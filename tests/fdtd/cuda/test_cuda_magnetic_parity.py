@@ -57,13 +57,16 @@ def _independent_inv_spacing(nodes: np.ndarray) -> tuple[torch.Tensor, torch.Ten
     return to_device(dual), to_device(primal)
 
 
-def _prepared_solver(monkeypatch, backend: str, scene: mw.Scene):
+def _prepared_solver(monkeypatch, backend: str, scene: mw.Scene, core_path=False):
+    # The existing-runner kernels are under test: the core runtime compiles its
+    # coefficient tables at preparation, so it never sees the in-place reseeding.
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", backend)
     return mw.Simulation.fdtd(
         scene,
         frequency=1.0e9,
         run_time=mw.TimeConfig(time_steps=1),
         spectral_sampler=mw.SpectralSampler(window="none"),
+        fdtd_core_path=core_path,
     ).prepare().solver
 
 
@@ -174,6 +177,31 @@ def test_native_cuda_standard_eh_one_step_matches_python_reference(monkeypatch):
             rtol=2.0e-6,
             atol=2.0e-7,
         )
+
+
+def test_core_standard_eh_one_step_matches_python_reference_with_prepared_coefficients(monkeypatch):
+    # The core path reads the coefficient tables built at preparation, so only
+    # the fields are reseeded here.
+    native_solver = _prepared_solver(monkeypatch, "cuda", _standard_scene(), core_path=True)
+    assert native_solver._core_runtime is not None
+    generator = torch.Generator(device="cuda")
+    generator.manual_seed(1234)
+    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
+        getattr(native_solver, name).copy_(torch.randn(getattr(native_solver, name).shape, device="cuda", generator=generator))
+    expected = _standard_python_reference(native_solver)
+
+    native_solver._update_magnetic_fields(
+        native_solver.Hx, native_solver.Hy, native_solver.Hz,
+        native_solver.Ex, native_solver.Ey, native_solver.Ez,
+    )
+    native_solver._update_electric_fields(
+        native_solver.Ex, native_solver.Ey, native_solver.Ez,
+        native_solver.Hx, native_solver.Hy, native_solver.Hz,
+    )
+    torch.cuda.synchronize()
+
+    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
+        torch.testing.assert_close(getattr(native_solver, name), expected[name], rtol=2.0e-6, atol=2.0e-7)
 
 
 def test_native_cuda_standard_eh_one_step_matches_independent_reference_on_graded_grid(monkeypatch):

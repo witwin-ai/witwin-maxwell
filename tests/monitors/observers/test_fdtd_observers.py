@@ -112,30 +112,49 @@ def _to_cpu_numpy(value):
 
 
 def _manual_flux(monitor):
-    axis = monitor["axis"]
-    if axis != "z":
-        raise ValueError("This test helper currently expects a z-normal plane.")
-    x = np.asarray(monitor["x"], dtype=float)
-    y = np.asarray(monitor["y"], dtype=float)
-    wx = np.empty_like(x)
-    wy = np.empty_like(y)
-    dx = np.diff(x)
-    dy = np.diff(y)
-    wx[0] = dx[0]
-    wx[-1] = dx[-1]
-    wy[0] = dy[0]
-    wy[-1] = dy[-1]
-    if x.size > 2:
-        wx[1:-1] = (dx[:-1] + dx[1:]) / 2.0
-    if y.size > 2:
-        wy[1:-1] = (dy[:-1] + dy[1:]) / 2.0
-    weights = wx[:, None] * wy[None, :]
-    ex = _to_cpu_numpy(monitor["Ex"])
-    ey = _to_cpu_numpy(monitor["Ey"])
-    hx = _to_cpu_numpy(monitor["Hx"])
-    hy = _to_cpu_numpy(monitor["Hy"])
-    sz = 0.5 * np.real(ex * np.conj(hy) - ey * np.conj(hx))
-    return float(np.sum(sz * weights))
+    """Independent native Yee endpoint-product work on the physical z plane.
+
+    The displayed common-point fields have already discarded the E/H
+    covariance. Form each coincident native product before cell projection.
+    H spectra already carry the native half-step phase correction.
+    """
+    if monitor["axis"] != "z" or monitor.get("native_flux_heads"):
+        raise ValueError("This reference requires a z-normal non-copper plane.")
+    targets = [np.asarray(monitor[name], dtype=float) for name in ("x", "y")]
+    widths = [np.asarray(monitor["cell_widths"][name], dtype=float) for name in ("x", "y")]
+    if any(width.shape != target.shape or not np.all(width > 0) for width, target in zip(widths, targets)):
+        raise ValueError("The reference requires exact positive physical cell widths.")
+    total = 0.0
+    for electric, magnetic, averaging, sign in (("Ex", "Hy", 1, 1.0), ("Ey", "Hx", 0, -1.0)):
+        ep = monitor["components"][electric]
+        hp = monitor["components"][magnetic]
+        coords = [np.asarray(axis, dtype=float) for axis in ep["coords"]]
+        if ep.get("collocated", False) or hp.get("collocated", False):
+            raise ValueError("The independent reference requires retained native pairs.")
+        if not all(np.array_equal(a, b) for a, b in zip(coords, hp["coords"])):
+            raise ValueError("Native electric/magnetic pair coordinates differ.")
+        e = _to_cpu_numpy(ep["data"]).astype(np.complex128)
+        h = _to_cpu_numpy(hp["data"]).astype(np.complex128)
+        if e.ndim != 2 or e.shape != h.shape or e.shape != tuple(map(len, coords)):
+            raise ValueError("Select one frequency with matching native pair support.")
+        for i, x in enumerate(targets[0]):
+            for j, y in enumerate(targets[1]):
+                target = (x, y)
+                other = 1 - averaging
+                match = np.flatnonzero(coords[other] == target[other])
+                nodes = coords[averaging]
+                cell = int(np.searchsorted(nodes, target[averaging], side="right")) - 1
+                if len(match) != 1 or not 0 <= cell < len(nodes) - 1:
+                    raise ValueError("Physical cell lacks its actual native pair support.")
+                fraction = (target[averaging] - nodes[cell]) / (nodes[cell + 1] - nodes[cell])
+                low = [0, 0]
+                low[other], low[averaging] = int(match[0]), cell
+                high = low.copy()
+                high[averaging] += 1
+                product = (1 - fraction) * e[tuple(low)] * np.conj(h[tuple(low)])
+                product += fraction * e[tuple(high)] * np.conj(h[tuple(high)])
+                total += 0.5 * sign * product.real * widths[0][i] * widths[1][j]
+    return float(total if monitor.get("normal_direction", "+") == "+" else -total)
 
 
 def _interpolate_axis(field, coords, position, axis):

@@ -1,0 +1,70 @@
+{
+  "cases": [
+    {
+      "z": 0.5,
+      "tilt": 0.0,
+      "y_offset": 0.21,
+      "mode": "baseline",
+      "beta_h": 0.025,
+      "cells": 24,
+      "width_cells": 4.0,
+      "matrix_size": 1638,
+      "phase_velocity_over_c": 0.9508586631908301,
+      "velocity_dispersion_corrected": 0.9508834255865811,
+      "impedance_over_eta0": 0.4159165184191762,
+      "capacitance_normalized": 2.5285867817010566,
+      "inductance_normalized": 0.43741150448529376,
+      "capacitance_energy_normalized": 2.5286190269025144,
+      "inductance_energy_normalized": 0.43741708247086664,
+      "longitudinal_current_rows": 4,
+      "phantom_transverse_edge_rows": 1,
+      "sheet_height_span_cells": 0.0,
+      "low_branches_velocity_over_c": [
+        0.9508586631908301,
+        5.195570757279447,
+        5.326949551249506,
+        7.465160469877753,
+        9.601346454741513,
+        10.484324213271096,
+        10.48986671949332,
+        11.58986736011033
+      ],
+      "longitudinal_electric_energy_fraction": 0.0001187787394084665,
+      "seconds": 4.730567216873169,
+      "memory_gib": 0.24404001235961914
+    },
+    {
+      "z": 0.5,
+      "tilt": 0.0,
+      "y_offset": 0.21,
+      "mode": "endpoints",
+      "beta_h": 0.025,
+      "cells": 24,
+      "width_cells": 4.0,
+      "matrix_size": 1637,
+      "phase_velocity_over_c": 0.9999739585382972,
+      "velocity_dispersion_corrected": 1.0000000000015141,
+      "impedance_over_eta0": 0.43744982873706934,
+      "capacitance_normalized": 2.2860359667461365,
+      "inductance_normalized": 0.43746122086669903,
+      "capacitance_energy_normalized": 2.285976435031588,
+      "inductance_energy_normalized": 0.4374498287364203,
+      "longitudinal_current_rows": 4,
+      "phantom_transverse_edge_rows": 0,
+      "sheet_height_span_cells": 0.0,
+      "low_branches_velocity_over_c": [
+        0.9999739585382972,
+        5.251618333413696,
+        5.326949551249489,
+        7.465815628150485,
+        9.604506298250124,
+        10.486909045264241,
+        10.489866719493305,
+        11.64897758486735
+      ],
+      "longitudinal_electric_energy_fraction": 3.409407009882148e-28,
+      "seconds": 3.305238723754883,
+      "memory_gib": 0.24404001235961914
+    }
+  ]
+}

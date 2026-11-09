@@ -1,0 +1,3 @@
+# Original reciprocal-near resource evidence
+
+The native original3840-edge fixed-ka p11 resource measurement preserves original admission, geometry/materials, quadrature, capacity budgets and1e-11 current/H gates. Hash-pinned prior order/resource evidence is reused with automatic replanning forbidden. Only near storage changes to scalar_reciprocal_dk_v1. The complete setup/warmups/actions/differentiable-forward/backward process allocator interval is measured; peak allocated965,273,088B/reserved1,048,576,000B exceed943,718,400B same-N dense storage, so whole-peak and general crossover qualification remain false. Owned retained795,719,008B is a separate one-point comparison. Consult the assessment JSON for all exact phases, source bindings and limitations.

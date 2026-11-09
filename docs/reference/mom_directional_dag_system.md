@@ -1,0 +1,7 @@
+# Complete prescribed scalar DAG system actions
+
+Build actual-support `DirectionalRWGDAGProjection` maps with explicit carrier/order requests and physical direct-child DAG links, then material-bound `DirectionalFFTElectromagneticM2L.from_dag_contexts` couplings and the distinct `DirectionalDAGFarActions` owner. `DirectionalRegionalOperator` accepts this owner and combines it with original near integration over full physical-tree terminal IDs. Sparse context indices never replace physical near IDs.
+
+Compose the complete exterior and every disjoint actual body interior with `DirectionalSystemActions`, preserving one common exterior balancing impedance. Its existing guarded native forward/H/current path and `DirectionalMultipoleOperator` Riesz/Krylov adapter apply to the admitted complete DAG system. Explicit bounded original factors are optional solve preconditioners; compressed actions remain the actual DAG actions. Prescribed carriers/orders and ideal phase/material bounds do not establish automatic planning or implemented global certification.
+
+Selected full-matrix/original-H/q16 FAR/native-current/GMRES/block-GMRES and saved-state controls pass. Original near integration is shared with the full reference; converged physics, whole resources/crossover/scaling and public/periodic integration remain separate open gates. Read `docs/assessments/sie_directional_dag_system.md` for exact evidence scope. No production qualification.

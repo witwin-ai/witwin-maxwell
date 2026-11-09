@@ -172,6 +172,7 @@ def test_fdtd_graphene_sheet_transmission_matches_kubo_fresnel():
             half_width=20.0e-6,
             fit_gap=20.0e-6,
             fit_extent=200.0e-6,
+            absorber="cpml",
         )
         sigma = material.sheet_conductivity_at_freq(frequency)
         t_exact = 2.0 / (2.0 + _Z0 * sigma)
@@ -319,6 +320,7 @@ def test_fdtd_graphene_interband_sheet_scattering_matches_realized_sigma():
         half_width=3.0 * dl,
         fit_gap=2.0 * wavelength,
         fit_extent=7.0 * wavelength,
+        absorber="cpml",
         steady_cycles=24,
         transient_cycles=28,
     )

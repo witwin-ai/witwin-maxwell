@@ -203,6 +203,8 @@ def test_plan_never_prepares_or_queries_gpu_and_does_not_infer_full_field_dft(mo
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_trainable_batch_forward_is_not_silently_detached():
     sim = simulation()
+    # Density gradients use one-sample arithmetic averaging; kottke_edge is forward-only.
+    sim.scene.subpixel = mw.SubpixelSpec(samples=1, averaging="arithmetic")
     sim.config.spectral_sampler = mw.SpectralSampler(window="none")
     parameters = mw.BatchParameters(region_densities={"design": torch.ones(2, 2, 3, 1, requires_grad=True)})
     batch = mw.Simulation.batch(sim, parameters=parameters, execution=execution())

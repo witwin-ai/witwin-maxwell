@@ -4,53 +4,59 @@
 #include "../launch.h"
 #include "../tensors.h"
 #include "common.cuh"
+#include "../source_gather.cuh"
 
 namespace {
-__global__ void batch_source_patch_kernel(int64_t count, int64_t field_size, int64_t b,
-    int64_t steps, float* field, const int64_t* offsets, const int* lanes,
-    const float* first, const float* second, const float* signals,
-    const int* active, const int64_t* step, bool cw, int wrap, int64_t nx, int64_t ny, int64_t nz) {
-  const int64_t q = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (q >= count) return;
-  const int lane = lanes[q];
-  const int64_t n = step[0], offset = offsets[q];
-  if (lane < 0 || lane >= b || !active[lane] || n < 0 || n >= steps || offset < 0 || offset >= field_size ||
-      offset / (nx*ny*nz) != lane) return;
-  const int64_t signal = (n*b+lane)*2;
-  if (cw) {
-    const float value = signals[signal]*first[q] + signals[signal+1]*second[q];
-    field[offset] += value;
-  } else {
-    const int64_t local = offset % (nx*ny*nz);
-    const int64_t coords[3] = {local/(ny*nz), (local/nz)%ny, local%nz};
-    const int64_t sizes[3] = {nx, ny, nz};
-    int boundary = 0;
-    for (int axis = 0; axis < 3; ++axis)
-      if ((wrap & (1<<axis)) && (coords[axis] == 0 || coords[axis] == sizes[axis]-1)) boundary |= 1<<axis;
-    if (!boundary) {
-      // The ordinary periodic kernel rounds delta before its atomic branch;
-      // the uniform kernel contracts multiply/add. Preserve both paths.
-      if (wrap) field[offset] += __fmul_rn(signals[signal], first[q]);
-      else field[offset] = __fmaf_rn(signals[signal], first[q], field[offset]);
-    } else {
+SourceGather source_gather(const torch::stable::Tensor& field,
+    const torch::stable::Tensor& rows, const torch::stable::Tensor& targets,
+    const torch::stable::Tensor& entries) {
+  for (const auto& tensor : {rows, targets, entries}) {
+    check_cuda_tensor(tensor, "source gather");
+    check_contiguous_tensor(tensor, "source gather");
+    check_same_cuda_device(field, tensor, "source gather");
+    STD_TORCH_CHECK(tensor.scalar_type() == torch::headeronly::ScalarType::Long,
+        "source gather indices must be int64");
+  }
+  STD_TORCH_CHECK(rows.dim() == 1 && targets.dim() == 2 && targets.size(1) == 2 &&
+      entries.dim() == 2 && entries.size(1) == 2 && rows.numel() == targets.size(0)+1,
+      "invalid prepared source gather shape");
+  return {rows.const_data_ptr<int64_t>(), targets.const_data_ptr<int64_t>(),
+      entries.const_data_ptr<int64_t>(), targets.size(0)};
+}
+
+__global__ void batch_source_patch_kernel(SourceGather g, int64_t b, int64_t steps,
+    float* field, const int* lanes, const float* first, const float* second,
+    const float* signals, const int* active, const int64_t* step, bool cw, int wrap) {
+  const int64_t row = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (row >= g.count) return;
+  const int64_t n = step[0], dst = g.targets[2*row+1];
+  if (n < 0 || n >= steps) return;
+  float value = field[dst];
+  for (int64_t e = g.rows[row]; e < g.rows[row+1]; ++e) {
+    const int64_t q = g.entries[2*e];
+    const int lane = lanes[q];
+    if (lane < 0 || lane >= b || !active[lane]) continue;
+    const int64_t signal = (n*b+lane)*2;
+    if (cw) {
+      const float delta = __fmaf_rn(signals[signal], first[q], __fmul_rn(signals[signal+1], second[q]));
+      value = __fadd_rn(value, delta);
+    } else if (wrap) {
       const float delta = __fmul_rn(signals[signal], first[q]);
-      atomicAdd(field+offset, delta);
-      for (int subset = 1; subset < 8; ++subset) {
-        if (subset & ~boundary) continue;
-        int64_t target[3] = {coords[0], coords[1], coords[2]};
-        for (int axis = 0; axis < 3; ++axis)
-          if (subset & (1<<axis)) target[axis] = coords[axis] == 0 ? sizes[axis]-1 : 0;
-        atomicAdd(field + lane*nx*ny*nz + (target[0]*ny+target[1])*nz+target[2], delta);
-      }
+      value = (g.entries[2*e+1] & 8) ? source_atomic_sum(value, delta) : __fadd_rn(value, delta);
+    } else {
+      value = __fmaf_rn(signals[signal], first[q], value);
     }
   }
+  field[dst] = value;
 }
 }  // namespace
 
 void batch_source_patch_cuda(torch::stable::Tensor field, const torch::stable::Tensor& offsets,
     const torch::stable::Tensor& lanes, const torch::stable::Tensor& first,
     const torch::stable::Tensor& second, const torch::stable::Tensor& signals,
-    const torch::stable::Tensor& active, const torch::stable::Tensor& step, bool cw, int64_t wrap) {
+    const torch::stable::Tensor& active, const torch::stable::Tensor& step, bool cw, int64_t wrap,
+    const torch::stable::Tensor& gather_rows, const torch::stable::Tensor& gather_targets,
+    const torch::stable::Tensor& gather_entries) {
   check_float32_tensor(field, "field");
   check_contiguous_tensor(field, "field");
   STD_TORCH_CHECK(field.dim() == 4, "field must be [B,X,Y,Z]");
@@ -78,13 +84,13 @@ void batch_source_patch_cuda(torch::stable::Tensor field, const torch::stable::T
     STD_TORCH_CHECK(!value.numel() || x + field.numel()*4 <= y || y + value.numel()*value.element_size() <= x,
         "source inputs must not overlap writable fields");
   }
-  if (!count) return;
+  const auto gather = source_gather(field, gather_rows, gather_targets, gather_entries);
+  if (!gather.count) return;
   torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
-  batch_source_patch_kernel<<<linear_grid(count, 256), 256, 0, current_cuda_stream()>>>(
-      count, field.numel(), b, signals.size(0), field.mutable_data_ptr<float>(), offsets.mutable_data_ptr<int64_t>(),
-      lanes.mutable_data_ptr<int>(), first.mutable_data_ptr<float>(), second.mutable_data_ptr<float>(),
-      signals.mutable_data_ptr<float>(), active.mutable_data_ptr<int>(), step.mutable_data_ptr<int64_t>(), cw,
-      static_cast<int>(wrap), field.size(1), field.size(2), field.size(3));
+  batch_source_patch_kernel<<<linear_grid(gather.count, 256), 256, 0, current_cuda_stream()>>>(
+      gather, b, signals.size(0), field.mutable_data_ptr<float>(), lanes.const_data_ptr<int>(),
+      first.const_data_ptr<float>(), second.const_data_ptr<float>(), signals.const_data_ptr<float>(),
+      active.const_data_ptr<int>(), step.const_data_ptr<int64_t>(), cw, static_cast<int>(wrap));
   WITWIN_CUDA_CHECK();
 }
 
@@ -111,46 +117,13 @@ __device__ __forceinline__ long long offset_shape(int i, int j, int k, Shape3D s
   return (static_cast<long long>(i) * shape.y + j) * shape.z + k;
 }
 
-template <int Axis>
-__device__ __forceinline__ long long offset_replace_axis(int i, int j, int k, int value, Shape3D shape) {
-  if constexpr (Axis == 0) {
-    return offset_shape(value, j, k, shape);
-  } else if constexpr (Axis == 1) {
-    return offset_shape(i, value, k, shape);
-  } else {
-    return offset_shape(i, j, value, shape);
-  }
-}
-
-template <int AxisA, int AxisB>
-__device__ __forceinline__ long long offset_replace_two_axes(
-    int i,
-    int j,
-    int k,
-    int value_a,
-    int value_b,
-    Shape3D shape) {
-  if constexpr (AxisA == 0) {
-    i = value_a;
-  } else if constexpr (AxisA == 1) {
-    j = value_a;
-  } else {
-    k = value_a;
-  }
-  if constexpr (AxisB == 0) {
-    i = value_b;
-  } else if constexpr (AxisB == 1) {
-    j = value_b;
-  } else {
-    k = value_b;
-  }
-  return offset_shape(i, j, k, shape);
-}
-
 __device__ __forceinline__ bool in_bounds(int i, int j, int k, Shape3D shape) {
   return i >= 0 && i < shape.x && j >= 0 && j < shape.y && k >= 0 && k < shape.z;
 }
 
+// Analytic source-time kinds: 0 = CW, 1 = Gaussian pulse, 2 = Ricker wavelet,
+// 4 = broadband pulse (Gaussian pulse minus its DC-removing Gaussian pedestal).
+// Kind 3 (sampled table) is evaluated by evaluate_waveform_table below.
 template <int TimeKind>
 __device__ __forceinline__ float evaluate_source_time(
     float sample_time,
@@ -159,15 +132,27 @@ __device__ __forceinline__ float evaluate_source_time(
     float ricker_pi_frequency,
     float amplitude,
     float phase,
-    float delay) {
+    float delay,
+    float pedestal,
+    float pedestal_inv_sigma) {
   if constexpr (TimeKind == 0) {
     return amplitude * cosf(angular_frequency * sample_time + phase);
   }
-  if constexpr (TimeKind == 1) {
+  if constexpr (TimeKind == 1 || TimeKind == 4) {
     const float tau = sample_time - delay;
     const float normalized = tau * gaussian_inv_sigma;
     const float envelope = expf(-0.5f * normalized * normalized);
-    return amplitude * envelope * cosf(angular_frequency * tau + phase);
+    if constexpr (TimeKind == 1) {
+      // Keep the float32 association (amplitude * envelope) * cos of the
+      // original Gaussian-pulse kernel so existing pulses stay bit-identical.
+      return amplitude * envelope * cosf(angular_frequency * tau + phase);
+    }
+    float signal = envelope * cosf(angular_frequency * tau + phase);
+    if constexpr (TimeKind == 4) {
+      const float pedestal_normalized = tau * pedestal_inv_sigma;
+      signal -= pedestal * expf(-0.5f * pedestal_normalized * pedestal_normalized);
+    }
+    return amplitude * signal;
   }
   const float tau = sample_time - delay;
   const float alpha = ricker_pi_frequency * tau;
@@ -175,16 +160,54 @@ __device__ __forceinline__ float evaluate_source_time(
   return amplitude * (1.0f - 2.0f * alpha_sq) * expf(-alpha_sq);
 }
 
-__device__ __forceinline__ float2 phase_positive(float phase_cos, float phase_sin, float2 value) {
-  return make_float2(
-      phase_cos * value.x - phase_sin * value.y,
-      phase_sin * value.x + phase_cos * value.y);
+// Sampled waveform in the normalized knot coordinate u (uniform tables have
+// knots 0..count-1). Linear tables carry zero curvature, so one cubic-segment
+// formula serves both interpolations. Zero outside [knots[0], knots[count-1]].
+__device__ __forceinline__ float evaluate_waveform_table(
+    float u,
+    const float* __restrict__ knots,
+    const float* __restrict__ values,
+    const float* __restrict__ curvature,
+    int count,
+    int uniform) {
+  if (!(u >= 0.0f) || u > knots[count - 1]) {
+    return 0.0f;
+  }
+  int index;
+  if (uniform != 0) {
+    index = min(static_cast<int>(floorf(u)), count - 2);
+  } else {
+    int low = 0;
+    int high = count - 1;
+    while (high - low > 1) {
+      const int middle = (low + high) >> 1;
+      if (knots[middle] <= u) {
+        low = middle;
+      } else {
+        high = middle;
+      }
+    }
+    index = low;
+  }
+  const float u0 = knots[index];
+  const float h = knots[index + 1] - u0;
+  const float b = (u - u0) / h;
+  const float a = 1.0f - b;
+  return a * values[index] + b * values[index + 1] +
+      ((a * a * a - a) * curvature[index] + (b * b * b - b) * curvature[index + 1]) * (h * h * (1.0f / 6.0f));
 }
 
-__device__ __forceinline__ float2 phase_negative(float phase_cos, float phase_sin, float2 value) {
-  return make_float2(
-      phase_cos * value.x + phase_sin * value.y,
-      phase_cos * value.y - phase_sin * value.x);
+// Preserve the former scatter kernel's sm_86 contraction, including the
+// second positive rotation of a corner image. Explicit intrinsics keep routing
+// changes from changing which phase products are fused.
+__device__ __forceinline__ float2 source_image_phase(
+    float c, float s, float2 value, bool positive, bool second_corner = false) {
+  const float cx = __fmul_rn(c, value.x), sy = __fmul_rn(s, value.y);
+  if (!positive) return make_float2(__fadd_rn(cx, sy),
+      __fsub_rn(__fmul_rn(c, value.y), __fmul_rn(s, value.x)));
+  const float imag = second_corner ? __fmaf_rn(c, value.y, __fmul_rn(s, value.x)) :
+      __fmaf_rn(s, value.x, __fmul_rn(c, value.y));
+  return make_float2(__fsub_rn(cx, sy), imag);
 }
 
 __device__ __forceinline__ void add_real_direct(float* __restrict__ field, Shape3D shape, int i, int j, int k, float value) {
@@ -273,6 +296,8 @@ __global__ void add_time_shifted_source_patch_kernel(
     float amplitude,
     float phase,
     float delay,
+    float pedestal,
+    float pedestal_inv_sigma,
     int causal_gate,
     float* __restrict__ field,
     const float* __restrict__ patch,
@@ -298,7 +323,48 @@ __global__ void add_time_shifted_source_patch_kernel(
       ricker_pi_frequency,
       amplitude,
       phase,
-      delay);
+      delay,
+      pedestal,
+      pedestal_inv_sigma);
+  add_real_patch_value<CheckBounds>(
+      field, field_shape, offset_i + i, offset_j + j, offset_k + k, signal * patch[linear]);
+}
+
+template <bool CheckBounds>
+__global__ void add_table_time_shifted_source_patch_kernel(
+    Shape3D field_shape,
+    Shape3D patch_shape,
+    int offset_i,
+    int offset_j,
+    int offset_k,
+    float time,
+    float time_offset,
+    float inv_step,
+    float amplitude,
+    int count,
+    int uniform,
+    int causal_gate,
+    float* __restrict__ field,
+    const float* __restrict__ patch,
+    const float* __restrict__ delay_patch,
+    const float* __restrict__ activation_delay_patch,
+    const float* __restrict__ knots,
+    const float* __restrict__ values,
+    const float* __restrict__ curvature) {
+  const int k = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  const int j = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
+  const int i = static_cast<int>(blockIdx.z * blockDim.z + threadIdx.z);
+  if (!in_bounds(i, j, k, patch_shape)) {
+    return;
+  }
+  const long long linear = offset_shape(i, j, k, patch_shape);
+  if (causal_gate != 0) {
+    if (time < activation_delay_patch[linear]) {
+      return;
+    }
+  }
+  const float u = (time_offset - delay_patch[linear]) * inv_step;
+  const float signal = amplitude * evaluate_waveform_table(u, knots, values, curvature, count, uniform);
   add_real_patch_value<CheckBounds>(
       field, field_shape, offset_i + i, offset_j + j, offset_k + k, signal * patch[linear]);
 }
@@ -317,6 +383,8 @@ void launch_time_shifted_source_patch(
     float amplitude,
     float phase,
     float delay,
+    float pedestal,
+    float pedestal_inv_sigma,
     int causal_gate,
     float* __restrict__ field,
     const float* __restrict__ patch,
@@ -336,6 +404,8 @@ void launch_time_shifted_source_patch(
       amplitude,
       phase,
       delay,
+      pedestal,
+      pedestal_inv_sigma,
       causal_gate,
       field,
       patch,
@@ -343,226 +413,47 @@ void launch_time_shifted_source_patch(
       activation_delay_patch);
 }
 
-template <int AxisA, int AxisB, bool WrapA, bool WrapB>
-__global__ void add_periodic_source_patch_kernel(
-    Shape3D field_shape,
-    Shape3D patch_shape,
-    int offset_i,
-    int offset_j,
-    int offset_k,
-    float signal,
-    float* __restrict__ field,
-    const float* __restrict__ patch) {
-  const int k = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-  const int j = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
-  const int i = static_cast<int>(blockIdx.z * blockDim.z + threadIdx.z);
-  if (!in_bounds(i, j, k, patch_shape)) {
-    return;
-  }
-  const long long linear = offset_shape(i, j, k, patch_shape);
-  const int ci = offset_i + i;
-  const int cj = offset_j + j;
-  const int ck = offset_k + k;
-  if (!in_bounds(ci, cj, ck, field_shape)) {
-    return;
-  }
-  const int axis_a_coord = AxisA == 0 ? ci : (AxisA == 1 ? cj : ck);
-  const int axis_b_coord = AxisB == 0 ? ci : (AxisB == 1 ? cj : ck);
-  const int axis_a_size = AxisA == 0 ? field_shape.x : (AxisA == 1 ? field_shape.y : field_shape.z);
-  const int axis_b_size = AxisB == 0 ? field_shape.x : (AxisB == 1 ? field_shape.y : field_shape.z);
-  const float delta = signal * patch[linear];
-  const long long field_linear = offset_shape(ci, cj, ck, field_shape);
-  const bool boundary_a = WrapA && (axis_a_coord == 0 || axis_a_coord + 1 >= axis_a_size);
-  const bool boundary_b = WrapB && (axis_b_coord == 0 || axis_b_coord + 1 >= axis_b_size);
-  if constexpr (!WrapA && !WrapB) {
-    field[field_linear] += delta;
-    return;
-  } else {
-    if (!boundary_a && !boundary_b) {
-      field[field_linear] += delta;
-      return;
+__global__ void add_periodic_source_patch_kernel(SourceGather g,
+    bool wrap, float signal, float* field, const float* patch) {
+  const int64_t row = int64_t(blockIdx.x)*blockDim.x + threadIdx.x;
+  if (row >= g.count) return;
+  const int64_t dst = g.targets[2*row+1];
+  float value = field[dst];
+  for (int64_t e = g.rows[row]; e < g.rows[row+1]; ++e) {
+    const int64_t q = g.entries[2*e];
+    // Offline sm_86 PTX confirms every wrapped specialization materialized
+    // delta, including interior entries. Only the no-wrap specialization fused.
+    if (wrap) {
+      const float delta = __fmul_rn(signal, patch[q]);
+      value = (g.entries[2*e+1] & 8) ? source_atomic_sum(value, delta) : __fadd_rn(value, delta);
+    } else {
+      value = __fmaf_rn(signal, patch[q], value);
     }
-    atomicAdd(field + field_linear, delta);
   }
-
-  const int pair_a = axis_a_coord == 0 ? axis_a_size - 1 : 0;
-  const int pair_b = axis_b_coord == 0 ? axis_b_size - 1 : 0;
-  if (boundary_a) {
-    atomicAdd(field + offset_replace_axis<AxisA>(ci, cj, ck, pair_a, field_shape), delta);
-  }
-  if (boundary_b) {
-    atomicAdd(field + offset_replace_axis<AxisB>(ci, cj, ck, pair_b, field_shape), delta);
-  }
-  if (boundary_a && boundary_b) {
-    atomicAdd(field + offset_replace_two_axes<AxisA, AxisB>(ci, cj, ck, pair_a, pair_b, field_shape), delta);
-  }
+  field[dst] = value;
 }
 
-template <int AxisA, int AxisB, bool WrapA, bool WrapB>
-void launch_periodic_source_patch(
-    Shape3D field_shape,
-    Shape3D patch_shape,
-    int offset_i,
-    int offset_j,
-    int offset_k,
-    float signal,
-    float* __restrict__ field,
-    const float* __restrict__ patch) {
-  const dim3 block = patch_block3d();
-  add_periodic_source_patch_kernel<AxisA, AxisB, WrapA, WrapB><<<patch_grid3d(patch_shape, block), block, 0, current_cuda_stream()>>>(
-      field_shape,
-      patch_shape,
-      offset_i,
-      offset_j,
-      offset_k,
-      signal,
-      field,
-      patch);
-}
-
-template <int AxisA, int AxisB>
-void dispatch_periodic_source_wraps(
-    Shape3D field_shape,
-    Shape3D patch_shape,
-    int offset_i,
-    int offset_j,
-    int offset_k,
-    float signal,
-    int wrap_a,
-    int wrap_b,
-    float* __restrict__ field,
-    const float* __restrict__ patch) {
-  if (wrap_a != 0 && wrap_b != 0) {
-    launch_periodic_source_patch<AxisA, AxisB, true, true>(
-        field_shape, patch_shape, offset_i, offset_j, offset_k, signal, field, patch);
-  } else if (wrap_a != 0) {
-    launch_periodic_source_patch<AxisA, AxisB, true, false>(
-        field_shape, patch_shape, offset_i, offset_j, offset_k, signal, field, patch);
-  } else if (wrap_b != 0) {
-    launch_periodic_source_patch<AxisA, AxisB, false, true>(
-        field_shape, patch_shape, offset_i, offset_j, offset_k, signal, field, patch);
-  } else {
-    launch_periodic_source_patch<AxisA, AxisB, false, false>(
-        field_shape, patch_shape, offset_i, offset_j, offset_k, signal, field, patch);
+__global__ void add_bloch_source_patch_kernel(SourceGather g, Shape3D patch_shape,
+    int oi, int oj, int ok, int axis_a, int axis_b, float sr, float si,
+    float ca, float sa, float cb, float sb, float* real, float* imag, const float* patch) {
+  const int64_t row = int64_t(blockIdx.x)*blockDim.x + threadIdx.x;
+  if (row >= g.count) return;
+  const int64_t dst = g.targets[2*row+1];
+  float r = real[dst], im = imag[dst];
+  for (int64_t e = g.rows[row]; e < g.rows[row+1]; ++e) {
+    const int64_t q = g.entries[2*e], subset = g.entries[2*e+1];
+    const int coords[3] = {int(q/(int64_t(patch_shape.y)*patch_shape.z))+oi,
+        int((q/patch_shape.z)%patch_shape.y)+oj, int(q%patch_shape.z)+ok};
+    float2 delta = make_float2(__fmul_rn(sr, patch[q]), __fmul_rn(si, patch[q]));
+    if (subset & (1 << axis_a))
+      delta = source_image_phase(ca, sa, delta, coords[axis_a] == 0);
+    if (subset & (1 << axis_b))
+      delta = source_image_phase(cb, sb, delta, coords[axis_b] == 0, subset & (1 << axis_a));
+    r = (subset & 8) ? source_atomic_sum(r, delta.x) : __fadd_rn(r, delta.x);
+    im = (subset & 8) ? source_atomic_sum(im, delta.y) : __fadd_rn(im, delta.y);
   }
-}
-
-template <int AxisA, int AxisB>
-__global__ void add_bloch_source_patch_kernel(
-    Shape3D field_shape,
-    Shape3D patch_shape,
-    int offset_i,
-    int offset_j,
-    int offset_k,
-    float signal_real,
-    float signal_imag,
-    float phase_cos_a,
-    float phase_sin_a,
-    float phase_cos_b,
-    float phase_sin_b,
-    int wrap_a,
-    int wrap_b,
-    float* __restrict__ real,
-    float* __restrict__ imag,
-    const float* __restrict__ patch) {
-  const int k = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-  const int j = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
-  const int i = static_cast<int>(blockIdx.z * blockDim.z + threadIdx.z);
-  if (!in_bounds(i, j, k, patch_shape)) {
-    return;
-  }
-  const long long linear = offset_shape(i, j, k, patch_shape);
-  const int ci = offset_i + i;
-  const int cj = offset_j + j;
-  const int ck = offset_k + k;
-  if (!in_bounds(ci, cj, ck, field_shape)) {
-    return;
-  }
-
-  const int axis_a_coord = AxisA == 0 ? ci : (AxisA == 1 ? cj : ck);
-  const int axis_b_coord = AxisB == 0 ? ci : (AxisB == 1 ? cj : ck);
-  const int axis_a_size = AxisA == 0 ? field_shape.x : (AxisA == 1 ? field_shape.y : field_shape.z);
-  const int axis_b_size = AxisB == 0 ? field_shape.x : (AxisB == 1 ? field_shape.y : field_shape.z);
-  const float amplitude = patch[linear];
-  const float2 delta = make_float2(signal_real * amplitude, signal_imag * amplitude);
-  const long long field_linear = offset_shape(ci, cj, ck, field_shape);
-  const bool boundary_a = wrap_a != 0 && (axis_a_coord == 0 || axis_a_coord + 1 >= axis_a_size);
-  const bool boundary_b = wrap_b != 0 && (axis_b_coord == 0 || axis_b_coord + 1 >= axis_b_size);
-  if (!boundary_a && !boundary_b) {
-    real[field_linear] += delta.x;
-    imag[field_linear] += delta.y;
-    return;
-  }
-  atomicAdd(real + field_linear, delta.x);
-  atomicAdd(imag + field_linear, delta.y);
-
-  const int pair_a = axis_a_coord == 0 ? axis_a_size - 1 : 0;
-  const int pair_b = axis_b_coord == 0 ? axis_b_size - 1 : 0;
-  if (boundary_a) {
-    const float2 value = axis_a_coord == 0
-        ? phase_positive(phase_cos_a, phase_sin_a, delta)
-        : phase_negative(phase_cos_a, phase_sin_a, delta);
-    const long long offset = offset_replace_axis<AxisA>(ci, cj, ck, pair_a, field_shape);
-    atomicAdd(real + offset, value.x);
-    atomicAdd(imag + offset, value.y);
-  }
-  if (boundary_b) {
-    const float2 value = axis_b_coord == 0
-        ? phase_positive(phase_cos_b, phase_sin_b, delta)
-        : phase_negative(phase_cos_b, phase_sin_b, delta);
-    const long long offset = offset_replace_axis<AxisB>(ci, cj, ck, pair_b, field_shape);
-    atomicAdd(real + offset, value.x);
-    atomicAdd(imag + offset, value.y);
-  }
-  if (boundary_a && boundary_b) {
-    float2 value = axis_a_coord == 0
-        ? phase_positive(phase_cos_a, phase_sin_a, delta)
-        : phase_negative(phase_cos_a, phase_sin_a, delta);
-    value = axis_b_coord == 0
-        ? phase_positive(phase_cos_b, phase_sin_b, value)
-        : phase_negative(phase_cos_b, phase_sin_b, value);
-    const long long offset = offset_replace_two_axes<AxisA, AxisB>(ci, cj, ck, pair_a, pair_b, field_shape);
-    atomicAdd(real + offset, value.x);
-    atomicAdd(imag + offset, value.y);
-  }
-}
-
-template <int AxisA, int AxisB>
-void launch_bloch_source_patch(
-    Shape3D field_shape,
-    Shape3D patch_shape,
-    int offset_i,
-    int offset_j,
-    int offset_k,
-    float signal_real,
-    float signal_imag,
-    float phase_cos_a,
-    float phase_sin_a,
-    float phase_cos_b,
-    float phase_sin_b,
-    int wrap_a,
-    int wrap_b,
-    float* __restrict__ real,
-    float* __restrict__ imag,
-    const float* __restrict__ patch) {
-  const dim3 block = patch_block3d();
-  add_bloch_source_patch_kernel<AxisA, AxisB><<<patch_grid3d(patch_shape, block), block, 0, current_cuda_stream()>>>(
-      field_shape,
-      patch_shape,
-      offset_i,
-      offset_j,
-      offset_k,
-      signal_real,
-      signal_imag,
-      phase_cos_a,
-      phase_sin_a,
-      phase_cos_b,
-      phase_sin_b,
-      wrap_a,
-      wrap_b,
-      real,
-      imag,
-      patch);
+  real[dst] = r;
+  imag[dst] = im;
 }
 
 __global__ void add_scaled_slice_source_patch_kernel(
@@ -699,188 +590,22 @@ __global__ void add_interpolated_source_patch_kernel(
       scale * sampled * patch[linear]);
 }
 
-template <typename OffsetT>
-__device__ __forceinline__ void add_to_field_code_offset(
-    int field_code,
-    float* __restrict__ field_x,
-    float* __restrict__ field_y,
-    float* __restrict__ field_z,
-    OffsetT offset,
-    float value) {
-  if (field_code == 0) {
-    atomicAdd(field_x + offset, value);
-  } else if (field_code == 1) {
-    atomicAdd(field_y + offset, value);
-  } else {
-    atomicAdd(field_z + offset, value);
+template <bool Interpolated>
+__global__ void add_batched_source_patches_kernel(SourceGather g, int incident_count,
+    float origin, float inv_ds, float* field_x, float* field_y, float* field_z,
+    const float* coeff, const float* incident, const float* positions, const int* indices) {
+  const int64_t row = int64_t(blockIdx.x)*blockDim.x + threadIdx.x;
+  if (row >= g.count) return;
+  const int64_t code = g.targets[2*row], dst = g.targets[2*row+1];
+  float* field = code == 0 ? field_x : (code == 1 ? field_y : field_z);
+  float value = field[dst];
+  for (int64_t e = g.rows[row]; e < g.rows[row+1]; ++e) {
+    const int64_t q = g.entries[2*e];
+    const float sampled = Interpolated ?
+        interpolated_incident(incident, incident_count, positions[q], origin, inv_ds) : incident[indices[q]];
+    value = source_atomic_sum(value, __fmul_rn(coeff[q], sampled));
   }
-}
-
-__device__ __forceinline__ float warp_reduce_sum_active(float value, unsigned int mask) {
-  const unsigned int lane = threadIdx.x & 31u;
-#pragma unroll
-  for (int delta = 16; delta > 0; delta >>= 1) {
-    const float other = __shfl_down_sync(mask, value, delta);
-    if ((lane + static_cast<unsigned int>(delta)) < 32u && ((mask >> (lane + delta)) & 1u) != 0u) {
-      value += other;
-    }
-  }
-  return value;
-}
-
-__device__ __forceinline__ void add_to_field_code_offset_warp_aggregated(
-    int field_code,
-    float* __restrict__ field_x,
-    float* __restrict__ field_y,
-    float* __restrict__ field_z,
-    int offset,
-    float value) {
-  const unsigned int mask = __activemask();
-  const unsigned int lane = threadIdx.x & 31u;
-  const unsigned long long key =
-      (static_cast<unsigned long long>(static_cast<unsigned int>(field_code)) << 32)
-      | static_cast<unsigned int>(offset);
-  const unsigned long long prev_key = __shfl_up_sync(mask, key, 1);
-  const unsigned long long next_key = __shfl_down_sync(mask, key, 1);
-  const bool adjacent_repeat =
-      ((lane > 0u) && prev_key == key)
-      || ((lane < 31u) && next_key == key);
-  if (!__any_sync(mask, adjacent_repeat)) {
-    add_to_field_code_offset(field_code, field_x, field_y, field_z, offset, value);
-    return;
-  }
-
-  const unsigned int peers = __match_any_sync(mask, key);
-  if ((peers & (peers - 1u)) == 0u) {
-    add_to_field_code_offset(field_code, field_x, field_y, field_z, offset, value);
-    return;
-  }
-  if (peers == mask) {
-    const float sum = warp_reduce_sum_active(value, mask);
-    if (lane == static_cast<unsigned int>(__ffs(peers) - 1)) {
-      add_to_field_code_offset(field_code, field_x, field_y, field_z, offset, sum);
-    }
-    return;
-  }
-
-  float sum = 0.0f;
-  unsigned int remaining = peers;
-  while (remaining != 0u) {
-    const int source_lane = __ffs(remaining) - 1;
-    sum += __shfl_sync(peers, value, source_lane);
-    remaining &= remaining - 1u;
-  }
-  if (static_cast<int>(lane) == (__ffs(peers) - 1)) {
-    add_to_field_code_offset(field_code, field_x, field_y, field_z, offset, sum);
-  }
-}
-
-template <typename OffsetT>
-__global__ void add_batched_reference_source_patches_kernel(
-    int64_t total,
-    float* __restrict__ field_x,
-    float* __restrict__ field_y,
-    float* __restrict__ field_z,
-    const float* __restrict__ coeff_data,
-    const float* __restrict__ incident,
-    const int* __restrict__ field_codes_per_coeff,
-    const OffsetT* __restrict__ field_offsets,
-    const int* __restrict__ sample_indices_per_coeff) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
-    return;
-  }
-  const int sample_index = sample_indices_per_coeff[linear];
-  const float value = coeff_data[linear] * incident[sample_index];
-  add_to_field_code_offset(
-      field_codes_per_coeff[linear],
-      field_x,
-      field_y,
-      field_z,
-      field_offsets[linear],
-      value);
-}
-
-__global__ void add_batched_reference_source_patches_warp_kernel(
-    int64_t total,
-    float* __restrict__ field_x,
-    float* __restrict__ field_y,
-    float* __restrict__ field_z,
-    const float* __restrict__ coeff_data,
-    const float* __restrict__ incident,
-    const int* __restrict__ field_codes_per_coeff,
-    const int* __restrict__ field_offsets,
-    const int* __restrict__ sample_indices_per_coeff) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
-    return;
-  }
-  const int sample_index = sample_indices_per_coeff[linear];
-  const float value = coeff_data[linear] * incident[sample_index];
-  add_to_field_code_offset_warp_aggregated(
-      field_codes_per_coeff[linear],
-      field_x,
-      field_y,
-      field_z,
-      field_offsets[linear],
-      value);
-}
-
-template <typename OffsetT>
-__global__ void add_batched_interpolated_source_patches_kernel(
-    int64_t total,
-    int incident_count,
-    float origin,
-    float inv_ds,
-    float* __restrict__ field_x,
-    float* __restrict__ field_y,
-    float* __restrict__ field_z,
-    const float* __restrict__ coeff_data,
-    const float* __restrict__ incident,
-    const float* __restrict__ sample_positions,
-    const int* __restrict__ field_codes_per_coeff,
-    const OffsetT* __restrict__ field_offsets) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
-    return;
-  }
-  const float sampled = interpolated_incident(incident, incident_count, sample_positions[linear], origin, inv_ds);
-  const float value = coeff_data[linear] * sampled;
-  add_to_field_code_offset(
-      field_codes_per_coeff[linear],
-      field_x,
-      field_y,
-      field_z,
-      field_offsets[linear],
-      value);
-}
-
-__global__ void add_batched_interpolated_source_patches_warp_kernel(
-    int64_t total,
-    int incident_count,
-    float origin,
-    float inv_ds,
-    float* __restrict__ field_x,
-    float* __restrict__ field_y,
-    float* __restrict__ field_z,
-    const float* __restrict__ coeff_data,
-    const float* __restrict__ incident,
-    const float* __restrict__ sample_positions,
-    const int* __restrict__ field_codes_per_coeff,
-    const int* __restrict__ field_offsets) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
-    return;
-  }
-  const float sampled = interpolated_incident(incident, incident_count, sample_positions[linear], origin, inv_ds);
-  const float value = coeff_data[linear] * sampled;
-  add_to_field_code_offset_warp_aggregated(
-      field_codes_per_coeff[linear],
-      field_x,
-      field_y,
-      field_z,
-      field_offsets[linear],
-      value);
+  field[dst] = value;
 }
 
 __global__ void update_auxiliary_magnetic_kernel(
@@ -1055,6 +780,8 @@ void add_time_shifted_source_patch_cuda(
     double amplitude,
     double phase,
     double delay,
+    double pedestal,
+    double pedestal_fwidth,
     int64_t causal_gate) {
   check_float_3d(field, "field");
   check_float_3d(patch, "patch");
@@ -1063,6 +790,8 @@ void add_time_shifted_source_patch_cuda(
   check_same_cuda_device(field, patch, "patch");
   check_same_shape(patch, delay_patch, "delay_patch");
   check_same_shape(patch, activation_delay_patch, "activation_delay_patch");
+  STD_TORCH_CHECK(time_kind >= 0 && time_kind <= 4 && time_kind != 3,
+      "add_time_shifted_source_patch supports analytic time kinds 0, 1, 2 and 4");
   torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
   constexpr float two_pi = 6.283185307179586f;
   constexpr float pi = 3.141592653589793f;
@@ -1070,6 +799,7 @@ void add_time_shifted_source_patch_cuda(
   const float angular_frequency = two_pi * frequency_f;
   const float gaussian_inv_sigma = fmaxf(two_pi * static_cast<float>(fwidth), 1.0e-30f);
   const float ricker_pi_frequency = pi * frequency_f;
+  const float pedestal_inv_sigma = two_pi * static_cast<float>(pedestal_fwidth);
   const Shape3D field_shape = shape3d(field);
   const Shape3D patch_shape = shape3d(patch);
   const bool contained = patch_contained(field_shape, patch_shape, offset_i, offset_j, offset_k);
@@ -1089,6 +819,8 @@ void add_time_shifted_source_patch_cuda(
         static_cast<float>(amplitude),
         static_cast<float>(phase),
         static_cast<float>(delay),
+        static_cast<float>(pedestal),
+        pedestal_inv_sigma,
         static_cast<int>(causal_gate),
         field.mutable_data_ptr<float>(),
         patch.mutable_data_ptr<float>(),
@@ -1107,12 +839,85 @@ void add_time_shifted_source_patch_cuda(
     } else {
       launch(std::integral_constant<int, 1>{}, std::true_type{});
     }
+  } else if (time_kind == 4) {
+    if (contained) {
+      launch(std::integral_constant<int, 4>{}, std::false_type{});
+    } else {
+      launch(std::integral_constant<int, 4>{}, std::true_type{});
+    }
   } else {
     if (contained) {
       launch(std::integral_constant<int, 2>{}, std::false_type{});
     } else {
       launch(std::integral_constant<int, 2>{}, std::true_type{});
     }
+  }
+  WITWIN_CUDA_CHECK();
+}
+
+void add_table_time_shifted_source_patch_cuda(
+    torch::stable::Tensor field,
+    const torch::stable::Tensor& patch,
+    const torch::stable::Tensor& delay_patch,
+    const torch::stable::Tensor& activation_delay_patch,
+    const torch::stable::Tensor& knots,
+    const torch::stable::Tensor& values,
+    const torch::stable::Tensor& curvature,
+    int64_t offset_i,
+    int64_t offset_j,
+    int64_t offset_k,
+    double time,
+    double time_offset,
+    double inv_step,
+    double amplitude,
+    int64_t uniform,
+    int64_t causal_gate) {
+  check_float_3d(field, "field");
+  check_float_3d(patch, "patch");
+  check_float_3d(delay_patch, "delay_patch");
+  check_float_3d(activation_delay_patch, "activation_delay_patch");
+  check_same_cuda_device(field, patch, "patch");
+  check_same_shape(patch, delay_patch, "delay_patch");
+  check_same_shape(patch, activation_delay_patch, "activation_delay_patch");
+  const int64_t count = knots.numel();
+  for (const auto* table : {&knots, &values, &curvature}) {
+    check_float32_tensor(*table, "waveform table");
+    check_contiguous_tensor(*table, "waveform table");
+    check_same_cuda_device(field, *table, "waveform table");
+    STD_TORCH_CHECK(table->dim() == 1 && table->numel() == count, "waveform table tensors must be 1D of equal length");
+  }
+  STD_TORCH_CHECK(count >= 2 && count <= 2147483647LL, "waveform table needs between 2 and INT_MAX samples");
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
+  const Shape3D field_shape = shape3d(field);
+  const Shape3D patch_shape = shape3d(patch);
+  const auto launch = [&](auto check_bounds_tag) {
+    constexpr bool check_bounds = decltype(check_bounds_tag)::value;
+    const dim3 block = patch_block3d();
+    add_table_time_shifted_source_patch_kernel<check_bounds><<<patch_grid3d(patch_shape, block), block, 0, current_cuda_stream()>>>(
+        field_shape,
+        patch_shape,
+        static_cast<int>(offset_i),
+        static_cast<int>(offset_j),
+        static_cast<int>(offset_k),
+        static_cast<float>(time),
+        static_cast<float>(time_offset),
+        static_cast<float>(inv_step),
+        static_cast<float>(amplitude),
+        static_cast<int>(count),
+        static_cast<int>(uniform),
+        static_cast<int>(causal_gate),
+        field.mutable_data_ptr<float>(),
+        patch.mutable_data_ptr<float>(),
+        delay_patch.mutable_data_ptr<float>(),
+        activation_delay_patch.mutable_data_ptr<float>(),
+        knots.mutable_data_ptr<float>(),
+        values.mutable_data_ptr<float>(),
+        curvature.mutable_data_ptr<float>());
+  };
+  if (patch_contained(field_shape, patch_shape, offset_i, offset_j, offset_k)) {
+    launch(std::false_type{});
+  } else {
+    launch(std::true_type{});
   }
   WITWIN_CUDA_CHECK();
 }
@@ -1127,7 +932,9 @@ void add_source_patch_periodic_cuda(
     int64_t axis_a,
     int64_t axis_b,
     int64_t wrap_a,
-    int64_t wrap_b) {
+    int64_t wrap_b,
+    const torch::stable::Tensor& gather_rows, const torch::stable::Tensor& gather_targets,
+    const torch::stable::Tensor& gather_entries) {
   check_float_3d(field, "field");
   check_float_3d(patch, "patch");
   check_same_cuda_device(field, patch, "patch");
@@ -1135,34 +942,11 @@ void add_source_patch_periodic_cuda(
   STD_TORCH_CHECK(axis_b >= 0 && axis_b < 3, "axis_b must be in [0, 3)");
   STD_TORCH_CHECK(axis_a != axis_b, "axis_a and axis_b must be distinct");
   torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
-  const auto launch = [&](auto axis_a_tag, auto axis_b_tag) {
-    constexpr int axis_a_value = decltype(axis_a_tag)::value;
-    constexpr int axis_b_value = decltype(axis_b_tag)::value;
-    dispatch_periodic_source_wraps<axis_a_value, axis_b_value>(
-        shape3d(field),
-        shape3d(patch),
-        static_cast<int>(offset_i),
-        static_cast<int>(offset_j),
-        static_cast<int>(offset_k),
-        static_cast<float>(signal),
-        static_cast<int>(wrap_a),
-        static_cast<int>(wrap_b),
-        field.mutable_data_ptr<float>(),
-        patch.mutable_data_ptr<float>());
-  };
-  if (axis_a == 0 && axis_b == 1) {
-    launch(std::integral_constant<int, 0>{}, std::integral_constant<int, 1>{});
-  } else if (axis_a == 0 && axis_b == 2) {
-    launch(std::integral_constant<int, 0>{}, std::integral_constant<int, 2>{});
-  } else if (axis_a == 1 && axis_b == 0) {
-    launch(std::integral_constant<int, 1>{}, std::integral_constant<int, 0>{});
-  } else if (axis_a == 1 && axis_b == 2) {
-    launch(std::integral_constant<int, 1>{}, std::integral_constant<int, 2>{});
-  } else if (axis_a == 2 && axis_b == 0) {
-    launch(std::integral_constant<int, 2>{}, std::integral_constant<int, 0>{});
-  } else {
-    launch(std::integral_constant<int, 2>{}, std::integral_constant<int, 1>{});
-  }
+  const auto gather = source_gather(field, gather_rows, gather_targets, gather_entries);
+  if (!gather.count) return;
+  add_periodic_source_patch_kernel<<<linear_grid(gather.count), 256, 0, current_cuda_stream()>>>(
+      gather, wrap_a || wrap_b, static_cast<float>(signal),
+      field.mutable_data_ptr<float>(), patch.const_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
@@ -1185,7 +969,9 @@ void add_source_patch_bloch_cuda(
     double phase_cos_b,
     double phase_sin_b,
     int64_t wrap_axis_a,
-    int64_t wrap_axis_b) {
+    int64_t wrap_axis_b,
+    const torch::stable::Tensor& gather_rows, const torch::stable::Tensor& gather_targets,
+    const torch::stable::Tensor& gather_entries) {
   check_float_3d(ex_real, "ex_real");
   check_float_3d(ex_imag, "ex_imag");
   check_float_3d(ey_real, "ey_real");
@@ -1204,61 +990,16 @@ void add_source_patch_bloch_cuda(
   check_same_shape(ez_real, ez_imag, "ez_imag");
   STD_TORCH_CHECK(axis_code >= 0 && axis_code < 3, "axis_code must be in [0, 3)");
   torch::stable::accelerator::DeviceGuard guard(ex_real.get_device_index());
-  if (axis_code == 0) {
-    launch_bloch_source_patch<1, 2>(
-        shape3d(ex_real),
-        shape3d(patch),
-        static_cast<int>(offset_i),
-        static_cast<int>(offset_j),
-        static_cast<int>(offset_k),
-        static_cast<float>(signal_real),
-        static_cast<float>(signal_imag),
-        static_cast<float>(phase_cos_a),
-        static_cast<float>(phase_sin_a),
-        static_cast<float>(phase_cos_b),
-        static_cast<float>(phase_sin_b),
-        static_cast<int>(wrap_axis_a),
-        static_cast<int>(wrap_axis_b),
-        ex_real.mutable_data_ptr<float>(),
-        ex_imag.mutable_data_ptr<float>(),
-        patch.mutable_data_ptr<float>());
-  } else if (axis_code == 1) {
-    launch_bloch_source_patch<0, 2>(
-        shape3d(ey_real),
-        shape3d(patch),
-        static_cast<int>(offset_i),
-        static_cast<int>(offset_j),
-        static_cast<int>(offset_k),
-        static_cast<float>(signal_real),
-        static_cast<float>(signal_imag),
-        static_cast<float>(phase_cos_a),
-        static_cast<float>(phase_sin_a),
-        static_cast<float>(phase_cos_b),
-        static_cast<float>(phase_sin_b),
-        static_cast<int>(wrap_axis_a),
-        static_cast<int>(wrap_axis_b),
-        ey_real.mutable_data_ptr<float>(),
-        ey_imag.mutable_data_ptr<float>(),
-        patch.mutable_data_ptr<float>());
-  } else {
-    launch_bloch_source_patch<0, 1>(
-        shape3d(ez_real),
-        shape3d(patch),
-        static_cast<int>(offset_i),
-        static_cast<int>(offset_j),
-        static_cast<int>(offset_k),
-        static_cast<float>(signal_real),
-        static_cast<float>(signal_imag),
-        static_cast<float>(phase_cos_a),
-        static_cast<float>(phase_sin_a),
-        static_cast<float>(phase_cos_b),
-        static_cast<float>(phase_sin_b),
-        static_cast<int>(wrap_axis_a),
-        static_cast<int>(wrap_axis_b),
-        ez_real.mutable_data_ptr<float>(),
-        ez_imag.mutable_data_ptr<float>(),
-        patch.mutable_data_ptr<float>());
-  }
+  auto real = axis_code == 0 ? ex_real : (axis_code == 1 ? ey_real : ez_real);
+  auto imag = axis_code == 0 ? ex_imag : (axis_code == 1 ? ey_imag : ez_imag);
+  const int axis_a = axis_code == 0 ? 1 : 0;
+  const int axis_b = axis_code == 2 ? 1 : 2;
+  const auto gather = source_gather(real, gather_rows, gather_targets, gather_entries);
+  if (!gather.count) return;
+  add_bloch_source_patch_kernel<<<linear_grid(gather.count), 256, 0, current_cuda_stream()>>>(
+      gather, shape3d(patch), offset_i, offset_j, offset_k, axis_a, axis_b,
+      signal_real, signal_imag, phase_cos_a, phase_sin_a, phase_cos_b, phase_sin_b,
+      real.mutable_data_ptr<float>(), imag.mutable_data_ptr<float>(), patch.const_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
@@ -1401,7 +1142,9 @@ void add_batched_reference_source_patches_cuda(
     const torch::stable::Tensor& incident,
     const torch::stable::Tensor& field_codes_per_coeff,
     const torch::stable::Tensor& field_offsets,
-    const torch::stable::Tensor& sample_indices_per_coeff) {
+    const torch::stable::Tensor& sample_indices_per_coeff,
+    const torch::stable::Tensor& gather_rows, const torch::stable::Tensor& gather_targets,
+    const torch::stable::Tensor& gather_entries) {
   check_float_3d(field_x, "field_x");
   check_float_3d(field_y, "field_y");
   check_float_3d(field_z, "field_z");
@@ -1421,29 +1164,14 @@ void add_batched_reference_source_patches_cuda(
   STD_TORCH_CHECK(field_offsets.numel() == coeff_data.numel(), "field_offsets length must match coeff_data");
   STD_TORCH_CHECK(sample_indices_per_coeff.numel() == coeff_data.numel(), "sample_indices_per_coeff length must match coeff_data");
   torch::stable::accelerator::DeviceGuard guard(field_x.get_device_index());
-  if (field_offsets.scalar_type() == torch::headeronly::ScalarType::Int) {
-    add_batched_reference_source_patches_warp_kernel<<<linear_grid(coeff_data.numel()), 256, 0, current_cuda_stream()>>>(
-        coeff_data.numel(),
-        field_x.mutable_data_ptr<float>(),
-        field_y.mutable_data_ptr<float>(),
-        field_z.mutable_data_ptr<float>(),
-        coeff_data.mutable_data_ptr<float>(),
-        incident.mutable_data_ptr<float>(),
-        field_codes_per_coeff.mutable_data_ptr<int>(),
-        field_offsets.mutable_data_ptr<int>(),
-        sample_indices_per_coeff.mutable_data_ptr<int>());
-  } else {
-    add_batched_reference_source_patches_kernel<int64_t><<<linear_grid(coeff_data.numel()), 256, 0, current_cuda_stream()>>>(
-        coeff_data.numel(),
-        field_x.mutable_data_ptr<float>(),
-        field_y.mutable_data_ptr<float>(),
-        field_z.mutable_data_ptr<float>(),
-        coeff_data.mutable_data_ptr<float>(),
-        incident.mutable_data_ptr<float>(),
-        field_codes_per_coeff.mutable_data_ptr<int>(),
-        field_offsets.mutable_data_ptr<int64_t>(),
-        sample_indices_per_coeff.mutable_data_ptr<int>());
-  }
+  const auto gather = source_gather(field_x, gather_rows, gather_targets, gather_entries);
+  if (!gather.count) return;
+  add_batched_source_patches_kernel<false><<<linear_grid(gather.count), 256, 0, current_cuda_stream()>>>(
+      gather, incident.numel(), 0.0f, 0.0f,
+      field_x.mutable_data_ptr<float>(), field_y.mutable_data_ptr<float>(), field_z.mutable_data_ptr<float>(),
+      coeff_data.const_data_ptr<float>(), incident.const_data_ptr<float>(),
+      nullptr,
+      sample_indices_per_coeff.const_data_ptr<int>());
   WITWIN_CUDA_CHECK();
 }
 
@@ -1457,7 +1185,9 @@ void add_batched_interpolated_source_patches_cuda(
     const torch::stable::Tensor& field_codes_per_coeff,
     const torch::stable::Tensor& field_offsets,
     double origin,
-    double ds) {
+    double ds,
+    const torch::stable::Tensor& gather_rows, const torch::stable::Tensor& gather_targets,
+    const torch::stable::Tensor& gather_entries) {
   check_float_3d(field_x, "field_x");
   check_float_3d(field_y, "field_y");
   check_float_3d(field_z, "field_z");
@@ -1478,35 +1208,14 @@ void add_batched_interpolated_source_patches_cuda(
   STD_TORCH_CHECK(field_offsets.numel() == coeff_data.numel(), "field_offsets length must match coeff_data");
   torch::stable::accelerator::DeviceGuard guard(field_x.get_device_index());
   const float inv_ds = ds > 0.0 ? static_cast<float>(1.0 / ds) : 0.0f;
-  if (field_offsets.scalar_type() == torch::headeronly::ScalarType::Int) {
-    add_batched_interpolated_source_patches_warp_kernel<<<linear_grid(coeff_data.numel()), 256, 0, current_cuda_stream()>>>(
-        coeff_data.numel(),
-        static_cast<int>(incident.numel()),
-        static_cast<float>(origin),
-        inv_ds,
-        field_x.mutable_data_ptr<float>(),
-        field_y.mutable_data_ptr<float>(),
-        field_z.mutable_data_ptr<float>(),
-        coeff_data.mutable_data_ptr<float>(),
-        incident.mutable_data_ptr<float>(),
-        sample_positions.mutable_data_ptr<float>(),
-        field_codes_per_coeff.mutable_data_ptr<int>(),
-        field_offsets.mutable_data_ptr<int>());
-  } else {
-    add_batched_interpolated_source_patches_kernel<int64_t><<<linear_grid(coeff_data.numel()), 256, 0, current_cuda_stream()>>>(
-        coeff_data.numel(),
-        static_cast<int>(incident.numel()),
-        static_cast<float>(origin),
-        inv_ds,
-        field_x.mutable_data_ptr<float>(),
-        field_y.mutable_data_ptr<float>(),
-        field_z.mutable_data_ptr<float>(),
-        coeff_data.mutable_data_ptr<float>(),
-        incident.mutable_data_ptr<float>(),
-        sample_positions.mutable_data_ptr<float>(),
-        field_codes_per_coeff.mutable_data_ptr<int>(),
-        field_offsets.mutable_data_ptr<int64_t>());
-  }
+  const auto gather = source_gather(field_x, gather_rows, gather_targets, gather_entries);
+  if (!gather.count) return;
+  add_batched_source_patches_kernel<true><<<linear_grid(gather.count), 256, 0, current_cuda_stream()>>>(
+      gather, incident.numel(), static_cast<float>(origin), inv_ds,
+      field_x.mutable_data_ptr<float>(), field_y.mutable_data_ptr<float>(), field_z.mutable_data_ptr<float>(),
+      coeff_data.const_data_ptr<float>(), incident.const_data_ptr<float>(),
+      sample_positions.const_data_ptr<float>(),
+      nullptr);
   WITWIN_CUDA_CHECK();
 }
 

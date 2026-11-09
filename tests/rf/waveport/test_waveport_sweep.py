@@ -204,8 +204,8 @@ def test_axis_aligned_coax_tem_impedance_matches_analytic_value():
         polarization="Ey",
         voltage_path=((0.0, inner_radius, 0.0), (0.0, outer_radius, 0.0)),
         current_contour=mw.Box(
-            position=(0.00125, 0.0, 0.0),
-            size=(0.0, 0.2025, 0.2025),
+            position=(0.000625, 0.0, 0.0),
+            size=(0.0, 0.20125, 0.20125),
         ),
     )
     port = mw.WavePort(
@@ -218,7 +218,7 @@ def test_axis_aligned_coax_tem_impedance_matches_analytic_value():
     )
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.01, 0.01), (-0.205, 0.205), (-0.205, 0.205))),
-        grid=mw.GridSpec.uniform(0.0025),
+        grid=mw.GridSpec.uniform(0.00125),
         boundary=mw.BoundarySpec.none(),
         ports=(port,),
         device="cuda",

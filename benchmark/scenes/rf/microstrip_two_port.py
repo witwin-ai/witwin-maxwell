@@ -138,22 +138,32 @@ def microstrip_two_port_scene(*, dx: float = 0.005, device: str = "cuda") -> mw.
     )
     # Ground plane at z=0.
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, -0.5 * dx), size=(length, GROUND_W, dx)).with_material(
-            mw.Material.pec(), name="ground"
+        mw.Structure(
+            mw.Box(position=(0.0, 0.0, -0.5 * dx), size=(length, GROUND_W, dx)),
+            mw.Material.pec(),
+            name="ground",
         )
     )
     # Dielectric substrate between ground and strip.
     scene.add_structure(
-        mw.Box(
-            position=(0.0, 0.0, 0.5 * SUBSTRATE_H),
-            size=(length, GROUND_W, SUBSTRATE_H),
-        ).with_material(mw.Material(eps_r=SUBSTRATE_EPS), name="substrate")
+        mw.Structure(
+            mw.Box(
+                position=(0.0, 0.0, 0.5 * SUBSTRATE_H),
+                size=(length, GROUND_W, SUBSTRATE_H),
+            ),
+            mw.Material(eps_r=SUBSTRATE_EPS),
+            name="substrate",
+        )
     )
     # Signal strip on top of the substrate.
     scene.add_structure(
-        mw.Box(
-            position=(0.0, 0.0, SUBSTRATE_H + 0.5 * dx),
-            size=(length, STRIP_W, dx),
-        ).with_material(mw.Material.pec(), name="strip")
+        mw.Structure(
+            mw.Box(
+                position=(0.0, 0.0, SUBSTRATE_H + 0.5 * dx),
+                size=(length, STRIP_W, dx),
+            ),
+            mw.Material.pec(),
+            name="strip",
+        )
     )
     return scene

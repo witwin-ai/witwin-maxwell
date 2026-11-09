@@ -231,10 +231,10 @@ def test_evaluate_static_background_for_meshing():
     assert float(sample.mu_r) == pytest.approx(1.0)
 
 
-def test_off_diagonal_mu_guard_still_in_force():
-    """The ferrite must not widen the rejected off-diagonal mu_tensor path."""
+def test_off_diagonal_mu_static_guard_still_in_force():
+    """Full constant permeability remains unavailable to the static Yee compiler."""
     with pytest.raises(NotImplementedError):
-        mw.Material(mu_tensor=mw.Tensor3x3([[1, 0.1, 0], [0.1, 1, 0], [0, 0, 1]]))
+        mw.Material(mu_tensor=mw.Tensor3x3([[1, 0.1, 0], [0.1, 1, 0], [0, 0, 1]])).evaluate_static()
 
 
 def test_perturbation_medium_rejects_ferrite():

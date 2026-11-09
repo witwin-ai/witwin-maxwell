@@ -509,6 +509,15 @@ class TestBoundary:
         assert boundary.kind == "mixed"
         assert boundary.bloch_wavevector == "auto"
 
+    def test_mixed_bloch_boundary_accepts_explicit_periodic_limit(self):
+        boundary = mw.BoundarySpec.faces(default="pml", num_layers=4,
+            x="bloch", y="bloch", bloch_wavevector=(0., 0., 0.))
+        scene = make_scene(resolution=.1, device="cpu", boundary=boundary)
+        assert boundary.axis_kind("x") == boundary.axis_kind("y") == "bloch"
+        assert boundary.axis_kind("z") == "pml"
+        assert scene.bloch_wavevector == (0., 0., 0.)
+        assert scene.bloch_phase_factors == (1.+0j, 1.+0j, 1.+0j)
+
     def test_auto_bloch_phase_requires_solver_resolution(self):
         scene = make_scene(
             resolution=0.1,

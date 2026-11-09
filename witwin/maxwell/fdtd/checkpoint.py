@@ -6,6 +6,7 @@ import torch
 
 from .boundary import expand_cpml_memory_tensor
 from .boundary.mur import iter_mur_state_tensors
+from .lumped import LUMPED_STATE_NAMES
 
 _FIELD_STATE_NAMES = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 _COMPLEX_FIELD_STATE_NAMES = ("Ex_imag", "Ey_imag", "Ez_imag", "Hx_imag", "Hy_imag", "Hz_imag")
@@ -114,6 +115,7 @@ class FDTDCheckpointSchema:
     surface_impedance_state_names: tuple[str, ...] = ()
     mur_state_names: tuple[str, ...] = ()
     breakdown_state_names: tuple[str, ...] = ()
+    thin_sheet_state_names: tuple[str, ...] = ()
 
     @property
     def state_names(self) -> tuple[str, ...]:
@@ -133,6 +135,7 @@ class FDTDCheckpointSchema:
             + self.surface_impedance_state_names
             + self.mur_state_names
             + self.breakdown_state_names
+            + self.thin_sheet_state_names
         )
 
 
@@ -143,11 +146,14 @@ def lumped_state_name(kind: str, index: int, tensor_name: str) -> str:
 def iter_lumped_state_specs(solver):
     """Yield the frozen auxiliary state for each coupled single-device branch."""
 
+    tensor_names = ("inductor_current", "capacitor_voltage", "last_voltage_after")
+    if getattr(solver, "complex_fields_enabled", False):
+        tensor_names = LUMPED_STATE_NAMES + tuple(name + "_imag" for name in LUMPED_STATE_NAMES)
     for index, port_runtime in enumerate(getattr(solver, "_port_runtimes", ())):
         runtime = getattr(port_runtime, "lumped", None)
         if runtime is None or getattr(port_runtime, "embedded_network_name", None) is not None:
             continue
-        for tensor_name in ("inductor_current", "capacitor_voltage", "last_voltage_after"):
+        for tensor_name in tensor_names:
             yield (
                 lumped_state_name("port", index, tensor_name),
                 runtime,
@@ -159,13 +165,23 @@ def iter_lumped_state_specs(solver):
     for index, (runtime, field_name) in enumerate(
         getattr(solver, "_lumped_element_runtimes", ())
     ):
-        for tensor_name in ("inductor_current", "capacitor_voltage", "last_voltage_after"):
+        for tensor_name in tensor_names:
             yield (
                 lumped_state_name("element", index, tensor_name),
                 runtime,
                 tensor_name,
                 field_name,
                 "element",
+                index,
+            )
+    for index, runtime in enumerate(getattr(solver, "_coaxial_element_runtimes", ())):
+        for tensor_name in ("inductor_current", "capacitor_voltage", "last_voltage_after"):
+            yield (
+                lumped_state_name("coaxial_element", index, tensor_name),
+                runtime,
+                tensor_name,
+                None,
+                "coaxial_element",
                 index,
             )
 
@@ -258,13 +274,13 @@ def iter_surface_impedance_state_specs(solver):
     """
 
     surface = getattr(solver, "_surface_impedance", None)
-    if surface is None:
-        return
-    for index, write in enumerate(surface.get("writes", ())):
+    for index, write in enumerate(() if surface is None else surface.get("writes", ())):
         ade = write.get("ade")
         if ade is None:
             continue
         yield surface_impedance_state_name(index), ade["state"]
+    from .copper_foil import iter_copper_state
+    yield from iter_copper_state(solver)
 
 
 def iter_breakdown_state_tensors(solver):
@@ -288,7 +304,10 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     if getattr(solver, "tfsf_enabled", False):
         tfsf_state = getattr(solver, "_tfsf_state", None)
         if tfsf_state is not None and tfsf_state.get("auxiliary_grid") is not None:
-            tfsf_auxiliary_state_names = _TFSF_AUXILIARY_STATE_NAMES
+            aux = tfsf_state["auxiliary_grid"]
+            tfsf_auxiliary_state_names = (tuple("tfsf_aux_" + name for name in aux.state_tensors())
+                                         if tfsf_state.get("provider") == "plane_wave_fixed_k"
+                                         else _TFSF_AUXILIARY_STATE_NAMES)
 
     dispersive_state_names = []
     for component_name, model_name, index, tensor_names, _entry in iter_dispersive_state_specs(solver) or ():
@@ -351,6 +370,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         surface_impedance_state_names=surface_impedance_state_names,
         mur_state_names=tuple(name for name, _tensor in iter_mur_state_tensors(solver)),
         breakdown_state_names=tuple(name for name, _tensor in iter_breakdown_state_tensors(solver)),
+        thin_sheet_state_names=tuple(name for name, _tensor in iter_thin_sheet_state_tensors(solver)),
     )
 
 
@@ -385,7 +405,20 @@ def validate_checkpoint_state(
     return state.schema
 
 
+def iter_thin_sheet_state_tensors(solver):
+    for index, sheet in enumerate(getattr(solver, "_thin_sheets", ())):
+        for slot, tensor in enumerate(sheet.state_tensors()):
+            yield f"thin_sheet_{index}_{slot}", tensor
+
+
+def _reject_thin_sheet_checkpoint(solver):
+    sheets = getattr(solver, "_thin_sheets", ())
+    if sheets and not any(sheet.feeds for sheet in sheets):
+        raise NotImplementedError("Conformal thin-sheet checkpoint/resume is admitted only with a sheet gap feed.")
+
+
 def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
+    _reject_thin_sheet_checkpoint(solver)
     schema = checkpoint_schema(solver)
     tensors = {
         name: getattr(solver, name).detach().clone()
@@ -409,8 +442,12 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
         tfsf_state = getattr(solver, "_tfsf_state", None)
         auxiliary_grid = None if tfsf_state is None else tfsf_state.get("auxiliary_grid")
         if auxiliary_grid is not None:
-            tensors["tfsf_aux_electric"] = auxiliary_grid.electric.detach().clone()
-            tensors["tfsf_aux_magnetic"] = auxiliary_grid.magnetic.detach().clone()
+            if tfsf_state.get("provider") == "plane_wave_fixed_k":
+                tensors.update({"tfsf_aux_" + name: tensor.detach().clone()
+                                for name, tensor in auxiliary_grid.state_tensors().items()})
+            else:
+                tensors["tfsf_aux_electric"] = auxiliary_grid.electric.detach().clone()
+                tensors["tfsf_aux_magnetic"] = auxiliary_grid.magnetic.detach().clone()
     for component_name, model_name, index, tensor_names, entry in iter_dispersive_state_specs(solver) or ():
         for tensor_name in tensor_names:
             tensors[dispersive_state_name(component_name, model_name, index, tensor_name)] = (
@@ -460,6 +497,8 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
         tensors[name] = tensor.detach().clone()
     for name, tensor in iter_breakdown_state_tensors(solver):
         tensors[name] = tensor.detach().clone()
+    for name, tensor in iter_thin_sheet_state_tensors(solver):
+        tensors[name] = tensor.detach().clone()
     state = FDTDCheckpointState(step=int(step), schema=schema, tensors=tensors)
     validate_checkpoint_state(state)
     return state
@@ -479,8 +518,12 @@ def _checkpoint_tensor_targets(solver, schema: FDTDCheckpointSchema):
     if getattr(solver, "tfsf_enabled", False):
         auxiliary_grid = getattr(solver, "_tfsf_state", {}).get("auxiliary_grid")
         if auxiliary_grid is not None:
-            yield "tfsf_aux_electric", auxiliary_grid.electric, None
-            yield "tfsf_aux_magnetic", auxiliary_grid.magnetic, None
+            if solver._tfsf_state.get("provider") == "plane_wave_fixed_k":
+                for name, tensor in auxiliary_grid.state_tensors().items():
+                    yield "tfsf_aux_" + name, tensor, None
+            else:
+                yield "tfsf_aux_electric", auxiliary_grid.electric, None
+                yield "tfsf_aux_magnetic", auxiliary_grid.magnetic, None
     for component_name, model_name, index, tensor_names, entry in (
         iter_dispersive_state_specs(solver) or ()
     ):
@@ -543,6 +586,8 @@ def _checkpoint_tensor_targets(solver, schema: FDTDCheckpointSchema):
         yield name, tensor, None
     for name, tensor in iter_breakdown_state_tensors(solver):
         yield name, tensor, None
+    for name, tensor in iter_thin_sheet_state_tensors(solver):
+        yield name, tensor, None
 
 
 def _checkpoint_expected_shape(target: torch.Tensor, layout) -> tuple[int, ...]:
@@ -564,12 +609,15 @@ def graph_state_tensors(solver, *, tail=False):
     else:
         state = {name: tensor for name, tensor, _layout in _checkpoint_tensor_targets(solver, checkpoint_schema(solver))}
         state.update({name: value for name, value in vars(solver).items()
-            if torch.is_tensor(value) and (name.startswith("psi") or name in ("_modulation_time", "_nonlinear_peak"))})
+            if torch.is_tensor(value) and (name.startswith("psi") or name in ("_modulation_time", "_modulation_step", "_nonlinear_peak"))})
         wire = getattr(solver, "_wire_runtime", None)
         if wire is not None:
             state["wire_emf"] = wire.emf
             if getattr(wire, "ade_state", None) is not None:
                 state["wire_loss_ade"] = wire.ade_state
+        for index, runtime in enumerate(getattr(solver, "_thin_sheets", ())):
+            for slot, tensor in enumerate(runtime.state_tensors()):
+                state[f"thin_sheet_{index}_{slot}"] = tensor
     if tail:
         state.update(iter_mur_state_tensors(solver))
     return state
@@ -589,15 +637,8 @@ def _copy_checkpoint_tensor(target: torch.Tensor, source: torch.Tensor, layout) 
         )
 
 
-def restore_checkpoint_state(solver, state: FDTDCheckpointState) -> None:
-    """Restore a captured physical FDTD state into an initialized solver.
-
-    The full layout is validated before the first tensor is mutated. Checkpoints
-    loaded on CPU may be restored into a CUDA solver; dtype and shape must still
-    match exactly. CPML slab storage is populated from the dense checkpoint
-    representation without allocating persistent dense memory.
-    """
-
+def preflight_checkpoint_state(solver, state: FDTDCheckpointState):
+    """Validate all physical targets before any state is mutated."""
     expected_schema = checkpoint_schema(solver)
     validate_checkpoint_state(state, expected_schema=expected_schema)
     targets = tuple(_checkpoint_tensor_targets(solver, expected_schema))
@@ -605,6 +646,8 @@ def restore_checkpoint_state(solver, state: FDTDCheckpointState) -> None:
         raise RuntimeError("Initialized solver checkpoint targets drifted from its schema.")
     for name, target, layout in targets:
         source = state.tensors[name]
+        if not isinstance(source,torch.Tensor):
+            raise TypeError(f"Checkpoint tensor {name!r} must be a torch.Tensor.")
         expected_shape = _checkpoint_expected_shape(target, layout)
         if tuple(source.shape) != expected_shape:
             raise ValueError(
@@ -616,8 +659,21 @@ def restore_checkpoint_state(solver, state: FDTDCheckpointState) -> None:
                 f"Checkpoint tensor {name!r} has dtype {source.dtype}, "
                 f"expected {target.dtype}."
             )
+    return targets
+
+
+def restore_checkpoint_state(solver, state: FDTDCheckpointState) -> None:
+    """Restore validated physics while preserving compressed CPML storage."""
+    _reject_thin_sheet_checkpoint(solver)
+    targets = preflight_checkpoint_state(solver,state)
+    expected_schema = state.schema
     for name, target, layout in targets:
         _copy_checkpoint_tensor(target, state.tensors[name], layout)
+    auxiliary_grid = (getattr(solver, "_tfsf_state", None) or {}).get("auxiliary_grid")
+    if auxiliary_grid is not None:
+        # The saved step counts completed auxiliary updates as well as field
+        # updates. Boundary scratch is regenerated from this clock before use.
+        auxiliary_grid.time_step = state.step
     if expected_schema.breakdown_state_names:
         from .runtime.breakdown import restore_breakdown_coefficients
 

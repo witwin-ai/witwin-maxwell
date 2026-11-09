@@ -127,6 +127,26 @@ def _save_fixture(tmp_path):
     return directory, manifest, fields
 
 
+def test_mixed_sharded_result_restores_ratio_only_ports(tmp_path):
+    port = mw.PortData.from_power_waves(
+        port_name="feed", frequencies=torch.tensor(_FREQUENCIES),
+        a=torch.tensor([1. + .2j, .8 - .1j]), b=torch.tensor([.2j, .1j]), z0=50.,
+    )
+    result = Result(
+        method="fdtd", scene=_scene(), frequencies=_FREQUENCIES, ports={"feed": port},
+        solver=SimpleNamespace(export_field_shards=lambda: _artifacts(_global_fields())),
+        solver_stats={"time_plan": {"mixed_sources": True}, "normalize_source": False},
+    )
+    directory = tmp_path / "mixed-sharded"
+    result.save_sharded(directory)
+    loaded = Result.load_sharded(directory, scene=_scene())
+    from witwin.maxwell.result import _RatioOnlyPortData
+    assert isinstance(loaded.port("feed"), _RatioOnlyPortData)
+    assert torch.equal(loaded.port("feed").reflection_coefficient, port.reflection_coefficient)
+    with pytest.raises(ValueError, match="Absolute spectra of a run mixing ongoing"):
+        loaded.port("feed").voltage
+
+
 def test_sharded_round_trip_sorts_ranks_and_gathers_uneven_multifrequency_fields(
     tmp_path,
 ):

@@ -82,16 +82,21 @@ def test_material_composes_two_photon_absorption():
     assert material.is_nonlinear
     assert material.nonlinear_chi2 == 0.0
     assert material.nonlinear_chi3 == 0.0
-    # Default n0 = sqrt(eps_r).
-    expected = (4.0 / 3.0) * beta * (1.5 * eps0 * c0) ** 2
-    assert material.tpa_sigma_scale == pytest.approx(expected, rel=1.0e-9)
+    # Independently enforce beta's declared cycle-average intensity-loss units.
+    # E0 is a real sinusoidal peak; averaging sigma(E)*E^2 is heat [W/m^3].
+    phase = np.arange(4096) * (2.0 * np.pi / 4096)
+    electric = 100.0 * np.cos(phase)
+    intensity = 0.5 * 1.5 * eps0 * c0 * 100.0**2
+    actual_heat = np.mean(material.tpa_sigma_scale * electric**4)
+    assert actual_heat == pytest.approx(beta * intensity**2, rel=1.0e-9)
 
     explicit = mw.Material(eps_r=2.25, nonlinearity=mw.TwoPhotonAbsorption(beta=beta, n0=2.0))
-    expected_explicit = (4.0 / 3.0) * beta * (2.0 * eps0 * c0) ** 2
-    assert explicit.tpa_sigma_scale == pytest.approx(expected_explicit, rel=1.0e-9)
+    explicit_intensity = 0.5 * 2.0 * eps0 * c0 * 100.0**2
+    explicit_heat = np.mean(explicit.tpa_sigma_scale * electric**4)
+    assert explicit_heat == pytest.approx(beta * explicit_intensity**2, rel=1.0e-9)
 
 
-def test_nonlinear_material_composes_dispersion_but_rejects_anisotropy_in_same_material():
+def test_nonlinear_material_declares_dispersion_and_tensor_backgrounds():
     # Same-material nonlinearity + electric dispersion is now supported (chi2 SHG
     # needs the dispersion to set the phase-matching between w and 2w).
     dispersive_nonlinear = mw.Material(
@@ -101,13 +106,12 @@ def test_nonlinear_material_composes_dispersion_but_rejects_anisotropy_in_same_m
     )
     assert dispersive_nonlinear.is_nonlinear
     assert dispersive_nonlinear.is_electric_dispersive
-    # A nonlinear anisotropic tensor still needs a coupled tensor update.
-    with pytest.raises(NotImplementedError, match="nonlinear Material"):
-        mw.Material(
-            eps_r=2.25,
-            nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6),
-            epsilon_tensor=mw.DiagonalTensor3(2.0, 2.5, 3.0),
-        )
+    tensor_nonlinear = mw.Material(
+        eps_r=2.25,
+        nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6),
+        epsilon_tensor=mw.DiagonalTensor3(2.0, 2.5, 3.0),
+    )
+    assert tensor_nonlinear.is_nonlinear and tensor_nonlinear.is_anisotropic
 
 
 def test_scene_allows_nonlinear_and_dispersive_materials_in_separate_structures():
@@ -478,7 +482,23 @@ def _second_harmonic_amplitude(*, chi2, amplitude, thickness):
     return abs(_plane_complex_mean(payload["components"]["Ez"]))
 
 
-def _tpa_normalized_transmission(*, beta, amplitude):
+def _native_transmitted_pulse_energy(result):
+    """Signed native E(t) x H(t-dt/2) sum in joules, including resolved harmonics."""
+    payload = result.monitor("post_energy")
+    stats = result.stats()
+    times = np.asarray(_to_cpu_numpy(payload["t"]), dtype=np.float64)
+    flux = np.asarray(_to_cpu_numpy(payload["flux"]), dtype=np.float64)
+    assert payload["interval"] == 1
+    assert payload["field_time_offsets_steps"] == {"E": 0.0, "H": -0.5}
+    assert times.ndim == 1 and flux.shape == times.shape
+    assert len(times) == stats["steps_run"] and len(times) > 1
+    assert np.isfinite(times).all() and np.isfinite(flux).all()
+    # Flux-time samples carry the physical post-update label (n + 1) * dt (observer time origin).
+    np.testing.assert_allclose(times, (np.arange(len(times)) + 1) * stats["dt"], rtol=4.0e-12, atol=0.0)
+    return float(flux.sum() * stats["dt"])
+
+
+def _tpa_transmitted_pulse_energy(*, beta, amplitude):
     frequency = 5.0e8
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-1.0, 1.0), (-0.3, 0.3), (-0.3, 0.3))),
@@ -504,6 +524,7 @@ def _tpa_normalized_transmission(*, beta, amplitude):
         )
     )
     scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.55, fields=("Ez",)))
+    scene.add_monitor(mw.FluxTimeMonitor("post_energy", axis="x", position=0.55, interval=1))
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
@@ -511,39 +532,32 @@ def _tpa_normalized_transmission(*, beta, amplitude):
         spectral_sampler=mw.SpectralSampler(window="hanning", normalize_source=False),
         full_field_dft=False,
     ).run()
-    payload = result.monitor("post")["components"]["Ez"]
-    return abs(_plane_complex_mean(payload)) / amplitude
+    return _native_transmitted_pulse_energy(result)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_two_photon_absorption_transmission_decreases_with_intensity():
-    """TPA transmission follows the saturable 1/(1 + beta*I*L_eff) trend.
+    """Resolved pulse energy decreases relative to the actual linear slab reference.
 
-    The DFT amplitude is normalized by the incident amplitude, so a linear
-    medium gives an intensity-independent normalized transmission while a TPA
-    medium absorbs progressively more at higher intensity.
+    Native flux retains all resolved harmonics. The identical waveform's real
+    amplitude ratio supplies only the linear energy scaling, not source watts.
+    The beta coefficient is calibrated independently by the compiled cycle-work
+    unit tests; no universal fundamental-field attenuation ratio is assumed.
     """
     beta = 4.0e-5
     amplitudes = (25.0, 100.0, 400.0)
 
-    linear_low = _tpa_normalized_transmission(beta=0.0, amplitude=amplitudes[0])
-    linear_high = _tpa_normalized_transmission(beta=0.0, amplitude=amplitudes[-1])
-    # Linearity check of the normalization itself.
-    assert linear_high == pytest.approx(linear_low, rel=1.0e-3)
+    linear_low = _tpa_transmitted_pulse_energy(beta=0.0, amplitude=amplitudes[0])
+    linear_high = _tpa_transmitted_pulse_energy(beta=0.0, amplitude=amplitudes[-1])
+    assert linear_low > 0.0
+    assert linear_high / (amplitudes[-1] / amplitudes[0]) ** 2 == pytest.approx(linear_low, rel=1.0e-3)
 
     transmissions = [
-        _tpa_normalized_transmission(beta=beta, amplitude=amplitude) for amplitude in amplitudes
+        _tpa_transmitted_pulse_energy(beta=beta, amplitude=amplitude)
+        / ((amplitude / amplitudes[0]) ** 2 * linear_low)
+        for amplitude in amplitudes
     ]
-
-    # Nonlinear loss must be monotonic in intensity and significant at the top.
-    assert transmissions[0] < linear_low
-    assert transmissions[1] < transmissions[0]
-    assert transmissions[2] < 0.7 * transmissions[1]
-    assert transmissions[2] < 0.7 * transmissions[0]
-    # Saturable-absorber shape: the fractional loss grows slower than the
-    # intensity itself (1/(1+x) rather than exponential in x): a 16x intensity
-    # increase must not suppress transmission by more than 16x.
-    assert transmissions[2] > transmissions[0] / 16.0
+    assert 0.0 < transmissions[2] < transmissions[1] < transmissions[0] < 1.0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")

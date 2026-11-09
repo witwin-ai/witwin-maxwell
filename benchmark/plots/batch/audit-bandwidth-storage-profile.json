@@ -194,7 +194,7 @@
       "cumulative_s": 0.001366241
     },
     {
-      "file": "/home/xingyu/miniconda3/envs/maxwell/lib/python3.11/site-packages/torch/_ops.py",
+      "file": "<site-packages>/torch/_ops.py",
       "line": 1267,
       "function": "__call__",
       "calls": 896,

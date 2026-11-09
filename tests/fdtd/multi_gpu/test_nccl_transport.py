@@ -703,6 +703,7 @@ def test_nccl_forward_rejects_trainable_density(monkeypatch):
 
     _set_nccl_launcher_env(monkeypatch)
     scene = _nccl_base_scene()
+    scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
     density = torch.rand((4, 4, 4), dtype=torch.float32, requires_grad=True)
     scene.add_material_region(
         mw.MaterialRegion(

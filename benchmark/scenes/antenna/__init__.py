@@ -11,23 +11,20 @@ analytic antenna references.
   accepted power closure). The input reactance carries a documented delta-gap
   feed offset.
 * ``patch`` -- probe-fed rectangular microstrip patch on a finite grounded
-  dielectric slab. This exercises the real ``Result.antenna`` NF2FF pipeline over
-  a grounded-dielectric structure (the finite substrate leaves a homogeneous air
-  Huygens surface). The pipeline runs end to end and returns valid ``AntennaData``
-  (six faces, finite gains, positive radiated power, radiated-vs-accepted power
-  closure). The matched-broadside ``TM010`` resonance and the ``D >= 5 dBi`` gate
-  are a DOCUMENTED GAP: the probe on this thick finite-ground slab is
-  reactance-dominated (``|Gamma| ~ 1``) and the pattern is off-broadside. Feed/
-  ground redesign and the external-reference cross-check remain open items,
-  deferred past stage E2c to a future stage.
+  dielectric slab, with matched-broadside and power-closure gates near 3.2 GHz.
+* ``printed_patch`` -- fixed physical PEC sheet patch, square galvanic probe and
+  finite source aperture, with independently controlled lateral/substrate meshes.
+  Convergence qualification is recorded separately from nominal matching.
 """
 
 from __future__ import annotations
 
 from benchmark.scenes.antenna.half_wave_dipole import half_wave_dipole_scene
 from benchmark.scenes.antenna.patch import patch_antenna_scene
+from benchmark.scenes.antenna.printed_patch import printed_patch_scene
 
 __all__ = [
     "half_wave_dipole_scene",
     "patch_antenna_scene",
+    "printed_patch_scene",
 ]

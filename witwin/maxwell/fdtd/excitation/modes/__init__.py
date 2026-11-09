@@ -29,12 +29,15 @@ from scipy import linalg as scipy_linalg
 from scipy.sparse import linalg as scipy_sparse_linalg
 
 from ....constants import ETA_0
-from ..tfsf_common import nearest_index
+from ..tfsf_common import _component_roundoff_floor, nearest_index
 from .common import (
     _AXIS_TO_INDEX,
     _DENSE_EIGEN_LIMIT,
     _FIELD_COMPONENTS,
     _FULL_VECTOR_DENSE_LIMIT,
+    _VECTOR_GRAD_MATRIX_LIMIT,
+    _mode_source_trainable_plane,
+    _require_lossless_vector_planes,
     _IMPLICIT_EIGEN_CG_MAX_ITER,
     _IMPLICIT_EIGEN_CG_TOL,
     _LOBPCG_MAX_ITER,
@@ -101,11 +104,16 @@ from .tem import (
     _quasistatic_laplace_energy,
     _solve_pec_tem_mode_torch,
     _solve_quasistatic_line_modes,
+    _solve_terminal_line_basis,
+    _solve_terminal_line_mode,
     _tem_signal_potentials,
+    _terminal_conductor_labels,
 )
 from .vector import (
     _build_staggered_first_differences_sparse,
     _build_vector_operator_sparse,
+    _build_vector_operator_torch,
+    _IsolatedVectorEigenpair,
     _is_uniform_isotropic_vector_plane,
     _normalize_vector_mode_profiles_numpy,
     _pec_first_difference,
@@ -132,6 +140,8 @@ from .vector import (
 )
 from .yee import (
     _build_yee_transverse_operator_sparse,
+    _build_yee_transverse_operator_torch,
+    _yee_reconstruct_node_profiles_torch,
     _select_yee_transverse_mode_numpy,
     _solve_yee_transverse_pec_mode,
     _solve_yee_transverse_vector_mode,
@@ -255,6 +265,7 @@ def _assemble_vector_mode_data(
     mu_by_axis: dict,
     frequency: float,
     pec_occupancy: torch.Tensor | None = None,
+    tem_time_step=None,
 ):
     axis_u, axis_v = tangential_axes
     field_names = (
@@ -276,8 +287,25 @@ def _assemble_vector_mode_data(
     )
     if bend_factor is not None:
         eps_by_axis = {axis: _apply_bend_factor(component, bend_factor) for axis, component in eps_by_axis.items()}
-    du = _local_uniform_plane_spacing(solver.scene, axis_u, u_lo, u_hi)
-    dv = _local_uniform_plane_spacing(solver.scene, axis_v, v_lo, v_hi)
+    has_interior_pec = pec_occupancy is not None and bool(
+        torch.any(pec_occupancy[1:-1, 1:-1] >= _PEC_OCCUPANCY_THRESHOLD)
+    )
+    native_tem = has_interior_pec and source.get("wave_family") == "tem"
+    tem_coordinates = {}
+    if native_tem:
+        tem_coordinates = {
+            "coords_u":getattr(solver.scene,axis_u+"_nodes64")[u_lo:u_hi+1],
+            "coords_v":getattr(solver.scene,axis_v+"_nodes64")[v_lo:v_hi+1],
+        }
+    try:
+        du = _local_uniform_plane_spacing(solver.scene, axis_u, u_lo, u_hi)
+        dv = _local_uniform_plane_spacing(solver.scene, axis_v, v_lo, v_hi)
+    except ValueError:
+        if not native_tem:
+            raise
+        # Native TEM uses full primal/dual metric arrays; no scalar spacing
+        # approximation is supplied to its potential or gradient operators.
+        du = dv = None
     k0 = 2.0 * math.pi * float(frequency) / float(solver.c)
     # Order the diagonal components as (in-plane u, in-plane v, plane-normal w) so
     # the vector operator threads eps_ww/mu_ww through the eliminated longitudinal
@@ -297,11 +325,39 @@ def _assemble_vector_mode_data(
         "overlap_matrix": None,
         "selected_candidate_index": None,
     }
+    if source.get("terminal_mode") is not None:
+        beta_value, component_arrays, pec_node_count, terminal_record = _assemble_terminal_line_mode(
+            source,
+            source["terminal_mode"],
+            pec_occupancy,
+            tensor_eps_planes=tensor_eps_planes,
+            tensor_mu_planes=tensor_mu_planes,
+            k0=k0,
+            du=du,
+            dv=dv,
+            field_names=field_names,
+            tem_coordinates=tem_coordinates,
+        )
+        payload = _finalize_vector_mode_data(solver, source, beta_value=beta_value, component_arrays=component_arrays, pec_node_count=pec_node_count, solver_kind="quasistatic_line_torch", candidate_diagnostics=candidate_diagnostics, k0=k0, eps_by_axis=eps_by_axis, mu_by_axis=mu_by_axis, tensor_eps_planes=tensor_eps_planes, field_names=field_names, preferred_field_name=preferred_field_name, normal_axis=normal_axis, tangential_axes=tangential_axes, tangential_bounds=tangential_bounds, tangential_coord_map=tangential_coord_map, plane_index=plane_index, native_tem=native_tem, du=du, tem_coordinates=tem_coordinates)
+        payload["terminal_mode"] = terminal_record
+        return payload
     pec_node_count = 0
-    has_interior_pec = pec_occupancy is not None and bool(
-        torch.any(pec_occupancy[1:-1, 1:-1] >= _PEC_OCCUPANCY_THRESHOLD)
-    )
-    if has_interior_pec and source.get("wave_family") == "tem":
+    vector_state = getattr(solver, "_mode_source_vector_state", {}).get(source["name"], {})
+    trainable_vector = vector_state.get("trainable", False)
+    if not has_interior_pec and trainable_vector:
+        beta_value, component_arrays, candidate_diagnostics = _solve_vector_mode_torch(
+            tensor_eps_planes, tensor_mu_planes, source=source, k0=k0, du=du, dv=dv,
+            field_names=field_names, preferred_field_name=preferred_field_name,
+            gauge_state=vector_state)
+        solver_kind = "vector_dense_torch"
+    elif has_interior_pec and source.get("wave_family") == "tem":
+        normal_spacing = None
+        if tem_time_step is not None:
+            nodes = getattr(solver.scene, normal_axis + "_nodes64")
+            low, high = nodes[plane_index]-nodes[plane_index-1], nodes[plane_index+1]-nodes[plane_index]
+            if not math.isclose(low, high, rel_tol=1e-7, abs_tol=0.):
+                raise NotImplementedError("Lossy TEM native propagation requires locally uniform axial spacing at the mode plane.")
+            normal_spacing = float(low)
         try:
             beta_value, component_arrays, pec_node_count = _solve_pec_tem_mode_torch(
                 tensor_eps_planes,
@@ -312,9 +368,14 @@ def _assemble_vector_mode_data(
                 dv=dv,
                 mode_index=int(source["mode_index"]),
                 field_names=field_names,
+                time_step=tem_time_step,
+                normal_spacing=normal_spacing,
+                **tem_coordinates,
             )
             solver_kind = "tem_electrostatic_torch"
         except NotImplementedError:
+            if _max_component_imag(eps_by_axis) > 0 or _max_component_imag(mu_by_axis) > 0:
+                raise NotImplementedError("Spatially varying lossy quasi-TEM modes require a complex material potential solve.")
             # Inhomogeneous cross-section (substrate + air microstrip / coupled pair):
             # the uniform-fill electrostatic normalization does not apply, so the legacy
             # closed-form TEM solve fails closed. Route to the quasi-static variable-eps
@@ -338,6 +399,7 @@ def _assemble_vector_mode_data(
                 dv=dv,
                 field_names=field_names,
                 signal_potentials=signal_potentials,
+                **tem_coordinates,
             )
             beta_value = line["beta"]
             component_arrays = line["component_profiles"]
@@ -421,14 +483,28 @@ def _assemble_vector_mode_data(
             )
         solver_kind = "vector_dense" if use_dense else "vector_sparse"
 
+    return _finalize_vector_mode_data(solver, source, beta_value=beta_value, component_arrays=component_arrays, pec_node_count=pec_node_count, solver_kind=solver_kind, candidate_diagnostics=candidate_diagnostics, k0=k0, eps_by_axis=eps_by_axis, mu_by_axis=mu_by_axis, tensor_eps_planes=tensor_eps_planes, field_names=field_names, preferred_field_name=preferred_field_name, normal_axis=normal_axis, tangential_axes=tangential_axes, tangential_bounds=tangential_bounds, tangential_coord_map=tangential_coord_map, plane_index=plane_index, native_tem=native_tem, du=du, tem_coordinates=tem_coordinates)
+
+
+def _finalize_vector_mode_data(
+    solver, source, *, beta_value, component_arrays, pec_node_count, solver_kind, candidate_diagnostics,
+    k0, eps_by_axis, mu_by_axis, tensor_eps_planes, field_names, preferred_field_name, normal_axis,
+    tangential_axes, tangential_bounds, tangential_coord_map, plane_index, native_tem, du, tem_coordinates,
+):
+    """Normalize, place and package one solved transverse mode (shared by every solver kind)."""
+    axis_u, axis_v = tangential_axes
+    (u_lo, u_hi), (v_lo, v_hi) = tangential_bounds
     beta_real = (
         float(torch.real(beta_value).item())
         if isinstance(beta_value, torch.Tensor)
         else float(np.real(beta_value))
     )
-    effective_index_value = beta_real / max(k0, 1e-30)
+    effective_index_value = beta_real / k0
     target_device = torch.device(getattr(solver, "device", solver.scene.device))
     target_dtype = solver.Ex.dtype
+    complex_tem = solver_kind == "tem_electrostatic_torch" and (
+        _max_component_imag(eps_by_axis) > 0 or _max_component_imag(mu_by_axis) > 0)
+    profile_dtype = (torch.complex64 if target_dtype == torch.float32 else torch.complex128) if complex_tem else target_dtype
     # The profile set is peak-normalized to 1 on the preferred component, so
     # compare the residual imaginary content against the joint profile scale.
     # An iterative (ARPACK) eigensolve leaves tolerance-level imaginary noise
@@ -442,14 +518,15 @@ def _assemble_vector_mode_data(
         ),
         default=0.0,
     )
-    imag_bound = 1e-3 * max(profile_scale, 1e-30)
+    imag_bound = 1e-3 * profile_scale
     plane_shape = tuple(int(dim) for dim in tensor_eps_planes[0].shape)
     interior_shape = (plane_shape[0] - 2, plane_shape[1] - 2)
+    staggered = solver_kind in {"tem_electrostatic_torch", "quasistatic_line_torch"}
     component_profiles = {}
     for name, array in component_arrays.items():
         if isinstance(array, torch.Tensor):
             resolved_array = array
-            if resolved_array.is_complex():
+            if resolved_array.is_complex() and not complex_tem:
                 imag_max = float(torch.max(torch.abs(torch.imag(resolved_array))).item())
                 if imag_max > imag_bound:
                     raise RuntimeError(
@@ -458,11 +535,11 @@ def _assemble_vector_mode_data(
                 resolved_array = torch.real(resolved_array)
             resolved_profile = resolved_array.to(
                 device=target_device,
-                dtype=target_dtype,
+                dtype=profile_dtype,
             ).contiguous()
         else:
             resolved_array = np.asarray(array)
-            if np.iscomplexobj(resolved_array):
+            if np.iscomplexobj(resolved_array) and not complex_tem:
                 imag_max = float(np.max(np.abs(np.imag(resolved_array))))
                 if imag_max > imag_bound:
                     raise RuntimeError(
@@ -472,15 +549,23 @@ def _assemble_vector_mode_data(
             resolved_profile = torch.as_tensor(
                 resolved_array,
                 device=target_device,
-                dtype=target_dtype,
+                dtype=profile_dtype,
             ).contiguous()
 
         resolved_shape = tuple(int(dim) for dim in resolved_profile.shape)
-        if resolved_shape == interior_shape:
+        if staggered:
+            expected = list(plane_shape)
+            if name in (field_names[0], field_names[3]):
+                expected[0] -= 1
+            elif name in (field_names[1], field_names[2]):
+                expected[1] -= 1
+            if resolved_shape != tuple(expected):
+                raise RuntimeError(f"Staggered {name} mode profile has shape {resolved_shape}, expected {expected}.")
+        elif resolved_shape == interior_shape:
             component_profile = torch.zeros(
                 plane_shape,
                 device=target_device,
-                dtype=target_dtype,
+                dtype=profile_dtype,
             )
             component_profile[1:-1, 1:-1] = resolved_profile
             resolved_profile = component_profile
@@ -492,7 +577,8 @@ def _assemble_vector_mode_data(
         component_profiles[name] = resolved_profile.contiguous()
     reference_profile = next(iter(component_profiles.values()))
     for field_name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-        component_profiles.setdefault(field_name, torch.zeros_like(reference_profile))
+        component_profiles.setdefault(field_name, torch.zeros(plane_shape, device=target_device, dtype=profile_dtype)
+                                      if staggered else torch.zeros_like(reference_profile))
     if int(source["direction_sign"]) < 0:
         for field_name in field_names[2:]:
             component_profiles[field_name] = -component_profiles[field_name]
@@ -505,6 +591,7 @@ def _assemble_vector_mode_data(
             device=target_device, dtype=target_dtype
         ),
         normal_axis=normal_axis,
+        staggered=staggered,
     )
 
     lower = [0, 0, 0]
@@ -530,10 +617,16 @@ def _assemble_vector_mode_data(
         "profile_component": preferred_field_name,
         "component_profiles": component_profiles,
         "mode_solver_kind": solver_kind,
+        "staggered_profiles": staggered,
+        "native_transverse_metrics": bool(native_tem and (du is None or any(
+            not np.allclose(np.diff(coords),np.diff(coords)[0],rtol=1e-10,atol=0.)
+            for coords in tem_coordinates.values()))),
         "effective_index": float(effective_index_value),
         "beta": float(beta_real),
-        "effective_index_tensor": None,
-        "beta_tensor": None,
+        "beta_complex": complex(beta_value.detach()) if complex_tem else None,
+        "effective_index_complex": complex(beta_value.detach()) / k0 if complex_tem else None,
+        "effective_index_tensor": beta_value / k0 if solver_kind == "vector_dense_torch" else None,
+        "beta_tensor": beta_value if complex_tem or solver_kind == "vector_dense_torch" else None,
         "pec_node_count": int(pec_node_count),
         "candidate_diagnostics": candidate_diagnostics["candidates"],
         "candidate_overlap_matrix": candidate_diagnostics["overlap_matrix"],
@@ -546,16 +639,72 @@ def _assemble_vector_mode_data(
     }
 
 
+def _assemble_terminal_line_mode(source, terminal_mode, pec_occupancy, *, tensor_eps_planes, tensor_mu_planes,
+                                 k0, du, dv, field_names, tem_coordinates):
+    """Quasi-TEM mode of a multi-conductor TerminalWavePort aperture.
+
+    ``terminal_mode`` carries the plane-local node masks of every terminal and of
+    the reference, plus either an explicit modal potential vector or ``None`` to
+    request the full terminal basis (capacitance matrices and modal potentials),
+    from which column ``mode_index`` is then solved.
+    """
+    if source.get("wave_family") != "tem":
+        raise ValueError("A TerminalWavePort mode must use the quasi-TEM family.")
+    if any(component.is_complex() and bool(torch.any(torch.imag(component) != 0))
+           for component in (*tensor_eps_planes, *tensor_mu_planes)):
+        raise NotImplementedError(
+            "TerminalWavePort quasi-TEM modes require a lossless cross-section; lossy or "
+            "complex media need a complex multi-conductor potential solve."
+        )
+    if not all(bool(np.allclose(_real_plane_numpy(component), 1.0)) for component in tensor_mu_planes):
+        raise NotImplementedError(
+            "TerminalWavePort quasi-TEM modes require a nonmagnetic cross-section; the "
+            "vacuum-capacitance inductance model does not include magnetic media."
+        )
+    if pec_occupancy is None:
+        raise ValueError("A TerminalWavePort aperture contains no conductor.")
+    label_map = _terminal_conductor_labels(
+        pec_occupancy,
+        terminal_masks=terminal_mode["terminal_masks"],
+        reference_mask=terminal_mode["reference_mask"],
+        plane_shape=terminal_mode["plane_shape"],
+    )
+    eps_uu, eps_vv, _ = tensor_eps_planes
+    eps_node = 0.5 * (torch.real(eps_uu) + torch.real(eps_vv))
+    basis = None
+    potentials = terminal_mode.get("potentials")
+    if potentials is None:
+        basis = _solve_terminal_line_basis(eps_node.detach(), label_map, du=du, dv=dv, **tem_coordinates)
+        potentials = tuple(float(value) for value in basis["modal_potentials"][:, int(source["mode_index"])])
+    if len(potentials) != len(terminal_mode["terminal_masks"]):
+        raise ValueError("TerminalWavePort modal potentials must contain one value per terminal.")
+    beta, profiles, conductor_count, eps_eff, wall_fraction = _solve_terminal_line_mode(
+        tensor_eps_planes, label_map, potentials, k0=k0, du=du, dv=dv,
+        field_names=field_names, **tem_coordinates)
+    record = {
+        "potentials": tuple(float(value) for value in potentials),
+        "eps_eff": float(eps_eff),
+        "wall_charge_fraction": float(wall_fraction),
+        "label_map": torch.as_tensor(label_map, dtype=torch.int64),
+    }
+    if basis is not None:
+        record["basis"] = basis
+    return beta, profiles, conductor_count, record
+
+
 def solve_mode_source_profile(solver, source) -> dict[str, object]:
+    from .conductors import (copper_intersects_mode, prepare_good_conductor_context,
+                             apply_good_conductor_perturbation)
+    if not getattr(solver,"_good_conductor_context",False):
+        if source.get("conductor_model") == "good_conductor":
+            context=prepare_good_conductor_context(solver,source)
+            data=solve_mode_source_profile(context,source)
+            return apply_good_conductor_perturbation(context,source,data)
+        if copper_intersects_mode(solver.scene,source):
+            raise NotImplementedError("A modal aperture intersecting CopperFoil requires explicit WaveModeSpec(conductor_model='good_conductor') within its applicability contract, or a finite-Et modal solve.")
     if source.get("injection", {}).get("kind") != "soft":
         raise ValueError("ModeSource currently supports soft injection only.")
     source_time = source["source_time"]
-    if source_time["kind"] == "custom":
-        raise ValueError(
-            "ModeSource does not support CustomSourceTime; the native time-shifted surface "
-            "kernel evaluates only the analytic CW/Gaussian/Ricker forms. Use PointDipole "
-            "for arbitrary custom waveforms."
-        )
     if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
         raise NotImplementedError(
             "ModeSource mode solving is undefined under a periodic/Bloch transverse boundary: "
@@ -574,6 +723,7 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
 
     compiled_material_model = getattr(solver, "_compiled_material_model", None)
     rebuild_from_fields = bool(getattr(solver, "_mode_source_rebuild_from_fields", False))
+    vector_state = getattr(solver, "_mode_source_vector_state", {}).get(source["name"], {})
     if compiled_material_model is not None and rebuild_from_fields:
         pec_coord_map = {
             axis: _mode_source_node_axis_coords(solver.scene, axis)
@@ -600,7 +750,7 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
 
     if (
         compiled_material_model is not None
-        and not rebuild_from_fields
+        and (not rebuild_from_fields or vector_state.get("trainable", False))
     ):
         node_coord_map = {
             axis: _mode_source_node_axis_coords(solver.scene, axis)
@@ -611,15 +761,35 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
             source,
             axis_coords_by_axis=node_coord_map,
         )
-        eps_node_by_axis, mu_node_by_axis = _mode_source_relative_material_slices(
-            solver,
-            frequency=frequency,
-            normal_axis=normal_axis,
-            plane_index=plane_index,
-            tangential_bounds=node_tangential_bounds,
-        )
+        if rebuild_from_fields and vector_state.get("trainable", False):
+            eps_node_by_axis, mu_node_by_axis = solver._source_vector_materials[source["name"]]
+        else:
+            # Retain the exact forward slices before detaching the native launch.
+            # Preparation also rebuilds source terms before the backward guard runs.
+            with torch.enable_grad():
+                eps_node_by_axis, mu_node_by_axis = _mode_source_relative_material_slices(
+                    solver, frequency=frequency, normal_axis=normal_axis,
+                    plane_index=plane_index, tangential_bounds=node_tangential_bounds)
+                trainable = _mode_source_trainable_plane(
+                    solver, source, materials=(eps_node_by_axis, mu_node_by_axis))
+            if not hasattr(solver, "_mode_source_vector_state"):
+                solver._mode_source_vector_state = {}
+            vector_state = solver._mode_source_vector_state.setdefault(source["name"], {})
+            vector_state["trainable"] = trainable
+            if trainable:
+                if not hasattr(solver, "_source_vector_materials"):
+                    solver._source_vector_materials = {}
+                solver._source_vector_materials[source["name"]] = (eps_node_by_axis, mu_node_by_axis)
+        if not torch.is_grad_enabled():
+            # Retaining the compiler graph must not turn native launch slices
+            # into grad-bearing views (notably on fixed PEC apertures).
+            eps_node_by_axis = {axis: value.detach() for axis, value in eps_node_by_axis.items()}
+            mu_node_by_axis = {axis: value.detach() for axis, value in mu_node_by_axis.items()}
         eps_node_imag = _max_component_imag(eps_node_by_axis)
         mu_node_imag = _max_component_imag(mu_node_by_axis)
+        if vector_state.get("trainable", False):
+            _require_lossless_vector_planes(tuple(eps_node_by_axis.values()),
+                                            tuple(mu_node_by_axis.values()), source_name=source["name"])
         pec_occupancy = _mode_source_pec_slice(
             solver,
             normal_axis=normal_axis,
@@ -630,10 +800,28 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
             torch.any(pec_occupancy[1:-1, 1:-1] >= _PEC_OCCUPANCY_THRESHOLD)
         )
         if has_interior_pec and (eps_node_imag > 1.0e-7 or mu_node_imag > 1.0e-7):
-            raise NotImplementedError(
-                "Lossy PEC-aware modes require a device-resident complex vector eigensolve; "
-                "the scalar complex mode path cannot enforce internal conductors."
-            )
+            if any(value.requires_grad for value in (*eps_node_by_axis.values(), *mu_node_by_axis.values())):
+                raise NotImplementedError("Differentiable lossy TEM material profiles require a complex mode-shape adjoint.")
+            if source.get("wave_family") != "tem":
+                raise NotImplementedError(
+                    "Lossy PEC-aware guided modes require a device-resident complex vector eigensolve.")
+            if any(compiled_material_model.get(prefix + kind + "_poles", ())
+                   for prefix in ("", "mu_") for kind in ("debye", "drude", "lorentz")):
+                raise NotImplementedError("Lossy TEM currently requires static conductivity; native pole projection is not yet implemented.")
+            dt = getattr(solver, "dt", None)
+            if dt is None:
+                dt = solver.resolve_mode_time_step(frequency)
+            angle = math.pi * frequency * dt
+            correction = angle / math.tan(angle)
+            # Frequency material evaluation uses exp(+iwt); native FDTD spectra
+            # use exp(-iwt), with conductivity sampled at the electric midpoint.
+            native = lambda values: {axis: torch.complex(value.real, -(value.imag if value.is_complex() else torch.zeros_like(value)) * correction)
+                                     for axis, value in values.items()}
+            return _assemble_vector_mode_data(solver, source, normal_axis=normal_axis,
+                tangential_axes=tangential_axes, tangential_bounds=node_tangential_bounds,
+                tangential_coord_map=node_coord_map, plane_index=plane_index,
+                eps_by_axis=native(eps_node_by_axis), mu_by_axis=native(mu_node_by_axis),
+                frequency=frequency, pec_occupancy=pec_occupancy, tem_time_step=dt)
         if has_interior_pec and any(
             component.requires_grad
             for component in (*eps_node_by_axis.values(), *mu_node_by_axis.values())
@@ -864,13 +1052,19 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
     }
     scalar_profile = profile.to(device=target_device, dtype=target_dtype).contiguous()
+    electric_floor = _component_roundoff_floor(electric_vector.values(), dtype=torch.float64)
     for name, component in electric_vector.items():
-        if abs(float(component)) > 1e-12:
+        if abs(float(component)) > electric_floor:
             component_profiles[name] = float(component) * scalar_profile
+    magnetic_floor = _component_roundoff_floor(
+        resolved_magnetic_vector.values(),
+        dtype=torch.float64,
+    )
     for name, component in resolved_magnetic_vector.items():
         if isinstance(component, torch.Tensor):
-            component_profiles[name] = component * scalar_profile
-        elif abs(float(component)) > 1e-12:
+            if float(component.abs().max().item()) > magnetic_floor:
+                component_profiles[name] = component * scalar_profile
+        elif abs(float(component)) > magnetic_floor:
             component_profiles[name] = float(component) * scalar_profile
 
     component_profiles = _normalize_mode_profiles_to_unit_power(
@@ -935,12 +1129,13 @@ def sample_mode_source_component(mode_data, positions: torch.Tensor, field_name:
                 sample_positions,
             )
         )
-    return _bilinear_sample(
-        profile,
-        mode_data["coords_u"],
-        mode_data["coords_v"],
-        sample_positions,
-    )
+    coords_u, coords_v = mode_data["coords_u"], mode_data["coords_v"]
+    if mode_data.get("staggered_profiles", False):
+        if field_name in (f"E{axis_u}", f"H{axis_v}"):
+            coords_u = .5 * (coords_u[:-1] + coords_u[1:])
+        elif field_name in (f"E{axis_v}", f"H{axis_u}"):
+            coords_v = .5 * (coords_v[:-1] + coords_v[1:])
+    return _bilinear_sample(profile, coords_u, coords_v, sample_positions)
 
 
 def sample_mode_source_profile(mode_data, positions: torch.Tensor) -> torch.Tensor:
@@ -961,3 +1156,92 @@ def sample_mode_source_profile(mode_data, positions: torch.Tensor) -> torch.Tens
             sample_positions,
         )
     return sample_mode_source_component(mode_data, positions, field_name)
+
+
+def _gauge_vector_profiles(profiles, preferred_field_name, *, state=None):
+    preferred = profiles[preferred_field_name].reshape(-1)
+    peak_index = int(preferred.abs().argmax())
+    peak_magnitude = preferred[peak_index].abs()
+    gauge_index = peak_index
+    if state is not None:
+        previous = state.get("gauge")
+        signature = (preferred_field_name, tuple(profiles[preferred_field_name].shape))
+        # Keep the phase reference through competing peaks until it falls below
+        # half the current peak; the Scene/SceneModule owns it across forwards.
+        if previous is not None and previous[:2] == signature:
+            if bool(preferred[previous[2]].abs() >= .5 * peak_magnitude):
+                gauge_index = previous[2]
+        state["gauge"] = (*signature, gauge_index)
+    pivot = preferred[gauge_index]
+    rotation = pivot.conj() / pivot.abs()
+    return {name: value * rotation / peak_magnitude for name, value in profiles.items()}
+
+
+def _solve_vector_mode_torch(eps_planes, mu_planes, *, source, k0, du, dv,
+                             field_names, preferred_field_name, gauge_state=None):
+    """One dense vector eigenproblem defines both the launch and its derivative."""
+    _require_lossless_vector_planes(eps_planes, mu_planes, source_name=source['name'])
+    eps_np = tuple(_real_plane_numpy(value) for value in eps_planes)
+    mu_np = tuple(_real_plane_numpy(value) for value in mu_planes)
+    uniform = _is_uniform_isotropic_vector_plane(eps_np, mu_np)
+    yee = uniform and all(np.allclose(value, 1.) for value in mu_np)
+    nu, nv = eps_planes[0].shape[0] - 2, eps_planes[0].shape[1] - 2
+    size = (nu + 1) * nv + nu * (nv + 1) if yee else 4 * nu * nv
+    if size > _VECTOR_GRAD_MATRIX_LIMIT:
+        forward_kind = "vector_dense" if nu * nv <= _FULL_VECTOR_DENSE_LIMIT else "vector_sparse"
+        raise NotImplementedError(
+            f"ModeSource/ModePort {source['name']!r} plane material is trainable "
+            "(material on the source plane requires grad): "
+            f"forward mode solver {forward_kind!r} differs from replay 'scalar_real'. "
+            "A matching mode-shape eigen-adjoint is required. "
+            f"Dense vector cap n <= {_VECTOR_GRAD_MATRIX_LIMIT}; actual n={size}.")
+    if yee:
+        operator, meta, eps_stag = _build_yee_transverse_operator_torch(
+            eps_planes, k0=k0, du=du, dv=dv, source_name=source['name'])
+    else:
+        operator, _, _ = _build_vector_operator_torch(
+            eps_planes, mu_planes, k0=k0, du=du, dv=dv, source_name=source['name'])
+    with torch.no_grad():
+        values, vectors = torch.linalg.eig(operator)
+    values_np, vectors_np = values.detach().cpu().numpy(), vectors.detach().cpu().numpy()
+    if yee:
+        detached_meta = {key: value.detach().cpu().numpy() if torch.is_tensor(value) else value
+                         for key, value in meta.items()}
+        beta_selected, _, diagnostics = _select_yee_transverse_mode_numpy(
+            values_np, vectors_np, meta=detached_meta,
+            eps_stag=tuple(value.detach().cpu().numpy() for value in eps_stag),
+            mode_index=int(source['mode_index']), field_names=field_names,
+            preferred_field_name=preferred_field_name, reject_spurious=False,
+            wave_family=source.get('wave_family'))
+        selected = int(np.argmin(abs(values_np - beta_selected**2)))
+    else:
+        beta_selected, _, _, diagnostics = _select_and_normalize_vector_mode_numpy(
+            values_np, vectors_np, interior_u=nu, interior_v=nv,
+            mode_index=int(source['mode_index']), field_names=field_names,
+            preferred_field_name=preferred_field_name, operator=operator.detach().cpu().numpy(),
+            eps_planes=eps_np, mu_planes=mu_np, k0=k0, du=du, dv=dv,
+            reject_spurious=not uniform, wave_family=source.get('wave_family'))
+        selected = int(np.argmin(abs(values_np - beta_selected)))
+    distances = abs(values.detach() - values[selected].detach())
+    distances[selected] = torch.inf
+    relative_gap = float(distances.min() / values[selected].detach().abs())
+    # Backward error is O(eps64 * ||A||_inf); eigenvector backward amplifies
+    # this by 1/gap. Require its scale estimate below sqrt(eps64).
+    delta = float(torch.finfo(torch.float64).eps**0.5 *
+                  torch.linalg.matrix_norm(operator.detach(), ord=float('inf')) /
+                  values[selected].detach().abs())
+    if relative_gap <= delta:
+        raise NotImplementedError(
+            f"ModeSource/ModePort {source['name']!r} degenerate vector mode: "
+            f"relative gap={relative_gap:.6g} <= delta={delta:.6g}; "
+            "the eigenvector derivative is not defined.")
+    value, vector = _IsolatedVectorEigenpair.apply(operator, values[selected], vectors[:, selected], source['name'])
+    beta = value.sqrt() if yee else value
+    if yee:
+        profiles = _yee_reconstruct_node_profiles_torch(vector, beta=beta, meta=meta,
+                                                       eps_stag=eps_stag, field_names=field_names)
+    else:
+        hu, hv, eu, ev = _split_vector_mode_components(vector, interior_u=nu, interior_v=nv, backend='torch')
+        profiles = dict(zip(field_names, (eu, ev, hu, hv)))
+    profiles = _gauge_vector_profiles(profiles, preferred_field_name, state=gauge_state)
+    return beta, profiles, diagnostics

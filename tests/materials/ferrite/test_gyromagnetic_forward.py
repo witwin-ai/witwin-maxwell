@@ -659,9 +659,8 @@ def test_fdfd_rejects_gyromagnetic_medium():
         device="cuda",
     )
     scene.add_structure(mw.Structure(geometry=Box(size=(10.0, 10.0, 10.0)), material=_ferrite()))
-    solver = FDFD(scene, frequency=8e9)
     with pytest.raises(NotImplementedError, match="FDFD does not support GyromagneticFerrite"):
-        solver._ensure_material_components()
+        FDFD(scene, frequency=8e9)
 
 
 # --- checkpoint / resume round-trip ------------------------------------------

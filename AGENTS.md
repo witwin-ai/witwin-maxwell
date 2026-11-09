@@ -26,10 +26,11 @@ This document defines the working rules for coding agents in this repository. Ke
 
 ## Project Overview
 
-This repository is a PyTorch-native differentiable full-wave electromagnetic simulation framework for Maxwell's equations with two internal solver runtimes:
+This repository is a PyTorch-native differentiable full-wave electromagnetic simulation framework for Maxwell's equations with three internal solver runtimes:
 
 - `FDFD`: frequency-domain finite-difference solver using sparse linear algebra.
 - `FDTD`: time-domain Yee-grid solver with native CUDA kernels, CPML support, and differentiable adjoint workflows.
+- `MoM`: experimental CUDA surface-integral runtime for disjoint, nonnested closed homogeneous passive bodies in vacuum, with scalar backends and explicitly configured tensor interiors in dense/H/H2, analytic incident carriers, scattered RWG currents and fixed-geometry current-vector gradients. Physical reference qualification is tracked separately from implementation.
 
 The public API is declarative:
 
@@ -76,6 +77,7 @@ The current codebase is organized as a Python package under `witwin/maxwell/`, w
 - `witwin/maxwell/result.py`: unified simulation result container.
 - `witwin/maxwell/compiler/`: scene compilers for materials, sources, ports, and monitors.
 - `witwin/maxwell/fdfd/`: internal FDFD runtime and postprocessing helpers.
+- `witwin/maxwell/mom/`: surface discretization, weak PMCHWT, CUDA algebra, field queries and native result payloads.
 - `witwin/maxwell/fdtd/`: internal FDTD runtime, CPML logic, source injection, observers, and adjoint support.
 - `witwin/maxwell/postprocess/`: near/far-field, directivity, RCS, scattering-parameter, and modal postprocessing.
 - `witwin/maxwell/adapters/`: interoperability adapters such as Tidy3D export.
@@ -137,7 +139,7 @@ If you add or modify Python code, prefer validating with targeted pytest coverag
 ## Windows / Codex Execution Notes
 
 - In this environment, `rg` may exist but fail with `Access is denied`. If that happens, switch immediately to PowerShell-native search with `Get-ChildItem` + `Select-String` instead of retrying `rg`.
-- `conda run -n maxwell` may fail to pass stdin through to `python -` reliably in this Codex/PowerShell setup. Prefer `conda run -n maxwell python -c ...` for short snippets, or invoke the environment interpreter directly with `C:\Users\Asixa\miniconda3\envs\maxwell\python.exe`.
+- `conda run -n maxwell` may fail to pass stdin through to `python -` reliably in this Codex/PowerShell setup. Prefer `conda run -n maxwell python -c ...` for short snippets, or invoke the environment interpreter directly with `<conda-root>\envs\maxwell\python.exe`.
 - Windows command-line length limits are easy to hit with `python -c` and large inline scripts. For long scripts, pass the code through an environment variable such as `PYCODE` and execute `python -c "import os; exec(os.environ['PYCODE'])"`, or use the environment interpreter with stdin if that path is reliable.
 - Large single-shot `apply_patch` updates can also hit Windows path/command length limits. If a full-file replacement fails for size reasons, rewrite it in smaller patch chunks instead of retrying the same oversized patch.
 - When checking whether `AGENTS.md` and `CLAUDE.md` match, do not use bare `fc` in PowerShell because it resolves to `Format-Custom`. Call `fc.exe` explicitly if you want the file-compare tool.

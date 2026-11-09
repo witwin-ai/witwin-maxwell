@@ -63,12 +63,17 @@ class WavePortRunManifest:
             "frequencies": self.frequencies,
             "execution": "single_device_frequency_sequential_cw",
             "normalization": "tracked one-watt modal power waves",
+            "conductor_approximations": {
+                port.port.name: tuple(tuple(data.get("conductor_approximation") for data in row)
+                                      for row in port.mode_data)
+                for port in self.prepared_ports
+                if any(data.get("conductor_approximation") for row in port.mode_data for data in row)},
         }
 
 
-def _mode_context(scene):
+def _mode_context(scene, *, requested_dt=None, base_frequency=None, max_electric_field=None):
     prepared = prepare_scene(scene)
-    return SimpleNamespace(
+    context = SimpleNamespace(
         scene=prepared,
         Ex=torch.empty((1,), device=prepared.device, dtype=torch.float32),
         c=C_0,
@@ -76,6 +81,21 @@ def _mode_context(scene):
         _compiled_material_model=prepared.compile_materials(),
         _mode_source_rebuild_from_fields=False,
     )
+    resolved_steps = {}
+
+    def resolve_time_step(frequency):
+        if frequency not in resolved_steps:
+            from .fdtd.solver import FDTD
+            timing = FDTD(prepared, frequency=frequency)
+            timing._requested_dt = requested_dt
+            timing._max_electric_field = max_electric_field
+            timing._requested_source_frequency = max(frequency, base_frequency or frequency)
+            timing.build_materials(prepared)
+            resolved_steps[frequency] = float(timing.dt)
+        return resolved_steps[frequency]
+
+    context.resolve_mode_time_step = resolve_time_step
+    return context
 
 
 def _mode_source(port: WavePort, compiled_mode, *, frequency: float, source_time=None):
@@ -89,6 +109,7 @@ def _mode_source(port: WavePort, compiled_mode, *, frequency: float, source_time
         name=f"{compiled_mode.tracking_id}::basis",
     )
     object.__setattr__(source, "_wave_family", compiled_mode.family)
+    object.__setattr__(source,"_conductor_model",compiled_mode.conductor_model)
     return source
 
 
@@ -131,7 +152,7 @@ def _solve_port_modes(context, port: WavePort, compiled, frequencies):
                     device=context.scene.device,
                     dtype=torch.float64,
                 )
-            beta_values.append(torch.real(beta_value).to(dtype=torch.float64))
+            beta_values.append(beta_value.to(dtype=torch.complex128 if beta_value.is_complex() else torch.float64))
             basis_values.append(_tracking_basis(mode_data))
         solved_by_frequency.append(tuple(solved_modes))
         beta_rows.append(torch.stack(beta_values))
@@ -190,14 +211,6 @@ def _integrate_mode_geometry(scene, mode_data, compiled_mode):
             values = sample_mode_source_component(mode_data, points, component)
             parts.append(torch.sum(values * weights))
         current = torch.stack(parts).sum()
-    if (
-        mode_data.get("mode_solver_kind") == "tem_electrostatic_torch"
-        and voltage is not None
-        and current is not None
-    ):
-        if not bool(torch.abs(current) > torch.finfo(current.dtype).eps):
-            raise RuntimeError("TEM WavePort current contour has zero circulation.")
-        current = 2.0 / torch.conj(voltage)
     return voltage, current
 
 
@@ -302,7 +315,7 @@ def _tracking_confidence(tracking: ModeTrackingResult) -> torch.Tensor:
     first = torch.ones(
         (1, mode_count),
         device=tracking.beta.device,
-        dtype=tracking.beta.dtype,
+        dtype=tracking.beta.real.dtype,
     )
     return torch.cat((first, tracking.confidence), dim=0).transpose(0, 1)
 
@@ -404,7 +417,8 @@ def _detach_material_model(value):
     return value
 
 
-def resolve_waveport_run_manifest(scene, sweep: PortSweep, frequencies) -> WavePortRunManifest:
+def resolve_waveport_run_manifest(scene, sweep: PortSweep, frequencies, *, requested_dt=None,
+                                  base_frequency=None, max_electric_field=None) -> WavePortRunManifest:
     if not isinstance(sweep, PortSweep):
         raise TypeError("sweep must be a PortSweep.")
     if sweep.source_time is not None:
@@ -450,7 +464,8 @@ def resolve_waveport_run_manifest(scene, sweep: PortSweep, frequencies) -> WaveP
     ) or scene.sources:
         raise ValueError("WavePort PortSweep requires a Scene without independent field sources.")
 
-    context = _mode_context(scene)
+    context = _mode_context(scene, requested_dt=requested_dt, base_frequency=base_frequency,
+                            max_electric_field=max_electric_field)
     compiled_by_name = {entry.port_name: entry for entry in scene.compile_waveports()}
     if scene_trainable_material_tensors(scene):
         _validate_fixed_trainable_cross_sections(
@@ -542,7 +557,7 @@ def _user_monitor_payloads(result, scene) -> dict:
     user_names = {monitor.name for monitor in scene.monitors}
     return {
         name: payload
-        for name, payload in result.monitors.items()
+        for name, payload in result._monitors.items()
         if name in user_names and not name.startswith(WAVEPORT_MONITOR_PREFIX)
     }
 
@@ -573,6 +588,7 @@ def _column_scene(
                     normal_direction=port.direction,
                 )
             object.__setattr__(monitor, "_wave_family", compiled_mode.family)
+            object.__setattr__(monitor,"_conductor_model",compiled_mode.conductor_model)
             monitors.append(monitor)
         if port_index != active_port_index:
             continue
@@ -581,11 +597,12 @@ def _column_scene(
             frequency_index,
             active_mode_index,
         ]
+        coefficient_floor = 64 * torch.finfo(coefficients.dtype).eps * abs(amplitude) * float(coefficients.abs().max().item())
         for raw_index, (compiled_mode, coefficient) in enumerate(
             zip(prepared_port.compiled.modes, coefficients)
         ):
             resolved_coefficient = amplitude * complex(coefficient.detach().cpu())
-            if abs(resolved_coefficient) <= 1.0e-14:
+            if abs(resolved_coefficient) <= coefficient_floor:
                 continue
             source = ModeSource(
                     position=source_position,
@@ -599,6 +616,7 @@ def _column_scene(
                     ),
                 )
             object.__setattr__(source, "_wave_family", compiled_mode.family)
+            object.__setattr__(source,"_conductor_model",compiled_mode.conductor_model)
             sources.append(source)
     passive_ports = tuple(port for port in scene.ports if not isinstance(port, WavePort))
     return scene.clone(
@@ -609,24 +627,48 @@ def _column_scene(
 
 
 def _extract_tracked_waves(result, manifest: WavePortRunManifest, frequency_index: int):
+    result = result._spectral_ratio_view()
     incident = []
     reflected = []
     for prepared_port in manifest.prepared_ports:
         raw_a = []
         raw_b = []
+        complex_tem = any(data.get("beta_complex") is not None
+                          for data in prepared_port.mode_data[frequency_index])
         for raw_index in range(len(prepared_port.compiled.modes)):
             modal = result.monitor(
                 _monitor_name(prepared_port.port.name, raw_index),
                 resolve_modal=True,
             )
-            scale = torch.sqrt(torch.abs(modal["mode_power"]))
+            scale = 1.0 if complex_tem else torch.sqrt(torch.abs(modal["mode_power"]))
             raw_a.append(modal["amplitude_forward"] * scale)
             raw_b.append(modal["amplitude_backward"] * scale)
         raw_a = torch.stack(raw_a).to(torch.complex128)
         raw_b = torch.stack(raw_b).to(torch.complex128)
         orientation = prepared_port.tracking.orientation[frequency_index]
-        incident.append(torch.conj(orientation) @ raw_a)
-        reflected.append(torch.conj(orientation) @ raw_b)
+        forward = torch.conj(orientation) @ raw_a
+        backward = torch.conj(orientation) @ raw_b
+        if complex_tem:
+            from .network_math import voltage_current_to_power_waves
+            voltage = []
+            current = []
+            for stable_index, compiled_mode in enumerate(prepared_port.compiled.modes):
+                reference_voltage = torch.zeros((),device=forward.device,dtype=torch.complex128)
+                reference_current = torch.zeros_like(reference_voltage)
+                for raw_index, raw_data in enumerate(prepared_port.mode_data[frequency_index]):
+                    vm, im = _integrate_mode_geometry(result.prepared_scene, raw_data, compiled_mode)
+                    coefficient = orientation[stable_index, raw_index]
+                    reference_voltage = reference_voltage + coefficient * vm
+                    reference_current = reference_current + coefficient * im
+                voltage.append(reference_voltage * (forward[stable_index] + backward[stable_index]))
+                current.append(reference_current * (forward[stable_index] - backward[stable_index]))
+            a, b = voltage_current_to_power_waves(torch.stack(voltage),torch.stack(current),
+                prepared_port.characteristic_impedance[:,frequency_index])
+            incident.append(a)
+            reflected.append(b)
+        else:
+            incident.append(forward)
+            reflected.append(backward)
     return torch.cat(incident), torch.cat(reflected)
 
 
@@ -850,6 +892,7 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
             **monitor_drive_note,
         },
         solver_stats={
+            "dt": first_result.stats().get("dt"),
             "network_sweep": manifest.metadata(),
             "columns": column_stats,
         },
@@ -923,7 +966,7 @@ def run_waveport_excitation(simulation, scene, excitation, manifest: WavePortRun
         ports={prepared_port.port.name: port_data},
         network=None,
         metadata={**simulation.metadata, "waveport_run_manifest": run_metadata},
-        solver_stats={"waveport_excitation": run_metadata, "columns": column_stats},
+        solver_stats={"dt": last_result.stats().get("dt"), "waveport_excitation": run_metadata, "columns": column_stats},
         raw_output={"waveport_run_manifest": run_metadata},
     )
 

@@ -8,6 +8,7 @@ import torch
 
 from ...fdtd_parallel import FDTDShardLayout
 from ..observers import _align_plane_monitor_payload, _compute_plane_flux
+from ..quadrature import _exact_cell_center_widths
 from .output import move_tensors_to_device
 
 
@@ -30,6 +31,7 @@ def _validate_matching_metadata(entries: list[tuple[int, Mapping[str, Any]]]) ->
             "position",
             "compute_flux",
             "normal_direction",
+            "sample_spacing",
         ):
             if payload.get(key) != first.get(key):
                 raise ValueError(
@@ -302,15 +304,57 @@ def _crop_aligned_to_physical_bounds(axis: str, aligned, physical_bounds):
     }
 
 
+def _merge_sampled_plane(entries, *, result_device):
+    """Concatenate unique global quadrature points, retaining physical weights."""
+    _validate_matching_metadata(entries)
+    first = entries[0][1]
+    axis = first["axis"]
+    names = _PLANE_COORD_NAMES[axis]
+    ordered = sorted(entries,key=lambda item:float(np.asarray(item[1][names[0]])[0]))
+    x = np.concatenate([np.asarray(payload[names[0]],dtype=np.float64) for _,payload in ordered])
+    if len(x)>1 and not np.all(np.diff(x)>0):
+        raise ValueError("Distributed sampled quadrature has duplicate or unordered ownership.")
+    other = np.asarray(first[names[1]],dtype=np.float64)
+    widths_x = np.concatenate([np.asarray(payload["cell_widths"][names[0]]) for _,payload in ordered])
+    widths_other = np.asarray(first["cell_widths"][names[1]])
+    merged = move_tensors_to_device(_plane_metadata_template(first),result_device)
+    components = {}
+    for component in first["fields"]:
+        tiles = []
+        for rank,payload in ordered:
+            if not np.array_equal(payload[names[1]],other):
+                raise ValueError(f"Shard {rank} sampled transverse coordinates differ.")
+            part = payload["components"][component]
+            if not part.get("collocated",False):
+                raise ValueError("Sampled monitor components must retain collocated native gathers.")
+            tiles.append(part["data"].to(device=result_device,non_blocking=True))
+        part = dict(first["components"][component])
+        part.update(data=torch.cat(tiles,dim=-2),coords=(x,other))
+        components[component] = part
+        merged[component] = part["data"]
+    merged.update(components=components,coords=(x,other),sample_cell_widths=(widths_x,widths_other))
+    merged[names[0]],merged[names[1]] = x,other
+    merged["cell_widths"] = dict(zip(names,(widths_x,widths_other)))
+    if len(first["fields"])==1:
+        component = first["fields"][0]
+        merged.update(component=component.lower(),data=merged[component])
+    if first.get("compute_flux",False):
+        merged["flux"] = merged["power"] = _compute_plane_flux(merged)
+    return merged
+
+
 def _merge_tiled_plane(
     entries: list[tuple[int, Mapping[str, Any]]],
     *,
     shard_layouts: Mapping[int, FDTDShardLayout],
     physical_bounds,
     result_device: torch.device,
+    quadrature_scene=None,
 ) -> dict[str, Any]:
     _validate_matching_metadata(entries)
     first = entries[0][1]
+    if first.get("sample_spacing") is not None:
+        return _merge_sampled_plane(entries,result_device=result_device)
     axis = str(first.get("axis", "")).lower()
     if axis not in {"y", "z"}:
         raise ValueError(f"Only y/z-normal planes are tiled across x, got axis={axis!r}.")
@@ -359,6 +403,9 @@ def _merge_tiled_plane(
     for component, values in aligned["fields"].items():
         merged[component] = values
 
+    if quadrature_scene is not None:
+        merged["cell_widths"] = {name:_exact_cell_center_widths(quadrature_scene,name,merged[name])
+                                 for name in coord_names}
     if bool(first.get("compute_flux", False)):
         flux = _compute_plane_flux(merged)
         merged["flux"] = flux
@@ -375,6 +422,7 @@ def merge_sharded_monitor_payloads(
         Mapping[int, FDTDShardLayout] | Iterable[FDTDShardLayout] | None
     ) = None,
     physical_bounds=None,
+    quadrature_scene=None,
 ) -> dict[str, Any]:
     """Merge rank-local monitor payloads in scene declaration order.
 
@@ -404,6 +452,7 @@ def merge_sharded_monitor_payloads(
                 shard_layouts=layouts,
                 physical_bounds=physical_bounds,
                 result_device=device,
+                quadrature_scene=quadrature_scene,
             )
         else:
             if len(entries) != 1:

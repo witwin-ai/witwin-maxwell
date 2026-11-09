@@ -6,7 +6,9 @@ import copy
 import dataclasses
 from datetime import datetime
 import hashlib
+import inspect
 import json
+import math
 import os
 import time
 from typing import Any
@@ -23,8 +25,9 @@ from benchmark.metrics import (
     field_correlation,
     field_l2_error,
     field_max_error,
+    field_runtime_convergence,
     flux_incident_normalized_error,
-    phase_align_field,
+    flux_runtime_convergence,
     plane_coord_keys,
     significant_field_mask,
     vector_field_comparison,
@@ -46,6 +49,8 @@ from benchmark.scenes import SCENARIOS, build_scene
 from benchmark.tidy3d_scene import benchmark_physical_bounds, prepare_tidy3d_benchmark_scene
 from witwin.maxwell.adapters.tidy3d import (
     _M_TO_UM,
+    _cw_steady_state_run_time,
+    _convert_source_time,
     _direction_to_angles,
     _scene_time_step,
 )
@@ -85,7 +90,7 @@ _DIRECTIONAL_SOURCE_EXPORT_CONTRACT_VERSION = 1
 _SOURCE_TIME_EXPORT_CONTRACT_VERSION = 1
 _BLOCH_BOUNDARY_EXPORT_CONTRACT_VERSION = 1
 _TFSF_SOURCE_EXPORT_CONTRACT_VERSION = 1
-_MESH_EXPORT_KINDS = {"torus", "pyramid", "prism", "hollow_box", "mesh", "poly_slab"}
+_MESH_EXPORT_KINDS = {"torus", "pyramid", "prism", "hollow_box", "mesh", "poly_slab", "ellipsoid"}
 _GEOMETRY_EXPORT_CONTRACT_KINDS = {"cone"}
 _INCIDENT_REFERENCE_SCENARIOS = (
     "planewave_vacuum",
@@ -251,19 +256,74 @@ def _incident_scene_signature(scene: mw.Scene, frequencies: tuple[float, ...]) -
 # regeneration) is a separate, supervisor-owned cache-lineage task. See
 # docs/assessments/f4-subpixel-lever-acceptance-2026-07-21.md.
 _POST_LINEAGE_NULL_MATERIAL_FIELDS = ("breakdown", "mass_density")
+_POST_LINEAGE_IDENTITY_FIELDS = ("material_id", "structure_id", "assignment_id", "surface_id")
+# Serialized constructor defaults added to structure/material models since the
+# cached payloads were generated. Non-default values must still invalidate them.
+_POST_LINEAGE_STRUCTURE_DEFAULTS = {
+    "version": 0,
+    "thickness_m": 0.1,
+    "layers": [],
+    "geometry_mode": "thin_sheet",
+    "roughness_front": None,
+    "roughness_back": None,
+    "dispersion": None,
+    "gain": 1.0,
+    "scattering_coefficient": 0.0,
+    "xpd_coefficient": 0.0,
+    "conductor_model": "finite",
+    "pmc": False,
+    "primitive_ids": None,
+    "phase_screen": None,
+    "uv": None,
+    "face_uv": None,
+}
 
 
-def _drop_post_lineage_null_material_fields(serialized):
-    """Recursively drop always-null post-lineage material fields from a payload."""
+def _drop_post_lineage_structure_fields(serialized):
+    """Drop identity labels and default post-lineage structure/material fields."""
     if isinstance(serialized, dict):
         return {
-            key: _drop_post_lineage_null_material_fields(val)
+            key: _drop_post_lineage_structure_fields(val)
             for key, val in serialized.items()
-            if not (key in _POST_LINEAGE_NULL_MATERIAL_FIELDS and val is None)
+            if key not in _POST_LINEAGE_IDENTITY_FIELDS
+            and not (key in _POST_LINEAGE_NULL_MATERIAL_FIELDS and val is None)
+            and not (
+                key in _POST_LINEAGE_STRUCTURE_DEFAULTS
+                and val == _POST_LINEAGE_STRUCTURE_DEFAULTS[key]
+            )
         }
     if isinstance(serialized, list):
-        return [_drop_post_lineage_null_material_fields(item) for item in serialized]
+        return [_drop_post_lineage_structure_fields(item) for item in serialized]
     return serialized
+
+
+def _benchmark_key_serialize(value):
+    """Use constructor float types and omit only default monitor additions."""
+    if dataclasses.is_dataclass(value):
+        parameters = inspect.signature(type(value)).parameters
+        payload = {}
+        for field in dataclasses.fields(value):
+            item = _benchmark_key_serialize(getattr(value, field.name))
+            parameter = parameters.get(field.name)
+            if parameter is not None:
+                if (
+                    field.name in ("sample_spacing", "closure_planes")
+                    and item == _stable_serialize(parameter.default)
+                ):
+                    continue
+                # Preserve discrete indices/counts and booleans in the cache lineage.
+                if type(item) in (int, float) and (
+                    parameter.annotation in (float, "float")
+                    or type(parameter.default) is float
+                ):
+                    item = float(item)
+            payload[field.name] = item
+        return payload
+    if isinstance(value, Mapping):
+        return {str(key): _benchmark_key_serialize(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_benchmark_key_serialize(item) for item in value]
+    return _stable_serialize(value)
 
 
 def _benchmark_cache_key(
@@ -274,6 +334,11 @@ def _benchmark_cache_key(
     normalize_source: bool = True,
 ) -> str:
     tidy_scene = prepare_tidy3d_benchmark_scene(scene)
+    boundary = _stable_serialize(tidy_scene.boundary)
+    if tidy_scene.boundary.mode_abc is None:
+        del boundary["mode_abc"]
+    if tidy_scene.boundary.mur_abc == mw.MurABC():
+        del boundary["mur_abc"]
     payload = {
         "version": 5,
         "courant": _maxwell_courant(scene, frequencies),
@@ -281,16 +346,20 @@ def _benchmark_cache_key(
         "run_time_factor": float(run_time_factor),
         "domain": _stable_serialize(tidy_scene.domain),
         "grid": _stable_serialize(tidy_scene.grid),
-        "boundary": _stable_serialize(tidy_scene.boundary),
+        "boundary": boundary,
         "symmetry": _stable_serialize(tidy_scene.symmetry),
-        "structures": _drop_post_lineage_null_material_fields(
-            _stable_serialize(tuple(tidy_scene.structures))
+        "structures": _drop_post_lineage_structure_fields(
+            _benchmark_key_serialize(tuple(tidy_scene.structures))
         ),
-        "sources": _stable_serialize(tuple(tidy_scene.sources)),
-        "monitors": _stable_serialize(tuple(tidy_scene.monitors)),
+        "sources": _benchmark_key_serialize(tuple(tidy_scene.sources)),
+        "monitors": _benchmark_key_serialize(tuple(tidy_scene.monitors)),
     }
     if not normalize_source:
         payload["source_normalization"] = False
+    requested_run_time = run_time_factor * max(hi - lo for lo, hi in tidy_scene.domain.bounds) / _C0
+    exported_run_time = _cw_steady_state_run_time(tidy_scene, requested_run_time)
+    if exported_run_time != requested_run_time:
+        payload["cw_export_run_time"] = exported_run_time
     if any(isinstance(source, mw.ModeSource) for source in tidy_scene.sources) or any(
         isinstance(monitor, mw.ModeMonitor) for monitor in tidy_scene.monitors
     ):
@@ -302,13 +371,25 @@ def _benchmark_cache_key(
         # CustomGridBoundaries, so meshing / node-convention changes alter the SaaS
         # grid without changing the declarative grid parameters serialized above.
         payload["grid_export_contract_version"] = _GRID_EXPORT_CONTRACT_VERSION
-    if any(
-        getattr(structure.geometry, "kind", None) in _MESH_EXPORT_KINDS
-        for structure in tidy_scene.structures
-    ):
-        # Primitive tessellation changes alter Tidy3D voxelization without changing
-        # the declarative geometry parameters serialized above.
+    mesh_exports = []
+    ellipsoid_meshes = {}
+    for index, structure in enumerate(tidy_scene.structures):
+        geometry = structure.geometry
+        kind = getattr(geometry, "kind", None)
+        if kind not in _MESH_EXPORT_KINDS:
+            continue
+        if kind == "ellipsoid":
+            rx, ry, rz = (float(value) for value in geometry.radii)
+            if abs(rx - ry) < 1e-12 and abs(ry - rz) < 1e-12:
+                continue  # The adapter exports equal radii as an analytic sphere.
+            # The adapter calls this same tessellator with its default arguments.
+            # Capture its actual output so changed defaults invalidate the cache.
+            ellipsoid_meshes[str(index)] = _stable_serialize(geometry.to_mesh())
+        mesh_exports.append(index)
+    if mesh_exports:
         payload["mesh_export_contract_version"] = _MESH_EXPORT_CONTRACT_VERSION
+    if ellipsoid_meshes:
+        payload["ellipsoid_export_meshes"] = ellipsoid_meshes
     if any(
         getattr(structure.geometry, "kind", None) in _GEOMETRY_EXPORT_CONTRACT_KINDS
         for structure in tidy_scene.structures
@@ -335,10 +416,10 @@ def _benchmark_cache_key(
         any(isinstance(source_time, mw.GaussianPulse) for source_time in source_times)
         and (not normalize_source or has_raw_time_output)
     ):
-        # Tidy3D ContinuousWave requires an explicit ramp bandwidth that is not
-        # part of Maxwell's ideal-CW declarative source. Raw Gaussian time data
-        # also depends on the exact cosine/phase lowering, while source-normalized
-        # linear frequency data cancels that arbitrary pulse convention.
+        # Continuous-wave export adds a ramp bandwidth absent from the declared
+        # ideal carrier. Normalized Gaussian fields also retain the exported
+        # phase convention; the analysis bridge below handles it without changing
+        # the identity of existing reference caches.
         payload["source_time_export_contract_version"] = _SOURCE_TIME_EXPORT_CONTRACT_VERSION
     if tidy_scene.boundary.uses_kind("bloch"):
         # Maxwell stores Bloch components in rad/m while Tidy3D expects units
@@ -354,6 +435,42 @@ def _benchmark_cache_key(
         # physical V/m-to-1 W/um^2 source convention.  Keep old unit-power
         # references from being silently interpreted as physical-field caches.
         payload["tfsf_source_export_contract_version"] = _TFSF_SOURCE_EXPORT_CONTRACT_VERSION
+    # Keep the historical payload bitwise for unchanged exports. Only record
+    # oblique amplitude factors and snapped plane coordinates that differ from
+    # the old export; a blanket contract bump would stale identical references.
+    amplitude_factors = {}
+    for index, source in enumerate(tidy_scene.sources):
+        if isinstance(getattr(source, "injection", None), mw.TFSF):
+            axis = resolve_injection_axis(source.direction, source.injection_axis)
+            factor = math.sqrt(abs(source.direction["xyz".index(axis)]))
+            if factor != 1.0:
+                amplitude_factors[str(index)] = factor
+    if amplitude_factors:
+        payload["tfsf_export_amplitude_factors"] = amplitude_factors
+    plane_positions = {}
+    prepared_scene = None
+    for monitor in tidy_scene.resolved_monitors():
+        if not (
+            getattr(monitor, "compute_flux", False)
+            or getattr(monitor, "closure_planes", None) is not None
+            or isinstance(monitor, mw.FluxTimeMonitor)
+        ):
+            continue
+        from witwin.maxwell.scene import prepare_scene
+        from witwin.maxwell.fdtd.observers import _flux_yee_plane_position
+
+        if prepared_scene is None:
+            prepared_scene = prepare_scene(tidy_scene.clone(device="cpu"), lazy_meshgrid=True)
+        requested = (
+            monitor.position
+            if isinstance(monitor, (mw.PlaneMonitor, mw.FluxTimeMonitor))
+            else monitor.plane_position
+        )
+        exported = _flux_yee_plane_position(prepared_scene, monitor.axis, requested) * _M_TO_UM
+        if exported != float(requested) * _M_TO_UM:
+            plane_positions[monitor.name] = exported
+    if plane_positions:
+        payload["monitor_export_plane_positions"] = plane_positions
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -550,6 +667,39 @@ def _dipole_moment_axis(source: "mw.PointDipole") -> int | None:
     return int(np.argmax(polarization))
 
 
+def _volume_current_exterior_mask(scene, monitor_axis, coords, monitor_position):
+    """Exclude current-source boxes dilated by one aligned plane-grid cell."""
+    sources = [
+        source for source in scene.sources
+        if isinstance(source, (mw.UniformCurrentSource, mw.CustomCurrentSource))
+    ]
+    if not sources or coords is None or monitor_position is None:
+        return None
+    coord_names = _PLANE_COORD_NAMES[monitor_axis]
+    coord_arrays = tuple(np.asarray(values, dtype=np.float64) for values in coords)
+    cell = max(
+        (float(np.median(np.diff(values))) for values in coord_arrays if values.size > 1),
+        default=0.0,
+    )
+    exterior = np.ones(tuple(values.size for values in coord_arrays), dtype=bool)
+    for source in sources:
+        if isinstance(source, mw.UniformCurrentSource):
+            lower = np.asarray(source.center) - 0.5 * np.asarray(source.size)
+            upper = np.asarray(source.center) + 0.5 * np.asarray(source.size)
+        else:
+            lower = np.array([values[0] for values in source.current_dataset.coords])
+            upper = np.array([values[-1] for values in source.current_dataset.coords])
+        lower, upper = lower - cell, upper + cell
+        normal = "xyz".index(monitor_axis)
+        if lower[normal] <= float(monitor_position) <= upper[normal]:
+            inside = []
+            for name, values in zip(coord_names, coord_arrays):
+                index = "xyz".index(name)
+                inside.append((values >= lower[index]) & (values <= upper[index]))
+            exterior &= ~(inside[0][:, None] & inside[1][None, :])
+    return exterior
+
+
 def _comparison_fields(
     scene: mw.Scene,
     monitor_axis: str,
@@ -558,19 +708,17 @@ def _comparison_fields(
     tidy3d_field,
     *,
     monitor_position: float | None = None,
-    phase_factor: complex | None = None,
-    align_phase: bool = True,
     frequency: float | None = None,
 ):
     """Remove source-support cells before comparing propagated fields."""
     def _finish(support):
         actual = np.asarray(maxwell_field)
         reference = np.asarray(tidy3d_field)
-        if phase_factor is not None:
-            actual = actual * complex(phase_factor)
-        elif align_phase:
-            actual, _ = phase_align_field(actual, reference, mask=support)
         return actual[support], reference[support]
+
+    exterior = _volume_current_exterior_mask(scene, monitor_axis, coords, monitor_position)
+    if exterior is not None:
+        return _finish(exterior)
 
     point_sources = [source for source in scene.sources if isinstance(source, mw.PointDipole)]
     coord_names = _PLANE_COORD_NAMES.get(monitor_axis, ())
@@ -635,22 +783,15 @@ def _comparison_fields(
     )
     directional_sources = [source for source in scene.sources if isinstance(source, directional_types)]
     if len(directional_sources) != 1:
-        if phase_factor is not None:
-            return _finish(np.ones(np.asarray(tidy3d_field).shape, dtype=bool))
         return maxwell_field, tidy3d_field
 
     source = directional_sources[0]
     if isinstance(source, (mw.PlaneWave, mw.GaussianBeam, mw.AstigmaticGaussianBeam)):
         if isinstance(getattr(source, "injection", None), mw.TFSF):
-            # Both solvers preserve the complete total/scattered-field slice,
-            # but their Fourier/source reference phases differ by one global
-            # unit phasor. Remove that convention only; retain all significant
-            # incident and scattered-field samples.
+            # Retain significant incident and scattered-field samples.
             support = significant_field_mask(tidy3d_field)
             return _finish(support)
         if getattr(source, "injection", "soft") != "soft":
-            if phase_factor is not None:
-                return _finish(np.ones(np.asarray(tidy3d_field).shape, dtype=bool))
             return maxwell_field, tidy3d_field
         injection_axis = resolve_injection_axis(source.direction, source.injection_axis)
         direction_component = float(source.direction["xyz".index(injection_axis)])
@@ -698,11 +839,9 @@ def _prepare_scalar_field_comparison(
     *,
     component: str,
     freq_index: int,
-    phase_factor: complex | None = None,
-    align_phase: bool = True,
     frequency: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Select, colocate, crop, and phase-reference one scalar monitor field."""
+    """Select, colocate, and crop one absolute complex monitor field."""
     maxwell_field = _select_monitor_plane_field(
         maxwell_monitor,
         component,
@@ -731,8 +870,6 @@ def _prepare_scalar_field_comparison(
         maxwell_field,
         tidy3d_field,
         monitor_position=maxwell_monitor.get("position", tidy3d_monitor.get("position")),
-        phase_factor=phase_factor,
-        align_phase=align_phase,
         frequency=frequency,
     )
 
@@ -1226,6 +1363,7 @@ def _run_maxwell(
     run_time_factor: float,
     solver: str = "fdtd",
     normalize_source: bool | None = None,
+    absorber: str = "auto",
 ):
     release_gpu_caches()
     scene = _clone_scene(scene, device="cuda")
@@ -1238,14 +1376,16 @@ def _run_maxwell(
         if solver == "fdfd":
             if len(frequencies) != 1:
                 raise ValueError("FDFD benchmark scenarios require exactly one frequency.")
+            # Keep plane descriptors for extraction from the solved volume fields below.
             result = Simulation.fdfd(
-                scene, frequency=frequencies[0],
+                scene.clone(monitors=[]), frequency=frequencies[0],
                 solver=mw.GMRES(solver_type="direct", precision="double"),
             ).run()
         elif solver == "fdtd":
             simulation = Simulation.fdtd(
                 scene, frequencies=frequencies, run_time=TimeConfig(time_steps=1),
                 spectral_sampler=mw.SpectralSampler(normalize_source=normalize_source),
+                absorber=absorber,
             )
             prepared = simulation.prepare()
             simulation.config.run_time = TimeConfig(
@@ -1278,6 +1418,38 @@ def _run_maxwell(
     return result, monitors, elapsed, performance
 
 
+def _source_normalization_bridge(source_time, exported_source_time, frequencies) -> np.ndarray:
+    """Translate reference-normalized spectra to the declared unit-envelope gauge.
+
+    A normalized reference divides the real exported waveform spectrum by
+    A*exp(i*exported_phase). Our denominator is the declared waveform with
+    amplitude one and physical phase zero. Their denominator ratio multiplies
+    reference fields; no measured field enters this calculation.
+    """
+    from scipy.integrate import quad_vec
+    from witwin.maxwell.sources import compile_source_time, evaluate_source_time_normalization
+
+    frequencies = np.asarray(frequencies, dtype=np.float64)
+    if isinstance(source_time, mw.CW):
+        # Both steady-state denominators are the unit carrier phasor. The
+        # exported turn-on ramp is absent from the steady-state spectrum.
+        return np.ones(frequencies.shape, dtype=np.complex128)
+
+    waveform = compile_source_time(source_time, default_frequency=frequencies[0])
+    duration = max(source_time.settling_time, exported_source_time.end_time())
+
+    def spectra(tau):
+        t = tau * duration
+        declared = evaluate_source_time_normalization(waveform, t)
+        exported = float(np.real(exported_source_time.amp_time(t)[0]))
+        exported /= exported_source_time.amplitude
+        return np.array((declared, exported))[:, None] * np.exp(2j * np.pi * frequencies * t)
+
+    declared_spectrum, exported_spectrum = quad_vec(spectra, 0.0, 1.0, epsabs=1e-12, epsrel=1e-10)[0]
+    reference_denominator = exported_spectrum / np.exp(1j * exported_source_time.phase)
+    return reference_denominator / declared_spectrum
+
+
 def _rescale_tidy3d_fields(
     monitors: dict[str, dict[str, Any]],
     *,
@@ -1291,7 +1463,20 @@ def _rescale_tidy3d_fields(
             for monitor in scene.resolved_monitors()
             if getattr(monitor, "fields", None)
         }
-    # Tidy3D always stores E/H fields in its micrometre-based units.  Source
+    bridge_factors = {}
+    if normalize_source and scene is not None:
+        import tidy3d as td
+
+        source_time = prepare_tidy3d_benchmark_scene(scene).resolved_sources()[0].source_time
+        exported_source_time = _convert_source_time(source_time, td)
+
+        def bridge(frequencies):
+            key = tuple(frequencies)
+            if key not in bridge_factors:
+                bridge_factors[key] = _source_normalization_bridge(source_time, exported_source_time, key)
+            return bridge_factors[key]
+
+    # The reference stores E/H fields in its micrometre-based units. Source
     # normalization changes the source-spectrum denominator, not the spatial
     # unit of the returned field.  This is also true for TFSF: a normalized
     # 1 V/m incident field is stored as approximately 1e-6 V/um and therefore
@@ -1310,10 +1495,17 @@ def _rescale_tidy3d_fields(
         for power_key in ("flux", "power"):
             if power_key in monitor_data:
                 monitor_data[power_key] = np.asarray(monitor_data[power_key])
+        factor = 1.0
+        if normalize_source and scene is not None and monitor_data.get("kind") not in ("field_time", "flux_time"):
+            if "fields" in monitor_data or monitor_data.get("kind") == "mode":
+                factor = bridge(monitor_data["frequencies"])
+                for key in ("amplitude_forward", "amplitude_backward"):
+                    if key in monitor_data.get("scalars", {}):
+                        monitor_data["scalars"][key] = np.asarray(monitor_data["scalars"][key]) * factor
         fields = monitor_data.get("fields")
         if fields is None:
             continue
-        # Tidy3D field data can expose all six components even when the public
+        # Reference field data can expose all six components even when the public
         # Maxwell monitor requested only a subset. Preserve the public monitor
         # contract so downstream scalar selection cannot consume an undeclared
         # near-zero component from a cached reference.
@@ -1323,7 +1515,7 @@ def _rescale_tidy3d_fields(
                 if component.lower() not in allowed:
                     del fields[component]
         for component, values in list(fields.items()):
-            fields[component] = np.asarray(values) * field_scale
+            fields[component] = np.asarray(values) * field_scale * factor
     return monitors
 
 
@@ -1556,6 +1748,7 @@ def _load_or_run_tidy3d(
     td_sim = td_scene.to_tidy3d(
         frequencies=frequencies,
         run_time=run_time,
+        cw_steady_state=True,
         courant=_maxwell_courant(scene, frequencies),
         normalize_index=0 if normalize_source else None,
     )
@@ -2298,6 +2491,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             run_time_factor=scenario.run_time_factor,
             solver=scenario.solver,
             normalize_source=normalize_source,
+            absorber=scenario.absorber,
         )
         if scenario.reference_solver == "fdtd":
             _, tidy3d_monitors, _, _ = _run_maxwell(
@@ -2306,6 +2500,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                 run_time_factor=scenario.run_time_factor,
                 solver="fdtd",
                 normalize_source=normalize_source,
+                absorber=scenario.absorber,
             )
             cache_hit = None
         elif scenario.reference_solver == "tidy3d":
@@ -2336,22 +2531,6 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                 component=component,
                 reference_index=scenario.spectral_reference_index,
             )
-        spectral_phase_factor = None
-        if scenario.spectral_reference_index is not None and not scenario.comparison_components:
-            carrier_maxwell, carrier_tidy3d = _prepare_scalar_field_comparison(
-                scene,
-                field_maxwell_monitors[monitor_name],
-                field_tidy3d_monitors[monitor_name],
-                component=component,
-                freq_index=scenario.spectral_reference_index,
-                align_phase=False,
-            )
-            _, spectral_phase_factor = phase_align_field(
-                carrier_maxwell,
-                carrier_tidy3d,
-                mask=significant_field_mask(carrier_tidy3d),
-            )
-
         per_frequency = []
         vector_plot_payloads = []
         for freq_index, frequency in enumerate(scenario.frequencies):
@@ -2373,6 +2552,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                     "frequency": float(frequency),
                     "field_l2": float(comparison["field_l2"]),
                     "field_shape_l2": float(comparison["field_shape_l2"]),
+                    "field_phase_fit_rad": float(np.angle(comparison["phase"])),
                     "field_linf": float(comparison["field_linf"]),
                     "field_corr": float(comparison["overlap"]),
                     "field_energy_ratio": float(comparison["energy_ratio"]),
@@ -2390,17 +2570,14 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                     field_tidy3d_monitors[monitor_name],
                     component=component,
                     freq_index=freq_index,
-                    phase_factor=spectral_phase_factor,
                     frequency=float(frequency),
                 )
-                if scenario.compare_magnitude:
-                    maxwell_field = np.abs(maxwell_field)
-                    tidy3d_field = np.abs(tidy3d_field)
-                shape_aligned, _ = best_fit_field_scale(maxwell_field, tidy3d_field)
+                shape_aligned, shape_scale = best_fit_field_scale(maxwell_field, tidy3d_field)
                 per_frequency.append({
                     "frequency": float(frequency),
                     "field_l2": field_l2_error(maxwell_field, tidy3d_field),
                     "field_shape_l2": field_l2_error(shape_aligned, tidy3d_field),
+                    "field_phase_fit_rad": float(np.angle(shape_scale)),
                     "field_linf": field_max_error(maxwell_field, tidy3d_field),
                     "field_corr": field_correlation(maxwell_field, tidy3d_field),
                 })
@@ -2421,6 +2598,34 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             if scenario.compare_flux
             else None
         )
+        field_runtime_change = None
+        field_converged = None
+        flux_runtime_change = None
+        flux_converged = None
+        if (
+            scenario.solver == "fdtd"
+            and (monitor_name or flux_error is not None)
+            and os.environ.get("WITWIN_BENCHMARK_SKIP_CONVERGENCE") != "1"
+        ):
+            _, doubled_monitors, _, _ = _run_maxwell(
+                scene,
+                frequencies=scenario.frequencies,
+                run_time_factor=scenario.run_time_factor * 2,
+                solver=scenario.solver,
+                normalize_source=normalize_source,
+                absorber=scenario.absorber,
+            )
+            if monitor_name:
+                field_runtime_change, field_converged = field_runtime_convergence(
+                    np.asarray(maxwell_monitors[monitor_name]["fields"][component]),
+                    np.asarray(doubled_monitors[monitor_name]["fields"][component]),
+                )
+            if flux_error is not None:
+                flux_names = [name for name, monitor in maxwell_monitors.items() if "flux" in monitor]
+                flux_runtime_change, flux_converged = flux_runtime_convergence(
+                    np.concatenate([np.asarray(maxwell_monitors[name]["flux"]).ravel() for name in flux_names]),
+                    np.concatenate([np.asarray(doubled_monitors[name]["flux"]).ravel() for name in flux_names]),
+                )
         scalar_metrics = _compare_scalar_observables(
             scenario.scalar_observable,
             maxwell_monitors,
@@ -2437,7 +2642,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
         if scenario.comparison_components:
             metric_component = "E-vector(" + ",".join(scenario.comparison_components) + ")"
         else:
-            metric_component = f"abs({component})" if scenario.compare_magnitude else component
+            metric_component = component
 
         material_source_plot = save_material_source_plot(
             scene=scene,
@@ -2452,7 +2657,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             freq_index=plot_frequency_index,
             frequency=float(scenario.frequencies[plot_frequency_index]),
         )
-        if spectral_phase_factor is not None:
+        if scenario.spectral_reference_index is not None and not scenario.comparison_components:
             diagnostic_plot = save_spectral_field_diagnostic_plot(
                 scene=scene,
                 scenario_name=name,
@@ -2462,7 +2667,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                 tidy3d_monitor=field_tidy3d_monitors[monitor_name],
                 frequencies=scenario.frequencies,
                 per_frequency=per_frequency,
-                phase_factor=spectral_phase_factor,
+                phase_factor=1.0,
                 reference_label=reference_label,
             )
         elif not vector_plot_payloads:
@@ -2517,6 +2722,10 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             field_linf=linf_error,
             field_corr=corr,
             flux_error=flux_error,
+            field_runtime_change=field_runtime_change,
+            field_converged=field_converged,
+            flux_runtime_change=flux_runtime_change,
+            flux_converged=flux_converged,
             compared_monitor=monitor_name,
             compared_component=metric_component,
             material_source_plot=material_source_plot,
@@ -2533,10 +2742,13 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
         )
         results.append(result)
         write_results_markdown([result])
+        field_status = " (unconverged; excluded from field pass/fail)" if field_converged is False else ""
         print(
             f"  {monitor_name}/{metric_component}: L2={l2_error:.4e} "
-            f"ShapeL2={shape_l2_error:.4e} Linf={linf_error:.4e} Corr={corr:.4f}"
+            f"ShapeL2={shape_l2_error:.4e} Linf={linf_error:.4e} Corr={corr:.4f}{field_status}"
         )
+        if field_runtime_change is not None:
+            print(f"  Field 2x-runtime change: {field_runtime_change:.4e}")
         if len(per_frequency) > 1:
             for item in per_frequency:
                 print(
@@ -2551,7 +2763,10 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                 f"{float(per_frequency[0]['field_energy_ratio']):.4f}"
             )
         if flux_error is not None:
-            print(f"  Flux error: {flux_error:.4e}")
+            status = " (unconverged; excluded from flux pass/fail)" if flux_converged is False else ""
+            print(f"  Flux error: {flux_error:.4e}{status}")
+        if flux_runtime_change is not None:
+            print(f"  Flux 2x-runtime change: {flux_runtime_change:.4e}")
         for item in scalar_metrics:
             phase_text = (
                 "-" if item["phase_error"] is None else f"{item['phase_error']:.4e} rad"

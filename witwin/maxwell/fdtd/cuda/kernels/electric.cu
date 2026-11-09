@@ -1,6 +1,7 @@
 #include "../launch.h"
 #include "../tensors.h"
 #include "common.cuh"
+#include "modulation.cuh"
 
 namespace {
 
@@ -20,7 +21,8 @@ bool inactive_boundary_pair(int64_t low_mode, int64_t high_mode) {
       (high_mode == BOUNDARY_NONE || high_mode == BOUNDARY_PML);
 }
 
-__device__ __forceinline__ float boundary_diff_low(float low_value, float high_value, int low_mode, float inv_delta) {
+template <typename ScalarT>
+__device__ __forceinline__ ScalarT boundary_diff_low(ScalarT low_value, ScalarT high_value, int low_mode, ScalarT inv_delta) {
   if (low_mode == BOUNDARY_PERIODIC) {
     return (low_value - high_value) * inv_delta;
   }
@@ -30,7 +32,8 @@ __device__ __forceinline__ float boundary_diff_low(float low_value, float high_v
   return 0.0f;
 }
 
-__device__ __forceinline__ float boundary_diff_high(float low_value, float high_value, int high_mode, float inv_delta) {
+template <typename ScalarT>
+__device__ __forceinline__ ScalarT boundary_diff_high(ScalarT low_value, ScalarT high_value, int high_mode, ScalarT inv_delta) {
   if (high_mode == BOUNDARY_PERIODIC) {
     return (low_value - high_value) * inv_delta;
   }
@@ -50,9 +53,9 @@ __device__ __forceinline__ bool boundary_inactive(unsigned int coord, unsigned i
   return low || high;
 }
 
-template <int Axis>
-__device__ __forceinline__ float backward_diff_axis(
-    const float* __restrict__ source,
+template <int Axis, typename ScalarT>
+__device__ __forceinline__ ScalarT backward_diff_axis(
+    const ScalarT* __restrict__ source,
     unsigned int target_size,
     unsigned int source_y,
     unsigned int source_z,
@@ -61,23 +64,23 @@ __device__ __forceinline__ float backward_diff_axis(
     unsigned int k,
     int low_mode,
   int high_mode,
-  const float* __restrict__ inv_delta) {
+  const ScalarT* __restrict__ inv_delta) {
   const unsigned int coord = Axis == 0 ? i : (Axis == 1 ? j : k);
   const unsigned int source_size = target_size - 1;
-  const float inv = inv_delta[coord];
+  const ScalarT inv = inv_delta[coord];
   const long long low = Axis == 0 ? offset3d(0, j, k, source_y, source_z)
       : (Axis == 1 ? offset3d(i, 0, k, source_y, source_z) : offset3d(i, j, 0, source_y, source_z));
   const long long high = Axis == 0 ? offset3d(source_size - 1, j, k, source_y, source_z)
       : (Axis == 1 ? offset3d(i, source_size - 1, k, source_y, source_z)
                    : offset3d(i, j, source_size - 1, source_y, source_z));
   if (coord == 0) {
-    const float low_value = source[low];
-    const float high_value = source[high];
+    const ScalarT low_value = source[low];
+    const ScalarT high_value = source[high];
     return boundary_diff_low(low_value, high_value, low_mode, inv);
   }
   if (coord + 1 == target_size) {
-    const float low_value = source[low];
-    const float high_value = source[high];
+    const ScalarT low_value = source[low];
+    const ScalarT high_value = source[high];
     return boundary_diff_high(low_value, high_value, high_mode, inv);
   }
   const long long current = offset3d(i, j, k, source_y, source_z);
@@ -86,14 +89,16 @@ __device__ __forceinline__ float backward_diff_axis(
   return (source[current] - source[previous]) * inv;
 }
 
-__device__ __forceinline__ float backward_diff_axis0(
-    const float* source, unsigned int target_x, unsigned int source_y, unsigned int source_z,
-    unsigned int i, unsigned int j, unsigned int k, int low_mode, int high_mode, const float* inv_delta) {
+template <typename ScalarT>
+__device__ __forceinline__ ScalarT backward_diff_axis0(
+    const ScalarT* source, unsigned int target_x, unsigned int source_y, unsigned int source_z,
+    unsigned int i, unsigned int j, unsigned int k, int low_mode, int high_mode, const ScalarT* inv_delta) {
   return backward_diff_axis<0>(source, target_x, source_y, source_z, i, j, k, low_mode, high_mode, inv_delta);
 }
 
-__device__ __forceinline__ float backward_diff_axis1(
-    const float* __restrict__ source,
+template <typename ScalarT>
+__device__ __forceinline__ ScalarT backward_diff_axis1(
+    const ScalarT* __restrict__ source,
     unsigned int source_y,
     unsigned int source_z,
     unsigned int i,
@@ -101,12 +106,13 @@ __device__ __forceinline__ float backward_diff_axis1(
     unsigned int k,
   int low_mode,
   int high_mode,
-  const float* __restrict__ inv_delta) {
+  const ScalarT* __restrict__ inv_delta) {
   return backward_diff_axis<1>(source, source_y + 1, source_y, source_z, i, j, k, low_mode, high_mode, inv_delta);
 }
 
-__device__ __forceinline__ float backward_diff_axis2(
-    const float* __restrict__ source,
+template <typename ScalarT>
+__device__ __forceinline__ ScalarT backward_diff_axis2(
+    const ScalarT* __restrict__ source,
     unsigned int source_y,
     unsigned int source_z,
     unsigned int i,
@@ -114,7 +120,7 @@ __device__ __forceinline__ float backward_diff_axis2(
     unsigned int k,
   int low_mode,
   int high_mode,
-  const float* __restrict__ inv_delta) {
+  const ScalarT* __restrict__ inv_delta) {
   return backward_diff_axis<2>(source, source_z + 1, source_y, source_z, i, j, k, low_mode, high_mode, inv_delta);
 }
 
@@ -223,15 +229,17 @@ __device__ __forceinline__ float modulation_factor(
 // evaluated per cell here rather than passed as scene-wide host scalars. This is
 // what lets disjoint structures modulate at independent frequencies in one run.
 __device__ __forceinline__ void modulation_phase_from_omega(
-    float omega, const float* __restrict__ modulation_time,
+    double omega, const double* __restrict__ modulation_time,
     float& cos_prev, float& sin_prev, float& cos_next, float& sin_next) {
-  sincosf(omega * modulation_time[0], &sin_prev, &cos_prev);
-  sincosf(omega * modulation_time[1], &sin_next, &cos_next);
+  modulation_sincos(omega, modulation_time[0], sin_prev, cos_prev);
+  modulation_sincos(omega, modulation_time[1], sin_next, cos_next);
 }
 
-__global__ void advance_modulation_time_kernel(float dt, float* __restrict__ modulation_time) {
-  modulation_time[0] = modulation_time[1];
-  modulation_time[1] += dt;
+__global__ void advance_modulation_time_kernel(
+    double dt, double* __restrict__ modulation_time, int64_t* __restrict__ modulation_step) {
+  const int64_t step = ++modulation_step[0];
+  modulation_time[0] = static_cast<double>(step - 1) * dt;
+  modulation_time[1] = static_cast<double>(step) * dt;
 }
 
 // The ``Modulated`` template flag folds the space-time modulated variants into
@@ -253,7 +261,7 @@ __global__ void update_electric_standard_kernel(
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
     const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
+    const double* __restrict__ modulation_time,
     float decay_value,
     float curl_value,
     const float* __restrict__ inv_a,
@@ -484,36 +492,36 @@ __global__ void update_electric_ez_bloch_kernel(
 // per-component (ex,ey,ez) to a single instantiation. ``Modulated`` folds the
 // space-time modulated variant in: identical psi/kappa handling with the
 // modulation factor applied to the decay/curl pair (never uniform).
-template <int Component, bool Uniform, bool Modulated, bool Batched = false>
+template <int Component, bool Uniform, bool Modulated, bool Batched = false, typename ScalarT = float>
 __global__ void update_electric_cpml_kernel(
     unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* __restrict__ first,
-    const float* __restrict__ second,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ mod_cos,
-    const float* __restrict__ mod_sin,
-    const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
-    float decay_value,
-    float curl_value,
-    const float* __restrict__ inv_kappa_a,
-    const float* __restrict__ b_a,
-    const float* __restrict__ c_a,
-    const float* __restrict__ inv_kappa_b,
-    const float* __restrict__ b_b,
-    const float* __restrict__ c_b,
-    const float* __restrict__ inv_a,
-    const float* __restrict__ inv_b,
+    const ScalarT* __restrict__ first,
+    const ScalarT* __restrict__ second,
+    const ScalarT* __restrict__ decay,
+    const ScalarT* __restrict__ curl_coeff,
+    const ScalarT* __restrict__ mod_cos,
+    const ScalarT* __restrict__ mod_sin,
+    const ScalarT* __restrict__ mod_omega,
+    const double* __restrict__ modulation_time,
+    ScalarT decay_value,
+    ScalarT curl_value,
+    const ScalarT* __restrict__ inv_kappa_a,
+    const ScalarT* __restrict__ b_a,
+    const ScalarT* __restrict__ c_a,
+    const ScalarT* __restrict__ inv_kappa_b,
+    const ScalarT* __restrict__ b_b,
+    const ScalarT* __restrict__ c_b,
+    const ScalarT* __restrict__ inv_a,
+    const ScalarT* __restrict__ inv_b,
     int a_low_mode,
     int a_high_mode,
     int b_low_mode,
     int b_high_mode,
-    float* __restrict__ psi_a,
-    float* __restrict__ psi_b,
-    float* __restrict__ field, FieldBatchLayout batch = {}) {
+    ScalarT* __restrict__ psi_a,
+    ScalarT* __restrict__ psi_b,
+    ScalarT* __restrict__ field, FieldBatchLayout batch = {}) {
   unsigned int i, j, k;
   if constexpr (Batched) {
     int64_t lane;
@@ -548,8 +556,8 @@ __global__ void update_electric_cpml_kernel(
       boundary_inactive(coord_b, size_b, b_low_mode, b_high_mode)) {
     return;
   }
-  float d_a;
-  float d_b;
+  ScalarT d_a;
+  ScalarT d_b;
   if constexpr (Component == 0) {
     d_a = backward_diff_axis1(second, ny - 1, nz, i, j, k, a_low_mode, a_high_mode, inv_a);
     d_b = backward_diff_axis2(first, ny, nz - 1, i, j, k, b_low_mode, b_high_mode, inv_b);
@@ -560,8 +568,8 @@ __global__ void update_electric_cpml_kernel(
     d_a = backward_diff_axis0(second, nx, ny, nz, i, j, k, a_low_mode, a_high_mode, inv_a);
     d_b = backward_diff_axis1(first, ny - 1, nz, i, j, k, b_low_mode, b_high_mode, inv_b);
   }
-  const float psi_a_value = b_a[coord_a] * psi_a[linear] + c_a[coord_a] * d_a;
-  const float psi_b_value = b_b[coord_b] * psi_b[linear] + c_b[coord_b] * d_b;
+  const ScalarT psi_a_value = b_a[coord_a] * psi_a[linear] + c_a[coord_a] * d_a;
+  const ScalarT psi_b_value = b_b[coord_b] * psi_b[linear] + c_b[coord_b] * d_b;
   psi_a[linear] = psi_a_value;
   psi_b[linear] = psi_b_value;
   if constexpr (Modulated) {
@@ -580,9 +588,9 @@ __global__ void update_electric_cpml_kernel(
     const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
     field[linear] = field[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
   } else {
-    const float corrected_a = d_a * inv_kappa_a[coord_a] + psi_a_value;
-    const float corrected_b = d_b * inv_kappa_b[coord_b] + psi_b_value;
-    const float curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
+    const ScalarT corrected_a = d_a * inv_kappa_a[coord_a] + psi_a_value;
+    const ScalarT corrected_b = d_b * inv_kappa_b[coord_b] + psi_b_value;
+    const ScalarT curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
     if constexpr (Uniform) {
       field[linear] = field[linear] * decay_value + curl_value * curl;
     } else {
@@ -710,7 +718,7 @@ __global__ void update_electric_ex_cpml_compressed_kernel(
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
     const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
+    const double* __restrict__ modulation_time,
     float decay_value,
     float curl_value,
     const float* __restrict__ inv_kappa_y,
@@ -798,7 +806,7 @@ __global__ void update_electric_ey_cpml_compressed_kernel(
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
     const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
+    const double* __restrict__ modulation_time,
     float decay_value,
     float curl_value,
     const float* __restrict__ inv_kappa_x,
@@ -886,7 +894,7 @@ __global__ void update_electric_ez_cpml_compressed_kernel(
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
     const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
+    const double* __restrict__ modulation_time,
     float decay_value,
     float curl_value,
     const float* __restrict__ inv_kappa_x,
@@ -1043,11 +1051,17 @@ void check_electric_inputs(
     const torch::stable::Tensor& decay,
     const torch::stable::Tensor& curl,
     const char* name) {
-  check_float32_tensor(field, name);
-  check_float32_tensor(first, "first");
-  check_float32_tensor(second, "second");
-  check_float32_tensor(decay, "decay");
-  check_float32_tensor(curl, "curl");
+  check_cuda_tensor(field, name);
+  STD_TORCH_CHECK(field.scalar_type() == torch::headeronly::ScalarType::Float || field.scalar_type() == torch::headeronly::ScalarType::Double, "field must be float32 or float64");
+  STD_TORCH_CHECK(field.scalar_type() == field.scalar_type(), "field update dtypes must match");
+  check_cuda_tensor(first, "first");
+  STD_TORCH_CHECK(first.scalar_type() == field.scalar_type(), "field update dtypes must match");
+  check_cuda_tensor(second, "second");
+  STD_TORCH_CHECK(second.scalar_type() == field.scalar_type(), "field update dtypes must match");
+  check_cuda_tensor(decay, "decay");
+  STD_TORCH_CHECK(decay.scalar_type() == field.scalar_type(), "field update dtypes must match");
+  check_cuda_tensor(curl, "curl");
+  STD_TORCH_CHECK(curl.scalar_type() == field.scalar_type(), "field update dtypes must match");
   check_same_cuda_device(field, first, "first");
   check_same_cuda_device(field, second, "second");
   check_same_cuda_device(field, decay, "decay");
@@ -1086,12 +1100,14 @@ void check_modulation_fields(
 void check_modulation_time(
     const torch::stable::Tensor& field,
     const torch::stable::Tensor& modulation_time) {
-  check_float32_tensor(modulation_time, "modulation_time");
+  check_cuda_tensor(modulation_time, "modulation_time");
+  STD_TORCH_CHECK(modulation_time.scalar_type() == torch::headeronly::ScalarType::Double,
+                  "modulation_time must be float64");
   check_contiguous_tensor(modulation_time, "modulation_time");
   check_same_cuda_device(field, modulation_time, "modulation_time");
   STD_TORCH_CHECK(
       modulation_time.dim() == 1 && modulation_time.numel() == 2,
-      "modulation_time must be a contiguous float32 CUDA tensor with two elements");
+      "modulation_time must be a contiguous float64 CUDA tensor with two elements");
 }
 
 void check_rank3_shape(
@@ -1134,8 +1150,10 @@ void check_electric_bloch_inputs(
   STD_TORCH_CHECK(second_real.dim() == 3, "second Bloch source tensor must be rank 3");
 }
 
-void check_vector_input(const torch::stable::Tensor& tensor, int64_t length, const char* name) {
-  check_float32_tensor(tensor, name);
+void check_vector_input(const torch::stable::Tensor& tensor, int64_t length, const char* name,
+    torch::headeronly::ScalarType dtype = torch::headeronly::ScalarType::Float) {
+  check_cuda_tensor(tensor, name);
+  STD_TORCH_CHECK(tensor.scalar_type() == dtype, "profile dtype must match field");
   check_contiguous_tensor(tensor, name);
   STD_TORCH_CHECK(tensor.dim() == 1, name, " must be rank 1");
   STD_TORCH_CHECK(tensor.size(0) == length, name, " length must match CPML field axis");
@@ -1146,7 +1164,7 @@ void check_spacing_vector(
     const torch::stable::Tensor& inv_delta,
     int64_t axis,
     const char* name) {
-  check_vector_input(inv_delta, field.size(axis), name);
+  check_vector_input(inv_delta, field.size(axis), name, field.scalar_type());
   check_same_cuda_device(field, inv_delta, name);
 }
 
@@ -1168,20 +1186,22 @@ void check_electric_cpml_inputs(
     int64_t second_axis,
     const char* name) {
   check_electric_inputs(field, first, second, decay, curl, name);
-  check_float32_tensor(psi_first, "psi_first");
-  check_float32_tensor(psi_second, "psi_second");
+  check_cuda_tensor(psi_first, "psi_first");
+  STD_TORCH_CHECK(psi_first.scalar_type() == field.scalar_type(), "CPML state dtype must match field");
+  check_cuda_tensor(psi_second, "psi_second");
+  STD_TORCH_CHECK(psi_second.scalar_type() == field.scalar_type(), "CPML state dtype must match field");
   check_same_cuda_device(field, psi_first, "psi_first");
   check_same_cuda_device(field, psi_second, "psi_second");
   check_contiguous_tensor(psi_first, "psi_first");
   check_contiguous_tensor(psi_second, "psi_second");
   STD_TORCH_CHECK(psi_first.sizes().equals(field.sizes()), "psi_first must match field shape");
   STD_TORCH_CHECK(psi_second.sizes().equals(field.sizes()), "psi_second must match field shape");
-  check_vector_input(inv_kappa_first, field.size(first_axis), "inv_kappa_first");
-  check_vector_input(b_first, field.size(first_axis), "b_first");
-  check_vector_input(c_first, field.size(first_axis), "c_first");
-  check_vector_input(inv_kappa_second, field.size(second_axis), "inv_kappa_second");
-  check_vector_input(b_second, field.size(second_axis), "b_second");
-  check_vector_input(c_second, field.size(second_axis), "c_second");
+  check_vector_input(inv_kappa_first, field.size(first_axis), "inv_kappa_first", field.scalar_type());
+  check_vector_input(b_first, field.size(first_axis), "b_first", field.scalar_type());
+  check_vector_input(c_first, field.size(first_axis), "c_first", field.scalar_type());
+  check_vector_input(inv_kappa_second, field.size(second_axis), "inv_kappa_second", field.scalar_type());
+  check_vector_input(b_second, field.size(second_axis), "b_second", field.scalar_type());
+  check_vector_input(c_second, field.size(second_axis), "c_second", field.scalar_type());
   check_same_cuda_device(field, inv_kappa_first, "inv_kappa_first");
   check_same_cuda_device(field, b_first, "b_first");
   check_same_cuda_device(field, c_first, "c_first");
@@ -1623,15 +1643,24 @@ __global__ void apply_electric_ez_cpml_x_correction_kernel(
 
 }  // namespace
 
-void advance_modulation_time_cuda(torch::stable::Tensor modulation_time, double dt) {
-  check_float32_tensor(modulation_time, "modulation_time");
+void advance_modulation_time_cuda(
+    torch::stable::Tensor modulation_time, torch::stable::Tensor modulation_step, double dt) {
+  check_cuda_tensor(modulation_time, "modulation_time");
+  STD_TORCH_CHECK(modulation_time.scalar_type() == torch::headeronly::ScalarType::Double,
+                  "modulation_time must be float64");
   check_contiguous_tensor(modulation_time, "modulation_time");
   STD_TORCH_CHECK(
       modulation_time.dim() == 1 && modulation_time.numel() == 2,
-      "modulation_time must be a contiguous float32 CUDA tensor with two elements");
+      "modulation_time must be a contiguous float64 CUDA tensor with two elements");
+  check_cuda_tensor(modulation_step, "modulation_step");
+  check_same_cuda_device(modulation_time, modulation_step, "modulation_step");
+  check_contiguous_tensor(modulation_step, "modulation_step");
+  STD_TORCH_CHECK(modulation_step.scalar_type() == torch::headeronly::ScalarType::Long &&
+                      modulation_step.dim() == 1 && modulation_step.numel() == 1,
+                  "modulation_step must be a contiguous int64 CUDA tensor with one element");
   const torch::stable::accelerator::DeviceGuard guard(modulation_time.get_device_index());
   advance_modulation_time_kernel<<<1, 1, 0, current_cuda_stream()>>>(
-      static_cast<float>(dt), modulation_time.mutable_data_ptr<float>());
+      dt, modulation_time.mutable_data_ptr<double>(), modulation_step.mutable_data_ptr<int64_t>());
   WITWIN_CUDA_CHECK();
 }
 
@@ -2122,6 +2151,40 @@ void update_electric_ex_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
   const auto sizes = ex.sizes();
   const dim3 block = field_block3d();
+  if (ex.scalar_type() == torch::headeronly::ScalarType::Double) {
+    update_electric_cpml_kernel<0, false, false, false, double><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        hy.mutable_data_ptr<double>(),
+        hz.mutable_data_ptr<double>(),
+        decay.mutable_data_ptr<double>(),
+        curl.mutable_data_ptr<double>(),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        0.0,
+        0.0,
+        inv_kappa_y.mutable_data_ptr<double>(),
+        b_y.mutable_data_ptr<double>(),
+        c_y.mutable_data_ptr<double>(),
+        inv_kappa_z.mutable_data_ptr<double>(),
+        b_z.mutable_data_ptr<double>(),
+        c_z.mutable_data_ptr<double>(),
+        inv_dy.mutable_data_ptr<double>(),
+        inv_dz.mutable_data_ptr<double>(),
+        static_cast<int>(y_low_mode),
+        static_cast<int>(y_high_mode),
+        static_cast<int>(z_low_mode),
+        static_cast<int>(z_high_mode),
+        psi_y.mutable_data_ptr<double>(),
+        psi_z.mutable_data_ptr<double>(),
+        ex.mutable_data_ptr<double>());
+    WITWIN_CUDA_CHECK();
+    return;
+  }
+
   if (inactive_boundary_pair(y_low_mode, y_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
     if (sizes[1] > 2 && sizes[2] > 2) {
       dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
@@ -2150,7 +2213,7 @@ void update_electric_ex_cpml_cuda(
     }
   } else {
     dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
-      update_electric_cpml_kernel<0, decltype(u_uniform)::value, false><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_cpml_kernel<0, decltype(u_uniform)::value, false, false, float><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2215,6 +2278,40 @@ void update_electric_ey_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(ey.get_device_index());
   const auto sizes = ey.sizes();
   const dim3 block = field_block3d();
+  if (ey.scalar_type() == torch::headeronly::ScalarType::Double) {
+    update_electric_cpml_kernel<1, false, false, false, double><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        hx.mutable_data_ptr<double>(),
+        hz.mutable_data_ptr<double>(),
+        decay.mutable_data_ptr<double>(),
+        curl.mutable_data_ptr<double>(),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        0.0,
+        0.0,
+        inv_kappa_x.mutable_data_ptr<double>(),
+        b_x.mutable_data_ptr<double>(),
+        c_x.mutable_data_ptr<double>(),
+        inv_kappa_z.mutable_data_ptr<double>(),
+        b_z.mutable_data_ptr<double>(),
+        c_z.mutable_data_ptr<double>(),
+        inv_dx.mutable_data_ptr<double>(),
+        inv_dz.mutable_data_ptr<double>(),
+        static_cast<int>(x_low_mode),
+        static_cast<int>(x_high_mode),
+        static_cast<int>(z_low_mode),
+        static_cast<int>(z_high_mode),
+        psi_x.mutable_data_ptr<double>(),
+        psi_z.mutable_data_ptr<double>(),
+        ey.mutable_data_ptr<double>());
+    WITWIN_CUDA_CHECK();
+    return;
+  }
+
   if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
     if (sizes[0] > 2 && sizes[2] > 2) {
       dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
@@ -2243,7 +2340,7 @@ void update_electric_ey_cpml_cuda(
     }
   } else {
     dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
-      update_electric_cpml_kernel<1, decltype(u_uniform)::value, false><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_cpml_kernel<1, decltype(u_uniform)::value, false, false, float><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2308,6 +2405,40 @@ void update_electric_ez_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
   const auto sizes = ez.sizes();
   const dim3 block = field_block3d();
+  if (ez.scalar_type() == torch::headeronly::ScalarType::Double) {
+    update_electric_cpml_kernel<2, false, false, false, double><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        hx.mutable_data_ptr<double>(),
+        hy.mutable_data_ptr<double>(),
+        decay.mutable_data_ptr<double>(),
+        curl.mutable_data_ptr<double>(),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        0.0,
+        0.0,
+        inv_kappa_x.mutable_data_ptr<double>(),
+        b_x.mutable_data_ptr<double>(),
+        c_x.mutable_data_ptr<double>(),
+        inv_kappa_y.mutable_data_ptr<double>(),
+        b_y.mutable_data_ptr<double>(),
+        c_y.mutable_data_ptr<double>(),
+        inv_dx.mutable_data_ptr<double>(),
+        inv_dy.mutable_data_ptr<double>(),
+        static_cast<int>(x_low_mode),
+        static_cast<int>(x_high_mode),
+        static_cast<int>(y_low_mode),
+        static_cast<int>(y_high_mode),
+        psi_x.mutable_data_ptr<double>(),
+        psi_y.mutable_data_ptr<double>(),
+        ez.mutable_data_ptr<double>());
+    WITWIN_CUDA_CHECK();
+    return;
+  }
+
   if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(y_low_mode, y_high_mode)) {
     if (sizes[0] > 2 && sizes[1] > 2) {
       dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
@@ -2336,7 +2467,7 @@ void update_electric_ez_cpml_cuda(
     }
   } else {
     dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
-      update_electric_cpml_kernel<2, decltype(u_uniform)::value, false><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_cpml_kernel<2, decltype(u_uniform)::value, false, false, float><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2759,7 +2890,7 @@ void update_electric_ex_cpml_modulated_compressed_cuda(
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
-      modulation_time.mutable_data_ptr<float>(),
+      modulation_time.mutable_data_ptr<double>(),
       0.0f,
       0.0f,
       inv_kappa_y.mutable_data_ptr<float>(),
@@ -2839,7 +2970,7 @@ void update_electric_ey_cpml_modulated_compressed_cuda(
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
-      modulation_time.mutable_data_ptr<float>(),
+      modulation_time.mutable_data_ptr<double>(),
       0.0f,
       0.0f,
       inv_kappa_x.mutable_data_ptr<float>(),
@@ -2919,7 +3050,7 @@ void update_electric_ez_cpml_modulated_compressed_cuda(
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
-      modulation_time.mutable_data_ptr<float>(),
+      modulation_time.mutable_data_ptr<double>(),
       0.0f,
       0.0f,
       inv_kappa_x.mutable_data_ptr<float>(),
@@ -3403,7 +3534,7 @@ void update_electric_ex_modulated_cuda(
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
-      modulation_time.mutable_data_ptr<float>(),
+      modulation_time.mutable_data_ptr<double>(),
       0.0f,
       0.0f,
       inv_dy.mutable_data_ptr<float>(),
@@ -3455,7 +3586,7 @@ void update_electric_ey_modulated_cuda(
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
-      modulation_time.mutable_data_ptr<float>(),
+      modulation_time.mutable_data_ptr<double>(),
       0.0f,
       0.0f,
       inv_dx.mutable_data_ptr<float>(),
@@ -3507,7 +3638,7 @@ void update_electric_ez_modulated_cuda(
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
-      modulation_time.mutable_data_ptr<float>(),
+      modulation_time.mutable_data_ptr<double>(),
       0.0f,
       0.0f,
       inv_dx.mutable_data_ptr<float>(),
@@ -3566,7 +3697,7 @@ void update_electric_ex_cpml_modulated_cuda(
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
-      modulation_time.mutable_data_ptr<float>(),
+      modulation_time.mutable_data_ptr<double>(),
       0.0f,
       0.0f,
       inv_kappa_y.mutable_data_ptr<float>(),
@@ -3633,7 +3764,7 @@ void update_electric_ey_cpml_modulated_cuda(
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
-      modulation_time.mutable_data_ptr<float>(),
+      modulation_time.mutable_data_ptr<double>(),
       0.0f,
       0.0f,
       inv_kappa_x.mutable_data_ptr<float>(),
@@ -3700,7 +3831,7 @@ void update_electric_ez_cpml_modulated_cuda(
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
-      modulation_time.mutable_data_ptr<float>(),
+      modulation_time.mutable_data_ptr<double>(),
       0.0f,
       0.0f,
       inv_kappa_x.mutable_data_ptr<float>(),
@@ -3793,7 +3924,7 @@ void update_electric_cpml_batch_cuda(torch::stable::Tensor field, const torch::s
           kappa_b.mutable_data_ptr<float>(), b_b.mutable_data_ptr<float>(), c_b.mutable_data_ptr<float>(),
           inv_a.mutable_data_ptr<float>(), inv_b.mutable_data_ptr<float>(),psi_a.mutable_data_ptr<float>(), psi_b.mutable_data_ptr<float>(), field.mutable_data_ptr<float>(), batch);
       } else {
-        update_electric_cpml_kernel<decltype(axis)::value, false, false, true><<<linear_grid(field.numel()), 256, 0, current_cuda_stream()>>>(field.size(1), field.size(2), field.size(3),
+        update_electric_cpml_kernel<decltype(axis)::value, false, false, true, float><<<linear_grid(field.numel()), 256, 0, current_cuda_stream()>>>(field.size(1), field.size(2), field.size(3),
           first.mutable_data_ptr<float>(), second.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(), curl.mutable_data_ptr<float>(),nullptr, nullptr, nullptr, nullptr, 0.0f, 0.0f,
           kappa_a.mutable_data_ptr<float>(), b_a.mutable_data_ptr<float>(), c_a.mutable_data_ptr<float>(),

@@ -159,7 +159,7 @@ def _sibc_scene():
         domain=mw.Domain(bounds=((-0.1, 0.1), (-0.1, 0.1), (-0.1, 0.1))),
         grid=mw.GridSpec.uniform(0.008),
         boundary=mw.BoundarySpec.faces(
-            default="periodic", num_layers=8, x=("pml", "pml")
+            default="periodic", num_layers=40, x=("pml", "pml")
         ),
         device="cuda",
     )
@@ -195,12 +195,15 @@ _COVERAGE = [
     ids=[case[0] for case in _COVERAGE],
 )
 def test_cuda_graph_capture_coverage(scene_factory, frequency, expected_active, decline_reason):
+    # The matrix covers the existing runner's graphable predicate; eligible scenes
+    # would otherwise take the core path's whole-step capture under the default.
     result = mw.Simulation.fdtd(
         scene_factory(),
         frequencies=(frequency,),
         full_field_dft=True,
         run_time=mw.TimeConfig(time_steps=40),
         cuda_graph=True,
+        fdtd_core_path=False,
     ).run()
     stats = result.stats()
     assert stats["cuda_graph_active"] is expected_active

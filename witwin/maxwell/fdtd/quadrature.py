@@ -75,23 +75,23 @@ def _cell_center_weights_1d(points):
     return weights
 
 
-def _exact_cell_center_widths(solver, axis, points):
+def _exact_cell_center_widths(prepared_scene, axis, points):
     """Resolve aligned Yee center samples to their exact primal cell widths."""
 
     axis_name = normalize_axis(axis)
     centers = np.asarray(
         {
-            "x": solver.scene.x_half64,
-            "y": solver.scene.y_half64,
-            "z": solver.scene.z_half64,
+            "x": prepared_scene.x_half64,
+            "y": prepared_scene.y_half64,
+            "z": prepared_scene.z_half64,
         }[axis_name],
         dtype=np.float64,
     )
     widths = np.asarray(
         {
-            "x": solver.scene.dx_primal64,
-            "y": solver.scene.dy_primal64,
-            "z": solver.scene.dz_primal64,
+            "x": prepared_scene.dx_primal64,
+            "y": prepared_scene.dy_primal64,
+            "z": prepared_scene.dz_primal64,
         }[axis_name],
         dtype=np.float64,
     )
@@ -120,6 +120,11 @@ def plane_normal_poynting(result):
     source of truth shared by plane-flux integration and incident power density so
     both stay exactly consistent (``flux == sum(poynting * weights)``).
     """
+
+    from .plane_product import native_plane_poynting
+    native = native_plane_poynting(result)
+    if native is not None:
+        return native
 
     axis = normalize_axis(result["axis"])
     axis_index = _AXIS_CODES[axis]

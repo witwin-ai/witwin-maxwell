@@ -36,7 +36,8 @@ def test_patch_updates_match_independent_native_arithmetic(cw, boundary, positio
                 slot.buffers[name].normal_()
             saved = {name: slot.buffers[name].clone() for name in ("Ex", "Ey", "Ez")}
             for solver in slot.solvers:
-                solver.add_source(time_value=n*solver.dt)
+                # Step n samples additive electric current at (n + 1/2) dt.
+                solver.add_source(n=n)
             expected = {name: slot.buffers[name].clone() for name in saved}
             for name, value in saved.items():
                 slot.buffers[name].copy_(value)

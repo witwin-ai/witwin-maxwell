@@ -212,10 +212,12 @@ def test_component_coords_use_per_cell_half_steps_on_custom_grid():
     np.testing.assert_array_equal(cz, half)
 
 
-def test_fdfd_rejects_custom_grid():
-    simulation = mw.Simulation.fdfd(_custom_scene(), frequency=1e9)
-    with pytest.raises(NotImplementedError, match="FDFD does not support nonuniform"):
-        simulation.prepare()
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fdfd_accepts_custom_grid():
+    simulation = mw.Simulation.fdfd(_custom_scene(device="cuda"), frequency=1e9)
+    solver = simulation.prepare().solver
+    solver._ensure_system_matrix()
+    assert solver.A_matrix.shape[0] == solver.scene.N_vector_total
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")

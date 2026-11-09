@@ -17,16 +17,14 @@ identity. ``sar/one_gram_cube`` is an ``analytic-identity`` (hand-computable 1 g
 average); ``sar/uniform_lossy_cube`` reports the self-consistency volume/channel
 closure (``tautology`` -- the volume integral and the channel total are two
 reductions of the same edge-loss field, so their closure is exact by construction
-and supporting only). ``sar/antenna_near_phantom`` is ``blocked`` -- the FDTD port
-machinery fails closed on a conductive tissue background, which a phantom is by
-construction; its wave-level class is recorded as a TARGET only (``target_gate_class``),
-never as an achieved gate.
+and supporting only). ``sar/antenna_near_phantom`` measures a functional driven
+conductive-material workflow, with ``gap`` status until independent field and
+grid-convergence qualification. Its wave-level class remains a target.
 
 Reference-solver policy (audit section 3): the conservation-law / analytic gates
 are the binding first-line references. No external reference-solver run backs this
-family in this build: the driven antenna scene (the only one whose absorbed-power
-field an external solver could cross-check) is blocked upstream, and the plane-wave
-phantoms are gated on conservation, so every row carries
+family in this build: the driven antenna scene has not received an independent
+field comparison, and the plane-wave phantoms are gated on conservation, so every row carries
 ``external_reference: analytic-only``.
 
 Run: ``python -m benchmark sar`` (all scenes) or ``python -m benchmark sar
@@ -44,7 +42,7 @@ import torch
 
 import witwin.maxwell as mw
 from benchmark.paths import ROOT
-from benchmark.scenes.sar import layered_slab, one_gram_cube, uniform_lossy_cube
+from benchmark.scenes.sar import antenna_near_phantom, layered_slab, one_gram_cube, uniform_lossy_cube
 from witwin.maxwell.compiler.power_loss import compile_power_loss_monitor
 from witwin.maxwell.scene import prepare_scene
 
@@ -55,6 +53,7 @@ SECTION_HEADER = "## SAR exposure validation"
 WAVE_LEVEL = "wave-level"
 ANALYTIC_IDENTITY = "analytic-identity"
 TAUTOLOGY = "tautology"
+POSTPROCESS_ONLY = "postprocess-only"
 ANALYTIC_ONLY = "analytic-only"
 
 # Three refinement tiers (m) for the layered-slab conservation convergence.
@@ -65,14 +64,12 @@ _CONVERGENCE_GRIDS = (0.005, 0.004, 0.003)
 class SarReport:
     name: str
     description: str
-    gate_class: str  # the ACHIEVED headline gate class ("" when the scene is blocked)
+    gate_class: str  # Achieved headline class; empty until a gate is measured.
     status: str  # pass | gap | fail | blocked | pending | error
     reference: str
     external_reference: str
     target: str
-    # Aspirational class of the gate the scene targets. Recorded (with the blocked
-    # status and a blocked marker in the table) when the wave-level gate cannot run,
-    # so a blocked row never claims an unachieved class as if measured.
+    # Target class remains distinct from any achieved functional reduction.
     target_gate_class: str = ""
     metrics: list[dict] = field(default_factory=list)
     convergence: list[dict] = field(default_factory=list)
@@ -274,29 +271,59 @@ def run_layered_slab() -> SarReport:
 
 
 # --------------------------------------------------------------------------- #
-# sar/antenna_near_phantom -- blocked (conductive-media port, no run).        #
+# sar/antenna_near_phantom -- functional workflow, physical qualification gap. #
 # --------------------------------------------------------------------------- #
-def run_antenna_near_phantom() -> SarReport:
-    return SarReport(
+def antenna_exposure_result(*, cuda_graph=True):
+    scene = antenna_near_phantom.build_scene(device="cuda")
+    return mw.Simulation.fdtd(scene,frequencies=antenna_near_phantom.FREQUENCIES,
+        excitations=mw.PortExcitation("feed",source_time=mw.GaussianPulse(
+            antenna_near_phantom.DESIGN_FREQUENCY,fwidth=1.5e9)),
+        run_time=mw.TimeConfig.auto(steady_cycles=24,transient_cycles=0),
+        spectral_sampler=mw.SpectralSampler(window="none"),full_field_dft=True,
+        cuda_graph=cuda_graph).run()
+
+
+def run_antenna_near_phantom(*, execute=True) -> SarReport:
+    report = SarReport(
         name="sar/antenna_near_phantom",
-        description="Driven dipole near a tissue block (conductive-media port blocker)",
-        # No gate ran, so no class is achieved. The wave-level class is the TARGET
-        # only; it is recorded in target_gate_class (with the blocked status), never
-        # in gate_class, so the row cannot read as a measured wave-level result.
+        description="Driven dipole near a conductive tissue block",
         gate_class="",
-        status="blocked",
+        status="gap",
         target_gate_class=WAVE_LEVEL,
-        reference="pending: needs a conductance-aware lumped-port update coefficient",
+        reference="independent electromagnetic field comparison and grid convergence pending",
         external_reference=ANALYTIC_ONLY,
-        target="accepted-power 1 W -> point SAR -> 1 g/10 g peaks (blocked upstream)",
+        target="functional accepted-power 1 W -> point SAR -> 1 g/10 g; absolute exposure qualification pending",
         notes=[
-            "The FDTD port machinery fails closed on a conductive background (a tissue "
-            "phantom is conductive by construction): the driven end-to-end SAR chain "
-            "raises NotImplementedError at prepare(). Unblocking needs a conductance-aware "
-            "lumped-port update coefficient, out of this stage's scope. Pinned as a "
-            "fail-closed gate in tests/sar/test_phantom_benchmarks.py."
+            "Conductive-material lumped-port coupling is available. The original arm/tissue "
+            "parameters are retained; explicit nodes and native half-grid H contours repair the fixture.",
+            "The fixed tissue catalogue coefficients are not a frequency-qualified or certified dosimetry dataset."
         ],
     )
+    if not execute:
+        report.notes.append("Functional solve not requested; no measured metric or achieved gate is reported.")
+        return report
+    if not torch.cuda.is_available():
+        report.status = "pending"
+        report.notes.append("CUDA is required for the functional field solve.")
+        return report
+    try:
+        result = antenna_exposure_result()
+        accepted = float(result.port("feed").accepted_power[0])
+        absorbed = float(result.power_loss("loss").conduction[0])
+        if accepted <= 0 or absorbed <= 0:
+            raise ValueError("Functional exposure requires positive measured accepted and conductive power.")
+        sar = result.sar("loss",normalization=mw.PowerNormalization.accepted_power("feed",1.),
+            averaging=mw.SARAveraging(mass=(1e-3,10e-3)))
+        report.gate_class = POSTPROCESS_ONLY
+        for quantity,value,unit in (("accepted_power",accepted,"W"),("absorbed_power",absorbed,"W"),
+                ("peak_1g_sar_at_1W",float(sar.peak(1e-3).sar[0]),"W/kg"),
+                ("peak_10g_sar_at_1W",float(sar.peak(10e-3).sar[0]),"W/kg")):
+            report.metrics.append({"quantity":quantity,"measured":value,"unit":unit,"class":POSTPROCESS_ONLY})
+        report.notes.append("Functional workflow measured. These reductions do not establish independent wave-level or absolute SAR accuracy.")
+    except Exception as exc:
+        report.status = "error"
+        report.notes.append(f"{type(exc).__name__}: {exc}")
+    return report
 
 
 SCENE_RUNNERS = {
@@ -323,9 +350,9 @@ _INTRO = (
     "whose uniform-field average equals the hand-computed point SAR). "
     "`sar/uniform_lossy_cube` reports the volume/channel self-consistency closure "
     "(`tautology` -- a self-comparison of the same edge-loss field, supporting only). "
-    "`sar/antenna_near_phantom` is `blocked` -- the FDTD port machinery fails closed on "
-    "the conductive tissue background; its wave-level class is a TARGET only (blocked "
-    "upstream), never an achieved gate. Gate "
+    "`sar/antenna_near_phantom` has a functional driven conductive-material workflow; "
+    "independent wave-level and absolute exposure qualification remain a `gap`. "
+    "Its wave-level class is a target, and measured SAR reductions are `postprocess-only`. Gate "
     "classes are the verbatim taxonomy (`docs/reference/gate-classification.md`); no "
     "external reference-solver run backs this family (every row `analytic-only`). "
     "Per-scene JSON artifacts live under `docs/assessments/sar-phantom-validation/`."
@@ -346,20 +373,20 @@ def _results_section(reports: list[SarReport]) -> str:
         return str(value).replace("|", r"\|")
 
     def gate_cell(report: SarReport) -> str:
-        # A blocked row shows its TARGET class with an explicit blocked marker,
-        # never a bare (unachieved) class.
+        # An unmeasured row shows its target class with the actual gap/status.
         if report.gate_class:
             return esc(report.gate_class)
         if report.target_gate_class:
-            return esc(f"{report.target_gate_class} (target; blocked)")
+            return esc(f"{report.target_gate_class} (target; {report.status})")
         return "-"
 
     for report in reports:
-        headline = next((m for m in report.metrics if "rel_error" in m), None)
+        headline = next((m for m in report.metrics if "rel_error" in m),
+                        report.metrics[0] if report.metrics else None)
         if headline is not None:
             measured = f"{headline.get('measured', float('nan')):.4g}"
-            reference = f"{headline.get('reference', float('nan')):.4g}"
-            rel = f"{headline['rel_error']:.3%}"
+            reference = f"{headline['reference']:.4g}" if "reference" in headline else "-"
+            rel = f"{headline['rel_error']:.3%}" if "rel_error" in headline else "-"
             quantity = str(headline.get("quantity", "-"))
         else:
             measured = reference = rel = "-"

@@ -55,16 +55,17 @@ def _psi_layout(solver, name):
 
 def validate_native_solver(solver):
     """Fail before advancing when the shared field block omits active physics."""
+    if getattr(solver.scene,"coordinates",None) is not None:
+        raise NotImplementedError("Mapped native batching requires coordinate-aware cohort and output qualification.")
     unsupported = (
-        "complex_fields_enabled", "dispersive_enabled", "electric_dispersive_enabled",
-        "magnetic_dispersive_enabled", "nonlinear_enabled", "modulation_enabled",
+        "complex_fields_enabled", "nonlinear_enabled", "modulation_enabled",
         "full_aniso_enabled", "gyromagnetic_enabled", "breakdown_enabled", "tfsf_enabled",
     )
     for name in unsupported:
         if getattr(solver, name, False):
             raise NotImplementedError(f"Native batch field execution does not yet support {name}.")
     for name in ("_magnetic_source_terms", "_electric_source_terms", "_wire_runtime",
-                 "_surface_impedance", "_circuit_runtimes", "_network_runtimes", "_mur_state"):
+                 "_surface_impedance", "_mur_state", "_abc_higdon_state", "_thin_sheets"):
         if getattr(solver, name, None):
             raise NotImplementedError(f"Native batch field execution does not yet support {name}.")
     for name in FIELDS:
@@ -132,6 +133,7 @@ class NativeFieldSlot:
         self._signature = signatures[0]
         self.initial.clear()
         self.state_names = FIELDS + psi_names
+        field_rebindings = {}
         for name in self.state_names + COEFFICIENTS:
             values = [getattr(solver, name) for solver in solvers]
             shared_coefficient = name in COEFFICIENTS and (
@@ -162,14 +164,45 @@ class NativeFieldSlot:
             if name in self.state_names and bool(torch.count_nonzero(target)):
                 self.initial[name] = target.clone()
             for lane, solver in enumerate(solvers):
+                if name in FIELDS:
+                    field_rebindings[id(values[lane])] = target[lane]
                 setattr(solver, name, target[lane])
+        for solver in solvers:
+            for runtime in getattr(solver, "_network_runtimes", ()):
+                runtime.electric_fields = tuple(field_rebindings.get(id(value), value) for value in runtime.electric_fields)
+                for group in runtime.terminal_groups:
+                    group.electric_field = field_rebindings.get(id(group.electric_field), group.electric_field)
         self.solvers = tuple(solvers)
+        from ..copper_foil import iter_copper_state
+        self._foil_lanes = tuple((solver, self.active[lane]) for lane, solver in enumerate(solvers)
+                                 if getattr(solver, "_copper_foils", ()))
+        self._foil_initial = tuple((tensor, tensor.clone())
+            for solver, _activity in self._foil_lanes for _name, tensor in iter_copper_state(solver))
+        from .batch_materials import NativeMaterialLane
+        self._material_lanes = tuple(NativeMaterialLane(solver, self.active[lane])
+            for lane, solver in enumerate(solvers) if solver.dispersive_enabled or solver.magnetic_dispersive_enabled)
+        from ..checkpoint import iter_lumped_state_specs, iter_circuit_state_specs, iter_network_state_specs, iter_network_delay_state_specs
+        self._rf_initial = tuple((tensor, tensor.clone()) for solver in solvers for tensor in (
+            *(getattr(runtime, name) for _key, runtime, name, *_rest in iter_lumped_state_specs(solver)),
+            *(tensor for iterator in (iter_circuit_state_specs, iter_network_state_specs, iter_network_delay_state_specs)
+              for _name, tensor in iterator(solver)),
+            *(getattr(runtime, name) for runtime in getattr(solver, "_network_runtimes", ())
+              for name in ("absorbed_energy", "generated_energy", "port_energy")),
+            *(tensor for runtime in getattr(solver, "_port_runtimes", ())
+              for tensor in (runtime.electric_time, runtime.magnetic_time, runtime.drive_buffer))))
         _share_static_materials(self.solvers)
         self.active.zero_()
         self.active[:len(solvers)].fill_(1)
         self._bind_operations()
 
     def reset(self):
+        for lane in getattr(self, "_material_lanes", ()):
+            for tensor, initial in lane.initial:
+                tensor.copy_(initial)
+        for tensor, initial in getattr(self, "_rf_initial", ()):
+            tensor.copy_(initial)
+        for tensor, initial in getattr(self, "_foil_initial", ()):
+            tensor.copy_(initial)
         for name in self.state_names:
             if name in self.initial:
                 self.buffers[name].copy_(self.initial[name])
@@ -179,8 +212,23 @@ class NativeFieldSlot:
         self.active[:len(self.solvers)].fill_(1)
 
     def advance(self):
-        for operation, args in self._operations:
+        from ..copper_foil import begin_copper_step, correct_copper_magnetic, advance_copper_electric, accumulate_copper_spectra
+        for solver, _activity in self._foil_lanes:
+            begin_copper_step(solver)
+        for lane in self._material_lanes:
+            lane.advance_magnetic()
+        for operation, args in self._operations[:3]:
             operation(*args)
+        for solver, activity in self._foil_lanes:
+            correct_copper_magnetic(solver, activity=activity)
+        for lane in self._material_lanes:
+            lane.correct_magnetic()
+            lane.advance_electric()
+        for operation, args in self._operations[3:]:
+            operation(*args)
+        for solver, activity in self._foil_lanes:
+            advance_copper_electric(solver, activity=activity)
+            accumulate_copper_spectra(solver, activity=activity)
 
     def _bind_operations(self):
         self._operations = []

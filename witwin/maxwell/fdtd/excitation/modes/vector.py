@@ -10,6 +10,7 @@ from scipy.sparse import linalg as scipy_sparse_linalg
 
 from ....constants import ETA_0
 from .common import (
+    _require_lossless_vector_planes,
     _PEC_OCCUPANCY_THRESHOLD,
     _PEC_VECTOR_MATRIX_LIMIT,
     _SPURIOUS_NEAR_K0_BETA_LIMIT,
@@ -128,6 +129,66 @@ def _build_vector_operator_sparse(eps_planes, mu_planes, *, k0: float, du: float
             [-a_hu_hu / electric_scale, -a_hu_hv / electric_scale, None, None],
         ],
         format="csr",
+    )
+    return operator, interior_u, interior_v
+
+
+def _torch_blocks(rows):
+    zero = torch.zeros_like(next(block for row in rows for block in row if block is not None))
+    return torch.cat([torch.cat([zero if block is None else block for block in row], dim=1)
+                      for row in rows], dim=0)
+
+
+def _build_vector_operator_torch(eps_planes, mu_planes, *, k0, du, dv, source_name="<unnamed>"):
+    """Dense FP64 version of the nodal vector operator, assembled on device."""
+    _require_lossless_vector_planes(eps_planes, mu_planes, source_name=source_name)
+    eps_uu, eps_vv, eps_ww = (value.real.to(torch.float64) for value in eps_planes)
+    mu_uu, mu_vv, mu_ww = (value.real.to(torch.float64) for value in mu_planes)
+    interior_u, interior_v = eps_uu.shape[0] - 2, eps_uu.shape[1] - 2
+    device = eps_uu.device
+    uniform = _is_uniform_isotropic_vector_plane(
+        [value.detach().cpu().numpy() for value in eps_planes],
+        [value.detach().cpu().numpy() for value in mu_planes])
+
+    def difference(count, spacing):
+        if uniform:
+            forward = _pec_first_difference(count, spacing, device=device)
+            return forward, forward
+        forward = -torch.eye(count, device=device, dtype=torch.float64) / spacing
+        indices = torch.arange(count - 1, device=device)
+        forward[indices, indices + 1] = 1.0 / spacing
+        return forward, -forward.T.contiguous()
+
+    uf, ub = difference(interior_u, du)
+    vf, vb = difference(interior_v, dv)
+    iu = torch.eye(interior_u, device=device, dtype=torch.float64)
+    iv = torch.eye(interior_v, device=device, dtype=torch.float64)
+    derivative_u_forward, derivative_u_backward = torch.kron(uf, iv), torch.kron(ub, iv)
+    derivative_v_forward, derivative_v_backward = torch.kron(iu, vf), torch.kron(iu, vb)
+    diag = lambda values: torch.diag(values[1:-1, 1:-1].reshape(-1))
+    eps_w_inv, mu_w_inv = diag(1.0 / eps_ww), diag(1.0 / mu_ww)
+    eps_u_diag, eps_v_diag = diag(eps_uu), diag(eps_vv)
+    mu_u_diag, mu_v_diag = diag(mu_uu), diag(mu_vv)
+    k0_sq = float(k0) * float(k0)
+    a_hu_hu = derivative_v_backward @ eps_w_inv @ derivative_v_forward + k0_sq * mu_u_diag
+    a_hu_hv = -derivative_v_backward @ eps_w_inv @ derivative_u_forward
+    a_hv_hu = -derivative_u_backward @ eps_w_inv @ derivative_v_forward
+    a_hv_hv = derivative_u_backward @ eps_w_inv @ derivative_u_forward + k0_sq * mu_v_diag
+
+    a_eu_eu = -derivative_v_forward @ mu_w_inv @ derivative_v_backward - k0_sq * eps_u_diag
+    a_eu_ev = derivative_v_forward @ mu_w_inv @ derivative_u_backward
+    a_ev_eu = derivative_u_forward @ mu_w_inv @ derivative_v_backward
+    a_ev_ev = -derivative_u_forward @ mu_w_inv @ derivative_u_backward - k0_sq * eps_v_diag
+
+    electric_scale = float(k0) / ETA_0
+    magnetic_scale = float(k0) * ETA_0
+    operator = _torch_blocks(
+        [
+            [None, None, a_ev_eu / magnetic_scale, a_ev_ev / magnetic_scale],
+            [None, None, -a_eu_eu / magnetic_scale, -a_eu_ev / magnetic_scale],
+            [a_hv_hu / electric_scale, a_hv_hv / electric_scale, None, None],
+            [-a_hu_hu / electric_scale, -a_hu_hv / electric_scale, None, None],
+        ],
     )
     return operator, interior_u, interior_v
 
@@ -514,9 +575,19 @@ def _vector_mode_wall_peak_fraction_numpy(
 
 def _relative_vector_residual(numerator, *terms) -> float:
     denominator = sum(float(np.linalg.norm(term)) for term in terms)
-    if denominator <= np.finfo(np.float64).eps:
+    if denominator == 0.0:
         return 0.0
     return float(np.linalg.norm(numerator)) / denominator
+
+
+def _vector_mode_power_overlap_numpy(power_gram):
+    """Normalize reciprocal-power overlaps without a dimensional power floor."""
+    power_norm = np.sqrt(np.abs(np.real(np.diag(power_gram))))
+    resolved = (power_norm[:, None] > 0.0) & (power_norm[None, :] > 0.0)
+    overlap = np.zeros_like(power_gram)
+    np.divide(power_gram, power_norm[:, None], out=overlap, where=resolved)
+    np.divide(overlap, power_norm[None, :], out=overlap, where=resolved)
+    return np.abs(overlap)
 
 
 def _vector_mode_eigenpair_residual_numpy(operator, beta, eigenvector) -> float | None:
@@ -661,7 +732,7 @@ def _select_and_normalize_vector_mode_numpy(
         # around 1e-5 relative), yet below distinct-mode spacings (>=1e-4
         # relative for the polarization pair of a mildly rectangular guide).
         degenerate_rtol = _VECTOR_DEGENERATE_RTOL if (reject_spurious or reject_near_k0) else 1.0e-7
-        tolerance = degenerate_rtol * max(abs(reference_value), 1.0)
+        tolerance = degenerate_rtol * abs(reference_value)
         while (
             group_stop < len(raw_candidates)
             and abs(raw_candidates[group_stop][1] - reference_value) <= tolerance
@@ -785,8 +856,7 @@ def _select_and_normalize_vector_mode_numpy(
                 left["profiles"],
                 right["profiles"],
             )
-    power_norm = np.sqrt(np.maximum(np.abs(np.real(np.diag(power_gram))), np.finfo(np.float64).eps))
-    overlap_matrix = np.abs(power_gram / power_norm[:, None] / power_norm[None, :])
+    overlap_matrix = _vector_mode_power_overlap_numpy(power_gram)
 
     retained_indices = []
     family_indices = []
@@ -815,7 +885,7 @@ def _select_and_normalize_vector_mode_numpy(
         )
         near_k0 = (
             reject_near_k0
-            and abs(np.imag(beta)) <= 1.0e-6 * max(abs(beta), 1.0)
+            and abs(np.imag(beta)) <= 1.0e-6 * abs(beta)
             and np.real(beta) >= _SPURIOUS_NEAR_K0_BETA_LIMIT * float(k0)
         )
         # F1c: the k0 null branch is identified by its ABSOLUTE transverse
@@ -858,7 +928,7 @@ def _select_and_normalize_vector_mode_numpy(
             float(overlap_matrix[candidate_index, prior])
             for prior in retained_indices
             if abs(beta - independent_candidates[prior]["beta"])
-            <= _VECTOR_DUPLICATE_BETA_RTOL * max(abs(beta), 1.0)
+            <= _VECTOR_DUPLICATE_BETA_RTOL * abs(beta)
         ]
         max_near_duplicate_overlap = max(near_duplicate_overlaps, default=0.0)
 
@@ -886,9 +956,9 @@ def _select_and_normalize_vector_mode_numpy(
                 "raw_indices": candidate["raw_indices"],
                 "beta_real": float(np.real(beta)),
                 "beta_imag": float(np.imag(beta)),
-                "effective_index_real": None if k0 is None else float(np.real(beta) / max(float(k0), 1e-30)),
-                "effective_index_imag": None if k0 is None else float(np.imag(beta) / max(float(k0), 1e-30)),
-                "propagating": bool(np.real(beta) > 0.0 and abs(np.imag(beta)) <= 1.0e-7 * max(abs(beta), 1.0)),
+                "effective_index_real": None if k0 is None else float(np.real(beta) / float(k0)),
+                "effective_index_imag": None if k0 is None else float(np.imag(beta) / float(k0)),
+                "propagating": bool(np.real(beta) > 0.0 and abs(np.imag(beta)) <= 1.0e-7 * abs(beta)),
                 "eigenpair_residual": eigenpair_residual,
                 "electric_divergence_residual": electric_divergence,
                 "magnetic_divergence_residual": magnetic_divergence,
@@ -1111,3 +1181,38 @@ def _solve_vector_mode_eigenpair_dense(
         reject_spurious=not _is_uniform_isotropic_vector_plane(eps_planes, mu_planes),
         wave_family=wave_family,
     )
+
+
+class _IsolatedVectorEigenpair(torch.autograd.Function):
+    """Selected-column dense eig backward without unused spectral denominators.
+
+    For a real isolated eigenpair, differentiate (A-lambda I)v=0 and v.T v=1.
+    The bordered transpose solve is the selected-column restriction of eig
+    backward. Unselected degenerate subspaces never enter a 0/0 division.
+    """
+
+    @staticmethod
+    def forward(ctx, operator, value, vector, source_name):
+        if bool(value.imag.abs() > torch.finfo(torch.float64).eps**0.5 * value.abs()):
+            raise NotImplementedError(
+                f"ModeSource/ModePort {source_name!r} selected vector eigenvalue is complex: "
+                "|Im lambda| > sqrt(eps64) * |lambda| requires a complex mode-shape adjoint.")
+        # Internal conditioning only; _gauge_vector_profiles defines the gauge contract.
+        pivot = vector[vector.abs().argmax()]
+        vector = (vector * pivot.conj() / pivot.abs()).real
+        vector = vector / torch.linalg.vector_norm(vector)
+        value = value.real
+        ctx.save_for_backward(operator, value, vector)
+        return value, vector
+
+    @staticmethod
+    def backward(ctx, grad_value, grad_vector):
+        operator, value, vector = ctx.saved_tensors
+        n = vector.numel()
+        bordered = torch.zeros((n + 1, n + 1), device=operator.device, dtype=operator.dtype)
+        bordered[:n, :n] = operator - value * torch.eye(n, device=operator.device, dtype=operator.dtype)
+        bordered[:n, n] = -vector
+        bordered[n, :n] = vector
+        rhs = torch.cat((grad_vector, grad_value.reshape(1)))
+        adjoint = torch.linalg.solve(bordered.T, rhs)[:n]
+        return -adjoint[:, None] * vector[None, :], None, None, None

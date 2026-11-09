@@ -1,0 +1,135 @@
+{
+  "max_relative_error": 4.138594879874673e-15,
+  "rows": [
+    {
+      "polarization": "TE",
+      "skew_adjoint_relative_error": 0.0,
+      "yee_storage_relative_error": 1.2865998333852762e-16
+    },
+    {
+      "polarization": "TE",
+      "preset": "real",
+      "method": "current",
+      "wave_elimination_relative_error": 2.09273689889804e-15
+    },
+    {
+      "polarization": "TE",
+      "preset": "real",
+      "method": "c1",
+      "wave_elimination_relative_error": 2.837284465315062e-15
+    },
+    {
+      "polarization": "TE",
+      "preset": "real",
+      "method": "c2",
+      "wave_elimination_relative_error": 3.177850833316375e-15
+    },
+    {
+      "polarization": "TE",
+      "preset": "real",
+      "method": "c3_old",
+      "wave_elimination_relative_error": 1.9495433768804463e-15
+    },
+    {
+      "polarization": "TE",
+      "preset": "real",
+      "method": "c3_average",
+      "wave_elimination_relative_error": 1.945196627783763e-15
+    },
+    {
+      "polarization": "TE",
+      "preset": "cfs",
+      "method": "current",
+      "wave_elimination_relative_error": 2.2124034431085218e-15
+    },
+    {
+      "polarization": "TE",
+      "preset": "cfs",
+      "method": "c1",
+      "wave_elimination_relative_error": 1.8636516210792216e-15
+    },
+    {
+      "polarization": "TE",
+      "preset": "cfs",
+      "method": "c2",
+      "wave_elimination_relative_error": 4.138594879874673e-15
+    },
+    {
+      "polarization": "TE",
+      "preset": "cfs",
+      "method": "c3_old",
+      "wave_elimination_relative_error": 2.0422451637110096e-15
+    },
+    {
+      "polarization": "TE",
+      "preset": "cfs",
+      "method": "c3_average",
+      "wave_elimination_relative_error": 2.3294865359624822e-15
+    },
+    {
+      "polarization": "TM",
+      "skew_adjoint_relative_error": 0.0,
+      "yee_storage_relative_error": 2.7718375075728086e-17
+    },
+    {
+      "polarization": "TM",
+      "preset": "real",
+      "method": "current",
+      "wave_elimination_relative_error": 2.2922178880486153e-15
+    },
+    {
+      "polarization": "TM",
+      "preset": "real",
+      "method": "c1",
+      "wave_elimination_relative_error": 2.2938384929351634e-15
+    },
+    {
+      "polarization": "TM",
+      "preset": "real",
+      "method": "c2",
+      "wave_elimination_relative_error": 2.3588910463262434e-15
+    },
+    {
+      "polarization": "TM",
+      "preset": "real",
+      "method": "c3_old",
+      "wave_elimination_relative_error": 2.602067260364363e-15
+    },
+    {
+      "polarization": "TM",
+      "preset": "real",
+      "method": "c3_average",
+      "wave_elimination_relative_error": 1.9244470802474306e-15
+    },
+    {
+      "polarization": "TM",
+      "preset": "cfs",
+      "method": "current",
+      "wave_elimination_relative_error": 2.2834963982650014e-15
+    },
+    {
+      "polarization": "TM",
+      "preset": "cfs",
+      "method": "c1",
+      "wave_elimination_relative_error": 1.821521026105524e-15
+    },
+    {
+      "polarization": "TM",
+      "preset": "cfs",
+      "method": "c2",
+      "wave_elimination_relative_error": 3.505963127213156e-15
+    },
+    {
+      "polarization": "TM",
+      "preset": "cfs",
+      "method": "c3_old",
+      "wave_elimination_relative_error": 1.7232533527220382e-15
+    },
+    {
+      "polarization": "TM",
+      "preset": "cfs",
+      "method": "c3_average",
+      "wave_elimination_relative_error": 2.798922854488151e-15
+    }
+  ]
+}

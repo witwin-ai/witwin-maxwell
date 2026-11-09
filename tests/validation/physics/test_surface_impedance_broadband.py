@@ -75,7 +75,7 @@ def _run_reflection(frequency, cells_per_wavelength, cuda_graph=False):
         ],
     )
     result = mw.Simulation.fdtd(
-        scene,
+        scene, absorber="cpml",
         frequencies=[frequency],
         run_time=mw.TimeConfig.auto(steady_cycles=16, transient_cycles=24),
         full_field_dft=True,

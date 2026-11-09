@@ -1,0 +1,64 @@
+{
+  "cell": {
+    "polarization": "TM",
+    "wall": "periodic",
+    "order": 0,
+    "dt": 1.6666666666666667e-11,
+    "dy": 0.025,
+    "dz": 0.025,
+    "period": 1.28,
+    "zhalf": 0.64,
+    "layers": 12,
+    "slab": true,
+    "slab_epsilon": 4.0,
+    "preset": "cfs",
+    "theta": 33.36701296923175,
+    "f_min": 2000000000.0,
+    "alpha_scale": null,
+    "grading": 3.0,
+    "kappa": 1.0,
+    "reflection": 1e-06
+  },
+  "f0_Hz": 2000000000.0,
+  "physical_k_parallel": 23.054295241468502,
+  "k_h": 22.746182886320515,
+  "slab_thickness_m": 0.1,
+  "spectrum": {
+    "rho": 1.00000016309302,
+    "frequency_GHz": 1.0608315262956751,
+    "all_rho": 1.00000016309302
+  },
+  "time": {
+    "steps": 320000,
+    "fitted_rho": 1.0000000027369091,
+    "passes": false,
+    "seed": 431,
+    "fit_window": [
+      160000,
+      320000
+    ],
+    "rescale_interval": 100,
+    "fit_first": [
+      160000,
+      -0.4271385435798463
+    ],
+    "fit_last": [
+      320000,
+      -0.42813626188831855
+    ],
+    "dominant_order": null,
+    "seconds": 36.72640218026936
+  },
+  "scope": "B0 transverse-mean eps=4 slab, fixed k; source-free norm fit, no r/t qualification",
+  "candidate": "AHK-family IMEX transverse-memory diffusion, nu=c0*hy/2, eta=0",
+  "input_sha256": {
+    "energy_stable.py": "efb9fe5d26bc1716fcbc7d857d25a1965d3d0fc4e6bfade8a227d3f3ca97f497",
+    "model.py": "c5d19a3bfdeb467a6b0767cb96588f7fcba61d51ad12fe16637b55b2c1156eb7",
+    "sweep.py": "c91b5ef97880d2943b7d1be8b3b2f9e3f1ae93037e791daf8c3d2273028a9667",
+    "bloch_sweep.py": "e4f1d4770b35a9a6c6fa305e19257d91c6795ed9ed02be68daec335d7397fd1e",
+    "reflection.py": "4d922efaa2618ccbf05446f87c78b6855d04dcf5f738fe3e2874550b41277c5a",
+    "energy.py": "dac708926b617ca881f57274c6a98e5632f92ef06747cacd78535ce912b851bc",
+    "power.py": "deef8d0216ad01a3149894eaf06c049b7e503c55ccc98161cd3b7c656b11d60f"
+  },
+  "cpu_only": true
+}

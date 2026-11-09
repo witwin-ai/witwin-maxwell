@@ -22,7 +22,8 @@ def _scene() -> mw.Scene:
 
 def test_fdfd_smoke_scene_simulation_result(monkeypatch):
     class FakeFDFD:
-        def __init__(self, scene, frequency, solver_type, preconditioner, precision, ssor_omega, enable_plot, verbose):
+        def __init__(self, scene, frequency, solver_type, preconditioner, precision, ssor_omega, enable_plot, verbose,
+                     device_memory_limit_bytes=None):
             self.scene = scene
             self.frequency = frequency
             self.solver_type = solver_type
@@ -56,9 +57,11 @@ def test_fdtd_smoke_scene_simulation_result(monkeypatch):
     class FakeFDTD:
         def __init__(self, scene, frequency, absorber_type, cpml_config):
             self.scene = scene
+            self._compiled_sources = []
             self.frequency = frequency
             self.absorber_type = absorber_type
             self.cpml_config = cpml_config
+            self._compiled_sources = ()
             self.c = 10.0
             self.dt = 0.25
             self.dft_sample_count = 6

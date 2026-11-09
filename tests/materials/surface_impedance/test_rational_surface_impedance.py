@@ -220,13 +220,13 @@ def test_fitter_rejects_active_non_passive_target():
 
 
 def test_fitter_matches_wire_impedance_excess_fit_scalar_z_form():
-    """Shared-fitter parity: the wire excess-Z fit is the scalar Z-form special case."""
+    """Shared-realization parity: the surface fit reproduces the passive wire Z form."""
     band, order = (4.0e8, 3.0e9), 10
     wire = fit_series_impedance(
-        5.0e-4, _COPPER, band=band, order=order, dt=8.0e-13, samples=240, iterations=20
+        5.0e-4, _COPPER, band=band, order=order, dt=8.0e-13, samples=240
     )
     frequencies = wire.sample_frequencies
-    excess = internal_impedance(5.0e-4, _COPPER, _MU0, frequencies) - wire.resistance_dc
+    excess = wire.model.evaluate(frequencies).reshape(-1)
     weights = 1.0 / excess.abs().clamp_min(torch.finfo(torch.float64).tiny)
     config = RationalFitConfig(
         order=order, band=band, iterations=20, proportional=False,
@@ -236,8 +236,8 @@ def test_fitter_matches_wire_impedance_excess_fit_scalar_z_form():
         (frequencies, excess), band=band, order=order, representation="Z",
         config=config, dt=8.0e-13,
     )
-    # Vector fitting is not bit-reproducible in its pole placement, but the two callers
-    # of the one shared fitter must agree on the fitted transfer function.
+    # Use the passive wire transfer in the shared network Fourier convention.
+    # The surface wrapper must reproduce that same state-space transfer.
     wire_response = wire.model.evaluate(frequencies).reshape(frequencies.numel(), -1)[:, 0]
     surface_response = surface.model.evaluate(frequencies).reshape(frequencies.numel(), -1)[:, 0]
     rel = float(((surface_response - wire_response).abs() / excess.abs()).max())

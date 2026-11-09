@@ -5,7 +5,7 @@ from collections.abc import Mapping
 
 import torch
 
-from ..sources import CW, GaussianPulse, PlaneWave, RickerWavelet
+from ..sources import CW, BroadbandPulse, CustomSourceTime, GaussianPulse, PlaneWave, RickerWavelet
 from ..constants import resolve_real_dtype
 from .stratton_chu import _resolve_tensor_device, _to_real_tensor
 
@@ -51,7 +51,7 @@ def infer_incident_plane_wave_amplitude(*, source=None, scene=None, result=None)
     source_time = plane_wave.source_time
     if source_time is None:
         return 1.0
-    if isinstance(source_time, (CW, GaussianPulse, RickerWavelet)):
+    if isinstance(source_time, (CW, GaussianPulse, RickerWavelet, BroadbandPulse, CustomSourceTime)):
         return float(source_time.amplitude)
     if isinstance(source_time, Mapping) and "amplitude" in source_time:
         return float(source_time["amplitude"])

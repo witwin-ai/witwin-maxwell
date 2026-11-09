@@ -8,7 +8,10 @@ import torch
 from tests.fdtd.cuda._parity_backend import backend
 
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for native FDTD backend tests.")
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for native FDTD backend tests."),
+    pytest.mark.usefixtures("native_cuda_extension"),
+]
 
 
 def _rand(shape, generator):

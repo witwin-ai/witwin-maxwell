@@ -206,7 +206,7 @@ def _run_slab(frequency, sigma):
         )
     )
     return mw.Simulation.fdtd(
-        scene,
+        scene, absorber="cpml",
         frequencies=[frequency],
         run_time=mw.TimeConfig.auto(steady_cycles=12, transient_cycles=26),
         full_field_dft=True,

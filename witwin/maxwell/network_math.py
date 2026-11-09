@@ -337,3 +337,47 @@ __all__ = [
     "power_waves_to_voltage_current",
     "voltage_current_to_power_waves",
 ]
+
+
+def _validate_reference_matrix(reference: torch.Tensor, *, frequency_count: int, port_count: int) -> torch.Tensor:
+    """Validate a full ``[F, N, N]`` real symmetric positive-definite reference matrix."""
+    target = (frequency_count, port_count, port_count)
+    if tuple(reference.shape) != target:
+        raise ValueError(f"reference_matrix must have shape [F, N, N] = {target}.")
+    if reference.is_complex() and bool(torch.any(torch.imag(reference) != 0)):
+        raise ValueError("reference_matrix must be real; complex references are supported on the diagonal z0 only.")
+    real = torch.real(reference) if reference.is_complex() else reference
+    if not bool(torch.all(torch.isfinite(real))):
+        raise ValueError("reference_matrix must contain only finite values.")
+    scale = torch.amax(torch.abs(real), dim=(-2, -1), keepdim=True)
+    if not bool(torch.all(torch.abs(real - real.transpose(-2, -1)) <= 1.0e-12 * scale)):
+        raise ValueError("reference_matrix must be symmetric.")
+    if not bool(torch.all(torch.linalg.eigvalsh(.5 * (real + real.transpose(-2, -1))) > 0)):
+        raise ValueError("reference_matrix must be positive definite.")
+    return reference
+
+
+def _reference_wave_root(reference: torch.Tensor) -> torch.Tensor:
+    """Symmetric ``F = (8 Zr)^-1/2`` of a real symmetric positive-definite reference."""
+    real = torch.real(reference) if reference.is_complex() else reference
+    real = .5 * (real + real.transpose(-2, -1))
+    values, vectors = torch.linalg.eigh(real.to(torch.float64))
+    root = vectors @ torch.diag_embed((8.0 * values).rsqrt()) @ vectors.transpose(-2, -1)
+    return root.to(reference.dtype if reference.is_complex() else torch.complex128)
+
+
+def _s_to_z_reference_matrix(s: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    """``Z = F^-1 (1 + S)(1 - S)^-1 F Zr`` for waves ``a, b = F (V +- Zr I)``."""
+    root = _reference_wave_root(reference).to(s.dtype)
+    identity = _identity_batch(s)
+    left = torch.linalg.solve(root, identity + s)
+    middle = _right_solve(left, identity - s, operation="S/Z conversion")
+    return middle @ root @ reference.to(s.dtype)
+
+
+def _z_to_s_reference_matrix(z: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    """``S = F (Z - Zr)(Z + Zr)^-1 F^-1`` for waves ``a, b = F (V +- Zr I)``."""
+    root = _reference_wave_root(reference).to(z.dtype)
+    matrix = reference.to(z.dtype)
+    inner = _right_solve(z - matrix, z + matrix, operation="Z/S conversion")
+    return _right_solve(root @ inner, root, operation="Z/S conversion")

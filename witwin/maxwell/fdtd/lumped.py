@@ -1,9 +1,28 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
+
+
+LUMPED_STATE_NAMES = (
+    "inductor_current", "capacitor_voltage", "last_voltage_before",
+    "last_voltage_midpoint", "last_voltage_after", "last_model_voltage_midpoint",
+    "last_branch_current", "last_resistor_current", "last_capacitor_current",
+    "last_inductor_current_midpoint", "last_dissipated_energy",
+    "last_stored_energy_change", "last_source_work", "last_field_energy_change",
+)
+
+
+@dataclass
+class ElectricPortHistory:
+    """Prepared voltage contribution from already advanced polarization currents."""
+
+    currents: tuple[torch.Tensor, ...]
+    weights: torch.Tensor
+    edge_buffer: torch.Tensor
+    voltage_buffer: torch.Tensor
 
 
 @dataclass
@@ -56,6 +75,47 @@ class LumpedRuntime:
     last_stored_energy_change: torch.Tensor
     last_source_work: torch.Tensor
     last_field_energy_change: torch.Tensor
+    electric_history: ElectricPortHistory | None = None
+    electric_response_shift: torch.Tensor | None = None
+    imaginary: LumpedRuntime | None = None
+    inductor_current_imag: torch.Tensor | None = None
+    capacitor_voltage_imag: torch.Tensor | None = None
+    last_voltage_before_imag: torch.Tensor | None = None
+    last_voltage_midpoint_imag: torch.Tensor | None = None
+    last_voltage_after_imag: torch.Tensor | None = None
+    last_model_voltage_midpoint_imag: torch.Tensor | None = None
+    last_branch_current_imag: torch.Tensor | None = None
+    last_resistor_current_imag: torch.Tensor | None = None
+    last_capacitor_current_imag: torch.Tensor | None = None
+    last_inductor_current_midpoint_imag: torch.Tensor | None = None
+    last_dissipated_energy_imag: torch.Tensor | None = None
+    last_stored_energy_change_imag: torch.Tensor | None = None
+    last_source_work_imag: torch.Tensor | None = None
+    last_field_energy_change_imag: torch.Tensor | None = None
+
+
+def prepare_imaginary_lumped_state(
+    runtime: LumpedRuntime,
+    electric_history_currents: tuple[torch.Tensor, ...],
+) -> None:
+    """Reuse the real LTI update with independent imaginary-bank history.
+
+    Scratch buffers and immutable coefficients are shared: the two applications
+    are sequential inside the same field step and CUDA graph.
+    """
+    state = {name: torch.zeros_like(getattr(runtime, name)) for name in LUMPED_STATE_NAMES}
+    history = runtime.electric_history
+    runtime.imaginary = replace(
+        runtime,
+        **state,
+        default_thevenin_voltage=torch.zeros_like(runtime.default_thevenin_voltage),
+        electric_history=(
+            replace(history, currents=electric_history_currents)
+            if history is not None else None
+        ),
+    )
+    for name, tensor in state.items():
+        setattr(runtime, name + "_imag", tensor)
 
 
 @dataclass
@@ -80,6 +140,8 @@ class FieldPortCoupling:
     last_current: torch.Tensor
     last_port_work: torch.Tensor
     last_field_energy_change: torch.Tensor
+    electric_history: ElectricPortHistory | None = None
+    electric_response_shift: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -195,12 +257,20 @@ def prepare_lumped_runtime(
     dt: torch.Tensor | float,
     eps_edge: torch.Tensor,
     yee_control_volume: torch.Tensor | float,
+    electric_update_coefficient: torch.Tensor | None = None,
+    electric_history_currents: tuple[torch.Tensor, ...] = (),
     resistance: torch.Tensor | float | None = None,
     termination: Any | None = None,
     thevenin_voltage: torch.Tensor | float = 0.0,
     diagnostics: bool = False,
 ) -> LumpedRuntime:
-    """Prepare ``q = dt * C_e^-1 w`` and all per-step work buffers.
+    """Prepare the measured/deposited voltage row and per-step work buffers.
+
+    With static conductivity, the base Yee solve uses
+    ``b = dt / (eps + sigma * dt / 2)``. Its response to a port current is
+    ``q = b * w / volume``. Passing the actual electric update coefficient
+    preserves that response, including nonuniform Yee control volumes.
+    Omitting it selects the lossless coefficient ``dt / eps``.
 
     A direct ``resistance`` represents a passive termination or the series
     resistance of a Thevenin excitation. ``termination`` accepts the public
@@ -276,8 +346,29 @@ def prepare_lumped_runtime(
         dtype=dtype,
     )
 
-    edge_capacitance = local_eps * local_volume
-    injection = dt_tensor * weights / edge_capacitance
+    if electric_update_coefficient is None:
+        local_response = dt_tensor / local_eps
+    else:
+        if electric_update_coefficient.shape != eps_edge.shape:
+            raise ValueError("electric_update_coefficient must match eps_edge shape.")
+        if (electric_update_coefficient.device != device
+                or electric_update_coefficient.dtype != dtype):
+            raise ValueError("electric_update_coefficient must match eps_edge device and dtype.")
+        local_response = electric_update_coefficient.reshape(-1).index_select(0, linear_indices)
+        if not bool(torch.all(torch.isfinite(local_response) & (local_response > 0.0))):
+            raise ValueError("Coupled voltage edges require a positive finite electric response.")
+    electric_history = None
+    if electric_history_currents:
+        if any(current.shape != eps_edge.shape or current.device != device or current.dtype != dtype
+               for current in electric_history_currents):
+            raise ValueError("electric_history_currents must match eps_edge shape, device and dtype.")
+        electric_history = ElectricPortHistory(
+            currents=electric_history_currents,
+            weights=-local_response * weights,
+            edge_buffer=torch.empty_like(weights),
+            voltage_buffer=torch.zeros((), device=device, dtype=dtype),
+        )
+    injection = local_response * weights / local_volume
     coupling_impedance = torch.dot(weights, injection)
     discrete_port_impedance = 0.5 * coupling_impedance
     scalar_zero = torch.zeros((), device=device, dtype=dtype)
@@ -374,6 +465,8 @@ def prepare_lumped_runtime(
         last_stored_energy_change=scalar_zeros[11],
         last_source_work=scalar_zeros[12],
         last_field_energy_change=scalar_zeros[13],
+        electric_history=electric_history,
+        electric_response_shift=dt_tensor / local_response - local_eps,
     )
 
 
@@ -383,6 +476,8 @@ def prepare_field_port_coupling(
     dt: torch.Tensor | float,
     eps_edge: torch.Tensor,
     yee_control_volume: torch.Tensor | float,
+    electric_update_coefficient: torch.Tensor | None = None,
+    electric_history_currents: tuple[torch.Tensor, ...] = (),
 ) -> FieldPortCoupling:
     """Prepare the exact Yee voltage/injection pair without a local termination."""
 
@@ -391,6 +486,8 @@ def prepare_field_port_coupling(
         dt=dt,
         eps_edge=eps_edge,
         yee_control_volume=yee_control_volume,
+        electric_update_coefficient=electric_update_coefficient,
+        electric_history_currents=electric_history_currents,
         resistance=torch.inf,
     )
     zeros = [torch.zeros((), device=eps_edge.device, dtype=eps_edge.dtype) for _ in range(7)]
@@ -413,7 +510,27 @@ def prepare_field_port_coupling(
         last_current=zeros[3],
         last_port_work=zeros[4],
         last_field_energy_change=zeros[5],
+        electric_history=open_runtime.electric_history,
+        electric_response_shift=open_runtime.electric_response_shift,
     )
+
+
+def add_electric_history_voltage(runtime: LumpedRuntime | FieldPortCoupling, voltage: torch.Tensor) -> None:
+    """Include the future additive ADE tail in the circuit's free voltage.
+
+    Polarization currents have already advanced from E^n when this is called.
+    The field tail later deposits them once. Forecasting their voltage here
+    makes the circuit solve see the final free field without reordering the
+    material update or advancing any ADE state a second time.
+    """
+    history = runtime.electric_history
+    if history is None:
+        return
+    for current in history.currents:
+        torch.index_select(current.reshape(-1), 0, runtime.linear_indices, out=history.edge_buffer)
+        torch.mul(history.edge_buffer, history.weights, out=history.edge_buffer)
+        torch.sum(history.edge_buffer, dim=0, out=history.voltage_buffer)
+        voltage.add_(history.voltage_buffer)
 
 
 def replay_lumped_runtime(
@@ -623,6 +740,8 @@ def pullback_lumped_runtime(
         0,
         runtime.linear_indices,
     )
+    if runtime.electric_response_shift is not None:
+        local_eps = local_eps + runtime.electric_response_shift
     local_grad_eps = -bar_injection * runtime.injection / local_eps
     # voltage_weights feeds three quantities under the averaging scheme:
     #   voltage_before  = dot(edge_values, voltage_weights)      -> bar_voltage_before
@@ -716,6 +835,7 @@ def apply_lumped_runtime(
         dim=0,
         out=runtime.last_voltage_before,
     )
+    add_electric_history_voltage(runtime, runtime.last_voltage_before)
 
     # Averaged port voltage 0.5 * (previous last_voltage_after + last_voltage_before)
     # for the implicit constitutive relation. Stage it in ``last_voltage_midpoint``
@@ -903,7 +1023,9 @@ def apply_lumped_runtime(
 
 
 __all__ = [
+    "ElectricPortHistory",
     "FieldPortCoupling",
+    "add_electric_history_voltage",
     "LumpedRuntime",
     "LumpedStepPullback",
     "LumpedStepTrace",

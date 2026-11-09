@@ -9,13 +9,14 @@ from benchmark.paths import RESULTS_MD, scenario_path_parts
 TABLE_HEADER = (
     "| Scenario | Description | Field monitor | Component | "
     "Field L2 [smaller, <1e-1] | Shape L2 [smaller] | Field Linf [smaller, <1e-1] | "
-    "Field Corr [larger, >0.99] | Flux err [smaller, <5e-2] | "
+    "Field Corr [larger, >0.99] | Field 2x-runtime change | Flux err [smaller, <5e-2] | "
+    "Flux 2x-runtime change | "
     "Maxwell time (s) [smaller] | ms/step | steps/s | DFT samples | "
     "Peak GPU (MiB) | Reference cache | Updated |"
 )
 TABLE_SEPARATOR = (
     "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | "
-    "---: | ---: | ---: | ---: | --- | --- |"
+    "---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"
 )
 
 
@@ -69,18 +70,7 @@ def _parse_existing_results():
             if not stripped.startswith("|") or stripped.startswith("| ---"):
                 continue
             parts = [part.strip() for part in stripped.strip("|").split("|")]
-            if len(parts) == 11:
-                parts = [
-                    *parts[:5],
-                    "-",
-                    *parts[5:9],
-                    "-",
-                    "-",
-                    "-",
-                    "-",
-                    *parts[9:],
-                ]
-            if len(parts) != 16:
+            if len(parts) != 18:
                 continue
             rows[parts[0]] = parts
             continue
@@ -179,6 +169,15 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
             key: row for key, row in merged_frequency_rows.items() if key[0] != result.name
         }
         flux_text = "-" if result.flux_error is None else f"{result.flux_error:.4e}"
+        if result.flux_converged is False:
+            flux_text += " (unconverged)"
+        flux_change_text = (
+            "-" if result.flux_runtime_change is None else f"{result.flux_runtime_change:.4e}"
+        )
+        field_status = " (unconverged)" if result.field_converged is False else ""
+        field_change_text = (
+            "-" if result.field_runtime_change is None else f"{result.field_runtime_change:.4e}"
+        )
         ms_per_step = "-" if result.maxwell_ms_per_step is None else f"{result.maxwell_ms_per_step:.4f}"
         steps_per_second = (
             "-" if result.maxwell_steps_per_second is None else f"{result.maxwell_steps_per_second:.2f}"
@@ -194,11 +193,13 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
             result.description,
             result.compared_monitor,
             result.compared_component,
-            f"{result.field_l2:.4e}",
-            f"{result.field_shape_l2:.4e}",
-            f"{result.field_linf:.4e}",
-            f"{result.field_corr:.4f}",
+            f"{result.field_l2:.4e}{field_status}",
+            f"{result.field_shape_l2:.4e}{field_status}",
+            f"{result.field_linf:.4e}{field_status}",
+            f"{result.field_corr:.4f}{field_status}",
+            field_change_text,
             flux_text,
+            flux_change_text,
             f"{result.maxwell_time_s:.2f}",
             ms_per_step,
             steps_per_second,
@@ -216,6 +217,12 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
         if result.scalar_plot is not None:
             scalar_rel = _display_path(result.scalar_plot)
             plot_links += f", [scalar comparison]({scalar_rel})"
+        phase_fits = [
+            f"{item['frequency']:.8e} Hz: {item['field_phase_fit_rad']:+.6e}"
+            for item in result.per_frequency if "field_phase_fit_rad" in item
+        ]
+        if phase_fits:
+            plot_links += "; fitted global phase (rad, diagnostic only): " + ", ".join(phase_fits)
         merged_plots[result.name] = f"- `{result.name}`: {plot_links}"
         for item in result.scalar_metrics:
             frequency_text = f"{float(item['frequency']):.8e}"
@@ -237,10 +244,10 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
             merged_frequency_rows[(result.name, frequency_text)] = [
                 result.name,
                 frequency_text,
-                f"{float(item['field_l2']):.4e}",
-                f"{float(item['field_shape_l2']):.4e}",
-                f"{float(item['field_linf']):.4e}",
-                f"{float(item['field_corr']):.4f}",
+                f"{float(item['field_l2']):.4e}{field_status}",
+                f"{float(item['field_shape_l2']):.4e}{field_status}",
+                f"{float(item['field_linf']):.4e}{field_status}",
+                f"{float(item['field_corr']):.4f}{field_status}",
                 (
                     "-"
                     if "field_energy_ratio" not in item
@@ -255,15 +262,18 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
         "",
         "## Metric Guide",
         "",
-        "- `Field L2 [smaller, <1e-1]`: smaller is better; below `1e-1` is a good alignment target.",
-        "- `Shape L2 [smaller]`: relative L2 after removing the best-fit global complex scale; it isolates spatial-shape error from amplitude and phase conventions.",
+        "- `Field L2 [smaller, <1e-1]`: absolute complex relative L2 after unit and source-spectrum conversion, without fitted phase or amplitude alignment.",
+        "- `Shape L2 [smaller]`: diagnostic only, relative L2 after removing the best-fit global complex scale. The fitted global phase in Plot Files rotates the actual field toward the reference; neither diagnostic is a pass/fail gate.",
         "- `Field Linf [smaller, <1e-1]`: smaller is better; below `1e-1` usually means no large local outlier.",
         "- `Field Corr [larger, >0.99]`: larger is better; above `0.99` means field shape is strongly aligned.",
+        "- `Field 2x-runtime change`: `||F_2x - F_1x||_2 / ||F_1x||_2` for the complex display monitor/component across all frequencies, without phase or amplitude alignment. Changes above `1e-2` (1%) mark field metrics `unconverged`, excluded from field pass/fail counts and summaries (including per-frequency metrics).",
         "- `Energy ratio`: weighted Maxwell/reference electric-field norm ratio for vector comparisons; unity is ideal.",
-        "- `Flux err [smaller, <5e-2]`: smaller is better; below `5e-2` is a strong flux match.",
+        "- `Flux err [smaller, <5e-2]`: smaller is better; below `5e-2` is a strong flux match. Flux metrics marked `unconverged` are excluded from flux pass/fail independently of field convergence.",
+        "- `Flux 2x-runtime change`: maximum `abs(P_2x - P_1x) / abs(P_1x)` over flux monitors and frequencies; changes above `1e-2` (1%) are unconverged.",
+        "- Both runtime checks share one doubled-duration FDTD rerun. `-` means no applicable comparison or no convergence measurement; `WITWIN_BENCHMARK_SKIP_CONVERGENCE=1` skips both checks.",
         "- `Complex err`: symmetric complex relative error; it remains finite for near-zero S-parameters.",
         "- `Phase err`: wrapped phase difference in radians; omitted when either magnitude is numerically zero.",
-        "- `Maxwell time (s) [smaller]`: runtime only, with no fixed pass/fail target.",
+        "- `Maxwell time (s) [smaller]`: original-run runtime only, excluding the convergence run, with no fixed pass/fail target.",
         "- `ms/step`, `steps/s`, and `DFT samples`: FDTD stepping diagnostics; omitted for backends that do not expose them.",
         "- `Peak GPU (MiB)`: driver-level high-water usage above the pre-run baseline, including Torch and CuPy allocations.",
         "- `Reference cache`: `hit` means a Tidy3D cloud reference was reused; `miss` means it was regenerated; `local` means another Maxwell backend supplied the reference.",

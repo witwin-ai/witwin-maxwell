@@ -9,17 +9,11 @@ node is bound to a scene ``TerminalPort`` via the strong FDTD+MNA coupling, and
 driven through a real source-impedance network, not the ideal current injection
 of the companion ``test_prebias`` e2e. Requires CUDA.
 
-DESIGN BLOCKER (documented, fail-closed): the strong FDTD+MNA port coupling does
-not support conductive media -- ``_validate_supported_field_coupling`` raises
-``NotImplementedError`` ("Lumped FDTD coupling in conductive media requires a
-conductance-aware port update coefficient") when any conductive material is
-present. A ``DielectricBreakdown`` material fundamentally introduces a
-(post-breakdown) conductivity, so the *dynamic conductive breakdown feedback*
-cannot ride the circuit-driven port path in the current runtime; it stays on the
-ideal-current-injection path (the companion ``test_prebias`` e2e). This test
-therefore pairs the circuit-driven port with a lossless dielectric plus the
-non-feedback stress monitor, and pins the fail-closed guard for the conductive
-combination in ``test_circuit_port_coupling_fails_closed_in_breakdown_media``.
+Dynamic dielectric breakdown changes the field response after preparation.
+Static conductive field/circuit elimination is supported, but a latched change
+requires rebuilding that response and its circuit factors together. The dynamic
+combination fails before execution; the circuit-driven control retains its
+non-feedback stress monitor.
 """
 
 from __future__ import annotations
@@ -88,8 +82,7 @@ def _fdtd_scene(circuit, *, dielectric_material=None):
     scene.add_structure(
         mw.Structure(name="ground", geometry=_box(*GROUND), material=mw.Material.pec())
     )
-    # Lossless dielectric: the strong FDTD+MNA port coupling requires
-    # non-conductive media (see the module-level design-blocker note).
+    # This control uses a fixed dielectric response with a stress-only monitor.
     material = mw.Material(eps_r=3.2) if dielectric_material is None else dielectric_material
     scene.add_structure(mw.Structure(name="diel", geometry=_box(*DIEL), material=material))
     scene.add_port(
@@ -169,14 +162,11 @@ def test_circuit_driven_prebias_esd_stress_end_to_end():
 
 
 def test_circuit_port_coupling_fails_closed_in_breakdown_media():
-    """Design blocker (documented): the strong FDTD+MNA port coupling refuses
-    conductive media, so the dynamic conductive breakdown feedback cannot ride the
-    circuit-driven port path. The guard fails closed at prepare() rather than
-    silently dropping the conductance term."""
+    """A changing conductivity must not retain the static MNA response."""
 
     circuit = _generator().build_circuit(t_end=RUN_STEPS * _dt())
     scene = _fdtd_scene(circuit, dielectric_material=_breakdown_material())
-    with pytest.raises(NotImplementedError, match="conductive media"):
+    with pytest.raises(NotImplementedError, match="dynamic dielectric breakdown"):
         mw.Simulation.fdtd(
             scene,
             frequencies=[1e9],

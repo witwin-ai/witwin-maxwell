@@ -58,6 +58,7 @@ def _scene(density, *, source_x, monitor_x, device):
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.custom(x, y, z),
         boundary=mw.BoundarySpec.none(),
@@ -381,9 +382,7 @@ def test_repeat_reverse_gradient_is_bitwise_deterministic(cuda_p2p_devices, cuda
     # The distributed reverse product -- the gathered global grad_eps -- is produced
     # by assign-semantics fused kernels, ordered add_ accumulation, and deterministic
     # gather copies, so two identical backward passes must reproduce it bit-for-bit.
-    # (The final density gradient additionally passes through torch's grid_sample VJP,
-    # whose backward uses atomicAdd and is not bitwise reproducible single- or
-    # multi-GPU alike; that shared step is checked with a tight tolerance below.)
+    # The final density pullback uses an ordered voxel CSR as well.
     base = _base_density()
     grad_eps_a, dens_grad_a = _solve_capture_grad_eps(
         base, parallel_devices=cuda_p2p_devices, source_x=-0.3, monitor_x=0.1
@@ -401,11 +400,9 @@ def test_repeat_reverse_gradient_is_bitwise_deterministic(cuda_p2p_devices, cuda
         )
     assert nonzero > 0.0
 
-    # The density gradient (grad_eps -> grid_sample VJP) reproduces to within the
-    # torch atomic-add floor (~1e-7 relative), far below the parity gate.
     scale = float(dens_grad_a.abs().max())
     assert scale > 0.0
-    torch.testing.assert_close(dens_grad_a, dens_grad_b, rtol=1.0e-5, atol=1.0e-9 * scale)
+    assert torch.equal(dens_grad_a, dens_grad_b)
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +423,7 @@ _GUARD_PARALLEL = FDTDParallelConfig(
 def _guard_scene(**overrides):
     boundary = overrides.pop("boundary", mw.BoundarySpec.none())
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=boundary,

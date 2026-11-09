@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 import numpy as np
 import torch
 
-from ..ports import LumpedPort, ModePort, TerminalPort, _resolve_terminal_port
+from ..ports import CoaxialLumpedPort, LumpedPort, ModePort, TerminalPort, _coordinate_roundoff, _resolve_terminal_port
 from ..scene import prepare_scene
 
 
@@ -52,6 +52,8 @@ class CompiledPortGeometry:
     reference_plane: float | None = None
     phasor_convention: str = "peak"
     power_convention: str = "0.5*Re(V*conj(I))"
+
+    metadata: Mapping[str, Any] = field(default_factory=dict,compare=False)
 
     def integrate_voltage(self, fields: Mapping[str, torch.Tensor]) -> torch.Tensor:
         return _integrate_sparse_term(
@@ -114,16 +116,43 @@ def _axis_widths(scene, axis: str, *, dual: bool) -> np.ndarray:
     return np.asarray(getattr(scene, f"d{axis}_{suffix}"), dtype=np.float64)
 
 
-def _grid_tolerance(coords: np.ndarray) -> float:
-    spacings = np.diff(coords)
-    minimum_spacing = float(np.min(np.abs(spacings))) if spacings.size else 1.0
-    return max(1.0e-12, minimum_spacing * 1.0e-6)
+def _snap_index(coords: np.ndarray, value: float, *, label: str, roundoff: float = 0.0) -> int:
+    """Normalize unique representation error without merging nearby grid planes.
 
-
-def _snap_index(coords: np.ndarray, value: float, *, label: str) -> int:
+    Input uncertainty comes from the original dtype, including the cancellation
+    in a Box center +/- half size. A local spacing cap rejects coordinates whose
+    source precision cannot distinguish nearby planes. Float64 arithmetic error
+    is accounted for separately; no absolute SI-coordinate tolerance is used.
+    """
+    if not np.isfinite(value) or not np.isfinite(roundoff):
+        raise ValueError(f"{label}={value} must be finite.")
     index = int(np.argmin(np.abs(coords - float(value))))
-    if abs(float(coords[index]) - float(value)) > _grid_tolerance(coords):
-        raise ValueError(f"{label}={value} must lie on the Yee {label} grid.")
+    neighbor_spacings = [
+        abs(float(coords[neighbor] - coords[index]))
+        for neighbor in (index - 1, index + 1)
+        if 0 <= neighbor < coords.size
+    ]
+    local_spacing = min(neighbor_spacings) if neighbor_spacings else float("inf")
+    precision_cap = local_spacing / 32.0
+    arithmetic_error = 8.0 * max(
+        abs(float(np.spacing(coords[index]))), abs(float(np.spacing(value))),
+        # Uniform grids add an origin to an integer spacing product. Near zero,
+        # cancellation is bounded by those construction operands, not ULP(0).
+        abs(float(np.spacing(coords[0]))), abs(float(np.spacing(coords[-1]))),
+        local_spacing * np.finfo(np.float64).eps if np.isfinite(local_spacing) else 0.0,
+    )
+    if roundoff > precision_cap or arithmetic_error > precision_cap:
+        raise ValueError(
+            f"{label}={value} has ambiguous coordinate precision for local Yee spacing "
+            f"{local_spacing}; supply float64 coordinates."
+        )
+    tolerance = min(roundoff + arithmetic_error, precision_cap)
+    residual = abs(float(coords[index]) - float(value))
+    if residual > tolerance:
+        raise ValueError(
+            f"{label}={value} must lie on the Yee {label} grid "
+            f"(off-grid; nearest={coords[index]}, residual={residual}, roundoff={tolerance})."
+        )
     return index
 
 
@@ -160,11 +189,15 @@ def _compile_voltage_path(
     negative,
     axis: str,
     device: torch.device,
+    positive_roundoff=(0.0, 0.0, 0.0),
+    negative_roundoff=(0.0, 0.0, 0.0),
 ):
     axis_index = _AXES.index(axis)
     nodes = _axis_values(scene, axis, half=False)
-    negative_index = _snap_index(nodes, negative[axis_index], label=f"{axis} node")
-    positive_index = _snap_index(nodes, positive[axis_index], label=f"{axis} node")
+    negative_index = _snap_index(nodes, negative[axis_index], label=f"{axis} node", roundoff=negative_roundoff[axis_index])
+    positive_index = _snap_index(nodes, positive[axis_index], label=f"{axis} node", roundoff=positive_roundoff[axis_index])
+    if negative_index == positive_index:
+        raise ValueError("LumpedPort terminals must occupy distinct Yee nodes.")
     direction = 1 if positive_index > negative_index else -1
     lower_index, upper_index = sorted((negative_index, positive_index))
 
@@ -177,7 +210,16 @@ def _compile_voltage_path(
             _axis_values(scene, transverse_axis, half=False),
             negative[transverse_index],
             label=f"{transverse_axis} node",
+            roundoff=negative_roundoff[transverse_index],
         )
+        positive_fixed_index = _snap_index(
+            _axis_values(scene, transverse_axis, half=False),
+            positive[transverse_index],
+            label=f"{transverse_axis} node",
+            roundoff=positive_roundoff[transverse_index],
+        )
+        if positive_fixed_index != fixed_indices[transverse_axis]:
+            raise ValueError("LumpedPort terminals must define one axis-aligned Yee path.")
 
     edge_indices = np.arange(lower_index, upper_index, dtype=np.int64)
     indices = np.empty((edge_indices.size, 3), dtype=np.int64)
@@ -196,13 +238,67 @@ def _compile_voltage_path(
 
 
 def _compile_voltage(port: LumpedPort | TerminalPort, scene, *, device: torch.device):
-    return _compile_voltage_path(
+    compiled = _compile_voltage_path(
         scene,
         positive=port.positive,
         negative=port.negative,
         axis=port.voltage_path.axis,
         device=device,
+        positive_roundoff=getattr(port, "_positive_roundoff", ()) or (0.0, 0.0, 0.0),
+        negative_roundoff=getattr(port, "_negative_roundoff", ()) or (0.0, 0.0, 0.0),
     )
+    aperture = getattr(port, "voltage_aperture", None)
+    if aperture is None:
+        return compiled
+    position, size = _box_values(aperture)
+    if not np.isfinite(position).all() or not np.isfinite(size).all() or np.any(size < 0):
+        raise ValueError(f"Port {port.name!r} voltage_aperture must have finite nonnegative extents.")
+    axis = _AXES.index(port.voltage_path.axis)
+    uncertainty = np.asarray(_coordinate_roundoff(aperture.position)) + .5 * np.asarray(
+        _coordinate_roundoff(aperture.size))
+    selections, quadratures = [], []
+    if not any(size[d] > 0 for d in range(3) if d != axis):
+        raise ValueError(f"Port {port.name!r} voltage_aperture requires a finite transverse width.")
+    for dim, name in enumerate(_AXES):
+        nodes = _axis_values(scene, name, half=False)
+        low, high = position[dim] - .5 * size[dim], position[dim] + .5 * size[dim]
+        lower = _snap_index(nodes, low, label=f"{name} aperture lower node", roundoff=uncertainty[dim])
+        upper = _snap_index(nodes, high, label=f"{name} aperture upper node", roundoff=uncertainty[dim])
+        if dim == axis:
+            endpoints = compiled[2][:, dim].detach().cpu().numpy()
+            if lower != int(endpoints.min()) or upper != int(endpoints.max()) + 1:
+                raise ValueError(f"Port {port.name!r} aperture must span exactly the voltage terminals.")
+            selections.append(np.arange(lower, upper))
+            quadratures.append(_axis_widths(scene, name, dual=False)[lower:upper] * compiled[0])
+        else:
+            if lower == upper:
+                selections.append(np.array([lower]))
+                quadratures.append(np.ones(1))
+            else:
+                chosen = np.arange(lower, upper + 1)
+                halves = .5 * (nodes[:-1] + nodes[1:])
+                left = np.maximum(nodes[lower], halves[np.maximum(0, chosen - 1)])
+                right = np.minimum(nodes[upper], halves[np.minimum(len(halves) - 1, chosen)])
+                left[0], right[-1] = nodes[lower], nodes[upper]
+                weight = (right - left) / (nodes[upper] - nodes[lower])
+                chart=getattr(scene,"coordinates",None)
+                if chart is not None and chart.curvature and axis==2 and dim==1:
+                    # A physical z-normal aperture has area h_s ds du.
+                    # Integrate the linear metric over each clipped dual
+                    # interval, then normalize the physical transverse area.
+                    physical=(right-left)*(1-chart.curvature*(left+right)/2)
+                    weight=physical/physical.sum()
+                selections.append(chosen)
+                quadratures.append(weight)
+    indices = np.stack(np.meshgrid(*selections, indexing="ij"), axis=-1).reshape(-1, 3)
+    weights = np.prod(np.stack(np.meshgrid(*quadratures, indexing="ij"), axis=-1), axis=-1).reshape(-1)
+    contour_position, contour_size = _box_values(port.current_surface)
+    for dim in range(3):
+        if dim != axis and (position[dim] - .5 * size[dim] < contour_position[dim] - .5 * contour_size[dim]
+                            or position[dim] + .5 * size[dim] > contour_position[dim] + .5 * contour_size[dim]):
+            raise ValueError(f"Port {port.name!r} current contour must enclose the voltage aperture.")
+    return compiled[0], compiled[1], torch.as_tensor(indices, device=device, dtype=torch.int64), torch.as_tensor(
+        weights, device=device, dtype=torch.float64)
 
 
 def _compile_current(
@@ -215,8 +311,9 @@ def _compile_current(
     normal_axis = port.voltage_path.axis
     normal_index = _AXES.index(normal_axis)
     surface_position, surface_size = _box_values(port.current_surface)
-    normal_tolerance = _grid_tolerance(_axis_values(scene, normal_axis, half=True))
-    zero_axes = tuple(index for index, extent in enumerate(surface_size) if abs(float(extent)) <= normal_tolerance)
+    position_roundoff = np.asarray(_coordinate_roundoff(port.current_surface.position))
+    size_roundoff = np.asarray(_coordinate_roundoff(port.current_surface.size))
+    zero_axes = tuple(index for index, extent in enumerate(surface_size) if float(extent) == 0.0)
     if len(zero_axes) != 1:
         raise ValueError("LumpedPort current_surface must be planar.")
     if zero_axes[0] != normal_index:
@@ -228,6 +325,7 @@ def _compile_current(
         _axis_values(scene, normal_axis, half=True),
         float(surface_position[normal_index]),
         label=f"{normal_axis} half-grid plane",
+        roundoff=float(position_roundoff[normal_index]),
     )
     path_lower, path_upper = sorted((port.negative[normal_index], port.positive[normal_index]))
     if not path_lower < float(surface_position[normal_index]) < path_upper:
@@ -240,15 +338,21 @@ def _compile_current(
         lower = float(surface_position[tangent_index] - 0.5 * surface_size[tangent_index])
         upper = float(surface_position[tangent_index] + 0.5 * surface_size[tangent_index])
         half_coords = _axis_values(scene, tangent_axis, half=True)
+        bound_roundoff = float(position_roundoff[tangent_index] + 0.5 * size_roundoff[tangent_index])
+        inherited_roundoff = getattr(port, "_current_bound_roundoff", ())
+        if inherited_roundoff:
+            bound_roundoff += inherited_roundoff[tangent_index]
         lower_index = _snap_index(
             half_coords,
             lower,
             label=f"{tangent_axis} half-grid boundary",
+            roundoff=bound_roundoff,
         )
         upper_index = _snap_index(
             half_coords,
             upper,
             label=f"{tangent_axis} half-grid boundary",
+            roundoff=bound_roundoff,
         )
         if lower_index >= upper_index:
             raise ValueError("LumpedPort current_surface tangential bounds must enclose at least one dual edge.")
@@ -309,12 +413,10 @@ def compile_port_geometry(
                 "by the thin-wire compiler."
             )
         binding_index = matches[0]
-        start = int(network.port_gap_offsets[binding_index])
-        end = int(network.port_gap_offsets[binding_index + 1])
-        negative_node = int(network.port_negative_node_ids[binding_index])
-        positive_node = int(network.port_positive_node_ids[binding_index])
-        records = tuple(network.metadata.get("port_bindings", ()))
-        record = records[binding_index] if binding_index < len(records) else {}
+        record = network.metadata["port_bindings"][binding_index]
+        start, end = network.metadata["port_gap_ranges"][binding_index]
+        negative_node = record["negative_node_id"]
+        positive_node = record["positive_node_id"]
         return CompiledWirePortGeometry(
             port_name=resolved_port.name,
             binding_kind=network.port_binding_kinds[binding_index],
@@ -340,14 +442,15 @@ def compile_port_geometry(
         current_components, current_indices, current_weights = _compile_current(
             resolved_port,
             resolved_scene,
-            direction,
+            # V is +integral(E) along the terminal arrow. Ampere circulation
+            # measures impressed current along that arrow, whose delivered work
+            # is -V*I. RF current into the field therefore has the opposite sign.
+            -direction,
             device=target_device,
         )
     except (TypeError, ValueError) as error:
-        if isinstance(port, TerminalPort):
-            raise type(error)(f"TerminalPort {port.name!r}: {error}") from error
-        raise
-    return CompiledPortGeometry(
+        raise type(error)(f"{type(port).__name__} {port.name!r}: {error}") from error
+    geometry = CompiledPortGeometry(
         port_name=resolved_port.name,
         axis=resolved_port.voltage_path.axis,
         direction=direction,
@@ -363,6 +466,16 @@ def compile_port_geometry(
         power_convention=resolved_port.power_convention,
     )
 
+    if isinstance(resolved_port, TerminalPort):
+        from ..geometry.terminal_support import audit_compiled_terminal
+        try:
+            audit=audit_compiled_terminal(resolved_scene,resolved_port,geometry)
+        except (ValueError,NotImplementedError) as error:
+            raise type(error)(f"TerminalPort {resolved_port.name!r}: {error}") from error
+        from dataclasses import replace
+        geometry=replace(geometry,metadata=audit)
+    return geometry
+
 
 def compile_ports(
     scene,
@@ -376,6 +489,11 @@ def compile_ports(
     compiled = []
     for port in selected_ports:
         if isinstance(port, ModePort):
+            continue
+        if isinstance(port, CoaxialLumpedPort):
+            from .coaxial import compile_coaxial_geometry
+
+            compiled.append(compile_coaxial_geometry(scene, port, device=device))
             continue
         if not isinstance(port, (LumpedPort, TerminalPort)):
             raise TypeError(f"Unsupported port type: {type(port).__name__}.")

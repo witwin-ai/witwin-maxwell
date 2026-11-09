@@ -1,0 +1,7 @@
+# Automatic scalar magnetic interior planning
+
+`AutomaticDirectionalRegionPlan` selects complete physical support-tree partitions and material-weighted cone/order catalogs for a scalar finite-frequency region. Build each admitted region with its original integration, explicit quadrature and component budgets. Compose the exterior and every actual body interior with `DirectionalSystemActions` and one common exterior balancing impedance. Actual medium/basis/tree identities and planner values remain guarded through build and fixed native current backward.
+
+The selected198-edge magnetic body controls admit positive interior FAR automatically. They verify complete integer physical coverage and sampled original complete-domain actions, plus selected independent q16 FAR rectangles. They do not establish a whole-matrix norm certificate, solver or converged physical reference qualification, automatic shared changing-carrier DAGs, whole-resource peaks, crossover or scaling. The original finite integration and quadrature limits remain separate from ideal kernel/material bounds.
+
+Tests default to portable fresh original-reference assembly. The phase collector explicitly pins an optional identity/SHA-bound cached original matrix in place. Read `docs/assessments/sie_directional_automatic_interior.md` for genuine historical tested source, reconciliation, exact scope and exclusions. All original final gates remain open; no production qualification.

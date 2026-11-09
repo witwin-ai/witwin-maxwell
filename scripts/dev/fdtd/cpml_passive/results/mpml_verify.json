@@ -1,0 +1,676 @@
+{
+  "passed": true,
+  "p0_native": [
+    {
+      "polarization": "TM",
+      "order": 1,
+      "rounded": false,
+      "spectrum": {
+        "rho": 1.0001352583369676,
+        "frequency_GHz": 0.23179458456592317,
+        "all_rho": 1.0001352583369678
+      },
+      "exact_B0_match": true
+    },
+    {
+      "polarization": "TM",
+      "order": 1,
+      "rounded": true,
+      "spectrum": {
+        "rho": 1.0001352599805269,
+        "frequency_GHz": 0.23179458275350884,
+        "all_rho": 1.0001352599805269
+      },
+      "exact_B0_match": true
+    },
+    {
+      "polarization": "TE",
+      "order": 1,
+      "rounded": false,
+      "spectrum": {
+        "rho": 0.9999636621692127,
+        "frequency_GHz": 0.21731679838886495,
+        "all_rho": 1.0000000444008859
+      },
+      "exact_B0_match": true
+    },
+    {
+      "polarization": "TE",
+      "order": 1,
+      "rounded": true,
+      "spectrum": {
+        "rho": 0.9999636598026976,
+        "frequency_GHz": 0.21731680727371072,
+        "all_rho": 1.0000000444008834
+      },
+      "exact_B0_match": true
+    },
+    {
+      "polarization": "TE",
+      "order": 0,
+      "rounded": false,
+      "spectrum": {
+        "rho": 0.999948067717421,
+        "frequency_GHz": 3.89778958955448,
+        "all_rho": 1.0000000358719057
+      },
+      "exact_B0_match": true
+    },
+    {
+      "polarization": "TE",
+      "order": 0,
+      "rounded": true,
+      "spectrum": {
+        "rho": 0.9999480673476169,
+        "frequency_GHz": 3.8977895466638133,
+        "all_rho": 1.0000000593439002
+      },
+      "exact_B0_match": true
+    }
+  ],
+  "wave_elimination": [
+    {
+      "p": 0.0,
+      "polarization": "TE",
+      "preset": "real",
+      "wave_elimination_relative_error": 2.123418442660832e-15
+    },
+    {
+      "p": 0.01,
+      "polarization": "TE",
+      "preset": "real",
+      "wave_elimination_relative_error": 3.6902816099465304e-15
+    },
+    {
+      "p": 0.1,
+      "polarization": "TE",
+      "preset": "real",
+      "wave_elimination_relative_error": 2.045665442469011e-15
+    },
+    {
+      "p": 0.3,
+      "polarization": "TE",
+      "preset": "real",
+      "wave_elimination_relative_error": 2.4912343206920567e-15
+    },
+    {
+      "p": 0.0,
+      "polarization": "TE",
+      "preset": "cfs",
+      "wave_elimination_relative_error": 3.0580682435719625e-15
+    },
+    {
+      "p": 0.01,
+      "polarization": "TE",
+      "preset": "cfs",
+      "wave_elimination_relative_error": 2.4944554508247505e-15
+    },
+    {
+      "p": 0.1,
+      "polarization": "TE",
+      "preset": "cfs",
+      "wave_elimination_relative_error": 1.9610348840817065e-15
+    },
+    {
+      "p": 0.3,
+      "polarization": "TE",
+      "preset": "cfs",
+      "wave_elimination_relative_error": 2.64224171314512e-15
+    },
+    {
+      "p": 0.0,
+      "polarization": "TM",
+      "preset": "real",
+      "wave_elimination_relative_error": 3.426309706313425e-15
+    },
+    {
+      "p": 0.01,
+      "polarization": "TM",
+      "preset": "real",
+      "wave_elimination_relative_error": 2.7396230390000387e-15
+    },
+    {
+      "p": 0.1,
+      "polarization": "TM",
+      "preset": "real",
+      "wave_elimination_relative_error": 3.2094014718266376e-15
+    },
+    {
+      "p": 0.3,
+      "polarization": "TM",
+      "preset": "real",
+      "wave_elimination_relative_error": 3.1720218697743435e-15
+    },
+    {
+      "p": 0.0,
+      "polarization": "TM",
+      "preset": "cfs",
+      "wave_elimination_relative_error": 1.9373022135961015e-15
+    },
+    {
+      "p": 0.01,
+      "polarization": "TM",
+      "preset": "cfs",
+      "wave_elimination_relative_error": 2.203787734010592e-15
+    },
+    {
+      "p": 0.1,
+      "polarization": "TM",
+      "preset": "cfs",
+      "wave_elimination_relative_error": 3.077455117780638e-15
+    },
+    {
+      "p": 0.3,
+      "polarization": "TM",
+      "preset": "cfs",
+      "wave_elimination_relative_error": 3.1825132604803586e-15
+    }
+  ],
+  "native_curve": [
+    {
+      "p": 0.0,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999636621692127,
+        "frequency_GHz": 0.21731679838886495,
+        "all_rho": 1.0000000444008859
+      }
+    },
+    {
+      "p": 0.0,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 1.0001352583369676,
+        "frequency_GHz": 0.23179458456592317,
+        "all_rho": 1.0001352583369678
+      }
+    },
+    {
+      "p": 0.001,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999634510970593,
+        "frequency_GHz": 0.21638674249368423,
+        "all_rho": 1.0000000444008863
+      }
+    },
+    {
+      "p": 0.001,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999690929618251,
+        "frequency_GHz": 0.23151808941478347,
+        "all_rho": 1.0000000400694928
+      }
+    },
+    {
+      "p": 0.002,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999719043981358,
+        "frequency_GHz": 0.2159244926691172,
+        "all_rho": 1.0000000445209738
+      }
+    },
+    {
+      "p": 0.002,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481476530803,
+        "frequency_GHz": 3.9050095620127054,
+        "all_rho": 1.0000000466943673
+      }
+    },
+    {
+      "p": 0.003,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.999975528229677,
+        "frequency_GHz": 0.21567507497761426,
+        "all_rho": 1.0000000451996605
+      }
+    },
+    {
+      "p": 0.003,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481476722867,
+        "frequency_GHz": 3.905009560654615,
+        "all_rho": 1.000000043764651
+      }
+    },
+    {
+      "p": 0.004,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999750526869221,
+        "frequency_GHz": 0.21552872612070167,
+        "all_rho": 1.0000000444008856
+      }
+    },
+    {
+      "p": 0.004,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481476914999,
+        "frequency_GHz": 3.9050095592966443,
+        "all_rho": 1.0000000341054311
+      }
+    },
+    {
+      "p": 0.005,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999720196026215,
+        "frequency_GHz": 0.21543849231819828,
+        "all_rho": 1.0000000473738193
+      }
+    },
+    {
+      "p": 0.005,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481477107217,
+        "frequency_GHz": 3.905009557938726,
+        "all_rho": 1.000000045415934
+      }
+    },
+    {
+      "p": 0.0075,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999594208703229,
+        "frequency_GHz": 0.21533366046737556,
+        "all_rho": 1.0000000471283292
+      }
+    },
+    {
+      "p": 0.0075,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481477587987,
+        "frequency_GHz": 3.905009554544444,
+        "all_rho": 1.000000047436063
+      }
+    },
+    {
+      "p": 0.01,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481505066159,
+        "frequency_GHz": 3.905010965929533,
+        "all_rho": 1.0000000444008843
+      }
+    },
+    {
+      "p": 0.01,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.999948147806926,
+        "frequency_GHz": 3.9050095511508207,
+        "all_rho": 1.0000000379482317
+      }
+    },
+    {
+      "p": 0.01347,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481505727963,
+        "frequency_GHz": 3.905010961217475,
+        "all_rho": 1.0000000444008832
+      }
+    },
+    {
+      "p": 0.01347,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.999948147873777,
+        "frequency_GHz": 3.9050095464414736,
+        "all_rho": 1.00000003987618
+      }
+    },
+    {
+      "p": 0.01348,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481505729864,
+        "frequency_GHz": 3.905010961203898,
+        "all_rho": 1.0000000476582085
+      }
+    },
+    {
+      "p": 0.01348,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481478739695,
+        "frequency_GHz": 3.9050095464278973,
+        "all_rho": 1.0000000450854478
+      }
+    },
+    {
+      "p": 0.01349,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481505731802,
+        "frequency_GHz": 3.905010961190322,
+        "all_rho": 1.0000000481993363
+      }
+    },
+    {
+      "p": 0.01349,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.999948147874163,
+        "frequency_GHz": 3.9050095464143286,
+        "all_rho": 1.000000045018122
+      }
+    },
+    {
+      "p": 0.0135,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481505733692,
+        "frequency_GHz": 3.9050109611767514,
+        "all_rho": 1.0000000444008872
+      }
+    },
+    {
+      "p": 0.0135,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.999948147874355,
+        "frequency_GHz": 3.9050095464007666,
+        "all_rho": 1.0000000394095516
+      }
+    },
+    {
+      "p": 0.015,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481506019999,
+        "frequency_GHz": 3.9050109591402187,
+        "all_rho": 1.0000000444008852
+      }
+    },
+    {
+      "p": 0.015,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481479032792,
+        "frequency_GHz": 3.9050095443654187,
+        "all_rho": 1.0000000281708235
+      }
+    },
+    {
+      "p": 0.02,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481506975427,
+        "frequency_GHz": 3.905010952353423,
+        "all_rho": 1.0000000444008847
+      }
+    },
+    {
+      "p": 0.02,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481479997911,
+        "frequency_GHz": 3.9050095375825604,
+        "all_rho": 1.0000000403949778
+      }
+    },
+    {
+      "p": 0.025,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481507932358,
+        "frequency_GHz": 3.905010945569204,
+        "all_rho": 1.00000004508211
+      }
+    },
+    {
+      "p": 0.025,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481480964592,
+        "frequency_GHz": 3.905009530802233,
+        "all_rho": 1.0000000412117678
+      }
+    },
+    {
+      "p": 0.03,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.999948150889087,
+        "frequency_GHz": 3.90501093878749,
+        "all_rho": 1.0000000473781703
+      }
+    },
+    {
+      "p": 0.03,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481481932845,
+        "frequency_GHz": 3.905009524024459,
+        "all_rho": 1.0000000441063492
+      }
+    },
+    {
+      "p": 0.04,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481510812519,
+        "frequency_GHz": 3.905010925231647,
+        "all_rho": 1.0000000447330246
+      }
+    },
+    {
+      "p": 0.04,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.999948148387393,
+        "frequency_GHz": 3.905009510476475,
+        "all_rho": 1.0000000433556817
+      }
+    },
+    {
+      "p": 0.05,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481512740283,
+        "frequency_GHz": 3.905010911685939,
+        "all_rho": 1.0000000444008867
+      }
+    },
+    {
+      "p": 0.05,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481485821219,
+        "frequency_GHz": 3.905009496938619,
+        "all_rho": 1.000000040051504
+      }
+    },
+    {
+      "p": 0.06,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481514674236,
+        "frequency_GHz": 3.9050108981503486,
+        "all_rho": 1.0000000461894474
+      }
+    },
+    {
+      "p": 0.06,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481487774576,
+        "frequency_GHz": 3.905009483410897,
+        "all_rho": 1.0000000374778304
+      }
+    },
+    {
+      "p": 0.07,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481516614231,
+        "frequency_GHz": 3.9050108846248466,
+        "all_rho": 1.0000000456004257
+      }
+    },
+    {
+      "p": 0.07,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481489734091,
+        "frequency_GHz": 3.9050094698932374,
+        "all_rho": 1.0000000349293379
+      }
+    },
+    {
+      "p": 0.085,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481519535668,
+        "frequency_GHz": 3.905010864355518,
+        "all_rho": 1.0000000455776692
+      }
+    },
+    {
+      "p": 0.085,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.99994814926847,
+        "frequency_GHz": 3.905009449635716,
+        "all_rho": 1.0000000368453483
+      }
+    },
+    {
+      "p": 0.1,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481522470625,
+        "frequency_GHz": 3.905010844108858,
+        "all_rho": 1.0000000444008839
+      }
+    },
+    {
+      "p": 0.1,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481495648904,
+        "frequency_GHz": 3.9050094294008804,
+        "all_rho": 1.000000037164286
+      }
+    },
+    {
+      "p": 0.125,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481527392179,
+        "frequency_GHz": 3.9050108104147303,
+        "all_rho": 1.0000000445621489
+      }
+    },
+    {
+      "p": 0.125,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.999948150061914,
+        "frequency_GHz": 3.9050093957264003,
+        "all_rho": 1.0000000338539774
+      }
+    },
+    {
+      "p": 0.15,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481532350778,
+        "frequency_GHz": 3.9050107767833286,
+        "all_rho": 1.0000000444209525
+      }
+    },
+    {
+      "p": 0.15,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481505626434,
+        "frequency_GHz": 3.9050093621147397,
+        "all_rho": 1.000000037984039
+      }
+    },
+    {
+      "p": 0.175,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.999948153734598,
+        "frequency_GHz": 3.9050107432145307,
+        "all_rho": 1.0000000444008854
+      }
+    },
+    {
+      "p": 0.175,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481510670345,
+        "frequency_GHz": 3.9050093285656593,
+        "all_rho": 1.0000000406526743
+      }
+    },
+    {
+      "p": 0.2,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481542377339,
+        "frequency_GHz": 3.905010709708152,
+        "all_rho": 1.0000000447554411
+      }
+    },
+    {
+      "p": 0.2,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481515750429,
+        "frequency_GHz": 3.905009295079064,
+        "all_rho": 1.0000000404766332
+      }
+    },
+    {
+      "p": 0.25,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481552547015,
+        "frequency_GHz": 3.9050106428821425,
+        "all_rho": 1.0000000446882047
+      }
+    },
+    {
+      "p": 0.25,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481526017645,
+        "frequency_GHz": 3.905009228292581,
+        "all_rho": 1.0000000420733148
+      }
+    },
+    {
+      "p": 0.3,
+      "polarization": "TE",
+      "spectrum": {
+        "rho": 0.9999481562856711,
+        "frequency_GHz": 3.905010576303974,
+        "all_rho": 1.0000000444666695
+      }
+    },
+    {
+      "p": 0.3,
+      "polarization": "TM",
+      "spectrum": {
+        "rho": 0.9999481536424832,
+        "frequency_GHz": 3.905009161754046,
+        "all_rho": 1.000000042984077
+      }
+    }
+  ],
+  "seconds": 35.80949249304831
+}

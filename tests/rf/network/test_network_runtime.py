@@ -455,3 +455,21 @@ def test_embedding_rejects_excitation_spectrum_outside_model_band() -> None:
             frequency=2.75e9,
             run_time=mw.TimeConfig(time_steps=8),
         ).prepare()
+
+
+@pytest.mark.parametrize("length", [1., 1e-6])
+def test_delayed_direct_loop_condition_is_independent_of_impedance_scale(length):
+    from dataclasses import replace
+    from witwin.maxwell.compiler.delay import CompiledNetworkDelay
+
+    solver = _solver(torch.device("cpu"))
+    original = solver._network_runtimes[0].compiled
+    z0 = torch.tensor([1e-30 * length**2], dtype=torch.float64)
+    solver._port_runtimes[0].lumped.discrete_port_impedance.copy_(z0[0])
+    discrete = replace(original.discrete, representation="S", D=torch.zeros((1,1), dtype=torch.float64))
+    delay = CompiledNetworkDelay((0.,), (0,), (0.,), (0.,), 1, None, 0, None, 0., 0.)
+    compiled = replace(original, discrete=discrete, delay=delay, reference_impedance=z0)
+    prepare_network_runtimes(solver, compiled_networks=(compiled,))
+    runtime = solver._network_runtimes[0]
+    assert runtime.loop_condition == pytest.approx(1.)
+    assert runtime.loop_denominator[0,0].item() == pytest.approx(2*z0[0].sqrt().item(), rel=1e-12, abs=0)

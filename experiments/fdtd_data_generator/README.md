@@ -31,7 +31,7 @@ A sample that still fails is rejected and is never written. This prevents
 early transient fields from entering a nominally steady dataset.
 
 ```bash
-/home/xingyu/miniconda3/envs/maxwell/bin/python \
+python \
   experiments/fdtd_data_generator/generate.py \
   --num-samples 100 --grid-size 256 --gpus 0,1
 ```

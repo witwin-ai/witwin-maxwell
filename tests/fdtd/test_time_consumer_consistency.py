@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
+from witwin.maxwell.fdtd.runtime.representation import spectral_scale
 
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -22,10 +23,15 @@ def test_port_tables_consume_the_joint_cw_or_pulse_time_plan(field_pulse, port_p
         return mw.GaussianPulse(1e9, .5e9) if pulse else mw.CW(1e9)
 
     runtime = SimpleNamespace(frequencies=torch.tensor([1e9], dtype=torch.float64),
-        excitation=None, lumped=None, wire_provider=None, field_name="Ez")
+        excitation=None, lumped=None, wire_provider=None, sheet_feed=None, field_name="Ez",
+        window_weights=None, voltage_phase_weights=None, current_phase_weights=None,
+        observer_current_buffer=None, observer_window_buffer=None,
+        observer_voltage_kernel_buffer=None, observer_current_kernel_buffer=None,
+        accumulator=None, drive_accumulator=None)
     solver = SimpleNamespace(dt=1e-10, c=299792458., device="cpu", Ez=torch.zeros(1),
         _port_runtimes=(runtime,),
-        _compiled_sources=({"source_time": compile_source_time(waveform(field_pulse), default_frequency=1e9)},))
+        _compiled_sources=({"kind": "point_dipole", "source_time": compile_source_time(waveform(field_pulse), default_frequency=1e9),
+                            "reference_provider_kind": "additive_J", "reference_waveform_kind": "gaussian_pulse" if field_pulse else "cw"},))
     solver._resolve_spectral_window_type = lambda window: resolve_spectral_window_type(solver, window)
     solver._compute_spectral_start_step = lambda frequency, window_type: compute_spectral_start_step(solver, frequency, window_type=window_type)
     scene = SimpleNamespace(domain=SimpleNamespace(bounds=((-0.1, .1),) * 3), circuits=())
@@ -49,8 +55,15 @@ def test_lower_monitor_frequency_does_not_change_default_incident_waveform(compi
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.1, .1),) * 3), device="cpu",
         sources=(mw.PointDipole((0., 0., 0.)),))
     solver = SimpleNamespace(dt=1e-11, c=299792458.)
-    if compiled:
-        solver._compiled_sources = compile_fdtd_sources(scene, default_frequency=1e9)
+    solver._compiled_sources = compile_fdtd_sources(scene, default_frequency=1e9)
+    for source in solver._compiled_sources:
+        source.update(reference_provider_kind="additive_J", reference_waveform_kind="cw")
+    if not compiled:
+        del solver._compiled_sources
+        with pytest.raises(AttributeError, match="_compiled_sources"):
+            compile_fdtd_time_plan(solver, scene, mw.TimeConfig(time_steps=20), [1e9, .5e9],
+                default_source_frequency=1e9)
+        return
     plan = compile_fdtd_time_plan(solver, scene, mw.TimeConfig(time_steps=20), [1e9, .5e9],
         default_source_frequency=1e9, excitations=(SimpleNamespace(source_time=None),), normalize_source=True)
     assert solver._normalization_source_time["frequency"] == 1e9
@@ -96,14 +109,18 @@ def test_port_pulse_window_and_field_line_integral_share_the_public_clock(graph)
     torch.testing.assert_close(results[0].port("feed").voltage, results[1].port("feed").voltage)
 
 
-def _unit_pulse_spectrum(dt, steps):
+def _unit_pulse_spectrum(solver, steps):
     # Independent analytical waveform: source amplitude and phase are physical
     # controls, so the normalization reference uses unit amplitude, zero phase.
     sigma = 1. / (2. * math.pi * .6e9)
     delay = 6. * sigma
-    t = torch.arange(steps, dtype=torch.float64) * dt
-    wave = torch.exp(-.5 * ((t - delay) / sigma).square()) * torch.cos(2. * math.pi * 3e9 * (t - delay))
-    return 2. * (wave * torch.exp(2j * math.pi * 3e9 * t)).sum() / steps
+    t = torch.arange(steps, dtype=torch.float64) * solver.dt
+    sample_time = t + .5 * solver.dt
+    wave = torch.exp(-.5 * ((sample_time - delay) / sigma).square()) * torch.cos(2. * math.pi * 3e9 * (sample_time - delay))
+    # Same per-reference-period pulse scaling as the library spectra.
+    scale = spectral_scale(steps, integration_dt=solver._spectral_integration_dt,
+                           reference_frequency=solver._spectral_reference_frequency, frequency=3e9)
+    return (wave * torch.exp(2j * math.pi * 3e9 * sample_time)).sum() * scale
 
 
 @requires_cuda
@@ -132,7 +149,7 @@ def test_port_only_normalization_matches_independent_unit_pulse_spectrum(graph):
             full_field_dft=True, cuda_graph=graph,
         ).run()
         results.append(result)
-    reference = _unit_pulse_spectrum(results[0].solver.dt, 500).to("cuda")
+    reference = _unit_pulse_spectrum(results[0].solver, 500).to("cuda")
     for actual, raw in (
         (results[1].field("Ez"), results[0].field("Ez")),
         (results[1].monitor("point")["data"], results[0].monitor("point")["data"]),

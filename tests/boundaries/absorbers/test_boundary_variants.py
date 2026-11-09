@@ -134,6 +134,7 @@ _LONG_STEPS = 600
         (mw.BoundarySpec.pml(num_layers=5, strength=1.0), "stablepml", 0.25),
         # First-order Mur reflects more than a PML, so it gets a looser bound.
         (mw.BoundarySpec.mur(), "cpml", 0.5),
+        (mw.BoundarySpec.mur(order=2), "cpml", 0.5),
     ],
 )
 def test_absorbing_boundary_dissipates_and_stays_stable(boundary, absorber, max_ratio):

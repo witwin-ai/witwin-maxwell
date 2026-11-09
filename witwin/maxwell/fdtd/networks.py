@@ -7,6 +7,7 @@ import torch
 from ..compiler.networks import CompiledNetworkBlock
 from ..network import EmbeddedNetworkData
 from .checkpoint import network_carried_voltage_name, network_state_name
+from .lumped import add_electric_history_voltage
 from .delay import (
     PreparedBidirectionalDelay,
     prepare_bidirectional_delay,
@@ -221,14 +222,14 @@ def _effective_source_band(source_time: dict) -> tuple[float, float]:
     frequency = float(source_time["frequency"])
     if kind == "cw":
         return frequency, frequency
-    if kind == "gaussian_pulse":
+    if kind in {"gaussian_pulse", "broadband_pulse"}:
         width = float(source_time["fwidth"])
         return max(0.0, frequency - 3.0 * width), frequency + 3.0 * width
     if kind == "ricker_wavelet":
         return 0.0, 3.0 * frequency
     raise ValueError(
         "Embedded networks with extrapolation='reject' require an analytic "
-        "CW, GaussianPulse, or RickerWavelet excitation with a finite effective band."
+        "CW, GaussianPulse, BroadbandPulse, or RickerWavelet excitation with a finite effective band."
     )
 
 
@@ -408,7 +409,7 @@ def prepare_network_runtimes(
         singular_values = torch.linalg.svdvals(loop_denominator)
         largest = float(torch.max(singular_values).item())
         smallest = float(torch.min(singular_values).item())
-        threshold = 64.0 * torch.finfo(dtype).eps * max(1.0, largest)
+        threshold = 64.0 * torch.finfo(dtype).eps * largest
         if smallest <= threshold:
             raise ValueError(
                 f"Embedded network {compiled.name!r} has a singular same-step direct loop."
@@ -776,6 +777,8 @@ def pullback_network_runtimes(
                 0,
                 lumped.linear_indices,
             )
+            if lumped.electric_response_shift is not None:
+                local_eps = local_eps + lumped.electric_response_shift
             local_grad_eps = (
                 -bar_injection[port_index] * lumped.injection / local_eps
             )
@@ -830,6 +833,8 @@ def _gather_network_free_voltage(runtime: PreparedNetworkRuntime) -> None:
             group.port_indices,
             group.edge_buffer,
         )
+    for index, port in enumerate(runtime.port_runtimes):
+        add_electric_history_voltage(port.lumped, runtime.raw_free_voltage[index])
     torch.add(
         runtime.carried_voltage,
         runtime.raw_free_voltage,

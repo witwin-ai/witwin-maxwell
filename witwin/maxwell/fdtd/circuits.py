@@ -17,7 +17,7 @@ from ..compiler.mna import (
     compile_coupled_mna_system,
 )
 from ..lumped import Capacitor, Inductor, Resistor
-from .lumped import FieldPortCoupling, prepare_field_port_coupling
+from .lumped import FieldPortCoupling, add_electric_history_voltage, prepare_field_port_coupling
 
 
 def _add(matrix, row: int | None, column: int | None, value) -> None:
@@ -152,6 +152,7 @@ class EMCircuitRuntime:
             out=port.field.edge_buffer,
         )
         torch.sum(port.field.edge_buffer, dim=0, out=port.field.last_voltage_before)
+        add_electric_history_voltage(port.field, port.field.last_voltage_before)
         return port.field.last_voltage_before
 
     def _coupling_voltage(
@@ -298,6 +299,15 @@ class EMCircuitRuntime:
         self.previous_stored_energy.copy_(self._stored_energy(self.state))
         self.running_energy_balance.zero_()
 
+    @staticmethod
+    def _reuse_prepared_buffer(previous, value):
+        if (isinstance(previous, torch.Tensor) and not value.requires_grad
+                and previous.shape == value.shape and previous.dtype == value.dtype
+                and previous.device == value.device):
+            previous.copy_(value)
+            return previous
+        return value
+
     def prepare_time_series(self, steps: int) -> None:
         if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
             raise ValueError("Circuit-coupled FDTD requires a positive integer step count.")
@@ -331,40 +341,42 @@ class EMCircuitRuntime:
         transient_times = (
             torch.arange(steps, device=device, dtype=dtype) + fractions
         ) * self.system.dt
-        self.sample_times = torch.cat((transient_times.new_zeros((1,)), transient_times))
-        self.source_values = self.system._source_values(transient_times)
+        self.sample_times = self._reuse_prepared_buffer(self.sample_times, torch.cat((transient_times.new_zeros((1,)), transient_times)))
+        self.source_values = {name: self._reuse_prepared_buffer(self.source_values.get(name), value)
+                              for name, value in self.system._source_values(transient_times).items()}
         self.switch_keys = self.system._switch_state_keys(transient_times)
-        self.node_samples = torch.empty(
+        self.node_samples = self._reuse_prepared_buffer(self.node_samples, torch.empty(
             (steps + 1, len(self.system.graph.nodes)),
             device=device,
             dtype=dtype,
-        )
-        self.branch_samples = torch.empty(
+        ))
+        self.branch_samples = self._reuse_prepared_buffer(self.branch_samples, torch.empty(
             (steps + 1, len(self.physical_branch_names)),
             device=device,
             dtype=dtype,
-        )
-        self.device_power_sample_matrix = torch.empty(
+        ))
+        self.device_power_sample_matrix = self._reuse_prepared_buffer(self.device_power_sample_matrix, torch.empty(
             (steps + 1, len(self.circuit.devices)),
             device=device,
             dtype=dtype,
-        )
+        ))
         self.device_power_samples = {
             device_item.name: self.device_power_sample_matrix[:, index]
             for index, device_item in enumerate(self.circuit.devices)
         }
-        self.energy_balance_samples = torch.zeros((steps + 1,), device=device, dtype=dtype)
-        self.port_power_samples = torch.zeros((steps + 1, len(self.ports)), device=device, dtype=dtype)
-        self.field_energy_change_samples = torch.zeros(
+        self.energy_balance_samples = self._reuse_prepared_buffer(self.energy_balance_samples, torch.zeros((steps + 1,), device=device, dtype=dtype))
+        self.port_power_samples = self._reuse_prepared_buffer(self.port_power_samples, torch.zeros((steps + 1, len(self.ports)), device=device, dtype=dtype))
+        self.field_energy_change_samples = self._reuse_prepared_buffer(self.field_energy_change_samples, torch.zeros(
             (steps + 1, len(self.ports)),
             device=device,
             dtype=dtype,
-        )
+        ))
+        previous_factors = dict(self.factor_cache)
         self.factor_cache.clear()
         self.step_index = 0
         self.step_tensor.zero_()
-        self.previous_stored_energy = self.initial_solution.new_zeros(())
-        self.running_energy_balance = self.initial_solution.new_zeros(())
+        self.previous_stored_energy = self._reuse_prepared_buffer(self.previous_stored_energy, self.initial_solution.new_zeros(()))
+        self.running_energy_balance = self._reuse_prepared_buffer(self.running_energy_balance, self.initial_solution.new_zeros(()))
         # Built-in switch/source schedules are fully precomputed on the device.
         # A separate graph is captured for each integration/switch factor class.
         self.graph_eligible = not any(
@@ -398,7 +410,9 @@ class EMCircuitRuntime:
                     port.conductance(integration),
                     zero_voltage,
                 )
-            self.factor_cache[factor_key] = self.system._factor(matrix)
+            previous = previous_factors.get(factor_key, (None, None, None))
+            self.factor_cache[factor_key] = tuple(self._reuse_prepared_buffer(old, value)
+                for old, value in zip(previous, self.system._factor(matrix)))
 
     def _copy_state_(self, source: CircuitState) -> None:
         for name, value in source.capacitor_voltage.items():
@@ -936,7 +950,7 @@ def _initial_coupled_solution(system, ports):
     solution, condition = system._solve(matrix, rhs)
     constraint_system = system._initial_constraint_system()
     if constraint_system is None:
-        return solution, condition
+        return solution, condition, matrix
     rows, targets = constraint_system
     count = rows.shape[0]
     augmented = matrix.new_zeros((system.unknown_count + count, system.unknown_count + count))
@@ -944,7 +958,7 @@ def _initial_coupled_solution(system, ports):
     augmented[: system.unknown_count, system.unknown_count :] = rows.transpose(0, 1)
     augmented[system.unknown_count :, : system.unknown_count] = rows
     constrained, condition = system._solve(augmented, torch.cat((rhs, targets)))
-    return constrained[: system.unknown_count], condition
+    return constrained[: system.unknown_count], condition, matrix
 
 
 def prepare_circuit_runtimes(
@@ -982,10 +996,14 @@ def prepare_circuit_runtimes(
                     raise RuntimeError(
                         f"Circuit-bound port {binding.port_name!r} has no Yee control volume."
                     )
+                from .ports import _electric_history_currents
+
                 field = prepare_field_port_coupling(
                     geometry,
                     dt=solver.dt,
                     eps_edge=getattr(solver, f"eps_{geometry.voltage_component}"),
+                    electric_update_coefficient=getattr(solver, f"c{geometry.voltage_component.lower()}_curl"),
+                    electric_history_currents=_electric_history_currents(solver, geometry),
                     yee_control_volume=port_runtime.yee_control_volume,
                 )
             port = CircuitPortRuntime(
@@ -1003,7 +1021,7 @@ def prepare_circuit_runtimes(
             )
             port_runtime.circuit_port = port
             ports.append(port)
-        initial_solution, condition = _initial_coupled_solution(system, tuple(ports))
+        initial_solution, condition, dc_matrix = _initial_coupled_solution(system, tuple(ports))
         zero = initial_solution.new_zeros(())
         initial_port_currents = tuple(
             port.conductance(circuit.config.integration)
@@ -1018,10 +1036,19 @@ def prepare_circuit_runtimes(
             )
             for port in ports
         )
-        if any(
-            not bool(torch.isclose(current, zero, rtol=1.0e-5, atol=1.0e-12))
-            for current in initial_port_currents
-        ):
+        node_count = len(system.graph.nodes) - 1
+        # Current-scaled MNA infinity norm: max(|I_branch|, max|G| * max|V_node|).
+        # Solve-dtype epsilon admits roundoff; scaling V by a and Z by b scales
+        # both this bound and the port currents by a/b, with no SI-unit floor.
+        voltage_current_scale = (
+            dc_matrix[:node_count, :node_count].abs().amax()
+            * initial_solution[:node_count].abs().amax()
+        )
+        current_scale = torch.cat(
+            (voltage_current_scale.reshape(1), initial_solution[node_count:].abs())
+        ).amax()
+        current_tolerance = 64 * torch.finfo(initial_solution.dtype).eps * current_scale
+        if any(bool(current.abs() > current_tolerance) for current in initial_port_currents):
             raise ValueError(
                 f"Circuit {circuit.name!r} has a nonzero DC port current, which is "
                 "inconsistent with the zero initial Yee field; ramp the source from zero "
@@ -1168,6 +1195,11 @@ def prepare_circuit_graph_runners(solver, use_cuda_graph: bool) -> None:
 
 def apply_circuit_runtimes(solver) -> None:
     runtimes = tuple(getattr(solver, "_circuit_runtimes", ()))
+    batch_indices = getattr(solver, "_native_batch_circuit_indices", None)
+    if batch_indices is not None:
+        for runtime, index in zip(runtimes, batch_indices):
+            runtime._apply_step(index, device_indexed_samples=True)
+        return
     replay_maps = tuple(getattr(solver, "_circuit_graph_runners", ()))
     if replay_maps:
         for runtime, replay_map in zip(runtimes, replay_maps):

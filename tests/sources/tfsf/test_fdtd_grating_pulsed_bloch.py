@@ -1,11 +1,4 @@
-"""Broadband (pulsed) plane-wave injection under Bloch transverse boundaries.
-
-P5.4 lifts the "Bloch-boundary source patches require CW phased source terms"
-guard (excitation/temporal.py) and its adjoint-replay twin (adjoint/core.py) so a
-``GaussianPulse`` grating slab injects its time-delayed surface currents into the
-split real/imag Bloch field. The forward and adjoint paths both evaluate the same
-per-cell delayed waveform and scatter it with the Bloch wrap phase.
-"""
+"""Broadband fixed-k slab preparation and delayed-patch arithmetic controls."""
 
 from __future__ import annotations
 
@@ -36,18 +29,17 @@ def _bloch_slab_boundary(*, wavevector, num_layers=4):
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_pulsed_bloch_grating_slab_runs_and_is_finite():
-    # Oblique broadband plane wave under Bloch transverse boundaries. The delayed
-    # (pulsed) TFSF surface-current patches are scattered into the split real/imag
-    # Bloch field with the boundary wrap phase, a path that previously raised
-    # NotImplementedError for any non-CW source_time. The run must stay finite and
-    # keep the grating slab provider (i.e. the pulse is not silently downgraded).
+def test_pulsed_bloch_grating_slab_prepares_complex_line(monkeypatch):
+    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda *args, **kwargs: None)
+    monkeypatch.setattr("witwin.maxwell.fdtd.solver._require_cuda_scene", lambda scene: None)
+    monkeypatch.setattr("witwin.maxwell.fdtd.solver._get_fdtd_module", lambda: object())
+    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.initialization.require_cuda_scene", lambda scene: None)
+    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.initialization.get_fdtd_module", lambda: object())
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
         grid=mw.GridSpec.uniform(0.06),
         boundary=_bloch_slab_boundary(wavevector=(math.pi, 0.5 * math.pi, 0.0)),
-        device="cuda",
+        device="cpu",
     )
     scene.add_source(
         mw.PlaneWave(
@@ -60,30 +52,22 @@ def test_pulsed_bloch_grating_slab_runs_and_is_finite():
     )
     scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
 
-    result = mw.Simulation.fdtd(
+    simulation = mw.Simulation.fdtd(
         scene,
         frequencies=[0.85e9, 1.0e9, 1.15e9],
         run_time=mw.TimeConfig(time_steps=256),
         absorber="cpml",
-    ).run()
-
-    assert result.solver.tfsf_enabled is True
-    assert result.solver.complex_fields_enabled is True
-    assert result.solver._tfsf_state["provider"] == "plane_wave_grating_slab_cw"
-    for frequency in (0.85e9, 1.0e9, 1.15e9):
-        payload = result.monitor("center", frequency=frequency)
-        assert torch.isfinite(torch.as_tensor(payload["Ex"]).abs()).all()
-        assert torch.isfinite(torch.as_tensor(payload["Ez"]).abs()).all()
+    )
+    solver = simulation.prepare().solver
+    assert solver._tfsf_state["provider"] == "plane_wave_fixed_k"
+    assert solver._tfsf_state["auxiliary_grid"].electric.is_complex()
 
 
 # --- Deterministic injection checks (no CUDA required) ------------------------
 # A capture module records the kernel call so the exact per-cell signal and Bloch
 # wrap phases injected for a delayed (pulsed) patch can be verified directly,
-# independent of a full solve. A steady-state CW comparison is intentionally
-# avoided here: an oblique Bloch grating driven by CW excites long-lived
-# transverse Bloch modes that do not settle within a practical run, so the CW
-# reference itself is unreliable -- exactly why broadband pulses are used for
-# gratings and the reason this capability exists.
+# independent of a full solve. Physical CW qualification lives in the acceptance
+# scripts, where long transients settle the transverse modes.
 
 
 class _CaptureLaunch:

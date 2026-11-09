@@ -15,8 +15,8 @@ reproduces the ordinary and extraordinary indices
     n_e(omega) = sqrt(eps_extraordinary + chi(omega)).
 
 The physics test propagates the two eigen-polarizations of a 45-degree rotated
-uniaxial slab and extracts ``n_o(omega)`` and ``n_e(omega)`` from the transmitted
-phase, comparing against the analytic dispersion at two frequencies (validating
+uniaxial slab and extracts ``n_o(omega)`` and ``n_e(omega)`` from the homogeneous
+interior Helmholtz recurrence, retaining both internal traveling waves, comparing against the analytic dispersion at two frequencies (validating
 each index within 2% and their smaller difference within 4%). A CUDA kernel-parity test
 checks the new off-diagonal polarization-current subtraction against an
 independent torch reference.
@@ -222,7 +222,7 @@ def _run_slab(frequency, polarization, *, with_crystal):
             )
         )
     return mw.Simulation.fdtd(
-        scene,
+        scene, absorber="cpml",
         frequencies=[frequency],
         run_time=mw.TimeConfig.auto(steady_cycles=12, transient_cycles=26),
         full_field_dft=True,
@@ -255,6 +255,36 @@ def _fit_window(xs):
     return (xs >= _FIT_LO) & (xs <= _FIT_HI)
 
 
+def _bulk_index_from_line(xs, line, frequency, dt, propagation_sign):
+    """Infer the bulk index without attributing etalon phase to propagation.
+
+    The three-point homogeneous Yee equation holds for an arbitrary pair of
+    internal traveling waves. Its symbol yields n directly, with the actual
+    temporal derivative symbol; no analytic material value enters extraction.
+    """
+    if not np.isfinite((frequency, dt)).all() or min(frequency, dt) <= 0 or propagation_sign not in (-1, 1):
+        raise ValueError("Bulk index extraction requires a positive carrier/dt and a signed propagation direction.")
+    xs = np.asarray(xs, dtype=np.float64)
+    line = np.asarray(line, dtype=np.complex128)
+    if xs.ndim != 1 or line.shape != xs.shape:
+        raise ValueError("Bulk index extraction requires a matching axis line.")
+    if not np.allclose(np.diff(xs), _SPACING, rtol=1e-12, atol=0.0):
+        raise ValueError("The slab index control requires its declared uniform grid.")
+    inside = np.flatnonzero(np.abs(xs) < _SLAB_THICKNESS / 2 - 3 * _SPACING)
+    if len(inside) < 5 or np.any(np.diff(inside) != 1):
+        raise ValueError("Bulk index extraction requires a homogeneous interior stencil.")
+    indices = inside[1:-1]
+    values = line[indices]
+    power = np.vdot(values, values).real
+    if not np.isfinite(line[inside]).all() or not np.isfinite(power) or power <= 0:
+        raise ValueError("Bulk index extraction requires a finite nonzero signal.")
+    cosine = np.vdot(values, line[indices - 1] + line[indices + 1]) / (2 * power)
+    if propagation_sign < 0:
+        cosine = cosine.conjugate()
+    omega_discrete = 2 * np.sin(np.pi * frequency * dt) / dt
+    return _C * np.sqrt(2 * (1 - cosine)) / (omega_discrete * _SPACING)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.parametrize("frequency", [0.8e9, 1.2e9])
 def test_rotated_birefringent_dispersive_slab_matches_analytic_indices(frequency):
@@ -271,7 +301,7 @@ def test_rotated_birefringent_dispersive_slab_matches_analytic_indices(frequency
     window = _fit_window(xs)
     slope = np.polyfit(xs[window], np.unwrap(np.angle(vac_line[window])), 1)[0]
     assert abs(abs(slope) / k0 - 1.0) < 0.1  # forward plane wave travels near c
-    signed_k = np.sign(slope) * k0
+    propagation_sign = np.sign(slope)
 
     results = {}
     for label, polarization, eps_axis in (
@@ -280,11 +310,11 @@ def test_rotated_birefringent_dispersive_slab_matches_analytic_indices(frequency
     ):
         crystal = _run_slab(frequency, polarization, with_crystal=True)
         _, crystal_line = _projected_axis_line(crystal, polarization)
-        # Per-x transmitted/incident phase in the post-slab window is ~constant
-        # and equals signed_k * (n - 1) * L (kept below pi by the slab thickness);
-        # averaging the ratio phase over the window suppresses the standing wave.
-        extra_phase = float(np.mean(np.angle(crystal_line[window] / vac_line[window])))
-        n_measured = 1.0 + extra_phase / (signed_k * _SLAB_THICKNESS)
+        # A finite slab's transmission phase includes interface reflections.
+        # Infer the bulk index from its homogeneous interior operator instead.
+        n_measured = _bulk_index_from_line(
+            xs, crystal_line, frequency, crystal.solver.dt, propagation_sign
+        ).real
 
         n_analytic = _analytic_index(eps_axis, frequency).real
         rel_error = abs(n_measured - n_analytic) / n_analytic
@@ -303,8 +333,8 @@ def test_rotated_birefringent_dispersive_slab_matches_analytic_indices(frequency
             f"{n_analytic:.4f} ({rel_error * 100:.2f}%)"
         )
 
-    # The difference of two independently fitted indices amplifies their finite-grid
-    # phase errors, so use a 4% tolerance while retaining the 2% per-index checks.
+    # The smaller difference remains subject to its original 4% gate,
+    # alongside the original 2% per-index checks.
     n_o_measured, n_o_analytic, _ = results["ordinary"]
     n_e_measured, n_e_analytic, _ = results["extraordinary"]
     delta_measured = n_e_measured - n_o_measured

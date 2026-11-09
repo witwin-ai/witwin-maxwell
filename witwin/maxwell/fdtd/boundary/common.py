@@ -19,6 +19,8 @@ BOUNDARY_KIND_TO_CODE = {
     # Mur ABC is applied in PyTorch after the E-update; the update kernel treats
     # these faces as inert so no dedicated CUDA boundary code is required.
     "mur": BOUNDARY_NONE,
+    # Mode-matched one-way faces reuse the same post-update ABC machinery.
+    "mode_abc": BOUNDARY_NONE,
 }
 
 

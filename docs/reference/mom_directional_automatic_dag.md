@@ -1,0 +1,7 @@
+# Automatic directional child-context sharing
+
+Create the existing `AutomaticDirectionalRegionPlan` for the actual support/medium/common impedance and unchanged root kernel/material budget. Pass it to `AutomaticDirectionalDAGPlan` with explicit quadrature, face/RHS batches, finite candidate/context capacities, phase budget and component capacities. Root cones/orders and complete physical near/FAR coverage are preserved. Sharing selects minimum feasible link padding only after recomputing all ancestor paths, every original root admission and complete live graph inventory.
+
+`build_far` uses the existing actual DAG maps and electromagnetic couplings; `build_region` shares that factory and combines original physical near integration. The resulting DAG owner binds the plan identity/configuration through saved forward/H/current checks. Original default prescribed owners remain available without a plan guard. All capacities are component inventories rather than measured whole-process peaks.
+
+Read `docs/assessments/sie_directional_automatic_dag.md` for selected positive changing-carrier and exact mixed-order evidence. The selected FAR-only physical control is not a complete automatic magnetic near+FAR system or solver/physics/resource qualification. Order/catalog representation limits, finite search and unmergeable cases are explicit; none replace the original Goal's final required scope. No production qualification.

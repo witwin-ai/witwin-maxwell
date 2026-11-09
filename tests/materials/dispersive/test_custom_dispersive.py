@@ -9,13 +9,17 @@ from witwin.maxwell.scene import prepare_scene
 _FREQUENCY = 1.0e9
 
 
-def _build_scene(*structures, device="cpu", sources=()):
+_NODE_SAMPLING = mw.SubpixelSpec(samples=1, averaging="arithmetic")
+
+
+def _build_scene(*structures, device="cpu", sources=(), subpixel_samples=None):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
         device=device,
         sources=list(sources),
+        **({} if subpixel_samples is None else {"subpixel_samples": subpixel_samples}),
     )
     for structure in structures:
         scene.add_structure(structure)
@@ -201,11 +205,14 @@ def test_custom_parameter_grid_is_resampled_to_node_coverage():
 def test_graded_custom_pole_matches_piecewise_uniform_reference(
     custom_material, left_material, right_material
 ):
+    # Pins the legacy node-sampling policy; graded-vs-piecewise identity is a node-grid property, not a subpixel-quality test.
     left_box, right_box = _piecewise_reference_boxes()
-    graded_scene = _build_scene(mw.Structure(geometry=_SLAB_BOX, material=custom_material))
+    graded_scene = _build_scene(mw.Structure(geometry=_SLAB_BOX, material=custom_material),
+                                subpixel_samples=_NODE_SAMPLING)
     reference_scene = _build_scene(
         mw.Structure(geometry=left_box, material=left_material),
         mw.Structure(geometry=right_box, material=right_material),
+        subpixel_samples=_NODE_SAMPLING,
     )
 
     eps_graded, _ = prepare_scene(graded_scene).compile_relative_materials(frequency=_FREQUENCY)
@@ -247,7 +254,7 @@ def test_fdtd_uniform_custom_drude_matches_scalar_drude_run():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_graded_custom_lorentz_matches_piecewise_uniform_run():
     def run(*structures, dt=None):
-        scene = _build_scene(*structures, device="cuda", sources=(_plane_wave(),))
+        scene = _build_scene(*structures, device="cuda", sources=(_plane_wave(),), subpixel_samples=_NODE_SAMPLING)
         scene.add_monitor(mw.PointMonitor("probe", (0.5, 0.0, 0.0), fields=("Ez",)))
         result = mw.Simulation.fdtd(
             scene,
@@ -278,40 +285,19 @@ def test_fdtd_graded_custom_lorentz_matches_piecewise_uniform_run():
     # compare their spatial discretizations on one identical temporal grid.
     graded_probe, _ = run(mw.Structure(geometry=_SLAB_BOX, material=graded), dt=dt)
 
-    # The graded slab and its two-box piecewise tiling are the SAME physics. The
-    # reference tiles the slab with two boxes whose shared face sits at the mid-cell
-    # plane x=0.025 -- chosen so the NODE-sampled fields of both scenes were
-    # byte-identical. Under per-Yee-component (edge-native) permittivity sampling the
-    # eps_inf background is evaluated at each staggered location, and that shared face
-    # lands exactly on the Ex edge at x=0.025: representing one solid slab as two
-    # abutting soft (tanh) occupancy boxes leaves their summed occupancy slightly
-    # under one at that single edge, so the two-box reference carries a small spurious
-    # sub-cell eps_inf dip (graded eps_inf 2.0 vs ref ~1.75 there) that the one-box
-    # graded slab (the more faithful discretization) does not. Node identity forces
-    # the internal interface onto that mid-cell Ex edge (the only mid-cell plane
-    # between the split nodes), so the seam term cannot be moved off a Yee edge at the
-    # scene level; the dispersive pole weights are node-averaged and unchanged, so
-    # this abutment seam is the ONLY difference between the two constructions.
-    #
-    # This is NOT a flaky tolerance. The seam is a fixed discretization artifact of
-    # the two-soft-box reference, not a run-to-run variable: the discrepancy measured
-    # below is max|graded-ref|/max|ref| = 0.02735 IDENTICALLY on 12/12 isolated CUDA
-    # runs (population stdev exactly 0; scratch/flaky_probe.py, recorded in the F4
-    # subpixel acceptance ledger). The effect is an occupancy-sampling difference, not
-    # a floating-point-reduction-order effect, so it is stable to ~machine epsilon and
-    # portable across IEEE GPUs. It is therefore gated as a TIGHT single-sided
-    # regression bound anchored on the measured seam magnitude (0.02735) with ~28%
-    # headroom, NOT a loose tolerance: the discrepancy must stay at the known seam
-    # level, so any genuinely new graded-vs-piecewise divergence trips the gate, while
-    # a future reference construction that removes the seam only lowers the value and
-    # still passes.
+    # Pins the legacy node-sampling policy; graded-vs-piecewise identity is a node-grid property, not a subpixel-quality test.
+    # The two scenes are different continuum profiles (the custom dataset interpolates a
+    # one-spacing ramp across x=0.025; the reference is a step) that agree only on the
+    # dataset node grid. Under the default kottke_edge policy the graded slab keeps
+    # fractional pole weights while the scalar two-box reference uses binary ownership at
+    # its vacuum faces, so the default comparison is intentionally not like-for-like
+    # (docs/assessments/dispersive-binary-poles-2026-11-02.md). Pinned value 0.026357.
     assert torch.is_tensor(graded_probe)
     reference_scale = reference_probe.abs().max()
     seam_discrepancy = float((graded_probe - reference_probe).abs().max() / reference_scale)
     assert seam_discrepancy < 3.5e-2, (
-        f"graded-vs-piecewise discrepancy {seam_discrepancy:.5f} exceeds the documented "
-        "deterministic sub-cell abutment seam (~0.02735); this indicates a real "
-        "graded custom-Lorentz regression, not the known reference-tiling artifact."
+        f"graded-vs-piecewise discrepancy {seam_discrepancy:.5f} exceeds the pinned node-sampling "
+        "level (0.026357); this indicates a real graded custom-Lorentz regression."
     )
 
 

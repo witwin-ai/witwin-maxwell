@@ -732,6 +732,9 @@ def test_compiled_cuda_extension_batched_source_duplicate_offsets_match_gpu_inde
         mask = field_codes == code
         expected_ref[code].reshape(-1).index_add_(0, field_offsets[mask].to(dtype=torch.long), ref_values[mask])
 
+    from witwin.maxwell.fdtd.excitation.gather import build_source_gather
+    backend_gather = build_source_gather(field_offsets, field_codes)
+
     ext.add_batched_reference_source_patches(
         actual_ref[0],
         actual_ref[1],
@@ -741,6 +744,7 @@ def test_compiled_cuda_extension_batched_source_duplicate_offsets_match_gpu_inde
         field_codes,
         field_offsets,
         sample_indices,
+        *backend_gather,
     )
 
     positions = (torch.arange(64, device="cuda", dtype=torch.float32) % 8) * 0.5
@@ -766,6 +770,7 @@ def test_compiled_cuda_extension_batched_source_duplicate_offsets_match_gpu_inde
         field_offsets,
         0.0,
         0.5,
+        *backend_gather,
     )
     torch.cuda.synchronize()
 
@@ -773,3 +778,52 @@ def test_compiled_cuda_extension_batched_source_duplicate_offsets_match_gpu_inde
         torch.testing.assert_close(actual_tensor, expected_tensor, rtol=2.0e-6, atol=2.0e-6)
     for actual_tensor, expected_tensor in zip(actual_interp, expected_interp, strict=True):
         torch.testing.assert_close(actual_tensor, expected_tensor, rtol=2.0e-6, atol=2.0e-6)
+
+
+def test_compiled_broadband_and_table_time_shifted_sources_match_torch_reference():
+    import numpy as np
+
+    from witwin.maxwell.waveforms import WaveformTable
+
+    generator = torch.Generator(device="cuda")
+    generator.manual_seed(611)
+    patch = _rand((3, 2, 4), generator)
+    delay_patch = torch.rand((3, 2, 4), device="cuda", dtype=torch.float32, generator=generator) * 0.6
+    activation_delay = torch.full((3, 2, 4), 0.1, device="cuda", dtype=torch.float32)
+    activation_delay[1, 0, 2] = 0.9
+
+    expected = torch.zeros((6, 5, 6), device="cuda", dtype=torch.float32)
+    actual = torch.zeros_like(expected)
+    broadband = dict(timeKind=4, time=0.7, frequency=1.3, fwidth=0.6, amplitude=1.4, phase=0.2,
+                     delay=0.4, pedestal=0.05, pedestalFwidth=0.2, causalGate=1)
+    for offsets in ((1, 2, 1), (4, -1, 3)):
+        kwargs = dict(sourcePatch=patch, delayPatch=delay_patch, activationDelayPatch=activation_delay,
+                      offsetI=offsets[0], offsetJ=offsets[1], offsetK=offsets[2], **broadband)
+        torch_reference._add_time_shifted_source_patch(field=expected, **kwargs)
+        backend._add_time_shifted_source_patch(field=actual, **kwargs)
+
+    times_uniform = np.linspace(-0.2, 0.9, 23)
+    times_nonuniform = np.sort(np.concatenate(([-0.3, 0.95], np.random.default_rng(3).uniform(-0.3, 0.95, 40))))
+    for times, interpolation, offsets in (
+        (times_uniform, "linear", (0, 0, 0)),
+        (times_uniform, "cubic", (3, 3, -1)),
+        (times_nonuniform, "cubic", (2, 1, 2)),
+    ):
+        table = WaveformTable(times, np.sin(5.0 * times) + 0.3 * times, interpolation=interpolation)
+        knots, values, curvature = table.tensors("cuda")
+        kwargs = dict(sourcePatch=patch, delayPatch=delay_patch, activationDelayPatch=activation_delay,
+                      knots=knots, values=values, curvature=curvature,
+                      offsetI=offsets[0], offsetJ=offsets[1], offsetK=offsets[2],
+                      time=0.7, timeOffset=0.7 - table.start, invStep=table.inv_step,
+                      amplitude=-1.7, uniform=1 if table.uniform else 0, causalGate=1)
+        torch_reference._add_table_time_shifted_source_patch(field=expected, **kwargs)
+        backend._add_table_time_shifted_source_patch(field=actual, **kwargs)
+        # The torch twin used by the Bloch and adjoint paths matches the kernel.
+        sample_time = 0.7 - delay_patch
+        twin = -1.7 * table.evaluate_torch(sample_time)
+        host = -1.7 * torch.as_tensor(table.evaluate(sample_time.double().cpu().numpy()), device="cuda")
+        torch.testing.assert_close(twin.double(), host, rtol=1.0e-5, atol=1.0e-5)
+    torch.cuda.synchronize()
+
+    assert table.uniform is False
+    torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=2.0e-6)

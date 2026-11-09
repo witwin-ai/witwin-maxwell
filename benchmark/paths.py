@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 from pathlib import Path
 
 
@@ -8,7 +9,7 @@ ROOT = Path(__file__).resolve().parent
 SCENES_DIR = ROOT / "scenes"
 CACHE_DIR = ROOT / "cache"
 PLOTS_DIR = ROOT / "plots"
-RESULTS_MD = ROOT / "RESULTS.md"
+RESULTS_MD = Path(os.environ.get("WITWIN_BENCHMARK_RESULTS_PATH", ROOT / "RESULTS.md"))
 
 
 def ensure_directories() -> None:

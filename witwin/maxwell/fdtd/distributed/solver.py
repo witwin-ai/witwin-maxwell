@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from witwin.core import Box
 
-from ...constants import C_0
+from ...constants import C_0, EPSILON_0, MU_0
 from ...monitors import (
     ClosedSurfaceMonitor,
     DiffractionMonitor,
@@ -21,6 +21,7 @@ from ...monitors import (
     PlaneMonitor,
     WireMonitor,
 )
+from ...monitors import AuxFieldTimeMonitor, SurfaceFieldTimeMonitor
 from ...scene import Scene, prepare_scene
 from ...ports import LumpedPort, ModePort, TerminalPort
 from ...sources import PointDipole, UniformCurrentSource
@@ -38,6 +39,7 @@ from .circuits import DistributedCircuitRuntime
 from .networks import DistributedNetworkRuntime
 from .frequency_counts import reduce_frequency_sample_counts
 from .monitor_merge import merge_sharded_monitor_payloads
+from .observations import DistributedObservationHalos
 from .persistence import export_distributed_field_shards
 from .nccl_transport import NcclHaloTransport
 from .shard_engine import ShardEngine, _plane_position
@@ -260,7 +262,12 @@ class DistributedFDTD:
         self.parallel = parallel
         self.devices = tuple(torch.device(device) for device in parallel.devices)
         self.device = torch.device(parallel.result_device)
-        self.absorber_type = str(absorber_type)
+        from ..boundary.runtime import resolve_absorber
+        resolved_absorber, self.absorber_resolution_reason = resolve_absorber(
+            scene, absorber_type, complex_fields=scene.boundary.uses_kind("bloch"),
+            distributed=True,
+        )
+        self.absorber_type = resolved_absorber if str(absorber_type) == "auto" else str(absorber_type)
         self.cpml_config = dict(cpml_config or {})
         requested_cpml_mode = str(self.cpml_config.get("memory_mode", "auto")).strip().lower()
         if requested_cpml_mode not in {"auto", "dense", "slab"}:
@@ -273,6 +280,8 @@ class DistributedFDTD:
         self._cpml_dense_memory_bytes = 0
         self._cpml_slab_memory_bytes = 0
         self.c = C_0
+        self.eps0 = EPSILON_0
+        self.mu0 = MU_0
         self.Nx, self.Ny, self.Nz = self.scene.Nx, self.scene.Ny, self.scene.Nz
         self.dt = None
         self.shards: tuple[ShardEngine, ...] = ()
@@ -308,6 +317,7 @@ class DistributedFDTD:
         self._distributed_circuit: DistributedCircuitRuntime | None = None
         self._distributed_network: DistributedNetworkRuntime | None = None
         self._distributed_wire: DistributedWireRuntime | None = None
+        self._distributed_copper = None
         self._wire_network_cpu = None
         self._wire_monitors_cpu: tuple = ()
         self._wire_cfl_metadata: dict[str, Any] = {}
@@ -316,6 +326,8 @@ class DistributedFDTD:
         self._validate_static_capabilities()
 
     def _validate_static_capabilities(self) -> None:
+        if getattr(self.logical_scene,"coordinates",None) is not None:
+            raise NotImplementedError("Mapped distributed fields require qualified chart ownership and physical observations.")
         if self._nccl:
             self._validate_nccl_capabilities()
         # Defense in depth: the public Simulation entry validates trainable+parallel
@@ -373,6 +385,16 @@ class DistributedFDTD:
         if boundary.axis_kind("x") == "periodic":
             raise ValueError(
                 "Multi-GPU x decomposition does not yet support periodic x ring exchange."
+            )
+        if (
+            boundary.uses_kind("mode_abc")
+            or (boundary.uses_kind("mur") and boundary.mur_abc.order != 1)
+            or getattr(self.logical_scene, "internal_absorbers", ())
+        ):
+            raise ValueError(
+                "Multi-GPU FDTD does not yet support second-order Mur faces, mode-matched ABC faces "
+                "or internal absorbers: their transverse stencils, cross-section mode solves and "
+                "interior planes are not decomposed across x shards."
             )
         if self.logical_scene.symmetry[0] is not None:
             raise ValueError("Multi-GPU x decomposition does not support x-axis symmetry yet.")
@@ -436,11 +458,7 @@ class DistributedFDTD:
                 "Multi-GPU lumped/terminal ports must be bound to the distributed "
                 f"circuit or network owner; unbound ports: {unbound_ports}."
             )
-        for monitor in self.logical_scene.monitors:
-            if isinstance(monitor, ClosedSurfaceMonitor):
-                raise ValueError(
-                    "Multi-GPU FDTD does not yet support closed-surface monitor assembly."
-                )
+        for monitor in self.logical_scene.resolved_monitors():
             if isinstance(monitor, DiffractionMonitor):
                 raise ValueError(
                     "Multi-GPU FDTD does not yet support distributed diffraction monitors."
@@ -452,6 +470,10 @@ class DistributedFDTD:
             if isinstance(monitor, FieldTimeMonitor) and monitor.region_kind != "point":
                 raise ValueError(
                     "Multi-GPU FDTD currently supports FieldTimeMonitor only for point regions."
+                )
+            if isinstance(monitor, (SurfaceFieldTimeMonitor, AuxFieldTimeMonitor)):
+                raise ValueError(
+                    f"Multi-GPU FDTD does not yet support {type(monitor).__name__}."
                 )
 
         prospective_plan = FDTDPartitionPlan(
@@ -485,6 +507,13 @@ class DistributedFDTD:
                     "use a tangential-field FluxMonitor/ModeMonitor."
                 )
         if any(
+            getattr(structure.geometry, "kind", None) == "surface_mesh"
+            for structure in self.logical_scene.structures if structure.enabled
+        ):
+            raise NotImplementedError(
+                "Distributed SurfaceMesh PEC constraints require joint surface-current ownership and halos."
+            )
+        if any(
             bool(getattr(getattr(structure, "material", None), "is_lossy_metal", False))
             or bool(getattr(getattr(structure, "material", None), "is_surface_impedance", False))
             for structure in self.logical_scene.structures
@@ -492,6 +521,13 @@ class DistributedFDTD:
             raise ValueError(
                 "Multi-GPU FDTD does not yet support distributed surface-impedance ownership."
             )
+        if any(getattr(structure.material, "is_copper_foil", False) for structure in self.logical_scene.structures):
+            if self._nccl:
+                raise NotImplementedError("Distributed CopperFoil shadow-trace halos currently require cuda_p2p transport.")
+            if self.logical_scene.thin_wires:
+                raise NotImplementedError("Distributed CopperFoil and ThinWire require joint field-edge ownership.")
+            if any(getattr(region.density, "requires_grad", False) for region in self.logical_scene.material_regions):
+                raise NotImplementedError("Distributed CopperFoil does not yet support material-density adjoints.")
         for monitor in self.logical_scene.resolved_monitors():
             if isinstance(monitor, (PermittivityMonitor, MediumMonitor)):
                 raise ValueError(
@@ -813,9 +849,30 @@ class DistributedFDTD:
                     dt=self.dt,
                     cfl_metadata=self._wire_cfl_metadata,
                 )
+        if any(getattr(structure.material, "is_copper_foil", False) for structure in self.logical_scene.structures):
+            from .copper import DistributedCopperRuntime
+            self._distributed_copper = DistributedCopperRuntime(self.shards, self.scene)
+        for shard in self.shards:
+            shard.solver._requested_port_frequencies = tuple(self._requested_port_frequencies)
+            for runtime in getattr(shard.solver,"_port_runtimes",()):
+                runtime.frequencies = torch.tensor(self._requested_port_frequencies,device=shard.device,dtype=torch.float64)
+        from ...compiler.sources import compile_fdtd_sources
+        from ..runtime.timeplan import source_reference_descriptor
+
+        self._compiled_sources = tuple(compile_fdtd_sources(
+            self.logical_scene, default_frequency=self.frequency))
+        for index, source in enumerate(self._compiled_sources):
+            descriptors = [source_reference_descriptor(shard.solver._compiled_sources[index])
+                           for shard in self.shards]
+            if not all(descriptor == descriptors[0] for descriptor in descriptors):
+                raise ValueError("Distributed source reference providers disagree across shards.")
+            source.update(descriptors[0])
         self._initialized = True
 
     def _prepare_outputs(self, time_steps, dft_frequency, dft_window, full_field_dft):
+        sampled = any(isinstance(monitor,FinitePlaneMonitor) and monitor.sample_spacing is not None
+                      for monitor in self.logical_scene.resolved_monitors())
+        self._observation_halos = DistributedObservationHalos(self.shards) if sampled else None
         spectral_enabled = any(shard.solver.observers for shard in self.shards)
         default_frequencies = dft_frequency if dft_frequency is not None else (self.frequency,)
         monitor_frequencies = tuple(
@@ -850,6 +907,8 @@ class DistributedFDTD:
                 time_steps=int(time_steps),
                 window_type=dft_window,
             )
+        if self._distributed_copper is not None:
+            self._distributed_copper.prepare_spectra(time_steps, default_frequencies, dft_window)
 
     def _overlap_active(self) -> bool:
         if self._nccl:
@@ -984,12 +1043,16 @@ class DistributedFDTD:
         time_value = n * self.dt
         for shard in self.shards:
             shard.advance_pre_magnetic()
+        if self._distributed_copper is not None:
+            self._distributed_copper.begin()
 
         if overlap_active:
             self._advance_magnetic_overlapped()
         else:
             self._advance_magnetic_serialized()
 
+        if self._distributed_copper is not None:
+            self._distributed_copper.correct_magnetic()
         for shard in self.shards:
             shard.apply_magnetic_sources_and_corrections(time_value)
 
@@ -1003,6 +1066,8 @@ class DistributedFDTD:
             self._advance_electric_overlapped()
         else:
             self._advance_electric_serialized(time_value)
+        if self._distributed_copper is not None:
+            self._distributed_copper.advance_electric()
 
         # Deposit the advanced wire current onto the owned E edges immediately after
         # the electric update, before any electric source injection, matching the
@@ -1018,6 +1083,10 @@ class DistributedFDTD:
         if self._distributed_network is not None:
             self._distributed_network.apply()
 
+        for shard in self.shards:
+            shard.complete_electric_updates()
+        if getattr(self,"_observation_halos",None) is not None:
+            self._observation_halos.exchange()
         for shard in self.shards:
             shard.accumulate(n)
 
@@ -1049,6 +1118,7 @@ class DistributedFDTD:
             result_device=self.device,
             shard_layouts=self.shard_layouts,
             physical_bounds=self.logical_scene.domain.bounds,
+            quadrature_scene=self.scene,
         )
 
         output: dict[str, Any] = {}
@@ -1089,6 +1159,8 @@ class DistributedFDTD:
                 output.setdefault("ports", {}).update(ports)
             if networks:
                 output["embedded_networks"] = networks
+        if self._distributed_copper is not None:
+            output["conductor_losses"] = self._distributed_copper.loss_report()
         # On a one-process-per-GPU launch only the result root assembles output;
         # non-root ranks have already contributed their slabs to the collective.
         if not self._result_root:
@@ -1109,11 +1181,11 @@ class DistributedFDTD:
         resume_from=None,
         stop_step: int | None = None,
     ):
-        if resume_from is not None or stop_step is not None:
-            raise ValueError(
-                "Distributed FDTD checkpoint replay is not available; circuit state is "
-                "owned and checkpointable on one GPU, but field-shard replay is deferred."
-            )
+        if stop_step is not None and (isinstance(stop_step,bool) or not isinstance(stop_step,int)
+                                      or not 0<=stop_step<int(time_steps)):
+            raise ValueError("Distributed stop_step must be an integer before the planned end.")
+        if self._nccl and (resume_from is not None or stop_step is not None):
+            raise NotImplementedError("Distributed resume currently requires cuda_p2p transport.")
         if self._nccl and float(shutoff) > 0.0:
             # reduce_owned_energy is a primitive-tested NCCL collective, but the
             # coordinator's shutoff bookkeeping (peak tracking on the result
@@ -1176,9 +1248,17 @@ class DistributedFDTD:
         self._shutoff_step = None
         self._shutoff_peak = torch.zeros((), device=self.device, dtype=torch.float32)
         self._synchronize_all()
-        start = time.perf_counter()
 
-        for n in range(int(time_steps)):
+        start_step = 0
+        if resume_from is not None:
+            from ..resume import restore_resume_checkpoint
+            start_step = restore_resume_checkpoint(self,resume_from,total_steps=int(time_steps))
+        self._execution_start_step = start_step
+        end_step = int(time_steps) if stop_step is None else stop_step
+        if end_step<start_step:
+            raise ValueError("Distributed stop_step precedes the resumed checkpoint.")
+        start = time.perf_counter()
+        for n in range(start_step,end_step):
             self._advance_one_step(n, overlap_active=overlap_active)
             if shutoff > 0.0 and (n + 1) % int(shutoff_check_interval) == 0:
                 energy = self.transport.reduce_owned_energy(self.shards)
@@ -1201,6 +1281,10 @@ class DistributedFDTD:
                 shutoff_step=self._shutoff_step,
             )
 
+        if stop_step is not None and not self._shutoff_triggered:
+            self._completed_steps = stop_step
+            return None
+
         if self._shutoff_triggered and self._distributed_wire is not None:
             self._distributed_wire.complete_normalization(int(time_steps))
 
@@ -1221,6 +1305,8 @@ class DistributedFDTD:
 
     def _build_parallel_stats(self, time_steps: int, overlap_active: bool) -> dict[str, Any]:
         steps_run = (self._shutoff_step + 1) if self._shutoff_triggered else int(time_steps)
+        resume_step = getattr(self,"_execution_start_step",0)
+        executed_steps = steps_run-resume_step
         gathered = self.transport.gather_stats(self.shards)
         halo_bytes_per_step = gathered["halo_bytes_per_step"]
         # A rank-local transport (one-process-per-GPU NCCL) cannot see both sides
@@ -1230,6 +1316,8 @@ class DistributedFDTD:
         stats_are_rank_local = bool(gathered.get("rank_local", False))
         stats = {
             "stats_rank_local": stats_are_rank_local,
+            "resumed_from_step": resume_step,
+            "executed_steps": executed_steps,
             "devices": tuple(str(device) for device in self.devices),
             "decomposition_axis": "x",
             "transport": self.transport.name,
@@ -1245,7 +1333,7 @@ class DistributedFDTD:
                 None if halo_bytes_per_step is None else int(halo_bytes_per_step)
             ),
             "halo_bytes_total": (
-                None if halo_bytes_per_step is None else int(halo_bytes_per_step * steps_run)
+                None if halo_bytes_per_step is None else int(halo_bytes_per_step * executed_steps)
             ),
             "peak_memory_bytes": gathered["peak_memory_bytes"],
             "peak_memory_bytes_including_gather": dict(self._peak_memory_including_gather),
@@ -1259,11 +1347,27 @@ class DistributedFDTD:
             ),
         }
         if self._distributed_circuit is not None:
-            stats["circuit"] = self._distributed_circuit.stats(steps_run=steps_run)
+            stats["circuit"] = self._distributed_circuit.stats(steps_run=executed_steps)
         if self._distributed_network is not None:
-            stats["network"] = self._distributed_network.stats(steps_run=steps_run)
+            stats["network"] = self._distributed_network.stats(steps_run=executed_steps)
         if self._distributed_wire is not None:
-            stats["thin_wire"] = self._distributed_wire.stats(steps_run=steps_run)
+            stats["thin_wire"] = self._distributed_wire.stats(steps_run=executed_steps)
+        if self._distributed_copper is not None:
+            extra_bytes = self._distributed_copper.shadow_halo_bytes_per_step
+            if stats["halo_bytes_per_step"] is not None:
+                stats["halo_bytes_per_step"] += extra_bytes
+                stats["halo_bytes_total"] += extra_bytes * executed_steps
+            stats["copper_foil"] = {
+                "owned_tangential_edges": self._distributed_copper.owned_edge_count,
+                "shadow_halo_bytes_per_step": self._distributed_copper.shadow_halo_bytes_per_step,
+                "state_ownership": "unique_electric_edge_owner",
+            }
+        if getattr(self,"_observation_halos",None) is not None:
+            extra_bytes = self._observation_halos.bytes_per_step
+            if stats["halo_bytes_per_step"] is not None:
+                stats["halo_bytes_per_step"] += extra_bytes
+                stats["halo_bytes_total"] += extra_bytes * executed_steps
+            stats["observation_halo_bytes_per_step"] = extra_bytes
         return stats
 
     @property

@@ -100,6 +100,7 @@ def _make_mock_tidy3d():
     class FluxTimeMonitor(_Recorder): pass
     class ContinuousWave(_Recorder): pass
     class GaussianPulse(_Recorder): pass
+    class BroadbandPulse(_Recorder): pass
 
     class ScalarFieldDataArray:
         def __init__(self, data, coords=None):
@@ -175,6 +176,7 @@ def _make_mock_tidy3d():
     td.FluxTimeMonitor = FluxTimeMonitor
     td.ContinuousWave = ContinuousWave
     td.GaussianPulse = GaussianPulse
+    td.BroadbandPulse = BroadbandPulse
     td.PML = PML
     td.Periodic = Periodic
     td.PECBoundary = PECBoundary
@@ -358,6 +360,56 @@ class TestGridConversion:
                 )
             )
             expected = resolve_auto_grid(scene)
+            sim = scene.to_tidy3d()
+            s = 1.0e6
+            for axis, nodes in zip(("x", "y", "z"), expected):
+                nodes = np.asarray(nodes)
+                boundaries = np.asarray(getattr(sim.grid.boundaries, axis))
+                lo, hi = nodes[0] * s, nodes[-1] * s
+                interior = boundaries[(boundaries >= lo - 1e-3) & (boundaries <= hi + 1e-3)]
+                assert interior.size == nodes.size
+                assert np.allclose(interior, nodes * s)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package to build the discretized Yee grid",
+    )
+    def test_corner_refined_auto_grid_exports_exact_nodes_to_real_tidy3d(self):
+        # Corner / layer-bounds refinement is exported as maxwell's resolved nodes
+        # (CustomGridBoundaries), the exact equivalent of Tidy3D LayerRefinementSpec
+        # corner refinement: the reference solver discretizes on the refined mesh.
+        import numpy as np
+
+        from witwin.maxwell.fdtd.meshing import resolve_auto_grid
+        l_shape = np.array([[0, 0], [2, 0], [2, 1], [1, 1], [1, 2], [0, 2]], dtype=float) * 0.1
+        with _real_tidy3d():
+            layer = mw.LayerRefinementSpec(
+                min_cells=None, axis="z", bounds=(0.0, 0.02),
+                corner_finder=mw.CornerFinderSpec(medium="all"),
+                corner_refinement=mw.GridRefinement(dl=0.005, num_cells=4),
+                bounds_refinement=mw.GridRefinement(dl=0.005),
+            )
+            scene = (
+                mw.Scene(
+                    domain=mw.Domain(bounds=((-0.3, 0.5), (-0.3, 0.5), (-0.3, 0.3))),
+                    grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.5, layer_refinement=layer),
+                    boundary=mw.BoundarySpec.pml(num_layers=6),
+                    device="cpu",
+                )
+                .add_structure(
+                    mw.Structure(mw.PolySlab(vertices=l_shape, bounds=(0.0, 0.02), axis="z"), mw.Material(eps_r=4.0))
+                )
+                .add_source(
+                    mw.PointDipole(
+                        position=(0, 0, 0.1),
+                        polarization="Ez",
+                        source_time=mw.GaussianPulse(frequency=6e8, fwidth=6e7),
+                    )
+                )
+            )
+            expected = resolve_auto_grid(scene)
+            plain = resolve_auto_grid(scene.clone(grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.5)))
+            assert expected[0].size > plain[0].size and expected[2].size > plain[2].size
             sim = scene.to_tidy3d()
             s = 1.0e6
             for axis, nodes in zip(("x", "y", "z"), expected):
@@ -1969,6 +2021,32 @@ class TestSourceTimeConversion:
         np.testing.assert_allclose(tidy3d_real, maxwell_real, rtol=2e-12, atol=2e-12)
 
 
+    def test_broadband_pulse_exports_declarative_contract(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        st = mw.BroadbandPulse(freq_range=(1.0e9, 6.0e9), minimum_amplitude=0.2, amplitude=1.5,
+                               phase=0.3, offset=2.0)
+        result = _convert_source_time(st, td, amplitude_scale=2.0)
+        assert isinstance(result, td.BroadbandPulse)
+        assert result.freq_range == (1.0e9, 6.0e9)
+        assert result.minimum_amplitude == pytest.approx(0.2)
+        assert result.amplitude == pytest.approx(3.0)
+        assert result.phase == pytest.approx(0.3)
+        assert result.offset == pytest.approx(2.0)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="tidy3d is not installed",
+    )
+    def test_broadband_pulse_export_validates_with_real_tidy3d(self):
+        st = mw.BroadbandPulse(freq_range=(2.0e14, 3.0e14), minimum_amplitude=0.3, phase=0.1)
+        with _real_tidy3d() as real_td:
+            exported = _convert_source_time(st, real_td)
+            assert isinstance(exported, real_td.BroadbandPulse)
+            assert tuple(exported.freq_range) == pytest.approx((2.0e14, 3.0e14))
+            assert exported.minimum_amplitude == pytest.approx(0.3)
+            assert exported.offset == pytest.approx(0.0)
+
+
 class TestMonitorConversion:
     def test_point_monitor(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
@@ -2231,6 +2309,57 @@ class TestFullSceneConversion:
         sim = scene.to_tidy3d(frequencies=1e9, run_time=1e-9)
         assert sim.run_time == 1e-9
 
+    @pytest.mark.parametrize("name", (
+        "planewave_cw", "dipole_cw_vacuum", "planewave_vacuum",
+        "modulated_slab", "modulated_slab_phase",
+    ))
+    def test_steady_state_reference_horizon(self, inject_mock_tidy3d, name):
+        from benchmark.scenes import SCENARIOS, build_scene
+
+        scene = build_scene(name)
+        scenario = SCENARIOS[name]
+        requested = scenario.run_time_factor * max(hi - lo for lo, hi in scene.domain.bounds) / 299_792_458.0
+        short = scene.to_tidy3d(frequencies=scenario.frequencies, run_time=requested)
+        settled = scene.to_tidy3d(
+            frequencies=scenario.frequencies, run_time=requested, cw_steady_state=True,
+        )
+        assert short.run_time == requested
+        if name in ("planewave_vacuum", "modulated_slab", "modulated_slab_phase"):
+            assert settled.run_time == requested
+        else:
+            assert settled.run_time > 50 * requested
+            # An explicitly longer observation horizon must never be shortened.
+            longer = scene.to_tidy3d(
+                frequencies=scenario.frequencies, run_time=2 * settled.run_time, cw_steady_state=True,
+            )
+            assert longer.run_time == 2 * settled.run_time
+        assert [monitor._kwargs for monitor in settled.monitors] == [
+            monitor._kwargs for monitor in short.monitors
+        ]
+
+    def test_cw_downstream_finite_history_power_prediction(self):
+        from benchmark.scenes import SCENARIOS, build_scene
+
+        scene = build_scene("planewave_cw")
+        scenario = SCENARIOS["planewave_cw"]
+        sim = scene.to_tidy3d(
+            frequencies=scenario.frequencies,
+            run_time=scenario.run_time_factor * 1.28 / 299_792_458.0,
+            cw_steady_state=True,
+        )
+        tau = 1.0 / (2.0 * math.pi * sim.sources[0].source_time.fwidth)
+        t0 = 5.0 * tau  # ContinuousWave's default offset in ramp widths.
+        # The diagnosed Yee group speed and actual source coordinate are fixed
+        # independent evidence, not a fitted amplitude correction.
+        downstream_z = next(m.center[2] * 1e-6 for m in sim.monitors if m.name == "transmitted")
+        delay = (downstream_z - (-0.5661538243293762)) / 258402284.40529925
+
+        def integral(t):
+            return tau * (np.logaddexp(0.0, (t - t0) / tau) - np.logaddexp(0.0, -t0 / tau))
+
+        factor = (integral(sim.run_time - delay) / integral(sim.run_time)) ** 2
+        assert abs(factor - 1.0) < 0.005
+
     def test_scene_time_monitor_steps_are_exported_as_seconds(self):
         scene = mw.Scene(
             domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
@@ -2483,3 +2612,105 @@ class TestGeometrySourceMonitorRealTidy3d:
             assert complex(src.current_dataset.Ez.values.reshape(-1)[0]).real == pytest.approx(1.0)
             assert complex(src.current_dataset.Hx.values.reshape(-1)[0]).real == pytest.approx(0.3)
             assert src.source_time.amplitude == pytest.approx(1.0e-12)
+
+
+@pytest.mark.parametrize("angle", (0, 30, 60))
+@pytest.mark.parametrize("polarization", ("TE", "TM"))
+@pytest.mark.parametrize("sign", (-1, 1))
+@pytest.mark.parametrize("axis", ("x", "y", "z"))
+def test_oblique_tfsf_physical_power_amplitude(inject_mock_tidy3d, angle, polarization, sign, axis):
+    from witwin.core.material import VACUUM_PERMITTIVITY
+
+    theta = math.radians(angle)
+    axis_idx = "xyz".index(axis)
+    transverse = (axis_idx + 1) % 3
+    other = (axis_idx + 2) % 3
+    direction = [0.0] * 3
+    direction[axis_idx] = sign * math.cos(theta)
+    direction[transverse] = math.sin(theta)
+    electric = [0.0] * 3
+    if polarization == "TE":
+        electric[other] = 1.0
+    else:
+        electric[axis_idx] = -sign * math.sin(theta)
+        electric[transverse] = math.cos(theta)
+    amplitude = 2.75
+    scale = 1e6
+    scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2),) * 3), device="cpu")
+    source = mw.PlaneWave(
+        direction=direction, polarization=electric, injection_axis=axis,
+        source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e8, amplitude=amplitude),
+        injection=mw.TFSF.slab(axis=axis, bounds=(-0.5, 0.5)),
+    )
+    result = _convert_source(source, scene, inject_mock_tidy3d, scale)
+    eta0 = 1.0 / (299_792_458.0 * VACUUM_PERMITTIVITY)
+    old_amplitude = amplitude * (1.0 / (scale * math.sqrt(2 * eta0)))
+    expected = amplitude * math.sqrt(math.cos(theta)) / (scale * math.sqrt(2 * eta0))
+    assert result.source_time.amplitude == pytest.approx(expected, rel=2e-15)
+    assert (result.source_time.amplitude * scale)**2 == pytest.approx(
+        amplitude**2 * math.cos(theta) / (2 * eta0), rel=3e-15,
+    )
+    if angle == 0:
+        assert result.source_time.amplitude.hex() == old_amplitude.hex()
+
+
+@pytest.mark.parametrize("axis", ("x", "y", "z"))
+@pytest.mark.parametrize("on_grid", (False, True))
+@pytest.mark.parametrize("kind", (
+    "flux", "plane_flux", "finite_flux", "mode", "diffraction", "flux_time",
+    "plane_field", "finite_field", "closed_field",
+))
+def test_export_plane_matches_compiled_monitor(inject_mock_tidy3d, axis, on_grid, kind):
+    from witwin.maxwell.compiler.monitors import compile_fdtd_observers, compile_fdtd_time_observers
+    from witwin.maxwell.fdtd.observers import _prepare_plane_observer
+    from witwin.maxwell.fdtd.coords import component_coords
+    from witwin.maxwell.fdtd.time_flux import prepare_time_flux
+    from witwin.maxwell.scene import prepare_scene
+
+    axis_idx = "xyz".index(axis)
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.64, 0.64),) * 3),
+        grid=mw.GridSpec.uniform(0.025), boundary=mw.BoundarySpec.pml(num_layers=8), device="cpu",
+    )
+    prepared = prepare_scene(scene, lazy_meshgrid=True)
+    requested = float(getattr(prepared, axis + "_nodes64")[46]) if on_grid else 0.3
+    center = [0.0] * 3
+    center[axis_idx] = requested
+    size = [0.8] * 3
+    size[axis_idx] = 0.0
+    kwargs = dict(name="probe", frequencies=(1e9,))
+    if kind == "flux":
+        monitor = mw.FluxMonitor(axis=axis, position=requested, **kwargs)
+    elif kind in ("plane_flux", "plane_field"):
+        monitor = mw.PlaneMonitor(axis=axis, position=requested, fields=("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"), compute_flux=kind == "plane_flux", **kwargs)
+    elif kind in ("finite_flux", "finite_field", "closed_field"):
+        closure = {a: (-0.4, 0.4) for a in "xyz" if a != axis} if kind == "closed_field" else None
+        monitor = mw.FinitePlaneMonitor(position=center, size=size, fields=("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"), compute_flux=kind == "finite_flux", closure_planes=closure, **kwargs)
+    elif kind == "mode":
+        monitor = mw.ModeMonitor(position=center, size=size, polarization="E" + "xyz"[(axis_idx + 1) % 3], **kwargs)
+    elif kind == "diffraction":
+        monitor = mw.DiffractionMonitor(position=center, size=size, **kwargs)
+    else:
+        monitor = mw.FluxTimeMonitor(name="probe", axis=axis, position=requested)
+    scene.add_monitor(monitor)
+    prepared = prepare_scene(scene, lazy_meshgrid=True)
+    if kind == "flux_time":
+        record = compile_fdtd_time_observers(scene)[0]
+        solver = types.SimpleNamespace(scene=prepared, device=torch.device("cpu"), dtype=torch.float32)
+        for component in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
+            setattr(solver, component, torch.zeros(tuple(len(coords) for coords in component_coords(prepared, component))))
+        prepare_time_flux(solver, record, 1)
+        compiled_position = record["yee_plane_position"]
+    else:
+        record = compile_fdtd_observers(scene)[0]
+        _prepare_plane_observer(prepared, record, device="cpu", dtype=torch.float32)
+        compiled_position = record.get("yee_plane_position", requested)
+    exported = scene.to_tidy3d(frequencies=(1e9,), length_scale=1.0).monitors[0]
+    assert exported.center[axis_idx] == pytest.approx(compiled_position, abs=1e-15)
+    snaps = kind in ("flux", "plane_flux", "finite_flux", "mode", "diffraction", "flux_time", "closed_field")
+    if snaps:
+        assert exported.center[axis_idx] == compiled_position
+        if not on_grid:
+            assert exported.center[axis_idx] != requested
+    if on_grid or not snaps:
+        assert exported.center[axis_idx] == requested

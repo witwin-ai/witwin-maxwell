@@ -70,6 +70,7 @@ def measure_sheet_scattering(
     half_width,
     fit_gap,
     fit_extent,
+    absorber,
     pml_layers=12,
     amplitude=80.0,
     steady_cycles=16,
@@ -109,7 +110,7 @@ def measure_sheet_scattering(
     )
     result = mw.Simulation.fdtd(
         scene,
-        frequencies=[frequency],
+        frequencies=[frequency], absorber=absorber,
         run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
         spectral_sampler=mw.SpectralSampler(window="hanning"),
         full_field_dft=True,

@@ -441,6 +441,7 @@ POSTPROCESS_COVERAGE_SCENARIOS = (
         frequencies=DIFFRACTION_FREQUENCIES,
         run_time_factor=12,
         scalar_observable="diffraction_orders",
+        absorber="cpml",
     ),
     _make(
         "point_monitor_probe",

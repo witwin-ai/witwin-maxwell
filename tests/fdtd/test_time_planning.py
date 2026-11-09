@@ -1,5 +1,6 @@
 """Independent source-order, sampling-clock, and raw-recording regressions."""
 from types import SimpleNamespace
+from dataclasses import replace
 import math
 
 import pytest
@@ -12,7 +13,8 @@ from witwin.maxwell.fdtd.runtime.timeplan import compile_fdtd_time_plan
 
 def _plan(waveforms, config, **kwargs):
     solver = SimpleNamespace(dt=1e-11, c=299792458., _compiled_sources=[
-        {"source_time": compile_source_time(source, default_frequency=1e9)} for source in waveforms])
+        {"kind": "point_dipole", "source_time": compile_source_time(source, default_frequency=1e9),
+         "reference_provider_kind": "additive_J", "reference_waveform_kind": source.kind} for source in waveforms])
     scene = SimpleNamespace(domain=SimpleNamespace(bounds=((-0.1, 0.1),) * 3), circuits=())
     return compile_fdtd_time_plan(solver, scene, config, [1e9], default_source_frequency=1e9, **kwargs)
 
@@ -46,9 +48,26 @@ def test_explicit_short_run_and_unknown_support_are_visible():
 
 
 def test_source_normalization_uses_common_spectrum():
-    with pytest.raises(NotImplementedError, match="single incident"):
+    with pytest.raises(ValueError, match="single incident"):
         _plan([mw.CW(1e9), mw.CW(2e9)], mw.TimeConfig(time_steps=10), normalize_source=True)
     _plan([mw.CW(1e9), mw.CW(1e9)], mw.TimeConfig(time_steps=10), normalize_source=True)
+
+
+@pytest.mark.parametrize("port_drive", [False, True])
+def test_source_normalization_allows_only_amplitude_scaled_waveforms(port_drive):
+    reference = mw.GaussianPulse(1e9, 0.5e9, amplitude=1.3, phase=0.2)
+
+    def plan(other, normalized=True):
+        return _plan([reference] if port_drive else [reference, other],
+            mw.TimeConfig(time_steps=10), normalize_source=normalized,
+            excitations=(mw.PortExcitation("feed", source_time=other),) if port_drive else ())
+
+    assert plan(replace(reference, amplitude=-2.6))["source_count"] == 2
+    for other in (replace(reference, frequency=1.1e9), replace(reference, fwidth=0.4e9),
+                  replace(reference, delay=2e-9), replace(reference, phase=0.3), mw.CW(1e9)):
+        with pytest.raises(ValueError, match="source_time waveforms may differ only in amplitude"):
+            plan(other)
+        assert plan(other, normalized=False)["source_count"] == 2
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -74,7 +93,8 @@ def test_multisource_forward_is_invariant_under_source_permutation():
 
 def _scene(grad=False, time_only=False, cw=False):
     density = torch.full((1, 1, 1), 0.5, device="cuda", requires_grad=grad)
-    scene = mw.Scene(domain=mw.Domain(bounds=((-0.4, 0.4),) * 3), grid=mw.GridSpec.uniform(0.1),
+    scene = mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+        domain=mw.Domain(bounds=((-0.4, 0.4),) * 3), grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.mur(), device="cuda")
     scene.add_material_region(mw.MaterialRegion(name="density", geometry=mw.Box(position=(0., 0., 0.), size=(0.2,) * 3),
         density=density, eps_bounds=(1., 4.)))

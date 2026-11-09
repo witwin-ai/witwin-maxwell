@@ -131,7 +131,11 @@ def lossy_waveguide_scene(
         ((0.0, 0.0, -zb - 0.5 * tw), (wl, 2.0 * yb, tw), "wall_z_low"),
     )
     structures = tuple(
-        mw.Box(position=position, size=size).with_material(metal, name=name)
+        mw.Structure(
+            mw.Box(position=position, size=size),
+            metal,
+            name=name,
+        )
         for position, size, name in walls
     )
     ports = (_wave_port("left", -half, "+"), _wave_port("right", half, "-"))
@@ -197,7 +201,11 @@ def lossy_waveguide_reference_scene(
         ((0.0, 0.0, -zb - 0.5 * tw), (wl, 2.0 * yb, tw), "wall_z_low"),
     )
     structures = tuple(
-        mw.Box(position=position, size=size).with_material(metal, name=name)
+        mw.Structure(
+            mw.Box(position=position, size=size),
+            metal,
+            name=name,
+        )
         for position, size, name in walls
     )
     scene = mw.Scene(

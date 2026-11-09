@@ -10,7 +10,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires 
 @pytest.mark.parametrize("samples", [(1, 1, 1), (2, 2, 2)])
 def test_inactive_channels_and_pole_templates_do_not_allocate_volume_storage(samples):
     sim = simulation(steps=8)
-    model = sim.prepare().solver.scene.compile_materials(subpixel_samples=mw.SubpixelSpec(samples=samples))
+    model = sim.prepare().solver.scene.compile_materials(subpixel_samples=mw.SubpixelSpec(samples=samples, averaging="arithmetic"))
     channels = [model[key] for key in ("kerr_chi3", "chi2", "tpa_sigma",
                                       "modulation_cos", "modulation_sin", "modulation_omega")]
     channels.extend(model["eps_offdiag_components"].values())

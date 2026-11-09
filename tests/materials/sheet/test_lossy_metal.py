@@ -33,13 +33,13 @@ def test_lossy_metal_construction_and_surface_impedance():
         metal.surface_impedance(0.0)
 
 
-def _slab_scene(*, device="cpu", conductivity=5.8e7, side="high"):
+def _slab_scene(*, device="cpu", conductivity=5.8e7, side="high", pml_layers=4):
     # Metal slab flush against the +x domain boundary spanning the full transverse
     # cross-section: a single axis-aligned face at normal incidence.
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.05),
-        boundary=mw.BoundarySpec.faces(default="periodic", num_layers=4, strength=1.0, x=("pml", "pml")),
+        boundary=mw.BoundarySpec.faces(default="periodic", num_layers=pml_layers, strength=1.0, x=("pml", "pml")),
         device=device,
         structures=[
             mw.Structure(
@@ -141,7 +141,7 @@ def test_lossy_metal_adjoint_is_rejected():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_lossy_metal_simulation_prepare_configures_surface_impedance():
-    solver = mw.Simulation.fdtd(_slab_scene(device="cuda"), frequencies=[1.0e9]).prepare().solver
+    solver = mw.Simulation.fdtd(_slab_scene(device="cuda", pml_layers=40), frequencies=[1.0e9]).prepare().solver
     assert solver.surface_impedance_enabled
     state = solver._surface_impedance
     # One full-plane order-0 face -> two tangential-component writes, each a resistive

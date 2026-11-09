@@ -1,0 +1,82 @@
+{
+  "cases": [
+    {
+      "z": 0.05,
+      "mode": "endpoints",
+      "beta_h": 0.05,
+      "cells": 20,
+      "width_cells": 4.0,
+      "matrix_size": 1125,
+      "phase_velocity_over_c": 0.9880214737561455,
+      "velocity_dispersion_corrected": 0.9881244001646596,
+      "impedance_over_eta0": 0.39758421214538503,
+      "capacitance_normalized": 2.5456839582509065,
+      "inductance_normalized": 0.4024044241001114,
+      "low_branches_velocity_over_c": [
+        0.9880214737561455,
+        3.2137547160376116,
+        3.293419643051106,
+        4.54787511201781,
+        5.941268491730642,
+        6.318306686162158,
+        6.335913961671614,
+        6.988609013086021
+      ],
+      "longitudinal_electric_energy_fraction": 1.8654584383203918e-05,
+      "seconds": 2.755152463912964,
+      "memory_gib": 0.11719942092895508
+    },
+    {
+      "z": 0.3,
+      "mode": "endpoints",
+      "beta_h": 0.05,
+      "cells": 20,
+      "width_cells": 4.0,
+      "matrix_size": 1125,
+      "phase_velocity_over_c": 0.9998896403188036,
+      "velocity_dispersion_corrected": 0.9999938030848184,
+      "impedance_over_eta0": 0.40556010846873,
+      "capacitance_normalized": 2.4659978902705904,
+      "inductance_normalized": 0.4056048708929734,
+      "low_branches_velocity_over_c": [
+        0.9998896403188036,
+        3.2276937674767425,
+        3.2938001165700794,
+        4.548294254990515,
+        5.930108310270949,
+        6.334729979816293,
+        6.336764051777839,
+        7.003935612692582
+      ],
+      "longitudinal_electric_energy_fraction": 3.7016036973036275e-08,
+      "seconds": 1.3943047523498535,
+      "memory_gib": 0.11719942092895508
+    },
+    {
+      "z": 0.5,
+      "mode": "endpoints",
+      "beta_h": 0.05,
+      "cells": 20,
+      "width_cells": 4.0,
+      "matrix_size": 1125,
+      "phase_velocity_over_c": 0.9998958365886913,
+      "velocity_dispersion_corrected": 1.000000000000198,
+      "impedance_over_eta0": 0.40816548030448935,
+      "capacitance_normalized": 2.450241930102425,
+      "inductance_normalized": 0.40820800064235974,
+      "low_branches_velocity_over_c": [
+        0.9998958365886913,
+        3.230665797850718,
+        3.2938001165698743,
+        4.548376528008697,
+        5.9046977176112785,
+        6.332936958750077,
+        6.336764051777835,
+        7.007146509296802
+      ],
+      "longitudinal_electric_energy_fraction": 3.7015997286025366e-29,
+      "seconds": 1.4316673278808594,
+      "memory_gib": 0.11719942092895508
+    }
+  ]
+}

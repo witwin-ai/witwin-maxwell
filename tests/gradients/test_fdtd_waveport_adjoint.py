@@ -23,6 +23,7 @@ def _wave_port(*, modes=None):
 
 def _guide_scene(*, device, density=None, region_position=(0.05, 0.0, 0.0), modes=None):
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.5, 0.5), (-0.35, 0.35))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.none(),

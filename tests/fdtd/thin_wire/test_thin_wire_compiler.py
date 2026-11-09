@@ -670,8 +670,13 @@ def test_narrow_pec_intersection_between_grid_samples_is_rejected():
         geometry=mw.Box(position=(0.3125, 0.5, 0.5), size=(0.02, 0.1, 0.1)),
         material=mw.Material.pec(),
     )
-    with pytest.raises(ValueError, match="overlaps PEC"):
+    with pytest.raises(ValueError, match="PEC structure 'sliver' is unresolved along x"):
         compile_thin_wires(_prepared(wires=(_straight(),), structures=(sliver,)))
+    # Once represented, the physical narrow intersection still reaches the
+    # wire compiler and is rejected as an overlap rather than disappearing.
+    nodes = np.array([0.0, 0.25, 0.3125, 0.5, 0.75, 1.0])
+    with pytest.raises(ValueError, match="overlaps PEC"):
+        compile_thin_wires(_prepared(wires=(_straight(),), nodes=nodes, structures=(sliver,)))
 
 
 def test_phase1_rejects_anisotropic_host_self_coefficients():
@@ -977,6 +982,37 @@ def test_static_network_cache_hits_and_trainable_coefficients_bypass_it():
     second_trainable = compile_thin_wires(trainable)
     assert first_trainable is not second_trainable
     assert first_trainable.metadata["cache_enabled"] is False
+
+
+def test_cache_invalidation_recompiles_changed_wire_inputs(monkeypatch):
+    import witwin.maxwell.compiler.thin_wire as compiler
+
+    radius = torch.tensor(1.0e-3, dtype=torch.float64)
+    prepared = _prepared(wires=(_straight(radius=radius),))
+    original = compiler._expanded_path
+    calls = []
+
+    def expanded_path(*args, **kwargs):
+        calls.append(None)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(compiler, "_expanded_path", expanded_path)
+    first = compile_thin_wires(prepared)
+    assert compile_thin_wires(prepared) is first
+    assert len(calls) == 1
+    prepared.thin_wires[0].radius.mul_(1.5)
+    changed = compile_thin_wires(prepared)
+    assert changed is not first
+    assert len(calls) == 2
+    fresh = compile_thin_wires(_prepared(wires=(_straight(radius=1.5e-3),)))
+    for field in compiler.fields(changed):
+        value = getattr(changed, field.name)
+        if isinstance(value, torch.Tensor):
+            assert torch.equal(value, getattr(fresh, field.name)), field.name
+    prepared.thin_wires[0].radius.requires_grad_()
+    trainable = compile_thin_wires(prepared)
+    assert compile_thin_wires(prepared) is not trainable
+    assert trainable.metadata["cache_enabled"] is False
 
 
 def test_empty_network_and_wire_monitor_resolution():

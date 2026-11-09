@@ -4,6 +4,7 @@ import contextlib
 import threading
 import warnings
 import functools
+import gc
 from collections.abc import Callable
 
 import torch
@@ -149,9 +150,18 @@ class CudaGraphRunner:
             with warnings.catch_warnings(record=True) as recorded:
                 warnings.simplefilter("always")
                 scope = self.memory_pool.capture_scope() if self.memory_pool is not None else contextlib.nullcontext(None)
-                with scope as pool_id, torch.cuda.graph(graph, stream=capture_stream, pool=pool_id,
-                                                       capture_error_mode=self.capture_error_mode):
-                    fn()
+                # Cyclic garbage may own old CUDA graphs. Their destructors reset
+                # device graph state, which CUDA forbids during another capture.
+                # Defer automatic collection until capture has ended.
+                collect_enabled = gc.isenabled()
+                gc.disable()
+                try:
+                    with scope as pool_id, torch.cuda.graph(graph, stream=capture_stream, pool=pool_id,
+                                                           capture_error_mode=self.capture_error_mode):
+                        fn()
+                finally:
+                    if collect_enabled:
+                        gc.enable()
             torch.cuda.synchronize(self.device)
 
         empty = False

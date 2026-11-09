@@ -6,9 +6,12 @@ from types import SimpleNamespace
 
 import torch
 
+from .accumulation import build_point_cell_plan
 from ..boundary import has_complex_fields
 from ..observers import get_observer_results as get_observer_results_impl
 from ..postprocess import get_frequency_solution as get_frequency_solution_impl
+from ..runtime.representation import spectral_scale
+from ..runtime.spectral import source_normalization_spectrum
 
 
 def _runtime():
@@ -66,16 +69,13 @@ class _DenseSeedBatch:
 class _PointSeedBatch:
     state_field_name: str
     entry_indices: torch.Tensor
-    point_i: torch.Tensor
-    point_j: torch.Tensor
-    point_k: torch.Tensor
     grad_real: torch.Tensor
     grad_imag: torch.Tensor
     cos_pack: torch.Tensor
     sin_pack: torch.Tensor
-    point_i32: torch.Tensor
-    point_j32: torch.Tensor
-    point_k32: torch.Tensor
+    cells: torch.Tensor
+    cell_offsets: torch.Tensor
+    point_order: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -194,6 +194,10 @@ def _clone_seed_solver(solver):
     seed_solver._normalize_source = getattr(solver, "_normalize_source", False)
     seed_solver._source_time = getattr(solver, "_source_time", None)
     seed_solver._normalization_source_time = getattr(solver, "_normalization_source_time", None)
+    seed_solver._source_time_offset = solver._source_time_offset
+    seed_solver._normalization_time_offset = solver._normalization_time_offset
+    seed_solver._spectral_integration_dt = solver._spectral_integration_dt
+    seed_solver._spectral_reference_frequency = solver._spectral_reference_frequency
     seed_solver.dft_window_type = getattr(solver, "dft_window_type", "none")
     seed_solver.observer_window_type = getattr(solver, "observer_window_type", "none")
     seed_solver.observers_enabled = bool(getattr(solver, "observers_enabled", False))
@@ -294,18 +298,23 @@ def _clone_seed_solver(solver):
 
     seed_solver._plane_observer_groups = {}
     for group_key, group in getattr(solver, "_plane_observer_groups", {}).items():
+        if "sample_points" in group:
+            pair_type, pairs = _PointAccumulatorPair, point_pairs
+            coordinates = {"point_"+label: group["sample_"+label].long() for label in "ijk"}
+        else:
+            pair_type, pairs = _PlaneAccumulatorPair, plane_pairs
+            coordinates = dict(axis_code=int(group["axis_code"]), plane_index=int(group["plane_index"]))
         cloned_group = dict(group)
         real = group["real"].detach().clone().requires_grad_(True)
         imag = group["imag"].detach().clone().requires_grad_(True)
         real_index = len(leaves)
         imag_index = len(leaves) + 1
         leaves.extend([real, imag])
-        plane_pairs.append(
-            _PlaneAccumulatorPair(
+        pairs.append(
+            pair_type(
                 state_field_name=group["field_name"],
                 global_indices=tuple(group["global_freq_indices"]),
-                axis_code=int(group["axis_code"]),
-                plane_index=int(group["plane_index"]),
+                **coordinates,
                 real_index=real_index,
                 imag_index=imag_index,
             )
@@ -318,12 +327,11 @@ def _clone_seed_solver(solver):
             aux_real_index = len(leaves)
             aux_imag_index = len(leaves) + 1
             leaves.extend([aux_real, aux_imag])
-            plane_pairs.append(
-                _PlaneAccumulatorPair(
+            pairs.append(
+                pair_type(
                     state_field_name=f"{group['field_name']}_imag",
                     global_indices=tuple(group["global_freq_indices"]),
-                    axis_code=int(group["axis_code"]),
-                    plane_index=int(group["plane_index"]),
+                    **coordinates,
                     real_index=aux_real_index,
                     imag_index=aux_imag_index,
                 )
@@ -420,6 +428,8 @@ def _build_output_seeds(
             runtime._safe_grad(leaf_grads[pair.imag_index], leaves[pair.imag_index]),
             entry_count,
         )
+        real_grad = real_grad.reshape(entry_count, -1).contiguous()
+        imag_grad = imag_grad.reshape(entry_count, -1).contiguous()
         entry_indices = torch.tensor(pair.global_indices, device=real_grad.device, dtype=torch.long)
         cos_pack, sin_pack = _schedule_pack_for(observer_schedule, entry_indices)
         cos_pack, sin_pack = _shift_observer_schedule_for_field(
@@ -432,20 +442,19 @@ def _build_output_seeds(
         point_i = pair.point_i.to(device=real_grad.device, dtype=torch.long)
         point_j = pair.point_j.to(device=real_grad.device, dtype=torch.long)
         point_k = pair.point_k.to(device=real_grad.device, dtype=torch.long)
+        cells, cell_offsets, point_order = build_point_cell_plan(
+            point_i, point_j, point_k, getattr(solver, pair.state_field_name).shape)
         point_batches.append(
             _PointSeedBatch(
                 state_field_name=pair.state_field_name,
                 entry_indices=entry_indices,
-                point_i=point_i,
-                point_j=point_j,
-                point_k=point_k,
                 grad_real=real_grad,
                 grad_imag=imag_grad,
                 cos_pack=cos_pack,
                 sin_pack=sin_pack,
-                point_i32=point_i.to(dtype=torch.int32),
-                point_j32=point_j.to(dtype=torch.int32),
-                point_k32=point_k.to(dtype=torch.int32),
+                cells=cells,
+                cell_offsets=cell_offsets,
+                point_order=point_order,
             )
         )
 
@@ -523,6 +532,13 @@ def _build_output_seeds(
                     if gradient is None
                     else gradient.to(device=output.device, dtype=output.dtype)
                 )
+                if solver._normalize_source:
+                    from ..observers import _safe_source_spectrum
+                    spectrum = _safe_source_spectrum(source_normalization_spectrum(
+                        solver, state["frequencies"].detach().cpu().tolist(),
+                        steps_run=time_steps, window_type=solver.observer_window_type,
+                    )).to(dtype=gradient.dtype)
+                    gradient = gradient / spectrum.conj().reshape(-1, 1)
                 cos_rows = []
                 sin_rows = []
                 for step_index in range(time_steps):
@@ -541,7 +557,10 @@ def _build_output_seeds(
                             else 0.0
                         )
                         normalization = float(entry["window_normalization"])
-                        scale = 2.0 * window / normalization if normalization > 0.0 else 0.0
+                        scale = window * spectral_scale(
+                            normalization, integration_dt=solver._spectral_integration_dt,
+                            reference_frequency=solver._spectral_reference_frequency, frequency=entry["frequency"],
+                        ) if normalization > 0.0 else 0.0
                         omega_dt = (
                             2.0
                             * math.pi
@@ -631,7 +650,20 @@ def _build_output_seeds(
             )
             voltage_kernel = torch.where(midpoint[:, None], current_kernel, voltage_kernel)
             current_kernel = voltage_kernel
-        scale = 2.0 / port_runtime.accumulator._window_weight_sum
+        scale = spectral_scale(port_runtime.accumulator._window_weight_sum,
+                               integration_dt=solver._spectral_integration_dt,
+                               reference_frequency=solver._spectral_reference_frequency,
+                               frequency=port_runtime.frequencies)
+        scale = torch.ones_like(port_runtime.accumulator._window_weight_sum) * scale
+        source_spectrum = None
+        if solver._normalize_source:
+            from ..observers import _safe_source_spectrum
+            source_spectrum = _safe_source_spectrum(source_normalization_spectrum(
+                solver, port_runtime.frequencies.detach().cpu().tolist(),
+                steps_run=port_runtime.sample_index, window_type=port_runtime.window_type,
+            )).to(dtype=voltage_grad.dtype)
+            voltage_grad = voltage_grad / source_spectrum.conj()
+            current_grad = current_grad / source_spectrum.conj()
         voltage_samples = torch.sum(
             scale[None, :]
             * (
@@ -653,13 +685,16 @@ def _build_output_seeds(
             if port_runtime.drive_accumulator is None:
                 raise RuntimeError("Active-port power seed requires a drive DFT accumulator.")
             source_voltage, _ = port_runtime.drive_accumulator.phasors(
-                normalization="peak"
+                normalization="peak", integration_dt=solver._spectral_integration_dt,
+                reference_frequency=solver._spectral_reference_frequency,
             )
             source_voltage_grad = (
                 available_power_grad
                 * source_voltage
                 / (4.0 * port_runtime.lumped.resistance)
             )
+            if source_spectrum is not None:
+                source_voltage_grad = source_voltage_grad / source_spectrum.abs().square()
             drive_samples = torch.sum(
                 scale[None, :]
                 * (
@@ -903,9 +938,9 @@ def _apply_point_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRunti
             AdjField=adj_state[batch.state_field_name],
             GradReal=batch.grad_real,
             GradImag=batch.grad_imag,
-            PointI=batch.point_i32,
-            PointJ=batch.point_j32,
-            PointK=batch.point_k32,
+            Cells=batch.cells,
+            CellOffsets=batch.cell_offsets,
+            PointOrder=batch.point_order,
             CosPack=batch.cos_pack,
             SinPack=batch.sin_pack,
             step=step_index,
@@ -915,6 +950,12 @@ def _apply_point_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRunti
 def _apply_plane_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRuntime, step_index):
     for batch in seed_runtime.plane_batches:
         if batch.cos_pack.shape[1] == 0:
+            continue
+        if batch.grad_real.dtype == torch.float64:
+            contribution = _seed_batch_contribution(batch.grad_real, batch.grad_imag,
+                batch.cos_pack[:, step_index], batch.sin_pack[:, step_index])
+            field = adj_state[batch.state_field_name]
+            field.select(batch.axis_code, batch.plane_index).add_(contribution.to(field.dtype))
             continue
         _cuda_backend._seed_inject_plane(
             AdjField=adj_state[batch.state_field_name],

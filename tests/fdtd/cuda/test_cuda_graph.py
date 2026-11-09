@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+
 import pytest
 import torch
 
@@ -35,3 +37,43 @@ def test_cuda_graph_runner_disabled_returns_original_callable():
 
     torch.testing.assert_close(value, torch.ones_like(value), rtol=0.0, atol=0.0)
     assert runner.graph is None
+
+
+def test_capture_defers_cyclic_device_resource_finalizers():
+    value = torch.zeros((1,), device="cuda")
+    finalized = []
+
+    class DeviceResource:
+        def __del__(self):
+            torch.cuda.synchronize()
+            finalized.append(True)
+
+    previous_threshold = gc.get_threshold()
+    previous_enabled = gc.isenabled()
+    gc.enable()
+    try:
+        gc.set_threshold(10, 10, 10)
+
+        def step():
+            resource = DeviceResource()
+            resource.cycle = resource
+            del resource
+            # Allocation pressure makes the cyclic CUDA owner collectible
+            # inside capture unless collection is deferred.
+            cycles = []
+            for _ in range(100):
+                cycle = []
+                cycle.append(cycle)
+                cycles.append(cycle)
+            value.add_(1.0)
+
+        replay = CudaGraphRunner(device=value.device, warmup_steps=0).capture(step)
+        assert gc.isenabled()
+        replay()
+        torch.testing.assert_close(value, torch.ones_like(value))
+        gc.collect()
+        assert finalized == [True]
+    finally:
+        gc.set_threshold(*previous_threshold)
+        if not previous_enabled:
+            gc.disable()

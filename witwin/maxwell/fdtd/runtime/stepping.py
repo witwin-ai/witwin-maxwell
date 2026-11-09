@@ -5,16 +5,25 @@ import time
 import numpy as np
 import torch
 from tqdm import tqdm
+from ..thin_sheet import begin_thin_sheet_step, advance_thin_sheet_magnetic, advance_thin_sheet_electric
+from ..copper_foil import (
+    initialize_copper_foils, begin_copper_step, correct_copper_magnetic,
+    advance_copper_electric, prepare_copper_spectra, accumulate_copper_spectra,
+    validate_copper_port_coupling,
+)
 
 from ...visualization import visualize_slice
 from ..boundary import (
     BOUNDARY_BLOCH,
+    BOUNDARY_NONE,
     BOUNDARY_PEC,
     BOUNDARY_PERIODIC,
     BOUNDARY_PML,
     has_complex_fields,
     initialize_boundary_state,
 )
+from ..boundary.mur import apply_extended_one_way_boundaries, has_extended_one_way_boundaries
+from ..excitation.temporal import injection_time
 from ..excitation import (
     advance_tfsf_auxiliary_electric,
     advance_tfsf_auxiliary_magnetic,
@@ -28,11 +37,13 @@ from ..excitation import (
 )
 from ..ports import (
     _accumulate_embedded_port_observers_gpu,
+    accumulate_port_observers,
     apply_port_runtimes,
     complete_port_observer_graph,
     complete_port_spectral_normalization,
     finalize_port_data,
     make_port_observer_runner,
+    prepare_port_drive_tables,
     prepare_port_runtimes,
     prepare_port_spectral_accumulators,
 )
@@ -303,6 +314,9 @@ def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
 
 
 def update_magnetic_fields(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
+    if getattr(solver, "_core_runtime", None) is not None:
+        solver._core_runtime.magnetic()
+        return
     if solver.uses_cpml:
         update_magnetic_fields_cpml(solver, hx, hy, hz, ex, ey, ez, imag=imag)
     else:
@@ -502,6 +516,32 @@ def update_electric_fields_cpml(solver, ex, ey, ez, hx, hy, hz):
         update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz)
         return
     update_electric_fields_cpml_compressed(solver, ex, ey, ez, hx, hy, hz)
+
+
+def electric_update_support(solver, component):
+    """Return half-open per-axis bounds where the E curl update can evolve.
+
+    Standard and CPML kernels in ``cuda/kernels/electric.cu`` test
+    ``boundary_inactive`` and ``boundary_pec`` on the two derivative axes:
+    none/PML rows are frozen and PEC rows are zeroed (also enforced by the
+    tangential PEC clamp). Mur maps to NONE: its separate post-source ABC
+    overwrites these rows rather than evolving an injected current there.
+    PMC uses mirrored derivatives; periodic/Bloch use wrapped derivatives, so
+    their wall rows stay active. Mixed Bloch/CPML restores the same PML/PEC
+    zeros. The component axis is half-staggered and has no wall-node exclusion.
+    """
+    if component not in ("Ex", "Ey", "Ez"):
+        raise ValueError(f"Expected an electric field component, got {component!r}.")
+    support = []
+    for axis, size in zip("xyz", getattr(solver, component).shape):
+        lo, hi = 0, int(size)
+        if axis != component[-1]:
+            if getattr(solver, f"boundary_{axis}_low_code") in (BOUNDARY_NONE, BOUNDARY_PML, BOUNDARY_PEC):
+                lo += 1
+            if getattr(solver, f"boundary_{axis}_high_code") in (BOUNDARY_NONE, BOUNDARY_PML, BOUNDARY_PEC):
+                hi -= 1
+        support.append((lo, hi))
+    return tuple(support)
 
 
 def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
@@ -808,6 +848,9 @@ def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy,
 
 
 def update_electric_fields(solver, ex, ey, ez, hx, hy, hz, *, time_value=None):
+    if getattr(solver, "_core_runtime", None) is not None:
+        solver._core_runtime.electric()
+        return
     if getattr(solver, "modulation_enabled", False):
         if time_value is None:
             raise RuntimeError(
@@ -1368,7 +1411,81 @@ def _apply_electric_x_cpml_corrections(solver, ey, ez, hy, hz, *, imag=False):
         ).launchRaw()
 
 
+def _bloch_cpml_multi_axis_layout(solver):
+    """Return the PML axes of a generalized Bloch+CPML face layout, or ``None``.
+
+    Every axis must be paired Bloch, paired PML or paired PEC, with at least one
+    Bloch axis and one PML axis. The single-PML-axis/two-Bloch-axis permutations
+    keep their dedicated split and return ``None`` here."""
+    if _bloch_cpml_pml_axis(solver) is not None:
+        return None
+    pairs = {
+        axis: (
+            int(getattr(solver, f"boundary_{axis}_low_code")),
+            int(getattr(solver, f"boundary_{axis}_high_code")),
+        )
+        for axis in ("x", "y", "z")
+    }
+    allowed = {(BOUNDARY_BLOCH, BOUNDARY_BLOCH), (BOUNDARY_PML, BOUNDARY_PML), (BOUNDARY_PEC, BOUNDARY_PEC)}
+    if any(pair not in allowed for pair in pairs.values()):
+        return None
+    pml_axes = tuple(axis for axis, pair in pairs.items() if pair == (BOUNDARY_PML, BOUNDARY_PML))
+    bloch_axes = tuple(axis for axis, pair in pairs.items() if pair == (BOUNDARY_BLOCH, BOUNDARY_BLOCH))
+    if not pml_axes or not bloch_axes:
+        return None
+    return pml_axes
+
+
+def update_electric_fields_bloch_multi_cpml(solver, pml_axes):
+    """Generalized Bloch+CPML electric update (e.g. one Bloch axis with two PML
+    axes, or Bloch with a PEC axis).
+
+    The base full-Bloch kernel carries the wrap phase on the Bloch axes and the
+    unit phase elsewhere; the recursive-convolution stretch is then folded in
+    along every PML axis for the components with a derivative along it, exactly
+    as the single-PML-axis split does for its one axis. The outermost tangential
+    planes of every PML face and the tangential planes of every PEC face are held
+    at zero in both the real and imaginary fields."""
+    update_electric_fields_bloch(solver)
+    for axis in pml_axes:
+        if axis == "x":
+            _apply_electric_x_cpml_corrections(solver, solver.Ey, solver.Ez, solver.Hy, solver.Hz, imag=False)
+            _apply_electric_x_cpml_corrections(
+                solver, solver.Ey_imag, solver.Ez_imag, solver.Hy_imag, solver.Hz_imag, imag=True
+            )
+        elif axis == "y":
+            _apply_electric_y_cpml_corrections(solver, solver.Ex, solver.Ez, solver.Hx, solver.Hz, imag=False)
+            _apply_electric_y_cpml_corrections(
+                solver, solver.Ex_imag, solver.Ez_imag, solver.Hx_imag, solver.Hz_imag, imag=True
+            )
+        else:
+            _apply_electric_z_cpml_corrections(solver, solver.Ex, solver.Ey, solver.Hx, solver.Hy, imag=False)
+            _apply_electric_z_cpml_corrections(
+                solver, solver.Ex_imag, solver.Ey_imag, solver.Hx_imag, solver.Hy_imag, imag=True
+            )
+    # The standard CPML update never advances the outermost tangential planes of
+    # a PML face, and PEC faces carry zero tangential E in both the real and the
+    # imaginary Bloch field; restore both after the wrapped base update (the
+    # post-update PEC pass clamps the real field only).
+    tangential = {"x": ("Ey", "Ez"), "y": ("Ex", "Ez"), "z": ("Ex", "Ey")}
+    pec_axes = tuple(
+        axis
+        for axis in ("x", "y", "z")
+        if int(getattr(solver, f"boundary_{axis}_low_code")) == BOUNDARY_PEC
+    )
+    for axis in pml_axes + pec_axes:
+        axis_index = "xyz".index(axis)
+        for name in tangential[axis]:
+            for field in (getattr(solver, name), getattr(solver, name + "_imag")):
+                clamp_field_face(solver, field, axis_index, "low")
+                clamp_field_face(solver, field, axis_index, "high")
+
+
 def update_electric_fields_bloch_cpml(solver):
+    multi_pml_axes = _bloch_cpml_multi_axis_layout(solver)
+    if multi_pml_axes is not None:
+        update_electric_fields_bloch_multi_cpml(solver, multi_pml_axes)
+        return
     pml_axis = _validate_bloch_cpml_update_layout(solver)
     if pml_axis == "z":
         # Grating-style x/y Bloch + z PML: standard boundary treatment on z keeps
@@ -1448,6 +1565,8 @@ def _enforce_native_pec_field(solver, field, axis_a, low_a, high_a, axis_b, low_
 def enforce_pec_boundaries(solver):
     if not getattr(solver, "has_pec_faces", False):
         return
+    if has_complex_fields(solver):
+        _enforce_imag_pec_boundaries(solver)
 
     if _enforce_native_pec_field(
         solver,
@@ -1486,6 +1605,24 @@ def enforce_pec_boundaries(solver):
         (solver.boundary_y_high_code, "high", (("Ex", 1), ("Ez", 1))),
         (solver.boundary_z_low_code, "low", (("Ex", 2), ("Ey", 2))),
         (solver.boundary_z_high_code, "high", (("Ex", 2), ("Ey", 2))),
+    )
+    for boundary_code, side, targets in face_specs:
+        if boundary_code != BOUNDARY_PEC:
+            continue
+        for field_name, axis in targets:
+            clamp_field_face(solver, getattr(solver, field_name), axis, side)
+
+
+def _enforce_imag_pec_boundaries(solver):
+    # The complex Bloch electric update writes every node, PEC faces included,
+    # so the imaginary split field needs the same tangential clamp as the real one.
+    face_specs = (
+        (solver.boundary_x_low_code, "low", (("Ey_imag", 0), ("Ez_imag", 0))),
+        (solver.boundary_x_high_code, "high", (("Ey_imag", 0), ("Ez_imag", 0))),
+        (solver.boundary_y_low_code, "low", (("Ex_imag", 1), ("Ez_imag", 1))),
+        (solver.boundary_y_high_code, "high", (("Ex_imag", 1), ("Ez_imag", 1))),
+        (solver.boundary_z_low_code, "low", (("Ex_imag", 2), ("Ey_imag", 2))),
+        (solver.boundary_z_high_code, "high", (("Ex_imag", 2), ("Ey_imag", 2))),
     )
     for boundary_code, side, targets in face_specs:
         if boundary_code != BOUNDARY_PEC:
@@ -1617,27 +1754,32 @@ def apply_mur_boundaries(solver):
             prevBoundary=entry["prev_boundary"],
             prevAdjacent=entry["prev_adjacent"],
         ).launchRaw()
+    if has_extended_one_way_boundaries(solver):
+        apply_extended_one_way_boundaries(solver)
 
 
 def init_field(solver):
-    solver.Ex = torch.zeros((solver.Nx - 1, solver.Ny, solver.Nz), device=solver.device, dtype=torch.float32)
-    solver.Ey = torch.zeros((solver.Nx, solver.Ny - 1, solver.Nz), device=solver.device, dtype=torch.float32)
-    solver.Ez = torch.zeros((solver.Nx, solver.Ny, solver.Nz - 1), device=solver.device, dtype=torch.float32)
-    solver.Hx = torch.zeros((solver.Nx, solver.Ny - 1, solver.Nz - 1), device=solver.device, dtype=torch.float32)
-    solver.Hy = torch.zeros((solver.Nx - 1, solver.Ny, solver.Nz - 1), device=solver.device, dtype=torch.float32)
-    solver.Hz = torch.zeros((solver.Nx - 1, solver.Ny - 1, solver.Nz), device=solver.device, dtype=torch.float32)
+    solver.Ex = torch.zeros((solver.Nx - 1, solver.Ny, solver.Nz), device=solver.device, dtype=solver.scene.x.dtype)
+    solver.Ey = torch.zeros((solver.Nx, solver.Ny - 1, solver.Nz), device=solver.device, dtype=solver.scene.x.dtype)
+    solver.Ez = torch.zeros((solver.Nx, solver.Ny, solver.Nz - 1), device=solver.device, dtype=solver.scene.x.dtype)
+    solver.Hx = torch.zeros((solver.Nx, solver.Ny - 1, solver.Nz - 1), device=solver.device, dtype=solver.scene.x.dtype)
+    solver.Hy = torch.zeros((solver.Nx - 1, solver.Ny, solver.Nz - 1), device=solver.device, dtype=solver.scene.x.dtype)
+    solver.Hz = torch.zeros((solver.Nx - 1, solver.Ny - 1, solver.Nz), device=solver.device, dtype=solver.scene.x.dtype)
 
     solver.build_materials(solver.scene)
     # Wire preparation may conservatively tighten dt using the joint
     # Maxwell-plus-wire spectral bound. All dt-dependent boundary and field
     # coefficients must therefore be built after it.
     initialize_wire_runtime(solver)
+    from ..thin_sheet import prepare_thin_sheet_time_step
+    prepare_thin_sheet_time_step(solver)
     from .materials import build_material_update_coefficients
 
     build_material_update_coefficients(solver)
     solver._time_step_metadata["dt"] = float(solver.dt)
     initialize_boundary_state(solver)
     solver._build_update_coefficients()
+    initialize_copper_foils(solver)
     # Compile the deterministic breakdown state machine after the base update
     # coefficients exist (they seed the exact intact-edge reconstruction). A scene
     # with no breakdown material leaves solver.breakdown_enabled False and adds no
@@ -1654,6 +1796,11 @@ def init_field(solver):
         getattr(solver, "_port_excitations", ()),
     )
     prepare_network_runtimes(solver)
+    validate_copper_port_coupling(solver)
+    from ..cut_surface import initialize_cut_surfaces
+    initialize_cut_surfaces(solver)
+    from ..thin_sheet import initialize_thin_sheets
+    initialize_thin_sheets(solver)
 
 
 def _compute_shutoff_min_step(solver, shutoff_check_interval: int) -> int:
@@ -1723,10 +1870,8 @@ def _planned_window_normalization(window_type: str, start_step: int, end_step: i
 
 
 def _complete_spectral_normalization(solver, time_steps: int) -> None:
-    # After an early auto-shutoff the omitted tail steps carry negligible field, so
-    # the running-DFT / observer numerators are already complete. Restore each
-    # spectral normalizer to its planned full-window value so the
-    # 2 / window_normalization scale is not inflated by the shortened run.
+    # Restore the historical planned CW denominator. Pulse integral scales use
+    # only dt, so these diagnostic weight sums cannot rescale a stopped pulse.
     if getattr(solver, "dft_enabled", False) and getattr(solver, "_dft_entries", None):
         for index in range(len(solver._dft_entries)):
             start_step = int(solver._dft_start_steps[index])
@@ -1756,9 +1901,12 @@ def _field_update_block(solver, time_value):
     a single function so the normal and graph-captured paths execute an identical
     kernel sequence.
     """
+    begin_copper_step(solver)
+    begin_thin_sheet_step(solver)
     if getattr(solver, "modulation_enabled", False):
         solver.fdtd_module.advanceModulationTime3D(
             ModulationTime=solver._modulation_time,
+            ModulationStep=solver._modulation_step,
             dt=solver.dt,
         ).launchRaw()
     solver._advance_magnetic_dispersive_state()
@@ -1778,11 +1926,15 @@ def _field_update_block(solver, time_value):
             solver.Ez_imag,
             imag=True,
         )
+    correct_copper_magnetic(solver)
+    advance_thin_sheet_magnetic(solver)
     if solver.tfsf_enabled:
         apply_tfsf_h_correction(solver, time_value)
         advance_tfsf_auxiliary_magnetic(solver)
     if solver._magnetic_source_terms:
-        inject_magnetic_surface_source_terms(solver, time_value=time_value)
+        inject_magnetic_surface_source_terms(
+            solver, time_value=injection_time("magnetic_current", time_value, solver.dt)
+        )
     solver._apply_magnetic_dispersive_corrections()
     # Non-reciprocal gyromagnetic step: the coupled implicit-midpoint magnetization
     # advance plus the correction H -= dM/mu_inf (magnetic mirror of the electric-side
@@ -1821,6 +1973,9 @@ def _field_update_block(solver, time_value):
     if solver._wire_runtime is not None:
         deposit_wire_current(solver)
     apply_surface_impedance(solver)
+    advance_copper_electric(solver)
+    advance_thin_sheet_electric(solver)
+    accumulate_copper_spectra(solver)
 
 
 def _make_field_update_runner(solver, use_cuda_graph: bool):
@@ -1850,8 +2005,8 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     # integer sample indices, so the block carries no per-step host input, and the
     # reference injection kernel's warp-aggregated writes are collision-free for the
     # axis-aligned face layout (bit-reproducible run to run). The 1D source waveform
-    # is evaluated on the host only in the E-side auxiliary advance, which runs
-    # eagerly after the block (outside the captured region), and the captured H
+    # is evaluated outside capture: entry-plane boundary values are staged
+    # before the block and the E-side hard seed is written after it. The captured H
     # correction reads whatever aux.electric holds at replay -- exactly matching the
     # eager path. The block mutates only aux.magnetic among the auxiliary tensors;
     # it is snapshotted below alongside aux.electric so warmup/capture on the zero
@@ -1941,6 +2096,8 @@ def _post_source_block(solver):
     if not solver.tfsf_enabled:
         enforce_pec_boundaries(solver)
     apply_mur_boundaries(solver)
+    from ..cut_surface import apply_cut_surface_constraints
+    apply_cut_surface_constraints(solver)
     solver.accumulate_dft_gpu()
 
 
@@ -1951,6 +2108,26 @@ def _make_tail_runner(solver, use_gpu_dft: bool):
     around capture so nonzero initial states are preserved too."""
     if not (use_gpu_dft and getattr(solver, "_cuda_graph_active", False)):
         return None
+    cosine = getattr(solver, "_dft_weighted_cos_table", None)
+    sine = getattr(solver, "_dft_weighted_sin_table", None)
+    counter = getattr(solver, "_dft_step", None)
+    if (not isinstance(cosine, torch.Tensor) or not isinstance(sine, torch.Tensor)
+        or cosine.ndim != 2 or sine.shape != cosine.shape or cosine.shape[1] == 0
+        or cosine.device != sine.device or cosine.dtype != torch.float32 or sine.dtype != torch.float32
+        or not isinstance(counter, torch.Tensor) or counter.shape != (1,)
+        or counter.dtype != torch.int64 or counter.device != cosine.device):
+        raise ValueError("Tail capture requires matching float32 DFT tables and an int64[1] device counter.")
+    # This single host read happens during preparation, never in capture/replay.
+    current_step = int(counter.item())
+    rows = int(cosine.shape[0])
+    if current_step < 0 or current_step > rows:
+        raise ValueError("Tail capture DFT counter is outside its precomputed table horizon.")
+    remaining = rows - current_step
+    if remaining == 0:
+        return None
+    # Conservatively reserve a valid row for capture preparation. Recording a
+    # CUDA graph does not physically advance the GPU state until replay.
+    warmup_steps = min(3, remaining - 1)
     from ..cuda.runtime.graph import CudaGraphRunner
 
     from ..checkpoint import graph_state_tensors
@@ -1970,7 +2147,7 @@ def _make_tail_runner(solver, use_gpu_dft: bool):
             state[k].copy_(v)
 
     try:
-        replay = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=3).capture(
+        replay = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=warmup_steps).capture(
             lambda: _post_source_block(solver)
         )
     except Exception:
@@ -1978,6 +2155,94 @@ def _make_tail_runner(solver, use_gpu_dft: bool):
         return None
     _restore()
     return replay
+
+
+def _port_step_block(solver, step: torch.Tensor | None, *, post_source=None) -> None:
+    """The post-source step phase of prepared ports, driven by a device step counter.
+
+    Applies the port terminations with the tabulated drive (see
+    ``prepare_port_drive_tables``), then the network feedback, the post-source
+    tail and the port V/I DFT: the eager order of ``solve_steps``. It carries no
+    per-step host input, so the single-run port graph and the native batch step
+    chunks capture this one sequence. ``step`` is not advanced here.
+    """
+    apply_port_runtimes(solver, drive_step=step)
+    for sheet in getattr(solver, "_thin_sheets", ()):
+        if sheet.feeds:
+            sheet.electric(solver)
+    apply_network_runtimes(solver, native_lu=True)
+    if post_source is None:
+        _post_source_block(solver)
+    else:
+        post_source()
+    accumulate_port_observers(solver, step=step)
+
+
+def _make_port_step_runner(solver, *, use_cuda_graph: bool, use_gpu_dft: bool, time_steps: int):
+    """Graph-capture the post-source phase of a run with lumped and gap ports.
+
+    Returns ``None``, keeping the eager phase, unless no port runtime is bound
+    to a circuit or an embedded network (driven or terminated Yee-edge, coaxial
+    and wire-bound ports, and passive V/I observation ports, all qualify), the
+    scene has no circuits or networks, and the running DFT (if any) is
+    GPU-driven. Otherwise one call per step runs
+    ``_port_step_block`` from the drive tables and ``solver._port_observer_step``.
+    The first call executes eagerly, which also initializes every kernel and
+    library handle; the second call captures the block (recording only, so no
+    state needs restoring) and every later call replays that one graph. If
+    capture fails the block keeps running eagerly with identical numerics.
+    """
+    runtimes = tuple(getattr(solver, "_port_runtimes", ()))
+    graphable = (
+        use_cuda_graph
+        and torch.cuda.is_available()
+        and torch.device(solver.device).type == "cuda"
+        and bool(runtimes)
+        and all(
+            runtime.embedded_network_name is None and runtime.circuit_port is None
+            for runtime in runtimes
+        )
+        and not getattr(solver, "_circuit_runtimes", ())
+        and not getattr(solver, "_network_runtimes", ())
+        and (not solver.dft_enabled or use_gpu_dft)
+    )
+    if not graphable:
+        return None
+    prepare_port_drive_tables(solver, time_steps)
+    counter = solver._port_observer_step
+    counter.fill_(runtimes[0].sample_index)
+    # Port spectra are now sampled from the device counter; the host sample
+    # count is restored by complete_port_observer_graph after the loop.
+    solver._port_observer_graph_active = True
+
+    def step() -> None:
+        _port_step_block(solver, counter)
+        counter.add_(1)
+
+    from ..cuda.runtime.graph import CudaGraphRunner
+
+    replay = None
+    calls = 0
+
+    def run() -> None:
+        nonlocal replay, calls
+        if replay is not None:
+            replay()
+            return
+        calls += 1
+        if calls == 2:
+            try:
+                replay = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=0).capture(step)
+            except Exception as error:
+                solver._port_graph_capture_error = repr(error)
+                replay = None
+            else:
+                solver._port_cuda_graph_active = True
+                replay()
+                return
+        step()
+
+    return run
 
 
 def _make_full_embedded_step_runner(solver, *, use_cuda_graph: bool):
@@ -2027,6 +2292,8 @@ def _make_full_embedded_step_runner(solver, *, use_cuda_graph: bool):
         if not solver.tfsf_enabled:
             enforce_pec_boundaries(solver)
         apply_mur_boundaries(solver)
+        from ..cut_surface import apply_cut_surface_constraints
+        apply_cut_surface_constraints(solver)
         _accumulate_embedded_port_observers_gpu(solver)
 
     from ..checkpoint import graph_state_tensors
@@ -2143,16 +2410,8 @@ def solve_steps(
     if normalize_source and not sources_share_spectrum(getattr(solver, "_compiled_sources", ())):
         raise NotImplementedError("normalize_source requires all sources to share one source-time spectrum.")
     checkpoint_execution = resume_from is not None or stop_step is not None
-    if checkpoint_execution and (
-        (dft_frequency is not None and full_field_dft)
-        or bool(getattr(solver, "observers", ()))
-        or bool(getattr(solver, "time_observers", ()))
-        or bool(getattr(solver, "breakdown_observers", ()))
-    ):
-        raise NotImplementedError(
-            "FDTD resume currently supports circuit/port workflows without full-field "
-            "DFT or field/time/breakdown observers."
-        )
+    if checkpoint_execution and bool(getattr(solver, "breakdown_observers", ())):
+        raise NotImplementedError("FDTD resume does not yet preserve breakdown observers.")
     if stop_step is not None:
         if isinstance(stop_step, bool) or not isinstance(stop_step, int):
             raise TypeError("stop_step must be an integer when provided.")
@@ -2177,7 +2436,11 @@ def solve_steps(
         solver._prepare_time_observers(time_steps)
     if getattr(solver, "breakdown_observers", None):
         solver._prepare_breakdown_observers()
+    from ..observers import make_single_observer_engine
+    run_spectral_observers = make_single_observer_engine(
+        solver, enabled=use_cuda_graph and cooperative_observer is None)
     prepare_port_spectral_accumulators(solver, time_steps, dft_window)
+    prepare_copper_spectra(solver, time_steps, observer_frequency, dft_window)
     prepare_circuit_time_series(solver, time_steps)
     circuit_runtimes = tuple(getattr(solver, "_circuit_runtimes", ()))
     if circuit_runtimes:
@@ -2186,10 +2449,16 @@ def solve_steps(
 
     # Deterministic breakdown mutates the electric update coefficients in place
     # between steps from an accumulated per-cell state; a captured CUDA graph would
-    # freeze the pre-breakdown coefficient reads, so keep the eager path.
+    # freeze the pre-breakdown coefficient reads, so keep the eager path. The core
+    # whole-step graph reads live coefficients and keeps the caller's request; its
+    # per-step fallback below stays eager.
+    core_use_cuda_graph = use_cuda_graph
     if getattr(solver, "breakdown_enabled", False):
         use_cuda_graph = False
 
+    from .passivity import make_passivity_state, sample_passivity, total_energy, SAMPLE_INTERVAL
+
+    solver._passivity_state = make_passivity_state(solver)
     solver._shutoff_triggered = False
     solver._shutoff_step = None
     solver._shutoff_peak = torch.zeros((), device=solver.device, dtype=solver.Ex.dtype)
@@ -2241,14 +2510,27 @@ def solve_steps(
         raise ValueError(
             f"stop_step={end_step} precedes resume step {start_step}."
         )
+    # Built after the resume restore: the drive tables start from the restored
+    # port clocks and the device counter from the restored sample index.
+    solver._port_cuda_graph_active = False
+    run_port_step = None
+    if run_full_embedded_step is None and end_step > start_step:
+        run_port_step = _make_port_step_runner(
+            solver,
+            use_cuda_graph=use_cuda_graph,
+            use_gpu_dft=use_gpu_dft,
+            time_steps=time_steps,
+        )
 
     measure_step_loop = bool(
         circuit_runtimes or getattr(solver, "_port_runtimes", ())
     )
-    step_start_event = torch.cuda.Event(enable_timing=True) if measure_step_loop else None
-    step_end_event = torch.cuda.Event(enable_timing=True) if measure_step_loop else None
+    time_on_device = measure_step_loop and torch.device(solver.device).type == "cuda"
+    step_start_event = torch.cuda.Event(enable_timing=True) if time_on_device else None
+    step_end_event = torch.cuda.Event(enable_timing=True) if time_on_device else None
     if step_start_event is not None:
         step_start_event.record()
+    host_step_start = time.perf_counter() if measure_step_loop and not time_on_device else None
     iterator = range(start_step, end_step)
     pbar = None
     if solver.verbose:
@@ -2264,9 +2546,28 @@ def solve_steps(
     if cooperative_driver:
         steps_run = yield {"gpu_dft": use_gpu_dft, "shutoff_min_step": shutoff_min_step}
         iterator = ()
+    if getattr(solver, "_core_runtime", None) is not None:
+        core_steps = solver._core_runtime.run_chunks(
+            solver, time_steps=time_steps, start_step=start_step, end_step=end_step,
+            use_cuda_graph=core_use_cuda_graph, use_gpu_dft=use_gpu_dft,
+            cooperative=cooperative, cooperative_driver=cooperative_driver,
+            cooperative_observer=cooperative_observer, resume_from=resume_from,
+            shutoff=shutoff, shutoff_check_interval=shutoff_check_interval,
+            shutoff_min_step=shutoff_min_step, enable_plot=enable_plot, pbar=pbar,
+        )
+        if core_steps is not None:
+            steps_run = core_steps
+            iterator = ()
     for n in iterator:
         steps_run = n + 1
         time_value = n * solver.dt
+        if solver.tfsf_enabled and solver._tfsf_state.get("auxiliary_grid") is not None:
+            # Stage the physical entry-plane ghost samples outside field-graph
+            # replay. The captured block reads persistent E/H boundary tensors.
+            # Auxiliary-line protocol: every auxiliary incident line must implement
+            # prepare_incident_boundary(values=None). It may be a no-op when the
+            # line's incident_reference is None (no entry-plane reference).
+            solver._tfsf_state["auxiliary_grid"].prepare_incident_boundary()
         if run_full_embedded_step is not None:
             run_full_embedded_step()
         else:
@@ -2284,37 +2585,57 @@ def solve_steps(
                 # the same n + 1/2 instant as the TFSF electric correction.
                 inject_electric_surface_source_terms(
                     solver,
-                    time_value=time_value + 0.5 * float(solver.dt),
+                    time_value=injection_time("equivalent_electric_current", time_value, solver.dt),
                 )
 
             if solver._source_terms and cooperative_observer is None:
-                solver.add_source(time_value=time_value)
-            apply_port_runtimes(solver)
-            run_network_updates()
-            if run_tail is not None:
-                run_tail()
+                solver.add_source(time_value=injection_time("electric_current", time_value, solver.dt))
+            if run_port_step is not None:
+                # Ports, networks, tail and port DFT in this same order.
+                run_port_step()
             else:
-                solver._apply_dispersive_corrections()
-                if not solver.tfsf_enabled:
-                    enforce_pec_boundaries(solver)
-                apply_mur_boundaries(solver)
-                if use_gpu_dft:
-                    solver.accumulate_dft_gpu()
+                def post_source():
+                    if run_tail is not None:
+                        run_tail()
+                    else:
+                        solver._apply_dispersive_corrections()
+                        if not solver.tfsf_enabled:
+                            enforce_pec_boundaries(solver)
+                        apply_mur_boundaries(solver)
+                        from ..cut_surface import apply_cut_surface_constraints
+                        apply_cut_surface_constraints(solver)
+                        if use_gpu_dft:
+                            solver.accumulate_dft_gpu()
+                        else:
+                            solver.accumulate_dft(n)
+
+                if any(r.sheet_feed is not None for r in solver._port_runtimes):
+                    _port_step_block(solver, None, post_source=post_source)
                 else:
-                    solver.accumulate_dft(n)
-            run_port_observers()
+                    apply_port_runtimes(solver)
+                    run_network_updates()
+                    post_source()
+                    run_port_observers()
         if getattr(solver, "breakdown_enabled", False):
             # After the full E-update (sources, PEC clamp, and tail applied), run the
             # per-cell breakdown state machine and scatter the updated conductivity
             # into the electric coefficients used by the next step.
             advance_breakdown_state(solver, n)
-        if cooperative_observer is None:
+        if run_spectral_observers is not None:
+            run_spectral_observers()
+        elif cooperative_observer is None:
             solver.accumulate_observers(n)
         else:
             yield ("observers", n)
         solver.accumulate_time_observers(n)
         solver.accumulate_breakdown_observers(n)
         accumulate_wire_monitors(solver, n)
+
+        if solver._passivity_state is not None and (n + 1) % SAMPLE_INTERVAL == 0:
+            sample_passivity(solver._passivity_state, n + 1, total_energy(solver))
+            if solver._passivity_state["warning"] is not None:
+                solver.passivity_guard_status = "warned: complex fixed-k growth"
+                solver.passivity_guard_warning = solver._passivity_state["warning"]
 
         if shutoff > 0 and (n + 1) % shutoff_check_interval == 0:
             e_energy = _electric_field_energy(solver)
@@ -2339,17 +2660,18 @@ def solve_steps(
         if enable_plot and n % solver.plot_interval == 0:
             visualize_slice(solver, n)
 
-    if step_start_event is not None and step_end_event is not None:
-        step_end_event.record()
-        step_end_event.synchronize()
+    if measure_step_loop:
         completed_steps = (
             solver._shutoff_step + 1 - start_step
             if solver._shutoff_triggered
             else end_step - start_step
         )
-        solver.last_step_loop_elapsed_s = (
-            step_start_event.elapsed_time(step_end_event) * 1.0e-3
-        )
+        if time_on_device:
+            step_end_event.record()
+            step_end_event.synchronize()
+            solver.last_step_loop_elapsed_s = step_start_event.elapsed_time(step_end_event) * 1.0e-3
+        else:
+            solver.last_step_loop_elapsed_s = time.perf_counter() - host_step_start
         solver.last_step_loop_steps = completed_steps
     # steps_run, not n + 1: the loop variable is unbound for time_steps == 0 and
     # the graph-driven observer step counter must match the steps actually run,
@@ -2357,6 +2679,11 @@ def solve_steps(
     if cooperative_observer is not None:
         engine, lane = cooperative_observer
         engine.finalize(lane)
+    if getattr(solver, "_single_observer_engine", None) is not None:
+        solver._single_observer_engine.finalize(0)
+        # The engine's slot holds the solver; drop the back-reference so a finished
+        # solver and its field/CPML/DFT buffers are freed without the cyclic GC.
+        solver._single_observer_engine = None
     complete_port_observer_graph(solver, steps_run)
     solver._synchronize_device()
     from .timestep import validate_nonlinear_field_envelope

@@ -1,26 +1,34 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from itertools import accumulate, repeat
 from typing import Literal
 
 import torch
 
 from ..compiler.structures import pec_structures
-from ..lumped import PortExcitation
-from ..network import PortData
-from ..sources import CW, CustomSourceTime, GaussianPulse, RickerWavelet
+from ..lumped import Capacitor, Inductor, ParallelRLC, PortExcitation, Resistor, SeriesRLC
+from ..network import PHASOR_CONVENTION, POWER_WAVE_CONVENTION, PortData
+from ..ports import LumpedPort, TerminalPort
+from ..sources import CW, BroadbandPulse, CustomSourceTime, GaussianPulse, RickerWavelet
+from .boundary import combine_complex_spectral_components
 from .checkpoint import lumped_state_name
+from .coaxial import CoaxialLumpedRuntime, apply_coaxial_runtime, harmonic_coaxial_geometry, prepare_coaxial_runtime
 from .circuits import apply_circuit_runtimes, prepare_circuit_runtimes
+from .excitation.temporal import injection_time
 from .lumped import (
     LumpedRuntime,
     LumpedStepPullback,
     LumpedStepTrace,
     apply_lumped_runtime,
+    prepare_imaginary_lumped_state,
     prepare_lumped_runtime,
     pullback_lumped_runtime,
     replay_lumped_runtime,
 )
 from .wire import _target_masses
+from .runtime.representation import spectral_scale
+from .runtime.spectral import source_normalization_spectrum
 
 
 PhasorNormalization = Literal["peak", "rms", "none"]
@@ -70,6 +78,8 @@ class PortDFTAccumulator:
         self,
         *,
         normalization: PhasorNormalization = "peak",
+        integration_dt: float | None = None,
+        reference_frequency: float | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return voltage and current phasors, each with explicit shape ``[F]``."""
 
@@ -87,7 +97,9 @@ class PortDFTAccumulator:
         )
         if normalization == "rms":
             amplitude_scale = torch.sqrt(amplitude_scale)
-        scale = amplitude_scale / self._window_weight_sum
+        scale = spectral_scale(self._window_weight_sum, phasor_factor=amplitude_scale,
+                               integration_dt=integration_dt, reference_frequency=reference_frequency,
+                               frequency=self.frequencies)
         return self._voltage_sum * scale, self._current_sum * scale
 
 
@@ -127,6 +139,25 @@ class _GeneralizedPortGeometry:
     voltage_weights: torch.Tensor
 
 
+@dataclass(frozen=True)
+class _SheetPortGeometry:
+    port_name: str
+    axis: str
+    direction: int
+
+
+@dataclass
+class SheetFeedBinding:
+    resistance: torch.Tensor
+    drive: torch.Tensor
+    voltage: torch.Tensor
+    current: torch.Tensor
+    column_voltage: torch.Tensor | None = None
+    column_conductance: torch.Tensor | None = None
+    column_sum: torch.Tensor | None = None
+    column_term: torch.Tensor | None = None
+
+
 @dataclass
 class PreparedPortRuntime:
     """Single-device FDTD state shared by a port source, load, and observer."""
@@ -154,6 +185,7 @@ class PreparedPortRuntime:
     window_weights: torch.Tensor | None = None
     window_type: str | None = None
     accumulator: PortDFTAccumulator | None = None
+    accumulator_imag: PortDFTAccumulator | None = None
     drive_accumulator: PortDFTAccumulator | None = None
     voltage_phase_weights: torch.Tensor | None = None
     current_phase_weights: torch.Tensor | None = None
@@ -164,6 +196,7 @@ class PreparedPortRuntime:
     sample_index: int = 0
     circuit_port: object | None = None
     embedded_network_name: str | None = None
+    sheet_feed: SheetFeedBinding | None = None
 
 
 def _field_map(solver) -> dict[str, torch.Tensor]:
@@ -335,6 +368,27 @@ def _prepare_wire_port_provider(
         {"Ex": solver.eps_Ex, "Ey": solver.eps_Ey, "Ez": solver.eps_Ez},
         geometry,
     )
+    for name, component in zip(("Ex", "Ey", "Ez"), range(3)):
+        selected = torch.nonzero(components == component, as_tuple=False).reshape(-1)
+        sigma = getattr(solver, f"sigma_e_{name}", None)
+        if sigma is not None and selected.numel() and bool(torch.any(
+            sigma.reshape(-1).index_select(0, offsets.index_select(0, selected)) != 0
+        )):
+            raise NotImplementedError(
+                f"Wire-bound port {geometry.port_name!r} intersects conductive Yee edges; "
+                "the generalized wire midpoint solve requires locally lossless support."
+            )
+    templates = getattr(solver, "_dispersive_templates", {})
+    for name, component in zip(("Ex", "Ey", "Ez"), range(3)):
+        selected = torch.nonzero(components == component, as_tuple=False).reshape(-1)
+        for kind in ("debye", "drude", "lorentz"):
+            for entry in templates.get(name, {}).get(kind, ()):
+                if selected.numel() and bool(torch.any(entry["drive"].reshape(-1).index_select(
+                    0, offsets.index_select(0, selected)) != 0)):
+                    raise NotImplementedError(
+                        f"Wire-bound port {geometry.port_name!r} intersects electric ADE support; "
+                        "the generalized wire midpoint solve requires locally nondispersive support."
+                    )
     field_control_volumes = field_masses / field_eps
     energy_masses = torch.cat((field_masses, node_capacitance)).reshape(-1, 1, 1)
     voltage_weights = torch.cat(
@@ -433,15 +487,12 @@ def _require_forward_only_parameters(
 
 
 def _validate_supported_field_coupling(solver) -> None:
-    if getattr(solver, "complex_fields_enabled", False):
-        raise NotImplementedError("Lumped FDTD coupling currently requires real Yee fields.")
-    if getattr(solver, "conductive_enabled", False):
+    from ..compiler.breakdown import scene_has_breakdown
+
+    if scene_has_breakdown(solver.scene):
         raise NotImplementedError(
-            "Lumped FDTD coupling in conductive media requires a conductance-aware port update coefficient."
-        )
-    if getattr(solver, "electric_dispersive_enabled", False):
-        raise NotImplementedError(
-            "Lumped FDTD coupling in electrically dispersive media requires the ADE correction in the joint circuit equation."
+            "Lumped FDTD coupling with dynamic dielectric breakdown requires refreshing "
+            "the coupled field/circuit response after every conductivity-state change."
         )
     if getattr(solver, "nonlinear_enabled", False):
         raise NotImplementedError(
@@ -457,16 +508,102 @@ def _validate_supported_field_coupling(solver) -> None:
         )
 
 
+def _validate_bloch_lumped_object(solver, obj, termination, excitation=None) -> None:
+    """Admit only passive LTI Yee couplings with support inside one cell."""
+    if excitation is not None:
+        raise NotImplementedError(f"Driven lumped port {obj.name!r} under Bloch boundaries is deferred to v2.")
+    if isinstance(obj, (LumpedPort, TerminalPort, Resistor, Capacitor, Inductor)):
+        _reject_bloch_copper_terminals(solver, obj)
+    if not isinstance(obj, (LumpedPort, Resistor, Capacitor, Inductor)) or (
+        termination is not None
+        and not isinstance(termination, (Resistor, Capacitor, Inductor, SeriesRLC, ParallelRLC))
+    ):
+        raise NotImplementedError("Complex lumped coupling supports only passive LTI R/L/C and LumpedPort terminations.")
+    supports = [("voltage path", tuple(min(a, b) for a, b in zip(obj.negative, obj.positive)),
+                 tuple(max(a, b) for a, b in zip(obj.negative, obj.positive)))]
+    for name in ("voltage_aperture", "current_surface"):
+        box = getattr(obj, name, None)
+        if box is not None:
+            position = box.position.detach().cpu().to(torch.float64).tolist()
+            size = box.size.detach().cpu().to(torch.float64).tolist()
+            supports.append((name.replace("_", " "),
+                             tuple(p - s / 2 for p, s in zip(position, size)),
+                             tuple(p + s / 2 for p, s in zip(position, size))))
+    for axis, label in enumerate("xyz"):
+        if solver.scene.boundary.axis_kind(label) != "bloch":
+            continue
+        low, high = solver.scene.domain.bounds[axis]
+        for support, lower, upper in supports:
+            if lower[axis] <= low or upper[axis] >= high:
+                raise NotImplementedError(
+                    f"Lumped object {obj.name!r} {support} touches or crosses the {label} Bloch seam "
+                    f"at cell bounds ({low}, {high}); v1 requires support strictly inside one cell."
+                )
+
+
+def _reject_bloch_copper_terminals(solver, obj) -> None:
+    """Reject terminal contact as well as the split-edge overlap checked later."""
+    from ..geometry.terminal_support import conductor_support
+
+    for structure in solver.scene.structures:
+        if not getattr(structure, "enabled", True) or not getattr(structure.material, "is_copper_foil", False):
+            continue
+        if isinstance(obj, TerminalPort):
+            contact = obj.wire_binding is None and structure.name in (
+                obj.positive_terminal.structure_name, obj.negative_terminal.structure_name,
+            )
+        else:
+            support = conductor_support(structure)
+            contact = any(support.contains(point, 1e-12 + max(support.roundoff))
+                          for point in (obj.negative, obj.positive))
+        if contact:
+            raise NotImplementedError(
+                f"Lumped object {obj.name!r} has a terminal on CopperFoil {structure.name!r}; "
+                "complex-field Bloch coupling requires an imaginary bank for the foil's two-sided state."
+            )
+
+
+def _electric_history_currents(solver, geometry) -> tuple[torch.Tensor, ...]:
+    """Return active pole currents on a coupled voltage support at prepare time."""
+    templates = getattr(solver, "_dispersive_templates", {}).get(geometry.voltage_component, {})
+    shape = getattr(solver, geometry.voltage_component).shape
+    indices = geometry.voltage_indices.to(device=solver.device, dtype=torch.int64)
+    linear = indices[:, 0] * shape[1] * shape[2] + indices[:, 1] * shape[2] + indices[:, 2]
+    return tuple(
+        entry["current"]
+        for kind in ("debye", "drude", "lorentz")
+        for entry in templates.get(kind, ())
+        if bool(torch.any(entry["drive"].reshape(-1).index_select(0, linear) != 0))
+    )
+
+
+def _prepare_bloch_lumped_state(solver, geometry, runtime) -> None:
+    templates = getattr(solver, "_dispersive_templates", {}).get(geometry.voltage_component, {})
+    imaginary_currents = {
+        id(entry["current"]): entry["current_imag"]
+        for kind in ("debye", "drude", "lorentz") for entry in templates.get(kind, ())
+    }
+    history = runtime.electric_history
+    prepare_imaginary_lumped_state(
+        runtime,
+        tuple(imaginary_currents[id(current)] for current in history.currents)
+        if history is not None else (),
+    )
+
+
 def _validate_local_update_coefficient(solver, runtime: LumpedRuntime, field_name: str) -> None:
     eps = getattr(solver, f"eps_{field_name}").reshape(-1)
     actual = getattr(solver, f"c{field_name.lower()}_curl").reshape(-1)
     local_eps = torch.index_select(eps, 0, runtime.linear_indices)
     local_actual = torch.index_select(actual, 0, runtime.linear_indices)
-    expected = runtime.dt / local_eps
+    sigma = getattr(solver, f"sigma_e_{field_name}", None)
+    local_sigma = torch.zeros_like(local_eps) if sigma is None else sigma.reshape(-1).index_select(0, runtime.linear_indices)
+    expected = runtime.dt / (local_eps + 0.5 * runtime.dt * local_sigma)
     if not bool(torch.allclose(local_actual, expected, rtol=1.0e-5, atol=0.0)):
         raise ValueError(
             f"Lumped object {runtime.port_name!r} overlaps an absorber, conductor, "
-            "or constrained Yee edge whose E update coefficient is not dt/eps."
+            "or constrained Yee edge whose E update coefficient does not match the "
+            "static conductive material response."
         )
 
 
@@ -572,14 +709,43 @@ def _open_declared_pec_terminal_edges(solver, geometry, lumped_object) -> None:
     _validate_explicit_pec_gap(solver, geometry, lumped_object)
 
     eps = getattr(solver, f"eps_{field_name}")
-    restored_curl = solver.dt / eps[selector]
+    sigma = getattr(solver, f"sigma_e_{field_name}", None)
+    half = 0.0 if sigma is None else 0.5 * solver.dt * sigma[selector] / eps[selector]
+    restored_curl = (solver.dt / eps[selector]) / (1.0 + half)
     curl[selector] = torch.where(suppressed, restored_curl, local_curl)
     local_decay = decay[selector]
-    decay[selector] = torch.where(suppressed, torch.ones_like(local_decay), local_decay)
+    restored_decay = torch.ones_like(local_decay) * ((1.0 - half) / (1.0 + half))
+    decay[selector] = torch.where(suppressed, restored_decay, local_decay)
     uniformity = getattr(solver, "_coefficient_uniformity", None)
     if isinstance(uniformity, dict):
         uniformity[curl_name] = None
         uniformity[decay_name] = None
+
+
+def _port_role(runtime) -> str:
+    return "coupled" if (
+        runtime.lumped is not None or runtime.wire_provider is not None
+        or runtime.circuit_port is not None or runtime.embedded_network_name is not None
+        or runtime.sheet_feed is not None
+    ) else "probe"
+
+
+def _validate_probe_gap(solver, runtime) -> None:
+    if _port_role(runtime) != "probe":
+        return
+    geometry = runtime.geometry
+    rows = (zip(geometry.voltage_components, geometry.voltage_indices)
+            if getattr(geometry, "is_coaxial", False)
+            else ((geometry.voltage_component, geometry.voltage_indices),))
+    suppressed = []
+    for component, indices in rows:
+        coefficient = getattr(solver, f"c{component.lower()}_curl")
+        suppressed.append((coefficient[tuple(indices.T)] == 0).all())
+    if bool(torch.stack(suppressed).all()):
+        raise ValueError(
+            f"Port {runtime.port.name} is an open probe over a PEC-covered gap and would read V = 0; "
+            "add a termination to declare a feed gap, or move the probe."
+        )
 
 
 def _source_descriptor(
@@ -594,9 +760,14 @@ def _source_descriptor(
         return None, 0.0, 0.0, 0.0, 0.0, zero
 
     source_time = excitation.source_time or CW(frequency=default_frequency)
+    if isinstance(source_time, BroadbandPulse) or (
+        isinstance(source_time, CustomSourceTime) and source_time.table is not None
+    ):
+        return _tabulated_source_descriptor(excitation, source_time, device=device, dtype=dtype)
     if isinstance(source_time, CustomSourceTime):
         raise NotImplementedError(
-            "PortExcitation requires a device-native CW, GaussianPulse, or RickerWavelet source_time."
+            "PortExcitation requires a sampled-table CustomSourceTime; a callable waveform "
+            "has no device-native port drive evaluation."
         )
     if not isinstance(source_time, (CW, GaussianPulse, RickerWavelet)):
         raise TypeError("Unsupported PortExcitation source_time type.")
@@ -614,6 +785,33 @@ def _source_descriptor(
     ):
         raise ValueError("RickerWavelet port excitation amplitude must be real.")
     return source_kind, frequency, fwidth, phase, delay, amplitude
+
+
+def _tabulated_source_descriptor(excitation: PortExcitation, source_time, *, device, dtype):
+    """Describe a sampled-table or broadband-pulse drive evaluated by the shared torch kernel."""
+    complex_dtype = torch.complex64 if dtype == torch.float32 else torch.complex128
+    amplitude = excitation.amplitude.to(device=device, dtype=complex_dtype)
+    if not bool(torch.isclose(amplitude.imag, torch.zeros_like(amplitude.imag))):
+        raise ValueError(f"{type(source_time).__name__} port excitation amplitude must be real.")
+    return (
+        source_time.kind,
+        float(source_time.frequency),
+        float(source_time.fwidth),
+        float(source_time.phase),
+        float(source_time.delay),
+        amplitude,
+    )
+
+
+def _attach_tabulated_drive(runtime, excitation) -> None:
+    """Attach the compiled waveform of a sampled-table or broadband-pulse port drive."""
+    if runtime.source_kind not in ("custom", "broadband_pulse"):
+        return
+    from ..sources import compile_source_time
+
+    runtime._compiled_source_time = compile_source_time(
+        excitation.source_time, default_frequency=runtime.source_frequency
+    )
 
 
 def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[PreparedPortRuntime, ...]:
@@ -641,12 +839,45 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
         termination_overrides.get(port.name, getattr(port, "termination", None)) is not None
         for port in ports_by_name.values()
     ) or bool(solver.scene.lumped_elements) or bool(circuit_port_names) or bool(network_by_port)
-    if has_coupled_objects:
+    if has_coupled_objects or (ports_by_name and getattr(solver, "complex_fields_enabled", False)):
         _validate_supported_field_coupling(solver)
+    complex_fields = getattr(solver, "complex_fields_enabled", False)
+    if complex_fields:
+        if getattr(solver.scene, "circuits", ()) or getattr(solver.scene, "networks", ()):
+            raise NotImplementedError("Circuits/MNA and embedded networks under Bloch boundaries are deferred to v2.")
+        for port in ports_by_name.values():
+            _validate_bloch_lumped_object(
+                solver, port, termination_overrides.get(port.name, port.termination),
+                excitation_by_name.get(port.name),
+            )
+        for element in solver.scene.lumped_elements:
+            _validate_bloch_lumped_object(solver, element, element)
+    sheet_gaps = {f.port_name: f for c in getattr(solver, "_thin_sheet_complexes", ()) for f in c.feeds}
     runtimes = []
-    for geometry in solver.scene.compile_ports(device=solver.device):
+    if sheet_gaps:
+        from ..compiler.ports import compile_ports
+        geometries = []
+        for port in solver.scene.ports:
+            if port.name in sheet_gaps:
+                d = sheet_gaps[port.name].direction
+                axis = int(abs(d).argmax())
+                geometries.append(_SheetPortGeometry(port.name, "xyz"[axis], 1 if d[axis] > 0 else -1))
+            else:
+                geometries.extend(compile_ports(solver.scene, ports=(port,), device=solver.device))
+    else:
+        geometries = solver.scene.compile_ports(device=solver.device)
+    for geometry in geometries:
         port = ports_by_name[geometry.port_name]
         excitation = excitation_by_name.get(port.name)
+        if getattr(geometry, "is_coaxial", False):
+            runtimes.append(_prepare_coaxial_port_runtime(
+                solver, geometry, port, excitation,
+                termination_overrides.get(port.name, port.termination),
+                frequency_tensor,
+                circuit_bound=port.name in circuit_port_names,
+                network_name=network_by_port.get(port.name),
+            ))
+            continue
         termination = termination_overrides.get(port.name, port.termination)
         if port.name in circuit_port_names and excitation is not None:
             raise ValueError(
@@ -665,7 +896,9 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
             )
         wire_provider = None
         generalized_geometry = None
-        if bool(getattr(geometry, "is_wire_bound", False)):
+        if port.name in sheet_gaps:
+            field, field_name = solver.Ex, None
+        elif bool(getattr(geometry, "is_wire_bound", False)):
             wire_provider, generalized_geometry = _prepare_wire_port_provider(
                 solver, geometry
             )
@@ -676,7 +909,21 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
             field_name = geometry.voltage_component
         control_volume = None
         lumped = None
-        if port.name in circuit_port_names:
+        sheet_feed = None
+        if port.name in sheet_gaps:
+            if port.name in circuit_port_names or embedded_network_name is not None:
+                raise NotImplementedError("Sheet gap feeds do not support circuits or embedded networks.")
+            if termination is not None and (termination.l is not None or termination.c is not None):
+                raise NotImplementedError("Sheet gap feeds require a purely resistive termination.")
+            resistance = (_real_source_resistance(port, excitation, device=solver.device, dtype=torch.float64)
+                          if excitation is not None else torch.as_tensor(
+                              port.reference_impedance if termination is None else termination.r,
+                              device=solver.device, dtype=torch.float64))
+            if not bool(torch.isfinite(resistance) & (resistance > 0)):
+                raise ValueError("Sheet gap feed resistance must be positive and finite.")
+            sheet_feed = SheetFeedBinding(resistance, *(torch.zeros((), device=solver.device, dtype=torch.float64)
+                                                       for _ in range(3)))
+        elif port.name in circuit_port_names:
             control_volume = _edge_control_volume(solver, geometry.voltage_component)
             _open_declared_pec_terminal_edges(solver, geometry, port)
         elif excitation is not None:
@@ -701,6 +948,8 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
                     geometry,
                     dt=solver.dt,
                     eps_edge=getattr(solver, f"eps_{geometry.voltage_component}"),
+                    electric_update_coefficient=getattr(solver, f"c{geometry.voltage_component.lower()}_curl"),
+                    electric_history_currents=_electric_history_currents(solver, geometry),
                     yee_control_volume=control_volume,
                     resistance=resistance,
                 )
@@ -723,6 +972,8 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
                     geometry,
                     dt=solver.dt,
                     eps_edge=getattr(solver, f"eps_{geometry.voltage_component}"),
+                    electric_update_coefficient=getattr(solver, f"c{geometry.voltage_component.lower()}_curl"),
+                    electric_history_currents=_electric_history_currents(solver, geometry),
                     yee_control_volume=control_volume,
                     termination=termination,
                 )
@@ -735,11 +986,15 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
                 geometry,
                 dt=solver.dt,
                 eps_edge=getattr(solver, f"eps_{geometry.voltage_component}"),
+                electric_update_coefficient=getattr(solver, f"c{geometry.voltage_component.lower()}_curl"),
+                electric_history_currents=_electric_history_currents(solver, geometry),
                 yee_control_volume=_edge_control_volume(solver, geometry.voltage_component),
                 resistance=0.0,
             )
             _validate_local_update_coefficient(solver, lumped, geometry.voltage_component)
 
+        if complex_fields and lumped is not None:
+            _prepare_bloch_lumped_state(solver, geometry, lumped)
         source_kind, source_frequency, source_fwidth, source_phase, source_delay, amplitude = (
             _source_descriptor(
                 excitation,
@@ -812,14 +1067,16 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
                 source_delay=source_delay,
                 source_amplitude=amplitude,
                 drive_buffer=torch.zeros((), device=solver.device, dtype=field.dtype),
-                electric_time=torch.as_tensor(solver.dt, device=solver.device, dtype=field.dtype),
-                magnetic_time=torch.as_tensor(0.5 * solver.dt, device=solver.device, dtype=field.dtype),
+                electric_time=torch.as_tensor(solver.dt, device=solver.device, dtype=torch.float64),
+                magnetic_time=torch.as_tensor(injection_time("port_drive", 0.0, solver.dt), device=solver.device, dtype=torch.float64),
                 substeps=substeps,
                 substep_buffers=substep_buffers,
                 exact_resistive=exact_resistive,
                 embedded_network_name=embedded_network_name,
+                sheet_feed=sheet_feed,
             )
         )
+        _attach_tabulated_drive(runtimes[-1], excitation)
     solver._port_runtimes = tuple(runtimes)
     element_by_name = {element.name: element for element in solver.scene.lumped_elements}
     element_runtimes = []
@@ -831,14 +1088,20 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
             geometry,
             dt=solver.dt,
             eps_edge=getattr(solver, f"eps_{geometry.voltage_component}"),
+            electric_update_coefficient=getattr(solver, f"c{geometry.voltage_component.lower()}_curl"),
+            electric_history_currents=_electric_history_currents(solver, geometry),
             yee_control_volume=_edge_control_volume(solver, geometry.voltage_component),
             termination=element,
         )
         _validate_local_update_coefficient(solver, element_runtime, geometry.voltage_component)
+        if complex_fields:
+            _prepare_bloch_lumped_state(solver, geometry, element_runtime)
         element_runtimes.append((element_runtime, geometry.voltage_component))
     solver._lumped_element_runtimes = tuple(element_runtimes)
+    solver._coaxial_element_runtimes = _prepare_coaxial_element_runtimes(solver)
     prepare_circuit_runtimes(solver, solver._port_runtimes)
     for runtime in solver._port_runtimes:
+        _validate_probe_gap(solver, runtime)
         if runtime.circuit_port is not None:
             _validate_local_update_coefficient(
                 solver,
@@ -855,6 +1118,16 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
         (runtime.port.name, runtime.field_name, runtime.lumped.linear_indices)
         for runtime in solver._port_runtimes
         if runtime.lumped is not None and runtime.wire_provider is None
+        and not isinstance(runtime.lumped, CoaxialLumpedRuntime)
+    )
+    coupled.extend(
+        (name, field_name, part.linear_indices)
+        for name, coaxial in (
+            *((runtime.port.name, runtime.lumped) for runtime in solver._port_runtimes
+              if isinstance(runtime.lumped, CoaxialLumpedRuntime)),
+            *((runtime.port_name, runtime) for runtime in solver._coaxial_element_runtimes),
+        )
+        for part, field_name in zip(coaxial.parts, coaxial.field_names)
     )
     coupled.extend(
         (
@@ -891,6 +1164,96 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
                 )
             occupied_edges[key] = runtime.port.name
     return solver._port_runtimes
+
+
+def _prepare_coaxial_port_runtime(
+    solver, geometry, port, excitation, termination, frequency_tensor, *, circuit_bound, network_name
+) -> PreparedPortRuntime:
+    """Prepare an annular port as a source/load/observer on the shared port clocks."""
+
+    if circuit_bound or network_name is not None:
+        raise NotImplementedError(
+            f"CoaxialLumpedPort {port.name!r} cannot bind to a circuit or embedded network; "
+            "those couplings use a single-component Yee voltage row."
+        )
+    _require_forward_only_parameters(port, excitation, termination)
+    if excitation is not None and termination is not None:
+        raise ValueError(
+            f"Active port {port.name!r} cannot also declare a passive termination in the same run."
+        )
+    geometry = harmonic_coaxial_geometry(solver, geometry)
+    lumped = None
+    shared = dict(
+        edge_control_volume=_edge_control_volume,
+        history_currents=_electric_history_currents,
+        validate_coefficient=_validate_local_update_coefficient,
+    )
+    if excitation is not None:
+        resistance = _real_source_resistance(port, excitation, device=solver.device, dtype=solver.Ex.dtype)
+        lumped = prepare_coaxial_runtime(solver, geometry, resistance=resistance, **shared)
+    elif termination is not None:
+        lumped = prepare_coaxial_runtime(solver, geometry, termination=termination, **shared)
+    source_kind, source_frequency, source_fwidth, source_phase, source_delay, amplitude = _source_descriptor(
+        excitation,
+        default_frequency=float(frequency_tensor[0]),
+        device=solver.device,
+        dtype=solver.Ex.dtype,
+    )
+    runtime = PreparedPortRuntime(
+        port=port,
+        geometry=geometry,
+        frequencies=frequency_tensor,
+        field_name=None,
+        yee_control_volume=None,
+        lumped=lumped,
+        wire_provider=None,
+        excitation=excitation,
+        source_kind=source_kind,
+        source_frequency=source_frequency,
+        source_fwidth=source_fwidth,
+        source_phase=source_phase,
+        source_delay=source_delay,
+        source_amplitude=amplitude,
+        drive_buffer=torch.zeros((), device=solver.device, dtype=solver.Ex.dtype),
+        electric_time=torch.as_tensor(solver.dt, device=solver.device, dtype=torch.float64),
+        magnetic_time=torch.as_tensor(injection_time("port_drive", 0.0, solver.dt), device=solver.device, dtype=torch.float64),
+    )
+    _attach_tabulated_drive(runtime, excitation)
+    return runtime
+
+
+def _prepare_coaxial_element_runtimes(solver) -> tuple[CoaxialLumpedRuntime, ...]:
+    from ..compiler.coaxial import compile_coaxial_geometry
+    from ..lumped import CoaxialLumpedResistor
+
+    runtimes = []
+    for element in solver.scene.lumped_elements:
+        if not isinstance(element, CoaxialLumpedResistor):
+            continue
+        geometry = harmonic_coaxial_geometry(
+            solver, compile_coaxial_geometry(solver.scene, element, device=solver.device, with_current=False)
+        )
+        runtimes.append(prepare_coaxial_runtime(
+            solver,
+            geometry,
+            resistance=element.resistance,
+            edge_control_volume=_edge_control_volume,
+            history_currents=_electric_history_currents,
+            validate_coefficient=_validate_local_update_coefficient,
+        ))
+    return tuple(runtimes)
+
+
+def _apply_coaxial_port_runtime(solver, runtime: PreparedPortRuntime, drive_step) -> None:
+    drive = None
+    if runtime.source_kind is not None:
+        if drive_step is None:
+            drive = _evaluate_drive(runtime)
+        else:
+            torch.index_select(runtime._drive_table, 0, drive_step, out=runtime._drive_row)
+            runtime.drive_buffer.copy_(runtime._drive_row[0])
+            drive = runtime.drive_buffer
+    apply_coaxial_runtime(runtime.lumped, _field_map(solver), thevenin_voltage=drive)
 
 
 def _spectral_weights(
@@ -940,6 +1303,13 @@ def prepare_port_spectral_accumulators(solver, time_steps: int, window_type: str
         return
     effective_window = solver._resolve_spectral_window_type(window_type)
     for runtime in runtimes:
+        retained = {name: getattr(runtime, name) for name in (
+            "window_weights", "voltage_phase_weights", "current_phase_weights",
+            "observer_current_buffer", "observer_window_buffer",
+            "observer_voltage_kernel_buffer", "observer_current_kernel_buffer",
+            "accumulator", "drive_accumulator")}
+        if getattr(solver, "complex_fields_enabled", False):
+            retained["accumulator_imag"] = runtime.accumulator_imag
         runtime.window_weights = _spectral_weights(
             solver,
             runtime.frequencies,
@@ -948,6 +1318,8 @@ def prepare_port_spectral_accumulators(solver, time_steps: int, window_type: str
         )
         runtime.window_type = effective_window
         runtime.accumulator = PortDFTAccumulator(runtime.frequencies)
+        if getattr(solver, "complex_fields_enabled", False):
+            runtime.accumulator_imag = PortDFTAccumulator(runtime.frequencies)
         runtime.drive_accumulator = (
             PortDFTAccumulator(runtime.frequencies)
             if runtime.excitation is not None
@@ -965,8 +1337,8 @@ def prepare_port_spectral_accumulators(solver, time_steps: int, window_type: str
         )
         # Observation phasors share the public field monitor time origin. The
         # separate drive/circuit clocks retain their integration coordinates.
-        electric_times = step * dt
-        magnetic_times = (step - 0.5) * dt
+        electric_times = (step + 1) * dt
+        magnetic_times = (step + 0.5) * dt
         # Non-wire lumped ports sample voltage at the magnetic half-step (shared
         # with the current). Wire-bound ports and pure field ports keep the
         # electric full-step voltage stagger.
@@ -1011,12 +1383,28 @@ def prepare_port_spectral_accumulators(solver, time_steps: int, window_type: str
         runtime.observer_current_kernel_buffer = torch.empty_like(
             runtime.observer_voltage_kernel_buffer
         )
+        if runtime.sheet_feed is not None:
+            runtime.sheet_feed.column_sum.zero_()
         runtime.sample_index = 0
-    solver._port_observer_step = torch.zeros(
-        (1,),
-        device=solver.device,
-        dtype=torch.int64,
-    )
+        # Cooperative graph replays retain these pointers across repeated runs.
+        # Copy the new plan into an equal buffer; changed shape forces a new plan.
+        for name, old in retained.items():
+            new = getattr(runtime, name)
+            if isinstance(new, torch.Tensor) and isinstance(old, torch.Tensor):
+                if new.shape == old.shape and new.dtype == old.dtype and new.device == old.device:
+                    old.copy_(new)
+                    setattr(runtime, name, old)
+            elif isinstance(new, PortDFTAccumulator) and isinstance(old, PortDFTAccumulator):
+                if torch.equal(new.frequencies, old.frequencies):
+                    for key in ("_voltage_sum", "_current_sum", "_window_weight_sum", "_voltage_term", "_current_term"):
+                        getattr(old, key).zero_()
+                    old._sample_count = 0
+                    setattr(runtime, name, old)
+    counter = getattr(solver, "_port_observer_step", None)
+    if counter is None:
+        solver._port_observer_step = torch.zeros((1,), device=solver.device, dtype=torch.int64)
+    else:
+        counter.zero_()
     solver._port_observer_graph_active = False
 
 
@@ -1029,6 +1417,8 @@ def complete_port_spectral_normalization(solver) -> None:
         planned = runtime.window_weights.sum(dim=0)
         if runtime.accumulator is not None:
             runtime.accumulator._window_weight_sum.copy_(planned)
+        if getattr(solver, "complex_fields_enabled", False):
+            runtime.accumulator_imag._window_weight_sum.copy_(planned)
         if runtime.drive_accumulator is not None:
             runtime.drive_accumulator._window_weight_sum.copy_(planned)
 
@@ -1047,6 +1437,12 @@ def _drive_value(runtime: PreparedPortRuntime, time: torch.Tensor) -> torch.Tens
         carrier = runtime.source_amplitude.real * torch.cos(angle)
         carrier = carrier + runtime.source_amplitude.imag * torch.sin(angle)
         value = envelope * carrier
+    elif runtime.source_kind in ("custom", "broadband_pulse"):
+        from ..waveforms import evaluate_time_shifted_waveform_torch
+
+        value = runtime.source_amplitude.real * evaluate_time_shifted_waveform_torch(
+            runtime._compiled_source_time, time
+        )
     else:
         tau = time - runtime.source_delay
         alpha_sq = (torch.pi * runtime.source_frequency * tau).square()
@@ -1058,6 +1454,45 @@ def _evaluate_drive(runtime: PreparedPortRuntime) -> torch.Tensor:
     value = _drive_value(runtime, runtime.magnetic_time)
     runtime.drive_buffer.copy_(value)
     return runtime.drive_buffer
+
+
+def prepare_port_drive_tables(solver, time_steps: int) -> None:
+    """Tabulate the drive of every applied port for ``apply_port_runtimes(drive_step=...)``.
+
+    Row ``n`` is bitwise the value ``_evaluate_drive`` writes at step ``n``. The
+    sample times replay the float64 recurrence of ``_advance_port_sample_time``
+    (one ``t += dt`` per step from the current magnetic clock, never
+    ``t0 + n * dt``), and the waveform is the same ``_drive_value`` expression,
+    evaluated elementwise. Rows before ``sample_index`` (a resumed run) are
+    never indexed and stay zero. A table of unchanged shape is refilled in place
+    so captured CUDA graphs keep their pointers.
+    """
+
+    runtimes = tuple(
+        runtime
+        for runtime in getattr(solver, "_port_runtimes", ())
+        if (runtime.lumped is not None or runtime.sheet_feed is not None) and runtime.embedded_network_name is None
+    )
+    if not runtimes:
+        return
+    dt = float(solver.dt)
+    clocks = torch.stack([runtime.magnetic_time for runtime in runtimes]).tolist()
+    for runtime, clock in zip(runtimes, clocks):
+        table = torch.zeros(time_steps, device=solver.device, dtype=runtime.drive_buffer.dtype)
+        start = runtime.sample_index
+        if runtime.source_kind is not None and start < time_steps:
+            times = torch.tensor(
+                list(accumulate(repeat(dt, time_steps - start - 1), initial=clock)),
+                device=solver.device,
+                dtype=runtime.magnetic_time.dtype,
+            )
+            table[start:] = _drive_value(runtime, times).to(table.dtype)
+        retained = getattr(runtime, "_drive_table", None)
+        if retained is not None and retained.shape == table.shape and retained.dtype == table.dtype:
+            retained.copy_(table)
+        else:
+            runtime._drive_table = table
+            runtime._drive_row = torch.empty(1, device=solver.device, dtype=table.dtype)
 
 
 def replay_port_runtimes(
@@ -1074,10 +1509,12 @@ def replay_port_runtimes(
         solver, "_lumped_element_runtimes", ()
     ):
         return electric_fields, {}
+    if getattr(solver, "complex_fields_enabled", False):
+        raise NotImplementedError("Complex-field lumped adjoint/pullback requires the discrete transpose of the imaginary state bank.")
     fields = dict(electric_fields)
     next_auxiliary = {}
     sample_time = torch.as_tensor(
-        time_value + 0.5 * float(solver.dt),
+        injection_time("port_drive", time_value, solver.dt),
         device=solver.device,
         dtype=solver.Ex.dtype,
     )
@@ -1485,6 +1922,8 @@ def pullback_port_runtimes(
 ):
     """Reverse all local branch solves before the Maxwell reverse step."""
 
+    if getattr(solver, "complex_fields_enabled", False):
+        raise NotImplementedError("Complex-field lumped adjoint/pullback requires the discrete transpose of the imaginary state bank.")
     updated = dict(adjoint_state)
     grad_eps = {name: torch.zeros_like(value) for name, value in eps_by_field.items()}
     wire_runtime = getattr(solver, "_wire_runtime", None)
@@ -1504,7 +1943,7 @@ def pullback_port_runtimes(
     )
     semantic_grads = {}
     sample_time = torch.as_tensor(
-        time_value + 0.5 * float(solver.dt),
+        injection_time("port_drive", time_value, solver.dt),
         device=solver.device,
         dtype=solver.Ex.dtype,
     )
@@ -1735,11 +2174,23 @@ def _apply_wire_port_substeps(solver, runtime: PreparedPortRuntime) -> None:
     )
 
 
-def apply_port_runtimes(solver) -> None:
+def apply_port_runtimes(solver, *, drive_step: torch.Tensor | None = None) -> None:
     """Apply prepared source/load corrections without host-device transfers."""
 
     for runtime in getattr(solver, "_port_runtimes", ()):
+        if runtime.sheet_feed is not None:
+            if drive_step is None:
+                drive = _evaluate_drive(runtime)
+            else:
+                torch.index_select(runtime._drive_table, 0, drive_step, out=runtime._drive_row)
+                runtime.drive_buffer.copy_(runtime._drive_row[0])
+                drive = runtime.drive_buffer
+            runtime.sheet_feed.drive.copy_(drive)
+            continue
         if runtime.lumped is None or runtime.embedded_network_name is not None:
+            continue
+        if isinstance(runtime.lumped, CoaxialLumpedRuntime):
+            _apply_coaxial_port_runtime(solver, runtime, drive_step)
             continue
         if runtime.source_kind is None and runtime.wire_provider is None:
             # Passive Yee-field termination: the drive is identically the prepared
@@ -1750,8 +2201,18 @@ def apply_port_runtimes(solver) -> None:
                 runtime.lumped,
                 getattr(solver, runtime.field_name),
             )
+            if getattr(solver, "complex_fields_enabled", False):
+                apply_lumped_runtime(
+                    runtime.lumped.imaginary,
+                    getattr(solver, runtime.field_name + "_imag"),
+                )
             continue
-        drive = _evaluate_drive(runtime)
+        if drive_step is None:
+            drive = _evaluate_drive(runtime)
+        else:
+            torch.index_select(runtime._drive_table, 0, drive_step, out=runtime._drive_row)
+            runtime.drive_buffer.copy_(runtime._drive_row[0])
+            drive = runtime.drive_buffer
         if runtime.wire_provider is None:
             apply_lumped_runtime(
                 runtime.lumped,
@@ -1765,12 +2226,31 @@ def apply_port_runtimes(solver) -> None:
             _apply_wire_port_substeps(solver, runtime)
     for runtime, field_name in getattr(solver, "_lumped_element_runtimes", ()):
         apply_lumped_runtime(runtime, getattr(solver, field_name))
+        if getattr(solver, "complex_fields_enabled", False):
+            apply_lumped_runtime(runtime.imaginary, getattr(solver, field_name + "_imag"))
+    coaxial_elements = getattr(solver, "_coaxial_element_runtimes", ())
+    if coaxial_elements:
+        fields = _field_map(solver)
+        for runtime in coaxial_elements:
+            apply_coaxial_runtime(runtime, fields)
     if getattr(solver, "_circuit_runtimes", ()):
         apply_circuit_runtimes(solver)
 
 
-def accumulate_port_observers(solver) -> None:
+def _advance_port_sample_time(solver, runtime) -> None:
+    """Advance physical clocks using the authoritative full Yee step in float64."""
+    runtime.electric_time.add_(float(solver.dt))
+    runtime.magnetic_time.add_(float(solver.dt))
+
+
+def accumulate_port_observers(solver, *, step: torch.Tensor | None = None) -> None:
     fields = None
+
+    def row(table, buffer):
+        if step is None:
+            return table[runtime.sample_index]
+        torch.index_select(table, 0, step, out=buffer)
+        return buffer[0]
     for runtime in getattr(solver, "_port_runtimes", ()):
         if (
             runtime.accumulator is None
@@ -1780,7 +2260,11 @@ def accumulate_port_observers(solver) -> None:
             or runtime.observer_current_buffer is None
         ):
             raise RuntimeError("Port spectral accumulators were not prepared.")
-        if runtime.circuit_port is not None:
+        if runtime.sheet_feed is not None:
+            voltage, current = runtime.sheet_feed.voltage, runtime.sheet_feed.current
+            voltage_kernel = row(runtime.current_phase_weights, runtime.observer_current_kernel_buffer)
+            current_kernel = voltage_kernel
+        elif runtime.circuit_port is not None:
             voltage = runtime.circuit_port.field.last_voltage
             current = -runtime.circuit_port.field.last_current
             # Circuit-bound ports sample voltage and current at the same instant,
@@ -1789,9 +2273,9 @@ def accumulate_port_observers(solver) -> None:
             # the matching precomputed phase table for both terms so the DFT
             # stagger follows the coupling point instead of the default E/H split.
             if runtime.circuit_port.last_integration == "trapezoidal":
-                voltage_kernel = runtime.current_phase_weights[runtime.sample_index]
+                voltage_kernel = row(runtime.current_phase_weights, runtime.observer_current_kernel_buffer)
             else:
-                voltage_kernel = runtime.voltage_phase_weights[runtime.sample_index]
+                voltage_kernel = row(runtime.voltage_phase_weights, runtime.observer_voltage_kernel_buffer)
             current_kernel = voltage_kernel
         elif runtime.lumped is not None and runtime.wire_provider is not None:
             # The wire terminal coordinate is electric-time data, while its branch
@@ -1808,8 +2292,8 @@ def accumulate_port_observers(solver) -> None:
             )
             voltage = torch.dot(coordinate.reshape(-1), provider.voltage_weights)
             current = -runtime.lumped.last_branch_current
-            voltage_kernel = runtime.voltage_phase_weights[runtime.sample_index]
-            current_kernel = runtime.current_phase_weights[runtime.sample_index]
+            voltage_kernel = row(runtime.voltage_phase_weights, runtime.observer_voltage_kernel_buffer)
+            current_kernel = row(runtime.current_phase_weights, runtime.observer_current_kernel_buffer)
         elif runtime.lumped is not None:
             # Voltage and current must come from the same implicit coupling
             # state. The corrected Yee field is the post-branch voltage, whereas
@@ -1825,8 +2309,8 @@ def accumulate_port_observers(solver) -> None:
                 out=runtime.observer_current_buffer,
             )
             current = runtime.observer_current_buffer
-            voltage_kernel = runtime.voltage_phase_weights[runtime.sample_index]
-            current_kernel = runtime.current_phase_weights[runtime.sample_index]
+            voltage_kernel = row(runtime.voltage_phase_weights, runtime.observer_voltage_kernel_buffer)
+            current_kernel = row(runtime.current_phase_weights, runtime.observer_current_kernel_buffer)
         elif runtime.wire_provider is not None:
             if fields is None:
                 fields = _field_map(solver)
@@ -1842,16 +2326,16 @@ def accumulate_port_observers(solver) -> None:
                 provider.voltage_weights,
             )
             current = torch.zeros_like(voltage)
-            voltage_kernel = runtime.voltage_phase_weights[runtime.sample_index]
-            current_kernel = runtime.current_phase_weights[runtime.sample_index]
+            voltage_kernel = row(runtime.voltage_phase_weights, runtime.observer_voltage_kernel_buffer)
+            current_kernel = row(runtime.current_phase_weights, runtime.observer_current_kernel_buffer)
         else:
             if fields is None:
                 fields = _field_map(solver)
             voltage = runtime.geometry.integrate_voltage(fields)
             current = runtime.geometry.integrate_current(fields)
-            voltage_kernel = runtime.voltage_phase_weights[runtime.sample_index]
-            current_kernel = runtime.current_phase_weights[runtime.sample_index]
-        weight = runtime.window_weights[runtime.sample_index]
+            voltage_kernel = row(runtime.voltage_phase_weights, runtime.observer_voltage_kernel_buffer)
+            current_kernel = row(runtime.current_phase_weights, runtime.observer_current_kernel_buffer)
+        weight = row(runtime.window_weights, runtime.observer_window_buffer)
         runtime.accumulator.accumulate_precomputed(
             voltage,
             current,
@@ -1859,6 +2343,28 @@ def accumulate_port_observers(solver) -> None:
             current_kernel=current_kernel,
             window_weight=weight,
         )
+        if getattr(solver, "complex_fields_enabled", False):
+            if runtime.lumped is not None:
+                voltage_imag = runtime.lumped.last_voltage_midpoint_imag
+                torch.neg(runtime.lumped.last_branch_current_imag, out=runtime.observer_current_buffer)
+                current_imag = runtime.observer_current_buffer
+            else:
+                imaginary_fields = {
+                    name: getattr(solver, name + "_imag")
+                    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+                }
+                voltage_imag = runtime.geometry.integrate_voltage(imaginary_fields)
+                current_imag = runtime.geometry.integrate_current(imaginary_fields)
+            runtime.accumulator_imag.accumulate_precomputed(
+                voltage_imag, current_imag,
+                voltage_kernel=voltage_kernel,
+                current_kernel=current_kernel,
+                window_weight=weight,
+            )
+        if runtime.sheet_feed is not None:
+            feed = runtime.sheet_feed
+            torch.mul(current_kernel[:, None], feed.column_voltage[None, :], out=feed.column_term)
+            feed.column_sum.add_(feed.column_term)
         if runtime.drive_accumulator is not None:
             runtime.drive_accumulator.accumulate_precomputed(
                 runtime.drive_buffer,
@@ -1867,21 +2373,9 @@ def accumulate_port_observers(solver) -> None:
                 current_kernel=current_kernel,
                 window_weight=weight,
             )
-        runtime.sample_index += 1
-        # Observer sample times advance by the outer macro step. For wire-bound
-        # ports the lumped runtime runs at a fractional substep (lumped.dt =
-        # macro_dt / substeps), so the macro advance is lumped.dt * substeps;
-        # for plain lumped and non-lumped ports this reduces to the single-step
-        # value. The substeps == 1 case reuses the existing lumped.dt tensor so
-        # the embedded-network observer hot path stays allocation-free.
-        if runtime.lumped is None:
-            macro_step = solver.dt
-        elif runtime.substeps == 1:
-            macro_step = runtime.lumped.dt
-        else:
-            macro_step = runtime.lumped.dt * runtime.substeps
-        runtime.electric_time.add_(macro_step)
-        runtime.magnetic_time.add_(macro_step)
+        if step is None:
+            runtime.sample_index += 1
+        _advance_port_sample_time(solver, runtime)
 
 
 def _accumulate_embedded_port_observers_gpu(solver) -> None:
@@ -1924,8 +2418,7 @@ def _accumulate_embedded_port_observers_gpu(solver) -> None:
         )
         accumulator._current_sum.add_(accumulator._current_term)
         accumulator._window_weight_sum.add_(runtime.observer_window_buffer[0])
-        runtime.electric_time.add_(lumped.dt)
-        runtime.magnetic_time.add_(lumped.dt)
+        _advance_port_sample_time(solver, runtime)
     step.add_(1)
 
 
@@ -1996,10 +2489,15 @@ def complete_port_observer_graph(solver, sample_count: int) -> None:
     for runtime in getattr(solver, "_port_runtimes", ()):
         runtime.sample_index = int(sample_count)
         runtime.accumulator._sample_count = int(sample_count)
+        if getattr(solver, "complex_fields_enabled", False):
+            runtime.accumulator_imag._sample_count = int(sample_count)
+        if runtime.drive_accumulator is not None:
+            runtime.drive_accumulator._sample_count = int(sample_count)
 
 
 def finalize_port_data(solver) -> dict[str, PortData]:
     output = {}
+    solver._port_drives = {}
     for runtime in getattr(solver, "_port_runtimes", ()):
         if runtime.accumulator is None:
             continue
@@ -2007,11 +2505,44 @@ def finalize_port_data(solver) -> dict[str, PortData]:
             raise RuntimeError(
                 f"Port {runtime.port.name!r} has no active DFT samples; increase run_time."
             )
-        voltage, current = runtime.accumulator.phasors(normalization="peak")
+        voltage, current = runtime.accumulator.phasors(
+            normalization="peak", integration_dt=solver._spectral_integration_dt,
+            reference_frequency=solver._spectral_reference_frequency)
+        source_spectrum = None
+        if solver._normalize_source:
+            from .observers import _safe_source_spectrum
+            source_spectrum = _safe_source_spectrum(source_normalization_spectrum(
+                solver, runtime.frequencies.detach().cpu().tolist(),
+                steps_run=runtime.sample_index, window_type=runtime.window_type,
+            )).to(dtype=voltage.dtype)
+            voltage = voltage / source_spectrum
+            current = current / source_spectrum
+        if getattr(solver, "complex_fields_enabled", False):
+            voltage_imag, current_imag = runtime.accumulator_imag.phasors(
+                normalization="peak", integration_dt=solver._spectral_integration_dt,
+                reference_frequency=solver._spectral_reference_frequency)
+            if source_spectrum is not None:
+                voltage_imag = voltage_imag / source_spectrum
+                current_imag = current_imag / source_spectrum
+            voltage = combine_complex_spectral_components(
+                voltage.real, voltage.imag, voltage_imag.real, voltage_imag.imag
+            )
+            current = combine_complex_spectral_components(
+                current.real, current.imag, current_imag.real, current_imag.imag
+            )
+            # Pulse banks already use dt*f_ref (factor=1); analytic CW needs
+            # half the per-real-bank peak normalization, matching field observers.
+            factor = solver._time_plan["spectral_phasor_factor"] / 2.0
+            voltage = voltage * factor
+            current = current * factor
         available_power = None
         excitation_threshold = None
-        if runtime.drive_accumulator is not None and runtime.lumped is not None:
-            source_voltage, _ = runtime.drive_accumulator.phasors(normalization="peak")
+        if runtime.drive_accumulator is not None and (runtime.lumped is not None or runtime.sheet_feed is not None):
+            source_voltage, _ = runtime.drive_accumulator.phasors(
+                normalization="peak", integration_dt=solver._spectral_integration_dt,
+                reference_frequency=solver._spectral_reference_frequency)
+            if source_spectrum is not None:
+                source_voltage = source_voltage / source_spectrum
             source_magnitude = torch.abs(source_voltage)
             excitation_threshold = torch.clamp(
                 torch.max(source_magnitude) * 1.0e-6,
@@ -2024,7 +2555,33 @@ def finalize_port_data(solver) -> dict[str, PortData]:
                     f"Port {runtime.port.name!r} excitation spectrum is below the "
                     f"relative threshold at frequencies {weak_frequencies}."
                 )
-            available_power = torch.abs(source_voltage).square() / (8.0 * runtime.lumped.resistance)
+            resistance = runtime.lumped.resistance if runtime.sheet_feed is None else runtime.sheet_feed.resistance
+            available_power = torch.abs(source_voltage).square() / (8.0 * resistance)
+            solver._port_drives[runtime.port.name] = dict(
+                source_spectrum=source_voltage, source_impedance=resistance)
+        sheet_diagnostics = None
+        if runtime.sheet_feed is not None:
+            feed = runtime.sheet_feed
+            scale = spectral_scale(runtime.accumulator._window_weight_sum, phasor_factor=2.0,
+                                   integration_dt=solver._spectral_integration_dt,
+                                   reference_frequency=solver._spectral_reference_frequency,
+                                   frequency=runtime.frequencies)
+            columns = (feed.column_sum.T * scale).T
+            if source_spectrum is not None:
+                columns = columns / source_spectrum[:, None]
+            g = feed.column_conductance
+            # Center first so a single column has exactly zero variance.
+            centered = columns - columns[:, :1]
+            deviation = centered - (centered * g).sum(1, keepdim=True) / g.sum()
+            variance = (deviation.abs().square() * g).sum(1)
+            source = source_voltage if runtime.drive_accumulator is not None else torch.zeros_like(voltage)
+            currents = g * (source[:, None] - columns)
+            port_power = .5 * (voltage * current.conj()).real
+            field_power = .5 * (columns * currents.conj()).real.sum(1)
+            sheet_diagnostics = dict(column_voltage=columns, column_current=currents,
+                                     column_conductance=g, variance_power=variance,
+                                     port_accepted_power=port_power, field_accepted_power=field_power,
+                                     power_correction=-.5*variance, phasor_power_factor=.5)
         output[runtime.port.name] = PortData(
             port_name=runtime.port.name,
             frequencies=runtime.frequencies,
@@ -2040,30 +2597,53 @@ def finalize_port_data(solver) -> dict[str, PortData]:
             reference_plane=runtime.port.reference_plane,
             available_power=available_power,
             metadata={
+                "port_role": _port_role(runtime),
                 "axis": getattr(runtime.geometry, "axis", None),
                 "orientation": getattr(runtime.geometry, "direction", 1),
                 "provider": (
                     f"wire_{runtime.geometry.binding_kind}"
                     if runtime.wire_provider is not None
-                    else "yee_contour"
+                    else "sheet_gap" if runtime.sheet_feed is not None else "yee_contour"
                 ),
                 "wire_binding": (
                     dict(runtime.geometry.metadata or {})
                     if runtime.wire_provider is not None
                     else None
                 ),
+                "terminal_audit": (
+                    dict(runtime.geometry.metadata or {})
+                    if isinstance(runtime.port, TerminalPort) and runtime.wire_provider is None
+                    else None
+                ),
                 "current_convention": (
                     "entering_wire_network"
                     if runtime.wire_provider is not None
                     else "entering_field_network"
-                    if runtime.lumped is not None or runtime.circuit_port is not None
+                    if runtime.lumped is not None or runtime.circuit_port is not None or runtime.sheet_feed is not None
                     else "positive_axis_h_contour"
                 ),
+                **({"sheet_gap": sheet_diagnostics} if sheet_diagnostics is not None else {}),
                 "dft_samples": runtime.sample_index,
                 "window": runtime.window_type,
                 "excitation_threshold": excitation_threshold,
                 "units": {"voltage": "V", "current": "A", "power": "W"},
+                "reference_frequency": ("per-frequency" if solver._spectral_reference_frequency is None
+                                        else solver._spectral_reference_frequency),
             },
+            phasor_convention=(
+                ("Fourier integral with per-frequency reference period and exp(+i*omega*t) kernel"
+                 if solver._spectral_reference_frequency is None else
+                 "Fourier integral per reference period with exp(+i*omega*t) kernel")
+                if solver._spectral_integration_dt is not None and not solver._normalize_source
+                else PHASOR_CONVENTION
+            ),
+            power_wave_convention=(
+                ("Kurokawa spectral waves in sqrt(watt) per-frequency reference period"
+                 if solver._spectral_reference_frequency is None else
+                 "Kurokawa spectral waves in sqrt(watt) per reference-period integral")
+                if solver._spectral_integration_dt is not None and not solver._normalize_source
+                else POWER_WAVE_CONVENTION
+            ),
         )
     return output
 
@@ -2075,6 +2655,7 @@ __all__ = [
     "apply_port_runtimes",
     "complete_port_spectral_normalization",
     "finalize_port_data",
+    "prepare_port_drive_tables",
     "prepare_port_runtimes",
     "prepare_port_spectral_accumulators",
     "pullback_port_runtimes",

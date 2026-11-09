@@ -25,6 +25,10 @@ class _ReverseStepResult:
     grad_eps_ey: torch.Tensor
     grad_eps_ez: torch.Tensor
     backend: str
+    grad_copper_coefficients: tuple[dict[str, torch.Tensor], ...] | None = None
+    grad_sigma_ex: torch.Tensor | None = None
+    grad_sigma_ey: torch.Tensor | None = None
+    grad_sigma_ez: torch.Tensor | None = None
     source_adjoint_state: dict[str, torch.Tensor] | None = None
     magnetic_output_adjoint: dict[str, torch.Tensor] | None = None
     # Kerr chi3 gradient channel; populated only when the reverse step ran with

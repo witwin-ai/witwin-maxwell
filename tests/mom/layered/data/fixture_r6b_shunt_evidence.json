@@ -1,0 +1,509 @@
+{
+  "native_coarse": {
+    "frequency_Hz": [
+      1000000000.0,
+      3400000000.0
+    ],
+    "y_real": [
+      [
+        [
+          1.2107197780535904e-05
+        ]
+      ],
+      [
+        [
+          0.00011535862261849867
+        ]
+      ]
+    ],
+    "y_imag": [
+      [
+        [
+          -0.00023004209576685424
+        ]
+      ],
+      [
+        [
+          -0.0007324370790256468
+        ]
+      ]
+    ],
+    "L_H": [
+      -6.899402840637797e-07,
+      -6.236331130125834e-08
+    ],
+    "series_R_ohm": [
+      228.15379289703137,
+      209.830053896844
+    ],
+    "summed_shunt_G_S": [
+      1.2107197780535904e-05,
+      0.00011535862261849867
+    ],
+    "unknowns": 270,
+    "faces": 222,
+    "seconds": 1.2514535000082105,
+    "peak_bytes": 172903936,
+    "exact_repeats": 3,
+    "metadata": {
+      "solver": "layered_mpie_dense",
+      "bridge_width": 9.999999999999999e-06,
+      "max_edge": 3.9999999999999996e-05,
+      "edge_cell": 9.999999999999999e-06,
+      "unknowns": 270,
+      "faces": 222,
+      "rho_max": 0.00019996979771955562,
+      "extract_distance": 0.0001131370849898476,
+      "mesh_quality": {
+        "min_angle_degrees": 25.20975023504197,
+        "max_aspect_ratio": 2.594941973171254,
+        "smallest_edge_m": 4.9999999999999996e-06
+      },
+      "sheets": [
+        {
+          "sigma": null,
+          "thickness": 2e-06,
+          "roughness": null
+        },
+        {
+          "sigma": null,
+          "thickness": 2e-06,
+          "roughness": null
+        }
+      ],
+      "port_bridges": "ideal_lossless",
+      "low_frequency_method": "loop_tree_scaled",
+      "loop_unknowns": 49,
+      "tree_unknowns": 221,
+      "components": 1,
+      "minimum_frequency_Hz": 1.0,
+      "dc": "positive_frequency_limit",
+      "breakpoint_tolerance_m": 0.0,
+      "factor_dtype": [
+        "complex64",
+        "complex64"
+      ],
+      "refinement_steps": [
+        2,
+        2
+      ],
+      "backward_error": [
+        3.916769087651085e-15,
+        1.2076800898752962e-15
+      ],
+      "frequency_chunk_size": 2
+    },
+    "source_sha256": {
+      "witwin/maxwell/mom/layered/__init__.py": "8cbb7ea3295374383363dfd473a348401ebb9f54549bd7e941f486a21a7bbfee",
+      "witwin/maxwell/mom/layered/loss.py": "2c3bc4eeac79ee343947f37a6f113cc13acb987be92f23cf4111273b9af7208b",
+      "witwin/maxwell/mom/layered/green.py": "f9ffa6acae753b5ef26d0cfe9a1bfa968db9fdbb369e16b0b1c8a541ff892843",
+      "witwin/maxwell/mom/layered/process.py": "5486af65e790ca3757dd5693cb1406624b1a6700d7c301a3442f471264a087e3",
+      "witwin/maxwell/mom/layered/build.py": "54aadfbda0ebdca7e94c674a61d4d63feff7a349b98efef14c0c6f0f39c16fff",
+      "witwin/maxwell/mom/layered/vertical.py": "3e800cbf255fde168a7bf52637d4af2a0dd0ae969748fa8d55046ca486a6a573",
+      "witwin/maxwell/mom/layered/network.py": "dc372a043e4b02d005064abe40f830b408f10d93be686215a4f8449331246857",
+      "witwin/maxwell/mom/layered/assembly.py": "bf27efa62b2083bf0d675ad16ebf86a0a498a7867ee4061798e399558e27e8a6",
+      "witwin/maxwell/mom/layered/mesh.py": "d37140840460b54d737cf0868ac1930401c2d27ed9d6de732af98fe08ddb9087",
+      "witwin/maxwell/mom/layered/config.py": "f36162d4af7bd721f94d9f45ecad4fbe29076565dc913cba8e5c57673dd1fa4a",
+      "witwin/maxwell/mom/layered/sweep.py": "5a3067b19309c3f0f8d75fae6ee9dc52df82b674729737983fc02dbd05b660e8",
+      "witwin/maxwell/mom/layered/runtime.py": "b90c0c0c382b5526688db3e5e7a24688968dc6e14665eb312a5313a8b685666d",
+      "witwin/maxwell/mom/layered/lowfreq.py": "7608cee84cd5c47ef7d40ab9b0776a0cbd027cf4cb1702e51e6a65cfd6dc0d2e",
+      "witwin/maxwell/mom/layered/cuda/assembly.cu": "35acfb2e55feec3b2f766e9939e769b84442a655ea30cdcd8d9321a4d6a26691",
+      "witwin/maxwell/mom/layered/cuda/common.cuh": "62b41971e1b06739c2b9c0212fc575a2084b45e2bfd9e0909f0e5ebf682c5864",
+      "witwin/maxwell/mom/layered/cuda/vertical.cu": "6a1ca6c31f978cc10ff697cd313c800bd642c951f130394c246d5ec1656deec5",
+      "witwin/maxwell/mom/layered/cuda/spectral.cu": "cfd91eaf6ae2a36871f39b75353b5c5bd57e35aa2ff3a91ec523a5faa6fb2ee1",
+      "witwin/maxwell/mom/layered/cuda/triangle_static.cuh": "c129a5f5f3dedb380724b26ab20a7f487aeb72f81b0dc9c0b1227e31407fe359",
+      "witwin/maxwell/mom/layered/cuda/bessel.cu": "10acfcda189ed9580a7b2f4231d6bc70431d7e6e416237a01c133338e61c3cee",
+      "witwin/maxwell/mom/layered/cuda/interp.cu": "f4584be63eddef1aa6636c9bc286787b461698b8b6d346b567e518f86b9afb85",
+      "witwin/maxwell/mom/layered/cuda/lowfreq.cu": "f54f4400bbf631bdf13fee75d91d369fac7452a29ac7eb75f850905226ce9cfe",
+      "witwin/maxwell/mom/layered/cuda/green_eval.cuh": "8035ac87259ca5bb69a55dc172508727c8a9e54cb4ad034e7c675327f3313f15",
+      "witwin/maxwell/mom/layered/cuda/binding.cpp": "7824d257dd284694af27f3f87e49b30fd44e5c60bfab269e21afa6a7aab83889"
+    }
+  },
+  "native_fine": {
+    "frequency_Hz": [
+      1000000000.0,
+      3400000000.0
+    ],
+    "y_real": [
+      [
+        [
+          1.2601016950184867e-05
+        ]
+      ],
+      [
+        [
+          0.00011962411209973757
+        ]
+      ]
+    ],
+    "y_imag": [
+      [
+        [
+          -0.00024302226467237147
+        ]
+      ],
+      [
+        [
+          -0.0007742025120297612
+        ]
+      ]
+    ],
+    "L_H": [
+      -6.53142598646946e-07,
+      -5.9052739698670804e-08
+    ],
+    "series_R_ohm": [
+      212.78813603955282,
+      194.92295548532155
+    ],
+    "summed_shunt_G_S": [
+      1.2601016950184867e-05,
+      0.00011962411209973757
+    ],
+    "unknowns": 5586,
+    "faces": 3888,
+    "seconds": 4.6303809779929,
+    "peak_bytes": 5466304000,
+    "exact_repeats": 1,
+    "metadata": {
+      "solver": "layered_mpie_dense",
+      "bridge_width": 9.999999999999999e-06,
+      "max_edge": 4.9999999999999996e-06,
+      "edge_cell": 1.2499999999999999e-06,
+      "unknowns": 5586,
+      "faces": 3888,
+      "rho_max": 0.00019996979771955562,
+      "extract_distance": 1.414213562373095e-05,
+      "mesh_quality": {
+        "min_angle_degrees": 14.036243467926221,
+        "max_aspect_ratio": 4.25000000000007,
+        "smallest_edge_m": 1.2499999999999762e-06
+      },
+      "sheets": [
+        {
+          "sigma": null,
+          "thickness": 2e-06,
+          "roughness": null
+        },
+        {
+          "sigma": null,
+          "thickness": 2e-06,
+          "roughness": null
+        }
+      ],
+      "port_bridges": "ideal_lossless",
+      "low_frequency_method": "loop_tree_scaled",
+      "loop_unknowns": 1699,
+      "tree_unknowns": 3887,
+      "components": 1,
+      "minimum_frequency_Hz": 1.0,
+      "dc": "positive_frequency_limit",
+      "breakpoint_tolerance_m": 0.0,
+      "factor_dtype": [
+        "complex64",
+        "complex64"
+      ],
+      "refinement_steps": [
+        3,
+        3
+      ],
+      "backward_error": [
+        2.3655520297962207e-17,
+        1.0693988906206041e-16
+      ],
+      "frequency_chunk_size": 2
+    },
+    "source_sha256": {
+      "witwin/maxwell/mom/layered/__init__.py": "8cbb7ea3295374383363dfd473a348401ebb9f54549bd7e941f486a21a7bbfee",
+      "witwin/maxwell/mom/layered/loss.py": "2c3bc4eeac79ee343947f37a6f113cc13acb987be92f23cf4111273b9af7208b",
+      "witwin/maxwell/mom/layered/green.py": "f9ffa6acae753b5ef26d0cfe9a1bfa968db9fdbb369e16b0b1c8a541ff892843",
+      "witwin/maxwell/mom/layered/process.py": "5486af65e790ca3757dd5693cb1406624b1a6700d7c301a3442f471264a087e3",
+      "witwin/maxwell/mom/layered/build.py": "54aadfbda0ebdca7e94c674a61d4d63feff7a349b98efef14c0c6f0f39c16fff",
+      "witwin/maxwell/mom/layered/vertical.py": "3e800cbf255fde168a7bf52637d4af2a0dd0ae969748fa8d55046ca486a6a573",
+      "witwin/maxwell/mom/layered/network.py": "dc372a043e4b02d005064abe40f830b408f10d93be686215a4f8449331246857",
+      "witwin/maxwell/mom/layered/assembly.py": "bf27efa62b2083bf0d675ad16ebf86a0a498a7867ee4061798e399558e27e8a6",
+      "witwin/maxwell/mom/layered/mesh.py": "d37140840460b54d737cf0868ac1930401c2d27ed9d6de732af98fe08ddb9087",
+      "witwin/maxwell/mom/layered/config.py": "f36162d4af7bd721f94d9f45ecad4fbe29076565dc913cba8e5c57673dd1fa4a",
+      "witwin/maxwell/mom/layered/sweep.py": "5a3067b19309c3f0f8d75fae6ee9dc52df82b674729737983fc02dbd05b660e8",
+      "witwin/maxwell/mom/layered/runtime.py": "b90c0c0c382b5526688db3e5e7a24688968dc6e14665eb312a5313a8b685666d",
+      "witwin/maxwell/mom/layered/lowfreq.py": "7608cee84cd5c47ef7d40ab9b0776a0cbd027cf4cb1702e51e6a65cfd6dc0d2e",
+      "witwin/maxwell/mom/layered/cuda/assembly.cu": "35acfb2e55feec3b2f766e9939e769b84442a655ea30cdcd8d9321a4d6a26691",
+      "witwin/maxwell/mom/layered/cuda/common.cuh": "62b41971e1b06739c2b9c0212fc575a2084b45e2bfd9e0909f0e5ebf682c5864",
+      "witwin/maxwell/mom/layered/cuda/vertical.cu": "6a1ca6c31f978cc10ff697cd313c800bd642c951f130394c246d5ec1656deec5",
+      "witwin/maxwell/mom/layered/cuda/spectral.cu": "cfd91eaf6ae2a36871f39b75353b5c5bd57e35aa2ff3a91ec523a5faa6fb2ee1",
+      "witwin/maxwell/mom/layered/cuda/triangle_static.cuh": "c129a5f5f3dedb380724b26ab20a7f487aeb72f81b0dc9c0b1227e31407fe359",
+      "witwin/maxwell/mom/layered/cuda/bessel.cu": "10acfcda189ed9580a7b2f4231d6bc70431d7e6e416237a01c133338e61c3cee",
+      "witwin/maxwell/mom/layered/cuda/interp.cu": "f4584be63eddef1aa6636c9bc286787b461698b8b6d346b567e518f86b9afb85",
+      "witwin/maxwell/mom/layered/cuda/lowfreq.cu": "f54f4400bbf631bdf13fee75d91d369fac7452a29ac7eb75f850905226ce9cfe",
+      "witwin/maxwell/mom/layered/cuda/green_eval.cuh": "8035ac87259ca5bb69a55dc172508727c8a9e54cb4ad034e7c675327f3313f15",
+      "witwin/maxwell/mom/layered/cuda/binding.cpp": "7824d257dd284694af27f3f87e49b30fd44e5c60bfab269e21afa6a7aab83889"
+    }
+  },
+  "static_fine": {
+    "pitch_um": 1.25,
+    "gap_um": 0.0,
+    "cells": 9792,
+    "frequency_Hz": [
+      1000000000.0,
+      3400000000.0
+    ],
+    "y_real": [
+      1.2455384109787392e-05,
+      0.00011821670963110947
+    ],
+    "y_imag": [
+      -0.00023975929526598476,
+      -0.0007634517601892442
+    ],
+    "seconds": 3585.4716446770035,
+    "lumped_estimate": {
+      "Cox_F": [
+        7.260434006496001e-14,
+        3.775425683377921e-14
+      ],
+      "Csub_F": [
+        2.3778296945444517e-14,
+        1.7146773776001793e-14
+      ],
+      "Rsub_ohm": [
+        443.113462726379,
+        614.4878118109079
+      ],
+      "y_real": [
+        2.4451210427719998e-05,
+        0.00018401210535812533
+      ],
+      "y_imag": [
+        -0.00015040932219252947,
+        -0.0003859337067936034
+      ]
+    }
+  },
+  "static_previous": {
+    "pitch_um": 2.5,
+    "gap_um": 0.0,
+    "cells": 2448,
+    "frequency_Hz": [
+      1000000000.0,
+      3400000000.0
+    ],
+    "y_real": [
+      1.2152875655476648e-05,
+      0.00011551710259305632
+    ],
+    "y_imag": [
+      -0.00023383221679644243,
+      -0.0007446823954354126
+    ],
+    "seconds": 269.70660507401044,
+    "lumped_estimate": {
+      "Cox_F": [
+        7.260434006496001e-14,
+        3.775425683377921e-14
+      ],
+      "Csub_F": [
+        2.3778296945444517e-14,
+        1.7146773776001793e-14
+      ],
+      "Rsub_ohm": [
+        443.113462726379,
+        614.4878118109079
+      ],
+      "y_real": [
+        2.4451210427719998e-05,
+        0.00018401210535812533
+      ],
+      "y_imag": [
+        -0.00015040932219252947,
+        -0.0003859337067936034
+      ]
+    }
+  },
+  "source_sha256": {
+    "witwin/maxwell/mom/layered/__init__.py": "8cbb7ea3295374383363dfd473a348401ebb9f54549bd7e941f486a21a7bbfee",
+    "witwin/maxwell/mom/layered/loss.py": "2c3bc4eeac79ee343947f37a6f113cc13acb987be92f23cf4111273b9af7208b",
+    "witwin/maxwell/mom/layered/green.py": "f9ffa6acae753b5ef26d0cfe9a1bfa968db9fdbb369e16b0b1c8a541ff892843",
+    "witwin/maxwell/mom/layered/process.py": "5486af65e790ca3757dd5693cb1406624b1a6700d7c301a3442f471264a087e3",
+    "witwin/maxwell/mom/layered/build.py": "54aadfbda0ebdca7e94c674a61d4d63feff7a349b98efef14c0c6f0f39c16fff",
+    "witwin/maxwell/mom/layered/vertical.py": "3e800cbf255fde168a7bf52637d4af2a0dd0ae969748fa8d55046ca486a6a573",
+    "witwin/maxwell/mom/layered/network.py": "dc372a043e4b02d005064abe40f830b408f10d93be686215a4f8449331246857",
+    "witwin/maxwell/mom/layered/assembly.py": "bf27efa62b2083bf0d675ad16ebf86a0a498a7867ee4061798e399558e27e8a6",
+    "witwin/maxwell/mom/layered/mesh.py": "d37140840460b54d737cf0868ac1930401c2d27ed9d6de732af98fe08ddb9087",
+    "witwin/maxwell/mom/layered/config.py": "f36162d4af7bd721f94d9f45ecad4fbe29076565dc913cba8e5c57673dd1fa4a",
+    "witwin/maxwell/mom/layered/sweep.py": "5a3067b19309c3f0f8d75fae6ee9dc52df82b674729737983fc02dbd05b660e8",
+    "witwin/maxwell/mom/layered/runtime.py": "b90c0c0c382b5526688db3e5e7a24688968dc6e14665eb312a5313a8b685666d",
+    "witwin/maxwell/mom/layered/lowfreq.py": "7608cee84cd5c47ef7d40ab9b0776a0cbd027cf4cb1702e51e6a65cfd6dc0d2e",
+    "witwin/maxwell/mom/layered/cuda/assembly.cu": "35acfb2e55feec3b2f766e9939e769b84442a655ea30cdcd8d9321a4d6a26691",
+    "witwin/maxwell/mom/layered/cuda/common.cuh": "62b41971e1b06739c2b9c0212fc575a2084b45e2bfd9e0909f0e5ebf682c5864",
+    "witwin/maxwell/mom/layered/cuda/vertical.cu": "6a1ca6c31f978cc10ff697cd313c800bd642c951f130394c246d5ec1656deec5",
+    "witwin/maxwell/mom/layered/cuda/spectral.cu": "cfd91eaf6ae2a36871f39b75353b5c5bd57e35aa2ff3a91ec523a5faa6fb2ee1",
+    "witwin/maxwell/mom/layered/cuda/triangle_static.cuh": "c129a5f5f3dedb380724b26ab20a7f487aeb72f81b0dc9c0b1227e31407fe359",
+    "witwin/maxwell/mom/layered/cuda/bessel.cu": "10acfcda189ed9580a7b2f4231d6bc70431d7e6e416237a01c133338e61c3cee",
+    "witwin/maxwell/mom/layered/cuda/interp.cu": "f4584be63eddef1aa6636c9bc286787b461698b8b6d346b567e518f86b9afb85",
+    "witwin/maxwell/mom/layered/cuda/lowfreq.cu": "f54f4400bbf631bdf13fee75d91d369fac7452a29ac7eb75f850905226ce9cfe",
+    "witwin/maxwell/mom/layered/cuda/green_eval.cuh": "8035ac87259ca5bb69a55dc172508727c8a9e54cb4ad034e7c675327f3313f15",
+    "witwin/maxwell/mom/layered/cuda/binding.cpp": "7824d257dd284694af27f3f87e49b30fd44e5c60bfab269e21afa6a7aab83889",
+    "tests/support/rfic_r6b_references.py": "e1994832dfc35208e7cf52db0bce7fc8b2c6025b055651f14b94e470d0ca07ac"
+  },
+  "native_previous": {
+    "frequency_Hz": [
+      1000000000.0,
+      3400000000.0
+    ],
+    "y_real": [
+      [
+        [
+          1.2449061925396677e-05
+        ]
+      ],
+      [
+        [
+          0.00011827337126643831
+        ]
+      ]
+    ],
+    "y_imag": [
+      [
+        [
+          -0.00023944948535404437
+        ]
+      ],
+      [
+        [
+          -0.0007627512530694916
+        ]
+      ]
+    ],
+    "L_H": [
+      -6.62878466114919e-07,
+      -5.99293593722216e-08
+    ],
+    "series_R_ohm": [
+      216.53918539831557,
+      198.519177411479
+    ],
+    "summed_shunt_G_S": [
+      1.2449061925396677e-05,
+      0.00011827337126643831
+    ],
+    "unknowns": 2256,
+    "faces": 1608,
+    "seconds": 1.5893506889988203,
+    "peak_bytes": 912119296,
+    "exact_repeats": 1,
+    "metadata": {
+      "solver": "layered_mpie_dense",
+      "bridge_width": 9.999999999999999e-06,
+      "max_edge": 9.999999999999999e-06,
+      "edge_cell": 2.4999999999999998e-06,
+      "unknowns": 2256,
+      "faces": 1608,
+      "rho_max": 0.00019996979771955562,
+      "extract_distance": 2.82842712474619e-05,
+      "mesh_quality": {
+        "min_angle_degrees": 14.036243467926353,
+        "max_aspect_ratio": 4.250000000000033,
+        "smallest_edge_m": 2.4999999999999795e-06
+      },
+      "sheets": [
+        {
+          "sigma": null,
+          "thickness": 2e-06,
+          "roughness": null
+        },
+        {
+          "sigma": null,
+          "thickness": 2e-06,
+          "roughness": null
+        }
+      ],
+      "port_bridges": "ideal_lossless",
+      "low_frequency_method": "loop_tree_scaled",
+      "loop_unknowns": 649,
+      "tree_unknowns": 1607,
+      "components": 1,
+      "minimum_frequency_Hz": 1.0,
+      "dc": "positive_frequency_limit",
+      "breakpoint_tolerance_m": 0.0,
+      "factor_dtype": [
+        "complex64",
+        "complex64"
+      ],
+      "refinement_steps": [
+        3,
+        3
+      ],
+      "backward_error": [
+        1.0819791637691663e-16,
+        2.3526636883169664e-16
+      ],
+      "frequency_chunk_size": 2
+    },
+    "source_sha256": {
+      "witwin/maxwell/mom/layered/__init__.py": "8cbb7ea3295374383363dfd473a348401ebb9f54549bd7e941f486a21a7bbfee",
+      "witwin/maxwell/mom/layered/loss.py": "2c3bc4eeac79ee343947f37a6f113cc13acb987be92f23cf4111273b9af7208b",
+      "witwin/maxwell/mom/layered/green.py": "f9ffa6acae753b5ef26d0cfe9a1bfa968db9fdbb369e16b0b1c8a541ff892843",
+      "witwin/maxwell/mom/layered/process.py": "5486af65e790ca3757dd5693cb1406624b1a6700d7c301a3442f471264a087e3",
+      "witwin/maxwell/mom/layered/build.py": "54aadfbda0ebdca7e94c674a61d4d63feff7a349b98efef14c0c6f0f39c16fff",
+      "witwin/maxwell/mom/layered/vertical.py": "3e800cbf255fde168a7bf52637d4af2a0dd0ae969748fa8d55046ca486a6a573",
+      "witwin/maxwell/mom/layered/network.py": "dc372a043e4b02d005064abe40f830b408f10d93be686215a4f8449331246857",
+      "witwin/maxwell/mom/layered/assembly.py": "bf27efa62b2083bf0d675ad16ebf86a0a498a7867ee4061798e399558e27e8a6",
+      "witwin/maxwell/mom/layered/mesh.py": "d37140840460b54d737cf0868ac1930401c2d27ed9d6de732af98fe08ddb9087",
+      "witwin/maxwell/mom/layered/config.py": "f36162d4af7bd721f94d9f45ecad4fbe29076565dc913cba8e5c57673dd1fa4a",
+      "witwin/maxwell/mom/layered/sweep.py": "5a3067b19309c3f0f8d75fae6ee9dc52df82b674729737983fc02dbd05b660e8",
+      "witwin/maxwell/mom/layered/runtime.py": "b90c0c0c382b5526688db3e5e7a24688968dc6e14665eb312a5313a8b685666d",
+      "witwin/maxwell/mom/layered/lowfreq.py": "7608cee84cd5c47ef7d40ab9b0776a0cbd027cf4cb1702e51e6a65cfd6dc0d2e",
+      "witwin/maxwell/mom/layered/cuda/assembly.cu": "35acfb2e55feec3b2f766e9939e769b84442a655ea30cdcd8d9321a4d6a26691",
+      "witwin/maxwell/mom/layered/cuda/common.cuh": "62b41971e1b06739c2b9c0212fc575a2084b45e2bfd9e0909f0e5ebf682c5864",
+      "witwin/maxwell/mom/layered/cuda/vertical.cu": "6a1ca6c31f978cc10ff697cd313c800bd642c951f130394c246d5ec1656deec5",
+      "witwin/maxwell/mom/layered/cuda/spectral.cu": "cfd91eaf6ae2a36871f39b75353b5c5bd57e35aa2ff3a91ec523a5faa6fb2ee1",
+      "witwin/maxwell/mom/layered/cuda/triangle_static.cuh": "c129a5f5f3dedb380724b26ab20a7f487aeb72f81b0dc9c0b1227e31407fe359",
+      "witwin/maxwell/mom/layered/cuda/bessel.cu": "10acfcda189ed9580a7b2f4231d6bc70431d7e6e416237a01c133338e61c3cee",
+      "witwin/maxwell/mom/layered/cuda/interp.cu": "f4584be63eddef1aa6636c9bc286787b461698b8b6d346b567e518f86b9afb85",
+      "witwin/maxwell/mom/layered/cuda/lowfreq.cu": "f54f4400bbf631bdf13fee75d91d369fac7452a29ac7eb75f850905226ce9cfe",
+      "witwin/maxwell/mom/layered/cuda/green_eval.cuh": "8035ac87259ca5bb69a55dc172508727c8a9e54cb4ad034e7c675327f3313f15",
+      "witwin/maxwell/mom/layered/cuda/binding.cpp": "7824d257dd284694af27f3f87e49b30fd44e5c60bfab269e21afa6a7aab83889",
+      "tests/support/rfic_r6b_references.py": "e1994832dfc35208e7cf52db0bce7fc8b2c6025b055651f14b94e470d0ca07ac"
+    }
+  },
+  "static_finite_source_gap": {
+    "pitch_um": 2.5,
+    "gap_um": 5.0,
+    "cells": 2440,
+    "frequency_Hz": [
+      1000000000.0,
+      3400000000.0
+    ],
+    "y_real": [
+      1.2142687389208811e-05,
+      0.00011541945632909436
+    ],
+    "y_imag": [
+      -0.0002312625136959979,
+      -0.0007359863239430779
+    ],
+    "seconds": 246.02553419600008,
+    "lumped_estimate": {
+      "Cox_F": [
+        7.260434006496001e-14,
+        3.775425683377921e-14
+      ],
+      "Csub_F": [
+        2.3778296945444517e-14,
+        1.7146773776001793e-14
+      ],
+      "Rsub_ohm": [
+        443.113462726379,
+        614.4878118109079
+      ],
+      "y_real": [
+        2.4451210427719998e-05,
+        0.00018401210535812533
+      ],
+      "y_imag": [
+        -0.00015040932219252947,
+        -0.0003859337067936034
+      ]
+    }
+  }
+}

@@ -194,7 +194,7 @@ def test_broadband_bloch_injection_confines_total_field_per_frequency():
 
     # The broadband pulse drives the genuine complex-field Bloch grating path.
     assert result.solver.complex_fields_enabled is True
-    assert result.solver._tfsf_state["provider"] == "plane_wave_grating_slab_cw"
+    assert result.solver._tfsf_state["provider"] == "plane_wave_fixed_k"
 
     dz = result.solver.scene.dz
     z_lo, z_hi = result.solver.scene.domain_range[4], result.solver.scene.domain_range[5]

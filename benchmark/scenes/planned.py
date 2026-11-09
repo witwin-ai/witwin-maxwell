@@ -517,6 +517,7 @@ def _make(
     normalize_source=None,
     spectral_reference_index=None,
     comparison_components=None,
+    absorber="auto",
 ):
     return ScenarioDefinition(name=name, description=f"{family}: {observable}", builder=builder,
         frequencies=frequencies, display_monitor="field", display_component=component,
@@ -524,7 +525,7 @@ def _make(
         scalar_observable=scalar_observable, normalize_source=normalize_source,
         compare_flux=compare_flux, compare_magnitude=compare_magnitude,
         spectral_reference_index=spectral_reference_index,
-        comparison_components=comparison_components)
+        comparison_components=comparison_components, absorber=absorber)
 
 
 PLANNED_SCENARIOS = (
@@ -555,6 +556,7 @@ PLANNED_SCENARIOS = (
                 ),
             ),
         ),
+        absorber="cpml",
     ),
     _make(
         "custom_pole_uniform_slab",
@@ -595,6 +597,7 @@ PLANNED_SCENARIOS = (
         _periodic_grating_scene,
         component="Ey",
         frequencies=GRATING_FREQUENCIES,
+        absorber="cpml",
     ),
     _make(
         "bloch_oblique",
@@ -660,6 +663,7 @@ PLANNED_SCENARIOS = (
         component="Ey",
         frequencies=GRATING_FREQUENCIES,
         scalar_observable="diffraction_orders",
+        absorber="cpml",
     ),
     _make(
         "sphere_rcs",

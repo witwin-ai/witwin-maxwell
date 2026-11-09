@@ -10,6 +10,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires 
 
 def density_batch(density, *, capacity=2, slots=1, devices=("cuda:0",), graph="required"):
     sim = simulation(steps=27, frequencies=(.8e9, 1e9))
+    sim.scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
     sim.scene.add_material_region(mw.MaterialRegion(name="rho",
         geometry=mw.Box(position=(.05, 0, 0), size=(.1, .1, .1), device="cuda:0"),
         density=torch.zeros(2, 2, 2, device="cuda:0"), eps_bounds=(1., 4.)))
@@ -186,6 +187,7 @@ def test_scene_module_optimizer_updates_recompile_current_parameters():
             self.rho = torch.nn.Parameter(torch.full((2, 2, 2), .3, device="cuda:0"))
         def to_scene(self):
             scene = simulation(steps=27).scene
+            scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
             scene.add_material_region(mw.MaterialRegion(name="rho",
                 geometry=mw.Box(position=(.05, 0., 0.), size=(.1, .1, .1), device="cuda:0"),
                 density=self.rho.sigmoid(), eps_bounds=(1., 4.)))
@@ -259,6 +261,8 @@ def test_dielectric_geometry_batch_gradient_matches_finite_difference():
     width = torch.tensor([.1, .08, .09], device="cuda:0", requires_grad=True)
     def run(size):
         sim = simulation(steps=35)
+        # Preserve the differentiable arithmetic interface used by this finite-difference oracle.
+        sim.scene.subpixel = mw.SubpixelSpec(samples=1, averaging="arithmetic")
         sim.scene.structures = [mw.Structure(name="design",
             geometry=mw.Box(position=(.05, 0., 0.), size=size, device="cuda:0"), material=mw.Material(eps_r=2.))]
         result = mw.Simulation.batch([sim], execution=mw.BatchExecution(devices=("cuda:0",),

@@ -17,6 +17,7 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
+from witwin.maxwell.fdtd.excitation.temporal import injection_time
 from witwin.core import Box
 
 _EPS_INF = (2.0, 3.0, 5.0)
@@ -32,7 +33,8 @@ def _advance_solver_one_step(solver, *, time_value):
     solver._apply_magnetic_dispersive_corrections()
     solver._advance_dispersive_state()
     solver._update_electric_fields(solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
-    solver.add_source(time_value=time_value)
+    # Mirror production stepping: additive electric current is injected at (n + 1/2) dt.
+    solver.add_source(time_value=injection_time("electric_current", time_value, solver.dt))
     solver._apply_dispersive_corrections()
     solver._enforce_pec_boundaries()
 

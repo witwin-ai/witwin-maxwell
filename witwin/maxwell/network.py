@@ -14,12 +14,15 @@ from .network_math import (
     _return_loss_db,
     _s_to_y,
     _s_to_z,
+    _s_to_z_reference_matrix,
     _terminate_s_matrix,
     _validate_complex_pair,
     _validate_reference_impedance,
+    _validate_reference_matrix,
     _vswr,
     _y_to_s,
     _z_to_s,
+    _z_to_s_reference_matrix,
     power_waves_to_voltage_current,
     voltage_current_to_power_waves,
 )
@@ -601,6 +604,7 @@ class NetworkData:
     metadata: Mapping[str, Any] = field(default_factory=dict)
     phasor_convention: str = PHASOR_CONVENTION
     power_wave_convention: str = POWER_WAVE_CONVENTION
+    reference_matrix: Any = None
 
     schema_version: ClassVar[int] = PERSISTENCE_SCHEMA_VERSION
 
@@ -629,6 +633,24 @@ class NetworkData:
         object.__setattr__(self, "port_names", names)
         object.__setattr__(self, "valid_columns", valid_columns)
         object.__setattr__(self, "metadata", dict(self.metadata))
+        if self.reference_matrix is not None:
+            # A coupled reference matrix (for example the terminal-basis image of
+            # differential/common references) defines the generalized power waves
+            # a, b = (8 Zr)^-1/2 (V +- Zr I); z0 then reports its diagonal.
+            matrix = _validate_reference_matrix(
+                torch.as_tensor(self.reference_matrix, device=s.device).to(dtype=s.dtype),
+                frequency_count=frequency_count,
+                port_count=port_count,
+            )
+            object.__setattr__(self, "reference_matrix", matrix)
+            object.__setattr__(self, "z0", torch.diagonal(matrix, dim1=-2, dim2=-1).clone())
+
+    def _require_diagonal_reference(self, operation: str):
+        if self.reference_matrix is not None:
+            raise ValueError(
+                f"{operation} needs a diagonal per-port reference; renormalize this coupled "
+                "reference-matrix network first (renormalize(z0) or to_basis(...))."
+            )
 
     @classmethod
     def from_touchstone(
@@ -660,12 +682,33 @@ class NetworkData:
         metadata: Mapping[str, Any] | None = None,
         phasor_convention: str = PHASOR_CONVENTION,
         power_wave_convention: str = POWER_WAVE_CONVENTION,
+        reference_matrix=None,
     ) -> "NetworkData":
         z, resolved_frequencies, frequency_count, port_count = _validate_network_matrix(
             z,
             frequencies,
             name="z",
         )
+        if reference_matrix is not None:
+            matrix = _validate_reference_matrix(
+                torch.as_tensor(reference_matrix, device=z.device).to(dtype=z.dtype),
+                frequency_count=frequency_count,
+                port_count=port_count,
+            )
+            valid = _normalize_valid_columns(valid_columns, port_count=port_count, device=z.device)
+            if not bool(torch.all(valid)):
+                raise RuntimeError("S/Z conversion requires complete excitation columns.")
+            return cls(
+                frequencies=resolved_frequencies,
+                s=_z_to_s_reference_matrix(z, matrix),
+                z0=torch.diagonal(matrix, dim1=-2, dim2=-1),
+                port_names=port_names,
+                valid_columns=valid,
+                metadata={} if metadata is None else metadata,
+                phasor_convention=phasor_convention,
+                power_wave_convention=power_wave_convention,
+                reference_matrix=matrix,
+            )
         names = _normalize_port_names(port_names, port_count=port_count)
         reference = _normalize_network_z0(
             z0,
@@ -763,11 +806,63 @@ class NetworkData:
 
     def to_z(self) -> torch.Tensor:
         self._require_complete("S/Z conversion")
+        if self.reference_matrix is not None:
+            return _s_to_z_reference_matrix(self.s, self.reference_matrix)
         return _s_to_z(self.s, self.z0)
 
     def to_y(self) -> torch.Tensor:
         self._require_complete("S/Y conversion")
+        if self.reference_matrix is not None:
+            return torch.linalg.inv(self.to_z())
         return _s_to_y(self.s, self.z0)
+
+    def to_basis(self, voltage_basis="modal", *, z0=None, port_names=None) -> "NetworkData":
+        """Change the voltage basis ``V' = T V`` with power-preserving ``I' = T^-H I``.
+
+        ``voltage_basis`` is a square ``[N, N]`` or ``[F, N, N]`` matrix ``T`` (then
+        ``z0`` and ``port_names`` are required), or ``"modal"`` to use the
+        ``metadata["terminal_transform"]`` recorded by a TerminalWavePort sweep: the
+        terminal-to-modal transform ``T = diag(sqrt(2 z_m)) Vm^-1`` and the per-line
+        modal impedances ``z_m = |Vm_m|^2 / (2 P_m)``. ``to_mixed_mode`` is the
+        differential/common special case. The impedance matrix transforms as
+        ``Z' = T Z T^H``, independent of the source reference.
+        """
+        if isinstance(voltage_basis, str):
+            if voltage_basis != "modal":
+                raise ValueError("to_basis voltage_basis must be a matrix or 'modal'.")
+            transform = self.metadata.get("terminal_transform")
+            if not transform:
+                raise ValueError("to_basis('modal') requires metadata['terminal_transform'] from a TerminalWavePort sweep.")
+            matrix = transform["voltage_basis"]
+            z0 = transform["z0"] if z0 is None else z0
+            port_names = transform["port_names"] if port_names is None else port_names
+        else:
+            matrix = voltage_basis
+        if z0 is None or port_names is None:
+            raise ValueError("to_basis with an explicit matrix requires z0 and port_names.")
+        matrix = torch.as_tensor(matrix, device=self.s.device).to(dtype=self.s.dtype)
+        frequency_count, port_count = self.s.shape[0], self.s.shape[1]
+        if matrix.ndim == 2:
+            matrix = matrix.expand(frequency_count, *matrix.shape)
+        if tuple(matrix.shape) != (frequency_count, port_count, port_count):
+            raise ValueError(f"voltage_basis must have shape [N, N] or [F, N, N] with N = {port_count}.")
+        source_z = self.to_z()
+        target_z = matrix @ source_z @ matrix.conj().transpose(-2, -1)
+        names = tuple(str(name) for name in port_names)
+        metadata = _append_transform_metadata(
+            self.metadata,
+            {"operation": "to_basis", "source_port_names": self.port_names, "target_port_names": names},
+        )
+        return type(self).from_z(
+            frequencies=self.frequencies,
+            z=target_z,
+            z0=z0,
+            port_names=names,
+            valid_columns=self.valid_columns,
+            metadata=metadata,
+            phasor_convention=self.phasor_convention,
+            power_wave_convention=self.power_wave_convention,
+        )
 
     def validate_physicality(
         self,
@@ -935,6 +1030,7 @@ class NetworkData:
         """
 
         self._require_complete("termination")
+        self._require_diagonal_reference("termination")
         if (gamma is None) == (impedance is None):
             raise ValueError("Provide exactly one of gamma= or impedance=.")
 
@@ -992,6 +1088,8 @@ class NetworkData:
             raise TypeError("cascade requires another NetworkData instance.")
         self._require_complete("cascade")
         other._require_complete("cascade")
+        self._require_diagonal_reference("cascade")
+        other._require_diagonal_reference("cascade")
         if self.s.device != other.s.device or self.s.dtype != other.s.dtype:
             raise ValueError("cascade requires matching device and dtype.")
         if self.frequencies.shape != other.frequencies.shape or not bool(
@@ -1014,7 +1112,7 @@ class NetworkData:
                 raise ValueError(f"other port {other.port_names[j]!r} is connected more than once.")
             _require_real_reference(self.z0[:, i], context="cascade")
             _require_real_reference(other.z0[:, j], context="cascade")
-            tolerance = 1.0e-6 * torch.clamp(torch.abs(torch.real(self.z0[:, i])), min=1.0)
+            tolerance = 1.0e-6 * torch.abs(torch.real(self.z0[:, i]))
             if bool(
                 torch.any(torch.abs(self.z0[:, i] - other.z0[:, j]) > tolerance)
             ):
@@ -1089,6 +1187,7 @@ class NetworkData:
         """
 
         self._require_complete("reference-plane shifting")
+        self._require_diagonal_reference("reference-plane shifting")
         distance = _normalize_port_distances(
             distances,
             port_count=self.s.shape[1],
@@ -1144,6 +1243,8 @@ class NetworkData:
         """
 
         self._require_complete("mixed-mode conversion")
+        if z0 is None:
+            self._require_diagonal_reference("mixed-mode conversion without an explicit z0")
         resolved_pairs = _resolve_mixed_mode_pairs(pairs, port_names=self.port_names)
         paired_indices = {index for pair in resolved_pairs for index in pair}
         unpaired_indices = tuple(
@@ -1252,6 +1353,7 @@ class NetworkData:
     ):
         """Export this complete network to a Touchstone file."""
 
+        self._require_diagonal_reference("Touchstone export")
         from .touchstone import write_touchstone
 
         return write_touchstone(
@@ -1293,7 +1395,7 @@ def _network_snapshot(data: NetworkData) -> dict[str, Any]:
     """Single safe serializer shared by standalone and nested NetworkData."""
 
     _validate_safe_persistence(data.metadata)
-    return {
+    snapshot = {
         "schema_version": data.schema_version,
         "data_type": type(data).__name__,
         "frequencies": _detach_to_cpu(data.frequencies),
@@ -1305,6 +1407,9 @@ def _network_snapshot(data: NetworkData) -> dict[str, Any]:
         "phasor_convention": data.phasor_convention,
         "power_wave_convention": data.power_wave_convention,
     }
+    if data.reference_matrix is not None:
+        snapshot["reference_matrix"] = _detach_to_cpu(data.reference_matrix)
+    return snapshot
 
 
 def _network_from_snapshot(payload) -> NetworkData:
@@ -1328,6 +1433,7 @@ def _network_from_snapshot(payload) -> NetworkData:
         metadata=payload["metadata"],
         phasor_convention=payload["phasor_convention"],
         power_wave_convention=payload["power_wave_convention"],
+        reference_matrix=payload.get("reference_matrix"),
     )
 
 

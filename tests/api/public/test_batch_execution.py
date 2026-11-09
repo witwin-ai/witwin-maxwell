@@ -182,6 +182,7 @@ def test_result_lifetime_does_not_depend_on_cyclic_gc():
 
 def test_trainable_scene_added_after_simulation_construction_is_detected():
     sim = simulation()
+    sim.scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
     sim.scene.add_material_region(mw.MaterialRegion(name="rho",
         geometry=mw.Box(size=(0.05, 0.05, 0.05), device="cuda:0"),
         density=torch.zeros(2, 2, 2, device="cuda:0", requires_grad=True), eps_bounds=(1., 5.)))

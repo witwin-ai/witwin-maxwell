@@ -271,9 +271,10 @@ def test_fdtd_mixed_bloch_pml_preserves_xy_phase_relationship():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_fdtd_mixed_bloch_cpml_rejects_two_pml_axes():
-    # One Bloch axis + two PML axes is outside the single-PML-axis / two-Bloch-axes
-    # contract: the split-field Bloch update carries one absorbing axis only.
+def test_fdtd_mixed_bloch_cpml_rejects_pmc_axis():
+    # One Bloch axis + two PML axes now runs through the generalized Bloch+CPML
+    # layout (tests/boundaries/boundary_physics/test_bloch_generalized_layouts.py);
+    # a PMC axis is still outside it because the wrapped base update has no PMC image.
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
         grid=mw.GridSpec.uniform(0.2),
@@ -282,7 +283,7 @@ def test_fdtd_mixed_bloch_cpml_rejects_two_pml_axes():
             num_layers=3,
             strength=1.0,
             x="bloch",
-            y="pml",
+            y="pmc",
             z="pml",
             bloch_wavevector=(math.pi / 1.2, 0.0, 0.0),
         ),

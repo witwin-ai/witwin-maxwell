@@ -427,6 +427,12 @@ def test_port_voltage_current_and_available_power_dft_seeds_are_exact():
         complex_fields_enabled=False,
         _normalize_source=False,
         _source_time=None,
+        # Additive electric sources and their normalization use the half-step clock.
+        _source_time_offset=0.5,
+        _normalization_time_offset=0.5,
+        # Averaged-phasor scaling: no pulsed Fourier integral on this fixture.
+        _spectral_integration_dt=None,
+        _spectral_reference_frequency=None,
         observers_enabled=False,
         observers=(),
         _dft_entries=(),
@@ -653,6 +659,7 @@ class _DensityPortScene(mw.SceneModule):
 
     def to_scene(self):
         scene = _physical_scene()
+        scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
         density = torch.sigmoid(self.logit).expand(2, 2, 2)
         scene.add_material_region(
             mw.MaterialRegion(

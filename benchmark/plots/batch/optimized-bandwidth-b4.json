@@ -136,7 +136,7 @@
       "cumulative_s": 0.0007344350000000001
     },
     {
-      "file": "/home/xingyu/miniconda3/envs/maxwell/lib/python3.11/site-packages/torch/_ops.py",
+      "file": "<site-packages>/torch/_ops.py",
       "line": 1267,
       "function": "__call__",
       "calls": 576,
@@ -232,7 +232,7 @@
       "cumulative_s": 0.000171237
     },
     {
-      "file": "/home/xingyu/miniconda3/envs/maxwell/lib/python3.11/site-packages/torch/cuda/_utils.py",
+      "file": "<site-packages>/torch/cuda/_utils.py",
       "line": 557,
       "function": "_get_device_index",
       "calls": 42,

@@ -7,9 +7,9 @@ def get_field_raw(solver):
         return None
     ex, ey, ez = solver.E_field
     return {
-        "Ex": ex.cpu().numpy().astype(np.complex64),
-        "Ey": ey.cpu().numpy().astype(np.complex64),
-        "Ez": ez.cpu().numpy().astype(np.complex64),
+        "Ex": ex.cpu().numpy(),
+        "Ey": ey.cpu().numpy(),
+        "Ez": ez.cpu().numpy(),
     }
 
 
@@ -26,8 +26,7 @@ def interpolate_yee_to_center(solver):
         ez_int = 0.5 * (ez_temp[:, :-1, :] + ez_temp[:, 1:, :])
         field_data = torch.sqrt(torch.abs(ex_int) ** 2 + torch.abs(ey_int) ** 2 + torch.abs(ez_int) ** 2)
 
-    dx, dy, dz = solver.scene.grid_spacing
-    x_c = (solver.scene.x[:-1] + dx / 2.0).cpu().numpy()
-    y_c = (solver.scene.y[:-1] + dy / 2.0).cpu().numpy()
-    z_c = (solver.scene.z[:-1] + dz / 2.0).cpu().numpy()
+    x_c = solver.scene.x_half.cpu().numpy()
+    y_c = solver.scene.y_half.cpu().numpy()
+    z_c = solver.scene.z_half.cpu().numpy()
     return field_data.cpu().numpy(), x_c, y_c, z_c

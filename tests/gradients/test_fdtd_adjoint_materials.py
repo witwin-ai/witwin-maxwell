@@ -116,7 +116,7 @@ class _AnisotropicGeometryScene(mw.SceneModule):
             device="cuda",
             # Sub-cell geometry sensitivity needs subpixel occupancy averaging,
             # matching the trainable-geometry FDFD gradient tests.
-            subpixel_samples=5,
+            subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
         )
         scene.add_structure(
             mw.Structure(
@@ -151,6 +151,7 @@ class _AnisotropicDensityScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -269,6 +270,7 @@ class _MagneticDispersiveDensityScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -345,6 +347,7 @@ def _conductive_scene(sigma_e, *, density=None):
     native conductive reverse transpose that the linear standard/CPML rule drops.
     """
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.12),
         boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -478,6 +481,7 @@ _KERR_CHI3 = 5.0e-3
 
 def _kerr_scene(chi3, *, density=None):
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.12),
         boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -639,7 +643,7 @@ class _KerrGeometryScene(mw.SceneModule):
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
             device="cuda",
-            subpixel_samples=5,
+            subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
         )
         scene.add_structure(
             mw.Structure(
@@ -742,6 +746,7 @@ _TPA_BETA = 40.0
 
 def _chi2_scene(chi2, *, density=None, boundary="pml"):
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.12),
         boundary=(
@@ -784,6 +789,7 @@ def _chi2_scene(chi2, *, density=None, boundary="pml"):
 
 def _tpa_scene(beta, *, density=None):
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.12),
         boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -1035,7 +1041,7 @@ class _Chi2GeometryScene(mw.SceneModule):
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
             device="cuda",
-            subpixel_samples=5,
+            subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
         )
         scene.add_structure(
             mw.Structure(
@@ -1200,6 +1206,7 @@ def _full_aniso_scene(offdiag=_FULL_ANISO_OFFDIAG, *, density=None):
     reflected back across) the off-diagonal coupling.
     """
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.12),
         boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -1420,6 +1427,7 @@ _BLOCH_DISP_K = math.pi / 1.8
 
 def _bloch_dispersive_scene(delta_eps, *, density=None):
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.12),
         boundary=mw.BoundarySpec.bloch((_BLOCH_DISP_K, 0.0, 0.0)),
@@ -1684,6 +1692,7 @@ class _BlochMagneticDispersiveDensityScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.15),
             boundary=mw.BoundarySpec.bloch((_BLOCH_DISP_K, 0.0, 0.0)),
@@ -1754,6 +1763,7 @@ class _AnisoDispersiveDensityScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),

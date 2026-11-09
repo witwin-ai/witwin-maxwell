@@ -153,13 +153,13 @@ subprocess sampler cannot find `ninja`):
 
 ```bash
 cd /path/to/worktree
-export CUDA_HOME=/home/xingyu/miniconda3/envs/maxwell/lib/python3.11/site-packages/nvidia/cu13
-export PATH="$CUDA_HOME/bin:/home/xingyu/miniconda3/envs/maxwell/bin:$PATH"
+export CUDA_HOME=<site-packages>/nvidia/cu13
+export PATH="$CUDA_HOME/bin:<maxwell-env>/bin:$PATH"
 export TORCH_EXTENSIONS_DIR="$PWD/build/torch_extensions"
 export CUDA_CACHE_PATH="$PWD/build/cuda_cache"
 export CMAKE_BUILD_DIR="$PWD/build/cmake"
 export WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR="$PWD/build/fdtd_cuda"
-PY=/home/xingyu/miniconda3/envs/maxwell/bin/python
+PY=python
 ```
 
 1. Confirm GPU idleness: `nvidia-smi --query-compute-apps=pid,process_name --format=csv`

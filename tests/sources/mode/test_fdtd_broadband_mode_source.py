@@ -5,8 +5,9 @@ waveform's center frequency, and drives that profile with the temporal envelope.
 With a ``GaussianPulse`` waveform this excites the whole band from a single run, the
 same way a pulsed ``PlaneWave`` TFSF source does. This module covers three things:
 
-1. a ``CustomSourceTime`` mode source is rejected (the native time-shifted surface
-   kernel evaluates only the analytic CW/Gaussian/Ricker forms);
+1. a callable ``CustomSourceTime`` mode source is rejected (the native time-shifted
+   surface kernel needs a sampled table; tabulated waveforms are covered by
+   ``tests/sources/incident/test_surface_custom_waveforms.py``);
 2. a ``GaussianPulse`` mode source compiles and drives the native time-shifted
    surface-term path (not the CW cos/sin path), with the mode solved at the pulse
    center frequency;
@@ -103,9 +104,9 @@ def _run(source_time, frequencies):
 # --- Structural / contract tests (no full run) --------------------------------
 
 
-def test_custom_source_time_mode_source_is_rejected():
+def test_callable_custom_source_time_mode_source_is_rejected():
     scene = _guide_scene(mw.CustomSourceTime(lambda t: 0.0, characteristic_frequency=_CENTER))
-    with pytest.raises(ValueError, match="CustomSourceTime"):
+    with pytest.raises(ValueError, match="Callable CustomSourceTime"):
         mw.Simulation.fdtd(scene, frequencies=[_CENTER]).prepare()
 
 

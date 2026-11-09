@@ -1,0 +1,38 @@
+{
+  "recommendation": "NO-GO",
+  "gates": {
+    "discrete_storage": false,
+    "cartesian": false,
+    "fixed_k": false,
+    "large_cell": false,
+    "g2b": false,
+    "reflection": false
+  },
+  "r0": "rejected at piecewise-constant discrete storage gate",
+  "r1": "completed diagnostic gates for the rejected transplant; no qualified R1 candidate",
+  "selected_for_r2": [],
+  "scope": "one AHK-family IMEX discretization; no rejection of the entire family",
+  "sources": {
+    "AHK": "https://kth.diva-portal.org/smash/get/diva2:12464/FULLTEXT01",
+    "Duru": "https://arxiv.org/pdf/1405.0536"
+  },
+  "reports_sha256": {
+    "verify": "ea0ae6c87a7c4216a052cb7880d2aa2efcaf63e9d5b1cd760ef2c33dd5c624cb",
+    "sweep": "53f7771135b7e7880d5372657056ffc1800eb03fd8e0e5a1ab6d26bfdf07b251",
+    "power": "5776fdc9b9aae85c3eca39b61c43035eceec38e2b1319055a1ea3e3770665ec6",
+    "g2b": "e333a6e77ef2d269567b4a3e0a3cefc930250742bfa16e18d22fe788b3ba2845",
+    "reflection": "fe4573db2f05e6c608dc13e59202a5b96d59ca59063d48edfa4f3f7d52c25b81",
+    "native_regression": "a44314407d92b08bc45b3c4bbfa5a989204a4c54d292707b66c7a14f213a18d2"
+  },
+  "candidate": "AHK-family IMEX transverse-memory diffusion, nu=c0*hy/2, eta=0",
+  "input_sha256": {
+    "energy_stable.py": "efb9fe5d26bc1716fcbc7d857d25a1965d3d0fc4e6bfade8a227d3f3ca97f497",
+    "model.py": "c5d19a3bfdeb467a6b0767cb96588f7fcba61d51ad12fe16637b55b2c1156eb7",
+    "sweep.py": "c91b5ef97880d2943b7d1be8b3b2f9e3f1ae93037e791daf8c3d2273028a9667",
+    "bloch_sweep.py": "e4f1d4770b35a9a6c6fa305e19257d91c6795ed9ed02be68daec335d7397fd1e",
+    "reflection.py": "4d922efaa2618ccbf05446f87c78b6855d04dcf5f738fe3e2874550b41277c5a",
+    "energy.py": "dac708926b617ca881f57274c6a98e5632f92ef06747cacd78535ce912b851bc",
+    "power.py": "deef8d0216ad01a3149894eaf06c049b7e503c55ccc98161cd3b7c656b11d60f"
+  },
+  "cpu_only": true
+}

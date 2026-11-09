@@ -1,11 +1,14 @@
 import warnings
+from functools import partial
 
 import numpy as np
 import torch
 
+from .._gc import paused_cyclic_gc
 from ..monitors import normalize_axis, normalize_component
 from .coords import component_coords
 from .boundary import combine_complex_spectral_components, has_complex_fields
+from .runtime.representation import normalization_sample_time, normalization_signal, spectral_scale
 from .quadrature import (
     _AXIS_CODES,
     _cell_center_weights_1d,
@@ -125,6 +128,11 @@ def _resolve_coord_source(component_payloads, *candidates):
 
 def _align_plane_monitor_payload(axis, component_payloads):
     axis_name = normalize_axis(axis)
+    if component_payloads and all(p.get("collocated", False) for p in component_payloads.values()):
+        first = next(iter(component_payloads.values()))
+        names = _plane_coord_names(axis_name)
+        return {names[0]: first["coords"][0], names[1]: first["coords"][1],
+                "fields": {name: p["data"] for name, p in component_payloads.items()}}
     rules = _PLANE_ALIGNMENT_RULES[axis_name]
     coord_names = _plane_coord_names(axis_name)
 
@@ -154,9 +162,9 @@ def _align_plane_monitor_payload(axis, component_payloads):
     }
 
 
-def _physical_plane_masks(solver, axis, coord_a, coord_b):
+def _physical_plane_masks(prepared_scene, axis, coord_a, coord_b):
     coord_names = _plane_coord_names(axis)
-    domain_range = getattr(solver.scene, "physical_domain_range", solver.scene.domain_range)
+    domain_range = getattr(prepared_scene, "physical_domain_range", prepared_scene.domain_range)
     bounds = {
         "x": (domain_range[0], domain_range[1]),
         "y": (domain_range[2], domain_range[3]),
@@ -171,16 +179,22 @@ def _physical_plane_masks(solver, axis, coord_a, coord_b):
     return tuple(masks)
 
 
-def _crop_aligned_plane_to_physical_bounds(solver, axis, aligned):
+def _crop_aligned_plane_to_physical_bounds(prepared_scene, axis, aligned):
     coord_names = _plane_coord_names(axis)
     mask_a, mask_b = _physical_plane_masks(
-        solver,
+        prepared_scene,
         axis,
         aligned[coord_names[0]],
         aligned[coord_names[1]],
     )
     indices_a = np.flatnonzero(mask_a)
     indices_b = np.flatnonzero(mask_b)
+    return _select_aligned_plane_samples(axis, aligned, indices_a, indices_b)
+
+
+def _select_aligned_plane_samples(axis, aligned, indices_a, indices_b):
+    """Select the same physical plane rows in forward and gradient Results."""
+    coord_names = _plane_coord_names(axis)
     if indices_a.size == 0 or indices_b.size == 0:
         raise ValueError("FluxMonitor plane has no samples inside the physical domain.")
 
@@ -233,12 +247,13 @@ def _merge_frequency_lists(*frequency_lists):
     return tuple(ordered)
 
 
-def _spectral_scale(entry):
-    if entry["window_normalization"] > 0:
-        return 2.0 / entry["window_normalization"]
-    if entry["sample_count"] > 0:
-        return 2.0 / entry["sample_count"]
-    return 0.0
+def _spectral_scale(solver, entry):
+    denominator = entry["window_normalization"] or entry["sample_count"]
+    return spectral_scale(
+        denominator, frequency=entry["frequency"], phasor_factor=entry.get("phasor_factor", 2.0),
+        integration_dt=solver._spectral_integration_dt,
+        reference_frequency=solver._spectral_reference_frequency,
+    ) if denominator > 0 else 0.0
 
 
 def clear_observers(solver):
@@ -268,18 +283,35 @@ def add_plane_observer(solver, name, axis="z", position=0.0, component="Ez"):
     solver.observers.append(_plane_observer_record(name, axis=axis, position=position, component=component))
 
 
-def get_component_coords(solver, component):
-    return component_coords(solver.scene, component)
+def get_component_coords(prepared_scene, component):
+    return component_coords(prepared_scene, component)
 
 
 def resolve_point_observer(solver, observer):
-    x_coords, y_coords, z_coords = get_component_coords(solver, observer["component"])
+    x_coords, y_coords, z_coords = get_component_coords(solver.scene, observer["component"])
     px, py, pz = observer["position"]
     return (
         int(np.argmin(np.abs(x_coords - px))),
         int(np.argmin(np.abs(y_coords - py))),
         int(np.argmin(np.abs(z_coords - pz))),
     )
+
+
+def _resolve_point_observers(solver, component, positions, *, max_bytes=32 * 1024 * 1024):
+    """Resolve one component with scalar-equivalent fp64 queries and first ties."""
+    coords = component_coords(solver.scene, component)
+    # Records already contain exactly the Python floats used by the scalar path.
+    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    indices = np.empty(positions.shape, dtype=np.int64)
+    for axis, values in enumerate(coords):
+        chunk = max(1, max_bytes // (values.size * np.dtype(np.float64).itemsize))
+        for start in range(0, len(positions), chunk):
+            stop = start + chunk
+            distances = values[None, :] - positions[start:stop, axis, None]
+            # Reuse the subtraction buffer to keep the temporary within 32 MiB.
+            np.abs(distances, out=distances)
+            indices[start:stop, axis] = np.argmin(distances, axis=1)
+    return [tuple(index) for index in indices.tolist()]
 
 
 def _plane_field_slice(axis, plane_index):
@@ -372,9 +404,9 @@ def _resolve_plane_sample_positions(coords, position):
     )
 
 
-def resolve_plane_observer(solver, observer):
+def resolve_plane_observer(prepared_scene, observer):
     axis = normalize_axis(observer["axis"])
-    x_coords, y_coords, z_coords = get_component_coords(solver, observer["component"])
+    x_coords, y_coords, z_coords = get_component_coords(prepared_scene, observer["component"])
     coord_map = {"x": x_coords, "y": y_coords, "z": z_coords}
     if axis not in coord_map:
         raise ValueError("Observer axis must be 'x', 'y', or 'z'")
@@ -387,7 +419,7 @@ def resolve_plane_observer(solver, observer):
     return plane_samples, (x_coords, y_coords)
 
 
-def _flux_yee_plane_position(solver, axis, requested_position):
+def _flux_yee_plane_position(prepared_scene, axis, requested_position):
     """Snap a flux plane to the nearest tangential-E Yee plane.
 
     Tangential electric components live on primal nodes along the plane normal;
@@ -396,187 +428,313 @@ def _flux_yee_plane_position(solver, axis, requested_position):
     arbitrary coordinate would attenuate each complex phasor by a position-
     dependent interpolation factor.
     """
-    axis_name = normalize_axis(axis)
-    nodes = {
-        "x": solver.scene.x_nodes64,
-        "y": solver.scene.y_nodes64,
-        "z": solver.scene.z_nodes64,
-    }[axis_name]
-    index = int(np.argmin(np.abs(np.asarray(nodes, dtype=np.float64) - float(requested_position))))
-    return float(nodes[index])
+    return nearest_primal_node(_primal_nodes(prepared_scene, axis), requested_position)
+
+
+def _primal_nodes(prepared_scene, axis):
+    return getattr(prepared_scene, f"{normalize_axis(axis)}_nodes64")
+
+
+def nearest_primal_node(nodes, requested_position):
+    """The single snapping rule shared by flux planes and closed-surface edges."""
+    nodes = np.asarray(nodes, dtype=np.float64)
+    return float(nodes[int(np.argmin(np.abs(nodes - float(requested_position))))])
+
+
+def finite_plane_integration_bounds(prepared_scene, monitor):
+    """Tangential rectangle integrated by a finite plane on this grid.
+
+    A standalone plane keeps its declared bounds. A closed-surface face is
+    bounded by the snapped Yee planes of its adjacent faces, so its edges meet
+    them exactly and the discrete surface is watertight.
+    """
+    closure = monitor.get("closure_planes") if isinstance(monitor, dict) else getattr(monitor, "closure_planes", None)
+    if closure is None:
+        bounds = monitor["tangential_bounds"] if isinstance(monitor, dict) else monitor.tangential_bounds
+        return dict(bounds)
+    def nodes(axis):
+        # x-slab shards snap tangential x edges on the global grid, as the
+        # undistributed face does; y and z nodes are already global there.
+        if axis == "x" and getattr(prepared_scene, "_fdtd_global_x_nodes64", None) is not None:
+            return prepared_scene._fdtd_global_x_nodes64
+        return _primal_nodes(prepared_scene, axis)
+
+    return {
+        axis: tuple(nearest_primal_node(nodes(axis), value) for value in planes)
+        for axis, planes in closure.items()
+    }
+
+
+def _sampled_plane_grid(observer, plane_coords):
+    """Midpoint quadrature independent of field resolution, with native gathers."""
+    coordinates, widths, brackets = [], [], []
+    for axis, native in zip(_plane_coord_names(observer["axis"]), plane_coords):
+        lo, hi = observer["tangential_bounds"][axis]
+        count = max(2, int(np.ceil((hi-lo)/observer["sample_spacing"])))
+        width = (hi-lo)/count
+        points = lo + (np.arange(count, dtype=np.float64)+.5)*width
+        if axis == "x" and observer.get("sample_x_indices") is not None:
+            points = points[observer["sample_x_indices"]]
+        native = np.asarray(native, dtype=np.float64)
+        if points[0] < native[0] or points[-1] > native[-1]:
+            raise ValueError("Sampled finite plane requires native Yee neighbors around every quadrature point.")
+        high = np.clip(np.searchsorted(native, points, side="right"), 1, len(native)-1)
+        low = high-1
+        fraction = (points-native[low])/(native[high]-native[low])
+        coordinates.append(points)
+        widths.append(np.full(len(points), width, dtype=np.float64))
+        brackets.append((low, high, fraction))
+    return tuple(coordinates), tuple(widths), tuple(brackets)
+
+
+def _sampled_plane_gathers(axis, plane_index, brackets, *, device, dtype):
+    tangent_axes = [index for index in range(3) if index != _AXIS_CODES[axis]]
+    (u0, u1, fu), (v0, v1, fv) = brackets
+    indices, weights = [], []
+    for ui, wu in ((u0, 1-fu), (u1, fu)):
+        for vi, wv in ((v0, 1-fv), (v1, fv)):
+            u, v = np.meshgrid(ui, vi, indexing="ij")
+            xyz = np.full((*u.shape, 3), plane_index, dtype=np.int64)
+            xyz[..., tangent_axes[0]], xyz[..., tangent_axes[1]] = u, v
+            indices.append(xyz)
+            weights.append(wu[:, None]*wv[None, :])
+    points = torch.as_tensor(np.stack(indices, axis=-2), device=device, dtype=torch.int32)
+    coefficients = torch.as_tensor(np.stack(weights, axis=-1), device=device, dtype=dtype)
+    return points.reshape(-1, 3), coefficients
+
+
+def _prepare_plane_observer(prepared_scene, observer, *, device, dtype):
+    """Resolve plane geometry and native gather weights without a solver."""
+    component = normalize_component(observer["component"])
+    sampling_observer = observer
+    if observer.get("closure_planes") is not None:
+        observer["tangential_bounds"] = finite_plane_integration_bounds(prepared_scene, observer)
+    if observer.get("compute_flux", False) or observer.get("closure_planes") is not None:
+        sampling_observer = dict(observer)
+        sampling_observer["position"] = _flux_yee_plane_position(
+            prepared_scene,
+            observer["axis"],
+            observer["position"],
+        )
+        observer["yee_plane_position"] = sampling_observer["position"]
+    plane_samples, plane_coords = resolve_plane_observer(prepared_scene, sampling_observer)
+    axis = normalize_axis(observer["axis"])
+    sampled = observer.get("sample_spacing") is not None
+    sample_key = None
+    if sampled:
+        plane_coords, cell_widths, brackets = _sampled_plane_grid(observer, plane_coords)
+        observer["sample_cell_widths"] = cell_widths
+        sample_key = (observer["sample_spacing"], tuple(observer["tangential_bounds"][a] for a in _plane_coord_names(axis)))
+    observer["plane_samples"] = []
+    for sample in plane_samples:
+        plane_index = sample["plane_index"]
+        group_key = (component, axis, plane_index)
+        if sampled:
+            group_key = (*group_key, sample_key)
+        resolved = {
+            "group_key": group_key,
+            "plane_index": plane_index,
+            "plane_position": sample["plane_position"],
+            "weight": sample["weight"],
+        }
+        if sampled:
+            points, weights = _sampled_plane_gathers(axis, plane_index, brackets, device=device, dtype=dtype)
+            resolved.update(sample_points=points, sample_weights=weights)
+        observer["plane_samples"].append(resolved)
+    primary_sample = max(
+        observer["plane_samples"],
+        key=lambda sample: (sample["weight"], -abs(sample["plane_position"] - float(observer["position"]))),
+    )
+    observer["group_key"] = primary_sample["group_key"]
+    observer["plane_index"] = primary_sample["plane_index"]
+    observer["plane_indices"] = tuple(sample["plane_index"] for sample in observer["plane_samples"])
+    observer["plane_weights"] = tuple(float(sample["weight"]) for sample in observer["plane_samples"])
+    observer["plane_positions"] = tuple(float(sample["plane_position"]) for sample in observer["plane_samples"])
+    observer["field_slice"] = _plane_field_slice(axis, observer["plane_index"])
+    observer["plane_coords"] = plane_coords
 
 
 def prepare_observers(solver, frequencies, window_type, time_steps):
-    default_frequencies = _normalize_frequency_list(frequencies)
-    if not solver.observers:
-        solver.observers_enabled = False
+    with paused_cyclic_gc():
+        observer_dtype = getattr(solver, "_observer_dtype", torch.float32)
+        if observer_dtype == torch.float64 and has_complex_fields(solver):
+            raise ValueError("Float64 spectral observers currently require real time-domain fields; complex replica ownership is not qualified.")
+        default_frequencies = _normalize_frequency_list(frequencies)
+        if not solver.observers:
+            solver.observers_enabled = False
+            solver._point_observer_groups = {}
+            solver._plane_observer_groups = {}
+            solver._observer_spectral_entries = []
+            solver._observer_point_groups_by_frequency = []
+            solver._observer_plane_groups_by_frequency = []
+            solver._sync_observer_legacy_state()
+            return
+
+        solver.observers_enabled = True
+        solver.observer_window_type = solver._resolve_spectral_window_type(window_type)
+        # DipoleEmissionMonitor needs the source current spectrum (the running DFT of
+        # the injected source signal) to form the delivered power, independently of
+        # the source-field normalization pass.
+        solver._accumulate_source_spectrum = any(
+            observer.get("monitor_type") == "dipole_emission" for observer in solver.observers
+        )
         solver._point_observer_groups = {}
         solver._plane_observer_groups = {}
-        solver._observer_spectral_entries = []
-        solver._observer_point_groups_by_frequency = []
-        solver._observer_plane_groups_by_frequency = []
-        solver._sync_observer_legacy_state()
-        return
+        frequency_cache = {None: ()}
 
-    solver.observers_enabled = True
-    solver.observer_window_type = solver._resolve_spectral_window_type(window_type)
-    # DipoleEmissionMonitor needs the source current spectrum (the running DFT of
-    # the injected source signal) to form the delivered power, independently of
-    # the source-field normalization pass.
-    solver._accumulate_source_spectrum = any(
-        observer.get("monitor_type") == "dipole_emission" for observer in solver.observers
-    )
-    solver._point_observer_groups = {}
-    solver._plane_observer_groups = {}
-    requested_frequencies = _merge_frequency_lists(
-        default_frequencies,
-        *(
-            observer.get("monitor_frequencies")
-            for observer in solver.observers
-            if observer.get("monitor_frequencies") is not None
-        ),
-    )
-    solver._observer_spectral_entries = [
-        build_observer_spectral_entry(
-            solver,
-            frequency,
-            end_step=time_steps,
-            window_type=solver.observer_window_type,
-        )
-        for frequency in requested_frequencies
-    ]
-    frequency_to_index = {entry["frequency"]: index for index, entry in enumerate(solver._observer_spectral_entries)}
+        def frequency_key(value):
+            if value is None:
+                return None
+            return tuple(value) if isinstance(value, (tuple, list, np.ndarray)) else (value,)
 
-    for observer in solver.observers:
-        observer_frequencies = _normalize_frequency_list(observer.get("monitor_frequencies")) or default_frequencies
-        observer["frequencies"] = observer_frequencies
-        observer["global_freq_indices"] = tuple(frequency_to_index[freq] for freq in observer_frequencies)
-        component = normalize_component(observer["component"])
-        observer["component"] = component
-        field = getattr(solver, _field_name(component))
-        if _observer_is_point(observer):
-            field_index = resolve_point_observer(solver, observer)
-            observer["field_index"] = field_index
-            group = solver._point_observer_groups.setdefault(
-                component,
-                {
-                    "field_name": _field_name(component),
-                    "point_i": [],
-                    "point_j": [],
-                    "point_k": [],
-                    "observers": [],
-                    "requested_global_freq_indices": [],
-                },
+        frequency_keys = []
+        for observer in solver.observers:
+            value = observer.get("monitor_frequencies")
+            key = frequency_key(value)
+            frequency_keys.append(key)
+            if key not in frequency_cache:
+                frequency_cache[key] = _normalize_frequency_list(value)
+        requested_frequencies = _merge_frequency_lists(
+            default_frequencies, *(value for value in frequency_cache.values() if value))
+        solver._observer_spectral_entries = [
+            build_observer_spectral_entry(
+                solver,
+                frequency,
+                end_step=time_steps,
+                window_type=solver.observer_window_type,
             )
-            observer["group_component"] = component
-            observer["group_offset"] = len(group["observers"])
-            group["observers"].append(observer)
-            group["point_i"].append(field_index[0])
-            group["point_j"].append(field_index[1])
-            group["point_k"].append(field_index[2])
-            group["requested_global_freq_indices"].extend(observer["global_freq_indices"])
-        else:
-            sampling_observer = observer
-            if observer.get("compute_flux", False):
-                sampling_observer = dict(observer)
-                sampling_observer["position"] = _flux_yee_plane_position(
-                    solver,
-                    observer["axis"],
-                    observer["position"],
-                )
-                observer["yee_plane_position"] = sampling_observer["position"]
-            plane_samples, plane_coords = resolve_plane_observer(solver, sampling_observer)
-            axis = normalize_axis(observer["axis"])
-            observer["plane_samples"] = []
-            for sample in plane_samples:
-                plane_index = sample["plane_index"]
-                group_key = (component, axis, plane_index)
-                group = solver._plane_observer_groups.get(group_key)
+            for frequency in requested_frequencies
+        ]
+        frequency_to_index = {entry["frequency"]: index for index, entry in enumerate(solver._observer_spectral_entries)}
+        frequency_cache = {
+            key: (value or default_frequencies,
+                  tuple(frequency_to_index[freq] for freq in (value or default_frequencies)))
+            for key, value in frequency_cache.items()
+        }
+        component_cache = {}
+
+        for observer, key in zip(solver.observers, frequency_keys):
+            observer_frequencies, global_indices = frequency_cache[key]
+            observer["frequencies"] = observer_frequencies
+            observer["global_freq_indices"] = global_indices
+            is_point = _observer_is_point(observer)
+            if is_point:
+                component = observer["component"]
+                cached = component_cache.get(component)
+                if cached is None:
+                    normalized = normalize_component(component)
+                    cached = (normalized, _field_name(normalized))
+                    component_cache[component] = cached
+                component, field_name = cached
+            else:
+                component = normalize_component(observer["component"])
+            observer["component"] = component
+            if is_point:
+                # Reserve the original key position; fill its tuple in the group batch.
+                observer["field_index"] = None
+                group = solver._point_observer_groups.get(component)
                 if group is None:
                     group = {
-                        "field_name": _field_name(component),
-                        "axis": axis,
-                        "axis_code": _AXIS_CODES[axis],
-                        "plane_index": plane_index,
-                        "plane_shape": _plane_shape(field, axis),
-                        "plane_coords": plane_coords,
-                        "field_slice": _plane_field_slice(axis, plane_index),
+                        "field_name": field_name,
+                        "point_i": [],
+                        "point_j": [],
+                        "point_k": [],
                         "observers": [],
                         "requested_global_freq_indices": [],
                     }
-                    solver._plane_observer_groups[group_key] = group
+                    solver._point_observer_groups[component] = group
+                observer["group_component"] = component
+                observer["group_offset"] = len(group["observers"])
                 group["observers"].append(observer)
                 group["requested_global_freq_indices"].extend(observer["global_freq_indices"])
-                observer["plane_samples"].append(
-                    {
-                        "group_key": group_key,
-                        "plane_index": plane_index,
-                        "plane_position": sample["plane_position"],
-                        "weight": sample["weight"],
-                    }
+            else:
+                field = getattr(solver, _field_name(component))
+                _prepare_plane_observer(
+                    solver.scene, observer, device=solver.device,
+                    dtype=getattr(solver, "_observer_dtype", solver.Ex.dtype),
                 )
-            primary_sample = max(
-                observer["plane_samples"],
-                key=lambda sample: (sample["weight"], -abs(sample["plane_position"] - float(observer["position"]))),
+                axis = normalize_axis(observer["axis"])
+                for sample in observer["plane_samples"]:
+                    group_key = sample["group_key"]
+                    plane_index = sample["plane_index"]
+                    group = solver._plane_observer_groups.get(group_key)
+                    if group is None:
+                        group = {
+                            "field_name": _field_name(component),
+                            "axis": axis,
+                            "axis_code": _AXIS_CODES[axis],
+                            "plane_index": plane_index,
+                            "plane_shape": _plane_shape(field, axis),
+                            "plane_coords": observer["plane_coords"],
+                            "field_slice": _plane_field_slice(axis, plane_index),
+                            "observers": [],
+                            "requested_global_freq_indices": [],
+                        }
+                        if "sample_weights" in sample:
+                            points, weights = sample["sample_points"], sample["sample_weights"]
+                            group.update(sample_points=points, sample_weights=weights,
+                                         plane_shape=tuple(weights.shape))
+                            for dim, label in enumerate("ijk"):
+                                group["sample_"+label] = points[:, dim].contiguous()
+                        solver._plane_observer_groups[group_key] = group
+                    group["observers"].append(observer)
+                    group["requested_global_freq_indices"].extend(observer["global_freq_indices"])
+
+        solver._observer_point_groups_by_frequency = [[] for _ in solver._observer_spectral_entries]
+        for component, group in solver._point_observer_groups.items():
+            point_count = len(group["observers"])
+            field = getattr(solver, group["field_name"])
+            indices = _resolve_point_observers(solver, component,
+                                              [observer["position"] for observer in group["observers"]])
+            for observer, index in zip(group["observers"], indices):
+                observer["field_index"] = index
+            for axis, label in enumerate("ijk"):
+                group["point_" + label] = [index[axis] for index in indices]
+            group["global_freq_indices"] = tuple(dict.fromkeys(group.pop("requested_global_freq_indices")))
+            group["frequencies"] = tuple(
+                solver._observer_spectral_entries[index]["frequency"]
+                for index in group["global_freq_indices"]
             )
-            observer["group_key"] = primary_sample["group_key"]
-            observer["plane_index"] = primary_sample["plane_index"]
-            observer["plane_indices"] = tuple(sample["plane_index"] for sample in observer["plane_samples"])
-            observer["plane_weights"] = tuple(float(sample["weight"]) for sample in observer["plane_samples"])
-            observer["plane_positions"] = tuple(float(sample["plane_position"]) for sample in observer["plane_samples"])
-            observer["field_slice"] = _plane_field_slice(axis, observer["plane_index"])
-            observer["plane_coords"] = plane_coords
+            group["freq_local_lookup"] = {
+                global_index: local_index
+                for local_index, global_index in enumerate(group["global_freq_indices"])
+            }
+            group["point_i"] = torch.tensor(group["point_i"], device=solver.device, dtype=torch.int32)
+            group["point_j"] = torch.tensor(group["point_j"], device=solver.device, dtype=torch.int32)
+            group["point_k"] = torch.tensor(group["point_k"], device=solver.device, dtype=torch.int32)
+            group["real"] = torch.zeros((len(group["global_freq_indices"]), point_count), device=solver.device, dtype=observer_dtype)
+            group["imag"] = torch.zeros((len(group["global_freq_indices"]), point_count), device=solver.device, dtype=observer_dtype)
+            if has_complex_fields(solver):
+                group["aux_real"] = torch.zeros((len(group["global_freq_indices"]), point_count), device=solver.device, dtype=observer_dtype)
+                group["aux_imag"] = torch.zeros((len(group["global_freq_indices"]), point_count), device=solver.device, dtype=observer_dtype)
+            for global_index, local_index in group["freq_local_lookup"].items():
+                solver._observer_point_groups_by_frequency[global_index].append((group, local_index))
 
-    solver._observer_point_groups_by_frequency = [[] for _ in solver._observer_spectral_entries]
-    for group in solver._point_observer_groups.values():
-        point_count = len(group["observers"])
-        field = getattr(solver, group["field_name"])
-        group["global_freq_indices"] = tuple(dict.fromkeys(group.pop("requested_global_freq_indices")))
-        group["frequencies"] = tuple(
-            solver._observer_spectral_entries[index]["frequency"]
-            for index in group["global_freq_indices"]
-        )
-        group["freq_local_lookup"] = {
-            global_index: local_index
-            for local_index, global_index in enumerate(group["global_freq_indices"])
-        }
-        group["point_i"] = torch.tensor(group["point_i"], device=solver.device, dtype=torch.int32)
-        group["point_j"] = torch.tensor(group["point_j"], device=solver.device, dtype=torch.int32)
-        group["point_k"] = torch.tensor(group["point_k"], device=solver.device, dtype=torch.int32)
-        group["real"] = torch.zeros((len(group["global_freq_indices"]), point_count), device=solver.device, dtype=field.dtype)
-        group["imag"] = torch.zeros((len(group["global_freq_indices"]), point_count), device=solver.device, dtype=field.dtype)
-        if has_complex_fields(solver):
-            group["aux_real"] = torch.zeros((len(group["global_freq_indices"]), point_count), device=solver.device, dtype=field.dtype)
-            group["aux_imag"] = torch.zeros((len(group["global_freq_indices"]), point_count), device=solver.device, dtype=field.dtype)
-        for global_index, local_index in group["freq_local_lookup"].items():
-            solver._observer_point_groups_by_frequency[global_index].append((group, local_index))
+        solver._observer_plane_groups_by_frequency = [[] for _ in solver._observer_spectral_entries]
+        for group in solver._plane_observer_groups.values():
+            field = getattr(solver, group["field_name"])
+            group["global_freq_indices"] = tuple(dict.fromkeys(group.pop("requested_global_freq_indices")))
+            group["frequencies"] = tuple(
+                solver._observer_spectral_entries[index]["frequency"]
+                for index in group["global_freq_indices"]
+            )
+            group["freq_local_lookup"] = {
+                global_index: local_index
+                for local_index, global_index in enumerate(group["global_freq_indices"])
+            }
+            group["real"] = torch.zeros((len(group["global_freq_indices"]),) + group["plane_shape"], device=solver.device, dtype=observer_dtype)
+            group["imag"] = torch.zeros((len(group["global_freq_indices"]),) + group["plane_shape"], device=solver.device, dtype=observer_dtype)
+            if has_complex_fields(solver):
+                group["aux_real"] = torch.zeros((len(group["global_freq_indices"]),) + group["plane_shape"], device=solver.device, dtype=observer_dtype)
+                group["aux_imag"] = torch.zeros((len(group["global_freq_indices"]),) + group["plane_shape"], device=solver.device, dtype=observer_dtype)
+            for global_index, local_index in group["freq_local_lookup"].items():
+                solver._observer_plane_groups_by_frequency[global_index].append((group, local_index))
 
-    solver._observer_plane_groups_by_frequency = [[] for _ in solver._observer_spectral_entries]
-    for group in solver._plane_observer_groups.values():
-        field = getattr(solver, group["field_name"])
-        group["global_freq_indices"] = tuple(dict.fromkeys(group.pop("requested_global_freq_indices")))
-        group["frequencies"] = tuple(
-            solver._observer_spectral_entries[index]["frequency"]
-            for index in group["global_freq_indices"]
-        )
-        group["freq_local_lookup"] = {
-            global_index: local_index
-            for local_index, global_index in enumerate(group["global_freq_indices"])
-        }
-        group["real"] = torch.zeros((len(group["global_freq_indices"]),) + group["plane_shape"], device=solver.device, dtype=field.dtype)
-        group["imag"] = torch.zeros((len(group["global_freq_indices"]),) + group["plane_shape"], device=solver.device, dtype=field.dtype)
-        if has_complex_fields(solver):
-            group["aux_real"] = torch.zeros((len(group["global_freq_indices"]),) + group["plane_shape"], device=solver.device, dtype=field.dtype)
-            group["aux_imag"] = torch.zeros((len(group["global_freq_indices"]),) + group["plane_shape"], device=solver.device, dtype=field.dtype)
-        for global_index, local_index in group["freq_local_lookup"].items():
-            solver._observer_plane_groups_by_frequency[global_index].append((group, local_index))
-
-    solver._sync_observer_legacy_state()
+        solver._sync_observer_legacy_state()
 
 
-def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
-    if not solver.observers_enabled:
-        return
+def observer_step_weights(solver, n):
+    """Yield exact host weights while advancing source and sampling metadata."""
 
     source_signal = None
     accumulate_source = getattr(solver, '_normalize_source', False) or getattr(solver, '_accumulate_source_spectrum', False)
@@ -584,9 +742,7 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                       if getattr(solver, '_normalize_source', False)
                       else getattr(solver, '_source_time', None))
     if accumulate_source and reference_time is not None:
-        from ..sources import evaluate_source_time_normalization
-
-        source_signal = evaluate_source_time_normalization(reference_time, n * solver.dt)
+        source_signal = normalization_signal(solver, reference_time, normalization_sample_time(solver, n))
 
     for global_index, entry in enumerate(solver._observer_spectral_entries):
         if n < entry["start_step"]:
@@ -604,9 +760,21 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
         weighted_sin = window_weight * entry["phase_sin"]
 
         if source_signal is not None:
-            entry["source_dft_real"] += source_signal * weighted_cos
-            entry["source_dft_imag"] += source_signal * weighted_sin
+            entry["source_dft_real"] += source_signal.real * weighted_cos - source_signal.imag * weighted_sin
+            entry["source_dft_imag"] += source_signal.real * weighted_sin + source_signal.imag * weighted_cos
 
+        yield global_index, entry, weighted_cos, weighted_sin
+        entry["window_normalization"] += window_weight
+        entry["sample_count"] += 1
+
+    advance_observer_entry_phases(solver)
+
+
+def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
+    if not solver.observers_enabled:
+        return
+
+    for global_index, entry, weighted_cos, weighted_sin in observer_step_weights(solver, n):
         # The E/H half-step retard convention lives in observer_stagger_weights;
         # the rotation constants are precomputed on the entry at prepare time.
         for group, local_index in solver._observer_point_groups_by_frequency[global_index]:
@@ -635,6 +803,18 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
 
         for group, local_index in solver._observer_plane_groups_by_frequency[global_index]:
             group_cos, group_sin = observer_stagger_weights(entry, group["field_name"], weighted_cos, weighted_sin)
+            if "sample_points" in group:
+                points = group["sample_points"]
+                for suffix, real_name, imag_name in (("", "real", "imag"), ("_imag", "aux_real", "aux_imag")):
+                    if real_name not in group:
+                        continue
+                    solver.fdtd_module.accumulatePointObservers3D(
+                        field=getattr(solver, group["field_name"]+suffix),
+                        pointI=group["sample_i"], pointJ=group["sample_j"], pointK=group["sample_k"],
+                        realAccum=group[real_name][local_index].reshape(-1),
+                        imagAccum=group[imag_name][local_index].reshape(-1),
+                        weightedCos=group_cos, weightedSin=group_sin).launchRaw()
+                continue
             solver.fdtd_module.accumulatePlaneObserver3D(
                 field=getattr(solver, group["field_name"]),
                 planeRealAccum=group["real"][local_index],
@@ -655,10 +835,6 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     weightedSin=group_sin,
                 ).launchRaw()
 
-        entry["window_normalization"] += window_weight
-        entry["sample_count"] += 1
-
-    advance_observer_entry_phases(solver)
     solver._sync_observer_primary_state()
 
 
@@ -691,6 +867,10 @@ class BatchObserverEngine:
         from ..sources import evaluate_source_time_normalization
         slot = self.slot
         solvers = slot.solvers
+        observer_dtypes = {getattr(solver, "_observer_dtype", torch.float32) for solver in solvers}
+        if len(observer_dtypes) != 1:
+            raise ValueError("A native observer cohort requires one observer_dtype; mixed spectral precision must use separate cohorts.")
+        observer_dtype = next(iter(observer_dtypes))
         b = slot.capacity
         f = max((len(s._observer_spectral_entries) for s in solvers), default=0)
         self.groups = []
@@ -710,16 +890,17 @@ class BatchObserverEngine:
                     "phase_cos", "phase_sin", "phase_step_cos", "phase_step_sin", "h_offset_cos", "h_offset_sin")]
                 schedule[lane, index] = (entry["start_step"], entry["end_step"], window)
             reference = (getattr(solver, "_normalization_source_time", None)
-                         if solver._normalize_source else None)
+                         if solver._normalize_source else
+                         getattr(solver, "_source_time", None) if getattr(solver, "_accumulate_source_spectrum", False) else None)
             if reference is not None:
                 steps = max(entry["end_step"] for entry in entries)
-                source_signals[lane] = [evaluate_source_time_normalization(reference, n * solver.dt)
+                source_signals[lane] = [evaluate_source_time_normalization(reference, normalization_sample_time(solver, n))
                                         for n in range(steps)]
             for kind, groups in (("point", solver._point_observer_groups),
                                  ("plane", solver._plane_observer_groups)):
                 for key, group in groups.items():
                     shape = tuple(group["real"].shape)
-                    signature = (kind, key, shape)
+                    signature = (kind, key, shape, observer_dtype)
                     collected.setdefault(signature, []).append((lane, group))
         signals = np.zeros((max((len(v) for v in source_signals.values()), default=1), b), dtype=np.float64)
         for lane, values in source_signals.items():
@@ -727,13 +908,13 @@ class BatchObserverEngine:
         self.state = self._upload("state", state)
         self.schedule = self._upload("schedule", schedule)
         self.signals = self._upload("signals", signals)
-        self.weights = self._upload("weights", np.zeros((b, f, 4), dtype=np.float32))
-        for (kind, key, shape), members in collected.items():
+        self.weights = self._upload("weights", np.zeros((b, f, 4), dtype=np.float64 if observer_dtype == torch.float64 else np.float32))
+        for (kind, key, shape, _dtype), members in collected.items():
             field_name = members[0][1]["field_name"]
             field = slot.buffers[field_name]
             ny, nz = field.shape[-2:]
             p = int(np.prod(shape[1:]))
-            signature = (kind, key, shape)
+            signature = (kind, key, shape, observer_dtype)
             if signature in self._group_storage:
                 offsets, frequency_map, real, imag = self._group_storage[signature]
                 real.zero_()
@@ -746,11 +927,14 @@ class BatchObserverEngine:
                 continue
             offsets = torch.full((b, p), -1, dtype=torch.int64, device=slot.device)
             frequency_map = torch.full((b, shape[0]), -1, dtype=torch.int64, device=slot.device)
-            real = torch.zeros((b, shape[0], p), device=slot.device, dtype=field.dtype)
+            real = torch.zeros((b, shape[0], p), device=slot.device, dtype=observer_dtype)
             imag = torch.zeros_like(real)
             for lane, group in members:
                 if kind == "point":
                     indices = (group["point_i"].long() * ny + group["point_j"].long()) * nz + group["point_k"]
+                elif "sample_points" in group:
+                    points = group["sample_points"].long()
+                    indices = (points[:, 0]*ny+points[:, 1])*nz+points[:, 2]
                 else:
                     axes = [torch.arange(size, device=slot.device) for size in field.shape[1:]]
                     axes[group["axis_code"]] = torch.tensor([group["plane_index"]], device=slot.device)
@@ -783,6 +967,57 @@ class BatchObserverEngine:
         solver._sync_observer_primary_state()
 
 
+def uses_native_point_observers(solver):
+    """Small real-field spectra that retain the native per-frequency point kernel."""
+    return (solver.observers_enabled and not has_complex_fields(solver)
+            and solver.Ex.dtype == torch.float32 and not getattr(solver, "cpu_reference", False)
+            and not solver._plane_observer_groups
+            and len(solver._point_observer_groups) == 1
+            and len(solver._observer_spectral_entries) <= 2)
+
+
+def make_single_observer_engine(solver, *, enabled):
+    """Reuse native grouped frequency sampling for one ordinary real-field run."""
+    solver._single_observer_engine = None
+    solver._observer_cuda_graph_active = False
+    if (not enabled or not solver.observers_enabled or has_complex_fields(solver)
+            or solver.Ex.dtype != torch.float32 or getattr(solver, "cpu_reference", False)):
+        return None
+    # A grouped recurrence adds a kernel and a graph launch. One field group
+    # at one or two frequencies is cheaper through the existing native point
+    # kernels; avoid penalizing small legacy workloads to optimize wide spectra.
+    if uses_native_point_observers(solver):
+        return None
+    from types import SimpleNamespace
+    from .cuda.backend import get_compiled_extension
+    from .cuda.runtime.graph import CudaGraphRunner
+
+    slot = SimpleNamespace(device=solver.device, solvers=(solver,), capacity=1,
+        native=get_compiled_extension(),
+        active=torch.ones(1, dtype=torch.int32, device=solver.device),
+        buffers={name: getattr(solver, name).unsqueeze(0)
+                 for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")})
+    engine = BatchObserverEngine(slot)
+    engine.bind()
+    solver._single_observer_engine = engine
+    state = [engine.step, engine.state, engine.weights]
+    for _, _, _, _, _, real, imag, _ in engine.groups:
+        state.extend((real, imag))
+    saved = [(tensor, tensor.clone()) for tensor in state if tensor is not None]
+
+    def restore():
+        for target, value in saved:
+            target.copy_(value)
+    try:
+        run = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=3).capture(engine.advance)
+    except Exception:
+        restore()
+        return engine.advance
+    restore()
+    solver._observer_cuda_graph_active = True
+    return run
+
+
 # ---------------------------------------------------------------------------
 # Time-domain observers (raw time-series fields and instantaneous flux).
 #
@@ -807,7 +1042,7 @@ def _primary_plane_index(plane_samples):
 
 def _resolve_time_plane_component(solver, axis, position, component):
     observer = {"axis": axis, "position": float(position), "component": component}
-    plane_samples, plane_coords = resolve_plane_observer(solver, observer)
+    plane_samples, plane_coords = resolve_plane_observer(solver.scene, observer)
     axis_name = normalize_axis(axis)
     plane_index = _primary_plane_index(plane_samples)
     field_name = _field_name(component)
@@ -823,7 +1058,7 @@ def _resolve_time_plane_component(solver, axis, position, component):
 
 
 def _resolve_time_volume_box(solver, component, position, size):
-    x_coords, y_coords, z_coords = get_component_coords(solver, component)
+    x_coords, y_coords, z_coords = get_component_coords(solver.scene, component)
     axis_coords = (
         np.asarray(x_coords, dtype=np.float64),
         np.asarray(y_coords, dtype=np.float64),
@@ -933,44 +1168,15 @@ def prepare_time_observers(solver, time_steps):
                     record["buffers"][component] = torch.zeros(
                         (num_samples,) + sub_shape, device=solver.device, dtype=recording_dtype(field)
                     )
+        elif record["kind"] == "surface_field_time":
+            from .time_traces import prepare_surface_field_time
+            prepare_surface_field_time(solver, record, num_samples)
+        elif record["kind"] == "aux_field_time":
+            from .time_traces import prepare_aux_field_time
+            prepare_aux_field_time(solver, record, num_samples)
         else:
-            record["flux_components"] = {
-                component: _resolve_time_plane_component(
-                    solver, record["axis"], record["position"], component
-                )
-                for component in record["fields"]
-            }
-            record["buffer"] = torch.zeros((num_samples,), device=solver.device, dtype=torch.float32)
-            # Precompute the constant trapezoidal area weights on the aligned
-            # plane grid plus the kernel's field mapping / sign, so the per-step
-            # flux is a single native reduction with no host-side work. The plane
-            # coordinates depend only on the grid, not on the evolving fields.
-            axis_name = normalize_axis(record["axis"])
-            rules = _PLANE_ALIGNMENT_RULES[axis_name]
-            coord_names = _plane_coord_names(axis_name)
-            coord_payloads = {
-                component: {"coords": meta["plane_coords"]}
-                for component, meta in record["flux_components"].items()
-            }
-            coord_a = _resolve_coord_source(coord_payloads, *rules["coord_sources"][coord_names[0]])
-            coord_b = _resolve_coord_source(coord_payloads, *rules["coord_sources"][coord_names[1]])
-            weights = (
-                _cell_center_weights_1d(np.asarray(coord_a, dtype=float))[:, None]
-                * _cell_center_weights_1d(np.asarray(coord_b, dtype=float))[None, :]
-            )
-            physical_a, physical_b = _physical_plane_masks(
-                solver,
-                axis_name,
-                coord_a,
-                coord_b,
-            )
-            weights *= physical_a[:, None] * physical_b[None, :]
-            record["flux_weights"] = torch.as_tensor(
-                weights, device=solver.device, dtype=torch.float32
-            ).contiguous()
-            record["flux_kernel_components"] = _FLUX_KERNEL_COMPONENTS[axis_name]
-            # scale = 2.0 (undo the 0.5 time-average) * 0.5 (Poynting) * direction.
-            record["flux_scale"] = 1.0 if record["normal_direction"] == "+" else -1.0
+            from .time_flux import prepare_time_flux
+            prepare_time_flux(solver, record, num_samples)
 
     solver.time_observers_enabled = any(records)
 
@@ -1012,27 +1218,17 @@ def accumulate_time_observers(solver, n):
                     buffer[k].copy_(sample)
             continue
 
-        axis = record["axis"]
-        component_payloads = {}
-        for component, meta in record["flux_components"].items():
-            field = getattr(solver, meta["field_name"])
-            plane = field[meta["field_slice"]].squeeze(meta["axis_code"])
-            component_payloads[component] = {"data": plane, "coords": meta["plane_coords"]}
-        # Yee-average the tangential slices onto the common plane grid, then
-        # reduce the instantaneous Poynting flux in a single native kernel that
-        # writes the scalar straight into this step's buffer slot.
-        aligned = _align_plane_monitor_payload(axis, component_payloads)["fields"]
-        ea_name, eb_name, ha_name, hb_name = record["flux_kernel_components"]
-        solver.fdtd_module.planeFluxReduce(
-            ea=aligned[ea_name].contiguous(),
-            eb=aligned[eb_name].contiguous(),
-            ha=aligned[ha_name].contiguous(),
-            hb=aligned[hb_name].contiguous(),
-            weights=record["flux_weights"],
-            out=record["buffer"],
-            outIndex=k,
-            scale=record["flux_scale"],
-        ).launchRaw()
+        if record["kind"] == "surface_field_time":
+            from .time_traces import accumulate_surface_field_time
+            accumulate_surface_field_time(solver, record, k)
+            continue
+        if record["kind"] == "aux_field_time":
+            from .time_traces import accumulate_aux_field_time
+            accumulate_aux_field_time(solver, record, k)
+            continue
+
+        from .time_flux import accumulate_time_flux
+        accumulate_time_flux(solver, record, k)
 
 
 def get_time_observer_results(solver):
@@ -1043,11 +1239,12 @@ def get_time_observer_results(solver):
         # count; truncate t and the buffers to what was actually recorded so the
         # trace never carries zeros at time steps that were never simulated.
         count = int(record.get("next_index", len(sample_steps)))
-        t = torch.tensor(sample_steps[:count], device=solver.device, dtype=torch.float64) * solver.dt
+        t = (torch.tensor(sample_steps[:count], device=solver.device, dtype=torch.float64) + 1) * solver.dt
         if record["kind"] == "field_time":
             components = {name: buffer[:count].detach() for name, buffer in record["buffers"].items()}
             payload = {
                 "kind": "field_time",
+                "field_time_offsets_steps": {"E": 0.0, "H": -0.5},
                 "differentiable": False,
                 "name": record["name"],
                 "t": t,
@@ -1070,10 +1267,19 @@ def get_time_observer_results(solver):
                 payload["data"] = buffer
                 payload["field"] = buffer
             results[record["name"]] = payload
+        elif record["kind"] == "surface_field_time":
+            from .time_traces import surface_field_time_payload
+            results[record["name"]] = surface_field_time_payload(record, t, count)
+        elif record["kind"] == "aux_field_time":
+            from .time_traces import aux_field_time_payload
+            results[record["name"]] = aux_field_time_payload(solver, record, t, count)
         else:
             payload = {
                 "kind": "flux_time",
                 "differentiable": False,
+                "flux_reduction_provenance": "native_product_v1_actual_Cu_sides",
+                "yee_plane_position": record["yee_plane_position"],
+                "field_time_offsets_steps": {"E": 0.0, "H": -0.5},
                 "name": record["name"],
                 "t": t,
                 "flux": record["buffer"][:count].detach(),
@@ -1090,6 +1296,7 @@ def get_time_observer_results(solver):
 
 def _compute_source_spectrum(entries, global_freq_indices, scale_fn):
     """Compute complex source DFT values for the given frequency indices."""
+    from .runtime.spectral import convert_source_spectrum
     device, _ = _infer_tensor_device_and_dtype()
     use_torch = False
     for idx in global_freq_indices:
@@ -1106,14 +1313,14 @@ def _compute_source_spectrum(entries, global_freq_indices, scale_fn):
             scale = float(scale_fn(entry))
             real = _to_torch_scalar_or_tensor(entry.get("source_dft_real", 0.0), device=device, dtype=torch.float32)
             imag = _to_torch_scalar_or_tensor(entry.get("source_dft_imag", 0.0), device=device, dtype=torch.float32)
-            spectrum[i] = (real.to(dtype=torch.complex64) + 1j * imag.to(dtype=torch.complex64)) * scale
+            spectrum[i] = convert_source_spectrum(entry, (real.to(dtype=torch.complex64) + 1j * imag.to(dtype=torch.complex64)) * scale)
         return spectrum
 
     spectrum = np.empty(len(global_freq_indices), dtype=np.complex128)
     for i, idx in enumerate(global_freq_indices):
         entry = entries[idx]
         scale = scale_fn(entry)
-        spectrum[i] = (entry["source_dft_real"] + 1j * entry["source_dft_imag"]) * scale
+        spectrum[i] = convert_source_spectrum(entry, (entry["source_dft_real"] + 1j * entry["source_dft_imag"]) * scale)
     return spectrum
 
 
@@ -1135,28 +1342,19 @@ def _combine_plane_sample_data(sample_data):
 def _safe_source_spectrum(spectrum):
     if isinstance(spectrum, torch.Tensor):
         spectrum_array = spectrum.to(dtype=torch.complex64)
-        if spectrum_array.ndim == 0 or spectrum_array.numel() == 1:
-            scalar = spectrum_array.reshape(-1)[0] if spectrum_array.numel() else spectrum_array.new_zeros(())
-            abs_scalar = torch.abs(scalar)
-            floor = max(float(abs_scalar.item()) * 1e-10, 1e-30)
-            return scalar if float(abs_scalar.item()) > floor else torch.as_tensor(complex(floor, 0.0), device=spectrum_array.device, dtype=spectrum_array.dtype)
-
-        abs_spectrum = torch.abs(spectrum_array)
-        peak = float(torch.max(abs_spectrum).item()) if abs_spectrum.numel() > 0 else 0.0
-        floor = 1e-10 * peak if peak > 0.0 else 1e-30
-        floor_tensor = torch.full_like(spectrum_array, complex(floor, 0.0))
-        return torch.where(abs_spectrum > floor, spectrum_array, floor_tensor)
+        abs_spectrum = spectrum_array.abs()
+        peak = abs_spectrum.max()
+        if bool(peak == 0):
+            raise ValueError("Cannot normalize by a zero source spectrum.")
+        floor = 1e-10 * peak
+        return torch.where(abs_spectrum > floor, spectrum_array, floor.to(spectrum_array.dtype))
 
     spectrum_array = np.asarray(spectrum, dtype=np.complex128)
-    if spectrum_array.ndim == 0 or spectrum_array.size == 1:
-        scalar = complex(spectrum_array.reshape(-1)[0]) if spectrum_array.size else 0.0j
-        abs_scalar = abs(scalar)
-        floor = max(abs_scalar * 1e-10, 1e-30)
-        return scalar if abs_scalar > floor else complex(floor, 0.0)
-
     abs_spectrum = np.abs(spectrum_array)
-    peak = float(np.max(abs_spectrum)) if abs_spectrum.size > 0 else 0.0
-    floor = 1e-10 * peak if peak > 0.0 else 1e-30
+    peak = np.max(abs_spectrum)
+    if peak == 0:
+        raise ValueError("Cannot normalize by a zero source spectrum.")
+    floor = 1e-10 * peak
     return np.where(abs_spectrum > floor, spectrum_array, complex(floor, 0.0))
 
 
@@ -1209,6 +1407,21 @@ def _normalize_flux_by_source_spectrum(flux_data, spectrum):
 
 
 def _normalize_monitor_result_inplace(result, spectrum):
+    # Preserve the denominator actually applied to each native component, before
+    # any result frequency selection can change the full-band clamp threshold.
+    native_denominators = {}
+    for name, entry in result.get("components", {}).items():
+        if isinstance(entry, dict) and "data" in entry:
+            data = entry["data"]
+            denominator = _safe_source_spectrum(spectrum)
+            if isinstance(data, torch.Tensor):
+                denominator = torch.as_tensor(denominator, device=data.device, dtype=data.dtype).clone()
+            else:
+                denominator = np.array(denominator, copy=True)
+            native_denominators[name] = denominator
+    if native_denominators:
+        result["source_normalization_spectra"] = native_denominators
+        result["source_normalization_frequencies"] = tuple(result["frequencies"])
     for comp_name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         if comp_name in result:
             result[comp_name] = _safe_divide_source_spectrum(result[comp_name], spectrum)
@@ -1232,234 +1445,306 @@ def _normalize_monitor_result_inplace(result, spectrum):
         result["flux"] = _normalize_flux_by_source_spectrum(result["flux"], spectrum)
     if "power" in result:
         result["power"] = _normalize_flux_by_source_spectrum(result["power"], spectrum)
+    if "power_delivered" in result and result["power_delivered"] is not None:
+        result["power_delivered"] = _normalize_flux_by_source_spectrum(result["power_delivered"], spectrum)
+        result["current_spectrum"] = _safe_divide_source_spectrum(result["current_spectrum"], spectrum)
 
 
-def get_observer_results(solver):
-    if not solver.observers_enabled or not any(entry["sample_count"] > 0 for entry in solver._observer_spectral_entries):
-        raise ValueError("No observer samples recorded. Configure observers and run solve().")
-
-    point_cache = {}
-    plane_cache = {}
-    monitor_source_indices = {}
-    results = {}
-    for observer in solver.observers:
-        monitor_name = observer.get("monitor_name", observer["name"])
-        monitor_source_indices.setdefault(monitor_name, observer["global_freq_indices"])
+def _assemble_plane_monitor_payload(prepared_scene, component_samples, *, samples=None):
+    """Build the common raw plane payload from resolved component samples."""
+    result = None
+    for observer, data in component_samples:
         monitor_fields = tuple(_field_name(field) for field in observer.get("monitor_fields", (observer["component"],)))
         public_component = _field_name(observer["component"])
         monitor_frequencies = tuple(float(freq) for freq in observer["frequencies"])
-        observer_samples = np.asarray(
-            [solver._observer_spectral_entries[index]["sample_count"] for index in observer["global_freq_indices"]],
-            dtype=int,
-        )
-
-        if _observer_is_point(observer):
-            cache_key = (observer["group_component"], observer["group_offset"])
-            if cache_key not in point_cache:
-                group = solver._point_observer_groups[observer["group_component"]]
-                offset = observer["group_offset"]
-                scales = torch.as_tensor(
-                    [_spectral_scale(solver._observer_spectral_entries[index]) for index in group["global_freq_indices"]],
-                    device=group["real"].device,
-                    dtype=group["real"].dtype,
-                )
-                point_cache[cache_key] = combine_complex_spectral_components(
-                    group["real"][:, offset],
-                    group["imag"][:, offset],
-                    group["aux_real"][:, offset] if "aux_real" in group else None,
-                    group["aux_imag"][:, offset] if "aux_imag" in group else None,
-                ) * scales
-            group = solver._point_observer_groups[observer["group_component"]]
-            local_indices = [group["freq_local_lookup"][index] for index in observer["global_freq_indices"]]
-            data = point_cache[cache_key][local_indices]
-            if len(monitor_frequencies) == 1:
-                data = data[0]
-        else:
-            plane_sample_data = []
-            for sample in observer["plane_samples"]:
-                cache_key = sample["group_key"]
-                if cache_key not in plane_cache:
-                    group = solver._plane_observer_groups[cache_key]
-                    scales = torch.as_tensor(
-                        [_spectral_scale(solver._observer_spectral_entries[index]) for index in group["global_freq_indices"]],
-                        device=group["real"].device,
-                        dtype=group["real"].dtype,
-                    )
-                    plane_cache[cache_key] = combine_complex_spectral_components(
-                        group["real"],
-                        group["imag"],
-                        group["aux_real"] if "aux_real" in group else None,
-                        group["aux_imag"] if "aux_imag" in group else None,
-                    ) * scales[:, None, None]
-                group = solver._plane_observer_groups[cache_key]
-                local_indices = [group["freq_local_lookup"][index] for index in observer["global_freq_indices"]]
-                sample_values = plane_cache[cache_key][local_indices]
-                if len(monitor_frequencies) == 1:
-                    sample_values = sample_values[0]
-                plane_sample_data.append((sample["weight"], sample_values))
-            data = _combine_plane_sample_data(plane_sample_data)
-
-        if _observer_is_point(observer):
-            entry = results.setdefault(
-                monitor_name,
-                {
-                    "kind": "point",
-                    "monitor_type": observer.get("monitor_type", "point"),
-                    "fields": monitor_fields,
-                    "components": {},
-                    "field_indices": {},
-                    "samples": observer_samples if len(monitor_frequencies) > 1 else int(observer_samples[0]),
-                    "frequency": monitor_frequencies[0],
-                    "frequencies": monitor_frequencies,
-                    "position": observer["position"],
-                    "dipole_polarization": observer.get("dipole_polarization"),
-                    "dipole_position": observer.get("dipole_position"),
-                    "source_name": observer.get("source_name"),
-                },
-            )
-            entry["components"][public_component] = data
-            entry["field_indices"][public_component] = observer["field_index"]
-        else:
-            entry = results.setdefault(
-                monitor_name,
-                {
-                    "kind": "plane",
-                    "monitor_type": observer.get("monitor_type", "plane"),
-                    "fields": monitor_fields,
-                    "components": {},
-                    "plane_indices": {},
-                    "samples": observer_samples if len(monitor_frequencies) > 1 else int(observer_samples[0]),
-                    "frequency": monitor_frequencies[0],
-                    "frequencies": monitor_frequencies,
-                    "axis": observer["axis"],
-                    "position": observer["position"],
-                    "compute_flux": bool(observer.get("compute_flux", False)),
-                    "normal_direction": observer.get("normal_direction", "+"),
-                    "mode_spec": observer.get("mode_spec"),
-                    "diffraction_spec": observer.get("diffraction_spec"),
-                },
-            )
-            entry["components"][public_component] = {
-                "data": data,
-                "coords": observer["plane_coords"],
-                "plane_index": observer["plane_index"],
-                "plane_indices": observer.get("plane_indices", (observer["plane_index"],)),
-                "plane_weights": observer.get("plane_weights", (1.0,)),
-                "plane_positions": observer.get("plane_positions", (float(observer["position"]),)),
+        if result is None:
+            result = {
+                "kind": "plane",
+                "monitor_type": observer.get("monitor_type", "plane"),
+                "fields": monitor_fields,
+                "components": {},
+                "plane_indices": {},
+                "frequency": monitor_frequencies[0],
+                "frequencies": monitor_frequencies,
+                "axis": observer["axis"],
+                "position": observer["position"],
+                "yee_plane_position": observer.get("yee_plane_position", observer["position"]),
+                "compute_flux": bool(observer.get("compute_flux", False)),
+                "normal_direction": observer.get("normal_direction", "+"),
+                "mode_spec": observer.get("mode_spec"),
+                "diffraction_spec": observer.get("diffraction_spec"),
+                "sample_spacing": observer.get("sample_spacing"),
+                "sample_cell_widths": observer.get("sample_cell_widths"),
             }
-            entry["plane_indices"][public_component] = observer["plane_index"]
-
-    for result in results.values():
-        primary_component = result["fields"][0]
-        if _monitor_payload_is_point(result):
-            for component_name, value in result["components"].items():
-                result[component_name] = value
-            if len(result["components"]) == 1:
-                result["component"] = normalize_component(primary_component)
-                result["data"] = result["components"][primary_component]
-                result["field_index"] = result["field_indices"][primary_component]
-            continue
-
-        axis = result["axis"]
-        coord_names = _plane_coord_names(axis)
-        if len(result["components"]) == 1:
-            payload = result["components"][primary_component]
-            result["component"] = normalize_component(primary_component)
-            result["data"] = payload["data"]
-            result["coords"] = payload["coords"]
-            result["plane_index"] = payload["plane_index"]
-            result["plane_sample_indices"] = payload.get("plane_indices", (payload["plane_index"],))
-            result["plane_sample_weights"] = payload.get("plane_weights", (1.0,))
-            result["plane_sample_positions"] = payload.get("plane_positions", ())
-            result[coord_names[0]] = payload["coords"][0]
-            result[coord_names[1]] = payload["coords"][1]
-            result[primary_component] = payload["data"]
-            continue
-
-        aligned = _align_plane_monitor_payload(axis, result["components"])
-        if aligned is None:
-            if result.get("compute_flux"):
-                raise ValueError(
-                    f"Monitor {result!r} is missing aligned tangential fields required for flux integration."
-                )
-            continue
-        if result.get("compute_flux"):
-            aligned = _crop_aligned_plane_to_physical_bounds(solver, axis, aligned)
-        result[coord_names[0]] = aligned[coord_names[0]]
-        result[coord_names[1]] = aligned[coord_names[1]]
-        result["coords"] = (aligned[coord_names[0]], aligned[coord_names[1]])
-        result["cell_widths"] = {
-            coord_names[0]: _exact_cell_center_widths(
-                solver, coord_names[0], aligned[coord_names[0]]
-            ),
-            coord_names[1]: _exact_cell_center_widths(
-                solver, coord_names[1], aligned[coord_names[1]]
-            ),
+        entry = result
+        entry["components"][public_component] = {
+            "data": data,
+            "coords": observer["plane_coords"],
+            "plane_index": observer["plane_index"],
+            "plane_indices": observer.get("plane_indices", (observer["plane_index"],)),
+            "plane_weights": observer.get("plane_weights", (1.0,)),
+            "plane_positions": observer.get("plane_positions", (float(observer["position"]),)),
+            "collocated": observer.get("sample_spacing") is not None,
         }
-        for component_name, value in aligned["fields"].items():
-            result[component_name] = value
+        entry["plane_indices"][public_component] = observer["plane_index"]
+    if samples is not None:
+        result["samples"] = samples
+    primary_component = result["fields"][0]
+    axis = result["axis"]
+    coord_names = _plane_coord_names(axis)
+    if len(result["components"]) == 1:
+        payload = result["components"][primary_component]
+        result["component"] = normalize_component(primary_component)
+        result["data"] = payload["data"]
+        result["coords"] = payload["coords"]
+        result["plane_index"] = payload["plane_index"]
+        result["plane_sample_indices"] = payload.get("plane_indices", (payload["plane_index"],))
+        result["plane_sample_weights"] = payload.get("plane_weights", (1.0,))
+        result["plane_sample_positions"] = payload.get("plane_positions", ())
+        result[coord_names[0]] = payload["coords"][0]
+        result[coord_names[1]] = payload["coords"][1]
+        result[primary_component] = payload["data"]
+        return result
+
+    aligned = _align_plane_monitor_payload(axis, result["components"])
+    if aligned is None:
         if result.get("compute_flux"):
-            flux = _compute_plane_flux(result)
-            result["flux"] = flux
-            result["power"] = flux
+            raise ValueError(
+                f"Monitor {result!r} is missing aligned tangential fields required for flux integration."
+            )
+        return result
+    if result.get("compute_flux"):
+        aligned = _crop_aligned_plane_to_physical_bounds(prepared_scene, axis, aligned)
+    result[coord_names[0]] = aligned[coord_names[0]]
+    result[coord_names[1]] = aligned[coord_names[1]]
+    result["coords"] = (aligned[coord_names[0]], aligned[coord_names[1]])
+    result["cell_widths"] = (dict(zip(coord_names, result["sample_cell_widths"]))
+                            if result.get("sample_spacing") is not None else {
+        coord_names[0]: _exact_cell_center_widths(
+            prepared_scene, coord_names[0], aligned[coord_names[0]]
+        ),
+        coord_names[1]: _exact_cell_center_widths(
+            prepared_scene, coord_names[1], aligned[coord_names[1]]
+        ),
+    })
+    for component_name, value in aligned["fields"].items():
+        result[component_name] = value
+    if result.get("compute_flux"):
+        flux = _compute_plane_flux(result)
+        result["flux"] = flux
+        result["power"] = flux
+    return result
 
-    # Dipole-emission power pass: P = -(1/2) Re(conj(J) . E) at the dipole cell.
-    # The delivered power is formed from the co-located E DFT and the known
-    # source current spectrum, then excluded from the field-normalization pass.
-    for monitor_name in list(results.keys()):
-        result = results[monitor_name]
-        if result.get("monitor_type") != "dipole_emission":
-            continue
-        global_freq_indices = monitor_source_indices.pop(monitor_name, None)
-        if global_freq_indices is None:
-            continue
-        current_spectrum = _compute_source_spectrum(
-            solver._observer_spectral_entries,
-            global_freq_indices,
-            _spectral_scale,
-        )
-        polarization = result.get("dipole_polarization") or (0.0, 0.0, 0.0)
-        components = result.get("components", {})
-        e_projected = None
-        for (comp_name, weight) in (("Ex", polarization[0]), ("Ey", polarization[1]), ("Ez", polarization[2])):
-            if weight == 0.0 or comp_name not in components:
-                continue
-            term = float(weight) * components[comp_name]
-            e_projected = term if e_projected is None else e_projected + term
-        if e_projected is None:
-            result["power_delivered"] = None
-            continue
-        if isinstance(e_projected, torch.Tensor):
-            current = current_spectrum
-            if not isinstance(current, torch.Tensor):
-                current = torch.as_tensor(current, device=e_projected.device, dtype=e_projected.dtype)
+
+def get_observer_results(solver):
+    with paused_cyclic_gc():
+        if not solver.observers_enabled or not any(entry["sample_count"] > 0 for entry in solver._observer_spectral_entries):
+            raise ValueError("No observer samples recorded. Configure observers and run solve().")
+
+        point_selection_cache = {}
+        point_selections = {}
+        point_flags = []
+        for observer in solver.observers:
+            is_point = _observer_is_point(observer)
+            point_flags.append(is_point)
+            if is_point:
+                key = observer["group_component"]
+                selections = point_selections.get(key)
+                if selections is None:
+                    selections = {}
+                    point_selections[key] = selections
+                selections[observer["global_freq_indices"]] = None
+        for cache_key, selections in point_selections.items():
+            group = solver._point_observer_groups[cache_key]
+            scales = torch.as_tensor(
+                [_spectral_scale(solver, solver._observer_spectral_entries[index]) for index in group["global_freq_indices"]],
+                device=group["real"].device,
+                dtype=group["real"].dtype,
+            )
+            values = combine_complex_spectral_components(
+                group["real"], group["imag"],
+                group["aux_real"] if "aux_real" in group else None,
+                group["aux_imag"] if "aux_imag" in group else None,
+            ) * scales[:, None]
+            for indices in selections:
+                local_indices = torch.as_tensor(
+                    [group["freq_local_lookup"][index] for index in indices],
+                    device=group["real"].device, dtype=torch.long,
+                )
+                selected = values[local_indices]
+                if len(indices) == 1:
+                    selected = selected[0]
+                # Preserve the single split for each component/frequency selection.
+                point_selection_cache[cache_key, indices] = (group["field_name"], selected.unbind(dim=-1))
+        fields_cache = {}
+        field_names = {}
+        frequency_metadata = {}
+        plane_cache = {}
+        plane_components = {}
+        monitor_source_indices = {}
+        results = {}
+        for observer, is_point in zip(solver.observers, point_flags):
+            monitor_name = observer.get("monitor_name", observer["name"])
+            monitor_source_indices.setdefault(monitor_name, observer["global_freq_indices"])
+            if is_point:
+                public_component, selected = point_selection_cache[
+                    observer["group_component"], observer["global_freq_indices"]]
+                data = selected[observer["group_offset"]]
             else:
-                current = current.to(device=e_projected.device, dtype=e_projected.dtype)
-            if current.ndim == 0 or e_projected.ndim == 0:
-                current = current.reshape(e_projected.shape)
-            power = -0.5 * torch.real(torch.conj(current) * e_projected)
-        else:
-            current = np.asarray(current_spectrum, dtype=np.complex128).reshape(np.asarray(e_projected).shape)
-            power = -0.5 * np.real(np.conj(current) * np.asarray(e_projected))
-        result["power_delivered"] = power
-        result["current_spectrum"] = current_spectrum
+                monitor_fields = tuple(_field_name(field) for field in observer.get("monitor_fields", (observer["component"],)))
+                public_component = _field_name(observer["component"])
+                monitor_frequencies = tuple(float(freq) for freq in observer["frequencies"])
+                observer_samples = np.asarray(
+                    [solver._observer_spectral_entries[index]["sample_count"] for index in observer["global_freq_indices"]],
+                    dtype=int,
+                )
+                plane_sample_data = []
+                for sample in observer["plane_samples"]:
+                    cache_key = sample["group_key"]
+                    if cache_key not in plane_cache:
+                        group = solver._plane_observer_groups[cache_key]
+                        scales = torch.as_tensor(
+                            [_spectral_scale(solver, solver._observer_spectral_entries[index]) for index in group["global_freq_indices"]],
+                            device=group["real"].device,
+                            dtype=group["real"].dtype,
+                        )
+                        values = combine_complex_spectral_components(
+                            group["real"],
+                            group["imag"],
+                            group["aux_real"] if "aux_real" in group else None,
+                            group["aux_imag"] if "aux_imag" in group else None,
+                        )
+                        if "sample_weights" in group:
+                            values = (values*group["sample_weights"]).sum(-1)
+                        plane_cache[cache_key] = values * scales[:, None, None]
+                    group = solver._plane_observer_groups[cache_key]
+                    local_indices = [group["freq_local_lookup"][index] for index in observer["global_freq_indices"]]
+                    sample_values = plane_cache[cache_key][local_indices]
+                    if len(monitor_frequencies) == 1:
+                        sample_values = sample_values[0]
+                    plane_sample_data.append((sample["weight"], sample_values))
+                data = _combine_plane_sample_data(plane_sample_data)
 
-    # Source-spectrum normalization pass
-    if getattr(solver, '_normalize_source', False) and getattr(solver, '_normalization_source_time', None) is not None:
-        for monitor_name, global_freq_indices in monitor_source_indices.items():
-            result = results.get(monitor_name)
-            if result is None:
+            if is_point:
+                if monitor_name not in results:
+                    fields = tuple(observer.get("monitor_fields", (observer["component"],)))
+                    monitor_fields = fields_cache.get(fields)
+                    if monitor_fields is None:
+                        for field in fields:
+                            if field not in field_names:
+                                field_names[field] = _field_name(field)
+                        monitor_fields = tuple(field_names[field] for field in fields)
+                        fields_cache[fields] = monitor_fields
+                    key = (tuple(observer["frequencies"]), observer["global_freq_indices"])
+                    metadata = frequency_metadata.get(key)
+                    if metadata is None:
+                        metadata = (tuple(float(freq) for freq in observer["frequencies"]),
+                                    tuple(solver._observer_spectral_entries[index]["sample_count"]
+                                          for index in observer["global_freq_indices"]))
+                        frequency_metadata[key] = metadata
+                    monitor_frequencies, sample_counts = metadata
+                    results[monitor_name] = {
+                        "kind": "point",
+                        "monitor_type": observer.get("monitor_type", "point"),
+                        "fields": monitor_fields,
+                        "components": {},
+                        "field_indices": {},
+                        "samples": np.asarray(sample_counts, dtype=int) if len(monitor_frequencies) > 1 else int(sample_counts[0]),
+                        "frequency": monitor_frequencies[0],
+                        "frequencies": monitor_frequencies,
+                        "position": observer["position"],
+                        "dipole_polarization": observer.get("dipole_polarization"),
+                        "dipole_position": observer.get("dipole_position"),
+                        "source_name": observer.get("source_name"),
+                    }
+                entry = results[monitor_name]
+                entry["components"][public_component] = data
+                entry["field_indices"][public_component] = observer["field_index"]
+            else:
+                entry = results.setdefault(monitor_name, {
+                    "samples": observer_samples if len(monitor_frequencies) > 1 else int(observer_samples[0]),
+                    "fields": monitor_fields,
+                    "axis": observer["axis"],
+                })
+                plane_components.setdefault(monitor_name, []).append((observer, data))
+
+        normalized_components = {}
+        for monitor_name, result in results.items():
+            primary_component = result["fields"][0]
+            if _monitor_payload_is_point(result):
+                for component_name, value in result["components"].items():
+                    result[component_name] = value
+                if len(result["components"]) == 1:
+                    component = normalized_components.get(primary_component)
+                    if component is None:
+                        component = normalize_component(primary_component)
+                        normalized_components[primary_component] = component
+                    result["component"] = component
+                    result["data"] = result["components"][primary_component]
+                    result["field_index"] = result["field_indices"][primary_component]
                 continue
-            spectrum = _compute_source_spectrum(
+
+            result.update(_assemble_plane_monitor_payload(
+                solver.scene, plane_components[monitor_name], samples=result["samples"],
+            ))
+
+        # Dipole-emission power pass: P = -(1/2) Re(conj(J) . E) at the dipole cell.
+        # The delivered power is formed from the co-located E DFT and the known
+        # source current spectrum, before the common source-normalization pass.
+        for monitor_name in list(results.keys()):
+            result = results[monitor_name]
+            if result.get("monitor_type") != "dipole_emission":
+                continue
+            global_freq_indices = monitor_source_indices.get(monitor_name)
+            if global_freq_indices is None:
+                continue
+            current_spectrum = _compute_source_spectrum(
                 solver._observer_spectral_entries,
                 global_freq_indices,
-                _spectral_scale,
+                partial(_spectral_scale, solver),
             )
-            if spectrum.size == 1:
-                spectrum = spectrum[0]
-            _normalize_monitor_result_inplace(result, spectrum)
+            polarization = result.get("dipole_polarization") or (0.0, 0.0, 0.0)
+            components = result.get("components", {})
+            e_projected = None
+            for (comp_name, weight) in (("Ex", polarization[0]), ("Ey", polarization[1]), ("Ez", polarization[2])):
+                if weight == 0.0 or comp_name not in components:
+                    continue
+                term = float(weight) * components[comp_name]
+                e_projected = term if e_projected is None else e_projected + term
+            if e_projected is None:
+                result["power_delivered"] = None
+                continue
+            if isinstance(e_projected, torch.Tensor):
+                current = current_spectrum
+                if not isinstance(current, torch.Tensor):
+                    current = torch.as_tensor(current, device=e_projected.device, dtype=e_projected.dtype)
+                else:
+                    current = current.to(device=e_projected.device, dtype=e_projected.dtype)
+                if current.ndim == 0 or e_projected.ndim == 0:
+                    current = current.reshape(e_projected.shape)
+                power = -0.5 * torch.real(torch.conj(current) * e_projected)
+            else:
+                current = np.asarray(current_spectrum, dtype=np.complex128).reshape(np.asarray(e_projected).shape)
+                power = -0.5 * np.real(np.conj(current) * np.asarray(e_projected))
+            result["power_delivered"] = power
+            result["current_spectrum"] = current_spectrum
 
-    return results
+        # Source-spectrum normalization pass
+        if getattr(solver, '_normalize_source', False) and getattr(solver, '_normalization_source_time', None) is not None:
+            for monitor_name, global_freq_indices in monitor_source_indices.items():
+                result = results.get(monitor_name)
+                if result is None:
+                    continue
+                spectrum = _compute_source_spectrum(
+                    solver._observer_spectral_entries,
+                    global_freq_indices,
+                    partial(_spectral_scale, solver),
+                )
+                if spectrum.size == 1:
+                    spectrum = spectrum[0]
+                _normalize_monitor_result_inplace(result, spectrum)
+
+        return results
 
 
 # --------------------------------------------------------------------------- #

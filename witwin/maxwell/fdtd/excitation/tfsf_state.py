@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import math
 
 from ..boundary.bloch import validate_grating_tfsf_slab_topology
 from .spatial import AuxiliaryGrid1D
@@ -43,7 +44,8 @@ from .tfsf_specs import (
 )
 
 
-ABSORBER_CELLS = 20
+ABSORBER_CELLS = 320
+_DOWNSTREAM_MARGIN_CELLS = 20
 
 
 def _domain_bounds(solver):
@@ -56,18 +58,65 @@ def _domain_bounds(solver):
 
 def _make_auxiliary_grid(solver, *, s_min, s_max, ds):
     eta0 = (solver.mu0 / solver.eps0) ** 0.5
+    source_time = solver._source_time
+    incident_reference = None
+    extent64 = None
+    if source_time["kind"] == "cw":
+        source = solver._compiled_source
+        injection = source["injection"]
+        bounds = injection.get("bounds")
+        if bounds is None:
+            bounds = list(_domain_bounds(solver))
+            bounds[AXIS_INDEX[injection["axis"]]] = injection["axis_bounds"]
+        center = tuple((low + high) / 2 for low, high in bounds)
+        reference = sum(value * direction for value, direction in zip(center, source["direction"]))
+        omega = 2 * math.pi * float(source_time["frequency"])
+        argument = math.sin(omega * solver.dt / 2) * ds / (solver.c * solver.dt)
+        if argument >= 1:
+            raise ValueError("CW incident frequency exceeds the auxiliary grid's propagating band; "
+                             "refine the spatial grid before defining an incident phase reference.")
+        wavenumber = 2 * math.asin(argument) / ds
+        # Transport the physically timed hard seed's CW phase to the declared
+        # injection-box centre, retaining the auxiliary discrete wavenumber.
+        source_time = dict(source_time, phase=float(source_time["phase"]) +
+                           wavenumber * (reference - s_min))
+    else:
+        source = solver._compiled_source
+        lower, upper, _ = resolve_tfsf_region_indices(solver, source["injection"])
+        bounds = tuple((float(coords[lo]), float(coords[hi])) for coords, lo, hi in
+                       zip((solver.scene.x, solver.scene.y, solver.scene.z), lower, upper))
+        incident_reference, exit_plane = projection_extrema(bounds, source["direction"])
+        # Start the incident line at the physical entry plane, with upstream
+        # ghost samples for staggered face corrections. Its entire extent is
+        # independent of PML padding. The entry E is the declared waveform.
+        projected_step = max(abs(direction) * float(np.diff(getattr(solver.scene, f"{axis}_nodes64"))[
+            max(lo - 1, 0):hi + 1].max()) for axis, direction, lo, hi in
+            zip("xyz", source["direction"], lower, upper))
+        upstream_cells = max(2, math.ceil(0.5 * projected_step / ds + 0.5))
+        s_min = incident_reference - upstream_cells * ds
+        s_max = exit_plane + 6 * ds
+        # Count from the original double-precision geometry. FP32 face
+        # coordinates can exceed the integer snap window; their sampled origin
+        # and positions still retain the exact existing arithmetic above.
+        bounds64 = tuple((getattr(solver.scene, axis + "_nodes64")[lo],
+                          getattr(solver.scene, axis + "_nodes64")[hi])
+                         for axis, lo, hi in zip("xyz", lower, upper))
+        entry64, exit64 = projection_extrema(bounds64, source["direction"])
+        extent64 = exit64 - entry64 + (upstream_cells + 6 + _DOWNSTREAM_MARGIN_CELLS) * ds
     return AuxiliaryGrid1D(
         s_min=s_min,
-        s_max=s_max + ABSORBER_CELLS * ds,
+        s_max=s_max + _DOWNSTREAM_MARGIN_CELLS * ds,
         ds=ds,
         dt=solver.dt,
         wave_speed=solver.c,
         impedance=eta0,
-        source_time=solver._source_time,
+        source_time=source_time,
         device=solver.device,
         dtype=solver.Ex.dtype,
         absorber_cells=ABSORBER_CELLS,
+        extent64=extent64,
         fdtd_module=solver.fdtd_module,
+        incident_reference=incident_reference,
     )
 
 
@@ -90,6 +139,48 @@ def _set_tfsf_state(
     bounds=None,
 ):
     injection = source["injection"]
+    if auxiliary_grid is not None and auxiliary_grid.incident_reference is not None:
+        # Reference terms were built with indices measured from the padded
+        # domain minimum; translate them to the physical incident-line origin.
+        padded_min, _ = projection_extrema(_domain_bounds(solver), source["direction"])
+        shift = round((padded_min - auxiliary_grid.s_min) / auxiliary_grid.ds)
+        for term in (*electric_terms, *magnetic_terms):
+            if "sample_indices" in term:
+                term["sample_indices"] = term["sample_indices"] + shift
+                if term["scalar_sample_index"] is not None:
+                    term["scalar_sample_index"] += shift
+    if auxiliary_grid is not None:
+        auxiliary_grid.assert_lossless_samples(electric_terms, magnetic_terms)
+    for term in (*electric_terms, *magnetic_terms):
+        # The shared face specs use the surface-source orientation. A TFSF
+        # enclosure requires its opposite so the interior contains +E_inc and
+        # the exterior contains only the scattered field. Keep modal/open-plane
+        # source orientation independent by applying this at the enclosure.
+        for key in ("coeff_patch", "patch", "cw_cos_patch", "cw_sin_patch"):
+            if term.get(key) is not None:
+                term[key] = -term[key]
+    source["reference_provider_kind"] = provider
+    if auxiliary_grid is not None:
+        solver._source_time_offset = 0.0 if provider == "plane_wave_fixed_k" else 1.0
+    source["reference_waveform_kind"] = source["source_time"]["kind"]
+    source["reference_incident_direction"] = tuple(float(v) for v in source["direction"])
+    source["reference_incident_bounds"] = tuple(
+        (float(coords[lo]), float(coords[hi])) for coords, lo, hi in
+        zip((solver.scene.x, solver.scene.y, solver.scene.z), lower, upper))
+    if auxiliary_grid is not None and auxiliary_grid.incident_reference is not None:
+        source["reference_incident_kind"] = "physical_upstream_yee_entry_plane"
+        source["reference_incident_projection"] = float(auxiliary_grid.incident_reference)
+    else:
+        source["reference_incident_kind"] = ("box_center" if source["source_time"]["kind"] == "cw"
+                                             else "analytic_profile")
+        if source["source_time"]["kind"] == "cw":
+            reference_bounds = injection.get("bounds") if bounds is None else bounds
+            if reference_bounds is None:
+                reference_bounds = list(_domain_bounds(solver))
+                reference_bounds[AXIS_INDEX[injection["axis"]]] = injection["axis_bounds"]
+            source["reference_incident_projection"] = sum(
+                (float(lo) + float(hi)) * .5 * float(direction)
+                for (lo, hi), direction in zip(reference_bounds, source["direction"]))
     state = {
         "provider": provider,
         "lower": lower,
@@ -109,6 +200,8 @@ def _set_tfsf_state(
         state["magnetic_batch"] = build_batched_aux_terms(solver, magnetic_terms)
     if auxiliary_grid is not None:
         state["auxiliary_grid"] = auxiliary_grid
+        if auxiliary_grid.incident_reference is not None:
+            state["incident_reference"] = auxiliary_grid.incident_reference
     if phase_speed is not None:
         state["phase_speed"] = phase_speed
     solver._tfsf_state = state
@@ -210,12 +303,8 @@ def _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds, delt
     # The transverse-axis topology (two Bloch axes, PML on the normal axis) is
     # validated upstream by ``validate_grating_tfsf_slab_topology``.
     #
-    # Both CW and pulsed (broadband) source times are supported: the fixed Bloch
-    # transverse phase is imposed by the boundary, while ``build_term_from_profile``
-    # emits CW-phased patches for a CW source_time and delayed-pulse patches
-    # otherwise. Automatic Bloch-wavevector resolution still requires CW (it maps
-    # a single frequency to a wavevector); that constraint is enforced upstream in
-    # ``resolve_bloch_wavevector`` before this state is built.
+    # Nonzero fixed-k pulses use the complex line before reaching this path.
+    # Keep the analytic CW and zero-k pulse construction unchanged.
     source_time = source["source_time"]
 
     eta0 = (solver.mu0 / solver.eps0) ** 0.5
@@ -242,7 +331,7 @@ def _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds, delt
             phase_speed=phase_speed,
             source_frequency=source_frequency,
         )
-        return build_term_from_profile(
+        term = build_term_from_profile(
             solver,
             field_name=spec["field_name"],
             offsets=spec["offsets"],
@@ -252,6 +341,11 @@ def _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds, delt
             source_time=source_time,
             omega=source_omega,
         )
+        if term is not None:
+            # A complete slab face already contains both native Bloch endpoint
+            # representatives. Extra wrap copies double-deposit those sources.
+            term["periodic_wrap_axes"] = (0, 0)
+        return term
 
     electric_terms = build_terms_from_specs(
         solver,
@@ -754,6 +848,14 @@ def initialize_tfsf_state(solver):
             deltas = _validate_locally_uniform_region(solver, lower, upper)
             _validate_slab_normal_bounds(solver, lower, upper, source["injection"]["axis"])
             _validate_slab_interfaces_are_vacuum(solver, lower, upper, source["injection"]["axis"])
+            if source["source_time"]["kind"] != "cw" and any(
+                k != 0.0 and solver.scene.boundary.axis_kind(axis) == "bloch"
+                for axis, k in zip("xyz", solver.resolved_bloch_wavevector)
+            ):
+                from .fixed_k import initialize_fixed_k_slab
+
+                initialize_fixed_k_slab(solver, source, lower, upper, bounds, deltas)
+                return
             _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds, deltas)
             return
         axis = source["injection"]["axis"]

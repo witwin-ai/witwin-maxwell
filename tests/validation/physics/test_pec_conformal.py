@@ -54,7 +54,7 @@ def _cavity_resonance(wall_x, pec_mode, *, grid=0.01, length=0.6, steps=12000):
         grid=mw.GridSpec.uniform(grid),
         boundary=mw.BoundarySpec.periodic().with_faces(x_low="pec", x_high="pec"),
         device="cuda",
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode),
+        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
     )
     scene.add_structure(
         mw.Structure(
@@ -106,7 +106,7 @@ def _slab_probe(pec_mode, *, dx=0.02, steps=1500):
         boundary=mw.BoundarySpec.pml(num_layers=8).with_faces(
             x_low="periodic", x_high="periodic", y_low="periodic", y_high="periodic"
         ),
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode),
+        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
         device="cuda",
     )
     # The slab faces at +-0.06 are exact multiples of the 20 mm spacing, so the
@@ -129,7 +129,7 @@ def _slab_probe(pec_mode, *, dx=0.02, steps=1500):
         mw.FieldTimeMonitor("probe", components=("Ex",), position=(0.0, 0.0, -0.16))
     )
     result = mw.Simulation.fdtd(
-        scene, frequencies=(2.0e9,), run_time=mw.TimeConfig(time_steps=steps)
+        scene, absorber="cpml", frequencies=(2.0e9,), run_time=mw.TimeConfig(time_steps=steps)
     ).run()
     return result.monitor("probe")["data"].detach().cpu().numpy().reshape(-1)
 
@@ -147,7 +147,7 @@ def _cavity_energy(pec_mode, steps, *, dx=0.02, half=0.2):
         domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.pec(),
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode),
+        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
         device="cuda",
     )
     # Off-centre so the sphere surface cuts edges asymmetrically in all three axes.

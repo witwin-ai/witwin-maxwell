@@ -35,6 +35,7 @@ from ...monitors import (
     PermittivityMonitor,
     PlaneMonitor,
     PointMonitor,
+    PowerLossMonitor,
     WireMonitor,
 )
 from ...scene import Domain, GridSpec, Scene
@@ -43,9 +44,11 @@ from ..excitation import (
     inject_magnetic_surface_source_terms,
 )
 from ..runtime import stepping
+from ..excitation.temporal import injection_time
 from ..solver import FDTD
 from .source_corrections import correct_ideal_point_ex_control_volume
 from .sources import crop_solver_source_terms_to_owned_x
+from .observations import sampled_monitor_for_shard
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +91,11 @@ def _plane_position(monitor: PlaneMonitor | FinitePlaneMonitor | ModeMonitor) ->
 
 def _local_monitors(scene: Scene, layout, global_prepared):
     selected = []
-    for monitor in scene.monitors:
+    for monitor in scene.resolved_monitors():
+        if isinstance(monitor, PowerLossMonitor):
+            # Loss is derived offline from the gathered fields and owned trace
+            # phasors, without a duplicated shard-local volume accumulator.
+            continue
         if isinstance(monitor, WireMonitor):
             # Wire monitors are owned and finalized by DistributedWireRuntime on the
             # single state-owner shard, not accumulated per field shard.
@@ -116,7 +123,10 @@ def _local_monitors(scene: Scene, layout, global_prepared):
                 global_prepared,
                 _plane_position(monitor),
             ):
-                selected.append(monitor)
+                local = (sampled_monitor_for_shard(monitor,layout,global_prepared)
+                         if isinstance(monitor,FinitePlaneMonitor) else monitor)
+                if local is not None:
+                    selected.append(local)
             continue
         raise ValueError(
             f"Multi-GPU FDTD does not support {type(monitor).__name__}."
@@ -242,6 +252,8 @@ class ShardEngine:
             )
             local_solver.dt = dt
             local_solver._requested_dt = dt
+            local_solver.scene._fdtd_shard_layout = layout
+            local_solver.scene._fdtd_global_x_nodes64 = global_prepared.x_nodes64
             local_solver.init_field()
             if local_solver.nonlinear_enabled:
                 raise ValueError(
@@ -316,6 +328,7 @@ class ShardEngine:
             if solver.modulation_enabled:
                 solver.fdtd_module.advanceModulationTime3D(
                     ModulationTime=solver._modulation_time,
+                    ModulationStep=solver._modulation_step,
                     dt=solver.dt,
                 ).launchRaw()
             solver._advance_magnetic_dispersive_state()
@@ -324,7 +337,9 @@ class ShardEngine:
         solver = self.solver
         with torch.cuda.device(self.device), torch.cuda.stream(self.compute_stream):
             if solver._magnetic_source_terms:
-                inject_magnetic_surface_source_terms(solver, time_value=time_value)
+                inject_magnetic_surface_source_terms(
+                    solver, time_value=injection_time("magnetic_current", time_value, solver.dt)
+                )
             solver._apply_magnetic_dispersive_corrections()
             solver._advance_dispersive_state()
             if solver.nonlinear_enabled:
@@ -343,17 +358,21 @@ class ShardEngine:
                 )
             if solver._electric_source_terms:
                 inject_electric_surface_source_terms(
-                    solver, time_value=time_value + 0.5 * float(solver.dt)
+                    solver, time_value=injection_time("equivalent_electric_current", time_value, solver.dt)
                 )
             if solver._source_terms:
-                solver.add_source(time_value=time_value)
+                solver.add_source(time_value=injection_time("electric_current", time_value, solver.dt))
 
-    def accumulate(self, n: int) -> None:
+    def complete_electric_updates(self) -> None:
         solver = self.solver
         with torch.cuda.device(self.device), torch.cuda.stream(self.compute_stream):
             solver._apply_dispersive_corrections()
             stepping.enforce_pec_boundaries(solver)
             stepping.apply_mur_boundaries(solver)
+
+    def accumulate(self, n: int) -> None:
+        solver = self.solver
+        with torch.cuda.device(self.device), torch.cuda.stream(self.compute_stream):
             solver.accumulate_dft(n)
             solver.accumulate_observers(n)
             solver.accumulate_time_observers(n)
@@ -405,6 +424,7 @@ class ShardEngine:
                 solver._prepare_time_observers(time_steps)
             solver._shutoff_triggered = False
             solver._shutoff_step = None
+            solver._shutoff_peak = torch.zeros((),device=solver.device,dtype=solver.Ex.dtype)
 
     def collect_local_monitor_payload(self):
         """Return this rank's ``(monitor payloads, DFT E fields, frequencies)``.

@@ -47,7 +47,7 @@ def compact_array_column_result(result, *, prepared_scene):
     )
     retained_monitors = {
         name: payload
-        for name, payload in result.monitors.items()
+        for name, payload in result._monitors.items()
         if not name.startswith(WAVEPORT_MONITOR_PREFIX)
     }
     return Result(

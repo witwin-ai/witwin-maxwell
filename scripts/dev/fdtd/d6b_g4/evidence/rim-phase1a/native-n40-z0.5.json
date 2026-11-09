@@ -1,0 +1,50 @@
+{
+  "dl": 0.0075,
+  "steps": 3001,
+  "f0": 1000000000.0,
+  "cases": {
+    "pec": {
+      "0.0": {
+        "f_res": 908531050.6821988,
+        "decay": 753181870.153013,
+        "f_peak": 935837871.1379784,
+        "peak": 0.5769503736113605,
+        "dt": 1.2986374446393778e-11,
+        "dt_empty": 1.2999373820213993e-11,
+        "dt_loaded": 1.2999373820213993e-11,
+        "steps": 3005,
+        "seconds": 3.424621820449829,
+        "max_memory_gib": 0.10692691802978516,
+        "shift": 0.0,
+        "peak_ratio": 1.0
+      }
+    }
+  },
+  "worst_shift": 0.0,
+  "gate_pass": true,
+  "resolution": 40,
+  "kind": "native",
+  "zoff": 0.5,
+  "offset": [
+    0.37,
+    0.21
+  ],
+  "grid_wavelength": 0.3,
+  "requested_duration": 3.9e-08,
+  "grid_shape": [
+    81,
+    81,
+    61
+  ],
+  "actual_spacing": [
+    0.0075000000000000015,
+    0.0075000000000000015,
+    0.007500000000000002
+  ],
+  "nearest_zero_node": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "trace_file": "/tmp/sheet-rim-phase1a-nominal/native-n40-z0.5.json"
+}

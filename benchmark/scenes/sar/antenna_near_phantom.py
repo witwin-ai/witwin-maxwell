@@ -6,18 +6,10 @@ Driving the feed and normalizing to a 1 W accepted port power turns the run into
 the full SAR chain -- accepted power -> point SAR -> 1 g / 10 g peaks ->
 save/load -- on a compact grid.
 
-The dipole arms are PEC boxes with a coordinate-defined :class:`LumpedPort` gap
-rather than thin wires. NOTE (recorded design blocker): the current FDTD build
-does not support a driven port alongside a conductive (lossy) background. Both
-the thin-wire runtime ("Thin-wire FDTD does not yet support a conductive
-background electric update") and the lumped-port runtime ("Lumped FDTD coupling
-in conductive media requires a conductance-aware port update coefficient") fail
-closed on a lossy medium, and a tissue phantom is conductive by construction.
-Preparing this scene therefore raises ``NotImplementedError`` today. The scene
-and its fail-closed behaviour are shipped and gated as the documented blocker;
-the accepted-power -> SAR -> 1 g/10 g -> save/load chain is validated on
-synthetic ports and on the plane-wave phantom scenes. Unblocking requires a
-conductance-aware lumped-port update coefficient (out of this stage's scope).
+The dipole arms are PEC boxes with a coordinate-defined :class:`LumpedPort` gap.
+The conductive-material port update supports this functional workflow. Explicit
+node coordinates preserve the physical domain and feed endpoints; the native
+magnetic contour encloses the arms on Yee half-grid planes.
 
 Redistributable canonical geometry only (PEC boxes plus a homogeneous tissue
 box); tissue values are the published-class numbers in ``_tissue.py``. The grid
@@ -28,6 +20,9 @@ separate grid study).
 
 from __future__ import annotations
 
+import math
+import numpy as np
+import torch
 import witwin.maxwell as mw
 
 from benchmark.models import ScenarioDefinition
@@ -56,6 +51,13 @@ def block_center_x() -> float:
     return BLOCK_GAP + 0.5 * BLOCK_SIZE[0]
 
 
+def _axis_nodes(low,high,dx):
+    """Keep the physical endpoints and exact integer-multiple feed grid."""
+    coordinates = np.arange(math.ceil(low/dx),math.floor(high/dx)+1,dtype=np.float64)*dx
+    roundoff = 16*np.finfo(np.float64).eps*max(abs(low),abs(high),dx)
+    return np.concatenate(([low],coordinates[(coordinates > low+roundoff) & (coordinates < high-roundoff)],[high]))
+
+
 def build_scene(*, dx: float = 0.0025, device: str = "cuda") -> mw.Scene:
     total = dipole_length()
     gap = 2.0 * dx
@@ -69,7 +71,8 @@ def build_scene(*, dx: float = 0.0025, device: str = "cuda") -> mw.Scene:
         negative=(0.0, 0.0, -0.5 * gap),
         voltage_path=mw.AxisPath("z"),
         current_surface=mw.Box(
-            position=(0.0, 0.0, 0.0), size=(arm_width, arm_width, 0.0)
+            position=torch.tensor((0.0,0.0,-.5*dx),dtype=torch.float64),
+            size=torch.tensor((3*dx,3*dx,0.0),dtype=torch.float64),
         ),
         reference_impedance=73.0,
     )
@@ -95,19 +98,16 @@ def build_scene(*, dx: float = 0.0025, device: str = "cuda") -> mw.Scene:
     domain_half_x = cx + 0.5 * BLOCK_SIZE[0] + 16 * dx
     domain_half_z = 0.5 * total + 16 * dx
     domain_half_y = max(0.5 * BLOCK_SIZE[1], arm_width) + 16 * dx
+    bounds = ((-16*dx,domain_half_x),(-domain_half_y,domain_half_y),(-domain_half_z,domain_half_z))
     scene = mw.Scene(
-        domain=mw.Domain(
-            bounds=(
-                (-16 * dx, domain_half_x),
-                (-domain_half_y, domain_half_y),
-                (-domain_half_z, domain_half_z),
-            )
-        ),
-        grid=mw.GridSpec.uniform(dx),
+        domain=mw.Domain(bounds=bounds),
+        grid=mw.GridSpec.custom(*(_axis_nodes(low,high,dx) for low,high in bounds)),
         boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
         ports=(feed,),
         structures=(*arms, block),
         device=device,
+        metadata={"qualification":"functional exposure fixture; absolute dosimetry convergence and reference validation pending",
+            "tissue_values":"unchanged canonical 900 MHz catalogue values used as fixed benchmark coefficients at 3 GHz"},
     )
     scene.add_monitor(
         mw.PowerLossMonitor(

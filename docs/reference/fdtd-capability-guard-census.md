@@ -1,753 +1,558 @@
-# FDTD Capability-Guard Census
+# Exact capability-guard review ledger
 
-This document is the maintained baseline for the AST guard gate in
-`tests/api/public/test_guard_census.py`. The gate distinguishes capability gaps
-from deliberate public-contract boundaries so new `NotImplementedError` paths
-cannot enter unnoticed.
+The user-approved observer origin option A adds
+`fdtd/resume.py::_preflight_observer_origin`, shared by single-domain and
+ distributed preflight before any state restoration. Format 6 requires
+`observer_spectral_origin="physical_yee_v1"`,
+`source_reference_label="provider_reference_v1"`, and the selected compiled
+provider/waveform/beta and incident descriptor. Missing or mismatched metadata
+is refused; format 5 is rejected on load. Reference stamps are derived metadata
+and are excluded from the unchanged physical configuration fingerprint.
+Negative coverage:
+`tests/fdtd/test_observer_origin_reference.py::test_old_observer_checkpoint_is_refused_before_restoring`
+and `test_format_five_is_refused_and_new_spectral_checkpoint_round_trips`.
 
-## Reconciled baseline
+The approved pulsed TFSF reference fix adds the shared
+`fdtd/resume.py::_preflight_pulsed_tfsf_reference` boundary. Auxiliary-line pulses
+must record `pulsed_tfsf_reference="physical_entry_plane"`; absent or different
+metadata means the old padding-dependent reference and is refused before both
+single-domain and distributed fingerprint comparisons. The configuration
+fingerprint algorithm is unchanged. CW and analytic providers carry no new key.
+The CPU negative assertion is
+`tests/sources/tfsf/test_pulsed_incident_reference.py::test_old_pulsed_tfsf_checkpoint_is_refused_before_fingerprint_comparison`
+(including distributed metadata). The native round-trip gate is
+`tests/sources/tfsf/test_pulsed_incident_reference.py::test_native_pulsed_reference_pml_causality_and_resume`.
+Restart an old affected run rather than mixing incident conventions.
 
-The 2026-07-17 integrated repository state (circuit co-simulation, Touchstone
-network embedding, the thin-wire subgrid conductor series in plan 07 phases
-0-3, the array basis / active-S feature series in plan 06 phases 0-1, and the
-plan 07 Phase 4 multi-GPU wire forward slice, plus the plan 07 Phase 4
-finite-conductor wire series-impedance slice, the plan 05 nonlinear-device
-Phase 0 slice, the plan 08 gyromagnetic-ferrite Phase 0 slices, and the plan 09
-surface-impedance Phase 0 slices, and the plan 05 nonlinear-device N1 standalone
-transient slice, all merged) contains 165 guards:
+CPML 1+2 (2026-11-02; resolution wording updated 2026-11-03) adds five inventoried safety refusals: distributed
+automatic graded absorption, automatic graded PML faces thinner than 40 layers,
+`FDTDPassivityError` on sustained energy-envelope growth, missing or changed
+guard history at resume, and the core-path closed-transverse CPML blocker.
+The automatic refusal records effective transverse axes and every deficient PML
+face count, including symmetry overrides, while retaining both remedies.
+Their matching CPU negative assertions are in
+`tests/boundaries/cpml/test_auto_passivity.py`. The core blocker also has a GPU
+`test_blockers[closed_transverse]` case. The existing CPU-reference absorber
+boundary is reviewed with automatic resolution before admission; its prior
+predicate is retired with positive default-resolution and resume evidence.
 
-- 139 capability guards tracked by the non-increasing test budget;
-- 26 contract guards excluded by exact file and message substring.
+The collector now inventories the explicitly scoped ValueError and
+FDTDPassivityError sites in `scripts/dev/fdtd/guard_census.py::SAFETY_GUARDS`,
+as well as every NotImplementedError. Ordinary input-validation ValueErrors
+remain outside this inventory. The immutable historical baseline and contract
+exclusions are unchanged. After rebasing onto master 2e8308d2 and reviewing the detailed automatic-refusal
+diagnostic there are 558 active reviewed entries and 48 reviewed retirements; this count does not assert physical qualification. The passivity error message now states that growth slower than 4e-7/step
+(about 1.5x energy over 1e6 steps) is not detected; its prior message
+identity is retired without removing or changing the guard. The CW-driven
+`modulated_slab` is a no-trip control; the off-axis CW-driven static slab is the
+must-trip case with onset and trip diagnostics. CUDA
+growth, passive-control, graph and disk-resume gates remain pending.
 
-The single-GPU circuit adjoint provides the circuit replay and transpose
-linear-solve VJP. Its remaining explicit limits are the omitted t=0
-operating-point/initial-state pullback (therefore trainable DC source values and
-circuit initial conditions), tensor seeds on the initial `CircuitData` sample,
-and trainable port reference impedance. Multi-circuit execution, distributed
-adjoints, and full-field/observer forward-resume accumulation remain separate
-capability gaps rather than reclassified permanent contracts. The thin-wire
-series adds ten capability guards on top of the 119-guard circuit/network
-baseline (119 + 10 = 129); their disposition is detailed in the
-[Thin-wire reconciliation](#thin-wire-reconciliation-2026-07-17) note below. The
-array-basis series adds one further capability guard (129 + 1 = 130); its
-disposition is detailed in the
-[Array-basis reconciliation](#array-basis-reconciliation-2026-07-17) note below.
-The plan 07 Phase 4 multi-GPU wire forward slice adds two further net capability
-guards (130 + 2 = 132) by implementing the distributed wire forward and replacing
-its single blanket guard with three narrower ones (CPML, Mur, and network/circuit
-composition); its disposition is also detailed in the
-[Thin-wire reconciliation](#thin-wire-reconciliation-2026-07-17) note.
 
-The capability baseline is distributed as follows:
+The approved additive-J resume rule adds one shared boundary in
+`fdtd/resume.py::_preflight_additive_j_timing`, called before both single-domain
+and distributed signature comparisons. A checkpoint with additive electric
+currents must record `additive_j_injection="n+1/2"`; absent metadata means exactly
+the old `"n"` convention. Old checkpoints raise:
 
-| Area | Capability guards |
-| --- | ---: |
-| External interoperability adapter | 19 |
-| Material compilers | 14 |
-| Frequency-domain runtime | 5 |
-| Time-domain adjoint | 19 |
-| Time-domain excitation | 12 |
-| Time-domain ports and lumped elements | 16 |
-| Time-domain runtime | 20 |
-| Public simulation, result, and network workflows | 24 |
-| Material models | 8 |
-| Postprocessing | 4 |
-| **Total** | **140** |
+> checkpoint predates the additive-J n+1/2 source timing; re-run from the start
 
-This integrated baseline is the 2026-07-16 circuit/network state (119 capability
-guards) plus the ten thin-wire capability guards from plan 07 phases 0-3 (giving
-129) plus the one array-basis capability guard from plan 06 phases 0-1 (giving
-130) plus the two net capability guards from the plan 07 Phase 4 multi-GPU wire
-forward slice (giving 132) plus the one array scene-gradient capability guard from
-plan 06 Phase 4 (giving 133); its disposition is detailed in the
-[Array scene-gradient reconciliation](#array-scene-gradient-reconciliation-2026-07-17)
-note below. The plan 07 Phase 4 finite-conductor wire series-impedance slice adds
-one further capability guard (giving 134); its disposition is detailed in the
-[Finite-conductor wire reconciliation](#finite-conductor-wire-reconciliation-2026-07-17)
-note below. The 119-guard baseline is itself the 2026-07-15 circuit co-simulation
-state (113 capability guards) plus the six 2026-07-16 network-embedding
-capability guards (Time-domain adjoint +3, Public simulation/result/network
-workflows +3); that reconciliation is detailed in the
-[Network-embedding reconciliation](#network-embedding-reconciliation-2026-07-16)
-section below.
+The timing label enters fingerprints only for PointDipole, UniformCurrentSource,
+and CustomCurrentSource with electric components. Magnetic-only custom currents
+and other non-J configurations retain their fingerprints. CPU prepared-scene
+single-domain and distributed metadata signatures match `f52aa33f` bitwise.
+The matching negative assertions are
+`tests/fdtd/test_resume_additive_j_timing.py::test_old_additive_j_checkpoint_is_refused_before_fingerprint_comparison`
+(CPU, missing/old metadata, single-domain/distributed preflight),
+`tests/fdtd/test_resume_additive_j_timing.py::test_native_resume_refuses_old_additive_j_checkpoint`
+(CUDA, all three additive electric-current families), and
+`tests/fdtd/multi_gpu/test_radiation_observation.py::test_distributed_resume_refuses_old_additive_j_timing`
+(two-GPU P2P, missing/old metadata). This boundary must remain; old additive-J
+runs need to restart.
 
-### Thin-wire reconciliation (2026-07-17)
+P-9(c) performance scope: planar real-field CopperFoil entries without material-trace
+ADE select the fused FP64 CUDA electric step plus begin/magnetic/spectral
+companion phases. State/gain arithmetic remains FP64; final H additions retain
+field dtype and the reference indexed-add semantics. E1 uses its original
+elementwise state/trace gate; E1b uses normwise relative <= `1e-13` per spectral
+tensor. Paired/phase and material-trace ADE
+entries retain torch; CPU and adjoint/replay retain torch. This adds no capability
+raise or retirement. `tests/materials/surface_impedance/test_copper_fused_kernel.py`
+owns the tolerance and fused graph/eager gates; historical pins retain torch.
 
-The thin-wire subgrid conductor series (plan 07, phases 0-3) adds ten reviewed
-capability guards rather than silently running unsupported compositions: two
-compiler guards (a locally anisotropic self-term guard and a Bloch-boundary
-phase-aware wire-topology guard); a set of single-device runtime host-composition
-guards (off-diagonal, conductive, dispersive, and nonlinear/modulated host
-material, plus a surface-impedance conductor-ownership guard); a distributed
-wire ownership guard; and an adjoint checkpoint/reverse guard. They remain
-capability debt, not contract exclusions.
+The authoritative inventory is [fdtd-capability-guards.json](fdtd-capability-guards.json), checked by `tests/api/public/test_guard_census.py`. It records unsupported capabilities; an audit pass does not mean those capabilities are implemented or physically qualified.
 
-The plan 07 Phase 4 multi-GPU wire forward slice (2026-07-17) implements the
-distributed thin-wire forward and therefore removes the single blanket
-distributed wire guard ("Multi-GPU ThinWire requires distributed fragment/state
-ownership...") and replaces it with three narrower capability guards in
-`fdtd/distributed/solver.py::_validate_distributed_wire_support`: a distributed
-thin-wire + CPML boundary (no verified wire-edge/PML ownership across the split),
-a distributed thin-wire + Mur absorbing boundary (wire-edge/boundary ownership on
-the split is undocumented and unverified), and a thin-wire scene mixed with an
-embedded network or lumped circuit (both claim owner-resident coordination state
-with no distributed merge). The Mur guard is the fail-closed integration decision
-folded into this merge: Mur + wire previously passed the PML-only gate but had no
-verified split coupling. Net +2 in the Time-domain runtime area (18 -> 20).
-Finite-conductor loss and distributed wire reverse/gradient are separate slices;
-lower this budget when those new guards are implemented. Phase 4 also owns finite-conductor loss and SIBC ownership; the
-remaining host-composition guards stay tracked capability debt for a later
-compatibility plan. Each future phase must lower this budget as it removes its
-guards. The thin-wire differentiable fixed-step
-requirement is instead a differentiation contract (the automatic joint-CFL clamp
-is a discrete preparation decision that is not differentiated with respect to
-radius or material parameters) and is listed under CONTRACT_GUARDS, not counted
-here.
+`compiler/materials.py::_PCBConductivityReplay.__init__` rejects `kottke_smooth`,
+whose fractional local-moment edge quadrature is outside scalar conductivity replay.
+The matching negative assertion is
+`tests/materials/compiler/test_kottke_smooth.py::test_trainable_geometry_and_material_are_accepted_and_replay_is_rejected`.
+Admission requires bitwise replay parity with complete compilation for this mode.
 
-### Array-basis reconciliation (2026-07-17)
+The existing `kottke_edge` mode review also records its geometry `ValueError`
+(outside the `NotImplementedError` identity census). The default
+`Scene()` / `SubpixelSpec()` now selects four samples per axis and this mode.
+A trainable structure or material-region geometry tensor, including one produced
+by a `SceneModule` geometry parameter, fails during material preparation with:
 
-The array basis / active-S feature series (plan 06, phases 0-1) adds one reviewed
-capability guard. `witwin/maxwell/postprocess/array.py` raises
-`NotImplementedError("Array basis extraction is FDTD-only.")` when a non-FDTD
-`Result` is passed to `array_basis()`. It is a genuine capability gap rather
-than a public contract: `array_basis()` consumes the retained in-memory
-full-wave PortSweep field columns, which only the FDTD backend currently
-produces. It stays counted in the budget (Postprocessing 3 -> 4) so extending
-basis extraction to another backend later lowers the count again.
+> kottke_edge (the default subpixel averaging) is not differentiable in geometry; set SubpixelSpec(averaging='kottke_smooth') or 'polarized' for shape gradients.
 
-### Array scene-gradient reconciliation (2026-07-17)
+A trainable tensor in any `MaterialRegion` field (including design density and
+nested tensor values) also fails during material preparation with:
 
-The array codebook/MIMO/gradient series (plan 06, phases 2-4) adds one reviewed
-capability guard. `witwin/maxwell/array.py::ArrayBasisData.scene_gradient_vjp`
-raises `NotImplementedError("Scene-parameter gradients through the array basis
-require the aggregated per-column adjoint envelope ...")`. Phases 2-4 land the
-codebook/scan/max-hold workflows, the field- and S-parameter-based MIMO metrics,
-and weight gradients through `combine()` (fully supported, no solver rerun). The
-scene/material/geometry gradient through the basis is deliberately sliced out and
-fails closed: the retained-column basis stores detached embedded-pattern tensors,
-so it cannot back-propagate to scene parameters, and the aggregated per-column
-adjoint (plan 06 Phase 4 exit gate, gated on the plan 02 Phase 7 distributed
-result-aggregation contract) is not wired to this single-device basis. It is
-counted under "Public simulation, result, and network workflows" (23 -> 24);
-lower the budget when the aggregated adjoint lands.
+> kottke_edge (the default subpixel averaging) does not support gradients through MaterialRegion design densities; set SubpixelSpec(samples=1, averaging='arithmetic') for density/topology optimization.
 
-### Array scene-gradient implemented (2026-07-21, plan 06 Phase 4)
+`Structure` material-value gradients remain allowed. `kottke_smooth` is not
+qualified for density gradients. The mode never changes automatically.
+`test_trainable_density_requires_explicit_averaging` in the module below checks
+the default rejection and explicit polarized admission.
+The default/explicit triggers and explicit differentiable alternatives are covered
+by `tests/materials/compiler/test_subpixel_default_guard.py`.
 
-`ArrayBasisData.scene_gradient_vjp` is now implemented on the single-device
-basis, so the fail-closed guard above is removed and `CAPABILITY_GUARD_BUDGET`
-drops `176 -> 175` in the same change ("Public simulation, result, and network
-workflows" `24 -> 23`). The method aggregates the per-column adjoints of the
-linear beam combine `E = sum_n w_n e_n` onto the scene parameters: the caller
-re-runs each column's forward under autograd and passes the resulting live
-embedded-pattern columns; the method forms the combined field, takes the
-combined-field cotangent `cot_E = autograd.grad(L, E)`, seeds each column with
-`conj(w_n) * cot_E` (`= w_n^* . (dL/dE)^*`, the PyTorch complex-product backward
-of the combine), and sums the per-column VJPs in a deterministic reduction
-order. The seeded sum is bit-identical to end-to-end autograd of the combined
-objective (verified in `tests/rf/array/test_array_scene_gradient.py`). Detached
-columns, a no-contribution parameter set, wrong column counts, batched
-`[B, F, N]` weights, and shape/dtype/device mismatches raise `ValueError` /
-`TypeError` (usage errors, not capability gaps) and do not occupy budget. The
-2-GPU ensemble aggregation of the same per-column VJPs is the plan 06 Phase 4b
-follow-on (plan 02 Phase 7 distributed result-aggregation contract).
+The immutable starting source is commit `10d351310b36e9681867347e772a21977e234bdf`: 329 `NotImplementedError` sites, including 300 capability sites and the unchanged 29 contract exclusions. Its committed scalar ceiling of 206 was already stale by 94 capability sites before this development. The original snapshot and a predicate/scope snapshot reconstructed from that commit are retained under `docs/assessments/pcb-development-2026-10-22/guard-census/`; their hashes are pinned in the audit tool. The [historical census](../archive/fdtd-capability-guard-census-through-2026-09-11.md) remains available and is not a current ceiling.
 
-### Finite-conductor wire reconciliation (2026-07-17)
+## Reviewed sites, not a scalar allowance
 
-The plan 07 Phase 4 finite-conductor wire series-impedance slice adds one
-reviewed capability guard. `witwin/maxwell/compiler/thin_wire.py` raises
-`NotImplementedError` ("ThinWire ... uses a finite conductor. The per-unit-length
-series-impedance model is available via ...fit_series_impedance, but the lossy
-current recurrence is not yet wired into the FDTD runtime; use a PEC conductor to
-run a thin-wire FDTD simulation.") when a `ThinWire` declares a non-PEC
-conductor. This slice lands the analytic round-wire skin-effect impedance and the
-passive rational ADE fit (`witwin/maxwell/compiler/wire_impedance.py`, reusing
-the shared network rational-fitting stack) plus their acceptance gates, but the
-lossy current recurrence that would feed that impedance into the Yee update is
-not yet wired into the FDTD runtime. The compiler therefore fails closed rather
-than silently running a finite conductor as if it were lossless. It is a genuine
-capability gap, not a public contract: the impedance model itself is implemented
-and the guard disappears once the recurrence lands. It is counted under
-"Material compilers" (11 -> 12); lower the budget when the lossy recurrence is
-wired into the runtime.
+Each active entry stores its path, qualified scope, exception expression, enclosing branches/loop capability sets, exact literal message and stable identity. Line-number-only changes do not change identity. A changed message, scope, exception or captured predicate requires review. Arbitrary data-flow equivalence is not proven by an AST inventory; ordinary code review still applies.
 
-**2026-07-21 update (plan 07 Phase 4, B2 lossy-wire recurrence):** the recurrence
-is now wired. The passive series-impedance ADE is consumed by the wire current
-update (`witwin/maxwell/fdtd/wire_lossy.py`), the `ohmic_loss` monitor emits real
-dissipation, and a finite conductor compiles and runs. The finite-conductor
-deferral guard above is REMOVED (-1, "Material compilers" 12 -> 11). The remaining
-compiler kind check rejects only malformed (non-pec/finite) conductors and is a
-defensive `ValueError`, not a counted capability guard. Two narrower capability
-gaps replace it (+2): the finite-conductor reverse/adjoint replay
-(`fdtd/wire.py::replay_wire_state`, gated until the B3 conductivity adjoint
-transposes the ADE state) and the finite-conductor checkpoint/resume
-(`fdtd/checkpoint.py`, the ADE loss state is not yet in the checkpoint schema).
-Net budget `175 -> 176`; lower it when the lossy reverse and checkpoint schema
-land (B3).
+Every new or modified boundary records the unsupported physical/runtime operation, rationale, responsible phase, negative-test reference and exit acceptance. `negative_control_status` distinguishes a matching negative assertion from `coverage_pending`, where only a module reference exists and individual trigger coverage is not claimed. A referenced test module is never treated as evidence that every guarded branch ran. Missing branch-level coverage remains visible audit debt. No capability is reclassified as a permanent contract to improve the count.
 
-**2026-07-21 update (plan 07 Wave C, B3 conductivity adjoint + multi-GPU
-disposition):** the deterministic conductivity adjoint of the dissipation channel
-lands as the closed-form `d Re(Z')/d sigma` of the analytic scaled-Bessel internal
-impedance (`witwin/maxwell/compiler/wire_impedance.py::internal_impedance_conductivity_gradient`)
-plus a PyTorch-native autograd path
-(`witwin/maxwell/fdtd/wire_lossy.py::analytic_ac_resistance`,
-`LossySegmentModel.conductivity_ac_resistance_gradient`). No guard is removed: the
-field-coupled current sensitivity `dI/dsigma` through the recurrence still fails
-closed, because the ADE coefficients come from the nondeterministic shared rational
-fit (B1) and are not a differentiable/reproducible map of `sigma`, so an exact
-reverse replay cannot be certified. The `fdtd/wire.py::replay_wire_state` and
-`fdtd/checkpoint.py` finite-conductor guards are only sharpened (the replay message
-now names the conductivity-fit nondeterminism and points to the shipped analytic
-adjoint), not lifted. One NEW capability guard is added (+1): the distributed
-lossy-wire forward reject in
-`fdtd/distributed/solver.py::_validate_distributed_wire_support`
-("Multi-GPU ThinWire with a finite-conductivity (lossy) conductor is not
-supported..."), because the distributed owner runtime builds only the lossless PEC
-current update and never constructs the passive series-impedance ADE companion, so
-a lossy wire would silently run as PEC across shards. Net budget `176 -> 177`;
-lower it when the distributed lossy forward (and its owner-resident ADE state) is
-implemented.
+A retired entry retains the old identity, explicit implementation/narrowing reason, positive-test evidence and replacement boundaries. A narrower supported subset does not clear the entire formerly rejected capability. Unrelated additions and removals cannot cancel each other because the test compares exact identities, not just totals. Every original baseline identity must remain active or have a retirement record. Unreachable/private experimental guards are still included by the AST census; recording them does not enable their public feature.
 
-### Nonlinear-circuit-device reconciliation (2026-07-17)
+The `CONTRACT_GUARDS` exclusions are fixed by an exact tuple hash; the only change since the 29-entry baseline is the authorized 29→28 reclassification recorded below. The tuple hash and the immutable baseline hashes are checked. The existing contract-accuracy and public-forward wording tests remain active.
 
-The plan 05 nonlinear-circuit-device Phase 0 slice adds the Device + Newton
-contract (`witwin/maxwell/circuit_devices.py`,
-`witwin/maxwell/compiler/nonlinear_devices.py`) and two reviewed contract guards,
-with **no** change to the capability budget (it stays 134). The two guards are
-the reserved transistor public surfaces `circuit_devices.py::BJT.__init__` and
-`circuit_devices.py::MOSFET.__init__`, each raising `NotImplementedError`
-("Transistor device BJT/MOSFET is gated behind the independent Phase 5 go/no-go
-transistor evaluation ..."). They are contract guards, not capability debt: per
-plan 05 §8 the diode/behavioral nonlinear device family (Diode, PiecewiseLinearIV,
-PolynomialIV, VoltageDependentCapacitor) is delivered by Phases 0-4, while
-transistor terminal physics, charge conservation, and gradients are a separate,
-independent go/no-go phase whose non-completion does not block the Phase 0-4
-release. Reserving the surface fail-closed makes "a parser or factory recognising
-a model card is not the same thing as supported physics" machine-checkable. The
-Device + Newton contract itself adds no `NotImplementedError`; that part of the
-count is unchanged and the contract table above rises from 22 to 24.
+## Review workflow
 
-### Nonlinear-device fail-closed hardening (2026-07-17)
+After relevant numerical source freezes, generate a separate proposal:
 
-Phase 0 admits the nonlinear device family through `Circuit.add` and validates
-its DC topology in `compile_circuit_graph`, but the executable runtimes were not
-yet extended: the linear MNA, coupled MNA, and FDTD Norton-companion paths build
-a single constant-conductance stamp with no Newton iteration, and the standalone
-Newton core consumes only the conduction law `i(v)`. Left unguarded, a diode
-compiled through those paths ran with the device silently absent, and validated
-`series_resistance` / `junction_capacitance` parameters were silently dropped.
-This slice closes those fail-open gaps with three capability guards (capability
-budget 134 -> 137, all under "Time-domain ports and lumped elements", 13 -> 16):
+```bash
+python scripts/dev/fdtd/guard_census.py --proposal /tmp/guard-review.json
+```
 
-- `compiler/circuits.py::reject_nonlinear_devices` rejects any nonlinear device
-  reaching a linear executable runtime, reached from `compile_mna_system`,
-  `compile_coupled_mna_system` (both via `_compile_mna_system`), and
-  `scene.compile_circuits()` (the FDTD circuit prepare path in
-  `Simulation._validate_circuit_execution`).
-- `compiler/nonlinear_devices.py::compile_nonlinear_devices` fails closed on a
-  diode with nonzero `series_resistance`: the ohmic series branch (an internal
-  node with the resistive drop) is not assembled into the ideal-Shockley `i(v)`,
-  so honouring the parameter needs the extended device topology.
-- `compiler/nonlinear_devices.py::newton_solve` fails closed on a diode with
-  nonzero `junction_capacitance` entering the conduction-only DC solve, which
-  never differentiates the stored charge `q(v)` into the system.
+The command never approves or overwrites the reviewed manifest. It preserves unchanged reviews, marks new/changed boundaries pending, and retains retirement candidates. Review each difference, document the actual unsupported boundary and evidence without upgrading its qualification, and apply the reviewed JSON as a deliberate code-review change. Set the snapshot status to `reviewed` only after the final source comparison. Then run:
 
-All three are genuine capability gaps, not permanent contracts: each guard is
-removed when its runtime slice (nonlinear device-runtime integration, the series
-branch, and the charge-aware transient solve) lands. The `q(v)` / `C(v)` charge
-model is still fully exercised through `CompiledNonlinearDevice.charge`, so the
-device math surface is unaffected.
+```bash
+python -m pytest tests/api/public/test_guard_census.py
+```
 
-### Nonlinear-device N1 standalone-transient reconciliation (2026-07-18)
+The gate rejects pending snapshots, unknown/changed/missing identities, unreviewed entries, falsified inherited identity, missing rationale/exit/test references and incomplete retirement evidence. The collector is independently cross-checked against the original complete AST exception inventory, with controls for line movement, changed predicates/scopes/messages and dynamic loop capability sets.
 
-The plan 05 N1 slice implements the charge-aware transient solve, so the third
-guard above is removed and the capability budget drops `140 -> 139`
-("Time-domain ports and lumped elements"). `NonlinearMNASystem` now folds the
-trapezoidal / backward-Euler stored-charge companion into the residual and
-Jacobian (`_charge_companion`, `advance_charge_state`) and `run_nonlinear_transient`
-drives Newton in the transient loop with gmin/source DC continuation
-(`solve_dc_operating_point`) and local backward-Euler PWL-kink breakpoints. The
-diode `junction_capacitance` and `VoltageDependentCapacitor` `q(v)` are therefore
-consumed by the integrator, and the DC operating point correctly treats the
-capacitance as an open circuit. The diode `series_resistance` guard stays: the
-internal-node ohmic branch is still not assembled this round.
+The current reconciliation and per-boundary review are recorded in [the assessment](../assessments/fdtd-capability-guard-reconciliation-2026-10-22.md). It remains separate from physical solver qualification and performance acceptance.
 
-### Gyromagnetic ferrite reconciliation (2026-07-17)
 
-The plan 08 Phase-0 gyromagnetic ferrite slices (0a physics contract, 0b torch
-reference oracle, 1a `GyromagneticFerrite` material type) add four reviewed
-`NotImplementedError` guards: two capability gaps and two permanent contracts.
+## Fixed-chart electrical material review, 2026-10-28
 
-Capability gaps (Phase 0 added +2, `134 -> 136`; slices 1b/1c then net +1 to the
-integrated budget, see the 1b/1c reconciliation below):
+The reviewed main snapshot contains **424** capability identities: **397** entries
+are unchanged, the blanket mapped-adjoint rejection is retained as a reviewed
+retirement, and **27** narrower admission boundaries replace it. The immutable
+300-capability baseline and 29 contract exclusions have not changed. The three
+core namespace guards present in private source snapshots are separate core
+contracts and are not imported into this Maxwell inventory.
 
-- `witwin/maxwell/compiler/materials.py` `_static_structure_material` rejected a
-  `GyromagneticFerrite` structure at Phase 0. **Removed in slice 1c**: a ferrite
-  now compiles as its diagonal background and the gyrotropy is produced by the
-  magnetization-ADE layout + FDTD forward hooks (see the slice-1b/1c
-  reconciliation).
-- `witwin/maxwell/media.py` `PerturbationMedium.__init__` rejects a
-  `GyromagneticFerrite` base. The medium perturbs a scalar permittivity
-  background, which would silently discard the ferrite's magnetization state
-  (Material models `7 -> 8`); lower the budget when a ferrite perturbation branch
-  is implemented.
+The new entries are reviewed boundaries, not 27 implemented features. Passive
+exception tracing of 363 CPU contracts observed the exact raising site for 25;
+two defensive ancestry/scalar-input invariants remain `coverage_pending` because
+normal scalar constructors did not provide genuine triggers. References to
+surrounding test modules do not close those two gaps. A site witness also does
+not prove every alternative of a compound predicate: the manifest retains such
+limits for parallel/initial-condition, UV, constitutive and other branches.
 
-Permanent contracts (+2, listed in `CONTRACT_GUARDS`, Material
-frequency-evaluation domains `9 -> 11`):
+The retired blanket guard records the actual public 24-case GPU qualification on
+frozen `e160f271` / core `f5c7bdae`, without a private admission bypass. The main
+source additionally includes the independently validated Result alias fix;
+main CPU integration has its own source identity. Neither result is relabelled
+as a final integrated GPU/full-suite run. See the [admission evidence](../assessments/fdtd-mapped-material-admission-2026-10-28/README.md)
+for the retained initial 3-pass/21-fail lifecycle result, exact-value dependency
+census, original finite-difference gates and remaining scope limitations.
 
-- `GyromagneticFerrite.relative_permeability` and
-  `GyromagneticFerrite.evaluate_at_frequency` both fail closed because a scalar
-  (or diagonal) `FrequencyMaterialSample` cannot represent the off-diagonal
-  gyromagnetic Polder tensor. Callers use `permeability_tensor_at_freq()` /
-  `polder_tensor()` instead. These are definitionally the same family as the
-  existing material "…is not defined for…" frequency-evaluation contracts, so they
-  are excluded by exact `(file, substring)` match rather than counted against the
-  capability budget.
-### Gyromagnetic ferrite slices 1b/1c reconciliation (2026-07-18)
+## Native spectral/time products, 2026-10-28
 
-Slice 1b (compiler layout) added no guards: `compile_gyromagnetic_layout` and
-`Scene.compile_gyromagnetic_materials` are pure lowering with no fail-closed path,
-and the full-tensor `mu(f)` accessor is total.
+The current reviewed inventory has **438** active capability identities. All
+424 previous identities and their review metadata remain unchanged; nine
+spectral and five time-flux boundaries describe the new bounded sided-Cu
+reduction. The existing retirement and all 29 contract exclusions remain.
 
-Slice 1c (axis-aligned forward) is a net `+1` capability guard (`140 -> 141`):
+Passive tracing of 25 CPU controls observes 13 of the 14 new exact raising
+sites, with opcode and test-node evidence. The time sampler's exact-native-E
+check remains `coverage_pending`: ordinary inputs snap to a single electric
+plane, and no genuine ordinary-input trigger was available. Related negative
+tests are not presented as a witness for that branch. Compound-predicate gaps
+remain explicit in each entry, including permeability representations,
+magnetic poles, missing-trace variants and endpoint directions.
 
-- Removed (`-1`): the `compiler/materials.py` `_static_structure_material` ferrite
-  reject. A `GyromagneticFerrite` now compiles as its diagonal background
-  (`eps_r` / `mu_infinity` / `sigma_e`), and the non-reciprocal off-diagonal
-  permeability is produced by `compile_gyromagnetic_layout` plus the FDTD
-  gyromagnetic forward hooks (`fdtd/runtime/gyromagnetic.py`
-  `advance_gyromagnetic_state` / `apply_gyromagnetic_correction`), so it no longer
-  silently drops the gyrotropy.
-- Added (`+2`), both in `witwin/maxwell/fdtd/runtime/gyromagnetic.py`
-  `build_gyromagnetic`:
-  1. A general (non-axis-aligned) bias, or a scene mixing bias axes, fails closed.
-     Slice 1c advances only the axis-aligned z/x/y fast path where the two
-     transverse H components co-locate on the shared Yee overlap (identity
-     collocation); an arbitrary bias needs the local-frame rotation and 4-point
-     collocation of the Phase-2 kernel. Genuine capability gap; lower the budget
-     when the arbitrary-bias kernel lands.
-  2. A Bloch-periodic ferrite run fails closed: the real-valued magnetization-ADE
-     correction would break the complex Bloch phase relation (the magnetic mirror
-     of the existing nonlinear / full-anisotropy / modulation + Bloch guards).
-     Genuine capability gap; lower the budget when a complex-field ferrite
-     correction lands.
+The numerical candidate separately passes 39 actual GPU controls on the same
+frozen source, genuine core 0.4.1 and the exact ABI4 library. They cover the
+supported Cartesian scalar-unit-permeability, actual Cu-side and normalization
+contracts; they do not implement the rejected magnetic/mapped/ambiguous-side
+combinations or complete physical PCB convergence. The frozen
+[joint evidence](../assessments/printed-lines-2026-10-28/native-product-joint/README.md)
+retains original failed prototypes and the corrected selector run.
 
-The `PerturbationMedium`-wraps-a-ferrite reject and the two
-`GyromagneticFerrite` scalar frequency-evaluation contracts are unchanged.
 
-### Gyromagnetic ferrite general + mixed bias forward reconciliation (2026-07-21)
+## Selected native queries: explicit bounded extension
 
-The plan 08 slice 2a/2b general-bias forward implements the arbitrary- and
-mixed-bias magnetization ADE, so the two remaining gyromagnetic forward-runtime
-capability guards in `witwin/maxwell/fdtd/runtime/gyromagnetic.py`
-`build_gyromagnetic` are **removed**; `CAPABILITY_GUARD_BUDGET` drops `175 -> 173`
-("Time-domain runtime" `20 -> 18`).
+The selected-component/frequency API retains the default all-six single-frequency boundary under its reviewed `components=None` predicate. The historical identifier is archived only to preserve the baseline identity chain; its replacement remains active debt. Seven newly explicit unsupported selected-query operations raise at their actual admission boundaries: coordinate/shape derivatives, analytic time-bank clocks, mapped coordinates, periodic/Bloch seams, undoing source normalization, weighted windows and matched-reference incident/scattered fields. This brings the reviewed Maxwell inventory to445 capability sites with29 unchanged contract exclusions; no scalar target or exception-class reclassification was used.
 
-- Removed (`-1`): the general (non-axis-aligned) bias reject. The general-bias
-  forward is a pure per-cell coordinate rotation of the SAME axis-aligned contracted
-  implicit-midpoint (Cayley) update -- no new integrator, no new coefficients. The
-  compiled layout already carries a per-cell bias, right-handed local frame
-  `[u|v|w]` (`w = b`), and per-cell `Phi`/`Gamma`/`B`/`C`; the runtime gathers the
-  RF drive `h_u = u . H`, `h_v = v . H` from all three lab `H` components and
-  scatters the back-reaction `dM = dm_u u + dm_v v` onto all three, with identity
-  collocation `C = I` reused from the axis-aligned slice (contract section 5). Because
-  `[u|v]^T[u|v] = I`, the local reduction and the coupled 2x2 solve are algebraically
-  identical to the fast path, so the general path reproduces it bit-for-bit for an
-  axis-aligned bias (rotation-equivalence gate). Verified against the Phase-0 torch
-  oracle for `b = (1,1,1)/sqrt(3)` at `reference_polder_rtol`.
-- Removed (`-1`): the mixed-bias-direction reject (the former "single uniform bias
-  direction" guard). A mixed-bias scene -- different bias axes, opposed signs on one
-  axis (e.g. a `+z`/`-z` latching circulator), or differing magnitudes/materials --
-  is supported through the SAME per-cell general path. The magnetization ADE is
-  purely local (no spatial coupling in the magnetization update; fields couple only
-  through the ordinary reciprocal Yee curl), so a mixed-bias scene is the direct sum
-  of independent per-cell passive blocks: each cell precesses around its own `b` with
-  the correct handedness (the right-handed local frame flips the lab-frame
-  off-diagonal for an opposed bias), and per-cell passivity gives global passivity.
-  Verified bit-for-bit against the two standalone single-material runs
-  (`test_mixed_bias_per_cell_independence`) and by the opposed-region frame check in
-  the forward suite. The old guard rejected mixed bias only because the axis-aligned
-  fast path applied a single global transverse sign; the fast path is now used only
-  for a uniform axis-aligned bias, and everything else routes to the per-cell path.
+All seven new sites and the preserved default are observed at exact `RAISE_VARARGS` instructions in11CPU admission cases. [Preparation/ROOT review evidence](../assessments/printed-lines-2026-10-28/public-selected-query-v3/preparation/README.md) preserves pending proposals, actual events and manual receipts. The separate [actual11GPU qualification](../assessments/printed-lines-2026-10-28/public-selected-query-v3/actual/README.md) covers the supported Cartesian/fixed-position/raw/none/real-bank subset, not the rejected operations or full physical PCB convergence. All437 other prior guard entries retain their existing review metadata and original coverage debt.
 
-Only the Bloch-periodic ferrite reject remains in that file (the real
-magnetization-ADE correction cannot carry the complex Bloch phase). The
-identity-collocation general path is accurate for smooth/uniform fields and passive
-(non-secularly-growing) in a closed lossless cavity, verified by
-`test_cuda_oblique_driven_cavity_energy_non_growth_lossless` (energy-envelope
-non-growth over 12k steps); the naive `eps0|E|^2 + mu0|H|^2` proxy oscillates within
-a bounded envelope for an oblique mode because it is not the exact conserved
-leapfrog invariant. The `PerturbationMedium`-wraps-a-ferrite reject, the FDFD /
-adjoint / distributed-shard consumer rejects, and the two `GyromagneticFerrite`
-scalar frequency-evaluation contract guards are all unchanged.
+## PMC, custom Sellmeier, pole perturbation and surface waveform tables, 2026-10-29
 
-### Gyromagnetic ferrite consumer-side fail-close hardening (2026-07-18)
+The reviewed Maxwell inventory now has **453** active capability identities with the
+29 unchanged contract exclusions. Of the twelve new identities, eight are new
+boundaries and four replace inherited identities whose predicate or message changed
+(three `modified_boundary`, plus the widened breakdown message as a
+`feature_boundary`). The four inherited identities are retired as
+`boundary_replaced` and admit no formerly rejected case.
 
-Slice 1c lifted the `compiler/materials.py` ferrite reject globally, but that
-compiler guard had also protected every *non-FDTD-forward* consumer of a ferrite
-scene, none of which received a replacement at the time. This hardening round adds
-the missing consumer-side guards, a net `+3` (`141 -> 144`), so each consumer fails
-closed instead of silently simulating a reciprocal medium:
+- PMC medium: electrostatic, zero-thickness sheet, mapped-adjoint and mode-plane
+  rejections; `is_pmc` added to the local-cache and batch-geometry-adjoint
+  rejections; breakdown rejection widened from PEC to PEC/PMC.
+- Custom Sellmeier: trainable coefficient grids and too many distinct resonance
+  levels.
+- PerturbationMedium poles: gain Lorentz poles and trainable perturbations with
+  nonzero pole sensitivities.
+- Surface waveform tables: the callable `CustomSourceTime` adjoint rejection now
+  tests `table is None`, an equivalent predicate.
 
-- Added (`+1`): `witwin/maxwell/fdfd/solver.py` `_ensure_material_components`
-  rejects a `GyromagneticFerrite`. The static material compile lowers a ferrite to
-  its diagonal background only; the frequency-domain solver never runs the
-  magnetization-ADE runtime, so it would ingest a reciprocal permeability and
-  silently drop the off-diagonal Polder gyrotropy. Frequency-domain runtime gap;
-  lower the budget when an FDFD gyromagnetic ingest lands.
-- Added (`+1`): `witwin/maxwell/fdtd/distributed/shard_engine.py` `ShardEngine.build`
-  rejects a `gyromagnetic_enabled` local solver. The shard phases never call the
-  magnetization-ADE hooks, and each shard-local layout has no rank-seam handling
-  (the overlap slice drops the top plane at rank seams), so a joint solve would
-  silently simulate a reciprocal medium with uncorrected seams. This restores the
-  frozen contract boundary 8 ("Multi-GPU ferrite -- rejected until Phase 4").
-- Split (`+1`): the former single axis-aligned guard in
-  `fdtd/runtime/gyromagnetic.py` `build_gyromagnetic` is now two guards -- a
-  general (non-axis-aligned) bias reject and a mixed-bias-direction reject. The old
-  `torch.unique(fast_axis)` check collapsed `+e_k` and `-e_k` to the same axis code,
-  so a scene mixing `+z` and `-z` ferrites passed the axis-only guard and the single
-  global transverse sign then silently inverted the non-reciprocity of the `-bias`
-  region (the opposed-bias latching-circulator device class). The mixed guard now
-  tests bias-vector uniformity, so both mixed axes and opposed signs on one axis
-  fail closed.
+Four Sellmeier/perturbation sites have matching negative assertions. The eight
+PMC/waveform sites remain `coverage_pending`: their test modules are referenced,
+but no individual trigger is claimed. Open-surface EFIE and MoM topology/runtime
+identities are not part of this review.
 
-Not a new guard node (no census delta):
+## In-simulation monitors, 2026-10-29
 
-- The adjoint reject (frozen contract boundary 9) is a new `return`-string branch in
-  `fdtd/adjoint/bridge.py` `_unsupported_adjoint_medium`, reusing the existing generic
-  `raise NotImplementedError(unsupported_medium_message)`; the non-reciprocal
-  magnetization-ADE correction has no reverse (transpose) core, so a differentiable
-  ferrite run would return gradients for a reciprocal medium.
-- The checkpoint/resume schema (`fdtd/checkpoint.py`, `fdtd/resume.py`) gains the
-  persistent gyromagnetic magnetization state names (`m_u` / `m_v` / `dm_u` / `dm_v`),
-  so a mid-run save/resume round-trips the magnetization instead of silently
-  re-zeroing it; `validate_checkpoint_state` now raises on a dropped gyromagnetic
-  state name.
+Four in-simulation monitor boundaries are reviewed, bringing the inventory to
+**457** active capability identities with the 29 unchanged contract exclusions:
+FDTD-only recording of projection, Gaussian-overlap, surface field-time and
+auxiliary field-time monitors, plus three reference-adapter export rejections
+(an unmatched k-space hemisphere, ADE auxiliary state with no reference
+equivalent, and a -normal Gaussian-overlap beam). Each cites a matching negative
+assertion. No identity is retired.
 
-### Surface-impedance adapter reconciliation (2026-07-17)
+The -normal Gaussian-overlap message was reworded before review: the reference
+monitor records both `+` and `-` overlap amplitudes, so the limit is the
+adapter's missing backward-amplitude mapping, not the reference monitor. Detached time-trace gradient and multi-GPU time-monitor
+rejections raise `RuntimeError`/`ValueError` and are outside this inventory.
 
-The surface-impedance Phase 0 slice froze the contract, the rational model, the
-shared fitter, and the compiler funnel with the guard census reconciled unchanged
-at 134 (the single re-authored `_reject_surface_impedance` funnel replaced the
-prior surface-impedance rejection, no net change). The follow-up fail-close in the
-interoperability adapter adds one reviewed capability guard.
-`witwin/maxwell/adapters/tidy3d.py::_convert_material` now raises
-`NotImplementedError` for a generic `SurfaceImpedanceMedium` instead of letting it
-fall through to the non-dispersive `td.Medium(permittivity=1.0)` path and silently
-export as vacuum. A generic surface-impedance medium carries its physics in a
-broadband causal rational tangential surface impedance
-`E_t = Z_s(omega) (n x H)` with no finite bulk-permittivity equivalent, and the
-reference backend has no surface-impedance construct mapped for a rational model
-yet (the narrowband good-conductor `LossyMetalMedium` keeps its dedicated
-lossy-metal surface path). It is a genuine capability gap, not a public contract:
-the guard disappears once the surface-impedance adapter mapping is designed. It is
-counted under "External interoperability adapter" (18 -> 19); lower the budget when
-the mapping lands.
+## Coaxial lumped ports and tabulated port drives, 2026-10-29
 
-### Surface-impedance Phase 1 slices S1.1 + S1.2 reconciliation (2026-07-18)
+Four new boundaries and one replaced inherited identity bring the reviewed inventory
+to **460** active capability identities with the 29 unchanged contract exclusions:
 
-The Phase 1 slices generalized the surface-impedance runtime (axis-aligned
-exposed-face layout for finite blocks, mid-domain double-sided plates, multiple
-metals, and multiple orientations; the generic per-edge Z-form ADE forward with the
-narrowband good conductor as its order-0 case). The single re-authored
-`witwin/maxwell/compiler/materials.py::_reject_surface_impedance` funnel now rejects
-strictly fewer cases -- finite blocks, mid-domain plates, multiple metals, multiple
-orientations, and the generic `SurfaceImpedanceMedium` all compile -- but it remains
-one `raise NotImplementedError` site (the oblique/rotated/curved and Bloch cases
-still funnel through it), so the capability count is unchanged. No guard was added or
-removed: the budget stays at **140**. The adjoint bridge guard
-(`fdtd/adjoint/bridge.py`) and the distributed-solver guard
-(`fdtd/distributed/solver.py`, a `ValueError`, not census-counted) were widened to
-also cover the generic `SurfaceImpedanceMedium` (previously only `LossyMetalMedium`),
-closing a fail-open gap without changing the count. The interoperability-adapter
-guard for a generic `SurfaceImpedanceMedium` remains until its export mapping lands.
+- annular coaxial branch on dispersive (ADE) row support (`fdtd/coaxial.py`);
+- `CoaxialLumpedPort` bound to a circuit or embedded network (`fdtd/ports.py`);
+- differentiable runs with `CoaxialLumpedPort` / `CoaxialLumpedResistor`
+  (`simulation.py`, forward-only rejection);
+- callable `CustomSourceTime(fn)` port drives (`fdtd/ports.py`). This replaces the
+  inherited `device-native CW, GaussianPulse, or RickerWavelet` rejection, retired as
+  `boundary_replaced`: sampled tables, `BroadbandPulse` and the tabulated baseband
+  pulses are now admitted, with the matched-coax drive-equivalence test as positive
+  evidence. Callables remain rejected.
 
-### Surface-impedance staircase generalization G4a reconciliation (2026-07-21)
+Each new entry cites a matching negative assertion. The ten open-surface EFIE / MoM
+topology identities are not part of this review.
 
-Stage G4a generalized the surface-impedance boundary from axis-aligned Box plates to
-any voxelized (possibly curved) good conductor: a non-Box conductor is staircased from
-its node occupancy and its axis-aligned voxel faces (all six orientations, mixed
-orientations, cylinder/sphere) compile into masked exposed-face writes
-(`witwin/maxwell/compiler/materials.py::_compile_voxel_surface_metal`,
-`fdtd/runtime/materials.py::_voxel_surface_writes`). The single
-`_reject_surface_impedance` funnel again rejects strictly fewer cases -- curved
-conductors now compile instead of being turned away for being non-Box -- while
-remaining one `raise NotImplementedError` site: it now funnels only the true
-conformal/oblique cases (a rotated Box, whose grid-unaligned normal is not
-staircased), a generic rational surface on a curved conductor (the per-edge ADE stays
-Box-only), the tangential 2x2 model, the contradictory-owner cases, and the
-Bloch-periodic run. No guard was added or removed and the budget is unchanged at
-**176**. The remaining SIBC gap is the true oblique/conformal (non-staircase) surface,
-not the staircased curved conductor, which is now supported.
+## Multi-conductor terminal wave port, 2026-10-29
 
-## Contract exclusions
+Five new boundaries bring the reviewed inventory to **470** active capability
+identities after merging master's 465 (which include the boundaries-branch review:
+six new entries and one retirement, 25 retired in total); no existing identity changed (the terminal mode solve enters through an
+early dispatch, so the enclosing branches of the TEM / vector mode guards are intact)
+and the 29 contract exclusions are unchanged:
 
-`CONTRACT_GUARDS` in the test is the canonical exact-match inventory. Its 24
-entries cover these stable contract families:
+- lossy (complex) and magnetic `TerminalWavePort` cross-sections
+  (`fdtd/excitation/modes/__init__.py`, two entries);
+- direct `PortExcitation` of a `TerminalWavePort` (`simulation.py`);
+- differentiable runs containing a `TerminalWavePort` (`simulation.py`, forward-only);
+- one sweep mixing `TerminalWavePort` and single-mode `WavePort` apertures
+  (`terminal_waveport.py`).
 
-| Contract family | Count |
-| --- | ---: |
-| Material frequency-evaluation domains | 11 |
-| Module-style scene implementation requirement | 1 |
-| Non-meshable complex polygon geometry | 1 |
-| Time-domain adjoint input, complex-state, and fixed-step requirements | 3 |
-| Frequency-domain adjoint input requirement | 1 |
-| External adapter medium limitations | 2 |
-| Bloch-boundary total-field/scattered-field slab requirement | 1 |
-| Closed-surface exterior-sampling requirements | 3 |
-| Time-domain-only embedded network feedback | 1 |
-| Transistor Phase-5 go/no-go boundary | 2 |
-| **Total** | **24** |
+Each entry cites a matching negative assertion in
+`tests/rf/terminal_wave/test_terminal_wave_guards.py`. The ten open-surface EFIE / MoM
+topology identities remain outside this review.
 
-When an implementation removes a capability guard, lower
-`CAPABILITY_GUARD_BUDGET` in the same commit. Reclassifying a guard as a public
-contract requires adding an exact entry to `CONTRACT_GUARDS` and updating the
-two tables above. Raising the budget requires an explicit capability review and
-an updated baseline here.
+## Conformal thin-sheet runtime review, 2026-10-31
 
-## Network-embedding reconciliation (2026-07-16)
+This scoped review adds **42** current fail-closed boundaries: 13 in the
+thin-sheet compiler, 18 in the runtime, one checkpoint boundary, eight explicit
+CPU-profile admission boundaries and two CPU-reference kernel boundaries. The
+CPU reference backend is a sanctioned, explicit opt-in parity mirror for small
+validation problems. It is never selected implicitly for a CPU scene.
 
-The Touchstone network-embedding series (`33c1ca5`, `f76a27a`, `2ff0003`) added
-exactly seven `NotImplementedError` guards and removed none (verified by
-`git log -S "raise NotImplementedError" master..HEAD -- witwin/`). Six are
-capability gaps and raise `CAPABILITY_GUARD_BUDGET` by six; combined with the
-five circuit co-simulation guards on the 2026-07-15 baseline of 108 this yields
-the integrated budget of 119 (108 + 5 + 6). The seventh network-embedding guard
-is a permanent architectural boundary reclassified into `CONTRACT_GUARDS`. Each
-guard was reviewed individually below. All seven are correct fail-closed
-rejections and are retained; this reconciliation records the baseline instead of
-deleting them.
+The native batch runtime tuple now includes `_thin_sheets`; its modified identity
+retains the existing source, wire, surface and absorber exclusions. The previous
+batch identity is retired as `boundary_replaced`, with no newly admitted case.
+The blanket `SurfaceMesh` finite-copper rejection in `compile_copper_faces` is
+retired because the conformal runtime now carries independent side fields and
+passive copper diffusion state. Positive tests run a folded finite-copper mesh
+and compare a planar mesh with the existing foil path. All narrower topology,
+medium, composition, gradient and lifecycle boundaries remain active.
 
-### Capability guards (+6: "Time-domain adjoint" +3, "Public simulation, result, and network workflows" +3)
+The pending thin-sheet proposal was checked against current source rather than
+copied wholesale: the dense trace-operator budget guard has been removed by the
+chord implementation, runtime predicates changed, and several old test references
+did not exercise the cited raises. The manifest contains only current identities.
 
-| Guard | Message | Capability review |
+The [site evidence](../assessments/fdtd-thin-sheet-guard-census-2026-10-31.json)
+records **59 passing targeted cases**, including both positive copper controls.
+Passive exception tracing observed all **43** reviewed raising sites (42 new and
+one modified); none lacks a negative test. Low-level geometry/profile controls
+exercise sites hidden behind earlier public validation, and material/coefficient
+controls isolate the individual update assumptions. These witnesses establish
+admission coverage, without extending physical or native CUDA qualification.
+
+This review added one implemented retirement and one replaced batch identity to the
+prior 27 retirements. It was merged together with the separate wire, antenna and contract
+review below (master `c6c40996`). The combined manifest has **524 active** and **32 retired**
+identities, and the full census passes (**7 passed**).
+
+## Wire and antenna identity mappings, one contract reclassification, 2026-10-31
+
+Two reviewed identities changed without a capability change, and one contract
+exclusion left the census:
+
+- `fdtd/wire.py::replay_wire_state` (inherited debt): a6e2a778 reworded the message.
+  The lossy-wire predicate, scope and exception class are unchanged. The old identity
+  is retired as `identity_mapping_only`; the replacement is a reviewed
+  `modified_boundary` with the matching negative assertion
+  `tests/fdtd/thin_wire/test_thin_wire_lossy_forward.py::test_lossy_reverse_replay_fails_closed`.
+- `postprocess/antenna.py::_far_fields_from_result` (inherited debt): 88ccca7a changed
+  only the loop variables. It is mapped the same way, with the new matching negative
+  assertion `tests/rf/antenna/test_result_antenna.py::test_result_antenna_rejects_a_lossy_exterior`.
+- `fdtd/runtime/timeplan.py` "normalize_source requires a single incident source
+  spectrum": 740c6fdd changed this invalid-input check to `ValueError`.
+  Authorization: "the coordinator, 2026-10-31: 740c6fdd changed an invalid-input
+  check to ValueError; contract list 29→28". The contract tuple hash in
+  `scripts/dev/fdtd/guard_census.py` is re-pinned to the 28 remaining exclusions; the
+  hash lock itself is unchanged. Without the exclusion, the baseline guard counts as
+  inherited debt, so it is retired with positive evidence that amplitude-only scaling
+  is admitted and every other waveform difference raises `ValueError`.
+
+The 42 thin-sheet and CPU-reference identities, the thin-sheet `batch.py` predicate
+change and the `copper_foil.py` retirement from the 3D thin-sheet merge are reviewed
+separately by that line.
+
+## FDFD scene-monitor refusal, 2026-10-31
+
+`simulation.py::Simulation._validate_method_scene_features` adds one new
+`feature_boundary`. FDFD Results populate only `PermittivityMonitor`/`MediumMonitor`
+material payloads and `FDFDConfig.observations`, so any other scene monitor is refused
+before execution. It no longer runs and returns without a payload. The matching negative
+assertion is `tests/fdfd/test_fdfd_monitor_refusal.py::test_fdfd_refuses_scene_monitor`,
+parametrized over every other public monitor type. The manifest has **525 active** and
+**32 retired** identities, and the full census passes (**7 passed**).
+
+## Antenna lossless-exterior identity mapping, 2026-11-04
+
+The scale sweep replaced the antenna guard's absolute imaginary-part tolerance
+with a tolerance relative to each real part. The message and unsupported
+lossless-exterior boundary remain unchanged. The existing review, negative test,
+rationale and exit acceptance carry from `ba40c60c…:0` to `825129b7…:0`; only the
+active identity, captured conditions and source line change. The old identity is
+retired as `identity_mapping_only`, and the earlier `011bb701…:0` mapping now
+points to the current identity while retaining the intermediate history.
+
+On this branch alone the inventory had **546 active** and **38 retired** identities, with **28**
+current contract exclusions; with the mode-source replay registration alone it had
+**548 active**, **38 retired** and **28** contract exclusions. This reconciliation carries existing review evidence and
+claims no capability implementation or new qualification.
+## Mode-source replay eigen-adjoint debt, 2026-11-04
+
+The frozen source proposal adds two raising-site identities, bringing the reviewed
+inventory from **546 to 548 active** capability sites. The **37 retired** identities
+and **28 contract** exclusions are unchanged: **576** total exception sites. All
+546 existing active reviews are preserved without re-review or identity mapping.
+This registration changes no runtime behavior or public feature.
+
+Both new sites in `fdtd/adjoint/bridge.py` retain the negative boundary:
+**mode-shape eigen-adjoint for vector-forward / scalar-replay on trainable
+ModeSource/ModePort launch planes**. Other mismatched forward/replay families are
+also refused when their launch-plane material depends on trainable inputs.
+Follow-up route (i) is `fix/mode-source-replay-vector-grad`; registration records
+capability debt and does not qualify that missing derivative.
+
+- `2892c16a2566ef908b0c18a3ef9fa530038609c96dd8dc9f6899b61b51c6e456:0`
+  is the standalone `_validate_mode_source_replay` raise (line 413).
+- `ca5c27d10e9a5108cfa9c17fd0cf988f123fe41dd7d9fbd484c2c81d08499aea:0`
+  is `_FDTDGradientBridge._validate_mode_source_replay` (line 477), which raises
+  the cached verdict before rebuilding sources or reverse stepping.
+
+`_mode_source_replay_error` builds the shared reason but does not raise. Both
+sites use `NotImplementedError(error)`, so their census literal messages are
+empty. The proposal labels them `modified_boundary` because an empty literal
+message matches unrelated baseline guards in the same file. Source review
+identifies two new feature-boundary sites, not replacements; their reviewed
+origin is therefore `feature_boundary` with an explicit unsupported boundary.
+
+The reported `347...316746` / `347...5af239` pair is not an identity change in
+this checkout. The full identities ending in those suffixes are separate guards:
+
+- `e07546afab0ab1d98abe64b4b90596770b2470b14e3234f9342c6ed29d316746:0`
+  is `waveport_sweep.py::resolve_waveport_run_manifest`, rejecting unterminated
+  non-wave ports; its inherited review already matches the source.
+- `6c09f7085c3964ad66486133ccec6ce350b3dc96a9fc48526a011df82c5af239:0`
+  is `fdtd/resume.py::_preflight_observer_origin`, rejecting old or mismatched
+  observer-origin/provider metadata. Commit `f36cdaf1` already registered it;
+  its review also matches the source. Neither guard moved because of the replay
+  edits, and the proposal removes no active identity.
+
+Matching negative assertions in
+`tests/gradients/test_mode_source_replay_guard.py` cover spatial ModeSource and
+ModePort refusal, dense/sparse vector launches, complex-forward/real-replay
+mismatch, multiple-source naming, exact epsilon/mu sampling-edge dependencies,
+and cached refusal with material-graph invalidation. Fixed launch planes and
+matching scalar families retain their admission. The manifest also pins
+`test_rectangular_guide_replay_against_richardson_bound[source]`: its native
+backward refusal and ordinary-forward finite differences require CUDA and are
+not executed by this CPU-only review. These references claim matching negative
+assertions, not passive raising-site tracing or GPU qualification.
+
+CPU gates in the `maxwell` environment with `CUDA_VISIBLE_DEVICES=` all returned
+rc 0: `tests/api/public/test_guard_census.py` (**7 passed**),
+`tests/validation/benchmark/test_integration_batch.py` (**82 passed**), and
+`tests/gradients/test_mode_source_replay_guard.py` (**40 passed, 4 skipped**).
+The four skipped cases require CUDA, including both FD-pinned guide cases.
+
+## Dense vector replay reconciliation, 2026-11-04
+
+Route (i) narrows the preceding review: lossless conductor-free trainable
+ModeSource/ModePort planes now use matching `vector_dense_torch` forward/replay
+profiles for actual operator row counts `n <= 4096` with an isolated selected
+eigenpair. Before the scale-guard merge, the inventory contained **552 active**, **43 retired** and
+**28 contract** identities: **580** current exception sites. Of the previous
+548 active entries, **540 reviews are unchanged**, **two are narrowed**, and
+**six are carried to changed predicate identities**; **four new boundaries**
+are registered. No shared bridge raising site is removed.
+
+The standalone `2892c16a…:0` and cached `ca5c27d1…:0` identities persist exactly.
+Their `unsupported_boundary` now covers remaining family mismatches and names
+the dedicated cap, isolation and loss limits. Both retain `positive_tests` and
+a `narrowing_review` using the retirement evidence fields (`retirement_review`,
+`retirement_kind`, `retired_boundary`, `retirement_reason`, `positive_tests`,
+`replacement_boundaries`). This retires only the supported subset of the old
+refusal, without creating a fictitious removed identity or retiring PEC/TEM or
+complex replay debt. Positive acceptance references are:
+
+- `test_mode_source_replay_guard.py::test_rectangular_guide_replay_against_richardson_bound[source]`;
+- `test_mode_source_vector_replay.py::test_metre_micrometre_gradient_scaling`;
+- `test_mode_source_vector_replay.py::test_bend_material_region_crosses_launch_plane`.
+
+These tests live under `tests/gradients/` and require CUDA. They are retained
+acceptance gates, not claims of GPU execution in this CPU-only reconciliation.
+The source FD case now requires an admitted, FD-correct gradient. Existing
+WavePort admission pins are unchanged. The sampling-edge and cached-refusal
+fixtures now use a synthetic `vector_pec_dense_torch` family, preserving tests
+of actual remaining family mismatch rather than refusing the admitted subset.
+
+Four new exact raising sites are reviewed with matching negative assertions in
+`tests/gradients/test_mode_source_vector_replay.py`:
+
+| Identity prefix | Unsupported boundary | Negative assertions |
 | --- | --- | --- |
-| `fdtd/adjoint/bridge.py` `_validate_supported_configuration` (delay branch) | "Differentiable embedded-network FDTD does not support explicit delay state." | Deferred capability. The forward explicit fractional-delay line is a fixed-length buffer recurrence; its reverse-mode adjoint is not yet derived, so a differentiable run with a delay network is rejected rather than returning a wrong gradient. Implementable later (delay-line adjoint), so it counts against the budget. |
-| `fdtd/adjoint/bridge.py` `_validate_supported_configuration` (RationalModel poles/proportional) | "Differentiable embedded RationalModel supports residues and direct terms only; trainable {…} are not supported." | Deferred capability. Plan 03 §5.3 defers gradients through pole relocation / passivity enforcement to a later version; trainable `poles`/`proportional` are rejected instead of silently detached. Implementable later, counts against the budget. |
-| `fdtd/adjoint/bridge.py` `_validate_supported_configuration` (state-space A/B/C/D) | "Differentiable embedded networks accept trainable residues/direct on a pre-fitted RationalModel; direct trainable state-space matrices are not supported." | Deferred capability. Direct differentiation of raw discrete `A/B/C/D` is not implemented; users differentiate a pre-fitted `RationalModel`'s residues/direct terms instead. Implementable later, counts against the budget. |
-| `fdtd/networks.py` `finalize_embedded_networks` (replay delay branch) | "Differentiable embedded-network replay does not support explicit delay state." | Deferred capability. Mirrors the bridge delay guard on the replay path so the checkpoint/replay adjoint cannot silently run without delay-state gradients. Implementable later, counts against the budget. |
-| `simulation.py` `_validate_trainable_rf_support` (RationalModel poles/proportional) | "Differentiable embedded RationalModel supports residues and direct terms only; trainable {…} are not supported." | Deferred capability. Public-entry mirror of the bridge poles/proportional guard so the rejection surfaces at `Simulation` construction, not deep in the adjoint. Implementable later, counts against the budget. |
-| `simulation.py` `_validate_trainable_rf_support` (state-space A/B/C/D) | "Differentiable embedded networks accept trainable residues/direct on a pre-fitted RationalModel; direct trainable state-space matrices are not supported." | Deferred capability. Public-entry mirror of the bridge state-space guard. Implementable later, counts against the budget. |
+| `9dc2f013…:0` | Actual dense operator rows `n > 4096` | `test_above_cap_refuses`, `test_above_cap_source_refuses_before_stepping` |
+| `bc5f466d…:0` | Relative selected eigen-gap at or below `sqrt(eps64) ||A||_infinity / abs(lambda)` | `test_square_guide_refuses_degenerate_polarizations` |
+| `907a99f0…:0` | Lossy/conductive relative epsilon or mu above the router's `1e-7` imaginary threshold | `test_lossy_trainable_vector_planes_refuse_before_real_projection`, `test_yee_operator_refuses_lossy_plane`, `test_lossless_threshold_uses_router_precision`, `test_conductive_trainable_launch_plane_refuses` |
+| `8b3671b5…:0` | Selected eigenvalue imaginary part above `sqrt(eps64) abs(lambda)` | `test_selected_eigenpair_checks_imaginary_part[1e-06-True]` |
 
-### Contract guard (+1)
+The remaining shared bridge negatives are the complex-forward/real-replay
+control, exact epsilon/mu sampling-edge dependencies and cached graph
+invalidation in `test_mode_source_replay_guard.py`. Cap/gap/loss controls pin
+their dedicated earlier raises; they are not raising-site witnesses for the
+bridge. All new controls are recorded as matching assertions, without a claim
+of passive raising-site tracing.
 
-| Guard | Message | Contract review |
+Six old conductor/TEM identities are retired as `boundary_replaced`, with
+replacement identities carrying their original reviews and explicit coverage
+debt. The enclosing dispatch now admits torch vector replay; these conductor
+capabilities remain unsupported:
+
+| Previous identity prefix | Current identity prefix | Preserved boundary |
 | --- | --- | --- |
-| `simulation.py` `_validate_network_solver` | "Embedded network feedback is defined only for the time-domain FDTD update; frequency-domain solvers cannot ignore Scene.networks." | Permanent architectural boundary, not a capability gap. Per plan 03 (2026-07-14 decision, §2.1 goal 3 and §5.2) network embedding is unified as a **time-domain** passive state-space recurrence `x[n+1]=Ad x[n]+Bd v[n]` fed back into each FDTD step; there is no per-step update in a frequency-domain solve for a network to couple into, and the plan explicitly rejects a post-simulation S-matrix cascade. This is definitionally the same family as the material "…is defined only for / is not defined for…" contract guards, so it is excluded by exact `(file, substring)` match rather than counted against the capability budget. |
+| `f822b1e4` | `f667ef58` | Lossy TEM locally uniform axial spacing |
+| `db458bb9` | `fa8fdab2` | Spatially varying lossy quasi-TEM potential |
+| `6ca19a7b` | `6c5ae0c3` | Lossy TEM material-profile adjoint |
+| `97de73c9` | `fc7f1af7` | Lossy PEC-aware vector solve |
+| `9870e7af` | `69cc9701` | Lossy TEM pole projection |
+| `4b8eabbf` | `9a8653c0` | Internal-PEC material eigen-adjoint |
 
-### Gyromagnetic export reconciliation (2026-07-18)
+All six retain `coverage_pending`; module references are not upgraded to
+individual trigger evidence. Positive profile-equality and fixed-PEC admission
+controls explain the dispatch change, without claiming conductor adjoints.
 
-The media-validation coverage fix (`is_gyromagnetic` registration) closed a
-fail-open export path: a `GyromagneticFerrite` kept scalar `mu_r = mu_infinity`
-and exposed no permeability pole, so it bypassed both the magnetic-dispersive and
-`mu_r != 1` interoperability guards and silently exported as a plain reciprocal
-isotropic medium, dropping the Polder tensor. `adapters/tidy3d.py` now raises
-`NotImplementedError` for gyromagnetic media (the external format has no
-non-reciprocal tensor model). One reviewed capability guard added, counted under
-"External interoperability adapter" (19 -> 20); measured capability total 143 -> 144
-and `CAPABILITY_GUARD_BUDGET` raised in the same change.
+## Scale-guard merge into dense vector replay, 2026-11-04
 
-### Electrostatics reconciliation (2026-07-19, plan 12 Phase 0+1)
+The current reviewed inventory has **552 active**, **44 retired** and **28
+contract** identities: **580 current exception sites**. Reconciliation began
+with the union of both parents and a fresh proposal from the merged source.
+Seven obsolete active identities already had reviewed retirement records: six
+conductor/TEM predicate replacements from route (i), and the antenna identity
+carry from the scale-guard merge. Those records are retained once each; no
+pending review or duplicate retirement remains. Active source lines are refreshed.
 
-The new cell-centred finite-volume electrostatic (Laplace/Poisson) solver adds
-eight reviewed capability guards; `CAPABILITY_GUARD_BUDGET` is raised `144 -> 152`
-in the same change. All eight fail closed on features that are genuinely out of
-this stage's scope and would otherwise be silently mishandled.
+The two shared replay guards keep route (i)'s narrowed boundaries, positive
+acceptance references and narrowing reviews. Its four added cap/gap/loss/complex
+eigenpair boundaries and six reviewed conductor/TEM replacements remain intact.
+Master's antenna carry `ba40c60c…:0 -> 825129b7…:0` and the earlier
+`011bb701…:0` mapping to the current identity are preserved, including the
+intermediate history. Compared with route (i)'s pre-merge ledger, this replaces
+one active antenna identity and adds one retirement; no capability is added or
+retired by this identity reconciliation.
 
-| Guard | Message substring | Capability review |
-| --- | --- | --- |
-| `compiler/electrostatic.py` `_require_electrostatic_boundary` | "requires Scene.boundary = BoundarySpec.none()" | Deferred capability. Electrostatics owns its boundary conditions through `ElectrostaticBoundarySpec`; a PML/periodic Scene boundary would extend the grid with absorber padding that has no electrostatic meaning. Periodic electrostatics is a later phase. |
-| `compiler/electrostatic.py` `_static_epsilon_scalar` (PEC) | "represent conductors with ElectrostaticTerminal" | Deferred capability. A PEC-material structure has no dielectric permittivity; conductors are equipotential terminals, not zero-permittivity dielectrics. |
-| `compiler/electrostatic.py` `_static_epsilon_scalar` (dispersive) | "do not define a zero-frequency permittivity" | Deferred capability. A dispersive material exposes no DC permittivity and the solver refuses to guess a zero-frequency limit; users must supply an explicit real static value (Phase 4 API). |
-| `compiler/electrostatic.py` `_static_epsilon_scalar` (tensor eps) | "Anisotropic (tensor) permittivity is not supported" | Deferred capability. The scalar operator handles isotropic media only; SPD tensor-eps is Phase 4. |
-| `compiler/electrostatic.py` `_static_epsilon_scalar` (per-cell tensor) | "Per-cell tensor permittivity is not supported" | Deferred capability, same Phase 4 tensor-eps family. |
-| `compiler/electrostatic.py` `_static_epsilon_scalar` (complex) | "not a valid DC static permittivity" | Deferred capability. A complex permittivity is not a DC static value. |
-| `electrostatic/runtime.py` `solve_electrostatics` (floating) | "requires the linear-superposition solve" | Deferred capability *at Phase 0+1*. A floating conductor with prescribed charge needs the Phase 2 linear-superposition solve; rejected rather than solved wrongly. Implemented and removed in Phase 2+3 (see below). |
-| `electrostatic/runtime.py` `solve_electrostatics` (pure Neumann) | "gauge-singular" | Deferred capability. A pure-Neumann problem with no conductor and no Dirichlet boundary is defined only up to a constant and cannot be solved; the gauge-fixable cases (floating conductors, mean(phi)=0) are now handled in Phase 2. |
+Torch dense vector launches and scipy launches use the same unit-power
+normalizer: `abs(power) <= 64 * eps(dtype) * reference`, where the reference
+integrates absolute transverse field products with the identical Yee quadrature.
+The obsolete torch-only aperture rescaling is removed. Vector finalization uses
+no absolute propagation-constant or imaginary-profile floor. Modal surface
+injection uses the same `64 * eps(float64)` pruning threshold relative to each
+E/H profile family on both paths. Forward/replay profile and patch equality
+remain exact acceptance requirements at metre and micrometre scales.
 
-This is the historical Phase 0+1 record (eight guards, matching the `144 -> 152`
-budget raise); the floating-conductor guard is removed by the Phase 2+3 slice
-documented below. Lower this budget as tensor-eps / open boundary (Phase 4) land.
+The audit also removed dimensional floors in the shared numpy candidate
+selectors reached by the torch solve: reciprocal-power overlaps handle exactly
+zero norms explicitly, residuals divide by every nonzero reference, and
+propagation-constant grouping, duplicate detection and effective-index
+diagnostics use relative scales. Nodal and Yee candidates are checked at length
+scales `1e-6` and `1e6`. These helpers remain shared with the scipy path; no new
+solver family or capability raising site is introduced.
 
-### Electrostatics reconciliation (2026-07-19, plan 12 Phase 2+3)
+Final CPU gates in the `maxwell` environment with `CUDA_VISIBLE_DEVICES=` each
+returned pytest rc 0:
 
-The Phase 2+3 slice (floating-conductor linear superposition, pure-Neumann gauge
-handling, N-terminal capacitance matrix) **implements** the previously deferred
-floating-conductor guard, so its `NotImplementedError` in
-`electrostatic/runtime.py` (`"requires the linear-superposition solve"`) is
-removed. Incompatible floating-charge constraints and missing capacitance return
-paths now fail closed with `ValueError` diagnostics (not counted as capability
-guards). Net measured capability total `152 -> 151`; `CAPABILITY_GUARD_BUDGET`
-is a ceiling and stays `152` (`151 <= 152`).
+| Gate | Passed | Skipped |
+| --- | ---: | ---: |
+| `tests/api/public/test_guard_census.py` | 7 | 0 |
+| `tests/validation/benchmark/test_integration_batch.py` | 82 | 0 |
+| `tests/gradients/test_mode_source_replay_guard.py` | 40 | 4 |
+| `tests/gradients/test_mode_source_vector_replay.py` | 81 | 9 |
+| `tests/sources/mode/` | 148 | 42 |
+| `tests/sources/test_source_term_count_roundoff.py` | 0 | 18 |
+| Total | 358 | 73 |
 
-### Electrostatics reconciliation (2026-07-19, plan 12 differentiability slice)
+The exact forward/replay profile, preparation-patch and fp64 material-replay
+checks also passed in three consecutive CPU runs (each **9 passed, 4 skipped**,
+rc 0). CUDA-only cases remain skipped; these CPU results make no claim of native
+FDTD gradient or GPU term-count qualification.
 
-The reduced electrostatic solve now provides implicit-differentiation backward
-(a `torch.autograd.Function`: forward Jacobi-PCG under `no_grad`, backward adjoint
-solve on the SPD reduced operator plus a residual VJP), so `d(energy)/d(eps)`,
-`dC_ij/d(eps)`, and `d(energy)/d(free_charge)` flow through the fixed-potential
-path. Gradients through the **floating-conductor** superposition solve are not
-implemented (the prescribed-charge `k x k` reduction is undifferentiated), so
-`electrostatic/runtime.py` adds one reviewed capability guard,
-`"Gradients through the floating-conductor superposition solve"`: a floating
-terminal combined with a differentiable permittivity / free charge fails closed
-rather than returning silently wrong gradients. Net measured capability total
-`151 -> 152`, exactly at the `CAPABILITY_GUARD_BUDGET` ceiling of `152`. Lower the
-budget when the floating-superposition gradient (or tensor-eps / open boundary,
-Phase 4) lands.
 
-### Electrostatics reconciliation (2026-07-19, plan 12 audit fix)
+## Fixed-k broadband slab injection, 2026-11-01
 
-Audit finding: the electrostatic compiler silently ignored `Scene.material_regions`
-(the RF density design-region object), solving with `eps_r = 1` inside a declared
-region instead of failing closed. `compiler/electrostatic.py` `_reject_material_regions`
-now raises `NotImplementedError` ("does not support Scene.material_regions") because
-`MaterialRegion` design regions are an RF-path feature that is not rasterized into the
-electrostatic permittivity; static dielectrics must be `Structure(material=Material(...))`
-bulk media. One reviewed capability guard added; net measured capability total
-`152 -> 153`; `CAPABILITY_GUARD_BUDGET` raised `152 -> 153` in the same change.
+The complex fixed-k incident line makes broadband TFSF-slab plane waves exact
+under fixed k. The directional-source guard
+`af76d41cf4d34b6e812b08aaa77d0cdd2a521e08f0802c4cc7fd294974507130:0` is retired
+and replaced by `84b8fe15…`, which keeps beams, mode and custom-field sources
+and soft plane waves CW-only. The GPU physical gates are
+`scripts/dev/fdtd/bloch_floquet_acceptance/oblique_slab_airy.py` and
+`broadband_checks.py`; their results are in the batch-4 merge note.
+Automatic wavevector resolution still requires CW.
 
-| Guard | Message substring | Capability review |
-| --- | --- | --- |
-| `compiler/electrostatic.py` `_reject_material_regions` | "does not support Scene.material_regions" | Deferred capability. `MaterialRegion` is the RF differentiable design-region object; the electrostatic compiler rasterizes permittivity only from `Structure` bulk media, so a region would otherwise solve as vacuum. Rejected rather than solved wrongly. |
+## Fixed-k merge reconciliation, 2026-11-04
 
-Lower this budget when MaterialRegion electrostatics (or tensor-eps / open
-boundary, Phase 4) lands.
-
-### Electrostatics reconciliation (2026-07-21, plan 12 Phase 4 SPD tensor eps, stage H2a)
-
-The SPD tensor-permittivity finite-volume operator lands: a full symmetric
-positive-definite 3x3 `epsilon(x)` is discretized as the existing conservative
-two-point face flux for the diagonal entries plus a symmetric cross-derivative
-coupling for the off-diagonal entries. The cross term is the gradient of a
-discrete quadratic energy, so the operator is symmetric to floating-point
-tolerance (verified: dense `<Ax,y>=<x,Ay>`), positive-definite (symmetric
-eigenvalues), second-order convergent (rotated-frame MMS), and reduces exactly to
-the isotropic/diagonal face-flux path when the off-diagonals vanish.
-
-Net capability-guard change is **zero** (budget stays **175**): one guard is
-removed and one reachable guard is added.
-
-- Removed (`-1`): the `compiler/electrostatic.py` anisotropic-tensor reject
-  (`"Anisotropic (tensor) permittivity is not supported..."`). A
-  `DiagonalTensor3` / `Tensor3x3` material now compiles into a per-cell
-  `TensorEpsilon` field and solves. (The former `_static_epsilon_scalar` extractor
-  is now `_material_static_matrix`, returning a validated SPD 3x3; its PEC,
-  dispersive, per-cell-tensor, and complex rejects are unchanged, and the
-  symmetric/positive-definite validation of an invalid tensor is a `ValueError`,
-  not a capability guard.)
-- Added (`+1`): `electrostatic/runtime.py` `_reject_trainable_tensor`
-  (`"Differentiable electrostatics through a full tensor (anisotropic)
-  permittivity is not implemented..."`). The tensor operator's off-diagonal
-  cross-flux has no reverse-mode (implicit-diff) VJP, so a trainable tensor
-  permittivity or a trainable free charge alongside a tensor dielectric fails
-  closed instead of silently detaching its gradient. Reachable (a trainable
-  `ChargeDensity` in a tensor-dielectric scene). Lower this budget when the
-  tensor-eps backward (or the open-boundary work, stage H2b) lands.
-
-### Electrostatics reconciliation (2026-07-21, plan 12 Phase 4 open boundary / truncation, stage H2b)
-
-The controlled open-boundary (domain-extension) piece lands: an opt-in
-`TruncationEstimate` runs one additional enlarged grounded-box capacitance solve
-(interior grid held byte-identical, the grounded box pushed out by whole cells) and
-reports the finite-enclosure truncation error plus a 1/L Richardson extrapolation
-to the infinite-domain limit (`CapacitanceData.truncation_estimate`). The second
-solve is never run silently; it is triggered only by `Simulation.capacitance(...,
-truncation_estimate=...)`.
-
-Net capability-guard change is **+1** (budget `175 -> 176`):
-
-- Added (`+1`): `electrostatic/api.py` `_normalize_bc_entry` rejects an `open`
-  (infinite-domain) boundary kind (`"Open (infinite-domain) electrostatic
-  boundaries are not implemented..."`). There is no exact radiation condition on
-  the scalar potential at a finite Cartesian face, so an `open` face fails closed
-  rather than silently solving a grounded/insulating truncation the user did not
-  request. The supported path is the domain-extension `truncation_estimate`. A
-  boundary-element exact open boundary is a later phase; lower this budget when it
-  lands.
-
-The `truncation_estimate` misuse cases (a non-Dirichlet enclosure, a non-uniform
-grid) raise `ValueError` (usage errors, not capability guards). The tensor-eps
-**differentiability disposition** is decided as **fail-closed**: Phase 4 owns the
-forward SPD tensor-eps operator and the plan defers electrostatic gradients to
-Phase 5, so the H2a `_reject_trainable_tensor` guard is retained unchanged and no
-differentiability guard is added or removed here.
-
-### Deterministic dielectric breakdown reconciliation (2026-07-19)
-
-Plan 13 Phase 4 lands the deterministic field-duration/latching dynamic
-dielectric-breakdown feedback model (`DielectricBreakdown` composed into
-`Material`, a compiled per-node state machine, a dynamic conductivity scatter, a
-typed event log, and a dedicated breakdown-dissipation energy channel). It adds
-fifteen fail-closed capability guards, all genuine gaps whose closure belongs to a
-later breakdown phase; the measured capability total moves 144 -> 159 and
-`CAPABILITY_GUARD_BUDGET` is raised in the same change.
-
-- `media.py` (10): the `DielectricBreakdown` descriptor rejects the four
-  unsupported descriptor settings whose state machines are a later phase
-  (`model != "field_duration"`, `state != "latching"`, a reserved `recovery`
-  model, a reserved `damage_parameters` model). A `Material` carrying a breakdown
-  descriptor rejects the six coefficient-path combinations the scalar conductivity
-  scatter cannot represent yet (PEC, anisotropic tensor, dispersive poles,
-  instantaneous nonlinearity, time modulation, 2D sheet).
-- `fdtd/runtime/breakdown.py` (3): `initialize_breakdown_runtime` rejects a complex
-  (Bloch) field run, a scene mixing breakdown with dispersive / nonlinear /
-  full-anisotropic / modulated media, and a gyromagnetic-ferrite scene — each
-  shares or redefines the per-edge electric-update coefficient representation the
-  breakdown scatter rewrites.
-- `simulation.py` (2): `_validate_breakdown_support` rejects a frequency-domain
-  (FDFD) breakdown scene (no dynamic conductivity update exists there) and a
-  trainable breakdown scene (the hard field-duration/latching switch is
-  non-differentiable at the trigger time; the smooth surrogate is deferred).
-
-The multi-GPU breakdown reject (`fdtd/distributed/solver.py`
-`_validate_static_capabilities`) and the event-buffer overflow guard
-(`fdtd/runtime/breakdown.py` `finalize_breakdown_data`) raise `ValueError` /
-`RuntimeError` respectively and are not counted against the capability budget.
-Lower this budget as the later breakdown phases land (recovery/damage state
-machines, the coefficient-path compositions, an FDFD or trainable smooth
-surrogate, and distributed breakdown).
-
-### SAR reconciliation (2026-07-19, plan 10 merge)
-
-The SAR merge adds four reviewed capability guards; `CAPABILITY_GUARD_BUDGET`
-rises `168 -> 172` in the merge-reconciliation change. `witwin/maxwell/sar.py`:
-(1) `SARAveraging.connectivity` other than `"cube"` (tissue flood-fill
-connectivity is a later averaging phase); (2) `SARAveraging.boundary_policy`
-other than `"strict-interior"`; (3) `PowerNormalization.input_power`, because
-this build exposes no total injected source-power diagnostic (use
-`accepted_power` or `source`). `witwin/maxwell/result.py`: (4) `Result.sar`
-consumes FDTD `PowerLossData` only. Four additional SAR raises that guarded pure
-usage errors (asking for a mass-averaged peak / field / soft peak without
-requesting averaging, and calling `accepted_power` on the bare reducer without a
-`Result`) were converted to `ValueError` at merge so they do not occupy
-capability budget.
-
-### Electrostatic pre-bias reconciliation (2026-07-19, plan 13 Phase 3 slice)
-
-The electrostatic pre-bias initial-condition slice adds four reviewed capability
-guards; `CAPABILITY_GUARD_BUDGET` rises `172 -> 176` in this change. All four live
-in `witwin/maxwell/simulation.py` `Simulation._validate_initial_condition_support`
-and reject an unsupported combination of `Simulation.fdtd(initial_condition=...)`:
-
-- a non-FDTD method (the pre-bias seeds the time-stepped E buffers; there is no
-  time-domain state to seed in the frequency-domain solver);
-- a distributed / multi-GPU run (seeding shard-local staggered E buffers with the
-  correct halo/ownership is a later phase);
-- a trainable / adjoint run (the seeded DC field would enter the taped forward
-  state without a differentiated map back to the electrostatic solve);
-- a Bloch-periodic run (the real-valued electrostatic seed does not carry the
-  complex Bloch phase).
-
-Lower this budget when any of those pre-bias combinations is implemented. The
-grid-identity mismatch, the discrete-Gauss tolerance gate, the negative-tolerance
-check, and the non-electrostatic-`Result` / wrong-type rejections in
-`electrostatic/initial_condition.py` raise `ValueError` / `TypeError` and are not
-counted against the capability budget.
-
-## 2026-09-08 normalization contract
-
-The unified time planner adds three permanent normalization contracts: an incident
-waveform must exist, every participating drive must share that waveform, and a
-circuit-driven field has no implicit single incident waveform. These reject an
-undefined quotient and do not change the capability budget. The matching entries
-are recorded in `tests/api/public/test_guard_census.py`.
+Merging master `2e8308d2` preserves its reviewed boundaries and carries the
+fixed-k slab admission above. The merged ledger contains **553 active**, **45
+retired** and **28 contract-excluded** identities: **581 current exception
+sites**. The one active replacement is `af76d41c...:0 -> 84b8fe15...:0`; its
+retirement and positive slab controls survive alongside all master reviews.
+Sixteen source-line anchors are refreshed without changing their identities,
+predicates or review evidence. No additional raising site is introduced by the
+provider-reference registration or exported incident-spectrum time conversion.
+The timing scope and deferred raw-exact work are recorded in
+`docs/memory/bloch-fixed-k-master-reconciliation-2026-11-04.md`.

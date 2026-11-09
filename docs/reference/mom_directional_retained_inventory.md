@@ -1,0 +1,5 @@
+# Directional retained native dependency accounting
+
+Call directional_retained_tensor_groups(actions) in witwin.maxwell.mom.fmm_capacity for references to actual native tensor dependencies. directional_retained_inventory(actions) reports full backing-storage bytes deduplicated by device/pointer, with standalone and disjoint attributed category counts. It includes bound automatic planner storage, independently supplied caller carriers, empty views with nonempty backing storage, and alternate projections reached through coupling owners. Physical inputs and prepared geometry are included explicitly.
+
+No tensors are copied or cached. Validation rejects stale planner, projection, tree, near and coupling state. Existing component owner inventories are unchanged. The scope excludes workspaces, caller currents, Riesz/solver state, allocator/library state and host metadata. Do not interpret retained bytes as measured setup/backward peak memory or a complexity/crossover certificate. See docs/assessments/sie_directional_retained_inventory.md for terminal controls, preserved failure/P2 and resource limitations.

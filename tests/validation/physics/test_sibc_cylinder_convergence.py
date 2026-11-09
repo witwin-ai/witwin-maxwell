@@ -71,28 +71,25 @@ _SIBC_GRID_INDEPENDENCE_TOL = 0.06  # SIBC absorbed power: tier-to-tier change
 _SIBC_VS_RESOLVED_TOL = 0.25        # documented first-order-Leontovich-on-curve systematic
 _PEC_ABSORPTION_FRACTION = 0.05     # PEC must absorb < 5% of the good conductor
 
+# Material policies (user decision 2026-11-04, default-policy requalification).
+# The resolved volumetric reference keeps the policy its convergence gate was
+# qualified with: under the shipped kottke_edge default, a resolved conductor at
+# 2-4 cells per skin depth shows +-4-8% non-monotone tier sensitivity
+# (docs/assessments/default-policy-requalification-results-2026-11-04.md).
+# The SIBC tiers and the SIBC-versus-resolved comparison run under the shipped default.
+_QUALIFIED_ARITHMETIC = mw.SubpixelSpec(samples=1, averaging="arithmetic")
+_SHIPPED_DEFAULT = mw.SubpixelSpec()
+
 
 def _skin_depth() -> float:
     return math.sqrt(2.0 / (2.0 * math.pi * _F * _MU0 * _SIGMA))
 
 
 def _flux_box():
-    freqs = (_F,)
-    plane = mw.FinitePlaneMonitor
-    return [
-        plane("box_xp", position=(_BOX, 0.0, 0.0), size=(0.0, 2 * _BOX, 2 * _BOX),
-              fields=("Ey", "Ez", "Hy", "Hz"), frequencies=freqs, compute_flux=True, normal_direction="+"),
-        plane("box_xn", position=(-_BOX, 0.0, 0.0), size=(0.0, 2 * _BOX, 2 * _BOX),
-              fields=("Ey", "Ez", "Hy", "Hz"), frequencies=freqs, compute_flux=True, normal_direction="-"),
-        plane("box_yp", position=(0.0, _BOX, 0.0), size=(2 * _BOX, 0.0, 2 * _BOX),
-              fields=("Ex", "Ez", "Hx", "Hz"), frequencies=freqs, compute_flux=True, normal_direction="+"),
-        plane("box_yn", position=(0.0, -_BOX, 0.0), size=(2 * _BOX, 0.0, 2 * _BOX),
-              fields=("Ex", "Ez", "Hx", "Hz"), frequencies=freqs, compute_flux=True, normal_direction="-"),
-        plane("box_zp", position=(0.0, 0.0, _BOX), size=(2 * _BOX, 2 * _BOX, 0.0),
-              fields=("Ex", "Ey", "Hx", "Hy"), frequencies=freqs, compute_flux=True, normal_direction="+"),
-        plane("box_zn", position=(0.0, 0.0, -_BOX), size=(2 * _BOX, 2 * _BOX, 0.0),
-              fields=("Ex", "Ey", "Hx", "Hy"), frequencies=freqs, compute_flux=True, normal_direction="-"),
-    ]
+    # A closed surface, not six standalone planes: its faces are snapped onto
+    # one watertight Yee box on every grid tier, so the net flux is the
+    # absorbed power wherever the declared 14 mm box lies within a cell.
+    return [mw.ClosedSurfaceMonitor.box("box", size=(2 * _BOX,) * 3, frequencies=(_F,))]
 
 
 def _cylinder(material):
@@ -102,13 +99,14 @@ def _cylinder(material):
     )
 
 
-def _absorbed_power(dx: float, material) -> float:
-    """Net power absorbed by the cylinder = net inward Poynting flux through the box."""
-    scene = mw.Scene(
+def _cylinder_scene(dx: float, material, *, subpixel_samples, device="cuda"):
+    """Shared physical fixture for the pinned gate and default-policy study."""
+    return mw.Scene(
         domain=mw.Domain(bounds=((-_DOMAIN, _DOMAIN), (-_DOMAIN, _DOMAIN), (-_DOMAIN, _DOMAIN))),
         grid=mw.GridSpec.uniform(dx),
+        subpixel_samples=subpixel_samples,
         boundary=mw.BoundarySpec.faces(default="pml", num_layers=8, strength=1.0),
-        device="cuda",
+        device=device,
         sources=[
             mw.PointDipole(
                 position=(-0.030, 0.0, 0.0),
@@ -121,19 +119,28 @@ def _absorbed_power(dx: float, material) -> float:
         structures=[_cylinder(material)],
         monitors=_flux_box(),
     )
+
+
+def _absorbed_power(
+    dx: float, material, *, subpixel_samples, device="cuda", backend="native", run_time=None,
+    spectral_sampler=None,
+) -> float:
+    """Net power absorbed by the cylinder = net inward Poynting flux through the box."""
+    scene = _cylinder_scene(dx, material, subpixel_samples=subpixel_samples, device=device)
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_F],
-        run_time=mw.TimeConfig.auto(steady_cycles=14, transient_cycles=20),
+        run_time=run_time or mw.TimeConfig.auto(steady_cycles=14, transient_cycles=20),
         full_field_dft=False,
+        backend=backend,
+        spectral_sampler=spectral_sampler,
     ).run()
-    outward = 0.0
-    for name in ("box_xp", "box_xn", "box_yp", "box_yn", "box_zp", "box_zn"):
-        flux = result.monitor(name)["flux"]
-        flux = flux.detach().cpu().numpy() if hasattr(flux, "detach") else np.asarray(flux)
-        outward += float(flux.reshape(-1)[0])
+    flux = result.monitor("box")["flux"]
+    flux = flux.detach().cpu().numpy() if hasattr(flux, "detach") else np.asarray(flux)
+    outward = float(flux.reshape(-1)[0])
     del result, scene
-    torch.cuda.empty_cache()
+    if torch.device(device).type == "cuda":
+        torch.cuda.empty_cache()
     return -outward  # net inward = absorbed
 
 
@@ -141,13 +148,24 @@ def _absorbed_power(dx: float, material) -> float:
 def absorbed():
     if not torch.cuda.is_available():
         pytest.skip("needs CUDA for FDTD")
+    resolved = mw.Material(eps_r=1.0, sigma_e=_SIGMA)
+    sibc = mw.LossyMetalMedium(conductivity=_SIGMA)
     return {
-        "resolved_coarse": _absorbed_power(0.0006, mw.Material(eps_r=1.0, sigma_e=_SIGMA)),
-        "resolved_fine": _absorbed_power(0.0005, mw.Material(eps_r=1.0, sigma_e=_SIGMA)),
-        "sibc_coarse": _absorbed_power(0.0012, mw.LossyMetalMedium(conductivity=_SIGMA)),
-        "sibc_fine": _absorbed_power(0.0008, mw.LossyMetalMedium(conductivity=_SIGMA)),
-        "pec": _absorbed_power(0.0012, mw.Material.pec()),
+        "resolved_coarse": _absorbed_power(0.0006, resolved, subpixel_samples=_QUALIFIED_ARITHMETIC),
+        "resolved_fine": _absorbed_power(0.0005, resolved, subpixel_samples=_QUALIFIED_ARITHMETIC),
+        "resolved_fine_default": _absorbed_power(0.0005, resolved, subpixel_samples=_SHIPPED_DEFAULT),
+        "sibc_coarse": _absorbed_power(0.0012, sibc, subpixel_samples=_SHIPPED_DEFAULT),
+        "sibc_fine": _absorbed_power(0.0008, sibc, subpixel_samples=_SHIPPED_DEFAULT),
+        "pec": _absorbed_power(0.0012, mw.Material.pec(), subpixel_samples=_QUALIFIED_ARITHMETIC),
     }
+
+
+def test_shipped_default_is_the_requalified_policy():
+    """The default-policy gates were requalified for samples=4 kottke_edge with a PEC staircase."""
+    from witwin.maxwell.compiler.materials import _resolve_subpixel
+
+    assert _resolve_subpixel(_SHIPPED_DEFAULT) == ((4, 4, 4), "kottke_edge", "staircase")
+    assert _resolve_subpixel(None) == _resolve_subpixel(_SHIPPED_DEFAULT)
 
 
 def test_skin_depth_is_resolved_by_the_reference_grids():
@@ -190,9 +208,12 @@ def test_sibc_absorbed_power_is_grid_independent(absorbed):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_staircased_sibc_reproduces_the_resolved_conductor_absorption(absorbed):
-    """SIBC absorbed power approaches the resolved conductor within the documented tolerance."""
+    """SIBC absorbed power approaches the resolved conductor within the documented tolerance.
+
+    Both sides use the shipped default policy (requalified 2026-11-04: 23.7%).
+    """
     sibc = absorbed["sibc_fine"]
-    resolved = absorbed["resolved_fine"]
+    resolved = absorbed["resolved_fine_default"]
     rel = abs(sibc - resolved) / resolved
     assert rel < _SIBC_VS_RESOLVED_TOL, (
         f"staircased SIBC absorbed {sibc:.3e} vs resolved conductor {resolved:.3e} "

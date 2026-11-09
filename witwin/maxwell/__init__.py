@@ -1,5 +1,8 @@
+from .fdtd.runtime.passivity import FDTDPassivityError
 from witwin.core import Box, Cone, Cylinder, Ellipsoid, HollowBox, Mesh, Prism, Pyramid, Sphere, Structure, Torus
 from .antenna import AntennaData, Ludwig3
+from .copper_foil import CopperFoil
+from .coordinates import BendCoordinates, FieldFrame, FramedFieldData
 from .array import (
     ArrayBasisData,
     BeamCodebook,
@@ -64,7 +67,7 @@ from .breakdown_stress import (
     ComponentRating,
     ComponentStressData,
 )
-from .geometry import ComplexPolySlab, PolySlab
+from .geometry import ComplexPolySlab, PolySlab, PlanarPEC, SurfaceMesh
 from .breakdown import (
     BreakdownEvent,
     BreakdownResultData,
@@ -89,12 +92,20 @@ from .media import (
     Medium2D,
     ModulationSpec,
     NonlinearSusceptibility,
+    TensorNonlinearSusceptibility,
     PerturbationMedium,
     RationalSurfaceImpedance,
     SurfaceImpedanceMedium,
     SurfaceImpedanceModel,
     Tensor3x3,
+    ComplexTensor3x3,
     TwoPhotonAbsorption,
+)
+from .roughness import (
+    GroisseRoughness,
+    HammerstadRoughness,
+    HurayRoughness,
+    SurfaceRoughness,
 )
 from .monitors import (
     BreakdownMonitor,
@@ -115,8 +126,18 @@ from .monitors import (
     PowerLossMonitor,
     WireMonitor,
 )
+from .monitors import (
+    AngleProjectionMonitor,
+    AstigmaticGaussianOverlapMonitor,
+    AuxFieldTimeMonitor,
+    CartesianProjectionMonitor,
+    GaussianOverlapMonitor,
+    KSpaceProjectionMonitor,
+    SurfaceFieldTimeMonitor,
+)
 from .lumped import (
     Capacitor,
+    CoaxialLumpedResistor,
     Inductor,
     ParallelRLC,
     PortExcitation,
@@ -158,21 +179,40 @@ from .postprocess.incident_power import IncidentPowerDensity
 from .thin_wire import ThinWire, WireConductor, WireData, WireEnd
 from .ports import (
     AxisPath,
+    CoaxialLumpedPort,
     LumpedPort,
+    PECFrame,
     ModePort,
     TerminalPort,
     TerminalRef,
+    TerminalWavePort,
     WireNodeRef,
     WirePortBinding,
     WaveModeSpec,
     WavePort,
 )
+from .terminal_waveport import TerminalWavePortApertureWarning
+from .path_integrals import (
+    AxisSegment,
+    CircleLoop,
+    CompositeCurrentIntegral,
+    CompositeVoltageIntegral,
+    CustomCurrentIntegral,
+    CustomVoltageIntegral,
+    PolygonLoop,
+    PolylinePath,
+    RectangleLoop,
+)
 from . import postprocess
+from .ports_postprocess import PortDrive, port_phasors, port_voltage, trapezoidal_impedance
 from .result import Result
+from .absorbers import InternalAbsorber, ModeABC, MurABC
 from .scene import (
     BoundaryKind,
     BoundarySpec,
+    CornerFinderSpec,
     Domain,
+    GridRefinement,
     GridSpec,
     LayerRefinementSpec,
     MaterialRegion,
@@ -181,8 +221,12 @@ from .scene import (
     SceneModule,
     SubpixelSpec,
 )
+from .postprocess.low_frequency import LowFrequencySmoothingSpec, smooth_low_frequency
 from .sources import (
+    BasebandGaussianPulse,
+    BasebandRectangularPulse,
     AstigmaticGaussianBeam,
+    BroadbandPulse,
     CurrentDataset,
     CustomCurrentSource,
     CustomFieldSource,
@@ -193,15 +237,37 @@ from .sources import (
     GaussianPulse,
     ModeSource,
     PlaneWave,
+    MaxwellPlaneModes,
     PointDipole,
     RickerWavelet,
     TFSF,
     UniformCurrentSource,
 )
+from .mom.periodic_config import MoMPeriodicConfig, MoMDyadicPeriodicConfig
+from .mom.hmatrix import HMatrixConfig
+from .mom.h2 import H2Config
+from .mom.direct_config import DirectH2Config
+from .mom.fmm_config import FMMConfig, DirectionalFMMConfig
+from .mom.pfft_config import PFFTConfig
+from .mom.preconditioning import (IdentityRightPreconditioner, LeafBlockRightPreconditioner,
+    FunctionRightPreconditioner, PreconditionerContext)
+from .mom.near_preconditioner import NearFieldRightPreconditioner
+from .mom.interpolation_error import KernelErrorBudget
+from .mom.harmonic_config import HarmonicBalanceConfig, HarmonicCutoffConfig
+from .mom.linear_volume_state import LinearCoupledConfig
+from .mom.volume_mesh import TetrahedralVolumeMesh
+from .mom.efie_open import OpenSurfaceConfig
+from .mom.layered.config import AdaptiveSweep, LayeredSurfaceConfig
+from .mom.layered.process import LayerMap, ProcessStack, ViaMap
+from .mom.layered.sweep import AdaptiveSweepResult
+from .layers import HalfSpace, Layer, LayerStack
+from .mom.efie_preconditioning import CalderonPreconditioner
 from .simulation import (
     AbsorberKind,
     FDFDConfig,
     FDTDConfig,
+    FDTDCoreFallbackWarning,
+    MoMConfig,
     GMRES,
     Simulation,
     SimulationMethod,
@@ -210,7 +276,11 @@ from .simulation import (
     TimeConfig,
     run,
 )
+from .mom.fields import FieldQueryConfig
+from .mom.primitive_mesh import EdgeGrading, SurfaceMeshConfig
+from .mom.dyadic_green import DyadicIntegrationConfig
 from .fdtd_parallel import FDTDParallelConfig
+from .material_cache import FDTDMaterialCache
 from .execution.batch import BatchExecution, BatchOutput, BatchParameters, BatchSimulation, BatchVariation
 from .execution.plan import BatchPlanReport
 from .execution.batch_runtime import PreparedBatch, BatchResultIterator
@@ -231,6 +301,10 @@ from .array_gradient import (
 from .fdtd.resume import FDTDResumeCheckpoint
 
 __all__ = [
+    "FDTDPassivityError",
+    "BendCoordinates", "FieldFrame", "FramedFieldData",
+    "CopperFoil",
+    "FDTDMaterialCache",
     "BatchExecution",
     "BatchOutput",
     "BatchParameters",
@@ -250,6 +324,9 @@ __all__ = [
     "AxisPath",
     "BoundarySpec",
     "BoundaryKind",
+    "InternalAbsorber",
+    "ModeABC",
+    "MurABC",
     "BeamCodebook",
     "BeamData",
     "BeamWeights",
@@ -290,6 +367,11 @@ __all__ = [
     "ComponentStressData",
     "ComponentStressMonitor",
     "CustomSourceTime",
+    "BasebandGaussianPulse",
+    "BasebandRectangularPulse",
+    "BroadbandPulse",
+    "CoaxialLumpedPort",
+    "CoaxialLumpedResistor",
     "Cylinder",
     "DebyePole",
     "DielectricBreakdown",
@@ -316,10 +398,51 @@ __all__ = [
     "EmbeddedNetworkData",
     "FieldDataset",
     "FieldTimeMonitor",
+    "AngleProjectionMonitor",
+    "AstigmaticGaussianOverlapMonitor",
+    "AuxFieldTimeMonitor",
+    "CartesianProjectionMonitor",
+    "GaussianOverlapMonitor",
+    "KSpaceProjectionMonitor",
+    "SurfaceFieldTimeMonitor",
     "FluxMonitor",
     "FluxTimeMonitor",
     "FDFDConfig",
     "FDTDConfig",
+    "MoMConfig",
+    "OpenSurfaceConfig",
+    "LayeredSurfaceConfig",
+    "AdaptiveSweep",
+    "AdaptiveSweepResult",
+    "LayerMap",
+    "ProcessStack",
+    "ViaMap",
+    "Layer",
+    "HalfSpace",
+    "LayerStack",
+    "CalderonPreconditioner",
+    "DyadicIntegrationConfig",
+    "MoMPeriodicConfig",
+    "MoMDyadicPeriodicConfig",
+    "HMatrixConfig",
+    "H2Config",
+    "DirectH2Config",
+    "FMMConfig",
+    "DirectionalFMMConfig",
+    "PFFTConfig",
+    "IdentityRightPreconditioner",
+    "LeafBlockRightPreconditioner",
+    "NearFieldRightPreconditioner",
+    "FunctionRightPreconditioner",
+    "PreconditionerContext",
+    "KernelErrorBudget",
+    "HarmonicBalanceConfig",
+    "LinearCoupledConfig",
+    "HarmonicCutoffConfig",
+    "TetrahedralVolumeMesh",
+    "FieldQueryConfig",
+    "SurfaceMeshConfig",
+    "EdgeGrading",
     "FDTDParallelConfig",
     "FDTDResumeCheckpoint",
     "FinitePlaneMonitor",
@@ -330,18 +453,27 @@ __all__ = [
     "GMRES",
     "Graphene",
     "GridSpec",
+    "GridRefinement",
+    "CornerFinderSpec",
     "GyromagneticFerrite",
     "HollowBox",
     "LayerRefinementSpec",
     "Inductor",
     "LorentzPole",
     "Ludwig3",
+    "LowFrequencySmoothingSpec",
     "LumpedPort",
+    "PECFrame",
+    "smooth_low_frequency",
     "LossyMetalMedium",
     "Material",
     "RationalSurfaceImpedance",
     "SurfaceImpedanceMedium",
     "SurfaceImpedanceModel",
+    "SurfaceRoughness",
+    "HammerstadRoughness",
+    "HurayRoughness",
+    "GroisseRoughness",
     "MaterialRegion",
     "MaxHoldComposite",
     "MeasuredWaveform",
@@ -362,12 +494,14 @@ __all__ = [
     "NetworkPhysicalityReport",
     "ModulationSpec",
     "NonlinearSusceptibility",
+    "TensorNonlinearSusceptibility",
     "PermittivityMonitor",
     "ParallelRLC",
     "PiecewiseLinearWaveform",
     "PerturbationMedium",
     "PlaneMonitor",
     "PlaneWave",
+    "MaxwellPlaneModes",
     "PointDipole",
     "PointMonitor",
     "PowerLossData",
@@ -381,12 +515,18 @@ __all__ = [
     "AVERAGING_PROFILE",
     "ThinWire",
     "PortData",
+    "PortDrive",
+    "port_voltage",
+    "port_phasors",
+    "trapezoidal_impedance",
     "PortBinding",
     "PortExcitation",
     "PortSweep",
     "PulseWaveform",
     "PassivityReport",
     "PolySlab",
+    "PlanarPEC",
+    "SurfaceMesh",
     "postprocess",
     "Prism",
     "Pyramid",
@@ -400,6 +540,7 @@ __all__ = [
     "Scene",
     "SceneModule",
     "Simulation",
+    "FDTDCoreFallbackWarning",
     "SimulationMethod",
     "StateSpaceNetwork",
     "SpectralSampler",
@@ -408,11 +549,23 @@ __all__ = [
     "Structure",
     "SubpixelSpec",
     "Tensor3x3",
+    "ComplexTensor3x3",
     "TimeConfig",
     "TouchstoneParseError",
     "TouchstoneNetwork",
     "TerminalPort",
     "TerminalRef",
+    "TerminalWavePort",
+    "TerminalWavePortApertureWarning",
+    "AxisSegment",
+    "CircleLoop",
+    "CompositeCurrentIntegral",
+    "CompositeVoltageIntegral",
+    "CustomCurrentIntegral",
+    "CustomVoltageIntegral",
+    "PolygonLoop",
+    "PolylinePath",
+    "RectangleLoop",
     "TimedSwitch",
     "DiscreteStateSpaceNetwork",
     "FitReport",
@@ -449,3 +602,33 @@ __all__ = [
 
 def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+from .fdfd_response import FieldProjection, LocalDesignRegion, LocalResponseConfig
+__all__ += ["FieldProjection", "LocalDesignRegion", "LocalResponseConfig"]
+from .fdfd_response import FarFieldProjection, LumpedCurrentSource
+__all__ += ["FarFieldProjection", "LumpedCurrentSource"]
+from witwin.core import Difference, Intersection, Union
+__all__ += ["Union", "Intersection", "Difference"]
+from .dispersion_fit import (
+    DispersionFit,
+    DispersionFitReport,
+    fit_dispersion,
+    fit_dispersion_nk,
+    load_dispersion_csv,
+    permittivity_from_nk,
+)
+__all__ += [
+    "DispersionFit",
+    "DispersionFitReport",
+    "fit_dispersion",
+    "fit_dispersion_nk",
+    "load_dispersion_csv",
+    "permittivity_from_nk",
+]
+from .material_library import MATERIAL_LIBRARY, MaterialLibraryEntry, library_material
+__all__ += ["MATERIAL_LIBRARY", "MaterialLibraryEntry", "library_material"]
+from .modal_sweep import ModalPortSweep, run_modal_port_sweep
+__all__ += ["ModalPortSweep", "run_modal_port_sweep"]
+from . import invdes
+__all__ += ["invdes"]
+from .compiler.accel import mesh as _mesh_accelerator

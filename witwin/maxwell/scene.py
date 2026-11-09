@@ -1,26 +1,40 @@
 from __future__ import annotations
 
+from ._fixed_inputs import require_fixed_input
+
 import math
 import copy
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
 import numpy as np
 import torch
 
-from witwin.core import Structure
+from witwin.core import Box, Structure
+from witwin.core.geometry.base import GeometryBase
 from .circuits import Circuit, CircuitNode
-from .lumped import Capacitor, Inductor, Resistor
+from .lumped import Capacitor, CoaxialLumpedResistor, Inductor, Resistor
 from .network import NetworkBlock
-from .ports import LumpedPort, ModePort, TerminalPort, WavePort, _resolve_terminal_port
+from .ports import (
+    CoaxialLumpedPort,
+    LumpedPort,
+    ModePort,
+    TerminalPort,
+    TerminalWavePort,
+    WavePort,
+    _resolve_terminal_port,
+    _resolve_terminal_wave_port,
+)
 from .thin_wire import ThinWire
+from .absorbers import InternalAbsorber, ModeABC, MurABC
 from .compiler.materials import (
     compile_material_model,
     evaluate_material_components,
 )
 
 
-BoundaryKind: TypeAlias = Literal["none", "pml", "periodic", "bloch", "pec", "pmc", "mur"]
+BoundaryKind: TypeAlias = Literal["none", "pml", "periodic", "bloch", "pec", "pmc", "mur", "mode_abc"]
 BoundaryAxisOverride: TypeAlias = BoundaryKind | tuple[BoundaryKind, BoundaryKind]
 BlochWavevector: TypeAlias = tuple[float, float, float] | Literal["auto"]
 
@@ -28,7 +42,7 @@ _ResolvedBoundaryKind: TypeAlias = BoundaryKind | Literal["mixed"]
 _BOUNDARY_AXES = ("x", "y", "z")
 _BOUNDARY_AXIS_TO_INDEX = {axis: index for index, axis in enumerate(_BOUNDARY_AXES)}
 _BOUNDARY_SIDE_TO_INDEX = {"low": 0, "high": 1}
-_VALID_BOUNDARY_KINDS = {"none", "pml", "periodic", "bloch", "pec", "pmc", "mur"}
+_VALID_BOUNDARY_KINDS = {"none", "pml", "periodic", "bloch", "pec", "pmc", "mur", "mode_abc"}
 _PAIR_ONLY_BOUNDARY_KINDS = {"periodic", "bloch"}
 
 
@@ -38,7 +52,8 @@ def _normalize_boundary_kind(value, *, allow_mixed: bool = False) -> str:
         return kind
     if kind not in _VALID_BOUNDARY_KINDS:
         raise ValueError(
-            "Boundary kind must be one of 'none', 'pml', 'periodic', 'bloch', 'pec', 'pmc', or 'mur'."
+            "Boundary kind must be one of 'none', 'pml', 'periodic', 'bloch', 'pec', 'pmc', 'mur', "
+            "or 'mode_abc'."
         )
     return kind
 
@@ -72,6 +87,7 @@ class Domain:
     bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
 
     def __init__(self, bounds):
+        require_fixed_input(bounds, name="Domain.bounds")
         if len(bounds) != 3:
             raise ValueError("bounds must contain x, y, z ranges.")
         normalized = []
@@ -130,32 +146,234 @@ class MeshOverrideStructure:
         object.__setattr__(self, "dl", values)
 
 
-@dataclass(frozen=True)
-class LayerRefinementSpec:
-    """Minimum cell count across thin structure-bounded intervals.
+_CORNER_MEDIA = ("metal", "dielectric", "all")
+_LAYER_BOUNDS_SNAPPING = ("bounds", "lower", "upper", "center")
 
-    ``axes=None`` covers all axes; otherwise only the listed axes are refined.
+
+def _optional_positive_int(value, name: str):
+    if value is None:
+        return None
+    if isinstance(value, bool) or int(value) != value or int(value) < 1:
+        raise ValueError(f"{name} must be a positive integer or None.")
+    return int(value)
+
+
+def _optional_positive_float(value, name: str):
+    if value is None:
+        return None
+    value = float(value)
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{name} must be a finite positive number or None.")
+    return value
+
+
+@dataclass(frozen=True)
+class CornerFinderSpec:
+    """Corner detection on the 2D cross-section of a layer.
+
+    A polygon vertex is a corner when the turn between its two edges is at least
+    ``angle_threshold`` radians (the spanned angle is at most
+    ``pi - angle_threshold``), so collinear and gently faceted vertices are
+    skipped. ``medium`` selects metal (PEC, planar PEC, lossy-metal, surface
+    impedance, copper foil), non-metal, or all structures. With
+    ``distance_threshold`` the outline is first simplified with Douglas-Peucker
+    at that tolerance and surviving corners closer than it are merged.
+
+    ``convex_resolution`` / ``concave_resolution`` / ``mixed_resolution``
+    request that many cells across each outline edge whose two end corners are
+    both convex, both concave, or mixed (strip widths, notch widths, steps).
     """
 
-    min_cells: int = 2
-    axes: tuple[str, ...] | None = None
+    medium: Literal["metal", "dielectric", "all"] = "metal"
+    angle_threshold: float = 0.25 * math.pi
+    distance_threshold: float | None = None
+    concave_resolution: int | None = None
+    convex_resolution: int | None = None
+    mixed_resolution: int | None = None
 
     def __post_init__(self):
-        min_cells = int(self.min_cells)
-        if min_cells < 1:
-            raise ValueError("LayerRefinementSpec.min_cells must be >= 1.")
-        object.__setattr__(self, "min_cells", min_cells)
+        require_fixed_input((self.angle_threshold, self.distance_threshold), name="CornerFinderSpec controls")
+        if self.medium not in _CORNER_MEDIA:
+            raise ValueError("CornerFinderSpec.medium must be 'metal', 'dielectric', or 'all'.")
+        angle = float(self.angle_threshold)
+        if not 0.0 <= angle < math.pi:
+            raise ValueError("CornerFinderSpec.angle_threshold must lie in [0, pi).")
+        object.__setattr__(self, "angle_threshold", angle)
+        object.__setattr__(
+            self, "distance_threshold",
+            _optional_positive_float(self.distance_threshold, "CornerFinderSpec.distance_threshold"),
+        )
+        for name in ("concave_resolution", "convex_resolution", "mixed_resolution"):
+            object.__setattr__(self, name, _optional_positive_int(getattr(self, name), f"CornerFinderSpec.{name}"))
+
+
+@dataclass(frozen=True)
+class GridRefinement:
+    """Local refinement around a point: ``num_cells`` cells of step ``dl``.
+
+    The step is ``vacuum_dl / refinement_factor`` and/or ``dl`` (the smaller one
+    when both are given; ``refinement_factor=2`` when neither is). The refined
+    window is ``num_cells * step`` wide and centered on the point; the
+    surrounding mesh grades into it within ``GridSpec.auto(max_ratio=...)``.
+    """
+
+    refinement_factor: float | None = None
+    dl: float | None = None
+    num_cells: int = 3
+
+    def __post_init__(self):
+        require_fixed_input((self.refinement_factor, self.dl), name="GridRefinement controls")
+        object.__setattr__(
+            self, "refinement_factor",
+            _optional_positive_float(self.refinement_factor, "GridRefinement.refinement_factor"),
+        )
+        object.__setattr__(self, "dl", _optional_positive_float(self.dl, "GridRefinement.dl"))
+        object.__setattr__(self, "num_cells", _optional_positive_int(self.num_cells, "GridRefinement.num_cells"))
+        if self.num_cells is None:
+            raise ValueError("GridRefinement.num_cells must be a positive integer.")
+
+    def grid_size(self, vacuum_dl: float) -> float:
+        """Refined step for a given vacuum step of the auto mesh."""
+        factor = self.refinement_factor
+        if factor is None and self.dl is None:
+            factor = 2.0
+        step = math.inf
+        if factor is not None:
+            step = float(vacuum_dl) / factor
+        if self.dl is not None:
+            step = min(step, self.dl)
+        return step
+
+
+@dataclass(frozen=True)
+class LayerRefinementSpec:
+    """Thin-interval and layer-local refinement for ``GridSpec.auto``.
+
+    ``min_cells`` (default 2) is the global rule: every structure-bounded
+    interval on the ``axes`` (``None`` = all axes) gets at least that many cells;
+    ``min_cells=None`` disables it.
+
+    Setting ``axis`` and ``bounds`` (layer extent along ``axis``) locates a layer
+    and enables the opt-in layer features, all off by default:
+
+    * ``min_steps_along_axis``: at least this many steps across the layer.
+    * ``bounds_snapping``: force nodes at the ``"lower"``, ``"upper"``,
+      ``"center"`` or both (``"bounds"``) layer planes.
+    * ``bounds_refinement``: a :class:`GridRefinement` window around each layer
+      plane along ``axis`` (dropped when not finer than ``min_steps_along_axis``).
+    * ``corner_finder``: detect corners of the structure cross-sections on the
+      layer mid-plane; with ``corner_snapping`` (default on once a finder is set)
+      in-plane nodes pass through every corner, and ``corner_refinement`` adds a
+      :class:`GridRefinement` window around each corner on both in-plane axes.
+    * ``dl_min_from_gap_width``: resolve each in-plane gap between metal
+      cross-sections that is narrower than two vacuum steps with at least two
+      cells, with nodes on the gap edges.
+    * ``refinement_inside_sim_only``: ignore corners outside the domain.
+    """
+
+    min_cells: int | None = 2
+    axes: tuple[str, ...] | None = None
+    axis: str | None = None
+    bounds: tuple[float, float] | None = None
+    min_steps_along_axis: float | None = None
+    bounds_snapping: Literal["bounds", "lower", "upper", "center"] | None = None
+    bounds_refinement: GridRefinement | None = None
+    corner_finder: CornerFinderSpec | None = None
+    corner_snapping: bool = True
+    corner_refinement: GridRefinement | None = None
+    refinement_inside_sim_only: bool = True
+    dl_min_from_gap_width: bool = False
+
+    def __post_init__(self):
+        if self.min_cells is not None:
+            min_cells = int(self.min_cells)
+            if min_cells < 1:
+                raise ValueError("LayerRefinementSpec.min_cells must be >= 1.")
+            object.__setattr__(self, "min_cells", min_cells)
         if self.axes is not None:
             axes = tuple(str(axis).lower() for axis in self.axes)
             if any(axis not in _BOUNDARY_AXIS_TO_INDEX for axis in axes):
                 raise ValueError("LayerRefinementSpec.axes entries must be 'x', 'y', or 'z'.")
             object.__setattr__(self, "axes", axes)
+        self._validate_layer()
+
+    def _validate_layer(self):
+        require_fixed_input((self.bounds, self.min_steps_along_axis), name="LayerRefinementSpec layer controls")
+        features = (
+            self.min_steps_along_axis is not None
+            or self.bounds_snapping is not None
+            or self.bounds_refinement is not None
+            or self.corner_finder is not None
+            or self.corner_refinement is not None
+            or self.dl_min_from_gap_width
+        )
+        if self.axis is None and self.bounds is None:
+            if features:
+                raise ValueError(
+                    "LayerRefinementSpec layer features (min_steps_along_axis, bounds_*, corner_*, "
+                    "dl_min_from_gap_width) require axis= and bounds=."
+                )
+            return
+        if self.axis is None or self.bounds is None:
+            raise ValueError("LayerRefinementSpec.axis and LayerRefinementSpec.bounds must be given together.")
+        axis = {0: "x", 1: "y", 2: "z"}.get(self.axis, self.axis) if isinstance(self.axis, int) else str(self.axis).lower()
+        if axis not in _BOUNDARY_AXIS_TO_INDEX:
+            raise ValueError("LayerRefinementSpec.axis must be 'x', 'y', 'z' or 0, 1, 2.")
+        object.__setattr__(self, "axis", axis)
+        if isinstance(self.bounds, torch.Tensor):
+            bounds = tuple(float(v) for v in self.bounds.detach().cpu().reshape(-1))
+        else:
+            bounds = tuple(float(v) for v in self.bounds)
+        if len(bounds) != 2 or not all(math.isfinite(v) for v in bounds) or bounds[1] < bounds[0]:
+            raise ValueError("LayerRefinementSpec.bounds must be finite (lower, upper) with lower <= upper.")
+        object.__setattr__(self, "bounds", bounds)
+        object.__setattr__(
+            self, "min_steps_along_axis",
+            _optional_positive_float(self.min_steps_along_axis, "LayerRefinementSpec.min_steps_along_axis"),
+        )
+        if self.bounds_snapping is not None and self.bounds_snapping not in _LAYER_BOUNDS_SNAPPING:
+            raise ValueError("LayerRefinementSpec.bounds_snapping must be 'bounds', 'lower', 'upper', 'center' or None.")
+        for name in ("bounds_refinement", "corner_refinement"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, GridRefinement):
+                raise TypeError(f"LayerRefinementSpec.{name} must be a GridRefinement or None.")
+        if self.corner_finder is not None and not isinstance(self.corner_finder, CornerFinderSpec):
+            raise TypeError("LayerRefinementSpec.corner_finder must be a CornerFinderSpec or None.")
+        if self.corner_refinement is not None and self.corner_finder is None:
+            raise ValueError("LayerRefinementSpec.corner_refinement requires corner_finder=.")
+        object.__setattr__(self, "corner_snapping", bool(self.corner_snapping))
+        object.__setattr__(self, "refinement_inside_sim_only", bool(self.refinement_inside_sim_only))
+        object.__setattr__(self, "dl_min_from_gap_width", bool(self.dl_min_from_gap_width))
+
+    @classmethod
+    def from_structures(cls, structures, axis, **kwargs) -> "LayerRefinementSpec":
+        """Layer spanning the axis extent of ``structures`` (Structure or geometry)."""
+        from .fdtd.meshing.autogrid import _geometry_aabb
+
+        items = list(structures) if isinstance(structures, (list, tuple)) else [structures]
+        if not items:
+            raise ValueError("LayerRefinementSpec.from_structures requires at least one structure.")
+        axis_name = str(axis).lower() if not isinstance(axis, int) else "xyz"[axis]
+        if axis_name not in _BOUNDARY_AXIS_TO_INDEX:
+            raise ValueError("LayerRefinementSpec.from_structures axis must be 'x', 'y', 'z' or 0, 1, 2.")
+        index = _BOUNDARY_AXIS_TO_INDEX[axis_name]
+        lows, highs = [], []
+        for item in items:
+            lo, hi = _geometry_aabb(getattr(item, "geometry", item))
+            lows.append(float(lo[index]))
+            highs.append(float(hi[index]))
+        return cls(axis=axis_name, bounds=(min(lows), max(highs)), **kwargs)
+
+    @property
+    def is_layer(self) -> bool:
+        return self.axis is not None
 
     def covers(self, axis: str) -> bool:
-        return self.axes is None or str(axis).lower() in self.axes
+        return self.min_cells is not None and (self.axes is None or str(axis).lower() in self.axes)
 
 
 def _validate_custom_axis_coords(values, axis: str) -> np.ndarray:
+    require_fixed_input(values, name=f"GridSpec.{axis}_coords")
     if isinstance(values, torch.Tensor):
         values = values.detach().cpu().numpy()
     coords = np.array(np.asarray(values, dtype=np.float64), copy=True)
@@ -183,15 +401,17 @@ class GridSpec:
     wavelength: float | None = None
     max_ratio: float | None = None
     override_structures: tuple[MeshOverrideStructure, ...] = ()
-    layer_refinement: LayerRefinementSpec | None = None
+    layer_refinement: LayerRefinementSpec | tuple[LayerRefinementSpec, ...] | None = None
 
     @classmethod
     def uniform(cls, dl: float) -> "GridSpec":
+        require_fixed_input(dl, name="GridSpec.uniform spacing")
         step = float(dl)
         return cls(step, step, step)
 
     @classmethod
     def anisotropic(cls, dx: float, dy: float, dz: float) -> "GridSpec":
+        require_fixed_input((dx, dy, dz), name="GridSpec.anisotropic spacing")
         return cls(float(dx), float(dy), float(dz))
 
     @classmethod
@@ -212,8 +432,9 @@ class GridSpec:
         wavelength: float | None = None,
         max_ratio: float = 1.4,
         override_structures=(),
-        layer_refinement: LayerRefinementSpec | None = None,
+        layer_refinement: LayerRefinementSpec | tuple[LayerRefinementSpec, ...] | None = None,
     ) -> "GridSpec":
+        require_fixed_input((min_steps_per_wavelength, wavelength, max_ratio), name="GridSpec.auto controls")
         steps = float(min_steps_per_wavelength)
         if steps <= 0.0:
             raise ValueError("GridSpec.auto min_steps_per_wavelength must be > 0.")
@@ -230,7 +451,13 @@ class GridSpec:
                 raise TypeError(
                     "GridSpec.auto override_structures must contain MeshOverrideStructure entries."
                 )
-        if layer_refinement is not None and not isinstance(layer_refinement, LayerRefinementSpec):
+        if isinstance(layer_refinement, (list, tuple)):
+            # Several specs (e.g. one per PCB layer) are kept as a tuple; a single
+            # spec is stored unchanged.
+            layer_refinement = tuple(layer_refinement)
+            if not layer_refinement or not all(isinstance(spec, LayerRefinementSpec) for spec in layer_refinement):
+                raise TypeError("GridSpec.auto layer_refinement must be a LayerRefinementSpec or a non-empty sequence of them.")
+        elif layer_refinement is not None and not isinstance(layer_refinement, LayerRefinementSpec):
             raise TypeError("GridSpec.auto layer_refinement must be a LayerRefinementSpec.")
         return cls(
             None,
@@ -305,12 +532,15 @@ class BoundarySpec:
     y_high: BoundaryKind | None = None
     z_low: BoundaryKind | None = None
     z_high: BoundaryKind | None = None
+    mur_abc: MurABC = MurABC()
+    mode_abc: ModeABC | None = None
     _face_kinds: tuple[tuple[BoundaryKind, BoundaryKind], tuple[BoundaryKind, BoundaryKind], tuple[BoundaryKind, BoundaryKind]] = field(
         init=False,
         repr=False,
     )
 
     def __post_init__(self):
+        require_fixed_input((self.num_layers, self.strength, self.bloch_wavevector), name="BoundarySpec physical controls")
         kind = _normalize_boundary_kind(self.kind)
 
         if self.num_layers < 0:
@@ -379,14 +609,9 @@ class BoundarySpec:
                     continue
                 if axis_face_kinds[0] != "bloch" or axis_face_kinds[1] != "bloch":
                     raise ValueError(f"{axis}-axis Bloch boundaries must be configured on both faces.")
-                if (
-                    bloch_wavevector != "auto"
-                    and resolved_kind != "bloch"
-                    and np.isclose(bloch_wavevector[axis_index], 0.0)
-                ):
-                    raise ValueError(
-                        f"{axis}-axis Bloch boundaries require a non-zero bloch_wavevector component."
-                    )
+                # Zero translation phase is the periodic limit of Bloch data.
+                # It is valid for explicit vectors, including mixed PML faces,
+                # just as it is for a normally incident auto-resolved source.
 
         for axis, axis_face_kinds in zip(_BOUNDARY_AXES, normalized_face_kinds):
             axis_face_set = set(axis_face_kinds)
@@ -394,6 +619,19 @@ class BoundarySpec:
                 raise ValueError(
                     f"{axis}-axis periodic and Bloch boundaries must use the same kind on both faces."
                 )
+
+        if not isinstance(self.mur_abc, MurABC):
+            raise TypeError("BoundarySpec.mur_abc must be a MurABC.")
+        if self.mode_abc is not None and not isinstance(self.mode_abc, ModeABC):
+            raise TypeError("BoundarySpec.mode_abc must be a ModeABC or None.")
+        uses_face_kind = lambda name: any(name in pair for pair in normalized_face_kinds)
+        if not uses_face_kind("mur"):
+            object.__setattr__(self, "mur_abc", MurABC())
+        if uses_face_kind("mode_abc"):
+            if self.mode_abc is None:
+                object.__setattr__(self, "mode_abc", ModeABC())
+        else:
+            object.__setattr__(self, "mode_abc", None)
 
         if not uses_bloch:
             bloch_wavevector = (0.0, 0.0, 0.0)
@@ -416,6 +654,7 @@ class BoundarySpec:
 
     @classmethod
     def pml(cls, num_layers: int = 15, strength: float = 1e6) -> "BoundarySpec":
+        require_fixed_input((num_layers, strength), name="BoundarySpec.pml controls")
         return cls(kind="pml", num_layers=int(num_layers), strength=float(strength))
 
     @classmethod
@@ -439,8 +678,8 @@ class BoundarySpec:
         return cls(kind="pmc")
 
     @classmethod
-    def mur(cls) -> "BoundarySpec":
-        return cls(kind="mur")
+    def mur(cls, order: int = 1, permittivity: float | None = None) -> "BoundarySpec":
+        return cls(kind="mur", mur_abc=MurABC(order=order, permittivity=permittivity))
 
     @classmethod
     def faces(
@@ -459,7 +698,10 @@ class BoundarySpec:
         y_high: BoundaryKind | None = None,
         z_low: BoundaryKind | None = None,
         z_high: BoundaryKind | None = None,
+        mur_abc: MurABC | None = None,
+        mode_abc: ModeABC | None = None,
     ) -> "BoundarySpec":
+        require_fixed_input((num_layers, strength, bloch_wavevector), name="BoundarySpec.faces controls")
         return cls(
             kind=default,
             num_layers=int(num_layers),
@@ -474,6 +716,8 @@ class BoundarySpec:
             y_high=y_high,
             z_low=z_low,
             z_high=z_high,
+            mur_abc=MurABC() if mur_abc is None else mur_abc,
+            mode_abc=mode_abc,
         )
 
     @property
@@ -562,6 +806,8 @@ class BoundarySpec:
             y_high=y_high,
             z_low=z_low,
             z_high=z_high,
+            mur_abc=self.mur_abc,
+            mode_abc=self.mode_abc,
         )
 
 @dataclass(frozen=True)
@@ -620,6 +866,7 @@ _USE_SCENE_SUBPIXEL_SAMPLES = object()
 
 
 def _normalize_subpixel_samples(value) -> tuple[int, int, int]:
+    require_fixed_input(value, name="SubpixelSpec.samples")
     if isinstance(value, bool):
         raise TypeError("subpixel_samples must be an int or a length-3 iterable, not bool.")
     if isinstance(value, int):
@@ -634,7 +881,7 @@ def _normalize_subpixel_samples(value) -> tuple[int, int, int]:
     return normalized
 
 
-_SUBPIXEL_AVERAGING = {"arithmetic", "polarized"}
+_SUBPIXEL_AVERAGING = {"arithmetic", "polarized", "polarized_tensor", "kottke_edge", "kottke_smooth"}
 _SUBPIXEL_PEC = {"staircase", "conformal"}
 
 
@@ -643,34 +890,62 @@ class SubpixelSpec:
     """Subpixel material-averaging policy.
 
     ``averaging`` selects the per-Yee-component permittivity/permeability blend:
-    ``"arithmetic"`` (scalar volume-fraction mixing, the default) or ``"polarized"``
+    ``"arithmetic"`` (scalar volume-fraction mixing) or ``"polarized"``
     (Kottke normal-projection mixing that uses the harmonic mean along the interface
-    normal and the arithmetic mean tangentially). ``pec`` selects how PEC-material
+    normal and the arithmetic mean tangentially). ``"polarized_tensor"`` also
+    reconstructs the full symmetric electric tensor at isotropic interfaces for
+    FDTD only (opt-in); FDFD preparation rejects it. Anisotropic constituents
+    retain local diagonal treatment. Both polarized modes require more than one
+    sample. ``"kottke_edge"`` uses binary per-edge samples, an in-window first
+    moment normal and the physical tensor diagonal (the FDTD and FDFD default).
+    Geometry and MaterialRegion tensor fields must be fixed; Structure material
+    values may be trainable. Use samples=4 for its reference quadrature.
+    ``"kottke_smooth"`` shares that window and blend with curvature-corrected
+    fractional coverage, allowing geometry and Structure material-value gradients.
+    MaterialRegion density gradients require explicit arithmetic or polarized
+    averaging; kottke_smooth is not qualified for them. Use samples=4.
+    It is recommended for shape differentiation, with larger errors than kottke_edge
+    at sharp high-contrast edges and corners.
+    ``pec`` selects how PEC-material
     edges are handled by FDTD: ``"staircase"`` (hard edge) or ``"conformal"``
-    (fractional partial-fill edge suppression). The defaults reproduce the legacy
-    arithmetic / staircase behaviour bitwise.
+    (fractional partial-fill edge suppression). The default uses four samples per
+    axis and staircase PEC. Geometry gradients require an explicit differentiable mode.
     """
 
-    samples: tuple[int, int, int] = (1, 1, 1)
-    averaging: str = "arithmetic"
+    samples: tuple[int, int, int] = (4, 4, 4)
+    averaging: str = "kottke_edge"
     pec: str = "staircase"
 
     def __post_init__(self):
         object.__setattr__(self, "samples", _normalize_subpixel_samples(self.samples))
         averaging = str(self.averaging).lower()
         if averaging not in _SUBPIXEL_AVERAGING:
-            raise ValueError("SubpixelSpec.averaging must be 'arithmetic' or 'polarized'.")
+            raise ValueError("SubpixelSpec.averaging must be 'arithmetic', 'polarized', 'polarized_tensor', 'kottke_edge', or 'kottke_smooth'.")
         pec = str(self.pec).lower()
         if pec not in _SUBPIXEL_PEC:
             raise ValueError("SubpixelSpec.pec must be 'staircase' or 'conformal'.")
+        if averaging in {"polarized", "polarized_tensor"} and self.samples == (1, 1, 1):
+            raise ValueError(
+                f"SubpixelSpec(averaging='{averaging}') needs more than one subpixel sample: a single "
+                "point sample has a binary fill, so the normal projection would reproduce the "
+                "staircase. Pass samples >= 2 (for example samples=4)."
+            )
         object.__setattr__(self, "averaging", averaging)
         object.__setattr__(self, "pec", pec)
+        if pec == "conformal":
+            warnings.warn(
+                'SubpixelSpec(pec="conformal") has a known systematic bias: '
+                'non-converging scattering error of about 30-40% on curved PEC. '
+                'Use pec="staircase" instead. See docs/memory/conformal-pec-bias.md.',
+                UserWarning,
+                stacklevel=2,
+            )
 
 
 def _coerce_subpixel(value) -> SubpixelSpec:
     if isinstance(value, SubpixelSpec):
         return value
-    return SubpixelSpec(samples=_normalize_subpixel_samples(value))
+    return SubpixelSpec(samples=_normalize_subpixel_samples(value), averaging="arithmetic")
 
 
 def _normalize_symmetry_entry(axis_value) -> tuple[str, str] | None:
@@ -780,12 +1055,26 @@ def _domain_range_from_bounds(
 class Scene:
     """Declarative 3D scene definition for simulation backends."""
 
+    def to_dict(self, arrays=None):
+        """Serialize a fixed scene as a JSON-safe ``witwin.scene/1`` dictionary."""
+        from .scene_dict import scene_to_dict
+
+        return scene_to_dict(self, arrays=arrays)
+
+    @classmethod
+    def from_dict(cls, d, arrays=None, device="cuda"):
+        """Rebuild a ``witwin.scene/1`` dictionary on the requested device."""
+        from .scene_dict import scene_from_dict
+
+        return scene_from_dict(d, arrays=arrays, device=device)
+
     def __init__(
         self,
         domain: Domain | None = None,
         grid: GridSpec | None = None,
         boundary: BoundarySpec | None = None,
         *,
+        background=None,
         structures=None,
         thin_wires=None,
         sources=None,
@@ -801,10 +1090,17 @@ class Scene:
         device="cuda",
         verbose=False,
         lazy_meshgrid=True,
-        subpixel_samples=1,
+        subpixel_samples=SubpixelSpec(),
         symmetry=None,
+        coordinates=None,
+        internal_absorbers=(),
     ):
         resolved_device = _resolve_scene_device(device)
+        from witwin.core import PhysicalMaterial
+        from .layers import LayerStack
+        if background is not None and not isinstance(background, (PhysicalMaterial, LayerStack)):
+            raise TypeError('Scene background must be a homogeneous material, a planar LayerStack or None')
+        self.background = background
         self.structures = list(structures or [])
         if any(not isinstance(structure, Structure) for structure in self.structures):
             raise TypeError("Maxwell Scene structures must be witwin.core.Structure instances.")
@@ -815,6 +1111,13 @@ class Scene:
         self.monitors = list(monitors or [])
         self.metadata = dict(metadata or {})
         self.device = resolved_device
+        if coordinates is not None:
+            from .coordinates import BendCoordinates
+            if not isinstance(coordinates,BendCoordinates):
+                raise TypeError("Scene.coordinates must be BendCoordinates or None.")
+            coordinates=coordinates.to(resolved_device)
+        self.coordinates = coordinates
+        require_fixed_input((verbose, lazy_meshgrid), name="Scene execution controls")
         self.verbose = bool(verbose)
 
         if domain is None:
@@ -825,6 +1128,8 @@ class Scene:
             boundary = BoundarySpec.none()
 
         self.domain = domain
+        if self.coordinates is not None:
+            self.coordinates.validate_bounds(domain.bounds)
         self.grid = grid
         self.boundary = boundary
         self.subpixel = _coerce_subpixel(subpixel_samples)
@@ -848,6 +1153,9 @@ class Scene:
         self.circuits = []
         for circuit in circuits:
             self.add_circuit(circuit)
+        self.internal_absorbers = []
+        for absorber in internal_absorbers:
+            self.add_internal_absorber(absorber)
         self.lazy_meshgrid = bool(lazy_meshgrid)
 
     @property
@@ -895,6 +1203,8 @@ class Scene:
             "bloch": "Bloch",
             "pec": "PEC",
             "pmc": "PMC",
+            "mur": "Mur",
+            "mode_abc": "ModeABC",
             "mixed": "Mixed",
         }
         return labels[self.boundary.kind]
@@ -970,7 +1280,14 @@ class Scene:
         self.monitors.append(monitor)
         return self
 
-    def add_port(self, port: ModePort | LumpedPort | TerminalPort | WavePort):
+    def add_port(self, port: ModePort | LumpedPort | TerminalPort | WavePort | CoaxialLumpedPort):
+        if isinstance(port, CoaxialLumpedPort):
+            return self._add_coaxial_object(port, self.ports, "Port")
+        if isinstance(port, TerminalWavePort):
+            if any(existing.name == port.name for existing in self.ports):
+                raise ValueError(f"Port name {port.name!r} is already present in the scene.")
+            self.ports.append(_resolve_terminal_wave_port(port, self.structures))
+            return self
         if not isinstance(port, (ModePort, LumpedPort, TerminalPort, WavePort)):
             raise TypeError(
                 "Maxwell Scene ports must be ModePort, LumpedPort, TerminalPort, or WavePort instances."
@@ -998,7 +1315,25 @@ class Scene:
         self.ports.append(port)
         return self
 
-    def add_lumped_element(self, element: Resistor | Capacitor | Inductor):
+    def _add_coaxial_object(self, item, target, label):
+        if any(existing.name == item.name for existing in target):
+            raise ValueError(f"{label} name {item.name!r} is already present in the scene.")
+        outer = 0.5 * item.outer_diameter
+        normal = "xyz".index(item.normal_axis)
+        for index, (axis, coordinate, (lower, upper)) in enumerate(
+            zip(_BOUNDARY_AXES, item.center, self.domain.bounds)
+        ):
+            reach = 0.0 if index == normal else outer
+            if coordinate - reach < lower or coordinate + reach > upper:
+                raise ValueError(
+                    f"{type(item).__name__} {item.name!r} annulus leaves the Scene domain along {axis}."
+                )
+        target.append(item)
+        return self
+
+    def add_lumped_element(self, element: Resistor | Capacitor | Inductor | CoaxialLumpedResistor):
+        if isinstance(element, CoaxialLumpedResistor):
+            return self._add_coaxial_object(element, self.lumped_elements, "Lumped element")
         if not isinstance(element, (Resistor, Capacitor, Inductor)):
             raise TypeError(
                 "Maxwell Scene lumped elements must be Resistor, Capacitor, or Inductor instances."
@@ -1135,6 +1470,15 @@ class Scene:
         self.material_regions.append(material_region)
         return self
 
+    def add_internal_absorber(self, absorber: InternalAbsorber):
+        """Register a one-way absorbing plane inside the FDTD domain."""
+        if not isinstance(absorber, InternalAbsorber):
+            raise TypeError("Scene.add_internal_absorber requires an InternalAbsorber.")
+        if absorber.name is not None and any(existing.name == absorber.name for existing in self.internal_absorbers):
+            raise ValueError(f"Internal absorber name {absorber.name!r} is already present in the scene.")
+        self.internal_absorbers.append(absorber)
+        return self
+
     def add_electrostatic_terminal(self, terminal):
         """Register an equipotential conductor for the electrostatic solver.
 
@@ -1175,6 +1519,7 @@ class Scene:
             "domain": self.domain,
             "grid": self.grid,
             "boundary": self.boundary,
+            "background": self.background,
             "structures": list(self.structures),
             "thin_wires": list(self.thin_wires),
             "sources": list(self.sources),
@@ -1192,12 +1537,18 @@ class Scene:
             "lazy_meshgrid": self.lazy_meshgrid,
             "subpixel_samples": self.subpixel,
             "symmetry": self.symmetry,
+            "coordinates": self.coordinates,
+            "internal_absorbers": list(self.internal_absorbers),
         }
         params.update(overrides)
         destination = _resolve_scene_device(params["device"])
         if destination != self.device:
             params = _place_scene_value(params, destination, {})
         return Scene(**params)
+
+    def physical_positions(self, chart_points):
+        """Map SI chart positions to world Cartesian positions."""
+        return chart_points if self.coordinates is None else self.coordinates.position(chart_points)
 
     def resolved_sources(self):
         resolved = []
@@ -1316,15 +1667,262 @@ def _build_axis_grid64(
     return nodes, primal, half, dual
 
 
+class _PMLExtrudedGeometry(GeometryBase):
+    """Compile-only normal continuation of a prismatic interface section."""
+
+    kind = "pml_extrusion"
+
+    def __init__(self, base, faces):
+        # Keep tensor leaves visible to the compiler's trainable-geometry gate.
+        self.__dict__.update({k: v for k, v in vars(base).items() if torch.is_tensor(v)})
+        self._pml_base = base
+        self._pml_faces = faces
+
+    def signed_distance(self, xx, yy, zz):
+        coords = [xx, yy, zz]
+        for axis, side, interface, _outer in self._pml_faces:
+            coords[axis] = (coords[axis].clamp(min=interface) if side == "low"
+                            else coords[axis].clamp(max=interface))
+        return self._pml_base.signed_distance(*coords)
+
+    def to_mesh(self, segments=16):
+        # Periodic-image bounds only need transverse extents: PML and periodic
+        # faces cannot share an axis. This wrapper is never a public mesh.
+        return self._pml_base.to_mesh(segments=segments)
+
+
+def _pml_plane_coords(scene, axis, value):
+    others = [i for i in range(3) if i != axis]
+    a, b = torch.meshgrid(*(getattr(scene, "xyz"[i]) for i in others), indexing="ij")
+    coords = [None, None, None]
+    coords[axis] = torch.ones_like(a) * value
+    coords[others[0]], coords[others[1]] = a, b
+    return tuple(coords)
+
+
+def _pml_conservative_bounds(geometry, reference):
+    """Cheap enclosing bounds only; unknown geometry keeps the exact census."""
+    from witwin.core import Mesh, Sphere
+
+    if isinstance(geometry, Box):
+        # A circumsphere encloses every rotation without tessellation.
+        radius = torch.linalg.vector_norm(geometry.size.to(reference) / 2)
+    elif isinstance(geometry, Sphere):
+        radius = geometry.radius.to(reference).abs()
+    elif isinstance(geometry, Mesh):
+        if geometry.fill_mode == "surface" or (geometry.fill_mode == "auto" and not geometry.is_watertight):
+            # Surface bands extend beyond the vertex AABB.
+            return None
+        vertices, _ = geometry.to_mesh()
+        return vertices.to(reference).amin(0), vertices.to(reference).amax(0)
+    else:
+        return None
+    center = geometry.position.to(reference)
+    return center - radius, center + radius
+
+
+def _pml_contact_faces(scene, geometry):
+    """Census flagged pairs, with an exact adjacent-plane prism decision."""
+    from .geometry.surface_mesh import SurfaceMesh
+
+    def occupied(value, axis):
+        coords = _pml_plane_coords(scene, axis, value)
+        if isinstance(geometry, SurfaceMesh):
+            # Zero-volume surfaces expose exact contact, not occupancy SDFs.
+            points = torch.stack(coords, dim=-1)
+            _, contact = geometry.classify_query_points(points.reshape(-1, 3))
+            return contact.reshape(points.shape[:-1])
+        return geometry.signed_distance(*coords) <= 0
+
+    flagged, rejected = [], []
+    with torch.no_grad():
+        bounds = _pml_conservative_bounds(geometry, scene.x)
+        if bounds is not None:
+            # Retain near-boundary cases for the authoritative SDF predicate,
+            # including rounding in transforms and the node-plane coordinate.
+            slack = 64 * torch.finfo(scene.x.dtype).eps * torch.stack(bounds).abs().amax().clamp(min=1)
+        for axis, name in enumerate("xyz"):
+            nodes = getattr(scene, name)
+            for side, bound, outer in (("low", scene.physical_domain_range[2*axis], nodes[0]),
+                                       ("high", scene.physical_domain_range[2*axis+1], nodes[-1])):
+                if scene.boundary.face_kind(name, side) != "pml":
+                    continue
+                index = int((nodes - bound).abs().argmin())
+                interface = nodes[index]
+                if bounds is not None and bool(
+                    (interface < bounds[0][axis] - slack) | (interface > bounds[1][axis] + slack)
+                ):
+                    continue
+                contact = occupied(interface, axis)
+                if not bool(contact.any()):
+                    continue
+                outside = ~occupied(outer, axis)
+                if not bool((contact & outside).any()):
+                    continue
+                inner = nodes[index + (1 if side == "low" else -1)]
+                inside = occupied(inner, axis)
+                face = (axis, side, interface, outer)
+                flagged.append(face)
+                if not torch.equal(contact, inside):
+                    rejected.append(face)
+    return flagged, rejected
+
+
+def _pml_enlarged_box(scene, geometry, faces):
+    lower, upper = geometry.position - geometry.size / 2, geometry.position + geometry.size / 2
+    lows, highs = list(lower.unbind()), list(upper.unbind())
+    for axis, side, _interface, outer in faces:
+        nodes = getattr(scene, "xyz"[axis])
+        # One full boundary cell beyond the last node also covers Yee samples.
+        margin = (nodes[1] - nodes[0]) if side == "low" else (nodes[-1] - nodes[-2])
+        target = (outer - margin if side == "low" else outer + margin).to(geometry.position)
+        (lows if side == "low" else highs)[axis] = target
+    lo, hi = torch.stack(lows), torch.stack(highs)
+    changed = {face[0] for face in faces}
+    position = torch.stack([(lo[i] + hi[i]) / 2 if i in changed else geometry.position[i] for i in range(3)])
+    size = torch.stack([hi[i] - lo[i] if i in changed else geometry.size[i] for i in range(3)])
+    return Box(position=position, size=size, rotation=geometry.rotation, device=geometry.device)
+
+
+def _pml_density_is_prismatic(scene, region, density, face):
+    axis, side, interface, _ = face
+    nodes = getattr(scene, "xyz"[axis])
+    index = int((nodes - interface).abs().argmin())
+    inner = nodes[index + (1 if side == "low" else -1)]
+    geometry = region.geometry
+    lower = geometry.position[axis] - geometry.size[axis] / 2
+    planes = torch.stack((interface, inner)).to(lower)
+    # align_corners=False puts native density texels at cell centres. Compare
+    # every native slice supporting the two planes, before interpolation can
+    # introduce rounding differences between identical density columns.
+    texels = ((planes - lower) / geometry.size[axis] * density.shape[axis] - .5).clamp(
+        0, density.shape[axis] - 1)
+    first, last = int(texels.min().floor()), int(texels.max().ceil())
+    slices = density.narrow(axis, first, last - first + 1)
+    return torch.equal(slices, slices.narrow(axis, 0, 1).expand_as(slices))
+
+
+def _pml_geometry_exclusion(geometry):
+    """Preserve geometry types consumed by sheet and mesh-specific compilers."""
+    from witwin.core import BooleanGeometry, Mesh
+    from .geometry.planar_pec import PlanarPEC
+    from .geometry.surface_mesh import SurfaceMesh
+
+    if isinstance(geometry, (PlanarPEC, SurfaceMesh)) or (
+        isinstance(geometry, Mesh) and geometry.fill_mode == "surface"
+    ):
+        return "sheet"
+    if isinstance(geometry, Mesh):
+        return "mesh geometry"
+    if isinstance(geometry, BooleanGeometry):
+        reasons = [_pml_geometry_exclusion(child) for child in geometry.geometries]
+        # A sheet leaf may not implement an occupancy SDF at all.
+        if "sheet" in reasons:
+            return "sheet"
+        if "mesh geometry" in reasons:
+            return "mesh geometry"
+    return None
+
+
+def _pml_surface_impedance_material(material):
+    """Use the compiler's conductor types and material capability flags."""
+    from .copper_foil import CopperFoil
+    from .media import LossyMetalMedium, SurfaceImpedanceMedium
+
+    # PEC/PMC have no surface-impedance layout and remain extrudable.
+    return isinstance(material, (LossyMetalMedium, SurfaceImpedanceMedium, CopperFoil)) or any(
+        bool(getattr(material, flag, False))
+        for flag in ("is_surface_impedance", "is_lossy_metal", "is_copper_foil")
+    )
+
+
+def _extrude_pml_contacts(scene):
+    """Modify only census-flagged prepared assignments, preserving their order."""
+    from witwin.core import BooleanGeometry
+
+    records = []
+    for collection, density_region in ((scene.structures, False), (scene.material_regions, True)):
+        for index, owner in enumerate(collection):
+            geometry = owner.geometry
+            exclusion = _pml_geometry_exclusion(geometry)
+            record = {"material_region_index" if density_region else "structure_index": index,
+                      "name": owner.name}
+            if exclusion == "sheet" and isinstance(geometry, BooleanGeometry):
+                # A Boolean sheet leaf may not implement an occupancy SDF.
+                continue
+            faces, rejected = _pml_contact_faces(scene, geometry)
+            if not faces:
+                continue
+            if not density_region and _pml_surface_impedance_material(owner.material):
+                names = ["xyz"[a] + "-" + s for a, s, *_ in faces]
+                warnings.warn(
+                    f"PML contact for structure {index} ({owner.name!r}) on faces {', '.join(names)}: "
+                    "surface-impedance conductor reaches a PML interface; not extruded",
+                    RuntimeWarning, stacklevel=3,
+                )
+                records.append(dict(record, faces=names, kind="skipped_surface_impedance"))
+                continue
+            if exclusion == "sheet":
+                records.append(dict(record, faces=["xyz"[a] + "-" + s for a, s, *_ in faces],
+                                    kind="skipped_sheet"))
+                continue
+            if exclusion == "mesh geometry":
+                warnings.warn(
+                    f"PML contact for structure {index} ({owner.name!r}) uses mesh geometry; "
+                    "not extruding this assignment.", RuntimeWarning, stacklevel=3,
+                )
+                continue
+            if density_region and not rejected:
+                from .compiler.materials import _prepare_material_region_density
+
+                with torch.no_grad():
+                    density = _prepare_material_region_density(scene, owner)
+                    for face in faces:
+                        if not _pml_density_is_prismatic(scene, owner, density, face):
+                            rejected.append(face)
+            if rejected:
+                names = ", ".join("xyz"[a] + "-" + s for a, s, *_ in rejected)
+                warnings.warn(
+                    f"PML contact for {'MaterialRegion' if density_region else 'structure'} "
+                    f"{index} ({owner.name!r}) is non-prismatic on faces {names}; not extruding this assignment.",
+                    RuntimeWarning, stacklevel=3,
+                )
+                continue
+            rotation = getattr(geometry, "rotation", None)
+            from witwin.core.geometry.base import _rotation_quaternion
+
+            is_box = isinstance(geometry, Box) and (rotation is None or torch.equal(
+                _rotation_quaternion(rotation).abs(), rotation.new_tensor((1., 0., 0., 0.))))
+            replacement = copy.copy(owner)
+            object.__setattr__(replacement, "geometry", _pml_enlarged_box(scene, geometry, faces)
+                               if is_box else _PMLExtrudedGeometry(geometry, faces))
+            if density_region:
+                # Border texture sampling replicates the edge slice without
+                # rescaling the interior design grid or its filter stencil.
+                object.__setattr__(replacement, "_pml_density_geometry", geometry)
+            collection[index] = replacement
+            records.append({"structure_index" if not density_region else "material_region_index": index,
+                            "name": owner.name, "faces": ["xyz"[a] + "-" + s for a, s, *_ in faces],
+                            "kind": "density" if density_region else "box" if is_box else "wrapper"})
+    return records
+
+
 class PreparedScene(Scene):
     """Internal solver-ready scene with compiled grid state."""
 
-    def __init__(self, scene: Scene, *, lazy_meshgrid: bool | None = None):
+    def __init__(self, scene: Scene, *, lazy_meshgrid: bool | None = None, material_dtype=torch.float32):
+        if material_dtype not in (torch.float32, torch.float64):
+            raise ValueError("Prepared material_dtype must be float32 or float64.")
+        self._material_dtype = material_dtype
+        from .sources import MaxwellPlaneModes
+        if scene.background is not None or any(isinstance(s, MaxwellPlaneModes) for s in scene.sources):
+            raise NotImplementedError('Grid preparation does not yet support homogeneous background declarations or physical Maxwell mode sources')
         resolved_lazy_meshgrid = scene.lazy_meshgrid if lazy_meshgrid is None else bool(lazy_meshgrid)
         super().__init__(
             domain=scene.domain,
             grid=scene.grid,
             boundary=scene.boundary,
+            background=scene.background,
             structures=list(scene.structures),
             thin_wires=list(scene.thin_wires),
             sources=list(scene.sources),
@@ -1342,6 +1940,8 @@ class PreparedScene(Scene):
             lazy_meshgrid=resolved_lazy_meshgrid,
             subpixel_samples=scene.subpixel,
             symmetry=scene.symmetry,
+            coordinates=scene.coordinates,
+            internal_absorbers=list(scene.internal_absorbers),
         )
         self._public_scene = scene
         self.physical_domain_range = _domain_range_from_bounds(self.domain.bounds)
@@ -1397,12 +1997,14 @@ class PreparedScene(Scene):
                 )
             )
         self.domain_range = _domain_range_from_bounds(computational_bounds)
-        self.x = torch.tensor(self.x_nodes64, dtype=torch.float32, device=self.device)
-        self.y = torch.tensor(self.y_nodes64, dtype=torch.float32, device=self.device)
-        self.z = torch.tensor(self.z_nodes64, dtype=torch.float32, device=self.device)
-        self.x_half = torch.tensor(self.x_half64, dtype=torch.float32, device=self.device)
-        self.y_half = torch.tensor(self.y_half64, dtype=torch.float32, device=self.device)
-        self.z_half = torch.tensor(self.z_half64, dtype=torch.float32, device=self.device)
+        self.x = torch.tensor(self.x_nodes64, dtype=material_dtype, device=self.device)
+        self.y = torch.tensor(self.y_nodes64, dtype=material_dtype, device=self.device)
+        self.z = torch.tensor(self.z_nodes64, dtype=material_dtype, device=self.device)
+        self.x_half = torch.tensor(self.x_half64, dtype=material_dtype, device=self.device)
+        self.y_half = torch.tensor(self.y_half64, dtype=material_dtype, device=self.device)
+        self.z_half = torch.tensor(self.z_half64, dtype=material_dtype, device=self.device)
+        self.pml_extrusions = _extrude_pml_contacts(self)
+        self.metadata["pml_extrusions"] = self.pml_extrusions
 
         self._xx = None
         self._yy = None
@@ -1716,11 +2318,12 @@ class PreparedScene(Scene):
         raise ValueError("axis must be 'x', 'y', or 'z'")
 
 
-def prepare_scene(scene: Scene | PreparedScene, *, lazy_meshgrid: bool | None = None) -> PreparedScene:
+def prepare_scene(scene: Scene | PreparedScene, *, lazy_meshgrid: bool | None = None, material_dtype=None) -> PreparedScene:
     if isinstance(scene, PreparedScene):
-        if lazy_meshgrid is None or scene.lazy_meshgrid == bool(lazy_meshgrid):
+        dtype = scene._material_dtype if material_dtype is None else material_dtype
+        if (lazy_meshgrid is None or scene.lazy_meshgrid == bool(lazy_meshgrid)) and dtype == scene._material_dtype:
             return scene
-        return PreparedScene(scene._public_scene, lazy_meshgrid=lazy_meshgrid)
+        return PreparedScene(scene._public_scene, lazy_meshgrid=lazy_meshgrid, material_dtype=dtype)
     if not isinstance(scene, Scene):
         raise TypeError("prepare_scene() expects a maxwell.Scene instance.")
-    return PreparedScene(scene, lazy_meshgrid=lazy_meshgrid)
+    return PreparedScene(scene, lazy_meshgrid=lazy_meshgrid, material_dtype=torch.float32 if material_dtype is None else material_dtype)

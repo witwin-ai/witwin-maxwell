@@ -1,3 +1,4 @@
+import gc
 import math
 from pathlib import Path
 
@@ -401,10 +402,8 @@ def dipole_closed_surface_validation():
     }
 
 
-@pytest.fixture(scope="module")
-def tfsf_rayleigh_rcs_validation():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
+def _rayleigh_scenes(dx, *, subpixel_samples, device="cuda"):
+    """Keep the physical sphere, domain, TFSF and Huygens geometry fixed."""
     frequency = 1.0e9
     amplitude = 1.0
     sphere_radius = 0.01
@@ -412,9 +411,10 @@ def tfsf_rayleigh_rcs_validation():
     surface_monitor = _closed_surface_box_monitor("huygens", box_half, frequency)
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.uniform(0.01),
+        grid=mw.GridSpec.uniform(dx),
+        subpixel_samples=subpixel_samples,
         boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device="cuda",
+        device=device,
     )
     scene.add_structure(
         mw.Structure(
@@ -436,9 +436,10 @@ def tfsf_rayleigh_rcs_validation():
 
     reference_scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.uniform(0.01),
+        grid=mw.GridSpec.uniform(dx),
+        subpixel_samples=subpixel_samples,
         boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device="cuda",
+        device=device,
     )
     reference_scene.add_source(
         mw.PlaneWave(
@@ -452,31 +453,51 @@ def tfsf_rayleigh_rcs_validation():
     reference_scene.add_monitor(
         mw.PointMonitor("incident_probe", (0.0, 0.0, 0.0), fields=("Ex",))
     )
+    return scene, reference_scene
+
+
+def _run_tfsf_rayleigh_rcs_validation(
+    dx, *, subpixel_samples, device="cuda", backend="native", output_dir=None,
+    run_time=None, angular_shape=(121, 241), batch_size=4096,
+):
+    """Shared simulation and analytic pattern measurement, with optional plots."""
+    frequency = 1.0e9
+    sphere_radius = 0.01
+    scene, reference_scene = _rayleigh_scenes(
+        dx, subpixel_samples=subpixel_samples, device=device,
+    )
+    run_time = run_time or mw.TimeConfig.auto(steady_cycles=12, transient_cycles=30)
+
+    # Finish and release the empty-cell solver before allocating the scattering solver.
+    reference_result = mw.Simulation.fdtd(
+        reference_scene,
+        frequencies=[frequency],
+        run_time=run_time,
+        spectral_sampler=mw.SpectralSampler(window="hanning"),
+        full_field_dft=False,
+        backend=backend,
+    ).run()
+    incident_amplitude = abs(reference_result.monitor("incident_probe")["data"].item())
+    del reference_result, reference_scene
+    gc.collect()
+    if torch.device(device).type == "cuda":
+        torch.cuda.empty_cache()
 
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=12, transient_cycles=30),
+        run_time=run_time,
         spectral_sampler=mw.SpectralSampler(window="hanning"),
         full_field_dft=False,
+        backend=backend,
     ).run()
 
-    reference_result = mw.Simulation.fdtd(
-        reference_scene,
-        frequencies=[frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=12, transient_cycles=30),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
-    ).run()
-    incident_amplitude = abs(reference_result.monitor("incident_probe")["data"].item())
-    del reference_result
-
-    currents = equivalent_surface_currents_from_monitor(result, surface_monitor.name)
-    transformer = NearFieldFarFieldTransformer(currents, solver=result.solver, device="cuda")
-    theta = torch.linspace(0.0, torch.pi, 121, device="cuda", dtype=torch.float64)
-    phi = torch.linspace(0.0, 2.0 * torch.pi, 241, device="cuda", dtype=torch.float64)
+    currents = equivalent_surface_currents_from_monitor(result, "huygens")
+    transformer = NearFieldFarFieldTransformer(currents, solver=result.solver, device=device)
+    theta = torch.linspace(0.0, torch.pi, angular_shape[0], device=device, dtype=torch.float64)
+    phi = torch.linspace(0.0, 2.0 * torch.pi, angular_shape[1], device=device, dtype=torch.float64)
     theta_grid, phi_grid = torch.broadcast_tensors(theta[:, None], phi[None, :])
-    far_field = transformer.transform(theta_grid, phi_grid, radius=8.0, batch_size=4096)
+    far_field = transformer.transform(theta_grid, phi_grid, radius=8.0, batch_size=batch_size)
     rcs = compute_bistatic_rcs(
         far_field,
         incident_amplitude=incident_amplitude,
@@ -498,19 +519,17 @@ def tfsf_rayleigh_rcs_validation():
     )
     phi90_index = int(np.argmin(np.abs(phi_np[0] - 0.5 * math.pi)))
 
-    _save_rcs_plot(
-        OUTPUT_DIR / "rcs_closed_surface_tfsf_rayleigh_phi_cuts.png",
-        _to_numpy(theta, float),
-        sigma[:, 0],
-        reference[:, 0],
-        sigma[:, phi90_index],
-        reference[:, phi90_index],
-    )
-    _save_scattered_field_plot(
-        OUTPUT_DIR / "tfsf_rayleigh_scattered_ex_xy.png",
-        result.monitor(surface_monitor.name)["faces"]["z_pos"],
-        None,
-    )
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _save_rcs_plot(
+            output_dir / "rcs_closed_surface_tfsf_rayleigh_phi_cuts.png",
+            _to_numpy(theta, float),
+            sigma[:, 0], reference[:, 0], sigma[:, phi90_index], reference[:, phi90_index],
+        )
+        _save_scattered_field_plot(
+            output_dir / "tfsf_rayleigh_scattered_ex_xy.png",
+            result.monitor("huygens")["faces"]["z_pos"], None,
+        )
 
     sigma_max = float(np.max(sigma))
     reference_max = float(np.max(reference))
@@ -530,6 +549,15 @@ def tfsf_rayleigh_rcs_validation():
         ),
         "sigma_max_ratio": sigma_max / reference_max,
     }
+
+
+@pytest.fixture(scope="module")
+def tfsf_rayleigh_rcs_validation():
+    # Requalified under the shipped default material policy (user decision 2026-11-04).
+    return _run_tfsf_rayleigh_rcs_validation(
+        0.01, subpixel_samples=mw.SubpixelSpec(),
+        output_dir=OUTPUT_DIR,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -633,22 +661,18 @@ def test_closed_surface_tfsf_rayleigh_rcs_matches_analytic_bistatic_pattern(tfsf
     assert tfsf_rayleigh_rcs_validation["rel_l2"] < 0.1
     assert tfsf_rayleigh_rcs_validation["phi0_rel"] < 0.1
     assert tfsf_rayleigh_rcs_validation["phi90_rel"] < 0.1
-    # Re-anchored for edge-native (per-Yee-component) subpixel material sampling.
-    # The radius is only one grid cell, so the ABSOLUTE Rayleigh cross section is
-    # not converged even though the NORMALIZED bistatic pattern is (rel_l2 < 0.1
-    # above -- the physics/NF2FF invariant that this test really guards).  The
-    # absolute sigma_max_ratio is a discretization-dependent scalar set by how the
-    # one-cell eps=4 sphere is rasterized: the previous hard node-staircase over-
-    # represented the polarizability and gave ~2.30, while edge-native subpixel
-    # sampling evaluates the occupancy-weighted eps at each Yee component's own
-    # staggered location and gives ~0.396.  The re-anchor keeps the same box-
-    # independence rigor that validated the old value: the new ratio is box-size
-    # independent (0.3961, 0.3965, 0.3969 at box_half = 0.05, 0.06, 0.07 -> 0.2%
-    # drift, scratch/rayleigh_box_independence.py), so the NF2FF far field is still
-    # self-consistent -- only the marginally-resolved sphere's effective
-    # polarizability moved with the sampling.  Band centered on the box-independent
-    # edge-native value.  See the F4 subpixel acceptance ledger.
-    assert 0.35 < tfsf_rayleigh_rcs_validation["sigma_max_ratio"] < 0.45
+    # The sphere radius is one cell, so the ABSOLUTE Rayleigh cross section is not
+    # converged even though the NORMALIZED bistatic pattern is (the rel_l2/phi gates
+    # above guard that invariant).  The absolute sigma_max_ratio is a discretization-
+    # dependent scalar set by how the one-cell eps=4 sphere is rasterized, so its band
+    # is tied to the material policy.  Requalified 2026-11-04 under the shipped
+    # samples=4 kottke_edge default: the ratio is 1.6066 / 1.1981 / 1.1385 at 1 / 2 / 4
+    # cells per radius, approaching the analytic value, and both fixed-order limits
+    # (p=1 0.934, p=2 1.090) are closer to one than the finest tier.  The band is the
+    # study's one-cell envelope: the p=2 prediction 1.6025 plus or minus two residual
+    # prediction standard errors and the p=1 versus p=2 spread (0.0905).  Evidence:
+    # docs/assessments/default-policy-requalification-results-2026-11-04.md.
+    assert 1.512 < tfsf_rayleigh_rcs_validation["sigma_max_ratio"] < 1.693
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")

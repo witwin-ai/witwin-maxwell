@@ -33,12 +33,15 @@ def _dielectric_dipole_scene():
 
 
 def _run(scene, *, cuda_graph):
+    # These checks cover the existing runner's graph capture; pin it so eligible
+    # scenes do not take the core path's whole-step capture under the default.
     result = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQ,),
         full_field_dft=True,
         run_time=mw.TimeConfig(time_steps=300),
         cuda_graph=cuda_graph,
+        fdtd_core_path=False,
     ).run()
     view = result.at(frequency=_FREQ)
     fields = {a: np.asarray(getattr(view.E, a).detach().cpu()) for a in ("x", "y", "z")}
@@ -69,6 +72,7 @@ def test_cuda_graph_multifreq_dft_bitexact():
             full_field_dft=True,
             run_time=mw.TimeConfig(time_steps=300),
             cuda_graph=cuda_graph,
+            fdtd_core_path=False,
         ).run()
         return {
             f: {a: np.asarray(getattr(result.at(frequency=f).E, a).detach().cpu()) for a in ("x", "y", "z")}

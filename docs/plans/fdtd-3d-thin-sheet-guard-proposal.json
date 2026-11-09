@@ -1,0 +1,1220 @@
+{
+ "status": "pending_review",
+ "note": "Guard census proposal for branch pcb/3d-thin-sheet (CPU reference and native CUDA stages). Not merged into docs/reference/fdtd-capability-guards.json: approval requires an explicit reviewer edit. The master manifest already has 10 unrelated pending MoM entries.",
+ "active_additions": [
+  {
+   "id": "af37df56e9bf03478824790657c8e0c5294319af66a9b42ae4b032ee619f823f:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "SheetSurface.pierce",
+   "message": "A Yee edge crosses the faceted sheet more than once; refine the grid.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A Yee edge crosses the faceted sheet more than once; refine the grid.')], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=Call(func=Name(id='len', ctx=Load()), args=[Name(id='found', ctx=Load())], keywords=[]), ops=[Gt()], comparators=[Constant(value=1)])",
+     "true"
+    ]
+   ],
+   "line": 249,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A Yee edge crosses the faceted sheet more than once; refine the grid.",
+   "negative_tests": [],
+   "exit_acceptance": "Admit only with a cut-cell topology that represents the configuration (multiple crossings, junctions, vertex cells) and pass the faceted structural, watertightness and scattering tests on it.",
+   "rationale": "Faceted thin-sheet geometry outside the validated cut-cell topology (one facet, or a fold-connected chain of one fold kind, per cut cell; single crossings) would produce an inconsistent cut complex instead of a degraded update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (faceted stage)"
+  },
+  {
+   "id": "0c9c347c9c86155f5712869102bb3cf9194681a14347ab50f38771bd1411cdb1:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "SheetSurface.below_volume",
+   "message": "A Yee dual cell meets thin-sheet facets that are not joined by folds of one kind (separate sheet parts or an inflection within one cell); refine the grid.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A Yee dual cell meets thin-sheet facets that are not joined by folds of one kind (separate sheet parts or an inflection within one cell); refine the grid.')], keywords=[])",
+   "conditions": [
+    [
+     "BoolOp(op=Or(), values=[Compare(left=Name(id='connected', ctx=Load()), ops=[NotEq()], comparators=[Call(func=Name(id='set', ctx=Load()), args=[Name(id='facet_ids', ctx=Load())], keywords=[])]), Compare(left=Call(func=Name(id='len', ctx=Load()), args=[Name(id='kinds', ctx=Load())], keywords=[]), ops=[NotEq()], comparators=[Constant(value=1)])])",
+     "true"
+    ]
+   ],
+   "line": 307,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A Yee dual cell meets thin-sheet facets that are not joined by folds of one kind (separate sheet parts or an inflection within one cell); refine the grid.",
+   "negative_tests": [],
+   "exit_acceptance": "Admit only with a cut-cell topology that represents the configuration (multiple crossings, junctions, vertex cells) and pass the faceted structural, watertightness and scattering tests on it.",
+   "rationale": "Faceted thin-sheet geometry outside the validated cut-cell topology (one facet, or a fold-connected chain of one fold kind, per cut cell; single crossings) would produce an inconsistent cut complex instead of a degraded update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (faceted stage)"
+  },
+  {
+   "id": "18d40828f6562543da1bf21ecd87cdc0fb5db50098fc4dc0fee59fbdf43302b2:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "sheet_surface",
+   "message": "The thin-sheet SurfaceMesh is not consistently oriented or not manifold.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='The thin-sheet SurfaceMesh is not consistently oriented or not manifold.')], keywords=[])",
+   "conditions": [
+    [
+     "for Tuple(elts=[Name(id='t', ctx=Store()), Name(id='tri', ctx=Store())], ctx=Store()) in Call(func=Name(id='enumerate', ctx=Load()), args=[Name(id='triangles', ctx=Load())], keywords=[])",
+     "body"
+    ],
+    [
+     "for Name(id='k', ctx=Store()) in Call(func=Name(id='range', ctx=Load()), args=[Constant(value=3)], keywords=[])",
+     "body"
+    ],
+    [
+     "Compare(left=Tuple(elts=[Name(id='a', ctx=Load()), Name(id='b', ctx=Load())], ctx=Load()), ops=[In()], comparators=[Name(id='directed', ctx=Load())])",
+     "true"
+    ]
+   ],
+   "line": 384,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "The thin-sheet SurfaceMesh is not consistently oriented or not manifold.",
+   "negative_tests": [],
+   "exit_acceptance": "Admit only with a cut-cell topology that represents the configuration (multiple crossings, junctions, vertex cells) and pass the faceted structural, watertightness and scattering tests on it.",
+   "rationale": "Faceted thin-sheet geometry outside the validated cut-cell topology (one facet, or a fold-connected chain of one fold kind, per cut cell; single crossings) would produce an inconsistent cut complex instead of a degraded update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (faceted stage)"
+  },
+  {
+   "id": "96e03e20d8c77dbbf566256456d7e34c4464e0778ecb265aa2008ef4cb4f3cba:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "sheet_surface",
+   "message": "A thin-sheet facet is not planar.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A thin-sheet facet is not planar.')], keywords=[])",
+   "conditions": [
+    [
+     "for Tuple(elts=[Name(id='index', ctx=Store()), Name(id='group', ctx=Store())], ctx=Store()) in Call(func=Name(id='enumerate', ctx=Load()), args=[Name(id='group_list', ctx=Load())], keywords=[])",
+     "body"
+    ],
+    [
+     "BoolOp(op=Or(), values=[Compare(left=Call(func=Attribute(value=BinOp(left=Subscript(value=Name(id='unit', ctx=Load()), slice=Name(id='group', ctx=Load()), ctx=Load()), op=MatMult(), right=Name(id='normal', ctx=Load())), attr='min', ctx=Load()), args=[], keywords=[]), ops=[Lt()], comparators=[BinOp(left=Constant(value=1), op=Sub(), right=Constant(value=1e-10))]), Compare(left=Call(func=Attribute(value=Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='abs', ctx=Load()), args=[BinOp(left=Name(id='offsets', ctx=Load()), op=Sub(), right=Name(id='offset', ctx=Load()))], keywords=[]), attr='max', ctx=Load()), args=[], keywords=[]), ops=[Gt()], comparators=[BinOp(left=Constant(value=1e-09), op=Mult(), right=Name(id='scale', ctx=Load()))])])",
+     "true"
+    ]
+   ],
+   "line": 420,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A thin-sheet facet is not planar.",
+   "negative_tests": [],
+   "exit_acceptance": "Admit only with a cut-cell topology that represents the configuration (multiple crossings, junctions, vertex cells) and pass the faceted structural, watertightness and scattering tests on it.",
+   "rationale": "Faceted thin-sheet geometry outside the validated cut-cell topology (one facet, or a fold-connected chain of one fold kind, per cut cell; single crossings) would produce an inconsistent cut complex instead of a degraded update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (faceted stage)"
+  },
+  {
+   "id": "6aca5baadfbd97ee5b178a88d34f656c78187e24e8c9b63934f5fc6c2e485164:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "sheet_surface",
+   "message": "Thin-sheet facets fold by more than  degrees.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[JoinedStr(values=[Constant(value='Thin-sheet facets fold by more than '), FormattedValue(value=Name(id='fold_limit_deg', ctx=Load()), conversion=-1, format_spec=JoinedStr(values=[Constant(value='g')])), Constant(value=' degrees.')])], keywords=[])",
+   "conditions": [
+    [
+     "for Tuple(elts=[Tuple(elts=[Name(id='fa', ctx=Store()), Name(id='fb', ctx=Store())], ctx=Store()), Tuple(elts=[Name(id='point', ctx=Store()), Name(id='direction', ctx=Store())], ctx=Store())], ctx=Store()) in Call(func=Attribute(value=Name(id='adjacency', ctx=Load()), attr='items', ctx=Load()), args=[], keywords=[])",
+     "body"
+    ],
+    [
+     "Compare(left=Call(func=Name(id='float', ctx=Load()), args=[BinOp(left=Attribute(value=Name(id='a', ctx=Load()), attr='normal', ctx=Load()), op=MatMult(), right=Attribute(value=Name(id='b', ctx=Load()), attr='normal', ctx=Load()))], keywords=[]), ops=[Lt()], comparators=[BinOp(left=Call(func=Attribute(value=Name(id='math', ctx=Load()), attr='cos', ctx=Load()), args=[Call(func=Attribute(value=Name(id='math', ctx=Load()), attr='radians', ctx=Load()), args=[Name(id='fold_limit_deg', ctx=Load())], keywords=[])], keywords=[]), op=Sub(), right=Constant(value=1e-12))])",
+     "true"
+    ]
+   ],
+   "line": 447,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Thin-sheet facets fold by more than  degrees.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_fold_sharper_than_ninety_degrees_is_rejected"
+   ],
+   "exit_acceptance": "Admit only with a cut-cell topology that represents the configuration (multiple crossings, junctions, vertex cells) and pass the faceted structural, watertightness and scattering tests on it.",
+   "rationale": "Faceted thin-sheet geometry outside the validated cut-cell topology (one facet, or a fold-connected chain of one fold kind, per cut cell; single crossings) would produce an inconsistent cut complex instead of a degraded update.",
+   "negative_control_status": "covered",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (faceted stage)"
+  },
+  {
+   "id": "a7c89f3a0504cbf3bb68c89ed2bcb089fe35d4158100d54137f1b31784aba8f6:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "sheet_surface",
+   "message": "Thin-sheet facets meet along a non-straight fold.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Thin-sheet facets meet along a non-straight fold.')], keywords=[])",
+   "conditions": [
+    [
+     "for Tuple(elts=[Tuple(elts=[Name(id='fa', ctx=Store()), Name(id='fb', ctx=Store())], ctx=Store()), Tuple(elts=[Name(id='point', ctx=Store()), Name(id='direction', ctx=Store())], ctx=Store())], ctx=Store()) in Call(func=Attribute(value=Name(id='adjacency', ctx=Load()), attr='items', ctx=Load()), args=[], keywords=[])",
+     "body"
+    ],
+    [
+     "BoolOp(op=Or(), values=[Compare(left=Call(func=Name(id='abs', ctx=Load()), args=[Call(func=Name(id='float', ctx=Load()), args=[BinOp(left=Name(id='direction', ctx=Load()), op=MatMult(), right=Attribute(value=Name(id='a', ctx=Load()), attr='normal', ctx=Load()))], keywords=[])], keywords=[]), ops=[Gt()], comparators=[Constant(value=1e-09)]), Compare(left=Call(func=Name(id='abs', ctx=Load()), args=[Call(func=Name(id='float', ctx=Load()), args=[BinOp(left=Name(id='direction', ctx=Load()), op=MatMult(), right=Attribute(value=Name(id='b', ctx=Load()), attr='normal', ctx=Load()))], keywords=[])], keywords=[]), ops=[Gt()], comparators=[Constant(value=1e-09)])])",
+     "true"
+    ]
+   ],
+   "line": 450,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Thin-sheet facets meet along a non-straight fold.",
+   "negative_tests": [],
+   "exit_acceptance": "Admit only with a cut-cell topology that represents the configuration (multiple crossings, junctions, vertex cells) and pass the faceted structural, watertightness and scattering tests on it.",
+   "rationale": "Faceted thin-sheet geometry outside the validated cut-cell topology (one facet, or a fold-connected chain of one fold kind, per cut cell; single crossings) would produce an inconsistent cut complex instead of a degraded update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (faceted stage)"
+  },
+  {
+   "id": "669bad85d03612256308fc68b8a2eb42c28b401a13f7b0efa1e6a80836401f55:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "compile_thin_sheet",
+   "message": "Conformal thin sheets support PEC or CopperFoil materials.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Conformal thin sheets support PEC or CopperFoil materials.')], keywords=[])",
+   "conditions": [
+    [
+     "BoolOp(op=And(), values=[UnaryOp(op=Not(), operand=Name(id='is_pec', ctx=Load())), UnaryOp(op=Not(), operand=Call(func=Name(id='isinstance', ctx=Load()), args=[Name(id='material', ctx=Load()), Name(id='CopperFoil', ctx=Load())], keywords=[]))])",
+     "true"
+    ]
+   ],
+   "line": 546,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin sheets support PEC or CopperFoil materials.",
+   "negative_tests": [],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "d47b49bf7f858d4516db779efcd38b695fa6af5e5cdf782dc1410cbd9b5b3682:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "compile_thin_sheet",
+   "message": "A Yee edge crosses the faceted thin sheet more than once; refine the grid.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A Yee edge crosses the faceted thin sheet more than once; refine the grid.')], keywords=[])",
+   "conditions": [
+    [
+     "for Tuple(elts=[Name(id='a', ctx=Store()), Name(id='b', ctx=Store()), Name(id='c', ctx=Store())], ctx=Store()) in Name(id='_FRAME', ctx=Load())",
+     "body"
+    ],
+    [
+     "UnaryOp(op=Not(), operand=Attribute(value=Name(id='surface', ctx=Load()), attr='planar', ctx=Load()))",
+     "true"
+    ],
+    [
+     "BoolOp(op=Or(), values=[Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='any', ctx=Load()), args=[Compare(left=Name(id='count', ctx=Load()), ops=[Gt()], comparators=[Constant(value=1)])], keywords=[]), Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='any', ctx=Load()), args=[BinOp(left=BinOp(left=BinOp(left=Compare(left=Name(id='count', ctx=Load()), ops=[Eq()], comparators=[Constant(value=1)]), op=BitAnd(), right=UnaryOp(op=Invert(), operand=Name(id='pierced_all', ctx=Load()))), op=BitAnd(), right=Compare(left=Name(id='s0', ctx=Load()), ops=[NotEq()], comparators=[Constant(value=0)])), op=BitAnd(), right=Compare(left=Name(id='s1', ctx=Load()), ops=[NotEq()], comparators=[Constant(value=0)]))], keywords=[])])",
+     "true"
+    ]
+   ],
+   "line": 623,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A Yee edge crosses the faceted thin sheet more than once; refine the grid.",
+   "negative_tests": [],
+   "exit_acceptance": "Admit only with a cut-cell topology that represents the configuration (multiple crossings, junctions, vertex cells) and pass the faceted structural, watertightness and scattering tests on it.",
+   "rationale": "Faceted thin-sheet geometry outside the validated cut-cell topology (one facet, or a fold-connected chain of one fold kind, per cut cell; single crossings) would produce an inconsistent cut complex instead of a degraded update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (faceted stage)"
+  },
+  {
+   "id": "dd25cd9556d2a4186f734b953ddeebaf6415167f325575df167a977a87aaafb8:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "compile_thin_sheet.cut_path",
+   "message": "A Yee face is cut by two thin-sheet facets that do not meet inside it; refine the grid or widen the facets.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A Yee face is cut by two thin-sheet facets that do not meet inside it; refine the grid or widen the facets.')], keywords=[])",
+   "conditions": [],
+   "line": 705,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A Yee face is cut by two thin-sheet facets that do not meet inside it; refine the grid or widen the facets.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_facets_narrower_than_a_cell_are_rejected"
+   ],
+   "exit_acceptance": "Admit only with a cut-cell topology that represents the configuration (multiple crossings, junctions, vertex cells) and pass the faceted structural, watertightness and scattering tests on it.",
+   "rationale": "Faceted thin-sheet geometry outside the validated cut-cell topology (one facet, or a fold-connected chain of one fold kind, per cut cell; single crossings) would produce an inconsistent cut complex instead of a degraded update.",
+   "negative_control_status": "covered",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (faceted stage)"
+  },
+  {
+   "id": "a47ffe146bb0bc7a3a58f11e584d025460ab14eb7973711b6711c52099d1f3d0:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "compile_thin_sheet",
+   "message": "A Yee face is cut more than once by the thin sheet; refine the grid.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A Yee face is cut more than once by the thin sheet; refine the grid.')], keywords=[])",
+   "conditions": [
+    [
+     "for Tuple(elts=[Name(id='key', ctx=Store()), Name(id='info', ctx=Store())], ctx=Store()) in Call(func=Attribute(value=Name(id='face_info', ctx=Load()), attr='items', ctx=Load()), args=[], keywords=[])",
+     "body"
+    ],
+    [
+     "Compare(left=Call(func=Name(id='len', ctx=Load()), args=[Name(id='zeros', ctx=Load())], keywords=[]), ops=[NotEq()], comparators=[Constant(value=2)])",
+     "true"
+    ]
+   ],
+   "line": 725,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A Yee face is cut more than once by the thin sheet; refine the grid.",
+   "negative_tests": [],
+   "exit_acceptance": "Admit only with a cut-cell topology that represents the configuration (multiple crossings, junctions, vertex cells) and pass the faceted structural, watertightness and scattering tests on it.",
+   "rationale": "Faceted thin-sheet geometry outside the validated cut-cell topology (one facet, or a fold-connected chain of one fold kind, per cut cell; single crossings) would produce an inconsistent cut complex instead of a degraded update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (faceted stage)"
+  },
+  {
+   "id": "a9729c25b2af819168d3cf9276e376252281a3a2c4f5f6d33a57214453b3e874:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "compile_thin_sheet",
+   "message": "Thin sheet cut edges may touch PEC or PMC domain walls only.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Thin sheet cut edges may touch PEC or PMC domain walls only.')], keywords=[])",
+   "conditions": [
+    [
+     "for Tuple(elts=[Name(id='key', ctx=Store()), Name(id='info', ctx=Store())], ctx=Store()) in Call(func=Attribute(value=Name(id='edge_info', ctx=Load()), attr='items', ctx=Load()), args=[], keywords=[])",
+     "body"
+    ],
+    [
+     "BoolOp(op=And(), values=[Name(id='fixed_wall', ctx=Load()), Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Compare(left=Name(id='kind', ctx=Load()), ops=[NotIn()], comparators=[Tuple(elts=[Constant(value='pec'), Constant(value='pmc')], ctx=Load())]), generators=[comprehension(target=Name(id='kind', ctx=Store()), iter=Name(id='kinds', ctx=Load()), ifs=[], is_async=0)])], keywords=[]), BoolOp(op=Or(), values=[Compare(left=Name(id='key', ctx=Load()), ops=[In()], comparators=[Name(id='split_edges', ctx=Load())]), Compare(left=Name(id='key', ctx=Load()), ops=[In()], comparators=[Name(id='active_trace', ctx=Load())])])])",
+     "true"
+    ]
+   ],
+   "line": 761,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Thin sheet cut edges may touch PEC or PMC domain walls only.",
+   "negative_tests": [],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "8a63e726ff22d6c8a21a7baf4b28c146cf2a472daa86514f38a34fd342b32dd0:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "compile_thin_sheet",
+   "message": "A thin-sheet mass partition reaches across another part of the faceted sheet; refine the grid or keep sheet parts further apart.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A thin-sheet mass partition reaches across another part of the faceted sheet; refine the grid or keep sheet parts further apart.')], keywords=[])",
+   "conditions": [
+    [
+     "Name(id='orphans', ctx=Load())",
+     "true"
+    ],
+    [
+     "for Tuple(elts=[Name(id='comp', ctx=Store()), Name(id='side', ctx=Store()), Name(id='center', ctx=Store()), Name(id='orphan', ctx=Store())], ctx=Store()) in Name(id='orphans', ctx=Load())",
+     "body"
+    ],
+    [
+     "UnaryOp(op=Not(), operand=Attribute(value=Name(id='surface', ctx=Load()), attr='planar', ctx=Load()))",
+     "true"
+    ],
+    [
+     "Subscript(value=Call(func=Attribute(value=Name(id='surface', ctx=Load()), attr='crossings', ctx=Load()), args=[Subscript(value=Name(id='center', ctx=Load()), slice=Constant(value=None), ctx=Load()), Subscript(value=Subscript(value=Name(id='e_pos', ctx=Load()), slice=Name(id='target', ctx=Load()), ctx=Load()), slice=Constant(value=None), ctx=Load()), Name(id='region_tol', ctx=Load())], keywords=[keyword(arg='exclude', value=Call(func=Attribute(value=Name(id='surface', ctx=Load()), attr='neighbourhood', ctx=Load()), args=[Call(func=Name(id='int', ctx=Load()), args=[Subscript(value=Name(id='facet', ctx=Load()), slice=Constant(value=0), ctx=Load())], keywords=[])], keywords=[]))]), slice=Constant(value=0), ctx=Load())",
+     "true"
+    ]
+   ],
+   "line": 893,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A thin-sheet mass partition reaches across another part of the faceted sheet; refine the grid or keep sheet parts further apart.",
+   "negative_tests": [],
+   "exit_acceptance": "Admit only with a cut-cell topology that represents the configuration (multiple crossings, junctions, vertex cells) and pass the faceted structural, watertightness and scattering tests on it.",
+   "rationale": "Faceted thin-sheet geometry outside the validated cut-cell topology (one facet, or a fold-connected chain of one fold kind, per cut cell; single crossings) would produce an inconsistent cut complex instead of a degraded update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (faceted stage)"
+  },
+  {
+   "id": "53b15345f29ee25c71a25fcd863f382d8a5f3de7ca97c76ff2b6fc51ca009cde:0",
+   "path": "witwin/maxwell/compiler/thin_sheet.py",
+   "scope": "compile_thin_sheet.fit",
+   "message": "A copper trace stencil reaches across another part of the faceted thin sheet; refine the grid or keep sheet parts further apart.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A copper trace stencil reaches across another part of the faceted thin sheet; refine the grid or keep sheet parts further apart.')], keywords=[])",
+   "conditions": [
+    [
+     "UnaryOp(op=Not(), operand=Attribute(value=Name(id='surface', ctx=Load()), attr='planar', ctx=Load()))",
+     "true"
+    ],
+    [
+     "Call(func=Attribute(value=Name(id='hidden', ctx=Load()), attr='any', ctx=Load()), args=[], keywords=[])",
+     "true"
+    ]
+   ],
+   "line": 952,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A copper trace stencil reaches across another part of the faceted thin sheet; refine the grid or keep sheet parts further apart.",
+   "negative_tests": [],
+   "exit_acceptance": "Admit only with a cut-cell topology that represents the configuration (multiple crossings, junctions, vertex cells) and pass the faceted structural, watertightness and scattering tests on it.",
+   "rationale": "Faceted thin-sheet geometry outside the validated cut-cell topology (one facet, or a fold-connected chain of one fold kind, per cut cell; single crossings) would produce an inconsistent cut complex instead of a degraded update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (faceted stage)"
+  },
+  {
+   "id": "af5ada9fe2cde455869b5f96687878a2029f6565ac8bfb523cb9d1f32ee9cf3d:0",
+   "path": "witwin/maxwell/fdtd/checkpoint.py",
+   "scope": "_reject_thin_sheet_checkpoint",
+   "message": "Conformal thin-sheet private side unknowns and copper states are not registered for checkpoint/resume.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Conformal thin-sheet private side unknowns and copper states are not registered for checkpoint/resume.')], keywords=[])",
+   "conditions": [
+    [
+     "Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Constant(value='_thin_sheets'), Tuple(elts=[], ctx=Load())], keywords=[])",
+     "true"
+    ]
+   ],
+   "line": 390,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin-sheet private side unknowns and copper states are not registered for checkpoint/resume.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_checkpoint_capture_is_rejected"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "5b1df11656ee55ac9775d92a8cc492e88eb1f126cd8cdf55917631a368eaf299:0",
+   "path": "witwin/maxwell/fdtd/cpu_profile.py",
+   "scope": "admit_cpu_reference_scene",
+   "message": "FDTD backend='cpu_reference' supports single-device execution only.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value=\"FDTD backend='cpu_reference' supports single-device execution only.\")], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=Attribute(value=Name(id='config', ctx=Load()), attr='parallel', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "line": 22,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "FDTD backend='cpu_reference' supports single-device execution only.",
+   "negative_tests": [
+    "tests/fdtd/test_cpu_reference_backend.py::test_cpu_reference_rejects_unqualified_profiles",
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_trainable_copper_is_rejected_as_forward_only"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "e978cc161391d5cd64ede4fc5e569a6a469d26e04432bd26570538351f09936c:0",
+   "path": "witwin/maxwell/fdtd/cpu_profile.py",
+   "scope": "admit_cpu_reference_scene",
+   "message": "FDTD backend='cpu_reference' is forward-only; trainable scene parameters are not supported.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value=\"FDTD backend='cpu_reference' is forward-only; trainable scene parameters are not supported.\")], keywords=[])",
+   "conditions": [
+    [
+     "Attribute(value=Name(id='simulation', ctx=Load()), attr='has_trainable_parameters', ctx=Load())",
+     "true"
+    ]
+   ],
+   "line": 24,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "FDTD backend='cpu_reference' is forward-only; trainable scene parameters are not supported.",
+   "negative_tests": [
+    "tests/fdtd/test_cpu_reference_backend.py::test_cpu_reference_rejects_unqualified_profiles",
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_trainable_copper_is_rejected_as_forward_only"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "108388df0bfac82f2170e64101986a6691a1a941a559ef3dc14878992ab0f617:0",
+   "path": "witwin/maxwell/fdtd/cpu_profile.py",
+   "scope": "admit_cpu_reference_scene",
+   "message": "FDTD backend='cpu_reference' does not support FDTDMaterialCache.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value=\"FDTD backend='cpu_reference' does not support FDTDMaterialCache.\")], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=Attribute(value=Name(id='simulation', ctx=Load()), attr='material_cache', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "line": 26,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "FDTD backend='cpu_reference' does not support FDTDMaterialCache.",
+   "negative_tests": [
+    "tests/fdtd/test_cpu_reference_backend.py::test_cpu_reference_rejects_unqualified_profiles",
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_trainable_copper_is_rejected_as_forward_only"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "282f3d1263d86a14b25afabfba8712658b3fc6d5457a50401b95b3ededf1d0c8:0",
+   "path": "witwin/maxwell/fdtd/cpu_profile.py",
+   "scope": "admit_cpu_reference_scene",
+   "message": "FDTD backend='cpu_reference' does not support port sweeps or wave-port excitations.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value=\"FDTD backend='cpu_reference' does not support port sweeps or wave-port excitations.\")], keywords=[])",
+   "conditions": [
+    [
+     "BoolOp(op=Or(), values=[Compare(left=Attribute(value=Name(id='simulation', ctx=Load()), attr='port_sweep', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=None)]), Compare(left=Call(func=Attribute(value=Name(id='simulation', ctx=Load()), attr='_waveport_excitation', ctx=Load()), args=[], keywords=[]), ops=[IsNot()], comparators=[Constant(value=None)])])",
+     "true"
+    ]
+   ],
+   "line": 28,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "FDTD backend='cpu_reference' does not support port sweeps or wave-port excitations.",
+   "negative_tests": [
+    "tests/fdtd/test_cpu_reference_backend.py::test_cpu_reference_rejects_unqualified_profiles",
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_trainable_copper_is_rejected_as_forward_only"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "5e068a48930f245fdff8504f64a3e95cc0b30eaa7d83ac88f10fd35a56e2aee8:0",
+   "path": "witwin/maxwell/fdtd/cpu_profile.py",
+   "scope": "admit_cpu_reference_scene",
+   "message": "FDTD backend='cpu_reference' does not support initial conditions.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value=\"FDTD backend='cpu_reference' does not support initial conditions.\")], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=Attribute(value=Name(id='config', ctx=Load()), attr='initial_condition', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "line": 30,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "FDTD backend='cpu_reference' does not support initial conditions.",
+   "negative_tests": [
+    "tests/fdtd/test_cpu_reference_backend.py::test_cpu_reference_rejects_unqualified_profiles",
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_trainable_copper_is_rejected_as_forward_only"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "b419490a51824b76363c29eb52fade2201c2704e0a60ab1e60b68a5d2d5a794c:0",
+   "path": "witwin/maxwell/fdtd/cpu_profile.py",
+   "scope": "admit_cpu_reference_scene",
+   "message": "FDTD backend='cpu_reference' supports the CPML absorber only.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value=\"FDTD backend='cpu_reference' supports the CPML absorber only.\")], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=Call(func=Attribute(value=Call(func=Name(id='str', ctx=Load()), args=[Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Name(id='config', ctx=Load()), attr='absorber', ctx=Load()), Constant(value='value'), Attribute(value=Name(id='config', ctx=Load()), attr='absorber', ctx=Load())], keywords=[])], keywords=[]), attr='lower', ctx=Load()), args=[], keywords=[]), ops=[NotEq()], comparators=[Constant(value='cpml')])",
+     "true"
+    ]
+   ],
+   "line": 32,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "FDTD backend='cpu_reference' supports the CPML absorber only.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_patch_reaching_the_cpml_is_rejected"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "c4ddbc38832b1a2a911543390f0620b087615f007cb4eb6eebc158f549a3e5ac:0",
+   "path": "witwin/maxwell/fdtd/cpu_profile.py",
+   "scope": "admit_cpu_reference_scene",
+   "message": "FDTD backend='cpu_reference' supports non-periodic Cartesian boundaries only.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value=\"FDTD backend='cpu_reference' supports non-periodic Cartesian boundaries only.\")], keywords=[])",
+   "conditions": [
+    [
+     "for Name(id='axis', ctx=Store()) in Constant(value='xyz')",
+     "body"
+    ],
+    [
+     "Compare(left=Call(func=Attribute(value=Name(id='boundary', ctx=Load()), attr='axis_kind', ctx=Load()), args=[Name(id='axis', ctx=Load())], keywords=[]), ops=[In()], comparators=[Tuple(elts=[Constant(value='periodic'), Constant(value='bloch')], ctx=Load())])",
+     "true"
+    ]
+   ],
+   "line": 36,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "FDTD backend='cpu_reference' supports non-periodic Cartesian boundaries only.",
+   "negative_tests": [
+    "tests/fdtd/test_cpu_reference_backend.py::test_cpu_reference_rejects_unqualified_profiles",
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_trainable_copper_is_rejected_as_forward_only"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "5df74746af32ba1a0f1d3513ecfcb2cb09e82520e65be26e4bc9ba33f1510e0e:0",
+   "path": "witwin/maxwell/fdtd/cpu_profile.py",
+   "scope": "admit_cpu_reference_scene",
+   "message": "FDTD backend='cpu_reference' supports Cartesian coordinates only.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value=\"FDTD backend='cpu_reference' supports Cartesian coordinates only.\")], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='prepared_scene', ctx=Load()), Constant(value='coordinates'), Constant(value=None)], keywords=[]), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "line": 38,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "FDTD backend='cpu_reference' supports Cartesian coordinates only.",
+   "negative_tests": [
+    "tests/fdtd/test_cpu_reference_backend.py::test_cpu_reference_rejects_unqualified_profiles",
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_trainable_copper_is_rejected_as_forward_only"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "63b913859191dbc4782e2c4a3adf8bb5ea3ecc7a5f0340ff022a9702c44b393b:0",
+   "path": "witwin/maxwell/fdtd/cpu_reference.py",
+   "scope": "_backward",
+   "message": "The CPU reference FDTD backend does not support periodic boundaries.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='The CPU reference FDTD backend does not support periodic boundaries.')], keywords=[])",
+   "conditions": [
+    [
+     "BoolOp(op=Or(), values=[Compare(left=Name(id='low_mode', ctx=Load()), ops=[In()], comparators=[Tuple(elts=[Name(id='BOUNDARY_PERIODIC', ctx=Load())], ctx=Load())]), Compare(left=Name(id='high_mode', ctx=Load()), ops=[In()], comparators=[Tuple(elts=[Name(id='BOUNDARY_PERIODIC', ctx=Load())], ctx=Load())])])",
+     "true"
+    ]
+   ],
+   "line": 39,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "The CPU reference FDTD backend does not support periodic boundaries.",
+   "negative_tests": [
+    "tests/fdtd/test_cpu_reference_backend.py::test_cpu_reference_rejects_unqualified_profiles"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "f48cbc60351f1111976584ed1c468456431b47d27c0401162b51f835a7f6383a:0",
+   "path": "witwin/maxwell/fdtd/cpu_reference.py",
+   "scope": "CpuReferenceFDTDModule.__getattr__",
+   "message": "FDTD kernel  is outside the CPU reference profile; run this feature on the native CUDA backend.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[JoinedStr(values=[Constant(value='FDTD kernel '), FormattedValue(value=Name(id='name', ctx=Load()), conversion=114), Constant(value=' is outside the CPU reference profile; run this feature on the native CUDA backend.')])], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=Name(id='kernel', ctx=Load()), ops=[Is()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "line": 265,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "FDTD kernel  is outside the CPU reference profile; run this feature on the native CUDA backend.",
+   "negative_tests": [
+    "tests/fdtd/test_cpu_reference_backend.py::test_unsupported_kernel_raises_clear_error"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "ffd7e28f43e787e79d5b45c9f826a65c7f1dc5d2cfb94ae5f3d06c159c112f7a:0",
+   "path": "witwin/maxwell/fdtd/runtime/batch.py",
+   "scope": "validate_native_solver",
+   "message": "Native batch field execution does not yet support .",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[JoinedStr(values=[Constant(value='Native batch field execution does not yet support '), FormattedValue(value=Name(id='name', ctx=Load()), conversion=-1), Constant(value='.')])], keywords=[])",
+   "conditions": [
+    [
+     "for Name(id='name', ctx=Store()) in Tuple(elts=[Constant(value='_magnetic_source_terms'), Constant(value='_electric_source_terms'), Constant(value='_wire_runtime'), Constant(value='_surface_impedance'), Constant(value='_mur_state'), Constant(value='_thin_sheets')], ctx=Load())",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Name(id='name', ctx=Load()), Constant(value=None)], keywords=[])",
+     "true"
+    ]
+   ],
+   "line": 70,
+   "origin": "modified_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Native batch field execution does not yet support .",
+   "negative_tests": [
+    "tests/api/public/test_batch_execution.py",
+    "tests/materials/thin_sheet/test_thin_sheet_cuda.py::test_native_batch_rejects_thin_sheets"
+   ],
+   "exit_acceptance": "Drop _thin_sheets from the tuple only after per-lane thin-sheet private state, copper state and activity masking are implemented and parity-tested against single-lane runs.",
+   "rationale": "Existing native batch admission extended with the conformal thin-sheet runtime: the shared batched field block would otherwise skip the per-solver sheet patch.",
+   "negative_control_status": "covered",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (native CUDA stage)"
+  },
+  {
+   "id": "38ec8ba781421649fd771ac161cb14ec96493898463c652b6a85a379c117295a:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_require_scope",
+   "message": "Conformal thin sheets run on the native CUDA backend or the explicit CPU reference backend.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Conformal thin sheets run on the native CUDA backend or the explicit CPU reference backend.')], keywords=[])",
+   "conditions": [
+    [
+     "UnaryOp(op=Not(), operand=BoolOp(op=Or(), values=[Call(func=Name(id='bool', ctx=Load()), args=[Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Constant(value='cpu_reference'), Constant(value=False)], keywords=[])], keywords=[]), Compare(left=Attribute(value=Name(id='device', ctx=Load()), attr='type', ctx=Load()), ops=[Eq()], comparators=[Constant(value='cuda')])]))",
+     "true"
+    ]
+   ],
+   "line": 39,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin sheets run on the native CUDA backend or the explicit CPU reference backend.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_cpu_solver_without_the_reference_backend_is_rejected"
+   ],
+   "exit_acceptance": "None needed: native CUDA and the CPU reference profile are the only FDTD executors.",
+   "rationale": "A CPU solver is only valid through the explicit CPU reference profile.",
+   "negative_control_status": "covered",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (native CUDA stage)"
+  },
+  {
+   "id": "be736b168f0d43b8eefaaad419afd5b599e3edb79edf0dce8b40c15e32369a4d:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_require_scope",
+   "message": "Conformal thin sheets do not yet support periodic or Bloch boundaries.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Conformal thin sheets do not yet support periodic or Bloch boundaries.')], keywords=[])",
+   "conditions": [
+    [
+     "for Name(id='axis', ctx=Store()) in Constant(value='xyz')",
+     "body"
+    ],
+    [
+     "Compare(left=Call(func=Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='axis_kind', ctx=Load()), args=[Name(id='axis', ctx=Load())], keywords=[]), ops=[In()], comparators=[Tuple(elts=[Constant(value='periodic'), Constant(value='bloch')], ctx=Load())])",
+     "true"
+    ]
+   ],
+   "line": 43,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin sheets do not yet support periodic or Bloch boundaries.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_cuda.py::test_periodic_boundaries_are_rejected_on_cuda"
+   ],
+   "exit_acceptance": "Wrap the cut complex and patch plans across periodic faces (and Bloch phase for complex fields), then pass periodic-sheet scattering against the analytic thin-sheet formulas.",
+   "rationale": "The local cut complex is clipped at the grid faces; a periodic wrap would leave one side of the sheet unpatched.",
+   "negative_control_status": "covered",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (native CUDA stage)"
+  },
+  {
+   "id": "78042697b94cd7bd600992da4ac7a9b0811178061306ed1846f7d3c61a3f3e07:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_require_scope",
+   "message": "Conformal thin sheets do not support  execution.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[JoinedStr(values=[Constant(value='Conformal thin sheets do not support '), FormattedValue(value=Call(func=Attribute(value=Name(id='name', ctx=Load()), attr='removesuffix', ctx=Load()), args=[Constant(value='_enabled')], keywords=[]), conversion=-1), Constant(value=' execution.')])], keywords=[])",
+   "conditions": [
+    [
+     "for Name(id='name', ctx=Store()) in Tuple(elts=[Constant(value='complex_fields_enabled'), Constant(value='full_aniso_enabled'), Constant(value='nonlinear_enabled'), Constant(value='modulation_enabled'), Constant(value='gyromagnetic_enabled'), Constant(value='breakdown_enabled'), Constant(value='dispersive_enabled'), Constant(value='magnetic_dispersive_enabled'), Constant(value='tfsf_enabled')], ctx=Load())",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='bool', ctx=Load()), args=[Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Name(id='name', ctx=Load()), Constant(value=False)], keywords=[])], keywords=[])",
+     "true"
+    ]
+   ],
+   "line": 48,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin sheets do not support  execution.",
+   "negative_tests": [],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "a68afc29040ff4712f1034926bb069fc81c23df5c8648806389b3c7441f2f0d5:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_require_scope",
+   "message": "Conformal thin sheets require Cartesian coordinates.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Conformal thin sheets require Cartesian coordinates.')], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), Constant(value='coordinates'), Constant(value=None)], keywords=[]), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "line": 50,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin sheets require Cartesian coordinates.",
+   "negative_tests": [],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "ca27ea1eff20752663ec1a0b76714508799aa1ce6f722b1727030b7c79b37c92:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_require_scope",
+   "message": "Conformal thin sheets require single-device execution.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Conformal thin sheets require single-device execution.')], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), Constant(value='_fdtd_shard_layout'), Constant(value=None)], keywords=[]), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "line": 52,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin sheets require single-device execution.",
+   "negative_tests": [],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "13cad672d59bdcc54b904af44be41d46479bed5d7e6a0788f326ebef4460f1cd:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_require_scope",
+   "message": "Conformal thin sheets do not yet support wires or ports in the same scene.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Conformal thin sheets do not yet support wires or ports in the same scene.')], keywords=[])",
+   "conditions": [
+    [
+     "BoolOp(op=Or(), values=[Compare(left=Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Constant(value='_wire_runtime'), Constant(value=None)], keywords=[]), ops=[IsNot()], comparators=[Constant(value=None)]), Call(func=Name(id='tuple', ctx=Load()), args=[BoolOp(op=Or(), values=[Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), Constant(value='ports'), Tuple(elts=[], ctx=Load())], keywords=[]), Tuple(elts=[], ctx=Load())])], keywords=[])])",
+     "true"
+    ]
+   ],
+   "line": 54,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin sheets do not yet support wires or ports in the same scene.",
+   "negative_tests": [],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "6aedf0aa018b81f902be7d738a7e06632e2bca48e794b62c3bca7d2cc6d8d765:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_side_materials",
+   "message": "Conformal thin sheets require a homogeneous isotropic medium on each side within two cells of the sheet; a material boundary there is a mixed cut cell the runtime cannot represent.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Conformal thin sheets require a homogeneous isotropic medium on each side within two cells of the sheet; a material boundary there is a mixed cut cell the runtime cannot represent.')], keywords=[])",
+   "conditions": [
+    [
+     "for Name(id='side', ctx=Store()) in Tuple(elts=[UnaryOp(op=USub(), operand=Constant(value=1)), Constant(value=1)], ctx=Load())",
+     "body"
+    ],
+    [
+     "BoolOp(op=Or(), values=[Compare(left=Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='ptp', ctx=Load()), args=[Name(id='e_side', ctx=Load())], keywords=[]), ops=[Gt()], comparators=[BinOp(left=Constant(value=1e-06), op=Mult(), right=Call(func=Attribute(value=Name(id='e_side', ctx=Load()), attr='max', ctx=Load()), args=[], keywords=[]))]), Compare(left=Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='ptp', ctx=Load()), args=[Name(id='s_side', ctx=Load())], keywords=[]), ops=[Gt()], comparators=[BinOp(left=Constant(value=1e-06), op=Mult(), right=Call(func=Name(id='max', ctx=Load()), args=[Call(func=Attribute(value=Name(id='s_side', ctx=Load()), attr='max', ctx=Load()), args=[], keywords=[]), Constant(value=1e-30)], keywords=[]))])])",
+     "true"
+    ]
+   ],
+   "line": 100,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin sheets require a homogeneous isotropic medium on each side within two cells of the sheet; a material boundary there is a mixed cut cell the runtime cannot represent.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_third_material_in_the_cut_cells_is_rejected"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "6d177e076fab621b86773f10cca9fe1827cec6f0110f0a040e0d6a52188c9865:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_side_materials",
+   "message": "A third material enters the thin-sheet cut cells; mixed sub-cell media are not represented.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A third material enters the thin-sheet cut cells; mixed sub-cell media are not represented.')], keywords=[])",
+   "conditions": [
+    [
+     "for Tuple(elts=[Name(id='side', ctx=Store()), Tuple(elts=[Name(id='eps_side', ctx=Store()), Name(id='sigma_side', ctx=Store())], ctx=Store())], ctx=Store()) in Call(func=Attribute(value=Name(id='media', ctx=Load()), attr='items', ctx=Load()), args=[], keywords=[])",
+     "body"
+    ],
+    [
+     "BoolOp(op=Or(), values=[Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='any', ctx=Load()), args=[Compare(left=Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='abs', ctx=Load()), args=[BinOp(left=Subscript(value=Name(id='eps', ctx=Load()), slice=Name(id='select', ctx=Load()), ctx=Load()), op=Sub(), right=Name(id='eps_side', ctx=Load()))], keywords=[]), ops=[Gt()], comparators=[BinOp(left=Constant(value=1e-06), op=Mult(), right=Name(id='eps_side', ctx=Load()))])], keywords=[]), Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='any', ctx=Load()), args=[Compare(left=Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='abs', ctx=Load()), args=[BinOp(left=Subscript(value=Name(id='sigma', ctx=Load()), slice=Name(id='select', ctx=Load()), ctx=Load()), op=Sub(), right=Name(id='sigma_side', ctx=Load()))], keywords=[]), ops=[Gt()], comparators=[BinOp(left=Constant(value=1e-06), op=Mult(), right=Call(func=Name(id='max', ctx=Load()), args=[Call(func=Name(id='abs', ctx=Load()), args=[Name(id='sigma_side', ctx=Load())], keywords=[]), Constant(value=1e-30)], keywords=[]))])], keywords=[])])",
+     "true"
+    ]
+   ],
+   "line": 126,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A third material enters the thin-sheet cut cells; mixed sub-cell media are not represented.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_third_material_in_the_cut_cells_is_rejected"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "bd72a21aeb25cfa02fa76594aa7dd6172542b2144efe5bd9a90833a70005b763:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_side_materials",
+   "message": "A third material enters the thin-sheet cut cells; mixed sub-cell media are not represented.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A third material enters the thin-sheet cut cells; mixed sub-cell media are not represented.')], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=Call(func=Name(id='len', ctx=Load()), args=[Name(id='media', ctx=Load())], keywords=[]), ops=[Eq()], comparators=[Constant(value=2)])",
+     "true"
+    ],
+    [
+     "BoolOp(op=Or(), values=[Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='any', ctx=Load()), args=[Compare(left=Subscript(value=Name(id='eps', ctx=Load()), slice=Name(id='close', ctx=Load()), ctx=Load()), ops=[Lt()], comparators=[BinOp(left=Subscript(value=Name(id='bounds_e', ctx=Load()), slice=Constant(value=0), ctx=Load()), op=Mult(), right=BinOp(left=Constant(value=1), op=Sub(), right=Name(id='tolerance', ctx=Load())))])], keywords=[]), Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='any', ctx=Load()), args=[Compare(left=Subscript(value=Name(id='eps', ctx=Load()), slice=Name(id='close', ctx=Load()), ctx=Load()), ops=[Gt()], comparators=[BinOp(left=Subscript(value=Name(id='bounds_e', ctx=Load()), slice=Constant(value=1), ctx=Load()), op=Mult(), right=BinOp(left=Constant(value=1), op=Add(), right=Name(id='tolerance', ctx=Load())))])], keywords=[]), Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='any', ctx=Load()), args=[Compare(left=Subscript(value=Name(id='sigma', ctx=Load()), slice=Name(id='close', ctx=Load()), ctx=Load()), ops=[Lt()], comparators=[BinOp(left=Subscript(value=Name(id='bounds_s', ctx=Load()), slice=Constant(value=0), ctx=Load()), op=Sub(), right=BinOp(left=Name(id='tolerance', ctx=Load()), op=Mult(), right=Call(func=Name(id='max', ctx=Load()), args=[Subscript(value=Name(id='bounds_s', ctx=Load()), slice=Constant(value=1), ctx=Load()), Constant(value=1e-30)], keywords=[])))])], keywords=[]), Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='any', ctx=Load()), args=[Compare(left=Subscript(value=Name(id='sigma', ctx=Load()), slice=Name(id='close', ctx=Load()), ctx=Load()), ops=[Gt()], comparators=[BinOp(left=Subscript(value=Name(id='bounds_s', ctx=Load()), slice=Constant(value=1), ctx=Load()), op=Add(), right=BinOp(left=Name(id='tolerance', ctx=Load()), op=Mult(), right=Call(func=Name(id='max', ctx=Load()), args=[Subscript(value=Name(id='bounds_s', ctx=Load()), slice=Constant(value=1), ctx=Load()), Constant(value=1e-30)], keywords=[])))])], keywords=[])])",
+     "true"
+    ]
+   ],
+   "line": 136,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A third material enters the thin-sheet cut cells; mixed sub-cell media are not represented.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_third_material_in_the_cut_cells_is_rejected"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "07365b833f8139d0a2edd4838202b4717d0603b2e14c35a77bd60038b63e5639:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "prepare_thin_sheet_time_step",
+   "message": "Conformal thin sheets are forward-only; trainable copper parameters are not supported.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Conformal thin sheets are forward-only; trainable copper parameters are not supported.')], keywords=[])",
+   "conditions": [
+    [
+     "for Name(id='structure', ctx=Store()) in Name(id='structures', ctx=Load())",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=BoolOp(op=And(), values=[Call(func=Attribute(value=Name(id='torch', ctx=Load()), attr='is_tensor', ctx=Load()), args=[Name(id='value', ctx=Load())], keywords=[]), Attribute(value=Name(id='value', ctx=Load()), attr='requires_grad', ctx=Load())]), generators=[comprehension(target=Name(id='value', ctx=Store()), iter=Tuple(elts=[Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='material', ctx=Load()), Constant(value='thickness'), Constant(value=None)], keywords=[]), Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='material', ctx=Load()), Constant(value='conductivity'), Constant(value=None)], keywords=[])], ctx=Load()), ifs=[], is_async=0)])], keywords=[])",
+     "true"
+    ]
+   ],
+   "line": 186,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin sheets are forward-only; trainable copper parameters are not supported.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_cuda.py::test_trainable_copper_is_rejected_on_cuda",
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_trainable_copper_is_rejected_as_forward_only"
+   ],
+   "exit_acceptance": "Register the patch operators and copper CN solve with the adjoint bridge and pass finite-difference gradient checks of thickness/conductivity.",
+   "rationale": "The patch and its copper CN solve have no adjoint; a trainable copper parameter must not run a forward pass whose gradient silently omits the sheet.",
+   "negative_control_status": "covered",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (native CUDA stage)"
+  },
+  {
+   "id": "4886e391840cd8d19f6cf71a63893e7d9de92c623e85c7419da7f3645f25dc13:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_SheetRuntime.__init__",
+   "message": "A thin-sheet patch intersects the CPML absorber; keep the sheet at least two cells inside the physical domain.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A thin-sheet patch intersects the CPML absorber; keep the sheet at least two cells inside the physical domain.')], keywords=[])",
+   "conditions": [
+    [
+     "Call(func=Name(id='_absorber_overlap', ctx=Load()), args=[Name(id='solver', ctx=Load()), Name(id='c', ctx=Load()), Name(id='pe', ctx=Load()), Name(id='special_h', ctx=Load())], keywords=[])",
+     "true"
+    ]
+   ],
+   "line": 266,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A thin-sheet patch intersects the CPML absorber; keep the sheet at least two cells inside the physical domain.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_patch_reaching_the_cpml_is_rejected"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "226ed6bbd29a912a667671560b85803afb7a3085efeb8a560f6aa9e4c6bbbaa4:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_SheetRuntime.__init__",
+   "message": "A thin-sheet patch edge overlaps a PEC-suppressed electric update.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A thin-sheet patch edge overlaps a PEC-suppressed electric update.')], keywords=[])",
+   "conditions": [
+    [
+     "Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='any', ctx=Load()), args=[Compare(left=Subscript(value=Subscript(value=Name(id='cb_native', ctx=Load()), slice=Name(id='pe', ctx=Load()), ctx=Load()), slice=Name(id='dynamic', ctx=Load()), ctx=Load()), ops=[Eq()], comparators=[Constant(value=0)])], keywords=[])",
+     "true"
+    ]
+   ],
+   "line": 269,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A thin-sheet patch edge overlaps a PEC-suppressed electric update.",
+   "negative_tests": [],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "559be6ab29ba7477f047843f88f93260a9d5419715623e072ff0c016a99d6cc5:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_SheetRuntime.__init__",
+   "message": "Thin-sheet patch faces require non-magnetic, magnetically lossless media.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Thin-sheet patch faces require non-magnetic, magnetically lossless media.')], keywords=[])",
+   "conditions": [
+    [
+     "UnaryOp(op=Not(), operand=BoolOp(op=And(), values=[Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='allclose', ctx=Load()), args=[Subscript(value=Name(id='da', ctx=Load()), slice=Name(id='ph', ctx=Load()), ctx=Load()), Constant(value=1.0)], keywords=[keyword(arg='rtol', value=Constant(value=0)), keyword(arg='atol', value=Constant(value=1e-06))]), Call(func=Attribute(value=Name(id='np', ctx=Load()), attr='allclose', ctx=Load()), args=[Subscript(value=Name(id='db', ctx=Load()), slice=Name(id='ph', ctx=Load()), ctx=Load()), BinOp(left=Name(id='dt', ctx=Load()), op=Div(), right=Attribute(value=Name(id='solver', ctx=Load()), attr='mu0', ctx=Load()))], keywords=[keyword(arg='rtol', value=Constant(value=2e-06)), keyword(arg='atol', value=Constant(value=0))])]))",
+     "true"
+    ]
+   ],
+   "line": 274,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Thin-sheet patch faces require non-magnetic, magnetically lossless media.",
+   "negative_tests": [],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "coverage_pending",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "6f0df83942455f2a9f5ea3d9c973a5a46ac4da86bde0ffd2924828a6f263ae79:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_SheetRuntime._init_copper",
+   "message": "The conformal copper sheet has  traces; its dense trace-space Crank-Nicolson operator exceeds the  GiB budget. Coarsen the sheet or split it into smaller sheets.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[JoinedStr(values=[Constant(value='The conformal copper sheet has '), FormattedValue(value=Name(id='T', ctx=Load()), conversion=-1), Constant(value=' traces; its dense trace-space Crank-Nicolson operator exceeds the '), FormattedValue(value=BinOp(left=Name(id='COPPER_DENSE_BYTES', ctx=Load()), op=Div(), right=BinOp(left=Constant(value=1024), op=Pow(), right=Constant(value=3))), conversion=-1, format_spec=JoinedStr(values=[Constant(value='.0f')])), Constant(value=' GiB budget. Coarsen the sheet or split it into smaller sheets.')])], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=BinOp(left=BinOp(left=BinOp(left=Constant(value=2), op=Mult(), right=Name(id='T', ctx=Load())), op=Pow(), right=Constant(value=2)), op=Mult(), right=Constant(value=8)), ops=[Gt()], comparators=[Name(id='COPPER_DENSE_BYTES', ctx=Load())])",
+     "true"
+    ]
+   ],
+   "line": 414,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "The conformal copper sheet has  traces; its dense trace-space Crank-Nicolson operator exceeds the  GiB budget. Coarsen the sheet or split it into smaller sheets.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_copper_trace_operator_above_the_dense_budget_is_rejected"
+   ],
+   "exit_acceptance": "Replace the dense trace operator by a scalable exact copper solve (cell-based tangential trace unknowns or hierarchical compression) with the same CN accuracy and passivity tests.",
+   "rationale": "The dense float64 trace-space operator grows as the square of the trace count; above the budget it would exhaust device memory.",
+   "negative_control_status": "covered",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (native CUDA stage)"
+  },
+  {
+   "id": "6e34f89d279253685023b7f798d73cf74b685bb47abb7b6f48130ab2d8914dfb:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_reject_overlaps",
+   "message": "A source overlaps a conformal thin-sheet patch; move the source away from the sheet.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A source overlaps a conformal thin-sheet patch; move the source away from the sheet.')], keywords=[])",
+   "conditions": [
+    [
+     "for Name(id='term', ctx=Store()) in Tuple(elts=[Starred(value=Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Constant(value='_source_terms'), Tuple(elts=[], ctx=Load())], keywords=[]), ctx=Load()), Starred(value=Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Constant(value='_electric_source_terms'), Tuple(elts=[], ctx=Load())], keywords=[]), ctx=Load()), Starred(value=Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Constant(value='_magnetic_source_terms'), Tuple(elts=[], ctx=Load())], keywords=[]), ctx=Load())], ctx=Load())",
+     "body"
+    ],
+    [
+     "for Name(id='key', ctx=Store()) in Tuple(elts=[Constant(value='patch'), Constant(value='cw_cos_patch'), Constant(value='cw_sin_patch'), Constant(value='coeff_patch')], ctx=Load())",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Compare(left=Call(func=Name(id='tuple', ctx=Load()), args=[Call(func=Name(id='map', ctx=Load()), args=[Name(id='int', ctx=Load()), Name(id='point', ctx=Load())], keywords=[])], keywords=[]), ops=[In()], comparators=[Subscript(value=Name(id='patch', ctx=Load()), slice=Name(id='name', ctx=Load()), ctx=Load())]), generators=[comprehension(target=Name(id='point', ctx=Store()), iter=Name(id='nonzero', ctx=Load()), ifs=[], is_async=0)])], keywords=[])",
+     "true"
+    ]
+   ],
+   "line": 547,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A source overlaps a conformal thin-sheet patch; move the source away from the sheet.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_source_on_the_patch_is_rejected"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "6ca3a38f533027786a2354943e0b3603f79c0adb6cfee1f3d072184d39dd4541:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_reject_overlaps",
+   "message": "A conformal thin sheet overlaps an axis-aligned CopperFoil interface.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A conformal thin sheet overlaps an axis-aligned CopperFoil interface.')], keywords=[])",
+   "conditions": [
+    [
+     "for Name(id='entry', ctx=Store()) in Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Constant(value='_copper_foils'), Tuple(elts=[], ctx=Load())], keywords=[])",
+     "body"
+    ],
+    [
+     "for Name(id='point', ctx=Store()) in Call(func=Attribute(value=Call(func=Attribute(value=Subscript(value=Name(id='entry', ctx=Load()), slice=Constant(value='indices'), ctx=Load()), attr='cpu', ctx=Load()), args=[], keywords=[]), attr='numpy', ctx=Load()), args=[], keywords=[])",
+     "body"
+    ],
+    [
+     "Compare(left=Call(func=Name(id='tuple', ctx=Load()), args=[Call(func=Name(id='map', ctx=Load()), args=[Name(id='int', ctx=Load()), Name(id='point', ctx=Load())], keywords=[])], keywords=[]), ops=[In()], comparators=[Subscript(value=Name(id='patch', ctx=Load()), slice=Name(id='name', ctx=Load()), ctx=Load())])",
+     "true"
+    ]
+   ],
+   "line": 552,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A conformal thin sheet overlaps an axis-aligned CopperFoil interface.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_source_on_the_patch_is_rejected"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "e0fd667594cd9fb7b282b7b740d5941ade50fe38aa4441dce2417453790bdb6b:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_reject_overlaps",
+   "message": "A conformal thin sheet overlaps a PEC cut-surface constraint.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='A conformal thin sheet overlaps a PEC cut-surface constraint.')], keywords=[])",
+   "conditions": [
+    [
+     "Compare(left=Name(id='cut', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ],
+    [
+     "for Tuple(elts=[Name(id='name', ctx=Store()), Name(id='group', ctx=Store())], ctx=Store()) in Call(func=Attribute(value=Subscript(value=Name(id='cut', ctx=Load()), slice=Constant(value='groups'), ctx=Load()), attr='items', ctx=Load()), args=[], keywords=[])",
+     "body"
+    ],
+    [
+     "for Name(id='point', ctx=Store()) in Call(func=Attribute(value=Call(func=Attribute(value=Subscript(value=Name(id='group', ctx=Load()), slice=Constant(value='indices'), ctx=Load()), attr='cpu', ctx=Load()), args=[], keywords=[]), attr='numpy', ctx=Load()), args=[], keywords=[])",
+     "body"
+    ],
+    [
+     "Compare(left=Call(func=Name(id='tuple', ctx=Load()), args=[Call(func=Name(id='map', ctx=Load()), args=[Name(id='int', ctx=Load()), Name(id='point', ctx=Load())], keywords=[])], keywords=[]), ops=[In()], comparators=[Subscript(value=Name(id='patch', ctx=Load()), slice=Name(id='name', ctx=Load()), ctx=Load())])",
+     "true"
+    ]
+   ],
+   "line": 558,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "A conformal thin sheet overlaps a PEC cut-surface constraint.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_source_on_the_patch_is_rejected"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "edee7cee35bfd79dad4fd5e285be3f464f3b37f9613694476c6855f31090a72e:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_reject_overlaps",
+   "message": "Conformal thin sheets do not yet support surface-impedance boundaries in the same scene.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Conformal thin sheets do not yet support surface-impedance boundaries in the same scene.')], keywords=[])",
+   "conditions": [
+    [
+     "Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Constant(value='_surface_impedance'), Constant(value=None)], keywords=[])",
+     "true"
+    ]
+   ],
+   "line": 560,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin sheets do not yet support surface-impedance boundaries in the same scene.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_source_on_the_patch_is_rejected"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  },
+  {
+   "id": "709e29fc1d60d08de455fef32efe2ba98a76115439e26e7f95ea5834b77b2aba:0",
+   "path": "witwin/maxwell/fdtd/thin_sheet.py",
+   "scope": "_reject_overlaps",
+   "message": "Conformal thin sheets do not yet support lumped elements in the same scene.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='Conformal thin sheets do not yet support lumped elements in the same scene.')], keywords=[])",
+   "conditions": [
+    [
+     "Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Constant(value='_lumped_element_runtimes'), Tuple(elts=[], ctx=Load())], keywords=[])",
+     "true"
+    ]
+   ],
+   "line": 563,
+   "origin": "feature_boundary",
+   "review_status": "pending",
+   "unsupported_boundary": "Conformal thin sheets do not yet support lumped elements in the same scene.",
+   "negative_tests": [
+    "tests/materials/thin_sheet/test_thin_sheet_admission.py::test_source_on_the_patch_is_rejected"
+   ],
+   "exit_acceptance": "Remove only after the combination has its own implementation and physical/lifecycle tests (native CUDA kernels, coupling/state contract, or kernel parity) recorded in docs/plans/fdtd-3d-thin-sheet-runtime.md.",
+   "rationale": "Restricted CPU reference stage of the conformal two-sided thin-sheet runtime and its explicit CPU kernel profile; unsupported combinations fail before stepping instead of degrading to an unqualified update.",
+   "negative_control_status": "matching_negative_assertion",
+   "owner_phase": "P2 genuine 3D thin-sheet runtime (CPU reference stage)"
+  }
+ ],
+ "retirements": [
+  {
+   "id": "da0ea0fe48fc83f39b5420fc5e7ee4a97308dde06e2bb5e51f5f43ad9002cbac:0",
+   "path": "witwin/maxwell/compiler/copper_foil.py",
+   "scope": "compile_copper_faces",
+   "message": "SurfaceMesh finite copper requires independent two-sided cut traces and a passive material solve.",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[Constant(value='SurfaceMesh finite copper requires independent two-sided cut traces and a passive material solve.')], keywords=[])",
+   "conditions": [
+    [
+     "for Name(id='structure', ctx=Store()) in Attribute(value=Name(id='scene', ctx=Load()), attr='structures', ctx=Load())",
+     "body"
+    ],
+    [
+     "Compare(left=Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Name(id='structure', ctx=Load()), attr='geometry', ctx=Load()), Constant(value='kind'), Constant(value=None)], keywords=[]), ops=[Eq()], comparators=[Constant(value='surface_mesh')])",
+     "true"
+    ]
+   ],
+   "line": 125,
+   "origin": "feature_boundary",
+   "review_status": "reviewed",
+   "unsupported_boundary": "SurfaceMesh finite copper requires independent two-sided cut traces and a passive material solve.",
+   "negative_tests": [
+    "tests/materials/surface_impedance/test_cut_surface.py::test_overlapping_port_and_finite_copper_surface_fail_preparation"
+   ],
+   "exit_acceptance": "Pass independent curved-film phase/transmission/absorption and refinement controls, then enable the complete passive native joint response.",
+   "rationale": "The candidate curved copper primitive failed independent physical shell gates; a supported planar foil cannot silently stand in for a two-trace curved constitutive solve.",
+   "owner_phase": "P12 public curved-copper qualification gate",
+   "qualification_status": "unsupported_capability_boundary",
+   "negative_control_status": "matching_negative_assertion",
+   "retirement_review": "pending",
+   "positive_tests": [
+    "tests/materials/surface_impedance/test_cut_surface.py::test_overlapping_port_and_finite_copper_surface_fail_preparation",
+    "tests/materials/thin_sheet/test_thin_sheet_cuda.py::test_cuda_matches_cpu_reference",
+    "tests/materials/thin_sheet/test_thin_sheet_runtime.py",
+    "tests/materials/thin_sheet/test_thin_sheet_scattering.py"
+   ],
+   "retirement_reason": "Planar SurfaceMesh CopperFoil is now owned by the conformal thin-sheet runtime on the native CUDA and CPU reference backends; curved meshes are rejected by the thin-sheet compiler."
+  },
+  {
+   "id": "90b96b0a2a53b51cbe161212d4b92753a4bc73442312fb8a12222fb3f9f1a1be:0",
+   "path": "witwin/maxwell/fdtd/runtime/batch.py",
+   "scope": "validate_native_solver",
+   "message": "Native batch field execution does not yet support .",
+   "expression": "Call(func=Name(id='NotImplementedError', ctx=Load()), args=[JoinedStr(values=[Constant(value='Native batch field execution does not yet support '), FormattedValue(value=Name(id='name', ctx=Load()), conversion=-1), Constant(value='.')])], keywords=[])",
+   "conditions": [
+    [
+     "for Name(id='name', ctx=Store()) in Tuple(elts=[Constant(value='_magnetic_source_terms'), Constant(value='_electric_source_terms'), Constant(value='_wire_runtime'), Constant(value='_surface_impedance'), Constant(value='_mur_state')], ctx=Load())",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Name(id='name', ctx=Load()), Constant(value=None)], keywords=[])",
+     "true"
+    ]
+   ],
+   "line": 70,
+   "origin": "modified_boundary",
+   "review_status": "reviewed",
+   "unsupported_boundary": "Native batch field execution does not yet support .",
+   "negative_tests": [
+    "tests/api/public/test_batch_execution.py"
+   ],
+   "exit_acceptance": "Implement its complete update, gating/reset/checkpoint and supported reverse state, then prove native cohort parity against independent physical solves.",
+   "rationale": "The native packed field kernel omits the specifically rejected complex/nonlinear/modulated/ferrite/breakdown/TFSF/source/wire/surface/Mur compositions.",
+   "owner_phase": "P8 native batch field block",
+   "qualification_status": "unsupported_capability_boundary",
+   "negative_control_status": "coverage_pending",
+   "baseline_boundary_ids": [
+    "1419545aa8664d8b9b02083b1a200ee009b88098e73eec58740ac67364bec676:0",
+    "bf0f3b580af282074e5551ea3011e7cd592d80e3fa395e4c1bb40dd6b796d453:0"
+   ],
+   "negative_coverage_reason": "A relevant module is referenced; no individual raising-site trigger evidence is retained. This boundary is reviewed debt, not completed unsupported-combination testing.",
+   "retirement_review": "pending",
+   "positive_tests": [],
+   "retirement_reason": "Same guard with _thin_sheets added to the rejected runtime tuple; replaced by the modified active entry."
+  }
+ ]
+}

@@ -168,19 +168,27 @@ def coax_thru_scene(*, dx: float = 0.0025, device: str = "cuda") -> mw.Scene:
         device=device,
     )
     scene.add_structure(
-        mw.Cylinder(
-            position=(0.0, 0.0, 0.0),
-            radius=INNER_RADIUS,
-            height=length,
-            axis="x",
-        ).with_material(mw.Material.pec(), name="inner_conductor")
+        mw.Structure(
+            mw.Cylinder(
+                position=(0.0, 0.0, 0.0),
+                radius=INNER_RADIUS,
+                height=length,
+                axis="x",
+            ),
+            mw.Material.pec(),
+            name="inner_conductor",
+        )
     )
     scene.add_structure(
-        _HollowCylinder(
-            position=(0.0, 0.0, 0.0),
-            inner_radius=OUTER_RADIUS,
-            outer_radius=SHIELD_OUTER,
-            length=length,
-        ).with_material(mw.Material.pec(), name="outer_conductor")
+        mw.Structure(
+            _HollowCylinder(
+                position=(0.0, 0.0, 0.0),
+                inner_radius=OUTER_RADIUS,
+                outer_radius=SHIELD_OUTER,
+                length=length,
+            ),
+            mw.Material.pec(),
+            name="outer_conductor",
+        )
     )
     return scene

@@ -51,12 +51,12 @@ def test_tensor3x3_epsilon_with_conductivity_constructs():
     assert diagonal.is_anisotropic
 
 
-def test_tensor3x3_mu_and_sigma_tensors_stay_rejected():
+def test_tensor3x3_mu_and_full_sigma_static_samples_stay_rejected():
     diagonal = mw.Tensor3x3(((2.0, 0.0, 0.0), (0.0, 2.0, 0.0), (0.0, 0.0, 2.0)))
     with pytest.raises(NotImplementedError, match="mu_tensor"):
-        mw.Material(mu_tensor=diagonal)
+        mw.Material(mu_tensor=diagonal).evaluate_static()
     with pytest.raises(NotImplementedError, match="sigma_e_tensor"):
-        mw.Material(sigma_e_tensor=diagonal)
+        mw.Material(sigma_e_tensor=diagonal).evaluate_static()
 
 
 def _build_cpu_scene(material, **scene_kwargs):

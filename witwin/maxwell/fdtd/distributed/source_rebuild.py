@@ -47,6 +47,19 @@ def rebuild_ideal_ex_interface_plane(
 
     dtype = solver.Ex.dtype
     device = solver.device
+    symmetry_scale = term.get("source_symmetry_scale")
+    if symmetry_scale is None:
+        raise RuntimeError("Compiled ideal point-source term is missing its symmetry scale.")
+    axis_factors = term.get("axis_factors")
+    if axis_factors is not None:
+        # A periodically wrapped term carries its folded y/z factors (weight per
+        # periodic control width); only the x endpoint width needs the global value.
+        y_factor = torch.as_tensor(axis_factors[1], device=device, dtype=dtype)
+        z_factor = torch.as_tensor(axis_factors[2], device=device, dtype=dtype)
+        eps = solver.eps_Ex[local_index, offset_y : offset_y + y_factor.numel(), offset_z : offset_z + z_factor.numel()]
+        scale = -float(solver.dt) * float(source["polarization"][0]) * float(symmetry_scale) * x_weight / float(global_x_width)
+        patch[relative_x].copy_(scale * (y_factor[:, None] * z_factor[None, :]) / eps)
+        return
     y_widths = _sample_control_widths(solver.scene.y.to(device=device, dtype=dtype))
     z_widths = _sample_control_widths(solver.scene.z.to(device=device, dtype=dtype))
     y_stop = offset_y + int(patch.shape[1])
@@ -55,9 +68,6 @@ def rebuild_ideal_ex_interface_plane(
     volume = x_width * y_widths[offset_y:y_stop, None] * z_widths[None, offset_z:z_stop]
     eps = solver.eps_Ex[local_index, offset_y:y_stop, offset_z:z_stop]
     denominator = eps * volume
-    symmetry_scale = term.get("source_symmetry_scale")
-    if symmetry_scale is None:
-        raise RuntimeError("Compiled ideal point-source term is missing its symmetry scale.")
     source_scale = (
         -float(solver.dt) * float(source["polarization"][0]) * float(symmetry_scale)
     )

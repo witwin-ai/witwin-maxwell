@@ -13,17 +13,11 @@ adds to its current recurrence. It has two layers:
   frequency-dependent excess impedance ``Z'(omega) - R_dc`` as a *passive*
   rational auxiliary-differential-equation (ADE) model.
 
-The fitting layer does **not** implement its own pole fitting. Per the thin-wire
-plan's explicit no-duplicate-pole-fitting rule (section 6.3), it reuses the
-shared network/embedding rational-fitting stack:
-
-* :func:`witwin.maxwell.rational.fit_rational` — the stable/passive vector fit,
-* :meth:`RationalModel.to_state_space` — the same realization the embedded
-  N-port networks use,
-* :meth:`StateSpaceNetwork.discretize` — the bilinear (trapezoidal, passivity
-  preserving) discretization,
-* :meth:`RationalModel.check_passivity` — the pole-aware positive-real
-  certificate.
+The fit uses nonnegative least squares on fixed logarithmic RL poles:
+``Z_excess(s) = sum_k r_k s/(s+p_k)``, ``r_k >= 0``, ``p_k > 0``.
+Each term is positive real on the entire right half-plane, including frequencies
+outside the accuracy band. The shared ``RationalModel``, real state-space
+realization and bilinear discretizer carry this Foster network into the runtime.
 
 The analytic impedance uses the exponentially scaled complex modified Bessel
 function ``scipy.special.ive`` (where ``ive(n, z) = iv(n, z) * exp(-|Re z|)``),
@@ -43,12 +37,11 @@ import torch
 from ..rational import (
     DiscreteStateSpaceNetwork,
     FitReport,
-    RationalFitConfig,
     RationalModel,
     StateSpaceNetwork,
-    fit_rational,
 )
 from ..constants import MU_0
+from .passive_fit import fit_passive_foster
 
 
 def _as_1d_frequencies(frequencies) -> torch.Tensor:
@@ -239,7 +232,7 @@ class SeriesImpedanceModel:
     ``resistance_dc`` is the exact analytic DC resistance. ``model`` fits the
     frequency-dependent *excess* impedance ``Z'(omega) - R_dc`` (positive-real,
     zero at DC), realized as ``state_space`` and discretized as ``discrete`` for
-    time stepping. ``fit_report`` is the shared fitter's auditable report.
+    time stepping. ``fit_report`` records the constrained fit error.
     """
 
     radius: float
@@ -252,6 +245,7 @@ class SeriesImpedanceModel:
     discrete: DiscreteStateSpaceNetwork | None
     fit_report: FitReport | None
     sample_frequencies: torch.Tensor
+    foster_resistance_gradient: torch.Tensor
 
     @property
     def state_count(self) -> int:
@@ -261,8 +255,24 @@ class SeriesImpedanceModel:
         """Return the fitted total series impedance ``R_dc + excess`` in ``[F]``."""
 
         freqs = _as_1d_frequencies(frequencies)
-        excess = self.model.evaluate(freqs).reshape(freqs.numel(), -1)[:, 0]
+        # The shared network convention is exp(-i omega t); the analytic wire
+        # reference here uses s=+i omega. Real coefficients make them conjugates.
+        excess = self.model.evaluate(freqs).reshape(freqs.numel(), -1)[:, 0].conj()
         return excess + self.resistance_dc
+
+    def conductivity_gradient(self, frequencies) -> torch.Tensor:
+        """Differentiate the realized fit on its NNLS active set, including DC.
+
+        The analytic Bessel derivative drives the fixed-pole least-squares
+        sensitivity. At an active-set boundary the fit is only piecewise smooth.
+        """
+
+        freqs = _as_1d_frequencies(frequencies).to(self.model.poles.device)
+        s = 2j * math.pi * freqs
+        p = -self.model.poles.real
+        basis = s[:, None] / (s[:, None] + p)
+        return (basis @ self.foster_resistance_gradient.to(basis.dtype)
+                - self.resistance_dc / self.conductivity)
 
     def ac_resistance(self, frequencies) -> torch.Tensor:
         """Return the fitted AC resistance ``Re(R_dc + excess)`` in ``[F]``."""
@@ -291,21 +301,18 @@ def fit_series_impedance(
     samples: int = 160,
     relative_weighting: bool = True,
     relative_tolerance: float = 0.1,
-    iterations: int = 18,
     device: str | torch.device | None = None,
     dtype: torch.dtype = torch.float64,
 ) -> SeriesImpedanceModel:
     """Fit a passive rational ADE for a lossy round wire's series impedance.
 
-    Reuses the shared rational-fitting stack (:func:`fit_rational`,
-    :meth:`RationalModel.to_state_space`, :meth:`StateSpaceNetwork.discretize`)
-    on the analytic excess impedance ``Z'(omega) - R_dc``. The DC resistance is
-    kept exact and applied separately, so the discrete model only has to capture
-    the skin-effect excess (zero at DC, growing toward the surface-resistance
-    asymptote).
+    Nonnegative least squares fits fixed log-spaced RL branch resistances.
+    The shared rational state-space and bilinear discretization are reused.
+    DC resistance stays exact; the excess is zero at DC and positive real at
+    every frequency. ``band`` sets accuracy, not a passivity boundary.
 
     ``radius`` must be a scalar for this fit (a per-segment fit loops over unique
-    radii). ``band`` is the fitting/validity band. When ``dt`` is given the
+    radii). ``band`` is the fitting accuracy band. When ``dt`` is given the
     continuous realization is discretized with the bilinear transform for time
     stepping; otherwise ``discrete`` is ``None``.
     """
@@ -336,23 +343,61 @@ def fit_series_impedance(
     resistance_dc = float(dc_resistance(radius_value, sigma).item())
     excess = analytic - resistance_dc
 
-    config_weights = None
-    if relative_weighting:
-        config_weights = (1.0 / excess.abs().clamp_min(torch.finfo(torch.float64).tiny))
-    config = RationalFitConfig(
-        order=order,
-        band=(f_min, f_max),
-        iterations=iterations,
-        proportional=False,
-        relative_tolerance=relative_tolerance,
-        weights=config_weights,
+    # Two exterior decades capture the low/high-frequency tails without an
+    # unconstrained direct term. Poles are fixed independently of conductivity.
+    poles = 2.0 * math.pi * torch.logspace(
+        math.log10(f_min) - 2.0, math.log10(f_max) + 2.0,
+        order, dtype=torch.float64,
     )
-    model = fit_rational(
-        fit_frequencies,
-        excess.to(dtype=torch.complex128),
-        config,
-        representation="Z",
+    s = 2j * math.pi * fit_frequencies
+    basis = s[:, None] / (s[:, None] + poles)
+    weights = 1.0 / excess.abs() if relative_weighting else torch.ones_like(excess.real)
+    matrix = torch.cat((basis.real, basis.imag))
+    target = torch.cat((excess.real, excess.imag))
+    weight_rows = weights.repeat(2)
+    weighted = matrix * weight_rows[:, None]
+    resistance = torch.from_numpy(fit_passive_foster(
+        fit_frequencies, excess.numpy(), basis.numpy(), weights.numpy(),
+    ))
+    fitted = basis @ resistance.to(basis.dtype)
+    error = (fitted - excess).abs()
+    relative_error = error / analytic.abs()
+    max_error = float(relative_error.max())
+    if max_error > relative_tolerance:
+        raise RuntimeError(
+            f"Passive wire fit relative error {max_error:.6g} exceeds {relative_tolerance:g}."
+        )
+    report = FitReport(
+        rms_error=float(error.square().mean().sqrt()), max_error=float(error.max()),
+        relative_rms_error=float(relative_error.square().mean().sqrt()),
+        relative_max_error=max_error, frequency_band=(f_min, f_max),
+        order=order, iterations=0, passivity_margin=0.0,
+        max_passivity_violation=0.0, passivity_enforced=True,
     )
+    model = RationalModel(
+        poles=(-poles).to(torch.complex128),
+        residues=(-resistance * poles).reshape(1, 1, -1).to(torch.complex128),
+        direct=resistance.sum().reshape(1, 1).to(torch.complex128),
+        proportional=torch.zeros(1, 1, dtype=torch.complex128),
+        representation="Z", report=report,
+    )
+
+    # Differentiate the active NNLS normal equations. Both the analytic target
+    # and relative weights depend on sigma; inactive branch derivatives are zero.
+    excess_gradient = internal_impedance_conductivity_gradient(
+        radius_value, sigma, mu, fit_frequencies
+    ) + resistance_dc / sigma
+    target_gradient = torch.cat((excess_gradient.real, excess_gradient.imag))
+    log_weight_gradient = (
+        -(excess.conj() * excess_gradient).real / excess.abs().square()
+        if relative_weighting else torch.zeros_like(weights)
+    ).repeat(2)
+    active = resistance > 0.0
+    active_matrix = weighted[:, active]
+    residual = (target - matrix @ resistance) * weight_rows
+    rhs = target_gradient * weight_rows + 2.0 * log_weight_gradient * residual
+    resistance_gradient = torch.zeros_like(resistance)
+    resistance_gradient[active] = torch.linalg.lstsq(active_matrix, rhs, driver="gelsd").solution
 
     state_space = model.to_state_space()
     discrete = None if dt is None else state_space.discretize(float(dt))
@@ -412,6 +457,7 @@ def fit_series_impedance(
         discrete=moved_discrete,
         fit_report=model.report,
         sample_frequencies=fit_frequencies.to(device=target_device),
+        foster_resistance_gradient=resistance_gradient.to(device=target_device, dtype=target_dtype),
     )
 
 

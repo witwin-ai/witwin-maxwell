@@ -142,6 +142,11 @@ def _material_static_matrix(material) -> np.ndarray:
             "A PEC-material structure has no dielectric permittivity for the electrostatic "
             "solver; represent conductors with ElectrostaticTerminal (equipotential) instead."
         )
+    if bool(getattr(material, "is_pmc", False)):
+        raise NotImplementedError(
+            "A PMC-material structure has no dielectric permittivity for the electrostatic "
+            "solver; a perfect magnetic conductor has no electrostatic counterpart."
+        )
     if bool(getattr(material, "is_dispersive", False)):
         raise NotImplementedError(
             "Dispersive materials do not define a zero-frequency permittivity; the "

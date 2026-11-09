@@ -13,7 +13,7 @@ def _loss(value, kind, stride, *, trainable=False, nonuniform=False):
     direction = torch.tensor([.3, -.7, .5, .2, -.4, .8, -.2, .6], device="cuda").reshape(2, 2, 2)
     nodes = np.array([-.6, -.48, -.36, -.25, -.13, 0., .09, .21, .36, .48, .6])
     grid = mw.GridSpec.custom(x_coords=nodes, y_coords=nodes, z_coords=nodes) if nonuniform else mw.GridSpec.uniform(.12)
-    scene = mw.Scene(domain=mw.Domain(bounds=((-0.6, .6),) * 3), grid=grid,
+    scene = mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=((-0.6, .6),) * 3), grid=grid,
         boundary=mw.BoundarySpec.pml(num_layers=2), device="cuda")
     scene.add_structure(mw.Structure(geometry=mw.Box(position=(0.,) * 3, size=(.36, .36, .12)),
         material=mw.Material(epsilon_tensor=mw.Tensor3x3(((5., 1.5, .8), (1.5, 4., .7), (.8, .7, 3.))))))
@@ -64,5 +64,4 @@ def test_tensor_current_interface_gradient_matches_fd_across_replay_strides(kind
         upper, _ = _loss(.2 + delta, kind, 17, nonuniform=nonuniform)
         lower, _ = _loss(.2 - delta, kind, 17, nonuniform=nonuniform)
         numerical = (upper - lower) / (2 * delta)
-        assert numerical.abs() > 1e-8
-        torch.testing.assert_close(gradients[0], numerical, rtol=.002, atol=1e-8)
+        torch.testing.assert_close(gradients[0], numerical, rtol=.002, atol=0.)

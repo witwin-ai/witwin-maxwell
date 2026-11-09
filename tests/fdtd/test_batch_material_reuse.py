@@ -149,3 +149,24 @@ def test_declared_moving_structures_reuse_one_bank_across_cohorts():
         reference = sim.run().raw_monitor("probe")["components"]["Ez"]
         torch.testing.assert_close(actual.raw_monitor("probe")["components"]["Ez"], reference, rtol=1e-4, atol=1e-6)
         torch.testing.assert_close(repeated_result.raw_monitor("probe")["components"]["Ez"], reference, rtol=1e-4, atol=1e-6)
+
+
+def test_declared_planar_pec_sheets_reuse_one_bank_and_match_single_runs():
+    sims = [simulation(steps=31) for _ in range(4)]
+    for index, sim in enumerate(sims):
+        # Fixed structures are shared declarations; only the named sheet varies.
+        sim.scene.structures = list(sims[0].scene.structures[:1])
+        sim.scene.add_structure(mw.Structure(name="plate", material=mw.Material.pec(),
+            geometry=mw.PlanarPEC.rectangle(((-.1, .1), (-.05, .0125 + .025 * index)),
+                                            normal_axis="z", coordinate=.025)))
+    batch = mw.Simulation.batch(sims,
+        variation=mw.BatchVariation(structures={"plate": mw.Box(size=(.3, .3, .3), device="cuda:0")}),
+        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
+    with batch.prepare() as prepared:
+        results = prepared.run()
+        results.results()
+        assert prepared._local_material_cache.full_compilations == 1
+        assert prepared._local_material_cache.patch_compilations == 3
+    for actual, sim in zip(results, sims):
+        reference = sim.run().raw_monitor("probe")["components"]["Ez"]
+        assert torch.equal(actual.raw_monitor("probe")["components"]["Ez"], reference)

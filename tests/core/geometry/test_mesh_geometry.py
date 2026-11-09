@@ -58,7 +58,11 @@ def test_mesh_from_obj_loads_and_reports_topology():
     assert mesh.is_watertight is True
     assert mesh.boundary_edge_count == 0
     assert mesh.non_manifold_edge_count == 0
-    assert mesh.bounds_world == ((0.0, 2.0), (1.0, 3.0), (2.0, 4.0))
+    torch.testing.assert_close(
+        mesh.bounds_world,
+        torch.tensor([[0.0, 1.0, 2.0], [2.0, 3.0, 4.0]],
+                     dtype=mesh.bounds_world.dtype, device=mesh.bounds_world.device),
+    )
     assert mesh.source_path is not None and mesh.source_path.endswith("cube.obj")
 
 

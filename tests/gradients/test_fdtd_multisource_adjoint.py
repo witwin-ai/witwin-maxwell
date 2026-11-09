@@ -71,6 +71,7 @@ class _TwoPointDipoleScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -228,6 +229,7 @@ class _TwoPortModeScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.72, 0.72), (-0.60, 0.60), (-0.60, 0.60))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -344,6 +346,7 @@ class _TwoDipoleNormalizeScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -404,7 +407,7 @@ def test_normalize_source_shared_spectrum_runs_multi_source():
 def test_normalize_source_distinct_spectrum_raises_with_physical_reason():
     """Distinct source spectra make source normalization physically ill-defined."""
     model = _TwoDipoleNormalizeScene(distinct_spectrum=True).cuda()
-    with pytest.raises(NotImplementedError, match="single incident source spectrum"):
+    with pytest.raises(ValueError, match="single incident source spectrum"):
         _run_normalized(model)
 
 

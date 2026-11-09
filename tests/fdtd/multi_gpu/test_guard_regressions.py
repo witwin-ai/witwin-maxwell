@@ -362,6 +362,7 @@ def _trainable_density_pml_scene(*, device="cpu") -> mw.Scene:
     """
 
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.pml(num_layers=2),

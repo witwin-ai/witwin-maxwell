@@ -22,6 +22,70 @@ def get_compiled_extension(*, verbose: bool = False) -> Any:
     return _COMPILED_EXTENSION
 
 
+def prepare_copper_electric(solver, entry):
+    from ..copper_foil import _flat_offsets
+
+    electric = getattr(solver, entry["electric_name"])
+    magnetic = getattr(solver, entry["magnetic_name"])
+    normal = getattr(solver, entry["normal_magnetic_name"])
+    offsets = torch.stack([
+        _flat_offsets(field.shape, torch.stack(index, dim=1))
+        for field, index in ((electric, entry["index"]), (magnetic, entry["low_h"]),
+                             (magnetic, entry["high_h"]), (normal, entry["low_normal_h"]),
+                             (normal, entry["high_normal_h"]))])
+    blocks = (entry["state"].shape[1] + 127) // 128
+    targets, positions = torch.unique(torch.cat((entry["low_normal_offsets"], entry["high_normal_offsets"])),
+                                      sorted=True, return_inverse=True)
+    sources = torch.full((2, targets.numel()), -1, dtype=torch.int64, device=solver.device)
+    gains = torch.zeros((2, targets.numel()), dtype=torch.float64, device=solver.device)
+    low, high = positions.split((entry["low_normal_offsets"].numel(), entry["high_normal_offsets"].numel()))
+    sources[0, low], sources[1, high] = entry["low_sources"], entry["high_sources"]
+    gains[0, low], gains[1, high] = entry["low_normal_gain"], entry["high_normal_gain"]
+    entry["fused_electric"] = dict(
+        offsets=offsets, valid=torch.stack((entry["low_valid"], entry["high_valid"])),
+        normal_targets=targets, normal_sources=sources, normal_gains=gains,
+        partials=torch.empty(blocks, dtype=torch.float64, device=solver.device),
+        counter=torch.zeros((), dtype=torch.int32, device=solver.device))
+    get_compiled_extension()
+
+
+def begin_copper_step(solver, entry):
+    _COMPILED_EXTENSION.begin_copper_step(getattr(solver, entry["electric_name"]),
+        entry["right_e"], entry["old_e"], entry["fused_electric"]["offsets"])
+
+
+def correct_copper_magnetic(solver, entry, *, activity):
+    plan = entry["fused_electric"]
+    _COMPILED_EXTENSION.correct_copper_magnetic(getattr(solver, entry["magnetic_name"]),
+        getattr(solver, entry["normal_magnetic_name"]), entry["old_e"], plan["offsets"],
+        entry["high_h_gain"], plan["normal_targets"], plan["normal_sources"], plan["normal_gains"],
+        activity if torch.is_tensor(activity) else None,
+        1. if torch.is_tensor(activity) else float(activity), entry["left_width"], entry["right_width"])
+
+
+def accumulate_copper_spectra(solver, entry, *, activity):
+    _COMPILED_EXTENSION.accumulate_copper_spectra(getattr(solver, entry["electric_name"]),
+        entry["right_e"], entry["fused_electric"]["offsets"], entry["spectral_step"],
+        entry["spectral_norm"], entry["spectral_real"], entry["spectral_imag"],
+        entry["spectral_frequencies"], entry["spectral_starts"], entry["fused_electric"]["counter"],
+        activity if torch.is_tensor(activity) else None,
+        1. if torch.is_tensor(activity) else float(activity), solver.dt, entry["spectral_end"],
+        {"hanning": 1, "ramp": 2}.get(entry["spectral_window"], 0))
+
+
+def advance_copper_electric(solver, entry, *, activity):
+    plan = entry["fused_electric"]
+    _COMPILED_EXTENSION.advance_copper_electric(
+        getattr(solver, entry["electric_name"]), getattr(solver, entry["magnetic_name"]),
+        getattr(solver, entry["normal_magnetic_name"]), entry["right_e"], entry["state"],
+        entry["cumulative_loss"], plan["partials"], plan["counter"], plan["offsets"], plan["valid"],
+        entry["old_e"], entry["B"], entry["decay"], entry["drive"], entry["rates"], entry["D"],
+        entry["rhs_matrix"], entry["inverse"], entry["admittance_scale"], entry["inv_tangent_dual"],
+        entry["area"], activity if torch.is_tensor(activity) else None,
+        1. if torch.is_tensor(activity) else float(activity), solver.dt, entry["sign"],
+        entry["left_width"], entry["right_width"])
+
+
 def build_info() -> dict[str, Any]:
     return {
         "backend": "torch-cuda",
@@ -1741,6 +1805,8 @@ def _add_time_shifted_source_patch(
     phase,
     delay,
     causalGate,
+    pedestal=0.0,
+    pedestalFwidth=0.0,
 ):
     _COMPILED_EXTENSION.add_time_shifted_source_patch(
                 field,
@@ -1757,11 +1823,62 @@ def _add_time_shifted_source_patch(
                 float(amplitude),
                 float(phase),
                 float(delay),
+                float(pedestal),
+                float(pedestalFwidth),
                 int(causalGate),
             )
 
 
-def _add_source_patch_periodic(*, signal, sourcePatch, offsetI, offsetJ, offsetK, wrapAxisA, wrapAxisB, **kwargs):
+def _add_table_time_shifted_source_patch(
+    *,
+    field,
+    sourcePatch,
+    delayPatch,
+    activationDelayPatch,
+    knots,
+    values,
+    curvature,
+    offsetI,
+    offsetJ,
+    offsetK,
+    time,
+    timeOffset,
+    invStep,
+    amplitude,
+    uniform,
+    causalGate,
+):
+    _COMPILED_EXTENSION.add_table_time_shifted_source_patch(
+                field,
+                sourcePatch,
+                delayPatch,
+                activationDelayPatch,
+                knots,
+                values,
+                curvature,
+                int(offsetI),
+                int(offsetJ),
+                int(offsetK),
+                float(time),
+                float(timeOffset),
+                float(invStep),
+                float(amplitude),
+                int(uniform),
+                int(causalGate),
+            )
+
+
+def _patch_source_gather(field, patch, offsets, axis_code, wrap_a, wrap_b, prepared):
+    if prepared is not None:
+        return prepared
+    from ..excitation.gather import build_patch_gather
+
+    axes = tuple(axis for axis in range(3) if axis != axis_code)
+    wrap = sum(1 << axis for axis, flag in zip(axes, (wrap_a, wrap_b)) if flag)
+    return build_patch_gather(field.shape, patch.shape, offsets, device=field.device, wrap=wrap)
+
+
+def _add_source_patch_periodic(*, signal, sourcePatch, offsetI, offsetJ, offsetK, wrapAxisA, wrapAxisB, sourceGather=None, **kwargs):
     if "Ex" in kwargs:
         field = kwargs["Ex"]
         extension_method = "add_source_patch_ex_periodic"
@@ -1771,6 +1888,9 @@ def _add_source_patch_periodic(*, signal, sourcePatch, offsetI, offsetJ, offsetK
     else:
         field = kwargs["Ez"]
         extension_method = "add_source_patch_ez_periodic"
+    axis_code = ("Ex", "Ey", "Ez").index(next(name for name in ("Ex", "Ey", "Ez") if name in kwargs))
+    gather = _patch_source_gather(field, sourcePatch, (offsetI, offsetJ, offsetK),
+                                  axis_code, wrapAxisA, wrapAxisB, sourceGather)
     getattr(_COMPILED_EXTENSION, extension_method)(
                 field,
                 sourcePatch,
@@ -1780,6 +1900,7 @@ def _add_source_patch_periodic(*, signal, sourcePatch, offsetI, offsetJ, offsetK
                 float(signal),
                 int(wrapAxisA),
                 int(wrapAxisB),
+                *gather,
             )
 
 
@@ -1804,13 +1925,18 @@ def _add_source_patch_bloch(
     phaseSinB,
     wrapAxisA=1,
     wrapAxisB=1,
+    sourceGather=None,
 ):
+    field = (ExReal, EyReal, EzReal)[int(axisCode)]
+    gather = _patch_source_gather(field, sourcePatch, (offsetI, offsetJ, offsetK),
+                                  int(axisCode), wrapAxisA, wrapAxisB, sourceGather)
+
     _COMPILED_EXTENSION.add_source_patch_bloch(
         ExReal, ExImag, EyReal, EyImag, EzReal, EzImag, sourcePatch,
         int(offsetI), int(offsetJ), int(offsetK),
         float(signalReal), float(signalImag), int(axisCode),
         float(phaseCosA), float(phaseSinA), float(phaseCosB), float(phaseSinB),
-        int(wrapAxisA), int(wrapAxisB),
+        int(wrapAxisA), int(wrapAxisB), *gather,
     )
 
 
@@ -1836,21 +1962,28 @@ def _add_cw_phased_source_patch_bloch(
     phaseSinB,
     wrapAxisA=1,
     wrapAxisB=1,
+    sourceGather=None,
 ):
+    field = (ExReal, EyReal, EzReal)[int(axisCode)]
+    gather = _patch_source_gather(field, sourcePatchCos, (offsetI, offsetJ, offsetK),
+                                  int(axisCode), wrapAxisA, wrapAxisB, sourceGather)
+
     real_values = sourcePatchCos * float(signalCos) + sourcePatchSin * float(signalSin)
-    imag_values = sourcePatchCos * float(signalSin) - sourcePatchSin * float(signalCos)
+    # Positive Bloch translation exp(+i*k*L) and the exp(-i*omega*t)
+    # phasor convention require the imaginary quadrature sin(k*x-omega*t).
+    imag_values = sourcePatchSin * float(signalCos) - sourcePatchCos * float(signalSin)
     extension = _COMPILED_EXTENSION
     extension.add_source_patch_bloch(
         ExReal, ExImag, EyReal, EyImag, EzReal, EzImag, real_values,
         int(offsetI), int(offsetJ), int(offsetK), 1.0, 0.0, int(axisCode),
         float(phaseCosA), float(phaseSinA), float(phaseCosB), float(phaseSinB),
-        int(wrapAxisA), int(wrapAxisB),
+        int(wrapAxisA), int(wrapAxisB), *gather,
     )
     extension.add_source_patch_bloch(
         ExReal, ExImag, EyReal, EyImag, EzReal, EzImag, imag_values,
         int(offsetI), int(offsetJ), int(offsetK), 0.0, 1.0, int(axisCode),
         float(phaseCosA), float(phaseSinA), float(phaseCosB), float(phaseSinB),
-        int(wrapAxisA), int(wrapAxisB),
+        int(wrapAxisA), int(wrapAxisB), *gather,
     )
 
 
@@ -2007,6 +2140,7 @@ def _add_batched_reference_source_patches(
     fieldCodesPerCoeff=None,
     fieldOffsets=None,
     sampleIndicesPerCoeff=None,
+    sourceGather=None,
 ):
     if fieldCodesPerCoeff is None or fieldOffsets is None or sampleIndicesPerCoeff is None:
         fieldCodesPerCoeff, fieldOffsets, sampleIndicesPerCoeff = _legacy_batched_flat_metadata(
@@ -2020,6 +2154,9 @@ def _add_batched_reference_source_patches(
             sampleIndexStarts=sampleIndexStarts,
             sampleIndices=sampleIndices,
         )
+    if sourceGather is None:
+        from ..excitation.gather import build_source_gather
+        sourceGather = build_source_gather(fieldOffsets, fieldCodesPerCoeff)
     _COMPILED_EXTENSION.add_batched_reference_source_patches(
                 fieldX,
                 fieldY,
@@ -2029,6 +2166,7 @@ def _add_batched_reference_source_patches(
                 fieldCodesPerCoeff.to(dtype=torch.int32).contiguous(),
                 fieldOffsets.contiguous(),
                 sampleIndicesPerCoeff.to(dtype=torch.int32).contiguous(),
+                *sourceGather,
             )
 
 
@@ -2048,6 +2186,7 @@ def _add_batched_interpolated_source_patches(
     fieldOffsets=None,
     origin,
     ds,
+    sourceGather=None,
 ):
     if fieldCodesPerCoeff is None or fieldOffsets is None:
         fieldCodesPerCoeff, fieldOffsets, _ = _legacy_batched_flat_metadata(
@@ -2058,6 +2197,9 @@ def _add_batched_interpolated_source_patches(
             fieldCodes=fieldCodes,
             fieldShapes=(fieldX.shape, fieldY.shape, fieldZ.shape),
         )
+    if sourceGather is None:
+        from ..excitation.gather import build_source_gather
+        sourceGather = build_source_gather(fieldOffsets, fieldCodesPerCoeff)
     _COMPILED_EXTENSION.add_batched_interpolated_source_patches(
                 fieldX,
                 fieldY,
@@ -2069,6 +2211,7 @@ def _add_batched_interpolated_source_patches(
                 fieldOffsets.contiguous(),
                 float(origin),
                 float(ds),
+                *sourceGather,
             )
 
 
@@ -2156,16 +2299,10 @@ def _accumulate_plane_observer(*, field, planeRealAccum, planeImagAccum, axisCod
             )
 
 
-def _plane_flux_reduce(*, ea, eb, ha, hb, weights, out, outIndex, scale):
+def _plane_flux_reduce(*, ea, eb, ha, hb, eaPositive, ebPositive, weights, out, outIndex, scale, averageAxis):
     _COMPILED_EXTENSION.plane_flux_reduce(
-        ea,
-        eb,
-        ha,
-        hb,
-        weights,
-        out,
-        int(outIndex),
-        float(scale),
+        ea, eb, ha, hb, eaPositive, ebPositive, weights, out,
+        int(outIndex), float(scale), int(averageAxis),
     )
 
 
@@ -2225,8 +2362,8 @@ def _apply_polarization_current_modulated(
             )
 
 
-def _advance_modulation_time(*, ModulationTime, dt):
-    _COMPILED_EXTENSION.advance_modulation_time(ModulationTime, float(dt))
+def _advance_modulation_time(*, ModulationTime, ModulationStep, dt):
+    _COMPILED_EXTENSION.advance_modulation_time(ModulationTime, ModulationStep, float(dt))
 
 
 def _update_kerr_ex(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, ExDecay, KerrChi3, dt, eps0):
@@ -2787,9 +2924,9 @@ def _seed_inject_dense(*, AdjField, GradReal, GradImag, CosPack, SinPack, step):
     _COMPILED_EXTENSION.seed_inject_dense(AdjField, GradReal, GradImag, CosPack, SinPack, int(step))
 
 
-def _seed_inject_point(*, AdjField, GradReal, GradImag, PointI, PointJ, PointK, CosPack, SinPack, step):
+def _seed_inject_point(*, AdjField, GradReal, GradImag, Cells, CellOffsets, PointOrder, CosPack, SinPack, step):
     _COMPILED_EXTENSION.seed_inject_point(
-        AdjField, GradReal, GradImag, PointI, PointJ, PointK, CosPack, SinPack, int(step)
+        AdjField, GradReal, GradImag, Cells, CellOffsets, PointOrder, CosPack, SinPack, int(step)
     )
 
 
@@ -3371,55 +3508,12 @@ def _reverse_dispersive_correction(
             )
 
 
-def _accumulate_tfsf_scalar_sample_adjoint(*, AdjAuxField, AdjFieldPatch, CoeffPatch, sampleIndex, componentScale):
-    _COMPILED_EXTENSION.accumulate_tfsf_scalar_sample_adjoint(
-                AdjAuxField,
-                AdjFieldPatch,
-                CoeffPatch,
-                int(sampleIndex),
-                float(componentScale),
-            )
-
-
-def _accumulate_tfsf_line_sample_adjoint(
-    *,
-    AdjAuxField,
-    AdjFieldPatch,
-    CoeffPatch,
-    SampleIndices,
-    sampleAxisCode,
-    componentScale,
+def _accumulate_tfsf_sample_adjoint(
+    *, AdjAuxField, AdjFieldPatch, CoeffPatch, RowOffsets, CellIndices, Weights, componentScale,
 ):
-    sample_indices = SampleIndices.to(device=AdjAuxField.device, dtype=torch.int32).contiguous()
-    _COMPILED_EXTENSION.accumulate_tfsf_line_sample_adjoint(
-                AdjAuxField,
-                AdjFieldPatch,
-                CoeffPatch,
-                sample_indices,
-                int(sampleAxisCode),
-                float(componentScale),
-            )
-
-
-def _accumulate_tfsf_interpolated_sample_adjoint(
-    *,
-    AdjAuxField,
-    AdjFieldPatch,
-    CoeffPatch,
-    SamplePositions,
-    origin,
-    ds,
-    componentScale,
-):
-    _COMPILED_EXTENSION.accumulate_tfsf_interpolated_sample_adjoint(
-                AdjAuxField,
-                AdjFieldPatch,
-                CoeffPatch,
-                SamplePositions,
-                float(origin),
-                float(ds),
-                float(componentScale),
-            )
+    _COMPILED_EXTENSION.accumulate_tfsf_sample_adjoint(
+        AdjAuxField, AdjFieldPatch, CoeffPatch, RowOffsets, CellIndices, Weights, float(componentScale)
+    )
 
 
 def _reverse_tfsf_auxiliary_electric(
@@ -3632,6 +3726,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "addSourcePatch3D": _add_source_patch,
     "addCwPhasedSourcePatch3D": _add_cw_phased_source_patch,
     "addTimeShiftedSourcePatch3D": _add_time_shifted_source_patch,
+    "addTableTimeShiftedSourcePatch3D": _add_table_time_shifted_source_patch,
     "addSourcePatchExPeriodic3D": _add_source_patch_periodic,
     "addSourcePatchEyPeriodic3D": _add_source_patch_periodic,
     "addSourcePatchEzPeriodic3D": _add_source_patch_periodic,
@@ -3713,9 +3808,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "reverseDrudeCurrent3D": _reverse_drude_current,
     "reverseLorentzCurrent3D": _reverse_lorentz_current,
     "reverseDispersiveCorrection3D": _reverse_dispersive_correction,
-    "accumulateTfsfScalarSampleAdjoint3D": _accumulate_tfsf_scalar_sample_adjoint,
-    "accumulateTfsfLineSampleAdjoint3D": _accumulate_tfsf_line_sample_adjoint,
-    "accumulateTfsfInterpolatedSampleAdjoint3D": _accumulate_tfsf_interpolated_sample_adjoint,
+    "accumulateTfsfSampleAdjoint3D": _accumulate_tfsf_sample_adjoint,
     "reverseTfsfAuxiliaryElectric1D": _reverse_tfsf_auxiliary_electric,
     "reverseTfsfAuxiliaryMagnetic1D": _reverse_tfsf_auxiliary_magnetic,
     "clampFieldFace3D": _clamp_field_face,

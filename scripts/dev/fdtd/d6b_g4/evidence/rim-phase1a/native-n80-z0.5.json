@@ -1,0 +1,50 @@
+{
+  "dl": 0.00375,
+  "steps": 6001,
+  "f0": 1000000000.0,
+  "cases": {
+    "pec": {
+      "0.0": {
+        "f_res": 903157236.8414692,
+        "decay": 764769060.2131621,
+        "f_peak": 931624485.3537515,
+        "peak": 0.5802832949742655,
+        "dt": 6.493187223196889e-12,
+        "dt_empty": 6.499686910106996e-12,
+        "dt_loaded": 6.499686910106996e-12,
+        "steps": 6008,
+        "seconds": 6.192516803741455,
+        "max_memory_gib": 0.4424710273742676,
+        "shift": 0.0,
+        "peak_ratio": 1.0
+      }
+    }
+  },
+  "worst_shift": 0.0,
+  "gate_pass": true,
+  "resolution": 80,
+  "kind": "native",
+  "zoff": 0.5,
+  "offset": [
+    0.37,
+    0.21
+  ],
+  "grid_wavelength": 0.3,
+  "requested_duration": 3.9e-08,
+  "grid_shape": [
+    139,
+    139,
+    101
+  ],
+  "actual_spacing": [
+    0.003750000000000002,
+    0.003750000000000002,
+    0.0037499999999999977
+  ],
+  "nearest_zero_node": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "trace_file": "/tmp/sheet-rim-phase1a-nominal/native-n80-z0.5.json"
+}

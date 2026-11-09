@@ -9,7 +9,8 @@ from ...compiler.ports import CompiledPortGeometry
 from ...fdtd_parallel import FDTDPartitionPlan, FDTDShardLayout
 from ...network import EmbeddedNetworkData
 from ...ports import TerminalPort, _resolve_terminal_port
-from ..lumped import LumpedRuntime, prepare_lumped_runtime
+from ..excitation.temporal import injection_time
+from ..lumped import LumpedRuntime, prepare_lumped_runtime, add_electric_history_voltage
 from ..networks import (
     advance_network_external,
     finalize_embedded_networks,
@@ -20,6 +21,7 @@ from ..ports import (
     _edge_control_volume,
     _open_declared_pec_terminal_edges,
     _validate_local_update_coefficient,
+    _electric_history_currents,
     _validate_supported_field_coupling,
     accumulate_port_observers,
     finalize_port_data,
@@ -196,6 +198,8 @@ def _owner_proxy_lumped(
     moved["injection"] = empty_values.clone()
     moved["edge_buffer"] = empty_values.clone()
     moved["correction_buffer"] = empty_values.clone()
+    moved["electric_history"] = None
+    moved["electric_response_shift"] = None
     return LumpedRuntime(**moved)
 
 
@@ -298,15 +302,6 @@ class DistributedNetworkRuntime:
                 "Distributed network preparation expects exactly one compiled network."
             )
         compiled = compiled_networks[0]
-        if compiled.delay is not None:
-            # The delayed-core path carries per-port bidirectional ring state that
-            # has only been validated on the single-device runtime. Reject it on
-            # the distributed path rather than run an unqualified numerical mode.
-            raise ValueError(
-                "Multi-GPU FDTD does not yet support embedded networks with an explicit "
-                f"per-port delay; network {compiled.name!r} declares delay_seconds."
-            )
-
         distributed_ports = []
         proxy_runtimes = []
         for port_plan in plan.ports:
@@ -326,6 +321,8 @@ class DistributedNetworkRuntime:
                         shard.solver,
                         f"eps_{local_geometry.voltage_component}",
                     ),
+                    electric_update_coefficient=getattr(shard.solver, "c" + local_geometry.voltage_component.lower() + "_curl"),
+                    electric_history_currents=_electric_history_currents(shard.solver, local_geometry),
                     yee_control_volume=_edge_control_volume(
                         shard.solver,
                         local_geometry.voltage_component,
@@ -379,12 +376,12 @@ class DistributedNetworkRuntime:
                     electric_time=torch.as_tensor(
                         owner_shard.solver.dt,
                         device=owner_device,
-                        dtype=owner_shard.solver.Ex.dtype,
+                        dtype=torch.float64,
                     ),
                     magnetic_time=torch.as_tensor(
-                        0.5 * owner_shard.solver.dt,
+                        injection_time("port_drive", 0.0, owner_shard.solver.dt),
                         device=owner_device,
-                        dtype=owner_shard.solver.Ex.dtype,
+                        dtype=torch.float64,
                     ),
                     embedded_network_name=block.name,
                 )
@@ -490,6 +487,7 @@ class DistributedNetworkRuntime:
         )
         torch.mul(lumped.edge_buffer, lumped.voltage_weights, out=lumped.edge_buffer)
         torch.sum(lumped.edge_buffer, dim=0, out=lumped.last_voltage_before)
+        add_electric_history_voltage(lumped, lumped.last_voltage_before)
 
     @staticmethod
     def _apply_current(

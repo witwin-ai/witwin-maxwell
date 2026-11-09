@@ -1,0 +1,3 @@
+# Experimental opposite-displacement compact M2L
+
+Use the internal primary compact translation's `reversed_translation()` to borrow fixed native complex128 coefficients for the opposite free-space center displacement. Retained dependencies are shared, with zero additional owned numerical tensors. Degree parity applies to Green tables; gradients have an additional minus. Hermitian current actions remain distinct. Original and reverse fixed-owner lifecycle guards apply to saved backward. This does not select a public FMM backend policy or update capacity planning. Read the assessment for exact native/MP100 evidence and open full integration/resource/physics requirements.

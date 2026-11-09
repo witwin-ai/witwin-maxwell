@@ -1,0 +1,650 @@
+{
+  "cartesian": {
+    "cases": 1458,
+    "failed": 928,
+    "all_eigenvalue_failed": 928,
+    "worst": {
+      "cell": {
+        "polarization": "TE",
+        "wall": "pec",
+        "order": 1,
+        "dt": 1.6666666666666667e-11,
+        "dy": 0.0125,
+        "dz": 0.025,
+        "period": 1.28,
+        "zhalf": 0.64,
+        "layers": 6,
+        "slab": true,
+        "slab_epsilon": 3.0,
+        "preset": "real",
+        "theta": 35.0,
+        "f_min": 300000000.0,
+        "alpha_scale": null,
+        "grading": 3.0,
+        "kappa": 1.0,
+        "reflection": 1e-06
+      },
+      "refinement": "y_half",
+      "result": {
+        "rho": 1.0001529090586536,
+        "frequency_GHz": 0.1137379136630698,
+        "all_rho": 1.0001529090586536
+      }
+    },
+    "largest_all_rho": 1.0001529090586536,
+    "worst_ten": [
+      {
+        "cell": {
+          "polarization": "TE",
+          "wall": "pec",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.0125,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 6,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "real",
+          "theta": 35.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "refinement": "y_half",
+        "result": {
+          "rho": 1.0001529090586536,
+          "frequency_GHz": 0.1137379136630698,
+          "all_rho": 1.0001529090586536
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TE",
+          "wall": "pec",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.0125,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 6,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "alpha0",
+          "theta": 35.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "refinement": "y_half",
+        "result": {
+          "rho": 1.0001529090586536,
+          "frequency_GHz": 0.1137379136630698,
+          "all_rho": 1.0001529090586536
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TE",
+          "wall": "pmc",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.0125,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 6,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "real",
+          "theta": 35.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "refinement": "y_half",
+        "result": {
+          "rho": 1.0001513434443974,
+          "frequency_GHz": 0.11377789185135682,
+          "all_rho": 1.0001513434443974
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TE",
+          "wall": "pmc",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.0125,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 6,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "alpha0",
+          "theta": 35.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "refinement": "y_half",
+        "result": {
+          "rho": 1.0001513434443974,
+          "frequency_GHz": 0.11377789185135682,
+          "all_rho": 1.0001513434443974
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TE",
+          "wall": "pec",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.0125,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "real",
+          "theta": 35.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "refinement": "y_half",
+        "result": {
+          "rho": 1.0001440668518637,
+          "frequency_GHz": 0.11322837891425529,
+          "all_rho": 1.0001440668518637
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TE",
+          "wall": "pec",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.0125,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "alpha0",
+          "theta": 35.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "refinement": "y_half",
+        "result": {
+          "rho": 1.0001440668518637,
+          "frequency_GHz": 0.11322837891425529,
+          "all_rho": 1.0001440668518637
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TE",
+          "wall": "pec",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 6,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "real",
+          "theta": 35.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "refinement": "base",
+        "result": {
+          "rho": 1.0001433279529741,
+          "frequency_GHz": 0.11370225693046536,
+          "all_rho": 1.0001433279529741
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TE",
+          "wall": "pec",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 6,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "alpha0",
+          "theta": 35.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "refinement": "base",
+        "result": {
+          "rho": 1.0001433279529741,
+          "frequency_GHz": 0.11370225693046536,
+          "all_rho": 1.0001433279529741
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TE",
+          "wall": "pmc",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.0125,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "real",
+          "theta": 35.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "refinement": "y_half",
+        "result": {
+          "rho": 1.0001419635573985,
+          "frequency_GHz": 0.1132728636234595,
+          "all_rho": 1.0001419635573985
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TE",
+          "wall": "pmc",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.0125,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "alpha0",
+          "theta": 35.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "refinement": "y_half",
+        "result": {
+          "rho": 1.0001419635573985,
+          "frequency_GHz": 0.1132728636234595,
+          "all_rho": 1.0001419635573985
+        }
+      }
+    ]
+  },
+  "fixed_k": {
+    "cases": 288,
+    "failed": 102,
+    "all_eigenvalue_failed": 102,
+    "worst": {
+      "cell": {
+        "polarization": "TM",
+        "wall": "periodic",
+        "order": 1,
+        "dt": 1.6666666666666667e-11,
+        "dy": 0.025,
+        "dz": 0.025,
+        "period": 1.28,
+        "zhalf": 0.64,
+        "layers": 12,
+        "slab": true,
+        "slab_epsilon": 3.0,
+        "preset": "cfs",
+        "theta": 0.0,
+        "f_min": 300000000.0,
+        "alpha_scale": null,
+        "grading": 3.0,
+        "kappa": 1.0,
+        "reflection": 1e-06
+      },
+      "physical_ky": 4.908738521234052,
+      "result": {
+        "rho": 1.000064419333427,
+        "frequency_GHz": 0.23120087058358804,
+        "all_rho": 1.000064419333427
+      }
+    },
+    "largest_all_rho": 1.000064419333427,
+    "worst_ten": [
+      {
+        "cell": {
+          "polarization": "TM",
+          "wall": "periodic",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "cfs",
+          "theta": 0.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "physical_ky": 4.908738521234052,
+        "result": {
+          "rho": 1.000064419333427,
+          "frequency_GHz": 0.23120087058358804,
+          "all_rho": 1.000064419333427
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TM",
+          "wall": "periodic",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "cfs",
+          "theta": 0.0,
+          "f_min": 2000000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "physical_ky": 4.908738521234052,
+        "result": {
+          "rho": 1.0000519927186382,
+          "frequency_GHz": 0.23014856682543017,
+          "all_rho": 1.0000519927186382
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TM",
+          "wall": "periodic",
+          "order": 0,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "cfs",
+          "theta": 45.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "physical_ky": 4.445958682014307,
+        "result": {
+          "rho": 1.0000340480659575,
+          "frequency_GHz": 0.20949811846402314,
+          "all_rho": 1.0000340480659573
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TM",
+          "wall": "periodic",
+          "order": 1,
+          "dt": 8.333333333333334e-12,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "cfs",
+          "theta": 0.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "physical_ky": 4.908738521234052,
+        "result": {
+          "rho": 1.0000325536110373,
+          "frequency_GHz": 0.23121296595830865,
+          "all_rho": 1.0000325536110373
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TM",
+          "wall": "periodic",
+          "order": 0,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "cfs",
+          "theta": 30.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "physical_ky": 3.143767532927522,
+        "result": {
+          "rho": 1.0000280901627883,
+          "frequency_GHz": 0.14861614413841953,
+          "all_rho": 1.0000280901627883
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TM",
+          "wall": "periodic",
+          "order": 1,
+          "dt": 8.333333333333334e-12,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "cfs",
+          "theta": 0.0,
+          "f_min": 2000000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "physical_ky": 4.908738521234052,
+        "result": {
+          "rho": 1.0000263477852165,
+          "frequency_GHz": 0.23015057504436692,
+          "all_rho": 1.0000263477852165
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TM",
+          "wall": "periodic",
+          "order": 1,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "cfs",
+          "theta": 10.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "physical_ky": 6.000557527436703,
+        "result": {
+          "rho": 1.0000253224958267,
+          "frequency_GHz": 0.28046271023910774,
+          "all_rho": 1.0000253224958267
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TM",
+          "wall": "periodic",
+          "order": 0,
+          "dt": 8.333333333333334e-12,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "cfs",
+          "theta": 45.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "physical_ky": 4.445958682014307,
+        "result": {
+          "rho": 1.000017012575056,
+          "frequency_GHz": 0.20950254137603164,
+          "all_rho": 1.000017012575056
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TM",
+          "wall": "periodic",
+          "order": 1,
+          "dt": 4.166666666666667e-12,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "cfs",
+          "theta": 0.0,
+          "f_min": 300000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "physical_ky": 4.908738521234052,
+        "result": {
+          "rho": 1.00001635210465,
+          "frequency_GHz": 0.23121894364198056,
+          "all_rho": 1.00001635210465
+        }
+      },
+      {
+        "cell": {
+          "polarization": "TM",
+          "wall": "periodic",
+          "order": 0,
+          "dt": 1.6666666666666667e-11,
+          "dy": 0.025,
+          "dz": 0.025,
+          "period": 1.28,
+          "zhalf": 0.64,
+          "layers": 12,
+          "slab": true,
+          "slab_epsilon": 3.0,
+          "preset": "cfs",
+          "theta": 10.0,
+          "f_min": 2000000000.0,
+          "alpha_scale": null,
+          "grading": 3.0,
+          "kappa": 1.0,
+          "reflection": 1e-06
+        },
+        "physical_ky": 7.2787933746843425,
+        "result": {
+          "rho": 1.0000148745494521,
+          "frequency_GHz": 0.3359623545175622,
+          "all_rho": 1.0000148745494521
+        }
+      }
+    ]
+  },
+  "threshold": 1.000000000001,
+  "raw_path": "/tmp/cpml-es-sweep-cases.json",
+  "raw_sha256": "1d4d12140753f1bc02b504716ad3a05f952348b7ad4f5f59d06deb014e199128",
+  "seconds": 185.84371859580278,
+  "complete": true,
+  "candidate": "AHK-family IMEX transverse-memory diffusion, nu=c0*hy/2, eta=0",
+  "input_sha256": {
+    "energy_stable.py": "efb9fe5d26bc1716fcbc7d857d25a1965d3d0fc4e6bfade8a227d3f3ca97f497",
+    "model.py": "c5d19a3bfdeb467a6b0767cb96588f7fcba61d51ad12fe16637b55b2c1156eb7",
+    "sweep.py": "c91b5ef97880d2943b7d1be8b3b2f9e3f1ae93037e791daf8c3d2273028a9667",
+    "bloch_sweep.py": "e4f1d4770b35a9a6c6fa305e19257d91c6795ed9ed02be68daec335d7397fd1e",
+    "reflection.py": "4d922efaa2618ccbf05446f87c78b6855d04dcf5f738fe3e2874550b41277c5a",
+    "energy.py": "dac708926b617ca881f57274c6a98e5632f92ef06747cacd78535ce912b851bc",
+    "power.py": "deef8d0216ad01a3149894eaf06c049b7e503c55ccc98161cd3b7c656b11d60f"
+  },
+  "cpu_only": true
+}

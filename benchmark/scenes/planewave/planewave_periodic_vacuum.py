@@ -71,4 +71,5 @@ SCENARIO = ScenarioDefinition(
     frequencies=FREQUENCIES,
     display_monitor="field_xz",
     display_component="Ex",
+    absorber="cpml",
 )

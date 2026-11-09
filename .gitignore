@@ -231,6 +231,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Repository-local development content and build artifacts
+.build/
 .bench_tmp/
 docs/
 assets/
@@ -252,4 +253,10 @@ experiments/fdtd_data_generator/*
 !experiments/fdtd_data_generator/generate.py
 !experiments/fdtd_data_generator/README.md
 !experiments/fdtd_data_generator/REPORT.md
+!experiments/emfc_validation/
+experiments/emfc_validation/*
+!experiments/emfc_validation/validate.py
+!experiments/emfc_validation/diagnose.py
 .worktrees/
+# Default local evidence root of development scripts (see WITWIN_EVIDENCE_ROOT)
+/evidence/

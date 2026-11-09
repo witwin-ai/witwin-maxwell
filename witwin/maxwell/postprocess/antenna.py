@@ -6,7 +6,7 @@ from collections.abc import Sequence
 import torch
 
 from ..antenna import AntennaData, Ludwig3, _power_normalized_antenna_metrics
-from ..constants import ETA_0
+from ..constants import C_0, EPSILON_0, ETA_0, MU_0
 from ..network import PortData
 
 
@@ -487,8 +487,11 @@ def _far_fields_from_result(
 ) -> dict[str, object]:
     """Transform a closed-surface result without imposing port-power validity."""
 
-    from .nfft import NearFieldFarFieldTransformer
-    from .stratton_chu import equivalent_surface_currents_from_monitor
+    from .nfft import NearFieldFarFieldTransformer, _transform_electric_spectrum
+    from .stratton_chu import (
+        _equivalent_surface_currents_from_monitor_spectrum,
+        equivalent_surface_currents_from_monitor,
+    )
 
     if not isinstance(surface, str) or not surface:
         raise ValueError("surface must be a non-empty monitor name.")
@@ -570,55 +573,62 @@ def _far_fields_from_result(
 
     e_theta_fields = []
     e_phi_fields = []
-    current_surfaces = []
     impedances = []
-    for index, frequency in enumerate(result_frequencies):
-        currents = equivalent_surface_currents_from_monitor(
-            result,
-            surface,
-            frequency=frequency,
+    radii = []
+    if frequency_count > 1:
+        current_surfaces = _equivalent_surface_currents_from_monitor_spectrum(
+            result, surface, result_frequencies
         )
+    else:
+        current_surfaces = (equivalent_surface_currents_from_monitor(
+            result, surface, frequency=result_frequencies[0]
+        ),)
+    for currents in current_surfaces:
         if torch.device(currents.device) != device:
             raise ValueError(
                 "The Huygens surface and driven-port data must be on the same device."
             )
-        transformer = NearFieldFarFieldTransformer(
-            currents,
-            solver=result.solver,
-            device=device,
-        )
+    transformers = NearFieldFarFieldTransformer._from_current_spectrum(
+        current_surfaces,
+        solver=result.solver,
+        device=device,
+        **({"c":C_0,"eps0":EPSILON_0,"mu0":MU_0} if result.solver is None else {}),
+    )
+    for index, transformer in enumerate(transformers):
         impedance = complex(transformer.eta)
         wavenumber = complex(transformer.k)
-        tolerance = 1e-10 * max(abs(impedance.real), abs(wavenumber.real), 1.0)
         if (
             impedance.real <= 0.0
-            or abs(impedance.imag) > tolerance
-            or abs(wavenumber.imag) > tolerance
+            or abs(impedance.imag) > 1e-10 * abs(impedance.real)
+            or abs(wavenumber.imag) > 1e-10 * abs(wavenumber.real)
         ):
             raise NotImplementedError(
                 "Antenna gain currently requires a homogeneous lossless exterior."
             )
-        selected_radius = _select_frequency_parameter(radius, index, frequency_count)
-        transformed = transformer.transform_directions(
-            global_direction.reshape(-1, 3),
-            radius=selected_radius,
-            batch_size=batch_size,
-        )
-        e_field = transformed["E"].reshape(theta_grid.shape + (3,))
+        radii.append(_select_frequency_parameter(radius, index, frequency_count))
+        impedances.append(impedance.real)
+
+    electric_fields = _transform_electric_spectrum(
+        transformers, global_direction.reshape(-1, 3), radii, batch_size
+    )
+    phase_projection = torch.sum(global_direction * resolved_center, dim=-1)
+    global_theta_complex = global_theta.to(dtype=electric_fields[0].dtype)
+    global_phi_complex = global_phi.to(dtype=electric_fields[0].dtype)
+    for transformer, electric_field in zip(transformers, electric_fields):
+        wavenumber = complex(transformer.k)
+        e_field = electric_field.reshape(theta_grid.shape + (3,))
         phase_shift = torch.exp(
             1j
             * wavenumber.real
-            * torch.sum(global_direction * resolved_center, dim=-1)
+            * phase_projection
         ).to(dtype=e_field.dtype)
         e_field = e_field * phase_shift[..., None]
         e_theta_fields.append(
-            torch.sum(e_field * global_theta.to(dtype=e_field.dtype), dim=-1)
+            torch.sum(e_field * global_theta_complex, dim=-1)
         )
         e_phi_fields.append(
-            torch.sum(e_field * global_phi.to(dtype=e_field.dtype), dim=-1)
+            torch.sum(e_field * global_phi_complex, dim=-1)
         )
-        current_surfaces.append(currents)
-        impedances.append(impedance.real)
 
     # The far field inherits its precision from the monitor payload (the solve
     # dtype), while the angular grid, radius, impedance, and driven-port powers
@@ -664,8 +674,8 @@ def antenna_data_from_result(
     """Build antenna results from a closed Huygens monitor and a driven port.
 
     The angular coordinates are expressed in ``frame``. Its columns are the
-    local x/y/z basis vectors in the simulation coordinates. ``phase_center``
-    is expressed in simulation coordinates and is applied to the far-field
+    local x/y/z basis vectors in world Cartesian coordinates. ``phase_center``
+    is expressed in world Cartesian coordinates and is applied to the far-field
     phase, rather than being stored as provenance only.
     """
 

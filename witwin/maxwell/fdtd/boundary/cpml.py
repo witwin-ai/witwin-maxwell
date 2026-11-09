@@ -10,8 +10,8 @@ DEFAULT_CPML_CONFIG = {
     # A cubic, impedance-matched conductivity ramp is the robust default for
     # the relatively thin (8-12 cell) layers used by Scene boundaries.  Large
     # kappa stretching at this thickness creates a resolvable entrance mismatch
-    # for propagating waves; complex-frequency shifting remains available through
-    # cpml_config and StablePML for low-frequency/late-time workloads.
+    # for propagating waves. Nonzero fixed-k Bloch runs resolve a frequency shift
+    # at boundary setup; real fields retain the unshifted default below.
     "grading_order": 3.0,
     "kappa_max": 1.0,
     "alpha_max": 0.0,
@@ -111,6 +111,32 @@ def _legacy_strength_scale(strength):
     return value
 
 
+def cpml_line_profiles(solver, count, spacing, thickness, *, reflection):
+    """E/H (inv_kappa, b, c) for a uniform auxiliary 1D line with PML at both ends.
+
+    Uses the solver's resolved CPML configuration and shift, so an auxiliary line
+    has the absorber model of the 3D grid. Only the nominal reflection differs:
+    a line feeds its end reflections straight into the injected incident field,
+    so it takes its own (deeper) target. E samples sit on the nodes, H samples
+    half a cell above them.
+    """
+    shift = getattr(solver, "_cpml_shift", None) or dict(rate=None, floor=0.0, magnetic_alpha_scale=1.0)
+    nodes64 = np.arange(count, dtype=np.float64) * float(spacing)
+    half64 = nodes64 + .5 * float(spacing)
+    eta0 = math.sqrt(solver.mu0 / solver.eps0)
+    scale = torch.tensor(1.0, device=solver.device, dtype=solver.Ex.dtype)
+    electric_config = dict(solver.cpml_config, reflection=float(reflection))
+    magnetic_config = dict(electric_config,
+                           alpha_max=solver.cpml_config["alpha_max"] * shift["magnetic_alpha_scale"])
+    profiles = []
+    for positions, vacuum, sigma_scale, config in ((nodes64, solver.eps0, scale, electric_config),
+                                                   (half64, solver.mu0, scale * (solver.mu0 / solver.eps0), magnetic_config)):
+        kappa, b, c = _cpml_profile_1d(positions, nodes64, thickness, solver.dt, vacuum, sigma_scale, eta0, config,
+                                       high_positions64=positions, shift_rate=shift["rate"], shift_floor=shift["floor"])
+        profiles.append((torch.reciprocal(kappa), b, c))
+    return profiles
+
+
 def _cpml_profile_1d(
     positions64,
     nodes64,
@@ -124,6 +150,8 @@ def _cpml_profile_1d(
     high_positions64=None,
     apply_low=True,
     apply_high=True,
+    shift_rate=None,
+    shift_floor=0.0,
 ):
     """Build (kappa, b, c) CPML profile vectors graded by physical depth.
 
@@ -133,16 +161,16 @@ def _cpml_profile_1d(
     per-side layer depth and peak conductivity derive from the physical layer
     extents, so nonuniform grids grade correctly and uniform grids reproduce
     the established index-based grading. ``high_positions64`` overrides the
-    sample positions used for the high-side depth (H profiles pass their
-    cell's outer node so the outermost H sample reaches full depth, matching
-    the calibrated legacy grading). Grading runs in float64; the returned
+    sample positions used for the high-side depth when a caller has distinct
+    physical sample coordinates. Standard E/H profiles use their actual node
+    and half-point coordinates on both sides. Grading runs in float64; the returned
     vectors are float32 on the device of ``sigma_scale``.
     """
     length = int(len(positions64))
     device = sigma_scale.device
 
     def _to_device(array):
-        return torch.tensor(array, dtype=torch.float32, device=device).contiguous()
+        return torch.tensor(array, dtype=sigma_scale.dtype, device=device).contiguous()
 
     thickness = int(thickness)
     if thickness <= 0:
@@ -201,12 +229,33 @@ def _cpml_profile_1d(
     kappa[active] = 1.0 + (kappa_max - 1.0) * graded[active]
     alpha = np.zeros(length, dtype=np.float64)
     alpha[active] = alpha_max * (1.0 - depth[active])
+    if shift_rate is not None and alpha_max != 0.0:
+        alpha[active] = alpha_max * (shift_floor + (1.0 - shift_floor) * (1.0 - graded[active]))
+        # CFS reduces Im(s) by omega^2/(omega^2 + (alpha/vacuum)^2).
+        # The maximum shift bounds this loss throughout the simulated band.
+        sigma *= 1.0 + (alpha_max / (float(vacuum_constant) * shift_rate)) ** 2
 
     decay = np.exp(-(sigma / kappa + alpha) * float(dt) / float(vacuum_constant))
     denom = sigma + alpha * kappa
     c = np.zeros(length, dtype=np.float64)
     mask = denom > 1e-12
     c[mask] = sigma[mask] * (decay[mask] - 1.0) / (denom[mask] * kappa[mask])
+    if shift_rate is not None and alpha_max != 0.0:
+        # Match the DC stretch and first time moment of a linear curl input.
+        # For G(z)=direct+c*z/(z-b), G(1)=1/kappa-weight and G'(1)=weight/u.
+        # A positive [2/2] Pade pole keeps the equivalent one-memory coefficients
+        # bounded even in stiff layers; the native update and state layout stay
+        # unchanged. A held-current exponential loses this moment when sigma*dt
+        # is large and can amplify loaded mesh-scale evanescent modes.
+        rate_dt = (sigma / kappa + alpha) * float(dt) / float(vacuum_constant)
+        numerator = 1.0 - .5 * rate_dt + rate_dt * rate_dt / 12.0
+        denominator = 1.0 + .5 * rate_dt + rate_dt * rate_dt / 12.0
+        weight = np.zeros(length, dtype=np.float64)
+        weight[mask] = sigma[mask] / (denom[mask] * kappa[mask])
+        direct = 1.0 / kappa - weight + weight / numerator
+        c = -weight * rate_dt / (numerator * denominator)
+        decay = numerator / denominator
+        kappa = 1.0 / direct
     return _to_device(kappa), _to_device(decay), _to_device(c)
 
 
@@ -377,13 +426,17 @@ def _clear_auxiliary_state(solver):
     solver._cpml_auto_free_bytes = None
 
 
-def build_cpml_profiles(solver):
+def build_cpml_profiles(solver, *, magnetic_alpha_scale=1.0, shift_rate=None, shift_floor=0.0):
     strength_scale = _legacy_strength_scale(solver.scene.pml_strength)
-    scale_tensor = torch.tensor(strength_scale, device=solver.device, dtype=torch.float32)
+    scale_tensor = torch.tensor(strength_scale, device=solver.device, dtype=solver.Ex.dtype)
     magnetic_scale = scale_tensor * (solver.mu0 / solver.eps0)
     thickness = solver.scene.pml_thickness
     eta0 = math.sqrt(solver.mu0 / solver.eps0)
     scene = solver.scene
+    magnetic_config = solver.cpml_config
+    if magnetic_alpha_scale != 1.0:
+        magnetic_config = dict(solver.cpml_config,
+            alpha_max=solver.cpml_config["alpha_max"] * magnetic_alpha_scale)
 
     axis_masters = {
         "x": (scene.x_nodes64, scene.x_half64),
@@ -404,6 +457,8 @@ def build_cpml_profiles(solver):
             solver.cpml_config,
             apply_low=apply_low,
             apply_high=apply_high,
+            shift_rate=shift_rate,
+            shift_floor=shift_floor,
         )
         kappa_h, b_h, c_h = _cpml_profile_1d(
             half64,
@@ -413,10 +468,11 @@ def build_cpml_profiles(solver):
             solver.mu0,
             magnetic_scale,
             eta0,
-            solver.cpml_config,
-            high_positions64=nodes64[1:],
+            magnetic_config,
             apply_low=apply_low,
             apply_high=apply_high,
+            shift_rate=shift_rate,
+            shift_floor=shift_floor,
         )
         setattr(solver, f"cpml_kappa_e_{axis}", kappa_e)
         setattr(solver, f"cpml_b_e_{axis}", b_e)
@@ -427,8 +483,41 @@ def build_cpml_profiles(solver):
 
 
 def initialize_cpml_state(solver):
+    magnetic_alpha_scale = 1.0
+    shift_rate = None
+    shift_floor = 0.0
+    if solver.active_absorber_type == "cpml" and solver.complex_fields_enabled:
+        k_parallel = math.hypot(*(k for axis, k in zip("xyz", solver.resolved_bloch_wavevector)
+                                  if solver.scene.boundary.axis_kind(axis) == "bloch"))
+        if k_parallel:
+            band_min = min(solver._requested_port_frequencies)
+            shift_rate = 2. * math.pi * band_min
+            parallel_fraction = solver.c * k_parallel / shift_rate
+            # Relax evanescent memory on twice the light-line scale, capped by
+            # the band-scale maximum rather than a shift far above the band.
+            shift_floor = min(1.0, 2.0 * parallel_fraction)
+            # Alpha/eps0 is an angular frequency. Put the largest shift at the
+            # lowest requested frequency so evanescent memory is damped without
+            # shifting far above the propagating band and weakening absorption.
+            if "alpha_max" not in solver._cpml_config_keys:
+                solver.cpml_config["alpha_max"] = solver.eps0 * shift_rate
+                if "grading_order" not in solver._cpml_config_keys:
+                    solver.cpml_config["grading_order"] = 2.
+                if "reflection" not in solver._cpml_config_keys:
+                    # A ray's layer return scales as R**cos(theta). Target
+                    # 10^-4.2 at the band edge, with headroom below 1e-4, while
+                    # capping the stretch at eight decades near grazing. Excess
+                    # stretch suppresses evanescent leakage and slows lossy tails.
+                    cutoff = math.sqrt(1.0 - (4.2 / 8.0) ** 2)
+                    cosine = math.sqrt(1.0 - min(parallel_fraction, cutoff) ** 2)
+                    solver.cpml_config["reflection"] = 10. ** (-4.2 / cosine)
+            # Alpha is an electric conductivity: match alpha_e/eps0 = alpha_h/mu0.
+            magnetic_alpha_scale = solver.mu0 / solver.eps0
     _clear_auxiliary_state(solver)
-    build_cpml_profiles(solver)
+    # Auxiliary 1D lines (fixed-k incident line) reuse the same resolved profile.
+    solver._cpml_shift = dict(rate=shift_rate, floor=shift_floor, magnetic_alpha_scale=magnetic_alpha_scale)
+    build_cpml_profiles(solver, magnetic_alpha_scale=magnetic_alpha_scale,
+                        shift_rate=shift_rate, shift_floor=shift_floor)
     _set_inv_kappa_buffers(solver)
     _allocate_cpml_memory_variables(solver)
 

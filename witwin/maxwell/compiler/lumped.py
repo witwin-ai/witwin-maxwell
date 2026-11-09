@@ -6,7 +6,7 @@ import math
 
 import torch
 
-from ..lumped import Capacitor, Inductor, Resistor
+from ..lumped import Capacitor, CoaxialLumpedResistor, Inductor, Resistor
 from ..scene import prepare_scene
 from .ports import _compile_voltage_path, _integrate_sparse_term
 
@@ -68,6 +68,8 @@ def compile_lumped_elements(
     target_device = torch.device(resolved_scene.device if device is None else device)
     compiled = []
     for element in resolved_scene.lumped_elements:
+        if isinstance(element, CoaxialLumpedResistor):
+            continue
         if not isinstance(element, _LUMPED_ELEMENT_TYPES):
             raise TypeError(
                 "Lumped elements must be Resistor, Capacitor, or Inductor instances."

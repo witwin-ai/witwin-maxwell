@@ -1,0 +1,50 @@
+{
+  "results": [
+    {
+      "polarization": "TE",
+      "method": "current",
+      "steps": 100000,
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "dominant_order": 3,
+      "fitted_rho": 1.0001857433292116,
+      "passes": false
+    },
+    {
+      "polarization": "TE",
+      "method": "c1",
+      "steps": 100000,
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "dominant_order": 3,
+      "fitted_rho": 1.000203547932015,
+      "passes": false
+    },
+    {
+      "polarization": "TM",
+      "method": "current",
+      "steps": 100000,
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "dominant_order": 4,
+      "fitted_rho": 1.0001326810038091,
+      "passes": false
+    },
+    {
+      "polarization": "TM",
+      "method": "c1",
+      "steps": 100000,
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "dominant_order": 4,
+      "fitted_rho": 1.0001564177697322,
+      "passes": false
+    }
+  ],
+  "seconds": 150.33872268907726,
+  "limitation": "Fourier-stack model uses transverse-mean material coefficients; no claim of full-y native invariance"
+}

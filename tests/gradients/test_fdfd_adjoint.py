@@ -16,6 +16,7 @@ class _DensityScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -42,9 +43,10 @@ class _DensityScene(mw.SceneModule):
 
 
 class _BoxPositionScene(mw.SceneModule):
-    def __init__(self, init_x=0.10):
+    def __init__(self, init_x=0.10, conductivity=0.0):
         super().__init__()
         self.box_x = torch.nn.Parameter(torch.tensor(float(init_x), device="cuda"))
+        self.conductivity = conductivity
 
     def to_scene(self):
         position = torch.stack(
@@ -55,13 +57,13 @@ class _BoxPositionScene(mw.SceneModule):
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
             device="cuda",
-            subpixel_samples=5,
+            subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
         )
         scene.add_structure(
             mw.Structure(
                 name="design_box",
                 geometry=mw.Box(position=position, size=(0.18, 0.18, 0.18)),
-                material=mw.Material(eps_r=20.0),
+                material=mw.Material(eps_r=20.0, sigma_e=self.conductivity),
             )
         )
         scene.add_source(
@@ -107,17 +109,19 @@ def test_fdfd_gradient_matches_central_difference_for_density():
 
 @requires_cuda
 def test_fdfd_gradient_matches_central_difference_for_geometry_position():
-    model = _BoxPositionScene()
+    model = _BoxPositionScene(0.1037)
     loss = _loss(model)
     loss.backward()
     backward_grad = model.box_x.grad.detach()
 
-    delta = 1.0e-2
-    loss_plus = _loss(_BoxPositionScene(0.10 + delta)).detach()
-    loss_minus = _loss(_BoxPositionScene(0.10 - delta)).detach()
+    # Keep the edge samples away from coverage/SDF kinks; resolve the local
+    # geometry derivative with a small symmetric secant.
+    delta = 1.0e-4
+    loss_plus = _loss(_BoxPositionScene(0.1037 + delta)).detach()
+    loss_minus = _loss(_BoxPositionScene(0.1037 - delta)).detach()
     finite_diff = (loss_plus - loss_minus) / (2.0 * delta)
 
-    assert torch.allclose(backward_grad, finite_diff, rtol=6e-1, atol=1e-10), (
+    assert torch.allclose(backward_grad, finite_diff, rtol=2e-2, atol=1e-10), (
         backward_grad.item(),
         finite_diff.item(),
     )
@@ -135,3 +139,16 @@ def test_fdfd_bridge_reports_solver_stats_and_converges():
     assert stats["solver"]["type"] == "direct"
     assert stats["converged"] is True
     assert result.fields["EZ"].requires_grad
+
+
+@requires_cuda
+def test_fdfd_lossy_geometry_gradient_uses_complex_material_pullback():
+    model = _BoxPositionScene(0.1037, conductivity=0.3)
+    loss = _loss(model)
+    loss.backward()
+    delta = 1e-4
+    finite_diff = (
+        _loss(_BoxPositionScene(0.1037 + delta, 0.3)).detach()
+        - _loss(_BoxPositionScene(0.1037 - delta, 0.3)).detach()
+    ) / (2 * delta)
+    torch.testing.assert_close(model.box_x.grad, finite_diff, rtol=0.02, atol=1e-8)

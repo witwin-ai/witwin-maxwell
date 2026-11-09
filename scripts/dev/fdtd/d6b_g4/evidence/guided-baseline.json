@@ -1,0 +1,108 @@
+{
+  "cases": [
+    {
+      "z": 0.0,
+      "mode": "baseline",
+      "beta_h": 0.05,
+      "cells": 20,
+      "width_cells": 4.0,
+      "matrix_size": 1114,
+      "phase_velocity_over_c": 0.9998958365886059,
+      "velocity_dispersion_corrected": 1.0000000000001128,
+      "impedance_over_eta0": 0.3895028940317853,
+      "capacitance_normalized": 2.567642473488085,
+      "inductance_normalized": 0.3895434702085285,
+      "low_branches_velocity_over_c": [
+        0.9998958365886059,
+        3.2134735652758604,
+        3.2938001165700497,
+        4.547882072004761,
+        6.006007585210603,
+        6.336764051777861,
+        6.336764051777865,
+        6.988249709227891
+      ],
+      "longitudinal_electric_energy_fraction": 6.902952821926947e-29,
+      "seconds": 2.675344467163086,
+      "memory_gib": 0.11356639862060547
+    },
+    {
+      "z": 0.05,
+      "mode": "baseline",
+      "beta_h": 0.05,
+      "cells": 20,
+      "width_cells": 4.0,
+      "matrix_size": 1126,
+      "phase_velocity_over_c": 0.9382074637014193,
+      "velocity_dispersion_corrected": 0.9383052007721663,
+      "impedance_over_eta0": 0.3775899045754339,
+      "capacitance_normalized": 2.822804116960174,
+      "inductance_normalized": 0.4024588581780888,
+      "low_branches_velocity_over_c": [
+        0.9382074637014193,
+        3.1597855979573697,
+        3.293383141810976,
+        4.546761674453599,
+        5.935095573807179,
+        6.315591325404915,
+        6.335905763170668,
+        6.92688879773614
+      ],
+      "longitudinal_electric_energy_fraction": 0.0005529908914656194,
+      "seconds": 1.4508626461029053,
+      "memory_gib": 0.11726808547973633
+    },
+    {
+      "z": 0.3,
+      "mode": "baseline",
+      "beta_h": 0.05,
+      "cells": 20,
+      "width_cells": 4.0,
+      "matrix_size": 1126,
+      "phase_velocity_over_c": 0.9474332816989898,
+      "velocity_dispersion_corrected": 0.947531979862524,
+      "impedance_over_eta0": 0.3843292779471934,
+      "capacitance_normalized": 2.7462994715587223,
+      "inductance_normalized": 0.40565313185746743,
+      "low_branches_velocity_over_c": [
+        0.9474332816989898,
+        3.177059572543793,
+        3.2938001165700093,
+        4.547412929482847,
+        5.923854921348518,
+        6.333437015465584,
+        6.33676405177787,
+        6.948795015895462
+      ],
+      "longitudinal_electric_energy_fraction": 0.00041046974969086495,
+      "seconds": 1.4108295440673828,
+      "memory_gib": 0.11726808547973633
+    },
+    {
+      "z": 0.5,
+      "mode": "baseline",
+      "beta_h": 0.05,
+      "cells": 20,
+      "width_cells": 4.0,
+      "matrix_size": 1126,
+      "phase_velocity_over_c": 0.9469391979795206,
+      "velocity_dispersion_corrected": 0.9470378446722477,
+      "impedance_over_eta0": 0.3866098898946933,
+      "capacitance_normalized": 2.7315235311361716,
+      "inductance_normalized": 0.40827319295642306,
+      "low_branches_velocity_over_c": [
+        0.9469391979795206,
+        3.18085049355136,
+        3.293800116570047,
+        4.547543776716609,
+        5.898573657963399,
+        6.329316240244981,
+        6.336764051777873,
+        6.953753791348159
+      ],
+      "longitudinal_electric_energy_fraction": 0.0004094679081737204,
+      "seconds": 1.3534626960754395,
+      "memory_gib": 0.11726808547973633
+    }
+  ]
+}

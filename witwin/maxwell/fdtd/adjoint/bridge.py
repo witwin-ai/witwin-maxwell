@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import torch
 
@@ -19,7 +20,9 @@ from ...media import Tensor3x3
 from ...rational import RationalModel, StateSpaceNetwork
 from ...result import Result
 from ...scene import prepare_scene
-from ..boundary import BOUNDARY_BLOCH, BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PML, has_complex_fields
+from ...sources import ModeSource
+from ..boundary import BOUNDARY_PERIODIC, BOUNDARY_BLOCH, BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PML, has_complex_fields
+from ..excitation.temporal import injection_time
 from .profiler import _BackwardProfiler, _clone_backward_profile, _empty_backward_profile
 from ..excitation import (
     advance_tfsf_auxiliary_electric,
@@ -61,6 +64,7 @@ from ..networks import (
     pullback_network_runtimes,
 )
 from .dispatch import reverse_step
+from .copper_foil import COPPER_COEFFICIENTS
 from .reverse_common import _ReverseScratch
 
 
@@ -95,6 +99,8 @@ def _material_has_conductivity(material) -> bool:
         return True
     sigma_e_tensor = getattr(material, "sigma_e_tensor", None)
     if sigma_e_tensor is not None:
+        if hasattr(sigma_e_tensor, "rows"):
+            return any(float(component) != 0.0 for row in sigma_e_tensor.rows for component in row)
         return any(float(component) != 0.0 for component in sigma_e_tensor.as_tuple())
     return False
 
@@ -112,12 +118,36 @@ def _structure_has_trainable_geometry(structure) -> bool:
 from ..runtime.timeplan import sources_share_spectrum as _sources_share_spectrum
 
 
+def _require_fixed_trace_poles(scene):
+    from ...adjoint_inputs import material_pole_tensors
+
+    if any(value.requires_grad for structure in scene.structures
+           for value in material_pole_tensors(structure.material)):
+        raise ValueError(
+            "Pole parameter gradients through split-trace conductor histories are unsupported: "
+            "their local pole coefficients have no material-parameter pullback."
+        )
+
+
 def _unsupported_adjoint_medium(scene, *, trainable_geometry_indices=()):
     trainable_geometry_indices = frozenset(trainable_geometry_indices)
     for structure_index, structure in enumerate(getattr(scene, "structures", ())):
         material = getattr(structure, "material", None)
         if material is None:
             continue
+        if getattr(getattr(structure, "geometry", None), "kind", None) == "surface_mesh":
+            return "SurfaceMesh PEC trace projection currently supports fixed-geometry forward solves; its material/shape adjoint is not registered."
+        if getattr(material, "is_copper_foil", False) and (
+            structure_index in trainable_geometry_indices or _structure_has_trainable_geometry(structure)
+        ):
+            return "FDTD CopperFoil gradients require fixed planar geometry and fixed modal topology."
+        if getattr(material, "is_pmc", False) and (
+            structure_index in trainable_geometry_indices or _structure_has_trainable_geometry(structure)
+        ):
+            return (
+                "FDTD adjoint does not support trainable PMC geometry: the PMC magnetic-edge "
+                "short is a fixed staircase mask with no occupancy gradient channel."
+            )
         if getattr(material, "is_medium2d", False):
             return "FDTD adjoint does not support 2D sheet (Medium2D) media yet."
         if getattr(material, "is_lossy_metal", False) or getattr(
@@ -298,6 +328,91 @@ def _tensor_depends_on(value, inputs, *, retain_graph):
     return any(dependency is not None for dependency in dependencies)
 
 
+def _mode_source_replay_error(solver, scene, inputs):
+    """Return the refusal reason for a material-dependent mismatched launch."""
+    runtime = _runtime()
+    sources = runtime._compiled_sources_for_replay(solver)
+    if not inputs or not all(source["kind"] in runtime._SOURCE_REPLAY_REBUILD_KINDS for source in sources):
+        return
+    from ..excitation.modes.common import (
+        _field_component_axis_coords, _mode_slice, _mode_source_axes,
+        _mode_source_component_permittivity, _mode_source_field_name,
+        _mode_source_relative_material_slices, _resolve_tangential_bounds,
+        _plane_depends_on_inputs,
+    )
+    from ..excitation.tfsf_common import nearest_index
+
+    def family(kind):
+        if kind in {"scalar_dense", "scalar_dense_torch", "scalar_sparse", "scalar_sparse_implicit"}:
+            return "scalar_real"
+        if kind in {"scalar_complex_dense", "scalar_complex_sparse"}:
+            return "scalar_complex"
+        return kind
+
+    mismatches = []
+    for source in sources:
+        if source["kind"] != "mode_source":
+            continue
+        axis, tangents = _mode_source_axes(source)
+        if (source["mode_solver_kind"] == "vector_dense_torch"
+                and getattr(solver, "_mode_source_vector_state", {}).get(
+                    source["name"], {}).get("trainable", False)):
+            continue
+        plane = nearest_index(getattr(solver.scene, axis), source["position"]["xyz".index(axis)])
+        field = _mode_source_field_name(source)
+        bounds, _ = _resolve_tangential_bounds(solver.scene, source, axis_coords_by_axis={
+            tangent: _field_component_axis_coords(solver.scene, field, tangent) for tangent in tangents
+        })
+        replay_eps = _mode_slice(getattr(solver, "eps_" + field), axis=axis,
+                                 plane_index=plane, tangential_bounds=bounds)
+        replay_kind = "scalar_complex" if replay_eps.is_complex() and bool(
+            torch.any(replay_eps.imag.abs() / solver.eps0 > 1e-7)
+        ) else "scalar_real"
+        if family(source["mode_solver_kind"]) != replay_kind:
+            mismatches.append((source, axis, tangents, plane, replay_kind))
+    if not mismatches:
+        return
+
+    prepared = prepare_scene(scene, material_dtype=solver.scene._material_dtype)
+    context = SimpleNamespace(scene=prepared, _compiled_material_model=prepared.compile_materials())
+    try:
+        for source, axis, tangents, plane, replay_kind in mismatches:
+            bounds, _ = _resolve_tangential_bounds(prepared, source, axis_coords_by_axis={
+                tangent: getattr(prepared, tangent) for tangent in tangents
+            })
+            eps, mu = _mode_source_relative_material_slices(context,
+                frequency=source["source_time"]["frequency"], normal_axis=axis,
+                plane_index=plane, tangential_bounds=bounds)
+            # Include the component-grid aperture used by scalar replay as well
+            # as the node-grid material used by the forward vector solve.
+            field = _mode_source_field_name(source)
+            bounds, _ = _resolve_tangential_bounds(prepared, source, axis_coords_by_axis={
+                tangent: _field_component_axis_coords(prepared, field, tangent) for tangent in tangents
+            })
+            edge = context._compiled_material_model.get("edge_components")
+            component = edge["eps"][field] if edge is not None else _mode_source_component_permittivity(
+                context, source, frequency=source["source_time"]["frequency"])
+            component = _mode_slice(component, axis=axis, plane_index=plane, tangential_bounds=bounds)
+            if _plane_depends_on_inputs((*eps.values(), *mu.values(), component), inputs):
+                return (
+                    f"ModeSource/ModePort {source['name']!r} plane material is trainable "
+                    "(material on the source plane requires grad): "
+                    f"forward mode solver {source['mode_solver_kind']!r} differs from "
+                    f"replay {replay_kind!r}. A matching mode-shape eigen-adjoint is required. "
+                    "Dense vector cap n <= 4096."
+                )
+    finally:
+        prepared.release_meshgrid()
+
+
+def _validate_mode_source_replay(solver, scene, inputs):
+    error = _mode_source_replay_error(solver, scene, inputs)
+    if error is not None:
+        raise NotImplementedError(error)
+    if getattr(solver, "_source_vector_materials", {}):
+        solver._source_vector_inputs = inputs
+
+
 class _FDTDGradientBridge:
     def __init__(self, simulation):
         self.simulation = simulation
@@ -345,6 +460,26 @@ class _FDTDGradientBridge:
         self._last_backward_profile = None
         self._last_circuits = {}
         self._last_embedded_networks = {}
+        self._mode_replay_cache = None
+
+    def _validate_mode_source_replay(self, solver, inputs):
+        # An accepted forward owns one scene/material graph. New forwards reset
+        # this cache, including SceneModule changes with unchanged parameters.
+        # Tensor versions also invalidate a verdict after in-place design edits.
+        key = (id(solver), id(self.simulation.scene),
+               tuple((id(value), value._version) for value in inputs))
+        if self._mode_replay_cache is None or self._mode_replay_cache[0] != key:
+            with torch.enable_grad():
+                error = _mode_source_replay_error(solver, self._material_graph_scene(), inputs)
+            self._mode_replay_cache = (key, error, getattr(solver, "_source_vector_materials", {}))
+        error = self._mode_replay_cache[1]
+        if error is not None:
+            raise NotImplementedError(error)
+        # Backward cleanup drops the solver's references. Keep the accepted
+        # graph with its verdict so another backward can rebuild torch profiles.
+        if self._mode_replay_cache[2]:
+            solver._source_vector_materials = self._mode_replay_cache[2]
+            solver._source_vector_inputs = inputs
 
     def _material_graph_scene(self):
         if self.simulation.scene_module is not None:
@@ -519,6 +654,32 @@ class _FDTDGradientBridge:
         )
 
     def _validate_supported_configuration(self, solver):
+        if getattr(solver, "_copper_foils", ()):
+            with torch.enable_grad():
+                _require_fixed_trace_poles(self._material_graph_scene())
+        if has_complex_fields(solver) and (
+            getattr(solver, "_port_runtimes", ())
+            or getattr(solver, "_lumped_element_runtimes", ())
+        ):
+            raise NotImplementedError(
+                "Complex-field lumped FDTD runs support forward/checkpoint execution only; "
+                "the lumped adjoint/pullback is not supported in v1."
+            )
+        if getattr(solver, "_abc_higdon_state", ()):
+            raise NotImplementedError(
+                "FDTD adjoint does not support second-order Mur faces or broadband (Higdon) "
+                "ModeABC planes: their multi-level plane histories have no discrete transpose. "
+                "First-order Mur, single-frequency ModeABC faces and InternalAbsorber planes "
+                "are differentiable."
+            )
+        if getattr(solver, "complex_fields_enabled", False) and getattr(solver, "uses_cpml", False):
+            from ..runtime.stepping import _bloch_cpml_multi_axis_layout
+
+            if _bloch_cpml_multi_axis_layout(solver) is not None:
+                raise NotImplementedError(
+                    "FDTD adjoint supports mixed Bloch/CPML layouts with exactly one PML axis and two "
+                    "Bloch axes; the generalized layouts (several PML axes or a PEC axis) run forward only."
+                )
         for block in getattr(solver.scene, "networks", ()):
             if block.delay_seconds is not None:
                 raise NotImplementedError(
@@ -605,7 +766,9 @@ class _FDTDGradientBridge:
                     "complex-field reverse replay applies the semi-implicit conduction-loss "
                     "coefficient on the real electric update only."
                 )
-        elif any(code not in {BOUNDARY_NONE, BOUNDARY_PML, BOUNDARY_PEC} for code in face_codes):
+        elif any(code not in ({BOUNDARY_NONE, BOUNDARY_PML, BOUNDARY_PEC, BOUNDARY_PERIODIC}
+                              if getattr(solver, "_copper_foils", ()) else {BOUNDARY_NONE, BOUNDARY_PML, BOUNDARY_PEC})
+                 for code in face_codes):
             raise NotImplementedError("FDTD adjoint currently supports none, pml, pec, and Bloch faces only.")
         # Every compiled source kind (point/plane/beam/mode plus the uniform and
         # custom current / field sources) injects an additive current whose patch
@@ -731,6 +894,8 @@ class _FDTDGradientBridge:
             solver._prepare_observers(observer_frequency, dft_window, time_steps)
         solver._prepare_time_observers(time_steps)
         prepare_port_spectral_accumulators(solver, time_steps, dft_window)
+        from ..copper_foil import prepare_copper_spectra
+        prepare_copper_spectra(solver, time_steps, observer_frequency, dft_window)
         prepare_circuit_time_series(solver, time_steps)
         for circuit_runtime in getattr(solver, "_circuit_runtimes", ()):
             if any(
@@ -742,47 +907,59 @@ class _FDTDGradientBridge:
 
         checkpoint_stride = runtime._checkpoint_stride(self.simulation, time_steps)
         checkpoints = [capture_checkpoint_state(solver, step=0)]
+        joint_field_runner = None
+        if getattr(solver, "_joint_material_adjoint", False):
+            from ..runtime.stepping import _make_field_update_runner
+            joint_field_runner = _make_field_update_runner(solver, self.simulation.config.cuda_graph)
         for step_index in range(time_steps):
             if step_index > 0 and step_index % checkpoint_stride == 0:
                 checkpoints.append(capture_checkpoint_state(solver, step=step_index))
 
             time_value = step_index * solver.dt
-            solver._advance_magnetic_dispersive_state()
-            solver._update_magnetic_fields(solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
-            if has_complex_fields(solver):
-                solver._update_magnetic_fields(
-                    solver.Hx_imag,
-                    solver.Hy_imag,
-                    solver.Hz_imag,
-                    solver.Ex_imag,
-                    solver.Ey_imag,
-                    solver.Ez_imag,
-                    imag=True,
-                )
-            if getattr(solver, "tfsf_enabled", False):
-                apply_tfsf_h_correction(solver, time_value)
-                advance_tfsf_auxiliary_magnetic(solver)
-            if solver._magnetic_source_terms:
-                from ..excitation import inject_magnetic_surface_source_terms
-
-                inject_magnetic_surface_source_terms(solver, time_value=time_value)
-            solver._apply_magnetic_dispersive_corrections()
-            sample_and_update_wire(solver)
-
-            solver._advance_dispersive_state()
-            if has_complex_fields(solver):
-                if getattr(solver, "uses_cpml", False):
-                    update_electric_fields_bloch_cpml(solver)
-                else:
-                    solver._update_electric_fields_bloch()
+            auxiliary_grid = (getattr(solver, "_tfsf_state", None) or {}).get("auxiliary_grid")
+            if auxiliary_grid is not None:
+                auxiliary_grid.prepare_incident_boundary()
+            if joint_field_runner is not None:
+                joint_field_runner(time_value)
             else:
-                if getattr(solver, "nonlinear_enabled", False):
-                    solver._update_nonlinear_electric_coefficients()
-                solver._update_electric_fields(solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
-                if getattr(solver, "full_aniso_enabled", False):
-                    apply_full_aniso_corrections(solver)
+                solver._advance_magnetic_dispersive_state()
+                solver._update_magnetic_fields(solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
+                if has_complex_fields(solver):
+                    solver._update_magnetic_fields(
+                        solver.Hx_imag,
+                        solver.Hy_imag,
+                        solver.Hz_imag,
+                        solver.Ex_imag,
+                        solver.Ey_imag,
+                        solver.Ez_imag,
+                        imag=True,
+                    )
+                if getattr(solver, "tfsf_enabled", False):
+                    apply_tfsf_h_correction(solver, time_value)
+                    advance_tfsf_auxiliary_magnetic(solver)
+                if solver._magnetic_source_terms:
+                    from ..excitation import inject_magnetic_surface_source_terms
 
-            deposit_wire_current(solver)
+                    inject_magnetic_surface_source_terms(
+                        solver, time_value=injection_time("magnetic_current", time_value, solver.dt)
+                    )
+                solver._apply_magnetic_dispersive_corrections()
+                sample_and_update_wire(solver)
+
+                solver._advance_dispersive_state()
+                if has_complex_fields(solver):
+                    if getattr(solver, "uses_cpml", False):
+                        update_electric_fields_bloch_cpml(solver)
+                    else:
+                        solver._update_electric_fields_bloch()
+                else:
+                    if getattr(solver, "nonlinear_enabled", False):
+                        solver._update_nonlinear_electric_coefficients()
+                    solver._update_electric_fields(solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+                    if getattr(solver, "full_aniso_enabled", False):
+                        apply_full_aniso_corrections(solver)
+
+                deposit_wire_current(solver)
 
             if getattr(solver, "tfsf_enabled", False):
                 apply_tfsf_e_correction(solver, time_value)
@@ -792,11 +969,11 @@ class _FDTDGradientBridge:
 
                 inject_electric_surface_source_terms(
                     solver,
-                    time_value=time_value + 0.5 * float(solver.dt),
+                    time_value=injection_time("equivalent_electric_current", time_value, solver.dt),
                 )
 
             if solver._source_terms:
-                solver.add_source(time_value=time_value)
+                solver.add_source(time_value=injection_time("electric_current", time_value, solver.dt))
             apply_port_runtimes(solver)
             apply_network_runtimes(solver)
             solver._apply_dispersive_corrections()
@@ -849,16 +1026,30 @@ class _FDTDGradientBridge:
         with torch.no_grad():
             self.simulation._refresh_scene()
             scene = self.simulation.scene
-            solver = self.simulation._build_fdtd_solver_for_scene(scene, initialize=True)
+            solver_scene = scene
+            if self.simulation.scene_module is not None and any(
+                isinstance(source, ModeSource) for source in scene.resolved_sources()
+            ):
+                # Only mode launch routing/replay needs the declarative graph.
+                # Keep the numerical scene for Result material consumers.
+                with torch.enable_grad():
+                    solver_scene = self._material_graph_scene()
+            solver = self.simulation._build_fdtd_solver_for_scene(solver_scene, initialize=True)
             self._validate_supported_configuration(solver)
             from .dispatch import validate_native_adjoint_preparation
 
-            validate_native_adjoint_preparation(solver)
+            solver._trainable_sigma_enabled = any(
+                isinstance(getattr(structure.material, "sigma_e", None), torch.Tensor)
+                for structure in solver.scene.structures
+            )
+            solver._joint_material_adjoint = validate_native_adjoint_preparation(solver).name == "JOINT_MATERIAL"
 
             time_steps = self.simulation._resolve_fdtd_time_steps(solver, scene)
             dft_cfg = self.simulation.config.spectral_sampler
-            requested_full_field_dft = self.simulation.config.full_field_dft
-            use_full_field_dft = requested_full_field_dft or len(self.simulation.frequencies) > 1
+            from ...simulation import _resolve_full_field_dft
+
+            use_full_field_dft = _resolve_full_field_dft(
+                self.simulation.config.full_field_dft, self.simulation.frequencies, scene.ports)
             dft_request = self.simulation.frequency if len(self.simulation.frequencies) == 1 else self.simulation.frequencies
             raw_output, checkpoints = self._run_forward_with_checkpoints(
                 solver,
@@ -873,11 +1064,28 @@ class _FDTDGradientBridge:
 
     def accept_forward(self, solver, raw_output, checkpoints, *, time_steps, use_full_field_dft):
         """Bind an already executed native forward and its owned checkpoints."""
+        self._mode_replay_cache = None
         runtime = _runtime()
         dft_cfg = self.simulation.config.spectral_sampler
         if raw_output is None:
             raise RuntimeError("FDTD solve did not return any output.")
 
+        copper_records = {}
+        from ..runtime.representation import energy_representation
+        for entry in getattr(solver, "_copper_foils", ()):
+            record = copper_records.setdefault(entry["face"].name, dict(dissipated_energy=0., stored_energy=0.,
+                frequency_range=entry["response"].frequency_range,
+                max_relative_model_error=entry["response"].max_relative_error, free_edge_trace_count=0))
+            record["energy_representation"] = energy_representation(solver)
+            if not entry["imaginary"]:
+                record["free_edge_trace_count"] += int((entry["admittance_scale"] != 1).sum())
+            record["dissipated_energy"] = record["dissipated_energy"] + entry["cumulative_loss"].clone()
+            record["stored_energy"] = record["stored_energy"] + .5 * torch.sum(
+                entry["state"].square() * entry["area"] * entry["admittance_scale"])
+        if copper_records:
+            raw_output["conductor_losses"] = copper_records
+        from .copper_spectra import prepare_spectral_outputs
+        prepare_spectral_outputs(solver, raw_output)
         pack = runtime._prepare_forward_pack(raw_output)
         checkpoint_schema = runtime._validate_checkpoint_sequence(checkpoints)
         self._last_solver = solver
@@ -903,7 +1111,7 @@ class _FDTDGradientBridge:
         self._observer_schedule_pack = _schedule_to_tensor_pack(
             self._observer_schedule,
             device=solver.device,
-            dtype=solver.eps_Ex.dtype,
+            dtype=getattr(solver, "_observer_dtype", solver.eps_Ex.dtype),
         )
         self._last_solver_stats = self.simulation._build_fdtd_solver_stats(
             solver,
@@ -925,6 +1133,9 @@ class _FDTDGradientBridge:
         }
         monitors = runtime._rebuild_monitors(pack.monitor_templates, output_tensors, len(pack.field_names))
         monitors.update(self._last_time_monitors)
+        from ..time_traces import guard_nondifferentiable_traces
+
+        guard_nondifferentiable_traces(monitors)
         monitors.update(
             runtime._rebuild_wire_monitors(
                 pack.wire_monitor_templates,
@@ -952,6 +1163,13 @@ class _FDTDGradientBridge:
             raw_output["ports"] = ports
         if circuits:
             raw_output["circuits"] = circuits
+        if pack.copper_templates:
+            raw_output["conductor_losses"] = {
+                name: {**record, **{quantity: output_tensors[index] for quantity, index in indices.items()}}
+                for name, (record, indices) in pack.copper_templates.items()}
+        from .copper_spectra import rebuild_spectral_outputs
+        raw_output["loss_materials"] = rebuild_spectral_outputs(
+            pack, output_tensors, raw_output.get("conductor_losses", {}))
         return fields, monitors, ports, circuits, raw_output
 
     def _backward_impl(self, base_inputs, grad_outputs, *, profile_enabled: bool):
@@ -978,11 +1196,17 @@ class _FDTDGradientBridge:
         if solver is None or self._last_pack is None or not self._last_checkpoints:
             raise RuntimeError("FDTD backward called before a forward pass initialized the adjoint bridge.")
 
+        if self.material_inputs and runtime._scene_has_mode_source(solver):
+            self._validate_mode_source_replay(solver, base_inputs)
+
         checkpoint_schema = self._checkpoint_schema or runtime._validate_checkpoint_sequence(self._last_checkpoints)
         profiler = _BackwardProfiler(enabled=profile_enabled, device=torch.device(solver.device))
         profiler.start_total()
 
         with profiler.section("seed_build"):
+            from .accumulation import prepare_tfsf_sample_plans
+
+            prepare_tfsf_sample_plans(solver)
             seed_runtime = _build_output_seeds(
                 solver,
                 self._last_pack,
@@ -995,7 +1219,7 @@ class _FDTDGradientBridge:
                 observer_schedule=(
                     self._observer_schedule_pack
                     if self._observer_schedule_pack is not None
-                    else _schedule_to_tensor_pack(self._observer_schedule, device=solver.device, dtype=solver.eps_Ex.dtype)
+                    else _schedule_to_tensor_pack(self._observer_schedule, device=solver.device, dtype=getattr(solver, "_observer_dtype", solver.eps_Ex.dtype))
                 ),
             )
         profiler.record_seed_runtime(
@@ -1015,6 +1239,26 @@ class _FDTDGradientBridge:
             for name in state_names
         }
 
+        for index, entry in enumerate(getattr(solver, "_copper_foils", ())):
+            _record, positions = self._last_pack.copper_templates[entry["face"].name]
+            heat = grad_outputs[positions["dissipated_energy"]]
+            if heat is not None:
+                adjoint_state[f"copper_foil_{index}_cumulative_loss"].add_(heat)
+        grad_copper_coefficients = tuple({
+            **{key: torch.zeros_like(entry[key]) for key in COPPER_COEFFICIENTS},
+            "response_alpha": entry.get("response_alpha", 1.),
+            "edge_geometry": entry.get("edge_geometry"),
+            "structure_index": next(index for index, structure in enumerate(solver.scene.structures)
+                                     if structure.material is entry["face"].material)
+        } for entry in getattr(solver, "_copper_foils", ()))
+        for index, entry in enumerate(getattr(solver, "_copper_foils", ())):
+            _record, positions = self._last_pack.copper_templates[entry["face"].name]
+            storage = grad_outputs[positions["stored_energy"]]
+            if storage is not None:
+                adjoint_state[f"copper_foil_{index}_state"].add_(
+                    storage * entry["state"] * entry["area"] * entry["admittance_scale"])
+                grad_copper_coefficients[index]["admittance_scale"].add_(
+                    .5 * storage * entry["state"].square().sum(0) * entry["area"])
         grad_accumulator_backend = _resolve_grad_accumulator_backend(solver.device)
         eps_ex = solver.eps_Ex.detach().clone().requires_grad_(True)
         eps_ey = solver.eps_Ey.detach().clone().requires_grad_(True)
@@ -1022,6 +1266,9 @@ class _FDTDGradientBridge:
         grad_eps_ex = torch.zeros_like(solver.eps_Ex)
         grad_eps_ey = torch.zeros_like(solver.eps_Ey)
         grad_eps_ez = torch.zeros_like(solver.eps_Ez)
+        grad_sigma = {name: torch.zeros_like(getattr(solver, f"sigma_e_{name}")) for name in ("Ex", "Ey", "Ez")}
+        from .copper_spectra import seed_spectral_outputs
+        seed_spectral_outputs(self._last_pack, grad_outputs, adjoint_state, grad_sigma, grad_copper_coefficients)
         solver._batch_source_scale_gradients = {
             index: torch.zeros((), device=solver.device, dtype=solver.eps_Ex.dtype)
             for index in getattr(solver, "_batch_source_scale_amplitudes", {})}
@@ -1101,8 +1348,8 @@ class _FDTDGradientBridge:
         # The compiled source-term set (curl-coefficient patches and, for mode
         # sources, the eigensolve profile) depends only on the solver and the frozen
         # eps leaves, both constant across the backward sweep, so resolve it once and
-        # hand the same lists to every reverse step instead of rebuilding the replay
-        # solver (and re-running the mode eigensolve) per step.
+        # hand the same lists to checkpoint replay and every reverse step instead
+        # of rebuilding the replay solver (and mode eigensolve) per step.
         resolved_source_terms = runtime._resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez)
         if hasattr(solver, "_mode_source_cotangent_accum"):
             delattr(solver, "_mode_source_cotangent_accum")
@@ -1121,6 +1368,20 @@ class _FDTDGradientBridge:
         # fresh-allocation behavior unchanged.
         reverse_scratch = _ReverseScratch()
         solver._reverse_ctx_scratch = reverse_scratch
+        from ...adjoint_inputs import material_pole_tensors
+        pole_gradients = None
+        with torch.enable_grad():
+            pole_scene = self._material_graph_scene()
+            trainable_poles = any(value.requires_grad for structure in pole_scene.structures
+                                  for value in material_pole_tensors(structure.material))
+        if trainable_poles:
+            pole_gradients = {}
+            for specs in (runtime.iter_dispersive_state_specs, runtime.iter_magnetic_dispersive_state_specs):
+                for component, kind, index, _, entry in specs(solver) or ():
+                    pole_gradients[(component, kind, index)] = {
+                        key: torch.zeros_like(value) if key == "drive" else entry["drive"].new_zeros(())
+                        for key, value in entry.items() if key in ("drive", "decay", "restoring")}
+        solver._pole_coefficient_gradients = pole_gradients
         try:
             for start_step, end_step in reversed(segment_bounds):
                 mid_magnetic = [] if capture_mid_magnetic else None
@@ -1137,6 +1398,7 @@ class _FDTDGradientBridge:
                         lumped_traces_out=lumped_traces,
                         circuit_traces_out=circuit_traces,
                         network_traces_out=network_traces,
+                        resolved_source_terms=resolved_source_terms,
                     )
                 rf_active = (
                     network_traces is not None
@@ -1263,6 +1525,16 @@ class _FDTDGradientBridge:
                         mur_transposed=True,
                     )
                     profiler.record_reverse_backend(step_result.backend)
+                    if step_result.grad_copper_coefficients is not None:
+                        for accumulated, gradients in zip(grad_copper_coefficients, step_result.grad_copper_coefficients):
+                            for key in COPPER_COEFFICIENTS:
+                                accumulated[key].add_(gradients[key])
+                    for name, gradient in zip(("Ex", "Ey", "Ez"), (
+                        step_result.grad_sigma_ex, step_result.grad_sigma_ey, step_result.grad_sigma_ez)):
+                        if gradient is not None:
+                            grad_sigma[name].add_(gradient)
+                        if local_grad_eps is not None:
+                            grad_sigma[name].add_(local_grad_eps[name], alpha=0.5 * float(solver.dt))
                     grad_eps_ex = _accumulate_grad(grad_accumulator_backend, grad_eps_ex, step_result.grad_eps_ex)
                     grad_eps_ey = _accumulate_grad(grad_accumulator_backend, grad_eps_ey, step_result.grad_eps_ey)
                     grad_eps_ez = _accumulate_grad(grad_accumulator_backend, grad_eps_ez, step_result.grad_eps_ez)
@@ -1382,6 +1654,12 @@ class _FDTDGradientBridge:
                             grad_eps_ey=grad_eps_ey,
                             grad_eps_ez=grad_eps_ez,
                             eps0=solver.eps0,
+                            dt=solver.dt,
+                            grad_pole_coefficients=pole_gradients,
+                            grad_copper_coefficients=grad_copper_coefficients,
+                            grad_sigma_ex=grad_sigma["Ex"],
+                            grad_sigma_ey=grad_sigma["Ey"],
+                            grad_sigma_ez=grad_sigma["Ez"],
                             grad_aniso_inverse=grad_aniso_inverse,
                             grad_chi3_ex=grad_chi3_ex,
                             grad_chi3_ey=grad_chi3_ey,
@@ -1413,12 +1691,17 @@ class _FDTDGradientBridge:
                             material_outputs,
                         )
                     )
+                    vector_gradients = getattr(solver, "_source_vector_gradients", None)
+                    if vector_gradients is not None:
+                        outputs = tuple(a if b is None else a + b for a, b in zip(outputs, vector_gradients))
                     if source_outputs is not None:
                         outputs = tuple(a + b for a, b in zip(outputs, source_outputs))
         finally:
+            del solver._pole_coefficient_gradients
             if hasattr(solver, "_mode_source_cotangent_accum"):
                 delattr(solver, "_mode_source_cotangent_accum")
-            for name in ("_source_aniso_inverse_leaves", "_source_aniso_inverse_gradients"):
+            for name in ("_source_aniso_inverse_leaves", "_source_aniso_inverse_gradients",
+                         "_source_vector_materials", "_source_vector_inputs", "_source_vector_gradients"):
                 if hasattr(solver, name):
                     delattr(solver, name)
             if getattr(solver, "_reverse_ctx_scratch", None) is not None:
@@ -1501,7 +1784,8 @@ def run_fdtd_with_gradient_bridge(simulation) -> Result:
     return Result(
         method="fdtd",
         scene=simulation.scene,
-        prepared_scene=bridge._last_solver.scene if bridge._last_solver is not None else None,
+        prepared_scene=(bridge._last_solver.scene if bridge._last_solver is not None
+                        and bridge._last_solver.scene._public_scene is simulation.scene else None),
         frequency=simulation.frequency,
         frequencies=simulation.frequencies,
         solver=bridge._last_solver,

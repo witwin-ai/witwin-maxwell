@@ -286,7 +286,7 @@ def _nonperiodic_slab_scene(*, direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0
                             source_time=None, injection=None):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.12),
+        grid=mw.GridSpec.uniform(0.06),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         device="cuda",
     )
@@ -320,6 +320,14 @@ def test_nonperiodic_tfsf_slab_initializes_axis_aligned_state():
     assert state["lower"][2] < state["upper"][2]
     assert len(state["electric_terms"]) > 0
     assert len(state["magnetic_terms"]) > 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
+def test_nonperiodic_cw_incident_phase_requires_propagating_native_grid():
+    scene = _nonperiodic_slab_scene()
+    scene.grid = mw.GridSpec.uniform(0.12)
+    with pytest.raises(ValueError, match="propagating band; refine the spatial grid"):
+        mw.Simulation.fdtd(scene, frequencies=[1.e9], run_time=mw.TimeConfig(time_steps=1)).prepare()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
@@ -724,8 +732,8 @@ def test_grating_tfsf_general_axis_forward_confines_total_field(axis):
 @pytest.mark.parametrize("axis", ["x", "y"])
 def test_grating_tfsf_general_axis_broadband_runs_finite(axis):
     # Broadband (GaussianPulse) grating injection on a non-z normal axis: the
-    # delayed surface-current patches scatter into the split real/imag Bloch field
-    # with the boundary wrap phase, and the pulse is not silently downgraded to CW.
+    # complex incident line carries the fixed transverse Bloch derivative across
+    # the band and injects both field banks without a carrier-delay approximation.
     frequencies = (0.85e9, 1.0e9, 1.15e9)
     result = mw.Simulation.fdtd(
         _general_axis_grating_scene(
@@ -740,7 +748,7 @@ def test_grating_tfsf_general_axis_broadband_runs_finite(axis):
 
     assert result.solver.tfsf_enabled is True
     assert result.solver.complex_fields_enabled is True
-    assert result.solver._tfsf_state["provider"] == "plane_wave_grating_slab_cw"
+    assert result.solver._tfsf_state["provider"] == "plane_wave_fixed_k"
     assert result.solver._tfsf_state["axis"] == axis
     for frequency in frequencies:
         payload = result.monitor("center", frequency=frequency)

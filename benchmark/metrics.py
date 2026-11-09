@@ -3,6 +3,24 @@ from __future__ import annotations
 import numpy as np
 
 
+FLUX_CONVERGENCE_TOLERANCE = 1e-2
+FIELD_CONVERGENCE_TOLERANCE = 1e-2
+
+
+def field_runtime_convergence(field_1x: np.ndarray, field_2x: np.ndarray) -> tuple[float, bool]:
+    """Classify the relative L2 change of the complex display field."""
+    relative_change = float(
+        np.linalg.norm((field_2x - field_1x).ravel()) / np.linalg.norm(field_1x.ravel())
+    )
+    return relative_change, relative_change <= FIELD_CONVERGENCE_TOLERANCE
+
+
+def flux_runtime_convergence(power_1x: np.ndarray, power_2x: np.ndarray) -> tuple[float, bool]:
+    """Classify the largest relative flux change across monitors and frequencies."""
+    relative_change = float(np.max(np.abs(power_2x - power_1x) / np.abs(power_1x)))
+    return relative_change, relative_change <= FLUX_CONVERGENCE_TOLERANCE
+
+
 def significant_field_mask(reference: np.ndarray, *, relative_floor: float = 0.1) -> np.ndarray:
     """Select the physically excited support of a reference complex field."""
     values = np.abs(np.asarray(reference, dtype=np.complex128))
@@ -126,7 +144,7 @@ def vector_field_comparison(
     *,
     coords: tuple[np.ndarray, np.ndarray],
 ) -> dict[str, object]:
-    """Compare co-located complex vector fields with one global phase and scale."""
+    """Compare absolute vector fields, retaining fitted phase/scale diagnostics."""
     actual_array = np.asarray(actual, dtype=np.complex128)
     reference_array = np.asarray(reference, dtype=np.complex128)
     if actual_array.shape != reference_array.shape or actual_array.ndim != 3:
@@ -159,9 +177,9 @@ def vector_field_comparison(
     amplitude_ratio = actual_peak / reference_peak
     energy_ratio = amplitude_ratio * np.sqrt(actual_energy / reference_energy)
 
-    phase_aligned = actual_scaled * phase * amplitude_ratio
+    absolute = actual_scaled * amplitude_ratio
     raw_l2 = np.sqrt(
-        float(np.sum(weights * np.abs(phase_aligned - reference_scaled) ** 2))
+        float(np.sum(weights * np.abs(absolute - reference_scaled) ** 2))
         / reference_energy
     )
     scale_denominator = np.sum(weights * np.abs(actual_scaled) ** 2)
@@ -171,7 +189,7 @@ def vector_field_comparison(
         float(np.sum(weights * np.abs(shape_aligned - reference_scaled) ** 2))
         / reference_energy
     )
-    linf = float(np.max(np.abs(phase_aligned - reference_scaled)))
+    linf = float(np.max(np.abs(absolute - reference_scaled)))
     shape_scale = complex(shape_scale_scaled * reference_peak / actual_peak)
     return {
         "valid": True,

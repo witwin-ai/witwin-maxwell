@@ -175,6 +175,7 @@ class PowerLossData:
     area_unit: str = "m^2"
     length_unit: str = "m"
     collocation: str = "Yee electric edges with component dual control volumes"
+    coordinate_frame: Mapping[str, object] | None = None
     normalization: str = (
         "peak phasor; time-average static electric conduction density "
         "q=0.5*sigma_e*|E|^2; total is the sum of explicitly available channels"

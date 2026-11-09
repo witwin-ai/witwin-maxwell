@@ -54,7 +54,7 @@ def test_shard_local_adjoint_outputs_keep_time_records_outside_spectral_pack():
 
 
 def _scene(density, *, time_only):
-    scene = mw.Scene(domain=mw.Domain(bounds=((-0.4, .4),) * 3),
+    scene = mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=((-0.4, .4),) * 3),
         grid=mw.GridSpec.uniform(.1), boundary=mw.BoundarySpec.none(), device="cuda:0")
     scene.add_material_region(mw.MaterialRegion("design", geometry=mw.Box(position=(0., 0., 0.), size=(.4, .4, .4)),
         density=density, eps_bounds=(1., 4.)))

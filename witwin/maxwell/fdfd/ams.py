@@ -40,6 +40,7 @@ from __future__ import annotations
 import cupy as cp
 import cupyx.scipy.sparse as cpsp
 import cupyx.scipy.sparse.linalg as cupy_linalg
+import torch
 
 # Complex shift applied to the vector auxiliary operator (shifted-Laplacian
 # damping); the gradient space is definite and needs no shift.
@@ -83,7 +84,7 @@ class _NodalMultigrid:
     (transposes, never conjugates).
 
     The operator is symmetrically diagonal-scaled first (S A S with
-    S = diag(A)^-1/2), which absorbs the orders-of-magnitude PML weight
+    S = diag(A)^-1/2), which absorbs the PML and material weight
     range into the transfers; the coarsest level is solved densely with a
     small Tikhonov term (the gradient-space operator has an exact constant
     null space)."""
@@ -107,13 +108,14 @@ class _NodalMultigrid:
         regularization = 1e-10 * float(cp.abs(coarse.diagonal()).max())
         coarse = coarse + regularization * cp.eye(coarse.shape[0], dtype=coarse.dtype)
         self.coarse_dense = coarse
+        self.coarse_dense_torch = torch.from_dlpack(coarse)
 
     def solve(self, r):
         return self.scale * self._cycle(0, self.scale * r)
 
     def _cycle(self, level, r):
         if level == len(self.levels):
-            return cp.linalg.solve(self.coarse_dense, r)
+            return cp.from_dlpack(torch.linalg.solve(self.coarse_dense_torch, torch.from_dlpack(r)))
         A, inv_diag, P, R = self.levels[level]
         z = self.omega * inv_diag * r
         z = z + P @ self._cycle(level + 1, R @ (r - A @ z))
@@ -130,15 +132,8 @@ def _edge_shapes(scene):
 
 
 def _stretch_half_factors(solver, dtype):
-    s_x, s_y, s_z = solver._create_pml_3d()
-    s_x = cp.asarray(s_x, dtype=dtype)
-    s_y = cp.asarray(s_y, dtype=dtype)
-    s_z = cp.asarray(s_z, dtype=dtype)
-    return (
-        (s_x[:-1] + s_x[1:]) / 2,
-        (s_y[:-1] + s_y[1:]) / 2,
-        (s_z[:-1] + s_z[1:]) / 2,
-    )
+    """Half-node stretch along each axis, the operator's own edge samples."""
+    return tuple(half.astype(dtype) for _main, half in solver._pml_stretch())
 
 
 def _edge_stretch_weights(solver, dtype):
@@ -192,14 +187,8 @@ def _average_block(node, axis, dtype):
 
 
 def _eps_face_vector(solver, dtype):
-    ex = cp.asarray(solver.material_eps_components["x"], dtype=dtype)
-    ey = cp.asarray(solver.material_eps_components["y"], dtype=dtype)
-    ez = cp.asarray(solver.material_eps_components["z"], dtype=dtype)
-    return cp.concatenate([
-        ((ex[:-1] + ex[1:]) / 2).ravel(),
-        ((ey[:, :-1] + ey[:, 1:]) / 2).ravel(),
-        ((ez[:, :, :-1] + ez[:, :, 1:]) / 2).ravel(),
-    ])
+    return cp.concatenate([cp.asarray(solver.material_eps_edges[axis], dtype=dtype).ravel()
+                           for axis in 'xyz'])
 
 
 class AMSPreconditioner:

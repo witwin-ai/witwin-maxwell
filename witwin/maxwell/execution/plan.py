@@ -100,6 +100,8 @@ def _batch_declaration(value, path, unresolved):
         return value.value
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, torch.dtype):
+        return str(value)
     if isinstance(value, torch.Tensor):
         unresolved.append(f"{path}: tensor values need compile-time comparison")
         return {"tensor_shape": list(value.shape), "dtype": str(value.dtype)}
@@ -255,7 +257,8 @@ def build_batch_plan(batch):
         "variant_ids": list(batch.variant_ids), "groups": groups, "devices": devices,
         "input_copy_bytes": None, "output_bytes": None, "retained_tape_bytes": None,
         "warnings": warnings, "unsupported_features": ["batch_autotuning", "fused_batch_reverse",
-            "exact_all_output_preplanning", "batch_rf_ports", "batch_advanced_material_dynamics"],
+            "exact_all_output_preplanning", "batch_modal_ports", "batch_port_sweeps",
+            "batch_nonlinear_materials", "batch_bloch_fields"],
         "configuration_digest": digest({"declarations": declarations, "execution": execution,
                                          "ids": batch.variant_ids,
                                          "variation": _batch_declaration(batch.variation, "variation", []),

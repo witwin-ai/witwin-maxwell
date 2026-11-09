@@ -1,0 +1,65 @@
+{
+  "results": [
+    {
+      "polarization": "TE",
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "steps": 100000,
+      "fitted_rho": 1.0001483272330691,
+      "passes": false,
+      "seed": 431,
+      "fit_window": [
+        50000,
+        100000
+      ],
+      "rescale_interval": 100,
+      "fit_first": [
+        50000,
+        3.761114330762875
+      ],
+      "fit_last": [
+        100000,
+        11.188260823755153
+      ],
+      "dominant_order": 3,
+      "seconds": 46.12992802262306
+    },
+    {
+      "polarization": "TM",
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "steps": 100000,
+      "fitted_rho": 1.0001154512451707,
+      "passes": false,
+      "seed": 431,
+      "fit_window": [
+        50000,
+        100000
+      ],
+      "rescale_interval": 100,
+      "fit_first": [
+        50000,
+        1.9248692595490642
+      ],
+      "fit_last": [
+        100000,
+        7.688150756336482
+      ],
+      "dominant_order": 4,
+      "seconds": 50.13427676260471
+    }
+  ],
+  "candidate": "AHK-family IMEX transverse-memory diffusion, nu=c0*hy/2, eta=0",
+  "input_sha256": {
+    "energy_stable.py": "efb9fe5d26bc1716fcbc7d857d25a1965d3d0fc4e6bfade8a227d3f3ca97f497",
+    "model.py": "c5d19a3bfdeb467a6b0767cb96588f7fcba61d51ad12fe16637b55b2c1156eb7",
+    "sweep.py": "c91b5ef97880d2943b7d1be8b3b2f9e3f1ae93037e791daf8c3d2273028a9667",
+    "bloch_sweep.py": "e4f1d4770b35a9a6c6fa305e19257d91c6795ed9ed02be68daec335d7397fd1e",
+    "reflection.py": "4d922efaa2618ccbf05446f87c78b6855d04dcf5f738fe3e2874550b41277c5a",
+    "energy.py": "dac708926b617ca881f57274c6a98e5632f92ef06747cacd78535ce912b851bc",
+    "power.py": "deef8d0216ad01a3149894eaf06c049b7e503c55ccc98161cd3b7c656b11d60f"
+  },
+  "cpu_only": true
+}

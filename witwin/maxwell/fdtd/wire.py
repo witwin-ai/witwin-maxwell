@@ -6,7 +6,10 @@ from typing import Any
 
 import torch
 
+from ..compiler.thin_wire import compile_wire_monitors
 from ..thin_wire import WireData
+from .runtime.representation import spectral_scale
+from .runtime.spectral import source_normalization_spectrum
 from .wire_lossy import (
     LossySegmentModel,
     build_lossy_segment_model,
@@ -172,14 +175,11 @@ def replay_wire_state(
     if runtime.lossy_model is not None:
         raise NotImplementedError(
             "Field-coupled reverse/adjoint replay of a finite-conductor thin wire is "
-            "not implemented: transposing the lossy current recurrence would require "
-            "the derivative of the passive series-impedance ADE coefficients with "
-            "respect to conductivity, but those coefficients come from the shared "
-            "rational vector fit, which is nondeterministic (B1) and not a "
-            "differentiable map of sigma -- so an exact reverse replay of dI/dsigma "
-            "through the recurrence cannot be certified. The deterministic conductivity "
-            "adjoint of the dissipation channel (d Re(Z')/d sigma via the analytic "
-            "internal impedance) is available through "
+            "not implemented: the lossy current/ADE transpose and field-coupled "
+            "conductivity sensitivity dI/dsigma remain deferred. The fixed-pole "
+            "passive fit supplies an active-set conductivity derivative for the "
+            "dissipation channel on LossySegmentModel. The analytic reference "
+            "conductivity adjoint is also available through "
             "witwin.maxwell.fdtd.wire_lossy.analytic_ac_resistance; run a PEC wire for "
             "field-coupled differentiable workflows."
         )
@@ -822,9 +822,9 @@ def initialize_wire_runtime(solver) -> WireRuntime | None:
         return None
 
     _reject_unsupported_composition(solver)
-    network = solver.scene.compile_thin_wires()
+    network = solver.scene.compile_thin_wires(device=solver.device)
     _validate_compiled_topology(network)
-    monitors = tuple(solver.scene.compile_wire_monitors())
+    monitors = compile_wire_monitors(solver.scene, network)
     device = solver.device
     dtype = solver.Ex.dtype
 
@@ -924,6 +924,10 @@ def initialize_wire_runtime(solver) -> WireRuntime | None:
             radius=network.radius.to(device=device, dtype=dtype),
             length=network.length.to(device=device, dtype=dtype),
             segment_wire_ids=network.segment_wire_ids,
+            tail=coefficients["tail"],
+            head=coefficients["head"],
+            node_capacitance=coefficients["node_capacitance"],
+            grounded=coefficients["grounded"],
             metadata=network.metadata,
             band=resolve_lossy_band(_lossy_band_frequencies(solver, monitors)),
             dt=float(solver.dt),
@@ -1270,7 +1274,8 @@ def finalize_wire_data(solver) -> dict[str, WireData]:
     for state in runtime.monitor_state:
         scales = torch.tensor(
             [
-                2.0 / entry["window_normalization"]
+                spectral_scale(entry["window_normalization"], integration_dt=solver._spectral_integration_dt,
+                               reference_frequency=solver._spectral_reference_frequency, frequency=entry["frequency"])
                 if entry["window_normalization"] > 0.0
                 else 0.0
                 for entry in state["entries"]
@@ -1289,6 +1294,17 @@ def finalize_wire_data(solver) -> dict[str, WireData]:
             if state["charge_real"] is not None
             else None
         )
+        if solver._normalize_source:
+            from .observers import _safe_source_spectrum
+            spectrum = _safe_source_spectrum(source_normalization_spectrum(
+                solver, state["frequencies"].detach().cpu().tolist(),
+                steps_run=state["entries"][0]["sample_count"] + state["entries"][0]["start_step"],
+                window_type=solver.observer_window_type,
+            )).to(dtype=torch.complex64 if solver.Ex.dtype == torch.float32 else torch.complex128).reshape(-1, 1)
+            if current is not None:
+                current = current / spectrum
+            if charge is not None:
+                charge = charge / spectrum
         segment_indices = monitor.segment_indices.to(device=network.segment_ids.device, dtype=torch.int64)
         ohmic_loss = None
         if "ohmic_loss" in monitor.quantities:
@@ -1346,7 +1362,13 @@ def finalize_wire_data(solver) -> dict[str, WireData]:
                 )
             ),
             "node_positions": network.node_positions.index_select(0, node_indices),
-            "phasor_convention": "peak phasor with exp(-i*omega*t) time dependence",
+            "phasor_convention": (
+                ("Fourier integral with per-frequency reference period and exp(+i*omega*t) kernel"
+                 if solver._spectral_reference_frequency is None else
+                 "Fourier integral per reference period with exp(+i*omega*t) kernel")
+                if solver._spectral_integration_dt is not None and not solver._normalize_source
+                else "peak phasor with exp(-i*omega*t) time dependence"
+            ),
             "wire_cfl_limit": runtime.cfl_limit,
             "uncoupled_wire_cfl_limit": runtime.wire_cfl_limit,
             "maxwell_cfl_limit": runtime.maxwell_cfl_limit,

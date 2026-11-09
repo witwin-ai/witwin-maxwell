@@ -103,21 +103,31 @@ def differential_pair_scene(*, dx: float = 0.005, device: str = "cuda") -> mw.Sc
         device=device,
     )
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, -0.5 * dx), size=(length, GROUND_W, dx)).with_material(
-            mw.Material.pec(), name="ground"
+        mw.Structure(
+            mw.Box(position=(0.0, 0.0, -0.5 * dx), size=(length, GROUND_W, dx)),
+            mw.Material.pec(),
+            name="ground",
         )
     )
     scene.add_structure(
-        mw.Box(
-            position=(0.0, 0.0, 0.5 * SUBSTRATE_H),
-            size=(length, GROUND_W, SUBSTRATE_H),
-        ).with_material(mw.Material(eps_r=SUBSTRATE_EPS), name="substrate")
+        mw.Structure(
+            mw.Box(
+                position=(0.0, 0.0, 0.5 * SUBSTRATE_H),
+                size=(length, GROUND_W, SUBSTRATE_H),
+            ),
+            mw.Material(eps_r=SUBSTRATE_EPS),
+            name="substrate",
+        )
     )
     for sign, name in ((+1.0, "strip_pos"), (-1.0, "strip_neg")):
         scene.add_structure(
-            mw.Box(
-                position=(0.0, sign * _STRIP_OFFSET, SUBSTRATE_H + 0.5 * dx),
-                size=(length, STRIP_W, dx),
-            ).with_material(mw.Material.pec(), name=name)
+            mw.Structure(
+                mw.Box(
+                    position=(0.0, sign * _STRIP_OFFSET, SUBSTRATE_H + 0.5 * dx),
+                    size=(length, STRIP_W, dx),
+                ),
+                mw.Material.pec(),
+                name=name,
+            )
         )
     return scene

@@ -1,0 +1,78 @@
+{
+  "rows": [
+    {
+      "p": 0.03,
+      "polarization": "TE",
+      "steps": 100000,
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "dominant_order": 94,
+      "fitted_rho": 1.0000000574465684,
+      "log_slope": 5.744656669451523e-08,
+      "passes": false
+    },
+    {
+      "p": 0.03,
+      "polarization": "TM",
+      "steps": 100000,
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "dominant_order": 1,
+      "fitted_rho": 1.0000001089746586,
+      "log_slope": 1.0897465260556094e-07,
+      "passes": false
+    },
+    {
+      "p": 0.1,
+      "polarization": "TE",
+      "steps": 100000,
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "dominant_order": 94,
+      "fitted_rho": 1.0000001063771313,
+      "log_slope": 1.0637712561779861e-07,
+      "passes": false
+    },
+    {
+      "p": 0.1,
+      "polarization": "TM",
+      "steps": 100000,
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "dominant_order": 102,
+      "fitted_rho": 1.0000000952654202,
+      "log_slope": 9.526541568018544e-08,
+      "passes": false
+    },
+    {
+      "p": 0.3,
+      "polarization": "TE",
+      "steps": 100000,
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "dominant_order": 73,
+      "fitted_rho": 1.000000144261032,
+      "log_slope": 1.4426102166401615e-07,
+      "passes": false
+    },
+    {
+      "p": 0.3,
+      "polarization": "TM",
+      "steps": 100000,
+      "period_m": 5.12,
+      "ny": 205,
+      "harmonics": 103,
+      "dominant_order": 102,
+      "fitted_rho": 1.0000001239535026,
+      "log_slope": 1.239534949654988e-07,
+      "passes": false
+    }
+  ],
+  "limitation": "Matrix-free Fourier stack, projected transverse means, same scope as B0",
+  "seconds": 105.85496006533504
+}

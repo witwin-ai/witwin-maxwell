@@ -12,6 +12,7 @@ from witwin.maxwell.fdtd.checkpoint import capture_checkpoint_state
 from witwin.maxwell.fdtd.material_pullback import pullback_density_gradients
 from witwin.maxwell.scene import prepare_scene
 from tests.gradients import fdtd_adjoint_baselines as adjoint_baselines
+from tests.gradients.scalar_permittivity_scene import ScalarPermittivityPointScene
 
 
 def _build_simulation(model, *, time_steps=24):
@@ -84,6 +85,7 @@ def test_fdtd_gradient_bridge_rejects_trainable_geometry_on_full_anisotropic_med
     off-diagonal coupling coefficients carry no material gradient channel, so the
     geometry sensitivity would be silently dropped."""
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
         device="cpu",
@@ -246,6 +248,7 @@ def test_fdtd_gradient_bridge_accepts_general_nonlinear_media(material):
 
 def test_fdtd_gradient_bridge_rejects_trainable_geometry_on_magnetic_dispersive_media():
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
         device="cpu",
@@ -1082,6 +1085,7 @@ def _build_material_pullback_scene(device: str):
         dtype=torch.float32,
     )
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((0.0, 0.5), (0.0, 0.4), (0.0, 0.4))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
@@ -1160,6 +1164,7 @@ class _DensityPointScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -1204,7 +1209,7 @@ class _AnalyticBoxPointScene(mw.SceneModule):
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
             device="cuda",
-            subpixel_samples=5,
+            subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
         )
         scene.add_structure(
             mw.Structure(
@@ -1253,6 +1258,7 @@ class _DensitySurfaceSourceScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.48, 0.48))),
             # Resolve the 1 GHz soft surface source above the positive discrete
             # Poynting-power limit; 0.12 m is too coarse for this wave in 3D.
@@ -1285,6 +1291,7 @@ class _DensityFluxScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -1334,6 +1341,7 @@ class _DensityDispersiveScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -1398,6 +1406,7 @@ class _DensityTFSFScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-1.2, 1.2), (-1.2, 1.2), (-1.2, 1.2))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
@@ -1425,6 +1434,7 @@ class _DensityBlochScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.15),
             boundary=mw.BoundarySpec.bloch((math.pi / 1.2, 0.0, 0.0)),
@@ -1462,6 +1472,7 @@ class _DensityBlochYPmlScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.75, 0.75), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.15),
             boundary=mw.BoundarySpec.faces(
@@ -1524,6 +1535,7 @@ class _DensityGratingTFSFScene(mw.SceneModule):
         boundary_kinds = {other: "bloch" for other in "xyz"}
         boundary_kinds[axis] = "pml"
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=domain_bounds),
             grid=mw.GridSpec.uniform(0.15),
             boundary=mw.BoundarySpec.faces(
@@ -1589,7 +1601,7 @@ def _build_direct_geometry_scene(position: torch.Tensor):
         grid=mw.GridSpec.uniform(0.12),
         boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
         device="cuda",
-        subpixel_samples=5,
+        subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
     )
     scene.add_structure(
         mw.Structure(
@@ -1703,7 +1715,7 @@ def test_fdtd_gradient_bridge_backpropagates_to_direct_scene_geometry_parameters
     assert position.grad is not None
     assert position.grad.shape == position.shape
     assert torch.isfinite(position.grad).all()
-    assert abs(float(position.grad[0].item())) > 1.0e-10
+    assert float(position.grad[0].abs() * .1 / loss.detach()) > 1.0e-6
     assert result.monitor("probe")["data"].grad_fn is not None
 
 
@@ -1721,7 +1733,7 @@ def test_fdtd_gradient_bridge_backpropagates_to_scene_module_geometry_parameters
 
     assert model.box_x.grad is not None
     assert torch.isfinite(model.box_x.grad).all()
-    assert abs(model.box_x.grad.item()) > 1.0e-10
+    assert float(model.box_x.grad.abs() * .1 / loss.detach()) > 1.0e-6
     assert result.monitor("probe")["data"].grad_fn is not None
 
 
@@ -1757,10 +1769,22 @@ def test_fdtd_gradient_bridge_matches_central_difference_for_scene_module_geomet
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_optimizer_step_reduces_geometry_target_loss():
+    """Adam steps on a box position reduce a probe-matching loss.
+
+    The start is x=0.13, where the 0.18 m box (+x face at 0.22) lies wholly
+    inside the 0.24 m physical domain. The former start x=0.16 put the +x face
+    at 0.25, inside the PML. There the loss slope is set by how the sub-sample
+    fill treats the sliver crossing the PML edge: the binary fill gave
+    +8.7e-3 and the exact coverage fill gives -1.3e-3. Both agree with central
+    finite differences (fd1 +8.9e-3 / -1.3e-3), so the adjoint is correct and
+    only that boundary-straddling start was non-monotone. From 0.13 the
+    trajectories of both fills converge the same way
+    (loss 2.6e-4 -> 1.2e-5, distance 0.21 -> 0.047).
+    """
     target_x = -0.08
     target_data = _geometry_target_probe(target_x)
 
-    model = _AnalyticBoxPointScene(init_x=0.16).cuda()
+    model = _AnalyticBoxPointScene(init_x=0.13).cuda()
     optimizer = torch.optim.Adam(model.parameters(), lr=5.0e-2)
     initial_distance = abs(float(model.box_x.detach().item()) - target_x)
 
@@ -2332,17 +2356,18 @@ def test_fdtd_replay_mid_magnetic_capture_leaves_gradient_bit_identical(monkeypa
     the same material gradient as recomputing it inside the reverse backend."""
     import witwin.maxwell.fdtd.adjoint.core as adjoint_core
 
-    model = _DensityPointScene(init=0.0).cuda()
+    model = ScalarPermittivityPointScene().cuda()
     _, _, loss = _loss_from_point_probe(model)
     loss.backward()
-    grad_with_capture = model.logits.grad.detach().clone()
+    grad_with_capture = model.eps_r.grad.detach().clone()
 
     monkeypatch.setattr(adjoint_core, "_replay_can_capture_mid_magnetic", lambda solver: False)
-    model_recompute = _DensityPointScene(init=0.0).cuda()
+    model_recompute = ScalarPermittivityPointScene().cuda()
     _, _, loss_recompute = _loss_from_point_probe(model_recompute)
     loss_recompute.backward()
-    grad_with_recompute = model_recompute.logits.grad.detach().clone()
+    grad_with_recompute = model_recompute.eps_r.grad.detach().clone()
 
+    assert torch.isfinite(grad_with_capture) and grad_with_capture.abs() > 0
     assert torch.equal(grad_with_capture, grad_with_recompute)
 
 
@@ -2365,14 +2390,17 @@ def test_fdtd_gradient_bridge_checkpoint_replay_matches_tfsf_forward_state():
         for name, tensor in checkpoint.tensors.items():
             if name.startswith("psi_"):
                 continue
+            if name.startswith("tfsf_aux_"):
+                assert torch.equal(tensor, reference_state[name]), (checkpoint.step, name)
+                continue
             assert torch.allclose(tensor, reference_state[name], rtol=1e-5, atol=1e-5)
 
     terminal_state = full_states[-1]
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         assert torch.allclose(terminal_state[name], getattr(solver, name), rtol=1e-4, atol=5e-5)
     auxiliary_grid = solver._tfsf_state["auxiliary_grid"]
-    assert torch.allclose(terminal_state["tfsf_aux_electric"], auxiliary_grid.electric, rtol=1e-5, atol=1e-5)
-    assert torch.allclose(terminal_state["tfsf_aux_magnetic"], auxiliary_grid.magnetic, rtol=1e-5, atol=1e-5)
+    assert torch.equal(terminal_state["tfsf_aux_electric"], auxiliary_grid.electric)
+    assert torch.equal(terminal_state["tfsf_aux_magnetic"], auxiliary_grid.magnetic)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")

@@ -20,7 +20,7 @@ def _as_real_if_lossless(value: complex | float | int) -> complex | float:
     keeps its original real dtype and only genuinely lossy backgrounds carry an
     imaginary part into the propagator kernels."""
     number = complex(value)
-    if abs(number.imag) <= 1e-12 * (abs(number.real) + 1.0):
+    if abs(number.imag) <= 1e-12 * abs(number.real):
         return number.real
     return number
 
@@ -435,12 +435,15 @@ class PlanarEquivalentCurrents:
     def plane_points(self) -> torch.Tensor:
         return build_plane_points(self.axis, self.position, self.u, self.v)
 
+    def _quadrature_weights(self) -> torch.Tensor:
+        return self.weights_2d()[..., None].to(dtype=self.J.real.dtype).to(dtype=self.J.dtype)
+
     def quadrature(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Flattened ``(points, J_weighted, M_weighted)`` for the radiation
         integral: the plane's Yee-consistent trapezoid area weights are folded
         into the electric/magnetic surface currents so every source-surface type
         (planar patch or general curved surface) exposes the same interface."""
-        weights = self.weights_2d()[..., None].to(dtype=self.J.real.dtype)
+        weights = self._quadrature_weights()
         points = self.plane_points().reshape(-1, 3)
         j_weighted = (self.J * weights.to(dtype=self.J.dtype)).reshape(-1, 3)
         m_weighted = (self.M * weights.to(dtype=self.M.dtype)).reshape(-1, 3)
@@ -636,11 +639,14 @@ class SurfaceEquivalentCurrents:
     def shape(self) -> tuple[int]:
         return (int(self.points.shape[0]),)
 
+    def _quadrature_weights(self) -> torch.Tensor:
+        return self.weights[:, None].to(dtype=self.J.dtype)
+
     def quadrature(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Flattened ``(points, J_weighted, M_weighted)`` with the per-point
         surface-area weights folded into the currents, matching the interface of
         :meth:`PlanarEquivalentCurrents.quadrature`."""
-        weights = self.weights[:, None]
+        weights = self._quadrature_weights()
         j_weighted = self.J * weights.to(dtype=self.J.dtype)
         m_weighted = self.M * weights.to(dtype=self.M.dtype)
         return self.points, j_weighted, m_weighted
@@ -746,20 +752,19 @@ def _coord_indices_from_bounds(coords: torch.Tensor, lower: float, upper: float)
     return indices.to(device=coords.device)
 
 
-def _sample_exterior_patch(
-    material: torch.Tensor,
+def _exterior_patch_indices(
     prepared_scene,
     face_payload: Mapping[str, object],
-) -> torch.Tensor:
+):
     axis = _normalize_axis(face_payload["axis"])
     axis_index = _AXIS_TO_INDEX[axis]
     tangential = _tangential_indices(axis)
-    permuted = material.permute((axis_index, tangential[0], tangential[1]))
 
     normal_direction = face_payload.get("normal_direction", "+")
     sign = 1 if normal_direction == "+" else -1
     normal_coords = getattr(prepared_scene, axis)
-    plane_position = float(face_payload["position"])
+    # Flux and closed-surface faces are sampled on their snapped Yee plane.
+    plane_position = float(face_payload.get("yee_plane_position", face_payload["position"]))
     face_index = int(torch.argmin(torch.abs(normal_coords - plane_position)).item())
     outside_index = face_index + sign
     if outside_index < 0 or outside_index >= normal_coords.numel():
@@ -780,7 +785,7 @@ def _sample_exterior_patch(
     indices_a = _coord_indices_from_bounds(coord_a, *tangential_bounds[coord_a_name])
     indices_b = _coord_indices_from_bounds(coord_b, *tangential_bounds[coord_b_name])
 
-    return permuted[outside_index].index_select(0, indices_a).index_select(1, indices_b)
+    return (axis_index, *tangential), outside_index, indices_a, indices_b
 
 
 def _validate_homogeneous_exterior(
@@ -791,17 +796,44 @@ def _validate_homogeneous_exterior(
     ``(eps_r, mu_r)`` so the exterior wavenumber/impedance can drive the
     near-to-far-field transform. Returns ``None`` for non-closed-surface
     monitors (their background defaults to vacuum)."""
+    chart=getattr(getattr(result,"scene",None),"coordinates",None)
+    if chart is not None and monitor.get("kind")=="closed_surface" and monitor.get("bounds") is not None:
+        from ..compiler.ports import _box_values
+        bounds=monitor["bounds"]
+        for structure in result.scene.structures:
+            if getattr(structure,"enabled",True) and getattr(structure.material,"is_copper_foil",False):
+                position,size=_box_values(structure.geometry)
+                if any(position[i]-size[i]/2<bounds[i][0] or position[i]+size[i]/2>bounds[i][1] for i in range(3)):
+                    raise ValueError("Mapped closed Huygens export requires all copper inside the surface; its exterior propagation kernel assumes a homogeneous physical medium.")
+    if chart is not None and monitor.get("kind")=="plane":
+        monitor={"kind":"closed_surface","faces":{"finite":monitor}}
     if monitor.get("kind") != "closed_surface":
         return None
 
     prepared_scene = result.prepared_scene
-    eps_r, mu_r = prepared_scene.compile_relative_materials(frequency=frequency)
+    if chart is None:
+        eps_r, mu_r = prepared_scene.compile_relative_materials(frequency=frequency)
+    else:
+        # Registration currently permits physical scalar bulk media. Undo the
+        # u-component constitutive metric for the physical exterior check;
+        # varying chart coefficients do not imply a varying physical medium.
+        eps_components,mu_components=prepared_scene.compile_material_components(frequency=frequency)
+        u=torch.as_tensor(prepared_scene.y_nodes64,device=eps_components["y"].device,dtype=torch.float64)
+        h=(1-chart.curvature*u)[None,:,None]
+        eps_r=eps_components["y"]/h.to(eps_components["y"])
+        mu_r=mu_components["y"]/h.to(mu_components["y"])
     reference_eps = None
     reference_mu = None
 
     for face_payload in monitor.get("faces", {}).values():
-        eps_patch = _sample_exterior_patch(eps_r, prepared_scene, face_payload)
-        mu_patch = _sample_exterior_patch(mu_r, prepared_scene, face_payload)
+        permutation, outside_index, indices_a, indices_b = _exterior_patch_indices(
+            prepared_scene, face_payload
+        )
+        # Validation only: the background is returned as complex(.item()), so it carries no
+        # gradient. The prepared scene of a differentiable run holds the live design graph;
+        # detaching keeps the homogeneity checks on plain values.
+        eps_patch = eps_r.permute(permutation)[outside_index].index_select(0, indices_a).index_select(1, indices_b).detach()
+        mu_patch = mu_r.permute(permutation)[outside_index].index_select(0, indices_a).index_select(1, indices_b).detach()
         eps_value = eps_patch.reshape(-1)[0]
         mu_value = mu_patch.reshape(-1)[0]
 
@@ -897,7 +929,7 @@ def _equivalent_surface_currents_from_payload(
         area_weights = width_u[:, None] * width_v[None, :]
     return equivalent_surface_currents_from_fields(
         axis=axis,
-        position=float(monitor["position"]),
+        position=float(monitor.get("yee_plane_position", monitor["position"])),
         frequency=resolved_frequency,
         u=monitor[coord_name_a],
         v=monitor[coord_name_b],
@@ -950,6 +982,31 @@ def equivalent_surface_currents_from_fields(
             f"Missing tangential field components for {axis_name}-normal plane: {missing_list}."
         )
 
+    j_field, m_field = _surface_current_vectors(
+        normalized_fields, shape, axis_name, normal_direction,
+        device=device, real_dtype=real_dtype, complex_dtype=complex_dtype,
+    )
+    currents = PlanarEquivalentCurrents(
+        axis=axis_name,
+        position=position,
+        frequency=frequency,
+        u=u_coords,
+        v=v_coords,
+        J=j_field,
+        M=m_field,
+        background_eps_r=background_eps_r,
+        background_mu_r=background_mu_r,
+        normal_direction=("+" if _normalize_normal_direction(normal_direction) > 0.0 else "-"),
+        quadrature_rule=quadrature_rule,
+        area_weights=area_weights,
+    )
+    return currents.windowed(window_size)
+
+
+def _surface_current_vectors(
+    normalized_fields, shape, axis, normal_direction, *, device, real_dtype, complex_dtype,
+):
+    """Pointwise surface equivalence, with optional leading spectral dimensions."""
     e_field = torch.zeros(shape + (3,), device=device, dtype=complex_dtype)
     h_field = torch.zeros(shape + (3,), device=device, dtype=complex_dtype)
     for index, axis_label in enumerate(_INDEX_TO_AXIS):
@@ -972,27 +1029,138 @@ def equivalent_surface_currents_from_fields(
                 dtype=complex_dtype,
             )
 
-    normal = torch.zeros((1, 1, 3), device=device, dtype=real_dtype)
-    normal[..., _AXIS_TO_INDEX[axis_name]] = _normalize_normal_direction(normal_direction)
+    normal = torch.zeros((1,) * len(shape) + (3,), device=device, dtype=real_dtype)
+    normal[..., _AXIS_TO_INDEX[axis]] = _normalize_normal_direction(normal_direction)
     normal_complex = normal.to(dtype=complex_dtype).expand_as(e_field)
     j_field = torch.cross(normal_complex, h_field, dim=-1)
     m_field = -torch.cross(normal_complex, e_field, dim=-1)
 
-    currents = PlanarEquivalentCurrents(
-        axis=axis_name,
-        position=position,
-        frequency=frequency,
-        u=u_coords,
-        v=v_coords,
-        J=j_field,
-        M=m_field,
-        background_eps_r=background_eps_r,
-        background_mu_r=background_mu_r,
-        normal_direction=("+" if _normalize_normal_direction(normal_direction) > 0.0 else "-"),
-        quadrature_rule=quadrature_rule,
-        area_weights=area_weights,
+    return j_field, m_field
+
+
+def _equivalent_surface_currents_from_payload_spectrum(monitors, backgrounds):
+    first = monitors[0]
+    if first.get("kind") == "closed_surface":
+        faces = [
+            _equivalent_surface_currents_from_payload_spectrum(
+                tuple(monitor["faces"][name] for monitor in monitors), backgrounds
+            )
+            for name in first["faces"]
+        ]
+        return tuple(
+            EquivalentCurrentsSurface(face[index] for face in faces)
+            for index in range(len(monitors))
+        )
+
+    template = _equivalent_surface_currents_from_payload(first, background=backgrounds[0])
+    fields = {
+        name.upper(): torch.stack([
+            _to_complex_tensor(monitor[name], device=template.device, dtype=template.J.dtype)
+            for monitor in monitors
+        ])
+        for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz") if name in first
+    }
+    j_field, m_field = _surface_current_vectors(
+        fields, (len(monitors), *template.shape), template.axis, template.normal_direction,
+        device=template.device, real_dtype=template.coord_dtype, complex_dtype=template.J.dtype,
     )
-    return currents.windowed(window_size)
+    surfaces = []
+    for index, monitor in enumerate(monitors):
+        surface = PlanarEquivalentCurrents(
+            axis=template.axis, position=template.position, frequency=monitor["frequency"],
+            u=template.u, v=template.v, J=j_field[index], M=m_field[index],
+            background_eps_r=backgrounds[index][0], background_mu_r=backgrounds[index][1],
+            normal_direction=template.normal_direction, quadrature_rule=template.quadrature_rule,
+        )
+        # The template already checked these exact frequency-independent weights.
+        object.__setattr__(surface, "area_weights", template.area_weights)
+        surfaces.append(surface)
+    return tuple(surfaces)
+
+
+def _mapped_surface_currents(currents, chart):
+    """Convert native covariant tangential samples into physical world currents."""
+    points,weights,electric,magnetic=[],[],[],[]
+    for surface in _normalize_currents_collection(currents):
+        if not isinstance(surface,PlanarEquivalentCurrents):
+            raise ValueError("Mapped native currents require explicit chart-plane quadrature.")
+        q=build_plane_points(surface.axis,surface.position,surface.u,surface.v).reshape(-1,3)
+        normal=torch.zeros_like(q)
+        normal[:,_AXIS_TO_INDEX[surface.axis]]=_normalize_normal_direction(surface.normal_direction)
+        nc=normal.to(surface.J.dtype)
+        # Only tangential components are needed: orthogonality ensures their
+        # pullback does not mix a missing normal field into a physical tangent.
+        e_cov=torch.cross(nc,surface.M.reshape(-1,3),dim=-1)
+        h_cov=-torch.cross(nc,surface.J.reshape(-1,3),dim=-1)
+        e_world=chart.physical_field(q,e_cov)
+        h_world=chart.physical_field(q,h_cov)
+        area_vector=chart.physical_area_vector(q,normal)
+        jacobian=torch.linalg.vector_norm(area_vector,dim=-1)
+        unit=(area_vector/jacobian[:,None]).to(e_world.dtype)
+        points.append(chart.position(q))
+        weights.append(surface.weights_2d().reshape(-1)*jacobian)
+        electric.append(torch.cross(unit,h_world,dim=-1))
+        magnetic.append(-torch.cross(unit,e_world,dim=-1))
+    first=_normalize_currents_collection(currents)[0]
+    return SurfaceEquivalentCurrents(frequency=first.frequency,points=torch.cat(points),weights=torch.cat(weights),
+        J=torch.cat(electric),M=torch.cat(magnetic),background_eps_r=first.background_eps_r,
+        background_mu_r=first.background_mu_r)
+
+
+def _equivalent_surface_currents_from_monitor_spectrum(result, monitor_name, frequencies):
+    """Reuse full-spectrum crops and frequency-independent exterior validation."""
+    from ..compiler.materials import (
+        _material_model_has_conductivity,
+        _material_model_has_electric_dispersion,
+        _material_model_has_magnetic_dispersion,
+    )
+    from ..result import _resolve_frequency_index, _select_monitor_frequency
+
+    chart = getattr(getattr(result, "scene", None), "coordinates", None)
+    getter = result.monitor if chart is None else result._native_raw_monitor
+    monitor = getter(monitor_name)
+    # The compiler returns the same tensors at every frequency only when neither
+    # poles nor bulk conductivity participate. Otherwise preserve each spectral
+    # material evaluation, even when its dispersive bodies are inside the box.
+    independent = monitor.get("kind") != "closed_surface" and chart is None
+    if not independent:
+        model = result.prepared_scene.compile_materials()
+        independent = not (
+            _material_model_has_electric_dispersion(model)
+            or _material_model_has_magnetic_dispersion(model)
+            or _material_model_has_conductivity(model)
+        )
+    if independent:
+        background = _validate_homogeneous_exterior(result, monitor, frequencies[0])
+
+    def select(payload, frequency):
+        payload_frequencies = _payload_monitor_frequencies(payload)
+        index = _resolve_frequency_index(payload_frequencies, frequency=frequency)
+        selected = (
+            dict(payload) if len(payload_frequencies) <= 1
+            else _select_monitor_frequency(payload, payload_frequencies, index)
+        )
+        if payload.get("kind") == "closed_surface":
+            selected["faces"] = {
+                name: select(face, frequency) for name, face in payload["faces"].items()
+            }
+        return selected
+
+    monitors = []
+    backgrounds = []
+    for frequency in frequencies:
+        if not independent:
+            background = _validate_homogeneous_exterior(result, monitor, frequency)
+        monitors.append(select(monitor, frequency))
+        backgrounds.append((1.0, 1.0) if background is None else background)
+    if chart is None:
+        return _equivalent_surface_currents_from_payload_spectrum(monitors, backgrounds)
+    return tuple(
+        _mapped_surface_currents(
+            _equivalent_surface_currents_from_payload(payload, background=background), chart
+        )
+        for payload, background in zip(monitors, backgrounds)
+    )
 
 
 def equivalent_surface_currents_from_monitor(
@@ -1004,22 +1172,25 @@ def equivalent_surface_currents_from_monitor(
     tangential_bounds: Mapping[str, tuple[float, float]] | None = None,
     normal_direction: str | int | float | None = None,
     window_size: tuple[float, float] | None = None,
-) -> PlanarEquivalentCurrents | EquivalentCurrentsSurface:
-    monitor = result.monitor(monitor_name, frequency=frequency, freq_index=freq_index)
+) -> PlanarEquivalentCurrents | EquivalentCurrentsSurface | SurfaceEquivalentCurrents:
+    chart=getattr(getattr(result,"scene",None),"coordinates",None)
+    getter=result.monitor if chart is None else result._native_raw_monitor
+    monitor = getter(monitor_name, frequency=frequency, freq_index=freq_index)
     monitor_frequencies = _payload_monitor_frequencies(monitor)
     if len(monitor_frequencies) > 1:
-        monitor = result.monitor(monitor_name, freq_index=0)
+        monitor = getter(monitor_name, freq_index=0)
     resolved_frequency = float(monitor.get("frequency", getattr(result, "frequency", None)))
     background = _validate_homogeneous_exterior(result, monitor, resolved_frequency)
     if background is None:
         background = (1.0, 1.0)
-    return _equivalent_surface_currents_from_payload(
+    currents=_equivalent_surface_currents_from_payload(
         monitor,
         tangential_bounds=tangential_bounds,
         normal_direction=normal_direction,
         window_size=window_size,
         background=background,
     )
+    return currents if chart is None else _mapped_surface_currents(currents,chart)
 
 
 def equivalent_surface_currents_from_monitors(
@@ -1032,7 +1203,7 @@ def equivalent_surface_currents_from_monitors(
     monitor_tangential_bounds: Mapping[str, Mapping[str, tuple[float, float]]] | None = None,
     normal_directions: Mapping[str, str | int | float] | None = None,
     window_size: tuple[float, float] | None = None,
-) -> EquivalentCurrentsSurface:
+) -> EquivalentCurrentsSurface | SurfaceEquivalentCurrents:
     names = tuple(str(name) for name in monitor_names)
     if not names:
         raise ValueError("monitor_names must contain at least one monitor.")
@@ -1057,6 +1228,12 @@ def equivalent_surface_currents_from_monitors(
             surfaces.extend(resolved.surfaces)
         else:
             surfaces.append(resolved)
+    if getattr(getattr(result,"scene",None),"coordinates",None) is not None:
+        first=surfaces[0]
+        return SurfaceEquivalentCurrents(frequency=first.frequency,
+            points=torch.cat([surface.points for surface in surfaces]),weights=torch.cat([surface.weights for surface in surfaces]),
+            J=torch.cat([surface.J for surface in surfaces]),M=torch.cat([surface.M for surface in surfaces]),
+            background_eps_r=first.background_eps_r,background_mu_r=first.background_mu_r)
     return EquivalentCurrentsSurface(tuple(surfaces))
 
 

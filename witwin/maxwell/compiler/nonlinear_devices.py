@@ -308,9 +308,9 @@ def _scatter_currents(target: torch.Tensor, positive, negative, values, *, sign:
     pos_mask = positive >= 0
     neg_mask = negative >= 0
     if bool(pos_mask.any()):
-        target.index_add_(0, positive[pos_mask], (sign * values)[pos_mask])
+        target.index_put_((positive[pos_mask],), (sign * values)[pos_mask], accumulate=True)
     if bool(neg_mask.any()):
-        target.index_add_(0, negative[neg_mask], (-sign * values)[neg_mask])
+        target.index_put_((negative[neg_mask],), (-sign * values)[neg_mask], accumulate=True)
 
 
 def _stamp_conductance(matrix: torch.Tensor, positive, negative, conductance) -> None:

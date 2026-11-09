@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ._fixed_inputs import require_fixed_input
+
 import math
 from dataclasses import dataclass
 from typing import Iterable
@@ -46,9 +48,11 @@ def _normalize_frequencies(frequencies):
     if frequencies is None:
         return None
     if isinstance(frequencies, Iterable) and not isinstance(frequencies, (str, bytes)):
-        values = tuple(float(freq) for freq in frequencies)
+        raw_values = tuple(frequencies)
     else:
-        values = (float(frequencies),)
+        raw_values = (frequencies,)
+    require_fixed_input(raw_values, name="Monitor frequencies")
+    values = tuple(float(freq) for freq in raw_values)
     if not values:
         raise ValueError("frequencies must not be empty.")
     return values
@@ -119,6 +123,56 @@ def _resolve_finite_plane_geometry(
     return resolved_position, resolved_size, axis, plane_position, tangential_bounds
 
 
+def _normalize_closure_planes(closure_planes, tangential_bounds):
+    if closure_planes is None:
+        return None
+    require_fixed_input(closure_planes, name="FinitePlaneMonitor.closure_planes")
+    planes = dict(closure_planes)
+    if set(planes) != set(tangential_bounds):
+        raise ValueError(
+            f"FinitePlaneMonitor closure_planes must name the tangential axes {tuple(tangential_bounds)}."
+        )
+    resolved = {}
+    for axis_name in tangential_bounds:
+        lower, upper = (float(value) for value in planes[axis_name])
+        if not (math.isfinite(lower) and math.isfinite(upper) and lower < upper):
+            raise ValueError("FinitePlaneMonitor closure_planes must be finite increasing pairs.")
+        resolved[axis_name] = (lower, upper)
+    return resolved
+
+
+def _surface_closure_planes(faces) -> list[dict[str, tuple[float, float]]]:
+    """Adjacent-face normal coordinates that bound every face of a closed surface.
+
+    Each tangential edge of a face lies on the plane of the face that meets it
+    there. That face's normal coordinate, which is snapped to the grid exactly
+    as the face itself is, bounds the edge. An edge without a declared
+    neighbour (an excluded projection face) keeps its own coordinate, which is
+    snapped by the same rule.
+    """
+    scale = max(
+        [1.0]
+        + [abs(float(value)) for face in faces for value in face.position]
+        + [float(value) for face in faces for value in face.size]
+    )
+    tolerance = 1e-9 * scale
+    planes = []
+    for face in faces:
+        resolved = {}
+        for axis_name, bounds in face.tangential_bounds.items():
+            edges = []
+            for bound in bounds:
+                matches = [
+                    float(other.plane_position)
+                    for other in faces
+                    if other.axis == axis_name and abs(float(other.plane_position) - bound) <= tolerance
+                ]
+                edges.append(min(matches, key=lambda value: abs(value - bound)) if matches else float(bound))
+            resolved[axis_name] = (edges[0], edges[1])
+        planes.append(resolved)
+    return planes
+
+
 def _face_area(face: "FinitePlaneMonitor") -> float:
     area = 1.0
     axis_index = _AXES.index(face.axis)
@@ -161,6 +215,7 @@ class PointMonitor:
     def __init__(self, name, position, fields=("Ez",)):
         if len(position) != 3:
             raise ValueError("position must contain exactly three values.")
+        require_fixed_input(position, name="PointMonitor.position")
         object.__setattr__(self, "name", str(name))
         object.__setattr__(self, "position", tuple(float(v) for v in position))
         object.__setattr__(self, "fields", _normalize_fields(fields))
@@ -229,6 +284,7 @@ class PlaneMonitor:
     ):
         axis_name = normalize_axis(axis)
         normalized_fields = _normalize_fields(fields)
+        require_fixed_input(compute_flux, name="Monitor.compute_flux")
         flux_enabled = bool(compute_flux)
         if flux_enabled:
             _validate_flux_fields(axis_name, normalized_fields, monitor_name="PlaneMonitor")
@@ -321,6 +377,22 @@ class IncidentPowerDensityMonitor(PlaneMonitor):
 
 @dataclass(frozen=True)
 class FinitePlaneMonitor:
+    """Finite planar observation with optional physical quadrature spacing.
+
+    ``sample_spacing`` sets a maximum rectangular midpoint quadrature interval
+    in metres, independently of the field grid. All components are linearly
+    interpolated from their native Yee locations to those common points.
+    Converge this observation quadrature separately from the field mesh. The
+    default retains the full native staggered plane representation.
+
+    A standalone plane integrates exactly over its declared rectangle, including
+    partial edge cells. Faces built by ``ClosedSurfaceMonitor`` and by box
+    projection surfaces carry ``closure_planes`` instead: the normal coordinates
+    of the adjacent faces that bound each tangential axis. Such a face is placed
+    on its nearest tangential-E Yee node like a flux plane, and its in-plane
+    rectangle is bounded by the same snapped node of each adjacent face, so the
+    discrete faces enclose one closed region exactly.
+    """
     name: str
     position: tuple[float, float, float]
     size: tuple[float, float, float]
@@ -333,6 +405,8 @@ class FinitePlaneMonitor:
     tangential_bounds: dict[str, tuple[float, float]] | None = None
     face_label: str | None = None
     surface_name: str | None = None
+    sample_spacing: float | None = None
+    closure_planes: dict[str, tuple[float, float]] | None = None
     kind: str = "finite_plane"
 
     def __init__(
@@ -347,12 +421,15 @@ class FinitePlaneMonitor:
         *,
         face_label=None,
         surface_name=None,
+        sample_spacing=None,
+        closure_planes=None,
     ):
         resolved_position, resolved_size, axis, plane_position, tangential_bounds = _resolve_finite_plane_geometry(
             position,
             size,
         )
         normalized_fields = _normalize_fields(fields)
+        require_fixed_input(compute_flux, name="Monitor.compute_flux")
         flux_enabled = bool(compute_flux)
         if flux_enabled:
             _validate_flux_fields(axis, normalized_fields, monitor_name="FinitePlaneMonitor")
@@ -369,6 +446,12 @@ class FinitePlaneMonitor:
         object.__setattr__(self, "tangential_bounds", tangential_bounds)
         object.__setattr__(self, "face_label", None if face_label is None else str(face_label))
         object.__setattr__(self, "surface_name", None if surface_name is None else str(surface_name))
+        require_fixed_input(sample_spacing, name="FinitePlaneMonitor.sample_spacing")
+        spacing = None if sample_spacing is None else float(sample_spacing)
+        if spacing is not None and (not math.isfinite(spacing) or spacing <= 0):
+            raise ValueError("FinitePlaneMonitor sample_spacing must be finite and positive.")
+        object.__setattr__(self, "sample_spacing", spacing)
+        object.__setattr__(self, "closure_planes", _normalize_closure_planes(closure_planes, tangential_bounds))
         object.__setattr__(self, "kind", "finite_plane")
 
 
@@ -395,6 +478,8 @@ class ClosedSurfaceMonitor:
                     "ClosedSurfaceMonitor expects FinitePlaneMonitor faces, "
                     f"got {type(face).__name__}."
                 )
+        closure_planes = _surface_closure_planes(face_defs)
+        for face, face_closure in zip(face_defs, closure_planes):
             face_label = face.face_label or face.name
             if face_label in face_labels:
                 raise ValueError(f"ClosedSurfaceMonitor face labels must be unique, got duplicate {face_label!r}.")
@@ -415,6 +500,8 @@ class ClosedSurfaceMonitor:
                     normal_direction=face.normal_direction,
                     face_label=face_label,
                     surface_name=surface_name,
+                    sample_spacing=face.sample_spacing,
+                    closure_planes=face_closure,
                 )
             )
 
@@ -467,6 +554,7 @@ class ClosedSurfaceMonitor:
         position=(0.0, 0.0, 0.0),
         size=(1.0, 1.0, 1.0),
         frequencies=None,
+        sample_spacing=None,
     ) -> "ClosedSurfaceMonitor":
         center = _require_length3("position", position)
         extents = _require_nonnegative_length3("size", size)
@@ -481,6 +569,7 @@ class ClosedSurfaceMonitor:
                 size=(0.0, extents[1], extents[2]),
                 fields=required_flux_fields("x"),
                 frequencies=frequencies,
+                sample_spacing=sample_spacing,
                 normal_direction="-",
             ),
             FinitePlaneMonitor(
@@ -489,6 +578,7 @@ class ClosedSurfaceMonitor:
                 size=(0.0, extents[1], extents[2]),
                 fields=required_flux_fields("x"),
                 frequencies=frequencies,
+                sample_spacing=sample_spacing,
                 normal_direction="+",
             ),
             FinitePlaneMonitor(
@@ -497,6 +587,7 @@ class ClosedSurfaceMonitor:
                 size=(extents[0], 0.0, extents[2]),
                 fields=required_flux_fields("y"),
                 frequencies=frequencies,
+                sample_spacing=sample_spacing,
                 normal_direction="-",
             ),
             FinitePlaneMonitor(
@@ -505,6 +596,7 @@ class ClosedSurfaceMonitor:
                 size=(extents[0], 0.0, extents[2]),
                 fields=required_flux_fields("y"),
                 frequencies=frequencies,
+                sample_spacing=sample_spacing,
                 normal_direction="+",
             ),
             FinitePlaneMonitor(
@@ -513,6 +605,7 @@ class ClosedSurfaceMonitor:
                 size=(extents[0], extents[1], 0.0),
                 fields=required_flux_fields("z"),
                 frequencies=frequencies,
+                sample_spacing=sample_spacing,
                 normal_direction="-",
             ),
             FinitePlaneMonitor(
@@ -521,6 +614,7 @@ class ClosedSurfaceMonitor:
                 size=(extents[0], extents[1], 0.0),
                 fields=required_flux_fields("z"),
                 frequencies=frequencies,
+                sample_spacing=sample_spacing,
                 normal_direction="+",
             ),
         )
@@ -582,9 +676,16 @@ class MediumMonitor:
 class PowerLossMonitor:
     """Select an axis-aligned volume and explicit physical loss channels.
 
-    The current automatic producer supports the ``conduction`` channel from
-    static electric conductivity. Other channel names reserve the stable data
-    contract and require an explicit physical channel input during postprocess.
+    Automatic FDTD producers support ``conduction`` from static conductivity
+    and ``electric_dispersion`` from native passive bulk polarization work.
+    Other channels require an explicit physical input during postprocess.
+
+    ``native_cells`` assigns complete native control volumes to selected edge
+    centers. ``physical_intersection`` integrates the compiled homogenized
+    cell density over the intersection with the requested box, including cells
+    whose centers lie outside it. It does not recover subcell material fill;
+    clipping a material interface requires joint material/window integration
+    for a stronger continuum interpretation.
     """
 
     name: str
@@ -592,6 +693,7 @@ class PowerLossMonitor:
     size: tuple[float, float, float]
     frequencies: tuple[float, ...] | None
     channels: tuple[str, ...]
+    quadrature: str
     bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
     kind: str = "power_loss"
 
@@ -602,6 +704,7 @@ class PowerLossMonitor:
         size,
         frequencies=None,
         channels=("conduction",),
+        quadrature="native_cells",
     ):
         monitor_name = str(name)
         if not monitor_name:
@@ -634,12 +737,15 @@ class PowerLossMonitor:
             raise ValueError(
                 f"Unsupported power-loss channels {unsupported}; choices are {POWER_LOSS_CHANNELS}."
             )
+        if quadrature not in ("native_cells", "physical_intersection"):
+            raise ValueError("PowerLossMonitor quadrature must be 'native_cells' or 'physical_intersection'.")
 
         object.__setattr__(self, "name", monitor_name)
         object.__setattr__(self, "position", resolved_position)
         object.__setattr__(self, "size", resolved_size)
         object.__setattr__(self, "frequencies", resolved_frequencies)
         object.__setattr__(self, "channels", resolved_channels)
+        object.__setattr__(self, "quadrature", quadrature)
         object.__setattr__(
             self,
             "bounds",
@@ -913,7 +1019,14 @@ class FieldTimeMonitor:
 
 @dataclass(frozen=True)
 class FluxTimeMonitor:
-    """Record detached instantaneous flux, including in differentiable simulations."""
+    """Record detached native-cell flux with the declared Yee time staggering.
+
+    Paired native products use E at trace time t and H at t - dt/2 before
+    tangential projection and integration with physical cell widths. Exported
+    metadata records these offsets; no common-clock time interpolation is
+    applied. Traces remain detached in differentiable simulations and do not
+    introduce time-monitor gradients.
+    """
     name: str
     axis: str
     position: float
@@ -1030,6 +1143,12 @@ class ModeMonitor:
         wave_family = getattr(self, "_wave_family", None)
         if wave_family is not None:
             spec["wave_family"] = wave_family
+        conductor_model=getattr(self,"_conductor_model",None)
+        if conductor_model is not None:
+            spec["conductor_model"]=conductor_model
+        terminal_mode = getattr(self, "_terminal_mode", None)
+        if terminal_mode is not None:
+            spec["terminal_mode"] = terminal_mode
         return spec
 
 
@@ -1097,3 +1216,770 @@ class DiffractionMonitor:
             "orders": self.orders,
             "normal_direction": self.normal_direction,
         }
+
+
+# ---------------------------------------------------------------------------
+# In-simulation field projection, Gaussian-overlap, surface and auxiliary time
+# monitors.
+# ---------------------------------------------------------------------------
+
+SURFACE_FACE_LABELS = ("x_neg", "x_pos", "y_neg", "y_pos", "z_neg", "z_pos")
+
+
+def _normalize_float_grid(name: str, values) -> tuple[float, ...]:
+    """Flatten a fixed 1-D sample grid (scalar, sequence, array or tensor)."""
+
+    require_fixed_input(values, name=name)
+    if hasattr(values, "detach"):
+        values = values.detach().cpu().reshape(-1).tolist()
+    elif hasattr(values, "tolist"):
+        values = values.tolist()
+    if isinstance(values, (int, float)):
+        values = (values,)
+    resolved = tuple(float(value) for value in values)
+    if not resolved:
+        raise ValueError(f"{name} must not be empty.")
+    if not all(math.isfinite(value) for value in resolved):
+        raise ValueError(f"{name} must contain finite values.")
+    return resolved
+
+
+def _normalize_surface_exclusions(exclude_surfaces) -> tuple[str, ...]:
+    if exclude_surfaces is None:
+        return ()
+    if isinstance(exclude_surfaces, str):
+        exclude_surfaces = (exclude_surfaces,)
+    labels = tuple(str(label) for label in exclude_surfaces)
+    unknown = tuple(label for label in labels if label not in SURFACE_FACE_LABELS)
+    if unknown:
+        raise ValueError(
+            f"exclude_surfaces entries must be face labels {SURFACE_FACE_LABELS}, got {unknown}."
+        )
+    if len(set(labels)) != len(labels):
+        raise ValueError("exclude_surfaces must not repeat a face label.")
+    return labels
+
+
+def _resolve_declared_surface(
+    monitor_name: str,
+    position,
+    size,
+    *,
+    owner: str,
+    normal_direction=None,
+    exclude_surfaces=None,
+):
+    """Resolve a declared plane patch or (open) box into axis-aligned face boxes.
+
+    Returns ``(surface_kind, center, extents, normal_direction, exclusions,
+    faces)`` where every face is ``(label, axis, normal_direction,
+    face_position, face_size)``. A plane patch (exactly one zero extent) yields
+    one ``"plane"`` face oriented by ``normal_direction`` (default ``"+"``). A
+    box (three positive extents) yields its outward faces minus
+    ``exclude_surfaces``.
+    """
+
+    center = _require_length3("position", position)
+    extents = _require_nonnegative_length3("size", size)
+    if not all(math.isfinite(value) for value in (*center, *extents)):
+        raise ValueError(f"{owner} position and size must be finite.")
+    zero_axes = [index for index, length in enumerate(extents) if abs(length) <= 1e-12]
+    exclusions = _normalize_surface_exclusions(exclude_surfaces)
+    if len(zero_axes) == 1:
+        if exclusions:
+            raise ValueError(f"{owner} exclude_surfaces applies to box surfaces only.")
+        direction = "+" if normal_direction is None else _normalize_normal_direction(normal_direction)
+        axis = _AXES[zero_axes[0]]
+        return "planar", center, extents, direction, (), (("plane", axis, direction, center, extents),)
+    if zero_axes:
+        raise ValueError(
+            f"{owner} size must describe a plane patch (one zero extent) or a box (three positive extents)."
+        )
+    if normal_direction is not None:
+        raise ValueError(f"{owner} normal_direction applies to planar surfaces only; box faces point outward.")
+    faces = []
+    for axis_index, axis in enumerate(_AXES):
+        for sign, suffix in ((-1.0, "neg"), (1.0, "pos")):
+            label = f"{axis}_{suffix}"
+            if label in exclusions:
+                continue
+            face_position = list(center)
+            face_position[axis_index] = center[axis_index] + sign * 0.5 * extents[axis_index]
+            face_size = list(extents)
+            face_size[axis_index] = 0.0
+            faces.append((label, axis, "+" if sign > 0 else "-", tuple(face_position), tuple(face_size)))
+    if not faces:
+        raise ValueError(f"{owner} must keep at least one face after exclude_surfaces.")
+    return "box", center, extents, None, exclusions, tuple(faces)
+
+
+class _ProjectionSurfaceMonitor:
+    """Shared Huygens-surface behaviour of the projection monitors.
+
+    The monitor records the tangential running-DFT fields on its faces as
+    ordinary finite-plane observations (``<name>::<face label>``) and projects
+    them when ``Result.monitor(name)`` is requested.
+    """
+
+    def _init_surface(
+        self,
+        name,
+        position,
+        size,
+        frequencies,
+        origin,
+        normal_direction,
+        exclude_surfaces,
+        window_size,
+        sample_spacing,
+        kind,
+    ):
+        monitor_name = str(name).strip()
+        if not monitor_name:
+            raise ValueError(f"{type(self).__name__} name must not be empty.")
+        owner = type(self).__name__
+        surface_kind, center, extents, direction, exclusions, face_specs = _resolve_declared_surface(
+            monitor_name,
+            position,
+            size,
+            owner=owner,
+            normal_direction=normal_direction,
+            exclude_surfaces=exclude_surfaces,
+        )
+        resolved_frequencies = _normalize_frequencies(frequencies)
+        if resolved_frequencies is not None and any(
+            not math.isfinite(value) or value <= 0.0 for value in resolved_frequencies
+        ):
+            raise ValueError(f"{owner} frequencies must be finite and strictly positive.")
+        resolved_origin = center if origin is None else _require_length3("origin", origin)
+        resolved_window = None
+        if window_size is not None:
+            if surface_kind != "planar":
+                raise ValueError(f"{owner} window_size applies to planar surfaces only.")
+            require_fixed_input(window_size, name=f"{owner}.window_size")
+            if len(window_size) != 2:
+                raise ValueError("window_size must contain two fractions.")
+            resolved_window = tuple(float(value) for value in window_size)
+            if any(not 0.0 <= value <= 1.0 for value in resolved_window):
+                raise ValueError("window_size fractions must lie in [0, 1].")
+        faces = tuple(
+            FinitePlaneMonitor(
+                f"{monitor_name}::{label}",
+                position=face_position,
+                size=face_size,
+                fields=required_flux_fields(axis),
+                frequencies=resolved_frequencies,
+                normal_direction=face_direction,
+                face_label=label,
+                surface_name=monitor_name,
+                sample_spacing=sample_spacing,
+            )
+            for label, axis, face_direction, face_position, face_size in face_specs
+        )
+        if surface_kind == "box":
+            # Huygens boxes, open ones included, are watertight on the grid.
+            faces = tuple(
+                FinitePlaneMonitor(
+                    face.name,
+                    position=face.position,
+                    size=face.size,
+                    fields=face.fields,
+                    frequencies=face.frequencies,
+                    normal_direction=face.normal_direction,
+                    face_label=face.face_label,
+                    surface_name=face.surface_name,
+                    sample_spacing=face.sample_spacing,
+                    closure_planes=planes,
+                )
+                for face, planes in zip(faces, _surface_closure_planes(faces))
+            )
+        object.__setattr__(self, "name", monitor_name)
+        object.__setattr__(self, "position", center)
+        object.__setattr__(self, "size", extents)
+        object.__setattr__(self, "frequencies", resolved_frequencies)
+        object.__setattr__(self, "origin", resolved_origin)
+        object.__setattr__(self, "normal_direction", direction)
+        object.__setattr__(self, "exclude_surfaces", exclusions)
+        object.__setattr__(self, "window_size", resolved_window)
+        object.__setattr__(self, "sample_spacing", faces[0].sample_spacing)
+        object.__setattr__(self, "surface_kind", surface_kind)
+        object.__setattr__(self, "faces", faces)
+        object.__setattr__(self, "bounds", ClosedSurfaceMonitor._compute_bounds(faces))
+        object.__setattr__(self, "kind", kind)
+
+    @property
+    def face_monitor_names(self) -> tuple[str, ...]:
+        return tuple(face.name for face in self.faces)
+
+    def resolved_monitors(self) -> tuple[FinitePlaneMonitor, ...]:
+        return self.faces
+
+
+@dataclass(frozen=True)
+class AngleProjectionMonitor(_ProjectionSurfaceMonitor):
+    """Project the fields on a Huygens surface onto a ``(theta, phi)`` grid.
+
+    ``position``/``size`` declare either a plane patch (one zero extent,
+    oriented by ``normal_direction``) or a box whose outward faces form the
+    surface; ``exclude_surfaces`` drops box faces by label (``"x_neg"`` ...
+    ``"z_pos"``), e.g. a face lying on a substrate. ``Result.monitor(name)``
+    returns the :class:`~witwin.maxwell.postprocess.ProjectedFieldData` that
+    ``FieldProjector.angles(theta, phi, radius=radius,
+    far_field_approx=far_field_approx)`` returns for the same surface data,
+    with the projection origin at ``origin`` (default: the surface center).
+    The exterior medium immediately outside every face must be homogeneous.
+    """
+
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    theta: tuple[float, ...]
+    phi: tuple[float, ...]
+    frequencies: tuple[float, ...] | None
+    radius: float
+    far_field_approx: bool
+    origin: tuple[float, float, float]
+    normal_direction: str | None
+    exclude_surfaces: tuple[str, ...]
+    window_size: tuple[float, float] | None
+    sample_spacing: float | None
+    surface_kind: str
+    faces: tuple[FinitePlaneMonitor, ...]
+    bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+    kind: str = "angle_projection"
+
+    def __init__(
+        self,
+        name,
+        position=(0.0, 0.0, 0.0),
+        size=(1.0, 1.0, 1.0),
+        *,
+        theta,
+        phi,
+        frequencies=None,
+        radius=1.0,
+        far_field_approx=True,
+        origin=None,
+        normal_direction=None,
+        exclude_surfaces=None,
+        window_size=None,
+        sample_spacing=None,
+    ):
+        require_fixed_input(radius, name="AngleProjectionMonitor.radius")
+        resolved_radius = float(radius)
+        if not math.isfinite(resolved_radius) or resolved_radius <= 0.0:
+            raise ValueError("AngleProjectionMonitor radius must be finite and positive.")
+        object.__setattr__(self, "theta", _normalize_float_grid("theta", theta))
+        object.__setattr__(self, "phi", _normalize_float_grid("phi", phi))
+        object.__setattr__(self, "radius", resolved_radius)
+        object.__setattr__(self, "far_field_approx", bool(far_field_approx))
+        self._init_surface(
+            name, position, size, frequencies, origin, normal_direction,
+            exclude_surfaces, window_size, sample_spacing, "angle_projection",
+        )
+
+
+@dataclass(frozen=True)
+class CartesianProjectionMonitor(_ProjectionSurfaceMonitor):
+    """Project the fields on a Huygens surface onto a Cartesian observation plane.
+
+    The plane is normal to ``axis`` at signed ``distance`` from ``origin``
+    (default: the surface center); ``x``/``y`` are local in-plane coordinates
+    along the two remaining world axes in ascending order, exactly as in
+    ``FieldProjector.cartesian``. ``far_field_approx=False`` (the default)
+    evaluates the exact Stratton-Chu field. Surface declaration and Result
+    access follow :class:`AngleProjectionMonitor`.
+    """
+
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    x: tuple[float, ...]
+    y: tuple[float, ...]
+    axis: str
+    distance: float
+    frequencies: tuple[float, ...] | None
+    far_field_approx: bool
+    origin: tuple[float, float, float]
+    normal_direction: str | None
+    exclude_surfaces: tuple[str, ...]
+    window_size: tuple[float, float] | None
+    sample_spacing: float | None
+    surface_kind: str
+    faces: tuple[FinitePlaneMonitor, ...]
+    bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+    kind: str = "cartesian_projection"
+
+    def __init__(
+        self,
+        name,
+        position=(0.0, 0.0, 0.0),
+        size=(1.0, 1.0, 1.0),
+        *,
+        x,
+        y,
+        distance,
+        axis="z",
+        frequencies=None,
+        far_field_approx=False,
+        origin=None,
+        normal_direction=None,
+        exclude_surfaces=None,
+        window_size=None,
+        sample_spacing=None,
+    ):
+        require_fixed_input(distance, name="CartesianProjectionMonitor.distance")
+        resolved_distance = float(distance)
+        if not math.isfinite(resolved_distance):
+            raise ValueError("CartesianProjectionMonitor distance must be finite.")
+        object.__setattr__(self, "x", _normalize_float_grid("x", x))
+        object.__setattr__(self, "y", _normalize_float_grid("y", y))
+        object.__setattr__(self, "axis", normalize_axis(axis))
+        object.__setattr__(self, "distance", resolved_distance)
+        object.__setattr__(self, "far_field_approx", bool(far_field_approx))
+        self._init_surface(
+            name, position, size, frequencies, origin, normal_direction,
+            exclude_surfaces, window_size, sample_spacing, "cartesian_projection",
+        )
+
+
+@dataclass(frozen=True)
+class KSpaceProjectionMonitor(_ProjectionSurfaceMonitor):
+    """Project the fields on a Huygens surface onto direction cosines ``(ux, uy)``.
+
+    Directions are ``ux u_hat + uy v_hat + s sqrt(1 - ux^2 - uy^2) n_hat`` about
+    ``axis`` with the in-plane axes ordered as in ``FieldProjector.kspace``;
+    ``hemisphere`` selects the sign ``s`` (default: the orientation of a planar
+    surface normal to ``axis``, else ``"+"``). Evanescent samples are masked and
+    zero. The far-field approximation is always used. Surface declaration and
+    Result access follow :class:`AngleProjectionMonitor`.
+    """
+
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    ux: tuple[float, ...]
+    uy: tuple[float, ...]
+    axis: str
+    hemisphere: str
+    radius: float
+    frequencies: tuple[float, ...] | None
+    origin: tuple[float, float, float]
+    normal_direction: str | None
+    exclude_surfaces: tuple[str, ...]
+    window_size: tuple[float, float] | None
+    sample_spacing: float | None
+    surface_kind: str
+    faces: tuple[FinitePlaneMonitor, ...]
+    bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+    far_field_approx: bool = True
+    kind: str = "kspace_projection"
+
+    def __init__(
+        self,
+        name,
+        position=(0.0, 0.0, 0.0),
+        size=(1.0, 1.0, 1.0),
+        *,
+        ux,
+        uy,
+        axis="z",
+        hemisphere=None,
+        radius=1.0,
+        frequencies=None,
+        origin=None,
+        normal_direction=None,
+        exclude_surfaces=None,
+        window_size=None,
+        sample_spacing=None,
+    ):
+        require_fixed_input(radius, name="KSpaceProjectionMonitor.radius")
+        resolved_radius = float(radius)
+        if not math.isfinite(resolved_radius) or resolved_radius <= 0.0:
+            raise ValueError("KSpaceProjectionMonitor radius must be finite and positive.")
+        axis_name = normalize_axis(axis)
+        object.__setattr__(self, "ux", _normalize_float_grid("ux", ux))
+        object.__setattr__(self, "uy", _normalize_float_grid("uy", uy))
+        object.__setattr__(self, "axis", axis_name)
+        object.__setattr__(self, "radius", resolved_radius)
+        object.__setattr__(self, "far_field_approx", True)
+        self._init_surface(
+            name, position, size, frequencies, origin, normal_direction,
+            exclude_surfaces, window_size, sample_spacing, "kspace_projection",
+        )
+        if hemisphere is None:
+            planar_face = self.faces[0] if self.surface_kind == "planar" else None
+            hemisphere = (
+                planar_face.normal_direction
+                if planar_face is not None and planar_face.axis == axis_name
+                else "+"
+            )
+        object.__setattr__(self, "hemisphere", _normalize_normal_direction(hemisphere))
+
+
+PROJECTION_MONITOR_TYPES = (AngleProjectionMonitor, CartesianProjectionMonitor, KSpaceProjectionMonitor)
+
+
+class _GaussianOverlapPlaneMonitor:
+    """Shared plane handling of the Gaussian-overlap monitors.
+
+    The monitor records its plane as one finite-plane observation carrying the
+    monitor's own name and decomposes it when ``Result.monitor(name)`` is
+    requested.
+    """
+
+    def _init_plane(self, name, position, size, frequencies, direction, polarization, focus, kind):
+        monitor_name = str(name).strip()
+        owner = type(self).__name__
+        if not monitor_name:
+            raise ValueError(f"{owner} name must not be empty.")
+        resolved_position, resolved_size, axis, plane_position, tangential_bounds = _resolve_finite_plane_geometry(
+            position,
+            size,
+        )
+        axis_index = _AXES.index(axis)
+        if direction is None:
+            direction = tuple(1.0 if index == axis_index else 0.0 for index in range(3))
+        from .sources import _validate_transverse_polarization
+
+        resolved_direction, resolved_polarization = _validate_transverse_polarization(direction, polarization)
+        normal_component = resolved_direction[axis_index]
+        if abs(normal_component) <= 1e-6:
+            raise ValueError(f"{owner} direction must cross the monitor plane.")
+        resolved_frequencies = _normalize_frequencies(frequencies)
+        if resolved_frequencies is not None and any(
+            not math.isfinite(value) or value <= 0.0 for value in resolved_frequencies
+        ):
+            raise ValueError(f"{owner} frequencies must be finite and strictly positive.")
+        resolved_focus = resolved_position if focus is None else _require_length3("focus", focus)
+        normal_direction = "+" if normal_component > 0.0 else "-"
+        plane = FinitePlaneMonitor(
+            monitor_name,
+            position=resolved_position,
+            size=resolved_size,
+            fields=required_flux_fields(axis),
+            frequencies=resolved_frequencies,
+            normal_direction=normal_direction,
+            face_label="plane",
+            surface_name=monitor_name,
+        )
+        object.__setattr__(self, "name", monitor_name)
+        object.__setattr__(self, "position", resolved_position)
+        object.__setattr__(self, "size", resolved_size)
+        object.__setattr__(self, "frequencies", resolved_frequencies)
+        object.__setattr__(self, "direction", resolved_direction)
+        object.__setattr__(self, "polarization", resolved_polarization)
+        object.__setattr__(self, "focus", resolved_focus)
+        object.__setattr__(self, "axis", axis)
+        object.__setattr__(self, "plane_position", plane_position)
+        object.__setattr__(self, "normal_direction", normal_direction)
+        object.__setattr__(self, "tangential_bounds", tangential_bounds)
+        object.__setattr__(self, "plane", plane)
+        object.__setattr__(self, "kind", kind)
+
+    def resolved_monitors(self) -> tuple[FinitePlaneMonitor, ...]:
+        return (self.plane,)
+
+
+@dataclass(frozen=True)
+class GaussianOverlapMonitor(_GaussianOverlapPlaneMonitor):
+    """Decompose the fields on a plane into a Gaussian beam profile, per frequency.
+
+    The beam is declared with the same vocabulary as :class:`GaussianBeam`:
+    propagation ``direction`` (default: the plane normal), transverse
+    ``polarization``, ``beam_waist`` radius and the waist center ``focus``
+    (default: the monitor center). ``Result.monitor(name)`` returns, per
+    frequency, the forward amplitude (along ``direction``) and the backward
+    amplitude of the tangentially mirrored profile ``(E_t, -H_t)``, in
+    ``sqrt(W)`` with the reference profile normalized to unit power, together
+    with the matching powers and their fractions of the net plane flux. The
+    paraxial profile is evaluated in the medium at the monitor center.
+    """
+
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    frequencies: tuple[float, ...] | None
+    direction: tuple[float, float, float]
+    polarization: tuple[float, float, float]
+    beam_waist: float
+    focus: tuple[float, float, float]
+    axis: str
+    plane_position: float
+    normal_direction: str
+    tangential_bounds: dict[str, tuple[float, float]]
+    plane: FinitePlaneMonitor
+    kind: str = "gaussian_overlap"
+
+    def __init__(
+        self,
+        name,
+        position=(0.0, 0.0, 0.0),
+        size=(1.0, 1.0, 0.0),
+        *,
+        beam_waist,
+        frequencies=None,
+        direction=None,
+        polarization=(1.0, 0.0, 0.0),
+        focus=None,
+    ):
+        require_fixed_input(beam_waist, name="GaussianOverlapMonitor.beam_waist")
+        waist = float(beam_waist)
+        if not math.isfinite(waist) or waist <= 0.0:
+            raise ValueError("beam_waist must be > 0.")
+        object.__setattr__(self, "beam_waist", waist)
+        self._init_plane(name, position, size, frequencies, direction, polarization, focus, "gaussian_overlap")
+
+    @property
+    def beam_waists(self) -> tuple[float, float]:
+        return (self.beam_waist, self.beam_waist)
+
+    @property
+    def focus_offsets(self) -> tuple[float, float]:
+        return (0.0, 0.0)
+
+
+@dataclass(frozen=True)
+class AstigmaticGaussianOverlapMonitor(_GaussianOverlapPlaneMonitor):
+    """Astigmatic variant of :class:`GaussianOverlapMonitor`.
+
+    Mirrors :class:`AstigmaticGaussianBeam`: ``beam_waist=(w_u, w_v)`` along
+    the polarization ``u`` and the binormal ``v = direction x polarization``,
+    with per-axis waist planes displaced by ``focus_u``/``focus_v`` along the
+    propagation direction from ``focus``.
+    """
+
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    frequencies: tuple[float, ...] | None
+    direction: tuple[float, float, float]
+    polarization: tuple[float, float, float]
+    beam_waist: tuple[float, float]
+    focus: tuple[float, float, float]
+    focus_u: float
+    focus_v: float
+    axis: str
+    plane_position: float
+    normal_direction: str
+    tangential_bounds: dict[str, tuple[float, float]]
+    plane: FinitePlaneMonitor
+    kind: str = "astigmatic_gaussian_overlap"
+
+    def __init__(
+        self,
+        name,
+        position=(0.0, 0.0, 0.0),
+        size=(1.0, 1.0, 0.0),
+        *,
+        beam_waist,
+        frequencies=None,
+        direction=None,
+        polarization=(1.0, 0.0, 0.0),
+        focus=None,
+        focus_u=0.0,
+        focus_v=0.0,
+    ):
+        from .sources import _require_beam_waist_pair
+
+        require_fixed_input(beam_waist, name="AstigmaticGaussianOverlapMonitor.beam_waist")
+        require_fixed_input((focus_u, focus_v), name="AstigmaticGaussianOverlapMonitor.focus offsets")
+        object.__setattr__(self, "beam_waist", _require_beam_waist_pair(beam_waist))
+        object.__setattr__(self, "focus_u", float(focus_u))
+        object.__setattr__(self, "focus_v", float(focus_v))
+        self._init_plane(
+            name, position, size, frequencies, direction, polarization, focus, "astigmatic_gaussian_overlap",
+        )
+
+    @property
+    def beam_waists(self) -> tuple[float, float]:
+        return self.beam_waist
+
+    @property
+    def focus_offsets(self) -> tuple[float, float]:
+        return (self.focus_u, self.focus_v)
+
+
+GAUSSIAN_OVERLAP_MONITOR_TYPES = (GaussianOverlapMonitor, AstigmaticGaussianOverlapMonitor)
+
+
+def _normalize_time_components(components, allowed, *, owner):
+    if isinstance(components, str):
+        components = (components,)
+    resolved = []
+    lookup = {name.lower(): name for name in allowed}
+    for component in components:
+        key = str(component).lower()
+        if key not in lookup:
+            raise ValueError(f"{owner} components must be drawn from {allowed}, got {component!r}.")
+        resolved.append(lookup[key])
+    if not resolved:
+        raise ValueError(f"{owner} components must not be empty.")
+    if len(set(resolved)) != len(resolved):
+        raise ValueError(f"{owner} components must be unique.")
+    return tuple(resolved)
+
+
+@dataclass(frozen=True)
+class SurfaceFieldTimeMonitor:
+    """Record detached time-domain Yee fields on a plane patch or an (open) box surface.
+
+    ``position``/``size`` declare one plane patch (one zero extent) or a box
+    whose six faces (minus ``exclude_surfaces``) form the surface. On every
+    face each requested component is copied from its nearest native Yee plane
+    over the face's tangential extent, without interpolation, on the
+    ``start``/``stop``/``interval`` step schedule of :class:`FieldTimeMonitor`.
+    Traces are detached, like :class:`FieldTimeMonitor`; use spectral monitors
+    for adjoint objectives.
+    """
+
+    name: str
+    components: tuple[str, ...]
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    start: int
+    stop: int | None
+    interval: int
+    surface_kind: str
+    exclude_surfaces: tuple[str, ...]
+    face_specs: tuple[tuple[str, str, str, tuple[float, float, float], tuple[float, float, float]], ...]
+    kind: str = "surface_field_time"
+
+    def __init__(
+        self,
+        name,
+        position=(0.0, 0.0, 0.0),
+        size=(1.0, 1.0, 1.0),
+        components=("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"),
+        start=0,
+        stop=None,
+        interval=1,
+        *,
+        exclude_surfaces=None,
+    ):
+        monitor_name = str(name).strip()
+        if not monitor_name:
+            raise ValueError("SurfaceFieldTimeMonitor name must not be empty.")
+        normalized_components = tuple(
+            normalize_component(component).capitalize() for component in _normalize_fields(components)
+        )
+        if len(set(normalized_components)) != len(normalized_components):
+            raise ValueError("SurfaceFieldTimeMonitor components must be unique.")
+        surface_kind, center, extents, _, exclusions, face_specs = _resolve_declared_surface(
+            monitor_name,
+            position,
+            size,
+            owner="SurfaceFieldTimeMonitor",
+            exclude_surfaces=exclude_surfaces,
+        )
+        resolved_start, resolved_stop, resolved_interval = _validate_time_sampling(start, stop, interval)
+        object.__setattr__(self, "name", monitor_name)
+        object.__setattr__(self, "components", normalized_components)
+        object.__setattr__(self, "position", center)
+        object.__setattr__(self, "size", extents)
+        object.__setattr__(self, "start", resolved_start)
+        object.__setattr__(self, "stop", resolved_stop)
+        object.__setattr__(self, "interval", resolved_interval)
+        object.__setattr__(self, "surface_kind", surface_kind)
+        object.__setattr__(self, "exclude_surfaces", exclusions)
+        object.__setattr__(self, "face_specs", face_specs)
+        object.__setattr__(self, "kind", "surface_field_time")
+
+    @property
+    def face_labels(self) -> tuple[str, ...]:
+        return tuple(spec[0] for spec in self.face_specs)
+
+
+# Auxiliary ADE state recorded by AuxFieldTimeMonitor, keyed by public name:
+# (field family, Yee component it is co-located with, state tensor name).
+AUX_FIELD_COMPONENTS = {
+    "Px": ("electric", "Ex", "polarization"),
+    "Py": ("electric", "Ey", "polarization"),
+    "Pz": ("electric", "Ez", "polarization"),
+    "Jpx": ("electric", "Ex", "current"),
+    "Jpy": ("electric", "Ey", "current"),
+    "Jpz": ("electric", "Ez", "current"),
+    "Mx": ("magnetic", "Hx", "polarization"),
+    "My": ("magnetic", "Hy", "polarization"),
+    "Mz": ("magnetic", "Hz", "polarization"),
+    "Jmx": ("magnetic", "Hx", "current"),
+    "Jmy": ("magnetic", "Hy", "current"),
+    "Jmz": ("magnetic", "Hz", "current"),
+}
+
+
+@dataclass(frozen=True)
+class AuxFieldTimeMonitor:
+    """Record detached time-domain auxiliary dispersive-material state.
+
+    Components are the native auxiliary-differential-equation (ADE) state the
+    FDTD runtime keeps for Debye/Drude/Lorentz poles, summed over all poles of
+    the co-located Yee component:
+
+    - ``Px, Py, Pz``: electric polarization (C/m^2) of Debye and Lorentz poles
+      (Drude poles carry no stored polarization);
+    - ``Jpx, Jpy, Jpz``: electric polarization current density (A/m^2) of all
+      electric poles;
+    - ``Mx, My, Mz`` and ``Jmx, Jmy, Jmz``: the magnetic-pole counterparts
+      (``mu0``-scaled magnetic polarization, V*s/m^2, and its rate, V/m^2).
+
+    A component whose ADE state does not exist in the run (no such pole in
+    the scene) records zeros and is flagged in the payload ``present``
+    mapping. Samples follow the :class:`FieldTimeMonitor` schedule and clock
+    (electric state with E, magnetic state with H); the state recorded at a
+    sample was advanced with the co-located field of the previous sample
+    (payload ``drive_lag_samples=1``). The region is a point, an axis-aligned patch or a volume; along a
+    zero extent the nearest native Yee index is used. Instantaneous Kerr,
+    chi2 and two-photon-absorption media keep no auxiliary state, and
+    free-carrier densities are not modeled, so neither is recordable.
+    Traces are detached; use spectral monitors for adjoint objectives.
+    """
+
+    name: str
+    components: tuple[str, ...]
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    start: int
+    stop: int | None
+    interval: int
+    region_kind: str
+    kind: str = "aux_field_time"
+
+    def __init__(
+        self,
+        name,
+        components=("Px", "Py", "Pz"),
+        position=(0.0, 0.0, 0.0),
+        size=(0.0, 0.0, 0.0),
+        start=0,
+        stop=None,
+        interval=1,
+    ):
+        monitor_name = str(name).strip()
+        if not monitor_name:
+            raise ValueError("AuxFieldTimeMonitor name must not be empty.")
+        resolved_components = _normalize_time_components(
+            components, tuple(AUX_FIELD_COMPONENTS), owner="AuxFieldTimeMonitor"
+        )
+        resolved_position = _require_length3("position", position)
+        resolved_size = _require_nonnegative_length3("size", size)
+        resolved_start, resolved_stop, resolved_interval = _validate_time_sampling(start, stop, interval)
+        zero_axes = sum(1 for length in resolved_size if abs(length) <= 1e-12)
+        region_kind = {3: "point", 2: "line", 1: "plane"}.get(zero_axes, "volume")
+        object.__setattr__(self, "name", monitor_name)
+        object.__setattr__(self, "components", resolved_components)
+        object.__setattr__(self, "position", resolved_position)
+        object.__setattr__(self, "size", resolved_size)
+        object.__setattr__(self, "start", resolved_start)
+        object.__setattr__(self, "stop", resolved_stop)
+        object.__setattr__(self, "interval", resolved_interval)
+        object.__setattr__(self, "region_kind", region_kind)
+        object.__setattr__(self, "kind", "aux_field_time")
+
+
+IN_SIMULATION_MONITOR_TYPES = (
+    *PROJECTION_MONITOR_TYPES,
+    *GAUSSIAN_OVERLAP_MONITOR_TYPES,
+    SurfaceFieldTimeMonitor,
+    AuxFieldTimeMonitor,
+)

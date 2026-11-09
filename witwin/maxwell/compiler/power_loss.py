@@ -22,6 +22,7 @@ class CompiledPowerLossMonitor:
     global_ids: Mapping[str, torch.Tensor]
     conductivity: Mapping[str, torch.Tensor] | None
     full_component_shapes: Mapping[str, tuple[int, int, int]]
+    component_cell_bounds: Mapping[str, tuple] | None = None
 
     @property
     def device(self) -> torch.device:
@@ -57,6 +58,30 @@ def _selection_mask(scene, monitor: PowerLossMonitor, component: str) -> torch.T
         & selections[1][None, :, None]
         & selections[2][None, None, :]
     )
+
+
+def _component_cell_bounds(scene, component):
+    """Physical primal/dual rectangles from the original float64 Yee nodes."""
+    result = []
+    for axis in "xyz":
+        nodes = torch.tensor(getattr(scene, axis+"_nodes64").copy(), device=scene.device, dtype=torch.float64)
+        if axis == component[-1].lower():
+            lower, upper = nodes[:-1], nodes[1:]
+        else:
+            middle = (nodes[:-1]+nodes[1:])/2
+            lower, upper = torch.cat((nodes[:1], middle)), torch.cat((middle, nodes[-1:]))
+        result.append((lower, upper))
+    return tuple(result)
+
+
+def _intersected_geometry(bounds, window):
+    widths = [torch.clamp(torch.minimum(upper, upper.new_tensor(hi))
+              - torch.maximum(lower, lower.new_tensor(lo)), min=0.)
+              for (lower, upper), (lo, hi) in zip(bounds, window)]
+    mask = ((widths[0] > 0)[:, None, None] & (widths[1] > 0)[None, :, None]
+            & (widths[2] > 0)[None, None, :])
+    volume = widths[0][:, None, None]*widths[1][None, :, None]*widths[2][None, None, :]
+    return mask, volume[mask]
 
 
 def _selected_control_volumes(
@@ -102,6 +127,8 @@ def compile_power_loss_monitor(
     The automatic ``conduction`` channel uses only the compiled static bulk
     electric conductivity. Surface sheets are rejected because their lowering
     into an effective volume conductivity no longer retains surface identity.
+    Physical intersections integrate this compiled homogenized cell density,
+    rather than reinterpreting its unresolved material fill fraction.
     """
 
     if not isinstance(monitor, PowerLossMonitor):
@@ -110,14 +137,26 @@ def compile_power_loss_monitor(
         from ..scene import prepare_scene
 
         scene = prepare_scene(scene)
+    if monitor.quadrature == "physical_intersection" and getattr(scene, "coordinates", None) is not None:
+        raise NotImplementedError("PowerLossMonitor physical_intersection currently requires Cartesian control volumes; mapped partial-volume metrics are not implemented.")
+    if monitor.quadrature == "physical_intersection" and any(
+        scene.boundary.axis_kind(axis) in ("periodic", "bloch") for axis in "xyz"
+    ):
+        raise NotImplementedError("PowerLossMonitor physical_intersection requires nonperiodic axes; wrapped control-volume fragments are not implemented.")
 
     masks = {}
     component_volumes = {}
     global_ids = {}
     full_shapes = {}
+    cell_bounds = {}
     offset = 0
     for component in _ELECTRIC_COMPONENTS:
-        mask = _selection_mask(scene, monitor, component)
+        if monitor.quadrature == "physical_intersection":
+            cell_bounds[component] = _component_cell_bounds(scene, component)
+            mask, volumes = _intersected_geometry(cell_bounds[component], monitor.bounds)
+        else:
+            mask = _selection_mask(scene, monitor, component)
+            volumes = _selected_control_volumes(scene, component, mask)
         if not bool(torch.any(mask)):
             raise ValueError(
                 f"PowerLossMonitor {monitor.name!r} contains no {component} Yee edges; "
@@ -125,7 +164,7 @@ def compile_power_loss_monitor(
             )
         masks[component] = mask
         full_shapes[component] = tuple(mask.shape)
-        component_volumes[component] = _selected_control_volumes(scene, component, mask)
+        component_volumes[component] = volumes
         full_ids = torch.arange(
             offset,
             offset + mask.numel(),
@@ -153,12 +192,14 @@ def compile_power_loss_monitor(
                 "magnetic conductivity requires full-frequency H fields and a separate channel."
             )
         sigma_e_components = material_model["sigma_e_components"]
+        edge_components = material_model.get("edge_components")
         conductivity = {}
         for component, axis in zip(_ELECTRIC_COMPONENTS, ("x", "y", "z")):
-            edge_conductivity = _node_to_electric_component(
-                sigma_e_components[axis],
-                component,
-            )
+            # Match the actual FDTD material path. Re-averaging node samples
+            # changes conductivity at interfaces even when native edges exist.
+            edge_conductivity = (edge_components["sigma_e"][component]
+                if edge_components is not None else
+                _node_to_electric_component(sigma_e_components[axis], component))
             conductivity[component] = edge_conductivity[masks[component]]
         conductivity = MappingProxyType(conductivity)
 
@@ -169,6 +210,7 @@ def compile_power_loss_monitor(
         global_ids=MappingProxyType(global_ids),
         conductivity=conductivity,
         full_component_shapes=MappingProxyType(full_shapes),
+        component_cell_bounds=MappingProxyType(cell_bounds) if cell_bounds else None,
     )
 
 

@@ -12,10 +12,11 @@ from witwin.maxwell.result import Result
 
 def _scene() -> mw.Scene:
     return mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
         domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
         grid=mw.GridSpec.uniform(0.25),
         boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
+        device="cpu",  # Backend routing is mocked; no CUDA allocation is needed.
     )
 
 
@@ -37,7 +38,7 @@ def test_parallel_config_is_public_and_forwarded_by_fdtd_factory():
 
 def test_parallel_none_keeps_single_gpu_backend_path(monkeypatch):
     scene = _scene()
-    prepared_scene = object()
+    prepared_scene = SimpleNamespace(device="cpu")
     calls = []
 
     class FakeFDTD:
@@ -51,20 +52,30 @@ def test_parallel_none_keeps_single_gpu_backend_path(monkeypatch):
         def init_field(self):
             self.initialized = True
 
-    monkeypatch.setattr(simulation_module, "prepare_scene", lambda value: prepared_scene)
+    prepare_calls = []
+
+    def prepare_single_scene(value, *, material_dtype):
+        assert value is scene
+        assert material_dtype is torch.float32
+        prepare_calls.append((value, material_dtype))
+        return prepared_scene
+
+    monkeypatch.setattr(simulation_module, "prepare_scene", prepare_single_scene)
     monkeypatch.setattr(simulation_module, "_require_cuda_scene", lambda *args, **kwargs: None)
     monkeypatch.setattr(simulation_module, "_resolve_fdtd_backend", lambda: (FakeFDTD, object()))
 
     simulation = mw.Simulation.fdtd(scene, frequency=1.0e9)
     solver = simulation._build_fdtd_solver_for_scene(scene, initialize=True)
 
+    assert simulation.config.field_dtype is torch.float32
+    assert prepare_calls == [(scene, torch.float32)]
     assert solver.initialized is True
     assert calls == [
         (
             prepared_scene,
             {
                 "frequency": 1.0e9,
-                "absorber_type": mw.AbsorberKind.CPML,
+                "absorber_type": mw.AbsorberKind.AUTO,
                 "cpml_config": {},
             },
         )
@@ -103,7 +114,7 @@ def test_parallel_builds_distributed_solver_and_initializes(monkeypatch):
             {
                 "frequency": 2.0e9,
                 "parallel": parallel,
-                "absorber_type": mw.AbsorberKind.CPML,
+                "absorber_type": mw.AbsorberKind.AUTO,
                 "cpml_config": {},
             },
         )
@@ -146,6 +157,7 @@ def _fake_solved_distributed_solver():
         last_solve_elapsed_s=1.0,
         dft_sample_counts=(0,),
         observer_sample_counts=(0,),
+        _spectral_reference_frequency=None,
         _shutoff_triggered=False,
         _shutoff_step=None,
         parallel_stats={"devices": ("cuda:0", "cuda:1"), "halo_bytes_total": 64},

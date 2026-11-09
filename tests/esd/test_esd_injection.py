@@ -268,8 +268,9 @@ def test_esd_terminal_injection_drives_causal_transient_and_records_provenance()
     field = _to_numpy(payload["field"]).reshape(len(times), -1)[:, 0]
     magnitude = np.abs(field)
 
-    # Causal onset and monotone charge accumulation toward a plateau.
-    assert field[0] == 0.0
+    # Sample zero follows the first E update driven by causal J(dt/2), so it is already negative.
+    assert waveform.current(torch.tensor(0.0, dtype=torch.float64)).item() == 0.0
+    assert field[0] < 0.0
     assert magnitude.max() > 0.0
     assert magnitude[-1] == pytest.approx(magnitude.max(), rel=1e-6)
 

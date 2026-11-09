@@ -7,6 +7,7 @@ from tests.fdtd.cuda._parity_backend import backend
 
 
 pytestmark = [
+    pytest.mark.usefixtures("native_cuda_extension"),
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for native CUDA parity tests."),
     pytest.mark.skipif(
         os.environ.get("WITWIN_RUN_CUDA_EXTENSION_BUILD") != "1",

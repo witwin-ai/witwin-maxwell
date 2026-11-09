@@ -5,12 +5,12 @@ import torch
 import witwin.maxwell as mw
 
 
-def _build_scene(source):
+def _build_scene(source, *, device="cuda"):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
         grid=mw.GridSpec.uniform(0.08),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
+        device=device,
     )
     scene.add_source(source)
     return scene
@@ -117,17 +117,21 @@ def test_fdtd_ideal_point_dipole_collapses_to_single_yee_sample():
     assert torch.count_nonzero(ideal_patch).item() <= torch.count_nonzero(gaussian_patch).item()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_fdtd_multi_frequency_dft_accumulates_all_frequencies_in_batched_tensors():
+@pytest.mark.parametrize("backend,device", [
+    ("cpu_reference", "cpu"),
+    pytest.param("native", "cuda", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="needs CUDA for FDTD")),
+])
+def test_fdtd_multi_frequency_dft_accumulates_all_frequencies_in_batched_tensors(backend, device):
     scene = _build_scene(
         mw.PointDipole(
             position=(0.0, 0.0, 0.0),
             polarization="Ez",
             width=0.05,
             source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=1.0e9, amplitude=50.0),
-        )
+        ), device=device,
     )
-    solver = mw.Simulation.fdtd(scene, frequencies=[1.0e9]).prepare().solver
+    solver = mw.Simulation.fdtd(scene, frequencies=[1.0e9], backend=backend).prepare().solver
     solver.enable_dft((1.0e9, 1.5e9), window_type="none", end_step=4)
     solver.Ex.fill_(1.0)
     solver.Ey.zero_()
@@ -138,8 +142,9 @@ def test_fdtd_multi_frequency_dft_accumulates_all_frequencies_in_batched_tensors
 
     for index, frequency in enumerate((1.0e9, 1.5e9)):
         omega_dt = 2.0 * np.pi * frequency * solver.dt
-        expected_real = 1.0 + np.cos(omega_dt)
-        expected_imag = np.sin(omega_dt)
+        # Post-update electric fields carry the physical labels dt and 2*dt.
+        expected_real = np.cos(omega_dt) + np.cos(2 * omega_dt)
+        expected_imag = np.sin(omega_dt) + np.sin(2 * omega_dt)
         measured_real = float(solver._dft_entries[index]["fields"]["Ex"]["real"][0, 0, 0].item())
         measured_imag = float(solver._dft_entries[index]["fields"]["Ex"]["imag"][0, 0, 0].item())
         assert measured_real == pytest.approx(expected_real, rel=1e-5, abs=1e-5)

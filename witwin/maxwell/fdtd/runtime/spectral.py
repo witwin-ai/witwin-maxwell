@@ -6,6 +6,68 @@ import numpy as np
 import torch
 
 from ..boundary import has_complex_fields
+from .representation import normalization_sample_time, normalization_signal, spectral_phasor_factor, spectral_scale, uses_analytic_cw
+
+
+def source_normalization_spectrum(solver, frequencies, *, steps_run, window_type):
+    """Injection-matched samples with the compiled provider reference labels."""
+    from ...sources import evaluate_source_time_normalization
+
+    end = solver._time_plan["total_steps"]
+    n = torch.arange(steps_run, device=solver.device, dtype=torch.float64)
+    times = (n + solver._normalization_label_offset) * solver.dt
+    sample_times = normalization_sample_time(solver, n)
+    source_time = solver._normalization_source_time
+    if uses_analytic_cw(solver):
+        signal = torch.exp(-2j * torch.pi * float(source_time["frequency"]) * sample_times)
+    elif source_time.get("fn") is not None:
+        # User callables accept scalar times; analytic and tabulated forms are tensor-native.
+        signal = torch.tensor(
+            [normalization_signal(solver, source_time, normalization_sample_time(solver, step)) for step in range(steps_run)],
+            device=solver.device, dtype=torch.complex128,
+        )
+    else:
+        signal = evaluate_source_time_normalization(source_time, sample_times).to(torch.complex128)
+    # The window start is frequency-independent once a time plan exists.
+    start = compute_spectral_start_step(solver, float(frequencies[0]), window_type=window_type)
+    pos = (n - start) / (end - start)
+    weights = torch.ones_like(n)
+    if window_type == "hanning":
+        weights = 0.5 * (1.0 - torch.cos(2 * torch.pi * pos))
+    elif window_type == "ramp":
+        weights = torch.where(pos < 0.1, 0.5 * (1.0 - torch.cos(torch.pi * pos / 0.1)), weights)
+    weights = torch.where((n >= start) & (n < end), weights, 0.0)
+    spectra = []
+    weight_sum = weights.sum()
+    for frequency in frequencies:
+        scale = spectral_scale(weight_sum, frequency=float(frequency),
+                               phasor_factor=spectral_phasor_factor(solver),
+                               integration_dt=solver._spectral_integration_dt,
+                               reference_frequency=solver._spectral_reference_frequency)
+        spectra.append((signal * weights * torch.exp(2j * torch.pi * float(frequency) * times)).sum() * scale)
+    return torch.stack(spectra)
+
+
+def source_reference_metadata(solver, frequency):
+    """Bind a conversion to the source signal accumulated by this entry."""
+    from .timeplan import source_reference_descriptor, source_reference_label_offset
+
+    if getattr(solver, "_normalize_source", False):
+        descriptor = solver._normalization_reference
+        beta = solver._normalization_label_offset
+    else:
+        source = getattr(solver, "_compiled_source", None)
+        descriptor = source_reference_descriptor(source) if source is not None else {}
+        beta = source_reference_label_offset(source) if source is not None else None
+    theta = 2 * np.pi * frequency * solver.dt
+    return dict(observer_spectral_origin="physical_yee_v1", source_reference_label="provider_reference_v1",
+                source_reference=descriptor, source_reference_label_offset=beta,
+                source_reference_factor=np.exp(1j * (beta - 1) * theta) if beta is not None else 1.0)
+
+
+def convert_source_spectrum(entry, spectrum):
+    """Convert a local result once; retained accumulated sums stay untouched."""
+    return spectrum * entry["source_reference_factor"]
 
 
 def normalize_target_frequencies(solver, frequencies) -> tuple[float, ...]:
@@ -166,6 +228,7 @@ def build_observer_spectral_entry(solver, frequency, *, end_step, window_type):
     h_phase_offset = -0.5 * 2.0 * np.pi * frequency * solver.dt
     return {
         "frequency": frequency,
+        **source_reference_metadata(solver, frequency),
         "start_step": compute_spectral_start_step(
             solver,
             frequency,
@@ -174,14 +237,15 @@ def build_observer_spectral_entry(solver, frequency, *, end_step, window_type):
         "end_step": end_step,
         "window_normalization": 0.0,
         "sample_count": 0,
-        "phase_cos": 1.0,
-        "phase_sin": 0.0,
+        "phase_cos": np.cos(omega_dt),
+        "phase_sin": np.sin(omega_dt),
         "phase_step_cos": np.cos(omega_dt),
         "phase_step_sin": np.sin(omega_dt),
         "h_offset_cos": np.cos(h_phase_offset),
         "h_offset_sin": np.sin(h_phase_offset),
         "source_dft_real": 0.0,
         "source_dft_imag": 0.0,
+        "phasor_factor": spectral_phasor_factor(solver),
     }
 
 
@@ -345,19 +409,23 @@ def enable_dft(solver, frequencies, window_type="hanning", end_step=None, compon
     # kernel without allocating an unwanted full-domain accumulator.
     solver._dft_empty_field = torch.empty(0, device=solver.device, dtype=solver.Ex.dtype)
     solver._dft_empty_accum = solver._dft_empty_field.view(1, 0).expand(frequency_count, 0)
-    solver._dft_phase_cos = np.ones(frequency_count, dtype=np.float32)
-    solver._dft_phase_sin = np.zeros(frequency_count, dtype=np.float32)
-    solver._dft_phase_step_cos_values = np.empty(frequency_count, dtype=np.float32)
-    solver._dft_phase_step_sin_values = np.empty(frequency_count, dtype=np.float32)
+    # The scalar clock must resolve RF phases for millions of tiny time steps.
+    # Round only the final CUDA weights, never the recursively advanced phase.
+    solver._dft_phase_cos = np.ones(frequency_count, dtype=np.float64)
+    solver._dft_phase_sin = np.zeros(frequency_count, dtype=np.float64)
+    solver._dft_phase_step_cos_values = np.empty(frequency_count, dtype=np.float64)
+    solver._dft_phase_step_sin_values = np.empty(frequency_count, dtype=np.float64)
     solver._dft_start_steps = np.empty(frequency_count, dtype=np.int64)
     solver._dft_end_steps = np.empty(frequency_count, dtype=np.int64)
-    solver._dft_window_normalization_values = np.zeros(frequency_count, dtype=np.float32)
+    solver._dft_window_normalization_values = np.zeros(frequency_count, dtype=np.float64)
     solver._dft_sample_count_values = np.zeros(frequency_count, dtype=np.int64)
     solver._dft_source_dft_real_values = np.zeros(frequency_count, dtype=np.float64)
     solver._dft_source_dft_imag_values = np.zeros(frequency_count, dtype=np.float64)
 
     for index, frequency in enumerate(frequency_values):
         omega_dt = 2 * np.pi * frequency * solver.dt
+        solver._dft_phase_cos[index] = np.cos(omega_dt)
+        solver._dft_phase_sin[index] = np.sin(omega_dt)
         solver._dft_phase_step_cos_values[index] = np.cos(omega_dt)
         solver._dft_phase_step_sin_values[index] = np.sin(omega_dt)
         solver._dft_start_steps[index] = compute_spectral_start_step(
@@ -372,17 +440,19 @@ def enable_dft(solver, frequencies, window_type="hanning", end_step=None, compon
         solver._dft_entries.append(
             {
                 "frequency": float(frequency),
+                **source_reference_metadata(solver, frequency),
                 "start_step": int(solver._dft_start_steps[index]),
                 "end_step": None if solver._dft_end_steps[index] < 0 else int(solver._dft_end_steps[index]),
                 "window_normalization": 0.0,
                 "sample_count": 0,
-                "phase_cos": 1.0,
-                "phase_sin": 0.0,
+                "phase_cos": float(solver._dft_phase_cos[index]),
+                "phase_sin": float(solver._dft_phase_sin[index]),
                 "phase_step_cos": float(solver._dft_phase_step_cos_values[index]),
                 "phase_step_sin": float(solver._dft_phase_step_sin_values[index]),
                 "fields": fields,
                 "source_dft_real": 0.0,
                 "source_dft_imag": 0.0,
+                "phasor_factor": spectral_phasor_factor(solver),
             }
         )
     sync_dft_legacy_state(solver)
@@ -398,32 +468,30 @@ def accumulate_dft(solver, n, phase_cos=None, phase_sin=None):
 
     source_signal = None
     if getattr(solver, "_normalize_source", False) and solver._normalization_source_time is not None:
-        from ...sources import evaluate_source_time_normalization
-
-        source_signal = evaluate_source_time_normalization(solver._normalization_source_time, n * solver.dt)
+        source_signal = normalization_signal(solver, solver._normalization_source_time, normalization_sample_time(solver, n))
     active = n >= solver._dft_start_steps
     active &= (solver._dft_end_steps < 0) | (n < solver._dft_end_steps)
     if solver.dft_window_type == "none":
-        window_weight = active.astype(np.float32)
+        window_weight = active.astype(np.float64)
     else:
         total_samples = solver._dft_end_steps - solver._dft_start_steps
         if solver.dft_window_type == "hanning":
-            pos = np.zeros_like(solver._dft_phase_cos, dtype=np.float32)
+            pos = np.zeros_like(solver._dft_phase_cos, dtype=np.float64)
             valid = active & (total_samples > 0)
             pos[valid] = (n - solver._dft_start_steps[valid]) / total_samples[valid]
-            window_weight = np.zeros_like(solver._dft_phase_cos, dtype=np.float32)
+            window_weight = np.zeros_like(solver._dft_phase_cos, dtype=np.float64)
             window_weight[active & (solver._dft_end_steps < 0)] = 1.0
             window_weight[valid] = 0.5 * (1.0 - np.cos(2 * np.pi * pos[valid]))
         elif solver.dft_window_type == "ramp":
-            pos = np.zeros_like(solver._dft_phase_cos, dtype=np.float32)
+            pos = np.zeros_like(solver._dft_phase_cos, dtype=np.float64)
             valid = active & (total_samples > 0)
             pos[valid] = (n - solver._dft_start_steps[valid]) / total_samples[valid]
-            window_weight = active.astype(np.float32)
+            window_weight = active.astype(np.float64)
             ramp_fraction = 0.1
             ramp_mask = valid & (pos < ramp_fraction)
             window_weight[ramp_mask] = 0.5 * (1.0 - np.cos(np.pi * pos[ramp_mask] / ramp_fraction))
         else:
-            window_weight = active.astype(np.float32)
+            window_weight = active.astype(np.float64)
 
     weighted_cos = window_weight * solver._dft_phase_cos
     weighted_sin = window_weight * solver._dft_phase_sin
@@ -431,8 +499,8 @@ def accumulate_dft(solver, n, phase_cos=None, phase_sin=None):
     weighted_sin_tensor = torch.as_tensor(weighted_sin, device=solver.device, dtype=torch.float32)
 
     if source_signal is not None:
-        solver._dft_source_dft_real_values += float(source_signal) * weighted_cos
-        solver._dft_source_dft_imag_values += float(source_signal) * weighted_sin
+        solver._dft_source_dft_real_values += source_signal.real * weighted_cos - source_signal.imag * weighted_sin
+        solver._dft_source_dft_imag_values += source_signal.real * weighted_sin + source_signal.imag * weighted_cos
 
     _launch_dft_accumulation(solver, weighted_cos_tensor, weighted_sin_tensor)
     if has_complex_fields(solver):
@@ -449,39 +517,39 @@ def accumulate_dft(solver, n, phase_cos=None, phase_sin=None):
         solver._dft_phase_sin * solver._dft_phase_step_cos_values
         + solver._dft_phase_cos * solver._dft_phase_step_sin_values
     )
-    solver._dft_phase_cos = next_cos.astype(np.float32, copy=False)
-    solver._dft_phase_sin = next_sin.astype(np.float32, copy=False)
+    solver._dft_phase_cos = next_cos.astype(np.float64, copy=False)
+    solver._dft_phase_sin = next_sin.astype(np.float64, copy=False)
     sync_dft_primary_runtime_state(solver)
 
 
 def _dft_window_weight(n, window_type, active, start, end):
     """The per-step spectral window weight vector, matching accumulate_dft."""
     if window_type == "none":
-        return active.astype(np.float32)
+        return active.astype(np.float64)
     total = end - start
     valid = active & (total > 0)
-    pos = np.zeros_like(start, dtype=np.float32)
+    pos = np.zeros_like(start, dtype=np.float64)
     pos[valid] = (n - start[valid]) / total[valid]
     if window_type == "hanning":
-        weight = np.zeros_like(start, dtype=np.float32)
+        weight = np.zeros_like(start, dtype=np.float64)
         weight[active & (end < 0)] = 1.0
         weight[valid] = 0.5 * (1.0 - np.cos(2 * np.pi * pos[valid]))
         return weight
     if window_type == "ramp":
-        weight = active.astype(np.float32)
+        weight = active.astype(np.float64)
         ramp_fraction = 0.1
         ramp_mask = valid & (pos < ramp_fraction)
         weight[ramp_mask] = 0.5 * (1.0 - np.cos(np.pi * pos[ramp_mask] / ramp_fraction))
         return weight
-    return active.astype(np.float32)
+    return active.astype(np.float64)
 
 
 def build_dft_step_tables(solver, time_steps):
     """Precompute the full per-step running-DFT weight table on the GPU.
 
     Each row ``table[n]`` is the ``window_weight(n) * phase(n)`` vector that
-    accumulate_dft computes at step ``n``; it is built with the identical float32
-    phase recurrence and window, so a GPU-driven accumulation that gathers rows
+    accumulate_dft computes at step ``n``; it is built with the identical float64
+    scalar phase recurrence with float32 device weights and window, so a GPU-driven accumulation that gathers rows
     by a device step counter is bit-identical to the per-step host path -- but
     with no per-step host arithmetic or host->device transfer (which makes the
     DFT accumulation capturable and cheaper). Eager and graph-captured runs both
@@ -502,7 +570,8 @@ def build_dft_step_tables(solver, time_steps):
     waveform = getattr(solver._normalization_source_time, "__dict__", None) if normalize else {}
     scalar_waveform = waveform is not None and all(
         value is None or isinstance(value, (str, int, float, bool)) for value in waveform.values())
-    key = (steps, tuple(entry["frequency"] for entry in solver._dft_entries), solver.dt,
+    key = ("physical_yee_v1", repr(source_reference_metadata(solver, 0.0)), steps, tuple(entry["frequency"] for entry in solver._dft_entries), solver.dt,
+           solver._normalization_time_offset if normalize else None,
            solver.dft_window_type, tuple(solver._dft_start_steps), tuple(solver._dft_end_steps),
            type(solver._normalization_source_time) if normalize else None,
            tuple(sorted(waveform.items()))) if scalar_waveform else None
@@ -517,13 +586,13 @@ def build_dft_step_tables(solver, time_steps):
         return True
     weighted_cos = np.zeros((steps, frequency_count), dtype=np.float32)
     weighted_sin = np.zeros((steps, frequency_count), dtype=np.float32)
-    window_norm = np.zeros(frequency_count, dtype=np.float32)
+    window_norm = np.zeros(frequency_count, dtype=np.float64)
     sample_count = np.zeros(frequency_count, dtype=np.int64)
     src_real = np.zeros(frequency_count, dtype=np.float64)
     src_imag = np.zeros(frequency_count, dtype=np.float64)
 
-    phase_cos = np.ones(frequency_count, dtype=np.float32)
-    phase_sin = np.zeros(frequency_count, dtype=np.float32)
+    phase_cos = solver._dft_phase_step_cos_values.copy()
+    phase_sin = solver._dft_phase_step_sin_values.copy()
     step_cos = solver._dft_phase_step_cos_values
     step_sin = solver._dft_phase_step_sin_values
     start = solver._dft_start_steps
@@ -541,13 +610,13 @@ def build_dft_step_tables(solver, time_steps):
         if normalize:
             from ...sources import evaluate_source_time_normalization
 
-            signal = float(evaluate_source_time_normalization(solver._normalization_source_time, n * solver.dt))
+            signal = float(evaluate_source_time_normalization(solver._normalization_source_time, normalization_sample_time(solver, n)))
             src_real += signal * wc
             src_imag += signal * ws
         next_cos = phase_cos * step_cos - phase_sin * step_sin
         next_sin = phase_sin * step_cos + phase_cos * step_sin
-        phase_cos = next_cos.astype(np.float32, copy=False)
-        phase_sin = next_sin.astype(np.float32, copy=False)
+        phase_cos = next_cos.astype(np.float64, copy=False)
+        phase_sin = next_sin.astype(np.float64, copy=False)
 
     for name, values in (("_dft_weighted_cos_table", weighted_cos), ("_dft_weighted_sin_table", weighted_sin)):
         setattr(solver, name, _dft_buffer(solver, getattr(solver, name, None), values.shape,

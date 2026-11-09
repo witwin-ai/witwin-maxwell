@@ -1,3 +1,5 @@
+import math
+
 import cupy as cp
 import pytest
 import torch
@@ -30,20 +32,23 @@ def _vacuum_scene(cells_half, strength=4.0):
     return scene
 
 
-def _direct_solver(scene):
+def _direct_solver(scene, precision="single"):
     return mw.Simulation.fdfd(
-        scene, frequency=FREQ, solver=mw.GMRES(solver_type="direct")
+        scene, frequency=FREQ, solver=mw.GMRES(solver_type="direct", precision=precision)
     ).prepare().solver
 
 
 @requires_cuda
-def test_assembled_matrix_is_complex_symmetric():
-    solver = _direct_solver(_vacuum_scene(12, strength=1e6))
+@pytest.mark.parametrize("strength", [1e6, 0.5, 4.0])
+def test_assembled_matrix_is_complex_symmetric(strength):
+    # The diagonal similarity D A D^-1 is symmetric entry by entry, so the
+    # complex128 system is symmetric to round-off (measured ~3e-16).
+    solver = _direct_solver(_vacuum_scene(12, strength=strength), precision="double")
     solver._ensure_system_matrix()
     A = solver.A_matrix
     asymmetry = A - A.transpose().tocsr()
     relative = float(cp.abs(asymmetry.data).max() / cp.abs(A.data).max()) if asymmetry.nnz else 0.0
-    assert relative < 1e-6
+    assert relative <= 1e-14
 
 
 @requires_cuda
@@ -89,3 +94,25 @@ def test_interior_matches_large_domain_reference():
     # symmetric UPML stencil measures ~2% on this small window (0.4% on a
     # 32^3-vs-64^3 pairing). 5% catches any regression of that class.
     assert error < 0.05, error
+
+
+@requires_cuda
+@pytest.mark.parametrize("layers", [8, 12])
+def test_default_pml_absorbs_short_dipole_radiation(layers):
+    # A one-edge gap fed by a unit lumped current radiates as a Hertzian
+    # dipole of length dx: R = 80 pi^2 (dx/lambda)^2 = 0.8785 Ohm at 1 GHz,
+    # dx = 1 cm. The absorbing default PML gives 0.8828 Ohm (0.48%, Yee
+    # discretization) for 8-14 layers; the former reflecting default gave
+    # 4e-4 to 1.4e-3 Ohm.
+    dx, dom = 0.01, 0.12
+    scene = mw.Scene(domain=mw.Domain(bounds=((-dom, dom),) * 3), grid=mw.GridSpec.uniform(dx),
+                     boundary=mw.BoundarySpec.pml(num_layers=layers), device="cuda")
+    start, end = (0.0, 0.0, 0.0), (dx, 0.0, 0.0)
+    scene.add_source(mw.LumpedCurrentSource(start=start, end=end, current=1.0))
+    result = mw.Simulation.fdfd(
+        scene, frequency=FREQ, solver=mw.GMRES(solver_type="direct", precision="double"),
+        observations=(mw.FieldProjection.voltage("feed", start, end),),
+    ).run()
+    resistance = complex(result.monitor("feed")["value"]).real
+    hertzian = 80.0 * math.pi**2 * (dx * FREQ / 299792458.0) ** 2
+    assert abs(resistance - hertzian) / hertzian < 0.01, resistance

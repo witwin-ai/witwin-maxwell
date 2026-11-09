@@ -93,14 +93,18 @@ def rectangular_waveguide_scene(
     )
     for position, size, name in walls:
         structures.append(
-            mw.Box(position=position, size=size).with_material(
-                mw.Material.pec(), name=name
+            mw.Structure(
+                mw.Box(position=position, size=size),
+                mw.Material.pec(),
+                name=name,
             )
         )
     if short_far_port:
         structures.append(
-            mw.Box(position=(half, 0.0, 0.0), size=(dx, GUIDE_A, GUIDE_B)).with_material(
-                mw.Material.pec(), name="short_termination"
+            mw.Structure(
+                mw.Box(position=(half, 0.0, 0.0), size=(dx, GUIDE_A, GUIDE_B)),
+                mw.Material.pec(),
+                name="short_termination",
             )
         )
     else:
@@ -161,7 +165,11 @@ def rectangular_waveguide_reference_scene(
         ((0.0, 0.0, -0.25), (wl, 0.60, 0.20), "wall_z_low"),
     )
     structures = [
-        mw.Box(position=position, size=size).with_material(mw.Material.pec(), name=name)
+        mw.Structure(
+            mw.Box(position=position, size=size),
+            mw.Material.pec(),
+            name=name,
+        )
         for position, size, name in walls
     ]
 

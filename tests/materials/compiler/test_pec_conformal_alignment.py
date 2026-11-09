@@ -43,7 +43,7 @@ def _pec_scene(geometry, pec_mode="conformal"):
         domain=mw.Domain(bounds=BOUNDS),
         grid=mw.GridSpec.uniform(DX),
         boundary=mw.BoundarySpec.pml(num_layers=8),
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode),
+        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
         device="cpu",
     )
     scene.add_structure(
@@ -149,7 +149,7 @@ def test_conformal_pec_edge_fill_is_differentiable_in_the_conductor_geometry():
         domain=mw.Domain(bounds=BOUNDS),
         grid=mw.GridSpec.uniform(DX),
         boundary=mw.BoundarySpec.pml(num_layers=8),
-        subpixel_samples=mw.SubpixelSpec(pec="conformal"),
+        subpixel_samples=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
         device="cpu",
     )
     scene.add_structure(
@@ -182,7 +182,7 @@ def test_non_pec_scene_has_no_edge_fill():
         domain=mw.Domain(bounds=BOUNDS),
         grid=mw.GridSpec.uniform(DX),
         boundary=mw.BoundarySpec.pml(num_layers=8),
-        subpixel_samples=mw.SubpixelSpec(pec="conformal"),
+        subpixel_samples=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
         device="cpu",
     )
     scene.add_structure(
@@ -210,3 +210,26 @@ def test_aligned_conductor_open_fractions_agree_across_modes(pec_mode):
             else _staircase_edge_fill(prepared, component)
         )
         assert torch.equal(fill, _staircase_edge_fill(reference, component)), component
+
+
+@pytest.mark.parametrize("mode", ["staircase", "conformal"])
+def test_one_cell_patch_survives_float32_boundary_cancellation(mode):
+    """Both patch faces remain PEC when center +/- half-size cancel in float32."""
+    spacing = .001
+    nodes = np.arange(-4, 9, dtype=np.float64)*spacing
+    prepared = prepare_scene(mw.Scene(
+        domain=mw.Domain(bounds=((nodes[0], nodes[-1]),)*3),
+        grid=mw.GridSpec.custom(nodes, nodes, nodes), boundary=mw.BoundarySpec.none(),
+        subpixel_samples=mw.SubpixelSpec(pec=mode, averaging="arithmetic", samples=1), device="cpu",
+        structures=[mw.Structure(mw.Box(position=(0, 0, .0035), size=(.028, .034, .001)), mw.Material.pec())]))
+    from types import SimpleNamespace
+    from witwin.maxwell.fdtd.runtime.materials import _pec_edge_open_fractions
+    opened = _pec_edge_open_fractions(SimpleNamespace(_compiled_material_model=prepared.compile_materials()))
+    for z in (.003, .004):
+        index = int(np.argmin(abs(prepared.z_nodes64-z)))
+        assert torch.all(opened["Ex"][:, :, index] == 0)
+        assert torch.all(opened["Ey"][:, :, index] == 0)
+    # The nearest genuine vacuum plane stays entirely open.
+    above = int(np.argmin(abs(prepared.z_nodes64-.005)))
+    assert torch.all(opened["Ex"][:, :, above] == 1)
+    assert torch.all(opened["Ey"][:, :, above] == 1)

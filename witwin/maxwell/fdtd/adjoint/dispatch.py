@@ -26,6 +26,7 @@ class _ReverseBackend(Enum):
     STANDARD = auto()
     CPML = auto()
     CONDUCTIVE = auto()
+    JOINT_MATERIAL = auto()
     KERR = auto()
     FULL_ANISO = auto()
     WIRE_STANDARD = auto()
@@ -45,6 +46,7 @@ _NATIVE_REVERSE_LABELS: dict[_ReverseBackend, str] = {
     _ReverseBackend.STANDARD: "native_standard",
     _ReverseBackend.CPML: "native_cpml",
     _ReverseBackend.CONDUCTIVE: "native_conductive",
+    _ReverseBackend.JOINT_MATERIAL: "torch_cuda_joint_material",
     _ReverseBackend.KERR: "native_kerr",
     _ReverseBackend.FULL_ANISO: "native_full_aniso",
     _ReverseBackend.WIRE_STANDARD: "native_wire_standard",
@@ -131,6 +133,8 @@ def _has_open_face_conflicts(face_codes: tuple[int, int, int, int, int, int]) ->
 
 def _only_bloch_or_mur_faces(solver):
     mur_faces = set(getattr(solver, "mur_faces", ()))
+    # Mode-matched one-way faces overwrite the same outer tangential planes.
+    mur_faces.update(getattr(solver, "mode_abc_faces", ()))
     faces = tuple((axis, side) for axis in "xyz" for side in ("low", "high"))
     # The periodic core's outer tangential writes are discarded by Mur. Their
     # cotangents are zeroed by the Mur transpose before that core is reversed.
@@ -519,6 +523,26 @@ def _supports_full_aniso(runtime, solver, forward_state, resolved_source_terms) 
     return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
 
 
+def _supports_joint_material(solver, forward_state):
+    if not (getattr(solver, "conductive_enabled", False) or getattr(solver, "_trainable_sigma_enabled", False)
+            or getattr(solver, "_copper_foils", ())):
+        return False
+    if not (getattr(solver, "_trainable_sigma_enabled", False) or getattr(solver, "_copper_foils", ())
+            or getattr(solver, "dispersive_enabled", False)
+            or getattr(solver, "_port_runtimes", ()) or getattr(solver, "_lumped_element_runtimes", ())):
+        return False
+    if any(bool(getattr(solver, name, False)) for name in (
+        "nonlinear_enabled", "full_aniso_enabled", "modulation_enabled", "tfsf_enabled",
+        "surface_impedance_enabled", "gyromagnetic_enabled")):
+        return False
+    if has_complex_fields(solver) and (not getattr(solver, "_copper_foils", ()) or getattr(solver, "conductive_enabled", False)):
+        return False
+    if getattr(solver, "_wire_runtime", None) is not None:
+        return False
+    return _matches_checkpoint_layout(solver, forward_state) and (has_complex_fields(solver) or not _has_open_face_conflicts(_face_codes(solver))
+        or (getattr(solver, "_copper_foils", ()) and all(code != BOUNDARY_PMC for code in _face_codes(solver))))
+
+
 def _select_reverse_backend(
     solver,
     forward_state,
@@ -529,6 +553,8 @@ def _select_reverse_backend(
     resolved_source_terms,
 ) -> _ReverseBackend:
     runtime = _runtime()
+    if _supports_joint_material(solver, forward_state):
+        return _ReverseBackend.JOINT_MATERIAL
 
     supports_tfsf = _supports_tfsf(runtime, solver, forward_state, resolved_source_terms)
     supports_grating_tfsf = _supports_grating_tfsf(runtime, solver, forward_state, resolved_source_terms)

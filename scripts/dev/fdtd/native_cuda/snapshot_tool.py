@@ -81,6 +81,7 @@ class _AdjointScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.03),
             boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),

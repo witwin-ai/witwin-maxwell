@@ -1,0 +1,11 @@
+# Native FP64 dense CPML arithmetic
+
+The dense electric and magnetic CPML kernels retain the field scalar type when computing spatial derivatives, convolution memories, corrected derivatives and curl. A float64 field therefore does not lose intermediate bits through float32 temporaries. The corresponding float32 specializations retain their arithmetic order and type.
+
+This repairs arithmetic inside the existing admitted native forward path. It does not expand `validate_fp64_forward`: unsupported materials, boundary combinations, graph/adjoint/distributed execution and output modes keep their existing admission behavior. It does not enable finite SurfaceMesh copper or establish general curved-cell stability.
+
+The maintained scalar-precision regression covers all six E/H components with active and inactive CPML states. Its exact-input rational reference constructs the physical curl through the Levi-Civita orientation and independent memory recurrences. Six CPU checks compare the reference with analytic linear curl. Twelve CUDA checks call the real native backend and retain the `2e-10` normalized update gate without a denominator floor; exact-zero scales require exact-zero error. The tests depend on the installed/current native backend and portable fixed inputs, with no historical artifact or absolute workspace dependency.
+
+Independent recorded GPU qualification covers 36 complete-grid local cases and 6,098 cells, plus 72 original/repaired float32 output comparisons and 30 actual native dtype rejections. Original double failures remain recorded. The unchanged three public FP64 cases separately cover direct Scene/Simulation forward execution, Result persistence, actual material sensitivity and rejection of trainable FP64 declarations. Their short 96-step fixture is not an antenna convergence claim. The saved high Result is independently inspected; unretained comparison endpoints are covered by the executed original assertions.
+
+The ABI signature is unchanged. Deploying the repair requires an updated compiled native image; an explicitly retained older prebuilt image still contains the older arithmetic. Historical caches used as frozen comparison endpoints must remain separate. Default-precision parity evidence is numerical, not a performance benchmark.

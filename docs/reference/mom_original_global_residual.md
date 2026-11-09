@@ -1,0 +1,7 @@
+# Complete original weak vector residual diagnostic
+
+Call internal `measure_original_global_residual(provider, value, rhs, edge_batch=32, source_batch=64, tolerance=1e-10, absolute_tolerance=0.)` from `witwin.maxwell.mom.operator_error` with an exact scalar free-space `ScalarSystemBlocks` and matching nonempty CUDA complex currents/RHS in global J/M ordering. Each leading RHS dimension is preserved in native independently gated norm and pass metadata. Every physical edge is tested in both J and M rows, using the primary original quadrature action and bounded source/target selections. Work is quadratic in physical edges; RHS count still determines workspace. This is an opt-in read-only diagnostic, not a new solver or differentiable parameter API.
+
+Inputs, configuration, scalar media, body routing and original provider geometry/version bindings are checked during measurement. Zero reference norm with nonzero error uses JSON-null relative error; native acceptance still uses `error <= absolute_tolerance + tolerance*rhs_norm`. Reported thresholds are the caller's explicit finite values. No existing compressed solver default or acceptance gate changes.
+
+The configured quadrature residual is not a continuum/rounding or all-operator-coefficient certificate. This function does not admit tensor or periodic providers, prove peak resources/scaling or grant production qualification. GSP-01 physical failures and final full-scope acceptance remain open.

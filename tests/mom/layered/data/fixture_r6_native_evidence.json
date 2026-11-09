@@ -1,0 +1,430 @@
+{
+  "solver_source_sha256": {
+    "witwin/maxwell/mom/layered/__init__.py": "8cbb7ea3295374383363dfd473a348401ebb9f54549bd7e941f486a21a7bbfee",
+    "witwin/maxwell/mom/layered/assembly.py": "bf27efa62b2083bf0d675ad16ebf86a0a498a7867ee4061798e399558e27e8a6",
+    "witwin/maxwell/mom/layered/build.py": "54aadfbda0ebdca7e94c674a61d4d63feff7a349b98efef14c0c6f0f39c16fff",
+    "witwin/maxwell/mom/layered/config.py": "f36162d4af7bd721f94d9f45ecad4fbe29076565dc913cba8e5c57673dd1fa4a",
+    "witwin/maxwell/mom/layered/cuda/assembly.cu": "35acfb2e55feec3b2f766e9939e769b84442a655ea30cdcd8d9321a4d6a26691",
+    "witwin/maxwell/mom/layered/cuda/bessel.cu": "10acfcda189ed9580a7b2f4231d6bc70431d7e6e416237a01c133338e61c3cee",
+    "witwin/maxwell/mom/layered/cuda/binding.cpp": "7824d257dd284694af27f3f87e49b30fd44e5c60bfab269e21afa6a7aab83889",
+    "witwin/maxwell/mom/layered/cuda/common.cuh": "62b41971e1b06739c2b9c0212fc575a2084b45e2bfd9e0909f0e5ebf682c5864",
+    "witwin/maxwell/mom/layered/cuda/green_eval.cuh": "8035ac87259ca5bb69a55dc172508727c8a9e54cb4ad034e7c675327f3313f15",
+    "witwin/maxwell/mom/layered/cuda/interp.cu": "f4584be63eddef1aa6636c9bc286787b461698b8b6d346b567e518f86b9afb85",
+    "witwin/maxwell/mom/layered/cuda/lowfreq.cu": "f54f4400bbf631bdf13fee75d91d369fac7452a29ac7eb75f850905226ce9cfe",
+    "witwin/maxwell/mom/layered/cuda/spectral.cu": "cfd91eaf6ae2a36871f39b75353b5c5bd57e35aa2ff3a91ec523a5faa6fb2ee1",
+    "witwin/maxwell/mom/layered/cuda/triangle_static.cuh": "c129a5f5f3dedb380724b26ab20a7f487aeb72f81b0dc9c0b1227e31407fe359",
+    "witwin/maxwell/mom/layered/cuda/vertical.cu": "6a1ca6c31f978cc10ff697cd313c800bd642c951f130394c246d5ec1656deec5",
+    "witwin/maxwell/mom/layered/green.py": "f9ffa6acae753b5ef26d0cfe9a1bfa968db9fdbb369e16b0b1c8a541ff892843",
+    "witwin/maxwell/mom/layered/loss.py": "2c3bc4eeac79ee343947f37a6f113cc13acb987be92f23cf4111273b9af7208b",
+    "witwin/maxwell/mom/layered/lowfreq.py": "7608cee84cd5c47ef7d40ab9b0776a0cbd027cf4cb1702e51e6a65cfd6dc0d2e",
+    "witwin/maxwell/mom/layered/mesh.py": "d37140840460b54d737cf0868ac1930401c2d27ed9d6de732af98fe08ddb9087",
+    "witwin/maxwell/mom/layered/network.py": "dc372a043e4b02d005064abe40f830b408f10d93be686215a4f8449331246857",
+    "witwin/maxwell/mom/layered/process.py": "5486af65e790ca3757dd5693cb1406624b1a6700d7c301a3442f471264a087e3",
+    "witwin/maxwell/mom/layered/runtime.py": "b90c0c0c382b5526688db3e5e7a24688968dc6e14665eb312a5313a8b685666d",
+    "witwin/maxwell/mom/layered/sweep.py": "5a3067b19309c3f0f8d75fae6ee9dc52df82b674729737983fc02dbd05b660e8",
+    "witwin/maxwell/mom/layered/vertical.py": "3e800cbf255fde168a7bf52637d4af2a0dd0ae969748fa8d55046ca486a6a573",
+    "witwin/maxwell/mom/open_surface.py": "9413110470acc9583c8d7d54a8ef2d70f05c2c205477926d6358fc3cfdad2d83",
+    "witwin/maxwell/mom/topology.py": "293234b9285b4e48505ff36b411d9bd1f2f323102058c88dac22314b85ff9a63",
+    "witwin/maxwell/scene.py": "90112cc7e6ac0fdd5f5b9a3b51d6eced9ffba3a23e659fb1727d77b3618e8135",
+    "witwin/maxwell/simulation.py": "7b27e94499c9809a19d943cfa2a86fc17e95a55a03d5b67b71768d88866d3df5",
+    "witwin/maxwell/network.py": "88c7e0e52e1da4c47326e1800ebf05aa83bb4f2b446cc8c170dc1287a73a484d",
+    "witwin/maxwell/network_math.py": "c90ee7782a6c48350d433139c98430439295ce77d8f5a24707f0e8af51d522fa",
+    "witwin/maxwell/constants.py": "3e31b470678ce464d5a5f96b75b4f1df3da92f20fca5a658d6b89dd4c0ff553b",
+    "witwin/maxwell/media.py": "01a1243a5bd78a79eec5f1e3973c64cfffead41fef31cd7bce96cf4323ad3c12",
+    "witwin/maxwell/layers.py": "4331b57b3ed8598310decb4d2f71f0714fe5affd03d03e96022ef415760cfd32",
+    "witwin/maxwell/ports.py": "54e1686ae27c5084d02744d2563eaed294e23f07400133c069acffcbf0a1ec55"
+  },
+  "analysis_source_sha256": {
+    "tests/support/rfic_fa_references.py": "e89495dbd647296aa0d2f2ce2ac050c39db2cf9dfa517cdd9124b6bd34a69d67",
+    "tests/support/rfic_r6_references.py": "13f3faf2307bac485c8343c72c639e72ed2e3f0b295c61a53460590cadf82128"
+  },
+  "coarse": {
+    "none": {
+      "metrics": {
+        "L_1GHz_H": 3.3540256667798866e-09,
+        "Q_peak": 17.960113221615885,
+        "peak_frequency_Hz": 3200000000.0,
+        "self_resonance_Hz": 14464841948.711885
+      },
+      "mesh": "shield",
+      "unknowns": 897,
+      "config": {
+        "bridge_width_m": 9.999999999999999e-06,
+        "max_edge_length_m": 7.999999999999999e-05,
+        "edge_cell_m": 1.9999999999999998e-05,
+        "growth_ratio": 1.5,
+        "breakpoint_tolerance_m": 0.0,
+        "sweep": null
+      },
+      "ports": [
+        {
+          "name": "p1",
+          "terminal_pair_um": [
+            [
+              130.0,
+              95.0,
+              305.0
+            ],
+            [
+              145.0,
+              95.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        },
+        {
+          "name": "p2",
+          "terminal_pair_um": [
+            [
+              130.0,
+              80.0,
+              305.0
+            ],
+            [
+              145.0,
+              80.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        }
+      ],
+      "geometry_sha256": "05c904b3da2eb6ce5fce8fe2f0cd8d25b54b5366feaefc1591c5c181f6cd1b5d",
+      "producer_fixture_sha256": [
+        "b483e3f352fe859a14471c7bf55ccc6844200ccab2982f246106b52c733db01f"
+      ],
+      "sources": [
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-shield-grounded1-sigma10-peak.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-shield-grounded1-sigma10-resonance.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-shield-grounded1-sigma10.json"
+      ]
+    },
+    "pgs": {
+      "metrics": {
+        "L_1GHz_H": 3.335029588421968e-09,
+        "Q_peak": 13.43499147318166,
+        "peak_frequency_Hz": 2400000000.0,
+        "self_resonance_Hz": 11979054275.547516
+      },
+      "mesh": "shield",
+      "unknowns": 4125,
+      "config": {
+        "bridge_width_m": 9.999999999999999e-06,
+        "max_edge_length_m": 7.999999999999999e-05,
+        "edge_cell_m": 1.9999999999999998e-05,
+        "growth_ratio": 1.5,
+        "breakpoint_tolerance_m": 0.0,
+        "sweep": null
+      },
+      "ports": [
+        {
+          "name": "p1",
+          "terminal_pair_um": [
+            [
+              130.0,
+              95.0,
+              305.0
+            ],
+            [
+              145.0,
+              95.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        },
+        {
+          "name": "p2",
+          "terminal_pair_um": [
+            [
+              130.0,
+              80.0,
+              305.0
+            ],
+            [
+              145.0,
+              80.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        }
+      ],
+      "geometry_sha256": "b673d998c6017dfa5adfb5c2409276518c70213c1b5e79ee7d16334ef269928d",
+      "producer_fixture_sha256": [
+        "b483e3f352fe859a14471c7bf55ccc6844200ccab2982f246106b52c733db01f"
+      ],
+      "sources": [
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield-grounded1-sigma10-peak.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield-grounded1-sigma10-resonance.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield-grounded1-sigma10.json"
+      ]
+    },
+    "solid": {
+      "metrics": {
+        "L_1GHz_H": 3.329456190654083e-09,
+        "Q_peak": 10.148574004108676,
+        "peak_frequency_Hz": 2000000000.0,
+        "self_resonance_Hz": 11407029657.408318
+      },
+      "mesh": "shield",
+      "unknowns": 4456,
+      "config": {
+        "bridge_width_m": 9.999999999999999e-06,
+        "max_edge_length_m": 7.999999999999999e-05,
+        "edge_cell_m": 1.9999999999999998e-05,
+        "growth_ratio": 1.5,
+        "breakpoint_tolerance_m": 0.0,
+        "sweep": null
+      },
+      "ports": [
+        {
+          "name": "p1",
+          "terminal_pair_um": [
+            [
+              130.0,
+              95.0,
+              305.0
+            ],
+            [
+              145.0,
+              95.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        },
+        {
+          "name": "p2",
+          "terminal_pair_um": [
+            [
+              130.0,
+              80.0,
+              305.0
+            ],
+            [
+              145.0,
+              80.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        }
+      ],
+      "geometry_sha256": "ce3fc730b7114652a0de29129673539f6783341bc5d5d90e92350ba2023028b5",
+      "producer_fixture_sha256": [
+        "b483e3f352fe859a14471c7bf55ccc6844200ccab2982f246106b52c733db01f"
+      ],
+      "sources": [
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield-grounded1-sigma10-peak.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield-grounded1-sigma10-resonance.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield-grounded1-sigma10.json"
+      ]
+    }
+  },
+  "finest": {
+    "none": {
+      "metrics": {
+        "L_1GHz_H": 3.3111646997838153e-09,
+        "Q_peak": 16.332077896229787,
+        "peak_frequency_Hz": 3300000000.0,
+        "self_resonance_Hz": 14368306842.44823
+      },
+      "mesh": "full",
+      "unknowns": 6041,
+      "config": {
+        "bridge_width_m": 9.999999999999999e-06,
+        "max_edge_length_m": 9.999999999999999e-06,
+        "edge_cell_m": 4.9000000000000005e-06,
+        "growth_ratio": 1.5,
+        "breakpoint_tolerance_m": 0.0,
+        "sweep": null
+      },
+      "ports": [
+        {
+          "name": "p1",
+          "terminal_pair_um": [
+            [
+              130.0,
+              95.0,
+              305.0
+            ],
+            [
+              145.0,
+              95.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        },
+        {
+          "name": "p2",
+          "terminal_pair_um": [
+            [
+              130.0,
+              80.0,
+              305.0
+            ],
+            [
+              145.0,
+              80.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        }
+      ],
+      "geometry_sha256": "05c904b3da2eb6ce5fce8fe2f0cd8d25b54b5366feaefc1591c5c181f6cd1b5d",
+      "producer_fixture_sha256": [
+        "b483e3f352fe859a14471c7bf55ccc6844200ccab2982f246106b52c733db01f"
+      ],
+      "sources": [
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-full-grounded1-sigma10-peak.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-full-grounded1-sigma10-refined.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-full-grounded1-sigma10-resonance.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-full-grounded1-sigma10.json"
+      ]
+    },
+    "pgs": {
+      "metrics": {
+        "L_1GHz_H": 3.3029650618369743e-09,
+        "Q_peak": 12.734346969660347,
+        "peak_frequency_Hz": 2400000000.0,
+        "self_resonance_Hz": 11906610200.914227
+      },
+      "mesh": "shield_fine",
+      "unknowns": 8935,
+      "config": {
+        "bridge_width_m": 9.999999999999999e-06,
+        "max_edge_length_m": 1.9999999999999998e-05,
+        "edge_cell_m": 4.9999999999999996e-06,
+        "growth_ratio": 1.5,
+        "breakpoint_tolerance_m": 0.0,
+        "sweep": null
+      },
+      "ports": [
+        {
+          "name": "p1",
+          "terminal_pair_um": [
+            [
+              130.0,
+              95.0,
+              305.0
+            ],
+            [
+              145.0,
+              95.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        },
+        {
+          "name": "p2",
+          "terminal_pair_um": [
+            [
+              130.0,
+              80.0,
+              305.0
+            ],
+            [
+              145.0,
+              80.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        }
+      ],
+      "geometry_sha256": "b673d998c6017dfa5adfb5c2409276518c70213c1b5e79ee7d16334ef269928d",
+      "producer_fixture_sha256": [
+        "b483e3f352fe859a14471c7bf55ccc6844200ccab2982f246106b52c733db01f"
+      ],
+      "sources": [
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield_fine-grounded1-sigma10-peak.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield_fine-grounded1-sigma10-resonance.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield_fine-grounded1-sigma10.json"
+      ]
+    },
+    "solid": {
+      "metrics": {
+        "L_1GHz_H": 3.298588095685448e-09,
+        "Q_peak": 9.703572557535248,
+        "peak_frequency_Hz": 2199214030.0,
+        "self_resonance_Hz": 11378989743.810455
+      },
+      "mesh": "shield_fine",
+      "unknowns": 10054,
+      "config": {
+        "bridge_width_m": 9.999999999999999e-06,
+        "max_edge_length_m": 1.9999999999999998e-05,
+        "edge_cell_m": 4.9999999999999996e-06,
+        "growth_ratio": 1.5,
+        "breakpoint_tolerance_m": 0.0,
+        "sweep": null
+      },
+      "ports": [
+        {
+          "name": "p1",
+          "terminal_pair_um": [
+            [
+              130.0,
+              95.0,
+              305.0
+            ],
+            [
+              145.0,
+              95.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        },
+        {
+          "name": "p2",
+          "terminal_pair_um": [
+            [
+              130.0,
+              80.0,
+              305.0
+            ],
+            [
+              145.0,
+              80.0,
+              305.0
+            ]
+          ],
+          "axis": "x",
+          "reference_impedance": 50.0
+        }
+      ],
+      "geometry_sha256": "ce3fc730b7114652a0de29129673539f6783341bc5d5d90e92350ba2023028b5",
+      "producer_fixture_sha256": [
+        "b483e3f352fe859a14471c7bf55ccc6844200ccab2982f246106b52c733db01f"
+      ],
+      "sources": [
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield_fine-grounded1-sigma10-peak.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield_fine-grounded1-sigma10-resonance.json",
+        "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield_fine-grounded1-sigma10.json"
+      ]
+    }
+  },
+  "pi_model_source_mesh": "shield_fine",
+  "pi_effective_shunt_conductance_3p4GHz_S": {
+    "none": 0.0004847114264560036,
+    "pgs": 0.0021197911578952626,
+    "solid": 0.0023173155763118467
+  }
+}

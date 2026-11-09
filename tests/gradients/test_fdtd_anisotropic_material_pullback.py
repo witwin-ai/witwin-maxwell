@@ -15,7 +15,7 @@ class _TensorInterfaceDesign(mw.SceneModule):
         self.register_buffer("direction", torch.tensor([1., -.4, .2, .5, -.3, .6, .1, -.2], device="cuda").reshape(2, 2, 2))
 
     def to_scene(self):
-        scene = mw.Scene(domain=mw.Domain(bounds=((-0.6, .6),) * 3),
+        scene = mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=((-0.6, .6),) * 3),
             grid=mw.GridSpec.uniform(.12), boundary=mw.BoundarySpec.pml(num_layers=2), device="cuda")
         scene.add_structure(mw.Structure(
             geometry=mw.Box(position=(0., 0., 0.), size=(.36, .36, .12)),

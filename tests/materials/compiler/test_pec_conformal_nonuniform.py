@@ -41,7 +41,7 @@ def _pec_scene(grid, bounds, wall_low_x, *, pec_mode="conformal"):
         domain=mw.Domain(bounds=bounds),
         grid=grid,
         device="cpu",
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode),
+        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
     )
     scene.add_structure(
         mw.Structure(
@@ -196,7 +196,7 @@ def test_auto_grid_pec_compiles_with_per_node_beta():
         domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
         grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.3),
         device="cpu",
-        subpixel_samples=mw.SubpixelSpec(pec="conformal"),
+        subpixel_samples=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
     )
     scene.add_structure(
         mw.Structure(

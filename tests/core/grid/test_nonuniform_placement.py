@@ -100,7 +100,7 @@ def test_plane_observer_resolves_graded_axis_neighbors_and_weights():
     # Ez plane samples live on the z half grid; 0.06 falls between the
     # half-points 0.03 and 0.08 (weights from the local, unequal spacing).
     record = {"name": "cut", "kind": "plane", "axis": "z", "position": 0.06, "component": "Ez"}
-    samples, in_plane = resolve_plane_observer(solver, record)
+    samples, in_plane = resolve_plane_observer(solver.scene, record)
     z_half = _HALF["z"]
     lower = int(np.searchsorted(z_half, 0.06, side="left")) - 1
 

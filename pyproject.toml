@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "witwin-maxwell"
-version = "0.5.1"
+version = "0.6.0"
 description = "Witwin Maxwell - Electromagnetic simulation (FDTD/FDFD)"
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
@@ -12,7 +12,7 @@ license = "LicenseRef-Witwin-Research OR LicenseRef-Witwin-Commercial"
 license-files = ["LICENSE"]
 
 dependencies = [
-    "witwin>=0.4,<0.5",
+    "witwin>=0.4.6,<0.5",
     "numpy>=1.24",
     "torch>=2.10",
     "scipy>=1.10",
@@ -39,6 +39,17 @@ artifacts = [
     "witwin/maxwell/fdtd/cuda/**/*.h",
     "witwin/maxwell/fdtd/cuda/prebuilt/*.pyd",
     "witwin/maxwell/fdtd/cuda/prebuilt/*.so",
+]
+
+# The source distribution carries the package and build inputs only. Repository
+# evidence (docs/assessments and other study outputs) stays out of the upload.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/witwin",
+    "/hatch_build.py",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
 ]
 
 [tool.hatch.build.hooks.custom]

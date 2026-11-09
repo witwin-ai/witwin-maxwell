@@ -116,12 +116,9 @@ def test_half_wave_dipole_end_to_end_radiation_and_impedance():
 # --------------------------------------------------------------------------- #
 # Patch antenna: real Result.antenna pipeline over a grounded dielectric slab. #
 # --------------------------------------------------------------------------- #
-# The probe-fed patch exercises the NF2FF transform over a finite grounded
-# substrate (the harder homogeneous-exterior case). The pipeline gate below is a
-# genuine PASS; the matched-broadside TM010 physics is a DOCUMENTED GAP recorded
-# as a strict xfail (it cannot silently xpass) and deferred to stage E2c.
-_PATCH_FREQUENCIES = tuple(f * 1e9 for f in (4.4, 4.8, 5.2, 5.6, 6.0))
-
+# The aligned PEC boundary regression restores the actual patch conductor. Its
+# resonance is inside this band; the former 4.4--6 GHz band missed it entirely.
+_PATCH_FREQUENCIES = tuple(f * 1e9 for f in (2.9, 3.0, 3.1, 3.2, 3.3, 3.4, 3.5))
 
 @pytest.fixture(scope="module")
 def patch_antenna_run():
@@ -131,7 +128,7 @@ def patch_antenna_run():
         frequencies=list(_PATCH_FREQUENCIES),
         excitations=mw.PortExcitation(
             "feed",
-            source_time=mw.GaussianPulse(frequency=5.2e9, fwidth=2.2e9),
+            source_time=mw.GaussianPulse(frequency=3.2e9, fwidth=2.2e9),
         ),
         run_time=mw.TimeConfig(time_steps=1),
         spectral_sampler=mw.SpectralSampler(window="none"),
@@ -176,19 +173,6 @@ def test_patch_antenna_result_antenna_pipeline_is_valid(patch_antenna_run):
     assert result.port("feed").z_in.numel() == len(_PATCH_FREQUENCIES)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Probe-fed patch does not resonate: F2b diagnosis (docs/assessments/"
-        "f2-rf-trio-acceptance-2026-07-21.md) shows Re(Zin) < 4 Ohm with no resonance "
-        "peak across 2-8 GHz and a purely capacitive reactance -- the lumped feed couples "
-        "capacitively, never galvanically exciting the TM010 cavity mode; the cavity "
-        "resonance (~3.39 GHz) also sits below the driven band and the finite ground is "
-        "~0.07 lambda. The galvanic via added in F2b cut the feed reactance ~5x but a "
-        "matched broadside D >= 5 dBi needs a wire-bound clean-gap probe feed + larger "
-        "ground + on-resonance drive (multi-run antenna co-design, deferred)."
-    ),
-)
 def test_patch_antenna_matched_broadside_gate(patch_antenna_run):
     result, data = patch_antenna_run
     theta = data.theta[:, 0]
@@ -198,6 +182,5 @@ def test_patch_antenna_matched_broadside_gate(patch_antenna_run):
     matched = 20.0 * torch.log10(reflection)
     # Physical patch gate (documented target): a broadside D >= 5 dBi lobe at a
     # frequency where the feed is matched better than -10 dB.
-    assert bool(
-        torch.any((broadside_dbi >= 5.0) & (matched <= -10.0))
-    )
+    closure = (data.p_rad-data.p_accepted).abs()/data.p_accepted.abs()
+    assert bool(torch.any((broadside_dbi >= 5.0) & (matched <= -10.0) & (closure <= .03)))

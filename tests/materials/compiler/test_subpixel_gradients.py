@@ -5,6 +5,7 @@ from witwin.maxwell.scene import prepare_scene
 
 
 def test_polarized_eps_is_differentiable_wrt_box_size():
+    """Polarized eps is differentiable in box size (samples=2: single-sample polarized raises, 2026-10-29)."""
     # Grid 0.25 with the box centered at (0.5, 0.5, 0.5): 0.25/0.5/0.75 are
     # exactly representable in float32, so the SDF is bitwise-symmetric and the
     # center node has |grad(sdf)| == 0. This exercises the degenerate-node case
@@ -17,7 +18,7 @@ def test_polarized_eps_is_differentiable_wrt_box_size():
         domain=domain,
         grid=grid,
         device="cpu",
-        subpixel_samples=mw.SubpixelSpec(averaging="polarized"),
+        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
     )
     scene.add_structure(
         mw.Structure(
@@ -42,7 +43,7 @@ def test_conformal_pec_occupancy_is_differentiable_wrt_box_size():
         domain=domain,
         grid=grid,
         device="cpu",
-        subpixel_samples=mw.SubpixelSpec(pec="conformal"),
+        subpixel_samples=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
     )
     scene.add_structure(
         mw.Structure(

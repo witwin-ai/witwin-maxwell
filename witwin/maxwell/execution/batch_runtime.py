@@ -76,7 +76,9 @@ class PreparedBatch:
         if policy.tune:
             raise ValueError("Resolve measured tuning through BatchSimulation.prepare().")
         if batch.outputs.materials or any(name.startswith("H") for name in batch.outputs.fields):
-            raise NotImplementedError("Batch material export and magnetic full-field spectra are not implemented yet.")
+            raise NotImplementedError(
+                "Batch material snapshots and magnetic full-field spectra have no output-buffer allocation in PreparedBatch."
+            )
         if batch.outputs.result_device not in ("local", "cpu", policy.devices[0]):
             if batch.outputs.result_device not in getattr(batch, "_export_pools", {}):
                 raise NotImplementedError("Cross-device batch result export requires a destination allocation pool.")
@@ -206,7 +208,7 @@ class PreparedBatch:
                 raise ValueError("PreparedBatch parameters must preserve the template schema and variant count.")
             batch._validate_parameters(parameters)
         from ..sources import PointDipole
-        from ..monitors import PointMonitor, PlaneMonitor, FluxMonitor
+        from ..monitors import PointMonitor, PlaneMonitor, FinitePlaneMonitor, FluxMonitor, PowerLossMonitor
         for model in batch.simulations:
             checked = copy.copy(model)
             checked._refresh_trainable_parameters()
@@ -216,15 +218,18 @@ class PreparedBatch:
             if torch.is_grad_enabled() and (checked.has_trainable_parameters or parameters is not None and parameters.requires_grad) and model.config.shutoff > 0:
                 raise ValueError("Batch adjoint requires a fixed time horizon: set shutoff=0.")
             scene = model.scene
-            for name in ("ports", "thin_wires", "networks", "lumped_elements", "circuits"):
+            for name in ("thin_wires",):
                 if getattr(scene, name, ()):
                     raise NotImplementedError(f"Native batch execution does not yet support Scene.{name}.")
-            if model.port_sweep is not None or model.excitations:
-                raise NotImplementedError("Batch RF port excitation is not implemented yet.")
+            if model.port_sweep is not None:
+                raise NotImplementedError(
+                    "Batch RF port excitation requires per-variant modal injection and port-state buffers; "
+                    "the native batch runtime only packs PointDipole drives."
+                )
             if any(not isinstance(source, PointDipole) for source in scene.resolved_sources()):
                 raise NotImplementedError("The current native batch tier supports PointDipole sources.")
-            if any(not isinstance(m, (PointMonitor, PlaneMonitor, FluxMonitor)) for m in scene.resolved_monitors()):
-                raise NotImplementedError("The current native batch tier supports point, plane and flux monitors.")
+            if any(not isinstance(m, (PointMonitor, PlaneMonitor, FinitePlaneMonitor, FluxMonitor, PowerLossMonitor)) for m in scene.resolved_monitors()):
+                raise NotImplementedError("The current native batch tier supports point, finite/full plane, flux and postprocessed power-loss monitors.")
             if model.config.enable_plot:
                 raise ValueError("Batch execution does not support per-step plotting.")
 
@@ -362,6 +367,10 @@ class PreparedBatch:
             self._slot = NativeFieldSlot(self.capacity, self.device)
         self._slot.bind(solvers)
         self._models = tuple(models)
+        from ..fdtd.excitation.temporal import BatchSourceEngine
+        self._sources = BatchSourceEngine(self._slot, max(
+            model._resolve_fdtd_time_steps(solver, model.scene)
+            for model, solver in zip(self._models, solvers)))
         # Keep identities alive for as long as the cached cohort uses them.
         # Source amplitudes materialize to Python floats, so the compiled Scene
         # alone does not retain their original tensors. Inference tensors lack
@@ -381,18 +390,13 @@ class PreparedBatch:
             lifecycle.close()
 
     def _cohort_steps(self):
-        from ..fdtd.runtime.stepping import solve_steps, _post_source_block, _electric_field_energy
+        from ..fdtd.runtime.stepping import solve_steps, _port_step_block, _electric_field_energy
         from ..fdtd.observers import BatchObserverEngine
-        from ..fdtd.excitation.temporal import BatchSourceEngine
         slot = self._slot
         slot.reset()
         if self._observers is None:
             self._observers = BatchObserverEngine(slot)
         observers = self._observers
-        if self._sources is None:
-            self._sources = BatchSourceEngine(slot, max(
-                model._resolve_fdtd_time_steps(solver, model.scene)
-                for model, solver in zip(self._models, slot.solvers)))
         generators, pending, outputs, checkpoints, strides = [], {}, {}, {}, {}
         try:
             for lane, (model, solver) in enumerate(zip(self._models, slot.solvers)):
@@ -407,8 +411,17 @@ class PreparedBatch:
                     dft_components=self.batch.outputs.fields)
                 generators.append(iterator)
                 descriptor = next(iterator)
+                # The cooperative driver samples port spectra from the shared
+                # GPU step counter. Finalization supplies the host sample count.
+                solver._port_observer_graph_active = bool(getattr(solver, "_port_runtimes", ()))
+                from ..fdtd.ports import prepare_port_drive_tables
+                prepare_port_drive_tables(solver, steps)
                 if solver.dft_enabled and not descriptor["gpu_dft"]:
                     raise NotImplementedError("Batch full-field spectra require GPU-driven accumulation.")
+                for runtime in getattr(solver, "_circuit_runtimes", ()):
+                    if not runtime.graph_eligible:
+                        raise NotImplementedError("Native batch MNA requires fixed circuit parameters and prepared source/switch schedules.")
+                solver._native_batch_circuit_indices = tuple(0 for _runtime in getattr(solver, "_circuit_runtimes", ()))
                 pending[lane] = (steps, descriptor["shutoff_min_step"])
             observers.bind()
             from ..fdtd.checkpoint import capture_checkpoint_state
@@ -422,7 +435,9 @@ class PreparedBatch:
             policy = self.batch.execution
             graph_enabled = policy.graph != "off"
             chunk_limit = 32 if policy.graph_steps == "auto" else policy.graph_steps
-            spectral_signature = tuple(getattr(solver, "_dft_buffer_generation", 0) for solver in slot.solvers)
+            spectral_signature = tuple((getattr(solver, "_dft_buffer_generation", 0),
+                                        getattr(solver, "_copper_spectral_generation", 0),
+                                        id(getattr(solver, "_port_observer_step", None))) for solver in slot.solvers)
             if spectral_signature != getattr(self, "_graph_spectral_signature", None):
                 self._graphs.clear()
                 self._graph_spectral_signature = spectral_signature
@@ -439,6 +454,18 @@ class PreparedBatch:
                     cfg = self._models[lane].config
                     if cfg.shutoff > 0:
                         deadline = min(deadline, (completed//cfg.shutoff_check_interval+1)*cfg.shutoff_check_interval)
+                circuit_signature = []
+                for lane in pending:
+                    solver = slot.solvers[lane]
+                    indices = []
+                    for runtime in getattr(solver, "_circuit_runtimes", ()):
+                        factor = (runtime.integration_keys[completed], runtime.switch_keys[completed])
+                        indices.append(next(index for index, pair in enumerate(zip(runtime.integration_keys, runtime.switch_keys)) if pair == factor))
+                        change = next((index for index in range(completed+1, deadline)
+                                       if (runtime.integration_keys[index], runtime.switch_keys[index]) != factor), deadline)
+                        deadline = min(deadline, change)
+                        circuit_signature.append((lane, factor, id(runtime.node_samples)))
+                    solver._native_batch_circuit_indices = tuple(indices)
                 count = min(chunk_limit if graph_enabled else 1, deadline-completed)
                 lanes = tuple(pending)
                 def advance_chunk():
@@ -446,10 +473,10 @@ class PreparedBatch:
                         slot.advance()
                         self._sources.advance(observers.step)
                         for lane in lanes:
-                            _post_source_block(slot.solvers[lane])
+                            _port_step_block(slot.solvers[lane], observers.step)
                         observers.advance()
                 if graph_enabled:
-                    key = (lanes, count)
+                    key = (lanes, count, tuple(circuit_signature))
                     replay = self._graphs.get(key)
                     if replay is None:
                         try:
@@ -477,6 +504,8 @@ class PreparedBatch:
                 for lane in tuple(pending):
                     solver = slot.solvers[lane]
                     cfg = self._models[lane].config
+                    for runtime in getattr(solver, "_circuit_runtimes", ()):
+                        runtime.step_index = completed
                     steps, minimum = pending[lane]
                     if cfg.shutoff > 0 and completed % cfg.shutoff_check_interval == 0:
                         energy = _electric_field_energy(solver)
@@ -538,14 +567,38 @@ class PreparedBatch:
         if set(fields) != set(self.batch.outputs.fields):
             raise RuntimeError("Batch output plan requested unavailable field spectra.")
         destination = getattr(self.batch, "_export_pools", {}).get(device)
+        # Retain input containers while the identity memo is live. Temporary
+        # empty/comprehension dictionaries can otherwise reuse an earlier id.
+        monitor_payload = raw.get("observers", {})
+        port_payload = {name: value for name, value in raw.get("ports", {}).items()
+                        if self.batch.outputs.ports == "all" or name in self.batch.outputs.ports}
+        circuit_payload = raw.get("circuits", {})
+        network_payload = raw.get("embedded_networks", {})
+        field_payload = {name.upper(): value for name, value in fields.items()}
         with (destination.activate() if destination is not None else contextlib.nullcontext()), torch.set_grad_enabled(differentiable):
-            exported_fields = _owned({name.upper(): value for name, value in fields.items()}, device, memo)
-            exported_monitors = _owned(raw.get("observers", {}), device, memo)
+            exported_fields = _owned(field_payload, device, memo)
+            exported_monitors = _owned(monitor_payload, device, memo)
         with torch.no_grad():
             scene_snapshot = _owned(model.scene, self.device, {})
+        loss_metadata = {}
+        loss_output = None
+        loss_payload = {key: raw[key] for key in ("conductor_losses", "loss_materials")
+                        if differentiable and raw.get(key)}
+        if loss_payload:
+            with torch.enable_grad():
+                loss_output = _owned(loss_payload, device, memo)
+            if "conductor_losses" in loss_output:
+                loss_metadata["conductor_losses"] = loss_output["conductor_losses"]
+        elif getattr(solver, "_copper_foils", ()):
+            from ..fdtd.copper_foil import copper_loss_report
+            loss_metadata["conductor_losses"] = copper_loss_report(solver)
         result = Result(method="fdtd", scene=scene_snapshot, frequencies=model.frequencies,
             fields=exported_fields, monitors=exported_monitors,
-            metadata={**model.metadata, "batch_index": index, "variant_id": self.batch.variant_ids[index]},
+            ports=_owned(port_payload, device, memo),
+            circuits=_owned(circuit_payload, device, memo),
+            embedded_networks=_owned(network_payload, device, memo),
+            raw_output=loss_output,
+            metadata={**model.metadata, **loss_metadata, "batch_index": index, "variant_id": self.batch.variant_ids[index]},
             solver_stats=model._build_fdtd_solver_stats(solver,
                 time_steps=model._resolve_fdtd_time_steps(solver, model.scene),
                 use_full_field_dft=bool(self.batch.outputs.fields), dft_cfg=model.config.spectral_sampler))

@@ -53,6 +53,53 @@ def test_direct_solve_is_accurate_and_caches_factorization():
 
 
 @requires_cuda
+def test_failed_solve_propagates_and_clears_stale_state(monkeypatch):
+    solver = _direct_solver()
+    solver.solve()
+    assert solver.E_field is not None
+    assert solver.converged is True
+    solver.E_field_raw = solver.get_field_raw()
+    assert solver.E_field_raw is not None
+
+    def fail_direct(b):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(solver, "_solve_direct", fail_direct)
+    with pytest.raises(RuntimeError, match="boom"):
+        solver.solve()
+
+    assert solver.E_field is None
+    assert solver.E_field_raw is None
+    assert solver.converged is None
+    assert solver.final_residual is None
+    assert solver.solver_info is None
+    assert solver.solver_residuals is None
+
+
+@requires_cuda
+def test_public_run_surfaces_the_solver_exception(monkeypatch):
+    from witwin.maxwell.fdfd.solver import FDFD
+
+    def fail_direct(self, b):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(FDFD, "_solve_direct", fail_direct)
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
+        grid=mw.GridSpec.uniform(0.02),
+        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1e6),
+        device="cuda",
+    )
+    scene.add_source(_dipole("src"))
+    with pytest.raises(ValueError, match="boom"):
+        mw.Simulation.fdfd(
+            scene,
+            frequency=FREQ,
+            solver=mw.GMRES(solver_type="direct"),
+        ).run()
+
+
+@requires_cuda
 def test_direct_factorization_reused_across_sources():
     solver = _direct_solver()
     solver.solve()

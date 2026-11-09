@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import math
+
 import torch
 
+from ...compiler.sources import validate_fdtd_source_times
 from .common import BOUNDARY_KIND_TO_CODE, BOUNDARY_PEC, initialize_complex_fields
+from .abc import (
+    initialize_internal_absorber_state,
+    initialize_mode_abc_state,
+    initialize_second_order_mur_faces,
+)
 from .bloch import resolve_bloch_phase_factors, resolve_bloch_wavevector
 from .cpml import (
     initialize_absorber_state,
@@ -11,6 +19,84 @@ from .cpml import (
     initialize_simple_pml_state,
     initialize_stable_pml_state,
 )
+
+
+def _effective_face_kinds(scene_or_boundary):
+    boundary = getattr(scene_or_boundary, "boundary", scene_or_boundary)
+    symmetry = getattr(scene_or_boundary, "symmetry", (None, None, None))
+    faces = []
+    for axis, entry in zip(("x", "y", "z"), symmetry):
+        pair = [boundary.face_kind(axis, side) for side in ("low", "high")]
+        if entry is not None:
+            mode, side = entry
+            pair[0 if side == "low" else 1] = mode.lower()
+        faces.append(tuple(pair))
+    return tuple(faces)
+
+
+def closed_transverse_pml(scene_or_boundary) -> bool:
+    """Whether a PML termination has closed transverse axes.
+
+    An axis with either PML face counts as PML-bearing, even when its other
+    face is open or reflective. Every non-PML axis must have *both* faces
+    periodic, Bloch, PEC or PMC (mixed PEC/PMC is closed). At least one
+    non-PML axis is required: an all-PML open box is not closed-transverse.
+    Scene symmetry replaces its face with PEC/PMC before classification;
+    passing only BoundarySpec cannot account for scene symmetry.
+    """
+    faces = _effective_face_kinds(scene_or_boundary)
+    transverse = [pair for pair in faces if "pml" not in pair]
+    closed = {"periodic", "bloch", "pec", "pmc"}
+    return (any("pml" in pair for pair in faces) and bool(transverse)
+            and all(kind in closed for pair in transverse for kind in pair))
+
+
+def complex_fixed_k(solver) -> bool:
+    """Complex fields with a nonzero resolved k component on a Bloch axis."""
+    return bool(getattr(solver, "complex_fields_enabled", False)) and any(
+        solver.scene.boundary.axis_kind(axis) == "bloch" and float(k) != 0.0
+        for axis, k in zip(("x", "y", "z"),
+                           getattr(solver, "resolved_bloch_wavevector", (0., 0., 0.)))
+    )
+
+
+def resolve_absorber(scene, requested, *, complex_fields, distributed=False):
+    """Resolve once, before coefficient construction; never change geometry."""
+    requested = str(requested)
+    if not scene.boundary.uses_kind("pml"):
+        return "none", "no PML faces"
+    if requested != "auto":
+        return requested, "explicit absorber selection"
+    if not complex_fields and closed_transverse_pml(scene):
+        if distributed:
+            raise NotImplementedError(
+                "absorber='auto' selects graded sigma for real-field closed-transverse "
+                "PML topology; the distributed solver verifies only cpml/stablepml. "
+                "Use a single-device run or an explicit absorber."
+            )
+        faces = _effective_face_kinds(scene)
+        boundary = scene.boundary
+        thin_faces = [
+            f"{axis}-{side}={boundary.pml_layers_for_face(axis, side)}"
+            for axis, pair in zip(("x", "y", "z"), faces)
+            for side, kind in zip(("low", "high"), pair)
+            if kind == "pml" and boundary.pml_layers_for_face(axis, side) < 40
+        ]
+        if thin_faces:
+            transverse = ", ".join(
+                f"{axis}(low={pair[0]}, high={pair[1]})"
+                for axis, pair in zip(("x", "y", "z"), faces) if "pml" not in pair
+            )
+            raise ValueError(
+                "absorber='auto' selects graded sigma for real-field closed-transverse "
+                f"PML topology: closed/periodic transverse axes: {transverse}; "
+                f"PML faces with fewer than 40 layers: {', '.join(thin_faces)}. "
+                "Requires >= 40 layers on every PML face. Either pass "
+                "absorber=\"cpml\" (CPML under the fail-closed passivity guard) or use "
+                ">= 40 PML layers for the graded absorber; geometry is never changed."
+            )
+        return "absorber", "auto: real-field closed-transverse PML topology"
+    return "cpml", "auto: complex fields or open PML topology"
 
 
 def _configure_face_boundary_codes(solver):
@@ -69,6 +155,17 @@ def _configure_face_boundary_codes(solver):
         if boundary.face_kind(axis, side) == "mur"
     )
     solver.has_mur_faces = bool(solver.mur_faces)
+    solver.mode_abc_faces = tuple(
+        (axis, side)
+        for axis in ("x", "y", "z")
+        for side in ("low", "high")
+        if boundary.face_kind(axis, side) == "mode_abc"
+    )
+    solver.internal_absorbers = tuple(getattr(solver.scene, "internal_absorbers", ()) or ())
+    if solver.mode_abc_faces or solver.internal_absorbers:
+        # Mode-matched faces and internal absorber planes run through the same
+        # post-E-update one-way boundary pass as the Mur faces.
+        solver.has_mur_faces = True
 
 
 _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
@@ -138,20 +235,23 @@ def initialize_boundary_state(solver):
         initialize_complex_fields(solver)
 
     solver.resolved_bloch_wavevector = resolve_bloch_wavevector(solver)
+    validate_fdtd_source_times(solver)
     phases = resolve_bloch_phase_factors(solver)
     solver.boundary_phase_cos = tuple(float(phase.real) for phase in phases)
     solver.boundary_phase_sin = tuple(float(phase.imag) for phase in phases)
-    solver.active_absorber_type = solver.absorber_type if solver.scene.boundary.uses_kind("pml") else "none"
+    solver.active_absorber_type, solver.absorber_resolution_reason = resolve_absorber(
+        solver.scene, solver.absorber_type, complex_fields=solver.complex_fields_enabled,
+    )
     solver.uses_cpml = solver.active_absorber_type in ("cpml", "stablepml")
 
     if solver.scene.boundary.uses_kind("pml"):
-        if solver.absorber_type == "cpml":
+        if solver.active_absorber_type == "cpml":
             initialize_cpml_state(solver)
-        elif solver.absorber_type == "stablepml":
+        elif solver.active_absorber_type == "stablepml":
             initialize_stable_pml_state(solver)
-        elif solver.absorber_type == "pml":
+        elif solver.active_absorber_type == "pml":
             initialize_simple_pml_state(solver)
-        elif solver.absorber_type == "absorber":
+        elif solver.active_absorber_type == "absorber":
             initialize_absorber_state(solver)
         else:
             raise ValueError(
@@ -174,13 +274,21 @@ _MUR_FACE_COMPONENTS = {
 
 def initialize_mur_state(solver):
     solver._mur_state = []
+    solver._abc_higdon_state = []
     if not getattr(solver, "has_mur_faces", False):
         return
 
     scene = solver.scene
     axis_primal = {"x": scene.dx_primal64, "y": scene.dy_primal64, "z": scene.dz_primal64}
     speed_dt = solver.c * solver.dt
-    for axis, side in solver.mur_faces:
+    mur_abc = scene.boundary.mur_abc
+    if mur_abc.permittivity is not None:
+        speed_dt = speed_dt / math.sqrt(mur_abc.permittivity)
+    first_order_faces = solver.mur_faces
+    if mur_abc.order == 2:
+        initialize_second_order_mur_faces(solver, solver.mur_faces, speed_dt)
+        first_order_faces = ()
+    for axis, side in first_order_faces:
         # Mur advection uses the local boundary-cell spacing of each face. The
         # coefficient depends only on c, dt, and that spacing, so it is constant
         # across time steps and precomputed once here.
@@ -209,3 +317,6 @@ def initialize_mur_state(solver):
                         "prev_adjacent": torch.zeros(plane_shape, device=solver.device, dtype=field.dtype),
                     }
                 )
+
+    initialize_mode_abc_state(solver)
+    initialize_internal_absorber_state(solver)

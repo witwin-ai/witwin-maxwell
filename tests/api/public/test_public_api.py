@@ -193,7 +193,8 @@ def test_fdtd_evaluation_compute_steps_accepts_public_scene(monkeypatch):
 
 def test_simulation_fdfd_wraps_solver(monkeypatch):
     class FakeFDFD:
-        def __init__(self, scene, frequency, solver_type, preconditioner, precision, ssor_omega, enable_plot, verbose):
+        def __init__(self, scene, frequency, solver_type, preconditioner, precision, ssor_omega, enable_plot, verbose,
+                     device_memory_limit_bytes=None):
             self.scene = scene
             self.frequency = frequency
             self.use_gpu = True
@@ -241,7 +242,8 @@ def test_simulation_fdfd_wraps_solver(monkeypatch):
 
 def test_simulation_accepts_scene_module_and_detects_trainable_parameters(monkeypatch):
     class FakeFDFD:
-        def __init__(self, scene, frequency, solver_type, preconditioner, precision, ssor_omega, enable_plot, verbose):
+        def __init__(self, scene, frequency, solver_type, preconditioner, precision, ssor_omega, enable_plot, verbose,
+                     device_memory_limit_bytes=None):
             self.scene = scene
             self.E_field = (
                 torch.ones((3, 4, 4), dtype=torch.complex64),
@@ -259,6 +261,7 @@ def test_simulation_accepts_scene_module_and_detects_trainable_parameters(monkey
 
         def to_scene(self):
             return mw.Scene(
+                subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
                 domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
                 grid=mw.GridSpec.uniform(0.25),
                 device="cpu",
@@ -359,9 +362,12 @@ def test_simulation_fdtd_wraps_solver(monkeypatch):
     class FakeFDTD:
         def __init__(self, scene, frequency, absorber_type, cpml_config):
             self.scene = scene
+            self._compiled_sources = []
             self.frequency = frequency
             self.absorber_type = absorber_type
             self.cpml_config = cpml_config
+            self._compiled_sources = ()
+            self.Ex = torch.zeros((3, 4, 4), dtype=torch.float32)
             self.c = 10.0
             self.dt = 0.25
             self.dft_sample_count = 8
@@ -395,7 +401,12 @@ def test_simulation_fdtd_wraps_solver(monkeypatch):
                 "dft_window": dft_window,
                 "full_field_dft": full_field_dft,
             }
-            return {"observers": {"center": {"data": np.complex64(1.0 + 2.0j)}}}
+            return {
+                "Ex": self.ex,
+                "Ey": self.ey,
+                "Ez": self.ez,
+                "observers": {"center": {"data": np.complex64(1.0 + 2.0j)}},
+            }
 
     monkeypatch.setattr("witwin.maxwell.simulation._resolve_fdtd_backend", lambda: (FakeFDTD, None))
     monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda scene, method: None)
@@ -433,9 +444,12 @@ def test_simulation_fdtd_multi_frequency_wraps_solver(monkeypatch):
     class FakeFDTD:
         def __init__(self, scene, frequency, absorber_type, cpml_config):
             self.scene = scene
+            self._compiled_sources = []
             self.frequency = frequency
             self.absorber_type = absorber_type
             self.cpml_config = cpml_config
+            self._compiled_sources = ()
+            self.Ex = torch.zeros((3, 4, 4), dtype=torch.float32)
             self.c = 10.0
             self.dt = 0.25
             self.dft_sample_count = 6

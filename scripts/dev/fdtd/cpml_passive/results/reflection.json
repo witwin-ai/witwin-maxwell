@@ -1,0 +1,1833 @@
+{
+  "method": "exact Yee/CN-ADE frequency-domain layer solve; h=c/(20*3 GHz), dt=h/(2*c*sqrt(2)); amplitude R at entrance",
+  "evanescent": "ky=1.25*omega/c; below-cutoff standing waveguide harmonic; R is amplitude ratio, not power",
+  "summary": {
+    "current": {
+      "max_R": 0.5059372266632145,
+      "failed_rows": 0,
+      "max_ratio_to_current": 1.0
+    },
+    "c1": {
+      "max_R": 0.5486614722237889,
+      "failed_rows": 64,
+      "max_ratio_to_current": 13.932206939617997
+    },
+    "c2": {
+      "max_R": 0.5486614722237889,
+      "failed_rows": 64,
+      "max_ratio_to_current": 13.932206939617997
+    },
+    "c3_old": {
+      "max_R": 0.5855473040579178,
+      "failed_rows": 71,
+      "max_ratio_to_current": 108.73395152769315
+    },
+    "c3_average": {
+      "max_R": 0.5493982726931995,
+      "failed_rows": 65,
+      "max_ratio_to_current": 18.62050619284446
+    }
+  },
+  "rows": [
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.0527290264193914e-05,
+        "c1": 1.2460179202572285e-05,
+        "c2": 1.2460179202572285e-05,
+        "c3_old": 3.18782265616321e-05,
+        "c3_average": 1.2991672609160634e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.046131679070261e-05,
+        "c1": 1.1139646853009722e-05,
+        "c2": 1.1139646853009722e-05,
+        "c3_old": 2.7491780034640173e-05,
+        "c3_average": 1.1381948582276279e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.0415053543219748e-05,
+        "c1": 8.942516165463248e-06,
+        "c2": 8.942516165463248e-06,
+        "c3_old": 1.8721653299180947e-05,
+        "c3_average": 8.601016180159908e-06
+      },
+      "passed": {
+        "current": true,
+        "c1": true,
+        "c2": true,
+        "c3_old": false,
+        "c3_average": true
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.098554980579707e-05,
+        "c1": 1.1186086648569802e-05,
+        "c2": 1.1186086648569802e-05,
+        "c3_old": 2.176866024930572e-05,
+        "c3_average": 1.1363909471919026e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.164915932719808e-05,
+        "c1": 1.3350026872261738e-05,
+        "c2": 1.3350026872261738e-05,
+        "c3_old": 3.29497685067976e-05,
+        "c3_average": 1.378084992420324e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 9.965387388716598e-06,
+        "c1": 2.8773647827884335e-05,
+        "c2": 2.8773647827884335e-05,
+        "c3_old": 0.00015025604326794715,
+        "c3_average": 3.3298105019891965e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 9.182855322429842e-06,
+        "c1": 2.5772857921347513e-05,
+        "c2": 2.5772857921347513e-05,
+        "c3_old": 0.00014689473256877632,
+        "c3_average": 3.0145713687925347e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 7.80239362398656e-06,
+        "c1": 1.958356162607562e-05,
+        "c2": 1.958356162607562e-05,
+        "c3_old": 0.0001405496308879631,
+        "c3_average": 2.378956964705553e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 8.276844730853992e-06,
+        "c1": 1.5834163564014012e-05,
+        "c2": 1.5834163564014012e-05,
+        "c3_old": 0.0001331830613475555,
+        "c3_average": 2.00878227702219e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.0745629524896477e-05,
+        "c1": 2.8891816890246136e-05,
+        "c2": 2.8891816890246136e-05,
+        "c3_old": 0.00014471446115975898,
+        "c3_average": 3.323925774802504e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.00020749920883061883,
+        "c1": 0.0011714256625850166,
+        "c2": 0.0011714256625850166,
+        "c3_old": 0.0041132117573239564,
+        "c3_average": 0.0013368739888335857
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.00020577905518875153,
+        "c1": 0.0011683962594309198,
+        "c2": 0.0011683962594309198,
+        "c3_old": 0.004106938814315378,
+        "c3_average": 0.0013335902114123101
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.00020208108605849578,
+        "c1": 0.0011614850733526769,
+        "c2": 0.0011614850733526769,
+        "c3_old": 0.004092278820655507,
+        "c3_average": 0.0013260788946634558
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.00019062775371079006,
+        "c1": 0.001133363693223749,
+        "c2": 0.001133363693223749,
+        "c3_old": 0.0040270211627484835,
+        "c3_average": 0.0012951879700431818
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.0001839780237027957,
+        "c1": 0.0010968514547636263,
+        "c2": 0.0010968514547636263,
+        "c3_old": 0.003927719132026162,
+        "c3_average": 0.0012541757064832128
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.04725877349171895,
+        "c1": 0.09185630153717965,
+        "c2": 0.09185630153717965,
+        "c3_old": 0.1454023924655978,
+        "c3_average": 0.09649397935682193
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.046787995843110324,
+        "c1": 0.09113811135005583,
+        "c2": 0.09113811135005583,
+        "c3_old": 0.1444824590009233,
+        "c3_average": 0.0957548071047531
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.04569721996996188,
+        "c1": 0.08946808268675158,
+        "c2": 0.08946808268675158,
+        "c3_old": 0.1423379272274733,
+        "c3_average": 0.09403551991689052
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.041017671371051036,
+        "c1": 0.0822028219394241,
+        "c2": 0.0822028219394241,
+        "c3_old": 0.13291693078802072,
+        "c3_average": 0.08654805648846968
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.03454837856073964,
+        "c1": 0.07185636009375675,
+        "c2": 0.07185636009375675,
+        "c3_old": 0.11921921075406997,
+        "c3_average": 0.07586114076868894
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.5059372266632145,
+        "c1": 0.5486614722237889,
+        "c2": 0.5486614722237889,
+        "c3_old": 0.5855473040579178,
+        "c3_average": 0.5493982726931995
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.25610220424389446,
+        "c1": 0.3012706962287279,
+        "c2": 0.3012706962287279,
+        "c3_old": 0.3430920460064558,
+        "c3_average": 0.3020821627402503
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.10348804043282792,
+        "c1": 0.13582198386937938,
+        "c2": 0.13582198386937938,
+        "c3_old": 0.16858372464717525,
+        "c3_average": 0.13643524172638258
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.010910100505379147,
+        "c1": 0.01900489512022299,
+        "c2": 0.01900489512022299,
+        "c3_old": 0.029119357010471556,
+        "c3_average": 0.019179866558926995
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "real",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.001190242173503707,
+        "c1": 0.002824548668172342,
+        "c2": 0.002824548668172342,
+        "c3_old": 0.005275523409758774,
+        "c3_average": 0.002863648785900051
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 5.721664307118213e-06,
+        "c1": 3.3104545057098127e-06,
+        "c2": 3.3104545057098127e-06,
+        "c3_old": 3.1670643025380426e-05,
+        "c3_average": 2.9620148943397286e-06
+      },
+      "passed": {
+        "current": true,
+        "c1": true,
+        "c2": true,
+        "c3_old": false,
+        "c3_average": true
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.4527842201093702e-05,
+        "c1": 1.3710804777330042e-05,
+        "c2": 1.3710804777330042e-05,
+        "c3_old": 1.7260650020109903e-05,
+        "c3_average": 1.347881568794358e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": true,
+        "c2": true,
+        "c3_old": false,
+        "c3_average": true
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 2.627466017804209e-05,
+        "c1": 2.586218531543383e-05,
+        "c2": 2.586218531543383e-05,
+        "c3_old": 2.6744021711297775e-05,
+        "c3_average": 2.5723604485445268e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": true,
+        "c2": true,
+        "c3_old": false,
+        "c3_average": true
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 5.539367795130154e-05,
+        "c1": 5.493966346374939e-05,
+        "c2": 5.493966346374939e-05,
+        "c3_old": 4.708210132431727e-05,
+        "c3_average": 5.4733767916900884e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": true,
+        "c2": true,
+        "c3_old": true,
+        "c3_average": true
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 8.596724950504672e-05,
+        "c1": 8.653609236308606e-05,
+        "c2": 8.653609236308606e-05,
+        "c3_old": 8.569687607570902e-05,
+        "c3_average": 8.663397834014765e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": true,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 3.8188046451934944e-05,
+        "c1": 0.0001095071424863425,
+        "c2": 0.0001095071424863425,
+        "c3_old": 0.0003549736271922462,
+        "c3_average": 0.00012706547485860805
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.2149747101755283e-05,
+        "c1": 1.0030814307870807e-05,
+        "c2": 1.0030814307870807e-05,
+        "c3_old": 4.8256250163094416e-05,
+        "c3_average": 8.523970607227425e-06
+      },
+      "passed": {
+        "current": true,
+        "c1": true,
+        "c2": true,
+        "c3_old": false,
+        "c3_average": true
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 2.150506595639684e-05,
+        "c1": 1.9339497450877554e-05,
+        "c2": 1.9339497450877554e-05,
+        "c3_old": 3.1929666629302404e-05,
+        "c3_average": 1.8376795351316862e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": true,
+        "c2": true,
+        "c3_old": false,
+        "c3_average": true
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 4.5061909741803646e-05,
+        "c1": 4.379524031597773e-05,
+        "c2": 4.379524031597773e-05,
+        "c3_old": 3.052407328904143e-05,
+        "c3_average": 4.308491147577247e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": true,
+        "c2": true,
+        "c3_old": true,
+        "c3_average": true
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 6.932122608349564e-05,
+        "c1": 6.920105257249866e-05,
+        "c2": 6.920105257249866e-05,
+        "c3_old": 4.8216717669046594e-05,
+        "c3_average": 6.895954782125138e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": true,
+        "c2": true,
+        "c3_old": true,
+        "c3_average": true
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 7.000509605615453e-05,
+        "c1": 0.0003609356644874138,
+        "c2": 0.0003609356644874138,
+        "c3_old": 0.002255284849097674,
+        "c3_average": 0.0005260480222854998
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 7.404660845491126e-06,
+        "c1": 4.1540363929413845e-05,
+        "c2": 4.1540363929413845e-05,
+        "c3_old": 0.0008051380334526395,
+        "c3_average": 8.221246856433588e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.2389416833514375e-05,
+        "c1": 2.753521930605597e-05,
+        "c2": 2.753521930605597e-05,
+        "c3_old": 0.0006031428032360294,
+        "c3_average": 5.3003545252212054e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 2.605531642114042e-05,
+        "c1": 3.373194529037079e-05,
+        "c2": 3.373194529037079e-05,
+        "c3_old": 0.0005272359491111211,
+        "c3_average": 5.017365505087834e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 3.998732355022056e-05,
+        "c1": 3.6250298712529443e-05,
+        "c2": 3.6250298712529443e-05,
+        "c3_old": 0.0004927092289395539,
+        "c3_average": 4.19205649197201e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": true,
+        "c2": true,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.040273116847097085,
+        "c1": 0.06333940380695327,
+        "c2": 0.06333940380695327,
+        "c3_old": 0.11951285141686771,
+        "c3_average": 0.07211536893406119
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.005994409669810006,
+        "c1": 0.029702438098422646,
+        "c2": 0.029702438098422646,
+        "c3_old": 0.08213032277060027,
+        "c3_average": 0.037027297140623756
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.0027845816369914205,
+        "c1": 0.022984706603849422,
+        "c2": 0.022984706603849422,
+        "c3_old": 0.07233399604135667,
+        "c3_average": 0.02952627939243971
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.0015514381843705308,
+        "c1": 0.018012866440788793,
+        "c2": 0.018012866440788793,
+        "c3_old": 0.06263461366507161,
+        "c3_average": 0.023664795578890306
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.0010189987226316333,
+        "c1": 0.014196901074910315,
+        "c2": 0.014196901074910315,
+        "c3_old": 0.05339691107077516,
+        "c3_average": 0.01897427202526292
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.0038161910966780918,
+        "c1": 0.022733799398792384,
+        "c2": 0.022733799398792384,
+        "c3_old": 0.05757676780465318,
+        "c3_average": 0.025017071614803117
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.013343877336620546,
+        "c1": 0.049675794082484945,
+        "c2": 0.049675794082484945,
+        "c3_old": 0.09622800918172686,
+        "c3_average": 0.05265421187922572
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.017498618241801156,
+        "c1": 0.052143694477702625,
+        "c2": 0.052143694477702625,
+        "c3_old": 0.09003241141804647,
+        "c3_average": 0.054230452948815226
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.005680801954424991,
+        "c1": 0.017865278648956553,
+        "c2": 0.017865278648956553,
+        "c3_old": 0.03189171628290378,
+        "c3_average": 0.01834306445463896
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "cfs",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.0010969174030309357,
+        "c1": 0.004278044330981615,
+        "c2": 0.004278044330981615,
+        "c3_old": 0.008805075247356998,
+        "c3_average": 0.004383882631285046
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.0527290264193914e-05,
+        "c1": 1.2460179202572285e-05,
+        "c2": 1.2460179202572285e-05,
+        "c3_old": 3.18782265616321e-05,
+        "c3_average": 1.2991672609160634e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.046131679070261e-05,
+        "c1": 1.1139646853009722e-05,
+        "c2": 1.1139646853009722e-05,
+        "c3_old": 2.7491780034640173e-05,
+        "c3_average": 1.1381948582276279e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.0415053543219748e-05,
+        "c1": 8.942516165463248e-06,
+        "c2": 8.942516165463248e-06,
+        "c3_old": 1.8721653299180947e-05,
+        "c3_average": 8.601016180159908e-06
+      },
+      "passed": {
+        "current": true,
+        "c1": true,
+        "c2": true,
+        "c3_old": false,
+        "c3_average": true
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.098554980579707e-05,
+        "c1": 1.1186086648569802e-05,
+        "c2": 1.1186086648569802e-05,
+        "c3_old": 2.176866024930572e-05,
+        "c3_average": 1.1363909471919026e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 0.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.164915932719808e-05,
+        "c1": 1.3350026872261738e-05,
+        "c2": 1.3350026872261738e-05,
+        "c3_old": 3.29497685067976e-05,
+        "c3_average": 1.378084992420324e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 9.965387388716598e-06,
+        "c1": 2.8773647827884335e-05,
+        "c2": 2.8773647827884335e-05,
+        "c3_old": 0.00015025604326794715,
+        "c3_average": 3.3298105019891965e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 9.182855322429842e-06,
+        "c1": 2.5772857921347513e-05,
+        "c2": 2.5772857921347513e-05,
+        "c3_old": 0.00014689473256877632,
+        "c3_average": 3.0145713687925347e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 7.80239362398656e-06,
+        "c1": 1.958356162607562e-05,
+        "c2": 1.958356162607562e-05,
+        "c3_old": 0.0001405496308879631,
+        "c3_average": 2.378956964705553e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 8.276844730853992e-06,
+        "c1": 1.5834163564014012e-05,
+        "c2": 1.5834163564014012e-05,
+        "c3_old": 0.0001331830613475555,
+        "c3_average": 2.00878227702219e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 35.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 1.0745629524896477e-05,
+        "c1": 2.8891816890246136e-05,
+        "c2": 2.8891816890246136e-05,
+        "c3_old": 0.00014471446115975898,
+        "c3_average": 3.323925774802504e-05
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.00020749920883061883,
+        "c1": 0.0011714256625850166,
+        "c2": 0.0011714256625850166,
+        "c3_old": 0.0041132117573239564,
+        "c3_average": 0.0013368739888335857
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.00020577905518875153,
+        "c1": 0.0011683962594309198,
+        "c2": 0.0011683962594309198,
+        "c3_old": 0.004106938814315378,
+        "c3_average": 0.0013335902114123101
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.00020208108605849578,
+        "c1": 0.0011614850733526769,
+        "c2": 0.0011614850733526769,
+        "c3_old": 0.004092278820655507,
+        "c3_average": 0.0013260788946634558
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.00019062775371079006,
+        "c1": 0.001133363693223749,
+        "c2": 0.001133363693223749,
+        "c3_old": 0.0040270211627484835,
+        "c3_average": 0.0012951879700431818
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 60.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.0001839780237027957,
+        "c1": 0.0010968514547636263,
+        "c2": 0.0010968514547636263,
+        "c3_old": 0.003927719132026162,
+        "c3_average": 0.0012541757064832128
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.04725877349171895,
+        "c1": 0.09185630153717965,
+        "c2": 0.09185630153717965,
+        "c3_old": 0.1454023924655978,
+        "c3_average": 0.09649397935682193
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.046787995843110324,
+        "c1": 0.09113811135005583,
+        "c2": 0.09113811135005583,
+        "c3_old": 0.1444824590009233,
+        "c3_average": 0.0957548071047531
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.04569721996996188,
+        "c1": 0.08946808268675158,
+        "c2": 0.08946808268675158,
+        "c3_old": 0.1423379272274733,
+        "c3_average": 0.09403551991689052
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.041017671371051036,
+        "c1": 0.0822028219394241,
+        "c2": 0.0822028219394241,
+        "c3_old": 0.13291693078802072,
+        "c3_average": 0.08654805648846968
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": false,
+      "theta": 80.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.03454837856073964,
+        "c1": 0.07185636009375675,
+        "c2": 0.07185636009375675,
+        "c3_old": 0.11921921075406997,
+        "c3_average": 0.07586114076868894
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 0.30000000000000004,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.5059372266632145,
+        "c1": 0.5486614722237889,
+        "c2": 0.5486614722237889,
+        "c3_old": 0.5855473040579178,
+        "c3_average": 0.5493982726931995
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 0.6000000000000001,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.25610220424389446,
+        "c1": 0.3012706962287279,
+        "c2": 0.3012706962287279,
+        "c3_old": 0.3430920460064558,
+        "c3_average": 0.3020821627402503
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.10348804043282792,
+        "c1": 0.13582198386937938,
+        "c2": 0.13582198386937938,
+        "c3_old": 0.16858372464717525,
+        "c3_average": 0.13643524172638258
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.010910100505379147,
+        "c1": 0.01900489512022299,
+        "c2": 0.01900489512022299,
+        "c3_old": 0.029119357010471556,
+        "c3_average": 0.019179866558926995
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    },
+    {
+      "preset": "alpha0",
+      "evanescent": true,
+      "theta": 0.0,
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "R": {
+        "current": 0.001190242173503707,
+        "c1": 0.002824548668172342,
+        "c2": 0.002824548668172342,
+        "c3_old": 0.005275523409758774,
+        "c3_average": 0.002863648785900051
+      },
+      "passed": {
+        "current": true,
+        "c1": false,
+        "c2": false,
+        "c3_old": false,
+        "c3_average": false
+      }
+    }
+  ]
+}

@@ -46,6 +46,7 @@ R4 最终专项/公共 API/缓存矩阵 80 passed；此前原有伴随与调度�
 
 ```python
 # rho is a CUDA tensor with shape [N, nx, ny, nz].
+template.scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
 rho = torch.nn.Parameter(initial_density)
 submission = mw.Simulation.batch(
     template, parameters=mw.BatchParameters(region_densities={"design": rho}),
@@ -729,6 +730,7 @@ PyTorch 的 allocated 与 reserved 指标含义不同，外部显存观测还包
 ### 8.1 用户接口
 
 ```python
+template.scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
 rho = torch.nn.Parameter(torch.rand(10, 32, 24, 1, device="cuda:0"))
 optimizer = torch.optim.Adam([rho], lr=1e-2)
 

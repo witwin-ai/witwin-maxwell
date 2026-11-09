@@ -49,7 +49,7 @@ def test_exact_fill_transverse_face_writes_the_whole_surface_plane():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.02, 0.02),) * 3),
         grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.faces(default="periodic", num_layers=8, strength=1.0, x=("pml", "pml")),
+        boundary=mw.BoundarySpec.faces(default="periodic", num_layers=40, strength=1.0, x=("pml", "pml")),
         device="cuda",
         sources=[
             mw.PointDipole(

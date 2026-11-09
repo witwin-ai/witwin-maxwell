@@ -146,6 +146,7 @@ class _ConductiveDesignScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),

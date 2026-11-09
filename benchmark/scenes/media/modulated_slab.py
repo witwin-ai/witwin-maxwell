@@ -39,4 +39,5 @@ SCENARIO = ScenarioDefinition(
     normalize_source=False,
     spectral_reference_index=1,
     compare_flux=False,
+    absorber="cpml",
 )

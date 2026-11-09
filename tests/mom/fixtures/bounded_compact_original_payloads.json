@@ -1,0 +1,445 @@
+{
+  "baseline": "1204329519c3eb83512613ccc0e88ba7650ea78d",
+  "baseline_config_sha256": "299235513c122c30be9da61ca5fd6727040e3e583a62cb0578481728713ff0be",
+  "cases": [
+    {
+      "options": {},
+      "payload": {
+        "version": "cartesian_fmm_config_v7",
+        "parameters": {
+          "order": 6,
+          "table_storage": "dense",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "shift_storage": "separable_v1"
+      },
+      "payload": {
+        "version": "cartesian_fmm_separable_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "dense",
+          "shift_storage": "separable_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "kernel_bound_rule": "real_support_min_v1"
+      },
+      "payload": {
+        "version": "cartesian_fmm_real_support_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "dense",
+          "shift_storage": "dense",
+          "kernel_bound_rule": "real_support_min_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "kernel_bound_rule": "positive_tail_min_v1"
+      },
+      "payload": {
+        "version": "cartesian_fmm_positive_tail_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "dense",
+          "shift_storage": "dense",
+          "kernel_bound_rule": "positive_tail_min_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "kernel_bound_rule": "first_wave_min_v1"
+      },
+      "payload": {
+        "version": "cartesian_fmm_first_wave_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "dense",
+          "shift_storage": "dense",
+          "kernel_bound_rule": "first_wave_min_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "kernel_bound_rule": "direct_positive_tail_min_v1"
+      },
+      "payload": {
+        "version": "cartesian_fmm_direct_positive_tail_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "dense",
+          "shift_storage": "dense",
+          "kernel_bound_rule": "direct_positive_tail_min_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "kernel_bound_rule": "direct_first_wave_min_v1"
+      },
+      "payload": {
+        "version": "cartesian_fmm_direct_first_wave_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "dense",
+          "shift_storage": "dense",
+          "kernel_bound_rule": "direct_first_wave_min_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "table_storage": "fft_v1"
+      },
+      "payload": {
+        "version": "cartesian_fmm_fft_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "fft_v1",
+          "shift_storage": "dense",
+          "kernel_bound_rule": "bivariate_cauchy_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "table_storage": "fft_ewald_v1"
+      },
+      "payload": {
+        "version": "cartesian_fmm_ewald_fft_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "fft_ewald_v1",
+          "shift_storage": "dense",
+          "kernel_bound_rule": "bivariate_cauchy_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "near_storage": "scalar_dk_v1",
+        "table_storage": "compact"
+      },
+      "payload": {
+        "version": "cartesian_fmm_scalar_dk_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "compact",
+          "shift_storage": "dense",
+          "near_storage": "scalar_dk_v1",
+          "kernel_bound_rule": "bivariate_cauchy_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "near_storage": "scalar_reciprocal_dk_v1",
+        "table_storage": "compact"
+      },
+      "payload": {
+        "version": "cartesian_fmm_reciprocal_dk_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "compact",
+          "shift_storage": "dense",
+          "near_storage": "scalar_reciprocal_dk_v1",
+          "kernel_bound_rule": "bivariate_cauchy_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "table_storage": "compact_shared_displacement_v1",
+        "near_storage": "full_matrix"
+      },
+      "payload": {
+        "version": "cartesian_fmm_shared_compact_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "compact_shared_displacement_v1",
+          "shift_storage": "dense",
+          "near_storage": "full_matrix",
+          "kernel_bound_rule": "bivariate_cauchy_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "table_storage": "compact_shared_displacement_v1",
+        "near_storage": "scalar_dk_v1"
+      },
+      "payload": {
+        "version": "cartesian_fmm_shared_compact_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "compact_shared_displacement_v1",
+          "shift_storage": "dense",
+          "near_storage": "scalar_dk_v1",
+          "kernel_bound_rule": "bivariate_cauchy_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    },
+    {
+      "options": {
+        "table_storage": "compact_shared_displacement_v1",
+        "near_storage": "scalar_reciprocal_dk_v1"
+      },
+      "payload": {
+        "version": "cartesian_fmm_shared_compact_config_v1",
+        "parameters": {
+          "order": 6,
+          "table_storage": "compact_shared_displacement_v1",
+          "shift_storage": "dense",
+          "near_storage": "scalar_reciprocal_dk_v1",
+          "kernel_bound_rule": "bivariate_cauchy_v1",
+          "m2l_row_batch": 16,
+          "near_action_batch": 32,
+          "max_order": null,
+          "rwg_absolute_budget": null,
+          "kernel_error_budget": null,
+          "quadrature_order": null,
+          "leaf_size": 32,
+          "separation_ratio": 0.5,
+          "action_retained_budget_bytes": 1073741824,
+          "table_budget_bytes": 536870912,
+          "near_budget_bytes": 1073741824,
+          "projection_budget_bytes": 1073741824,
+          "solve_dual_tolerance": 1e-08,
+          "original_sample_tolerance": 1e-08,
+          "leaf_factor_kernel": "none",
+          "leaf_factor_max_edges": 32,
+          "leaf_factor_budget_bytes": 268435456
+        }
+      }
+    }
+  ]
+}

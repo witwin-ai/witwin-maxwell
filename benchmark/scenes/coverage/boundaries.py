@@ -254,6 +254,7 @@ BOUNDARY_COVERAGE_SCENARIOS = (
         "boundaries",
         "periodic faces at normal incidence on a uniform slab",
         _periodic_slab_scene,
+        absorber="cpml",
     ),
     _make(
         "bloch_oblique_te",
@@ -280,6 +281,7 @@ BOUNDARY_COVERAGE_SCENARIOS = (
         "per-face periodic/PEC/PML mix",
         _mixed_faces_scene,
         component="Ey",
+        absorber="cpml",
     ),
     _make(
         "asymmetric_boundary_faces",

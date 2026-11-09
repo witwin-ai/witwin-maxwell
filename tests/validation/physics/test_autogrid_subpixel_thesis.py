@@ -48,6 +48,26 @@ staircasing floor drops (this exact config, A6000: uniform dl=0.024 err 0.0922 -
 errors fall. The auto grid still wins the whole uniform curve at fewer cells; the margin
 assertion below is set to that edge-native regime (see the F4 subpixel acceptance ledger
 for the full before/after table).
+
+Re-anchor note (exact sub-sample coverage fill, 2026-10-29). The assertions are
+unchanged and still pass. The absolute errors of this full-sphere metric grew
+against both the self-reference and the analytic Mie value of the same quantity:
+(1/V) int_sphere |Ex|^2 dV = 0.08163 for eps 12 + 3.598i, R = 0.2, lambda0 = 0.6.
+
+    grid             previous binary fill   coverage fill   (error vs Mie)
+    uniform 0.011    0.08487 (+4.0%)        0.08551 (+4.8%)
+    uniform 0.024    0.08875 (+8.7%)        0.09215 (+12.9%)
+    auto msw 12      0.08704 (+6.6%)        0.08841 (+8.3%)
+
+Restricted to the interior (r < 0.75 R, Mie 0.10489), the coverage fill is more
+accurate on every grid: +0.6% / +0.3% / +1.0% versus +1.3% / +1.1% / +1.7%.
+The excess is therefore concentrated in the fractionally filled interface cells.
+The conductivity there stays arithmetic while the normal permittivity is
+harmonic, so the normal-field loss and |E|^2 in those cells are over-stated.
+The binary fill had fewer such cells. A complex-permittivity normal blend at
+the source frequency was tried and rejected, because it worsened the interior
+field (+6.5..+14%). This is recorded as a FEATURE_LIST limitation for lossy
+curved bodies under polarized multi-sample averaging.
 """
 
 from __future__ import annotations
@@ -180,8 +200,11 @@ def test_autogrid_subpixel_beats_uniform_at_fewer_cells():
     )
 
     # The uniform grid genuinely has a non-trivial curved-boundary staircasing error
-    # (otherwise there is nothing to beat).
-    assert uniform_fine_err > 0.05, uniform_fine_err
+    # (otherwise there is nothing to beat). The high-side magnetic CPML grading fix
+    # (e2a10746) lowered every error against the same-code reference on this scene:
+    #   uniform dl=0.024 err 0.0547 -> 0.0457, auto msw=12 err 0.0338 -> 0.0256
+    # (ratio 0.62 -> 0.56), so the floor is 0.03 rather than the former 0.05.
+    assert uniform_fine_err > 0.03, uniform_fine_err
 
     # Core thesis: the auto grid uses FEWER cells than the finer uniform grid AND
     # achieves LOWER field error -- i.e. lower error at fewer cells (equivalently, at

@@ -22,6 +22,8 @@ _DENSE_EIGEN_LIMIT = 4096
 
 _FULL_VECTOR_DENSE_LIMIT = 384
 
+_VECTOR_GRAD_MATRIX_LIMIT = 4096
+
 
 _LOBPCG_REQUEST_PADDING = 4
 
@@ -279,15 +281,36 @@ def _mode_source_pec_slice(
     compiled_material_model = getattr(solver, "_compiled_material_model", None)
     if compiled_material_model is None:
         return None
+    pmc_occupancy = compiled_material_model.get("pmc_occupancy")
+    if pmc_occupancy is not None and bool(
+        torch.any(_mode_slice(pmc_occupancy, axis=normal_axis, plane_index=plane_index,
+                              tangential_bounds=tangential_bounds) >= _PEC_OCCUPANCY_THRESHOLD)
+    ):
+        raise NotImplementedError(
+            "Mode solving across a PMC structure is not supported: the transverse mode "
+            "solver has no perfect-magnetic-conductor wall. Keep mode planes clear of PMC."
+        )
     occupancy = compiled_material_model.get("pec_occupancy")
     if occupancy is None:
         return None
-    return _mode_slice(
-        occupancy,
-        axis=normal_axis,
-        plane_index=plane_index,
-        tangential_bounds=tangential_bounds,
-    )
+    result = _mode_slice(occupancy, axis=normal_axis, plane_index=plane_index,
+                         tangential_bounds=tangential_bounds)
+    edges = compiled_material_model.get("pec_sheet_edges", {}).get("E" + normal_axis)
+    if edges is None:
+        return result
+    # The longitudinal electric edge is a conductor node in the transverse
+    # electrostatic problem. Require both neighbouring edge segments so a sheet
+    # terminating on this plane is not mistaken for a translation-invariant line.
+    axis = _AXIS_TO_INDEX[normal_axis]
+    if plane_index <= 0 or plane_index >= edges.shape[axis]:
+        return result
+    mask = (edges.select(axis, plane_index - 1) >= _PEC_OCCUPANCY_THRESHOLD) & (edges.select(axis, plane_index) >= _PEC_OCCUPANCY_THRESHOLD)
+    if normal_axis == "y":
+        mask = mask.transpose(0,1)
+    (u_lo, u_hi), (v_lo, v_hi) = tangential_bounds
+    mask = mask[u_lo:u_hi + 1, v_lo:v_hi + 1]
+    return torch.maximum(result, mask.to(dtype=result.dtype))
+
 
 
 def _max_component_imag(components: dict) -> float:
@@ -297,6 +320,15 @@ def _max_component_imag(components: dict) -> float:
         if torch.is_complex(component):
             worst = max(worst, float(torch.max(torch.abs(torch.imag(component))).item()))
     return worst
+
+
+def _require_lossless_vector_planes(eps_planes, mu_planes, *, source_name):
+    # These are relative constitutive values, including sigma/(omega*eps0).
+    for name, planes in (("epsilon (including conductivity)", eps_planes), ("mu", mu_planes)):
+        if any(value.is_complex() and float(value.detach().imag.abs().max()) > 1e-7 for value in planes):
+            raise NotImplementedError(
+                f"ModeSource/ModePort {source_name!r} trainable vector plane requires lossless "
+                f"{name}: relative imaginary magnitude > 1e-7 requires a complex mode-shape adjoint.")
 
 
 def _min_component_real(components: dict) -> float:
@@ -342,6 +374,7 @@ def _normalize_mode_profiles_to_unit_power(
     coords_u: torch.Tensor,
     coords_v: torch.Tensor,
     normal_axis: str,
+    staggered: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Scale a common-node modal profile to one watt on the transverse Yee grids."""
     power = _discrete_mode_profile_power(
@@ -349,9 +382,18 @@ def _normalize_mode_profiles_to_unit_power(
         coords_u=coords_u,
         coords_v=coords_v,
         normal_axis=normal_axis,
+        staggered=staggered,
     )
     abs_power = torch.abs(power)
-    if float(abs_power.detach().item()) <= torch.finfo(abs_power.dtype).eps:
+    reference = _discrete_mode_profile_power(
+        component_profiles,
+        coords_u=coords_u,
+        coords_v=coords_v,
+        normal_axis=normal_axis,
+        staggered=staggered,
+        magnitude_reference=True,
+    )
+    if bool(abs_power <= 64 * torch.finfo(abs_power.dtype).eps * reference):
         raise RuntimeError("ModeSource eigenmode profile has zero integrated Poynting power.")
     scale = torch.rsqrt(abs_power)
     return {name: profile * scale for name, profile in component_profiles.items()}
@@ -363,10 +405,26 @@ def _discrete_mode_profile_power(
     coords_u: torch.Tensor,
     coords_v: torch.Tensor,
     normal_axis: str,
+    staggered: bool = False,
+    magnitude_reference: bool = False,
 ) -> torch.Tensor:
-    """Integrate signed modal power after interpolation to the transverse Yee grids."""
+    """Integrate signed power or its absolute-product reference on the same Yee grids."""
     if coords_u.ndim != 1 or coords_v.ndim != 1 or coords_u.numel() < 2 or coords_v.numel() < 2:
         raise ValueError("ModeSource profile coordinates must be one-dimensional with at least two samples.")
+    if staggered:
+        axis_u, axis_v = _RIGHT_HANDED_TANGENTIAL_AXES[normal_axis]
+        eu, ev = (component_profiles[f"E{axis}"] for axis in (axis_u, axis_v))
+        hu, hv = (component_profiles[f"H{axis}"] for axis in (axis_u, axis_v))
+        wu, wv = torch.diff(coords_u), torch.diff(coords_v)
+        du = torch.cat((wu[:1] / 2, (wu[:-1] + wu[1:]) / 2, wu[-1:] / 2))
+        dv = torch.cat((wv[:1] / 2, (wv[:-1] + wv[1:]) / 2, wv[-1:] / 2))
+        if magnitude_reference:
+            positive = .5 * eu.abs() * hv.abs() * wu[:, None] * dv[None, :]
+            negative = .5 * ev.abs() * hu.abs() * du[:, None] * wv[None, :]
+            return positive.sum() + negative.sum()
+        positive = .5 * torch.real(eu * torch.conj(hv)) * wu[:, None] * dv[None, :]
+        negative = .5 * torch.real(ev * torch.conj(hu)) * du[:, None] * wv[None, :]
+        return positive.sum() - negative.sum()
     expected_shape = (int(coords_u.numel()), int(coords_v.numel()))
     for field_name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         profile = component_profiles[field_name]
@@ -391,6 +449,9 @@ def _discrete_mode_profile_power(
 
     positive_density = 0.5 * torch.real(electric_u_half * torch.conj(magnetic_v_half))
     negative_density = 0.5 * torch.real(electric_v_half * torch.conj(magnetic_u_half))
+    if magnitude_reference:
+        positive_density = 0.5 * electric_u_half.abs() * magnetic_v_half.abs()
+        negative_density = 0.5 * electric_v_half.abs() * magnetic_u_half.abs()
     positive_power = torch.trapezoid(
         torch.trapezoid(positive_density, x=coords_v, dim=1),
         x=coords_u_half,
@@ -401,7 +462,7 @@ def _discrete_mode_profile_power(
         x=coords_u,
         dim=0,
     )
-    return positive_power - negative_power
+    return positive_power + negative_power if magnitude_reference else positive_power - negative_power
 
 
 def _mode_slice(tensor: torch.Tensor, *, axis: str, plane_index: int, tangential_bounds):
@@ -409,7 +470,8 @@ def _mode_slice(tensor: torch.Tensor, *, axis: str, plane_index: int, tangential
     if axis == "x":
         return tensor[plane_index, u_lo : u_hi + 1, v_lo : v_hi + 1]
     if axis == "y":
-        return tensor[u_lo : u_hi + 1, plane_index, v_lo : v_hi + 1]
+        # The right-handed transverse pair for +y propagation is (z,x).
+        return tensor[v_lo : v_hi + 1, plane_index, u_lo : u_hi + 1].transpose(0,1)
     return tensor[u_lo : u_hi + 1, v_lo : v_hi + 1, plane_index]
 
 
@@ -469,8 +531,8 @@ def _regular_grid_sample(coords: torch.Tensor, values: torch.Tensor):
 def _bilinear_sample(profile: torch.Tensor, coords_u: torch.Tensor, coords_v: torch.Tensor, positions: torch.Tensor):
     u_axis = int(profile.shape[0])
     v_axis = int(profile.shape[1])
-    u0, du = _regular_grid_sample(coords_u, profile[:, 0])
-    v0, dv = _regular_grid_sample(coords_v, profile[0, :])
+    _regular_grid_sample(coords_u, profile[:, 0])
+    _regular_grid_sample(coords_v, profile[0, :])
 
     pos_u = positions[..., 0]
     pos_v = positions[..., 1]
@@ -481,14 +543,14 @@ def _bilinear_sample(profile: torch.Tensor, coords_u: torch.Tensor, coords_v: to
         & (pos_v <= float(coords_v[-1].item()))
     )
 
-    u_coord = torch.clamp((pos_u - u0) / du, min=0.0, max=max(u_axis - 1, 0))
-    v_coord = torch.clamp((pos_v - v0) / dv, min=0.0, max=max(v_axis - 1, 0))
-    u_lower = torch.floor(u_coord).to(torch.int64)
-    v_lower = torch.floor(v_coord).to(torch.int64)
-    u_upper = torch.clamp(u_lower + 1, max=u_axis - 1)
-    v_upper = torch.clamp(v_lower + 1, max=v_axis - 1)
-    u_frac = u_coord - u_lower.to(dtype=profile.dtype)
-    v_frac = v_coord - v_lower.to(dtype=profile.dtype)
+    # Bracket against the represented coordinates rather than reconstructing
+    # an index from the first float32 spacing. Exact native nodes must sample
+    # their own profile value, particularly a conductor's zero tangential E.
+    u_upper = torch.searchsorted(coords_u.contiguous(),pos_u.contiguous()).clamp(1,u_axis-1)
+    v_upper = torch.searchsorted(coords_v.contiguous(),pos_v.contiguous()).clamp(1,v_axis-1)
+    u_lower, v_lower = u_upper-1, v_upper-1
+    u_frac = ((pos_u-coords_u[u_lower])/(coords_u[u_upper]-coords_u[u_lower])).clamp(0,1)
+    v_frac = ((pos_v-coords_v[v_lower])/(coords_v[v_upper]-coords_v[v_lower])).clamp(0,1)
 
     f00 = profile[u_lower, v_lower]
     f10 = profile[u_upper, v_lower]
@@ -559,12 +621,8 @@ def _vector_mode_supported(
     unknowns: int,
 ) -> bool:
     if getattr(solver, "_mode_source_rebuild_from_fields", False):
-        return False
+        return True
     if getattr(solver, "_compiled_material_model", None) is None:
-        return False
-    if any(component.requires_grad for component in eps_by_axis.values()):
-        return False
-    if any(component.requires_grad for component in mu_by_axis.values()):
         return False
     if unknowns <= 0:
         return False
@@ -590,3 +648,33 @@ def _boundary_connected_conductor(conductor: torch.Tensor) -> torch.Tensor:
         adjacent[:, :-1] |= connected[:, 1:]
         connected |= adjacent & conductor
     return connected
+
+
+def _plane_depends_on_inputs(values, inputs):
+    """Test spatial material dependence rather than a grid-wide requires_grad flag."""
+    if not inputs:
+        return False
+    for value in values:
+        if not value.requires_grad:
+            continue
+        weights = torch.linspace(1., 2., value.numel(), device=value.device,
+                                 dtype=value.real.dtype).reshape(value.shape)
+        probe = (value.real * weights).sum()
+        if value.is_complex():
+            probe = probe + (value.imag * weights.flip(tuple(range(value.ndim)))).sum()
+        gradients = torch.autograd.grad(probe, inputs, allow_unused=True, retain_graph=True)
+        if any(gradient is not None and bool(torch.any(gradient != 0)) for gradient in gradients):
+            return True
+    return False
+
+
+def _mode_source_trainable_plane(solver, source, *, materials):
+    """Probe the graph retained by the forward's own material compilation."""
+    from ....adjoint_inputs import scene_trainable_material_tensors
+
+    inputs = scene_trainable_material_tensors(solver.scene)
+    if not inputs:
+        return False
+    with torch.enable_grad():
+        eps, mu = materials
+        return _plane_depends_on_inputs((*eps.values(), *mu.values()), inputs)

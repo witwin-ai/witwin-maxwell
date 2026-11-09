@@ -1,0 +1,3 @@
+# Original shared compact fixed-ka resource reference
+
+The3840-edge p11 exact displacement-shared compact/reciprocal-near configuration records owned585,948,608B and full setup/warmup/forward/H/differentiable-forward/cold-current-backward/reset-gap/final-finite allocator peaks751,039,488B allocated and803,209,216B reserved. Both pass the unchanged943,718,400B same-N dense-storage comparison at this selected fixed-ka point. Past failed reciprocal-only/ordered-near points remain preserved. No solver/teardown/external-library/host-memory certificate, all-size scaling series, controlled timing or production qualification is implied. The frozenf5a80a7 numerical source and newer-source inverse applicability remain distinct.

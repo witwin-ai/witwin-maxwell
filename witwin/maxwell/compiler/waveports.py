@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from ..ports import AxisPath, WaveModeSpec, WavePort
+from ..ports import AxisPath, WaveModeSpec, WavePort, _coordinate_roundoff
 from ..scene import prepare_scene
 from ..sources import _resolve_mode_source_polarization_axis, polarization_vector
 from .ports import (
@@ -27,6 +27,7 @@ class CompiledWaveModeSpec:
     mode_name: str
     tracking_id: str
     family: str
+    conductor_model: str | None
     mode_index: int
     polarization_axis: str
     polarization: tuple[float, float, float]
@@ -91,12 +92,12 @@ def _geometry_values(port: WavePort, mode: WaveModeSpec):
     return position.numpy(), size.numpy()
 
 
-def _validate_in_domain(port: WavePort, lower: np.ndarray, upper: np.ndarray, domain_bounds) -> None:
+def _validate_in_domain(port: WavePort, lower: np.ndarray, upper: np.ndarray, domain_bounds, roundoff) -> None:
     scale = max(1.0, *(abs(float(value)) for bounds in domain_bounds for value in bounds))
     tolerance = 1.0e-12 * scale
-    for axis, value_lower, value_upper, bounds in zip(_AXES, lower, upper, domain_bounds):
+    for axis, value_lower, value_upper, bounds, uncertainty in zip(_AXES, lower, upper, domain_bounds, roundoff):
         domain_lower, domain_upper = (float(value) for value in bounds)
-        if value_lower < domain_lower - tolerance or value_upper > domain_upper + tolerance:
+        if value_lower < domain_lower - tolerance - uncertainty or value_upper > domain_upper + tolerance + uncertainty:
             raise _port_error(port, f"aperture lies outside the Scene domain along {axis}.")
 
 
@@ -105,7 +106,8 @@ def _compile_aperture(scene, port: WavePort, *, device: torch.device):
     size = np.asarray(port.size, dtype=np.float64)
     lower = position - 0.5 * size
     upper = position + 0.5 * size
-    _validate_in_domain(port, lower, upper, scene.domain.bounds)
+    roundoff = np.asarray(port._position_roundoff) + .5 * np.asarray(port._size_roundoff)
+    _validate_in_domain(port, lower, upper, scene.domain.bounds, roundoff)
 
     normal_index = _AXES.index(port.normal_axis)
     tangential_axes = tuple(axis for axis in _AXES if axis != port.normal_axis)
@@ -114,6 +116,7 @@ def _compile_aperture(scene, port: WavePort, *, device: torch.device):
             _axis_values(scene, port.normal_axis, half=False),
             port.reference_plane,
             label=f"{port.normal_axis} aperture plane",
+            roundoff=port._reference_roundoff,
         )
         lower_indices = [plane_index, plane_index, plane_index]
         upper_indices = [plane_index, plane_index, plane_index]
@@ -121,8 +124,8 @@ def _compile_aperture(scene, port: WavePort, *, device: torch.device):
         for axis in tangential_axes:
             axis_index = _AXES.index(axis)
             coords = _axis_values(scene, axis, half=False)
-            lower_index = _snap_index(coords, lower[axis_index], label=f"{axis} aperture lower bound")
-            upper_index = _snap_index(coords, upper[axis_index], label=f"{axis} aperture upper bound")
+            lower_index = _snap_index(coords, lower[axis_index], label=f"{axis} aperture lower bound", roundoff=roundoff[axis_index])
+            upper_index = _snap_index(coords, upper[axis_index], label=f"{axis} aperture upper bound", roundoff=roundoff[axis_index])
             if lower_index >= upper_index:
                 raise _port_error(port, f"aperture must span at least one cell along {axis}.")
             lower_indices[axis_index] = lower_index
@@ -199,6 +202,8 @@ def _compile_voltage_geometry(
             negative=negative,
             axis=_AXES[varying_axis_index],
             device=device,
+            positive_roundoff=mode._voltage_roundoff[1],
+            negative_roundoff=mode._voltage_roundoff[0],
         )
     except ValueError as error:
         raise _port_error(port, f"mode {mode.name!r} voltage_path: {error}") from error
@@ -260,6 +265,7 @@ def _compile_current_geometry(
             half_coords,
             float(position[normal_index]),
             label=f"mode {mode.name} current contour plane",
+            roundoff=_coordinate_roundoff(mode.current_contour.position)[normal_index],
         )
     except ValueError as error:
         raise _port_error(port, str(error)) from error
@@ -337,6 +343,7 @@ def _compile_mode(
         mode_name=mode.name,
         tracking_id=port.mode_name(mode),
         family=mode.family,
+        conductor_model=mode.conductor_model,
         mode_index=mode.mode_index,
         polarization_axis=polarization_axis,
         polarization=polarization_vector(f"E{polarization_axis}"),

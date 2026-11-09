@@ -71,28 +71,28 @@ __global__ void update_magnetic_standard_kernel(
   }
 }
 
-template <int Component, bool Uniform, bool Batched = false>
+template <int Component, bool Uniform, bool Batched = false, typename ScalarT = float>
 __global__ void update_magnetic_cpml_kernel(
     unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* __restrict__ first,
-    const float* __restrict__ second,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    float decay_value,
-    float curl_value,
-    const float* __restrict__ inv_kappa_a,
-    const float* __restrict__ b_a,
-    const float* __restrict__ c_a,
-    const float* __restrict__ inv_kappa_b,
-    const float* __restrict__ b_b,
-    const float* __restrict__ c_b,
-    const float* __restrict__ inv_a,
-    const float* __restrict__ inv_b,
-    float* __restrict__ psi_a,
-    float* __restrict__ psi_b,
-    float* __restrict__ field, FieldBatchLayout batch = {}) {
+    const ScalarT* __restrict__ first,
+    const ScalarT* __restrict__ second,
+    const ScalarT* __restrict__ decay,
+    const ScalarT* __restrict__ curl_coeff,
+    ScalarT decay_value,
+    ScalarT curl_value,
+    const ScalarT* __restrict__ inv_kappa_a,
+    const ScalarT* __restrict__ b_a,
+    const ScalarT* __restrict__ c_a,
+    const ScalarT* __restrict__ inv_kappa_b,
+    const ScalarT* __restrict__ b_b,
+    const ScalarT* __restrict__ c_b,
+    const ScalarT* __restrict__ inv_a,
+    const ScalarT* __restrict__ inv_b,
+    ScalarT* __restrict__ psi_a,
+    ScalarT* __restrict__ psi_b,
+    ScalarT* __restrict__ field, FieldBatchLayout batch = {}) {
   unsigned int i, j, k;
   if constexpr (Batched) {
     int64_t lane;
@@ -114,8 +114,8 @@ __global__ void update_magnetic_cpml_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  float d_a;
-  float d_b;
+  ScalarT d_a;
+  ScalarT d_b;
   if constexpr (Component == 0) {
     d_a = (second[offset3d(i, j + 1, k, ny + 1, nz)] - second[offset3d(i, j, k, ny + 1, nz)]) * inv_a[j];
     d_b = (first[offset3d(i, j, k + 1, ny, nz + 1)] - first[offset3d(i, j, k, ny, nz + 1)]) * inv_b[k];
@@ -128,13 +128,13 @@ __global__ void update_magnetic_cpml_kernel(
   }
   const unsigned int coord_a = Component == 0 ? j : i;
   const unsigned int coord_b = Component == 2 ? j : k;
-  const float psi_a_value = b_a[coord_a] * psi_a[linear] + c_a[coord_a] * d_a;
-  const float psi_b_value = b_b[coord_b] * psi_b[linear] + c_b[coord_b] * d_b;
+  const ScalarT psi_a_value = b_a[coord_a] * psi_a[linear] + c_a[coord_a] * d_a;
+  const ScalarT psi_b_value = b_b[coord_b] * psi_b[linear] + c_b[coord_b] * d_b;
   psi_a[linear] = psi_a_value;
   psi_b[linear] = psi_b_value;
-  const float corrected_a = d_a * inv_kappa_a[coord_a] + psi_a_value;
-  const float corrected_b = d_b * inv_kappa_b[coord_b] + psi_b_value;
-  const float curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
+  const ScalarT corrected_a = d_a * inv_kappa_a[coord_a] + psi_a_value;
+  const ScalarT corrected_b = d_b * inv_kappa_b[coord_b] + psi_b_value;
+  const ScalarT curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
   if constexpr (Uniform) {
     field[linear] = field[linear] * decay_value - curl_value * curl;
   } else {
@@ -258,11 +258,17 @@ void check_magnetic_inputs(
     const torch::stable::Tensor& decay,
     const torch::stable::Tensor& curl,
     const char* name) {
-  check_float32_tensor(field, name);
-  check_float32_tensor(first, "first");
-  check_float32_tensor(second, "second");
-  check_float32_tensor(decay, "decay");
-  check_float32_tensor(curl, "curl");
+  check_cuda_tensor(field, name);
+  STD_TORCH_CHECK(field.scalar_type() == torch::headeronly::ScalarType::Float || field.scalar_type() == torch::headeronly::ScalarType::Double, "field must be float32 or float64");
+  STD_TORCH_CHECK(field.scalar_type() == field.scalar_type(), "field update dtypes must match");
+  check_cuda_tensor(first, "first");
+  STD_TORCH_CHECK(first.scalar_type() == field.scalar_type(), "field update dtypes must match");
+  check_cuda_tensor(second, "second");
+  STD_TORCH_CHECK(second.scalar_type() == field.scalar_type(), "field update dtypes must match");
+  check_cuda_tensor(decay, "decay");
+  STD_TORCH_CHECK(decay.scalar_type() == field.scalar_type(), "field update dtypes must match");
+  check_cuda_tensor(curl, "curl");
+  STD_TORCH_CHECK(curl.scalar_type() == field.scalar_type(), "field update dtypes must match");
   check_same_cuda_device(field, first, "first");
   check_same_cuda_device(field, second, "second");
   check_same_cuda_device(field, decay, "decay");
@@ -292,8 +298,10 @@ void check_rank3_shape(
       " has an incompatible Yee-grid shape");
 }
 
-void check_vector_input(const torch::stable::Tensor& tensor, int64_t length, const char* name) {
-  check_float32_tensor(tensor, name);
+void check_vector_input(const torch::stable::Tensor& tensor, int64_t length, const char* name,
+    torch::headeronly::ScalarType dtype = torch::headeronly::ScalarType::Float) {
+  check_cuda_tensor(tensor, name);
+  STD_TORCH_CHECK(tensor.scalar_type() == dtype, "profile dtype must match field");
   check_contiguous_tensor(tensor, name);
   STD_TORCH_CHECK(tensor.dim() == 1, name, " must be rank 1");
   STD_TORCH_CHECK(tensor.size(0) == length, name, " length must match CPML field axis");
@@ -304,7 +312,7 @@ void check_spacing_vector(
     const torch::stable::Tensor& inv_delta,
     int64_t axis,
     const char* name) {
-  check_vector_input(inv_delta, field.size(axis), name);
+  check_vector_input(inv_delta, field.size(axis), name, field.scalar_type());
   check_same_cuda_device(field, inv_delta, name);
 }
 
@@ -326,20 +334,22 @@ void check_magnetic_cpml_inputs(
     int64_t second_axis,
     const char* name) {
   check_magnetic_inputs(field, first, second, decay, curl, name);
-  check_float32_tensor(psi_first, "psi_first");
-  check_float32_tensor(psi_second, "psi_second");
+  check_cuda_tensor(psi_first, "psi_first");
+  STD_TORCH_CHECK(psi_first.scalar_type() == field.scalar_type(), "CPML state dtype must match field");
+  check_cuda_tensor(psi_second, "psi_second");
+  STD_TORCH_CHECK(psi_second.scalar_type() == field.scalar_type(), "CPML state dtype must match field");
   check_same_cuda_device(field, psi_first, "psi_first");
   check_same_cuda_device(field, psi_second, "psi_second");
   check_contiguous_tensor(psi_first, "psi_first");
   check_contiguous_tensor(psi_second, "psi_second");
   STD_TORCH_CHECK(psi_first.sizes().equals(field.sizes()), "psi_first must match field shape");
   STD_TORCH_CHECK(psi_second.sizes().equals(field.sizes()), "psi_second must match field shape");
-  check_vector_input(inv_kappa_first, field.size(first_axis), "inv_kappa_first");
-  check_vector_input(b_first, field.size(first_axis), "b_first");
-  check_vector_input(c_first, field.size(first_axis), "c_first");
-  check_vector_input(inv_kappa_second, field.size(second_axis), "inv_kappa_second");
-  check_vector_input(b_second, field.size(second_axis), "b_second");
-  check_vector_input(c_second, field.size(second_axis), "c_second");
+  check_vector_input(inv_kappa_first, field.size(first_axis), "inv_kappa_first", field.scalar_type());
+  check_vector_input(b_first, field.size(first_axis), "b_first", field.scalar_type());
+  check_vector_input(c_first, field.size(first_axis), "c_first", field.scalar_type());
+  check_vector_input(inv_kappa_second, field.size(second_axis), "inv_kappa_second", field.scalar_type());
+  check_vector_input(b_second, field.size(second_axis), "b_second", field.scalar_type());
+  check_vector_input(c_second, field.size(second_axis), "c_second", field.scalar_type());
   check_same_cuda_device(field, inv_kappa_first, "inv_kappa_first");
   check_same_cuda_device(field, b_first, "b_first");
   check_same_cuda_device(field, c_first, "c_first");
@@ -630,6 +640,32 @@ void update_magnetic_hx_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(hx.get_device_index());
   const auto sizes = hx.sizes();
   const dim3 block = field_block3d();
+  if (hx.scalar_type() == torch::headeronly::ScalarType::Double) {
+    update_magnetic_cpml_kernel<0, false, false, double><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        ey.mutable_data_ptr<double>(),
+        ez.mutable_data_ptr<double>(),
+        decay.mutable_data_ptr<double>(),
+        curl.mutable_data_ptr<double>(),
+        0.0,
+        0.0,
+        inv_kappa_y.mutable_data_ptr<double>(),
+        b_y.mutable_data_ptr<double>(),
+        c_y.mutable_data_ptr<double>(),
+        inv_kappa_z.mutable_data_ptr<double>(),
+        b_z.mutable_data_ptr<double>(),
+        c_z.mutable_data_ptr<double>(),
+        inv_dy.mutable_data_ptr<double>(),
+        inv_dz.mutable_data_ptr<double>(),
+        psi_y.mutable_data_ptr<double>(),
+        psi_z.mutable_data_ptr<double>(),
+        hx.mutable_data_ptr<double>());
+    WITWIN_CUDA_CHECK();
+    return;
+  }
+
   dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
     update_magnetic_cpml_kernel<0, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
         static_cast<unsigned int>(sizes[0]),
@@ -683,6 +719,32 @@ void update_magnetic_hy_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(hy.get_device_index());
   const auto sizes = hy.sizes();
   const dim3 block = field_block3d();
+  if (hy.scalar_type() == torch::headeronly::ScalarType::Double) {
+    update_magnetic_cpml_kernel<1, false, false, double><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        ex.mutable_data_ptr<double>(),
+        ez.mutable_data_ptr<double>(),
+        decay.mutable_data_ptr<double>(),
+        curl.mutable_data_ptr<double>(),
+        0.0,
+        0.0,
+        inv_kappa_x.mutable_data_ptr<double>(),
+        b_x.mutable_data_ptr<double>(),
+        c_x.mutable_data_ptr<double>(),
+        inv_kappa_z.mutable_data_ptr<double>(),
+        b_z.mutable_data_ptr<double>(),
+        c_z.mutable_data_ptr<double>(),
+        inv_dx.mutable_data_ptr<double>(),
+        inv_dz.mutable_data_ptr<double>(),
+        psi_x.mutable_data_ptr<double>(),
+        psi_z.mutable_data_ptr<double>(),
+        hy.mutable_data_ptr<double>());
+    WITWIN_CUDA_CHECK();
+    return;
+  }
+
   dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
     update_magnetic_cpml_kernel<1, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
         static_cast<unsigned int>(sizes[0]),
@@ -736,6 +798,32 @@ void update_magnetic_hz_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(hz.get_device_index());
   const auto sizes = hz.sizes();
   const dim3 block = field_block3d();
+  if (hz.scalar_type() == torch::headeronly::ScalarType::Double) {
+    update_magnetic_cpml_kernel<2, false, false, double><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        ex.mutable_data_ptr<double>(),
+        ey.mutable_data_ptr<double>(),
+        decay.mutable_data_ptr<double>(),
+        curl.mutable_data_ptr<double>(),
+        0.0,
+        0.0,
+        inv_kappa_x.mutable_data_ptr<double>(),
+        b_x.mutable_data_ptr<double>(),
+        c_x.mutable_data_ptr<double>(),
+        inv_kappa_y.mutable_data_ptr<double>(),
+        b_y.mutable_data_ptr<double>(),
+        c_y.mutable_data_ptr<double>(),
+        inv_dx.mutable_data_ptr<double>(),
+        inv_dy.mutable_data_ptr<double>(),
+        psi_x.mutable_data_ptr<double>(),
+        psi_y.mutable_data_ptr<double>(),
+        hz.mutable_data_ptr<double>());
+    WITWIN_CUDA_CHECK();
+    return;
+  }
+
   dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
     update_magnetic_cpml_kernel<2, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
         static_cast<unsigned int>(sizes[0]),

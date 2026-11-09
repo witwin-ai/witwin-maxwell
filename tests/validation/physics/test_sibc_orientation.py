@@ -162,7 +162,7 @@ def test_double_sided_plate_exercises_both_signs_and_stays_passive():
         ],
     )
     result = mw.Simulation.fdtd(
-        scene,
+        scene, absorber="cpml",
         frequencies=[_F],
         run_time=mw.TimeConfig(time_steps=6000),
         full_field_dft=True,

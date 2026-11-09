@@ -69,7 +69,7 @@ def test_non_pec_scene_has_none_pec_occupancy_and_unchanged_components():
         assert torch.equal(eps_ref[axis], eps_now[axis])
 
 
-def test_fdfd_rejects_in_domain_pec_material():
+def test_fdfd_preserves_in_domain_pec_constraints():
     if not torch.cuda.is_available():
         pytest.skip("FDFD requires CUDA")
     domain = mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5)))
@@ -91,5 +91,24 @@ def test_fdfd_rejects_in_domain_pec_material():
             name="src",
         )
     )
-    with pytest.raises(NotImplementedError):
-        mw.Simulation.fdfd(scene, frequency=5e9, solver=mw.GMRES(max_iter=10)).run()
+    prepared = mw.Simulation.fdfd(
+        scene, frequency=5e9, solver=mw.GMRES(max_iter=10)
+    ).prepare()
+    result = prepared.run()
+    # This checks exact constraints even for a truncated iterative solve;
+    # convergence of the full linear system is covered by the FDFD tests.
+    for component, axis in zip(("Ex", "Ey", "Ez"), "xyz"):
+        field = result.tensor(component)
+        coordinates = [torch.as_tensor(
+            getattr(prepared.solver.scene, f"{direction}_{'half' if direction == axis else 'nodes'}64"),
+            device=field.device,
+        ) for direction in "xyz"]
+        interior = torch.ones_like(field, dtype=torch.bool)
+        for normal, values in enumerate(coordinates):
+            shape = [1, 1, 1]
+            shape[normal] = values.numel()
+            interior &= (values.abs() < 0.075).reshape(shape)
+        assert bool(interior.any())
+        assert torch.count_nonzero(field[interior]) == 0
+        assert bool(torch.isfinite(field).all())
+    assert float(result.tensor("Ez").abs().max()) > 0

@@ -90,7 +90,7 @@ def build_half_wave_system() -> tuple[NonlinearMNASystem, callable, int]:
     return system, source_injection, 1
 
 
-def build_full_wave_system() -> tuple[NonlinearMNASystem, callable, int]:
+def build_full_wave_system(*, device="cpu") -> tuple[NonlinearMNASystem, callable, int]:
     """Return ``(system, source_injection, output_index)`` for the center-tapped cell."""
 
     circuit = mw.Circuit("full_wave")
@@ -104,21 +104,21 @@ def build_full_wave_system() -> tuple[NonlinearMNASystem, callable, int]:
         mw.Diode("d2", b, top, saturation_current=SATURATION_CURRENT, ideality=IDEALITY),
     ]
     cap = mw.VoltageDependentCapacitor("cs", top, gnd, q_coefficients=_linear_cap())
-    compiled = compile_nonlinear_devices([*diodes, cap], node_index, dtype=DTYPE, device="cpu")
+    compiled = compile_nonlinear_devices([*diodes, cap], node_index, dtype=DTYPE, device=device)
 
     gs = 1.0 / SOURCE_RESISTANCE
     gl = 1.0 / LOAD_RESISTANCE
     # Each secondary end is a ground-referenced Norton source; the center tap is
     # ground, so a and b each keep a DC path to ground in every conduction state.
     conductance = torch.tensor(
-        [[gs, 0.0, 0.0], [0.0, gs, 0.0], [0.0, 0.0, gl]], dtype=DTYPE
+        [[gs, 0.0, 0.0], [0.0, gs, 0.0], [0.0, 0.0, gl]], dtype=DTYPE, device=device
     )
-    injection = torch.zeros(3, dtype=DTYPE)
+    injection = torch.zeros(3, dtype=DTYPE, device=device)
     system = NonlinearMNASystem(3, conductance, injection, compiled)
 
     def source_injection(t: float) -> torch.Tensor:
         vs = AMPLITUDE * math.sin(2.0 * math.pi * FREQUENCY * t)
-        return torch.tensor([vs * gs, -vs * gs, 0.0], dtype=DTYPE)
+        return torch.tensor([vs * gs, -vs * gs, 0.0], dtype=DTYPE, device=device)
 
     return system, source_injection, 2
 

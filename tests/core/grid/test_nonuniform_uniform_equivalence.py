@@ -60,6 +60,8 @@ def _run_fields(scene, cpml_config=None):
     prepared = mw.Simulation.fdtd(
         scene,
         frequency=1.0e9,
+        # The mixed case deliberately exercises the CPML kernels: pin CPML explicitly.
+        absorber="cpml",
         cpml_config=cpml_config,
         run_time=mw.TimeConfig(time_steps=40),
         spectral_sampler=mw.SpectralSampler(window="none"),
@@ -128,6 +130,7 @@ class _DesignScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=self._bounds),
             grid=self._grid,
             boundary=mw.BoundarySpec(kind="pec"),

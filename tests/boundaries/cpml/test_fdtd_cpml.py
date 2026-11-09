@@ -9,6 +9,63 @@ from witwin.maxwell.fdtd.checkpoint import capture_checkpoint_state
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+@pytest.mark.parametrize("transverse,k_parallel", [("periodic", 0.), ("bloch", 0.), ("bloch", 10.), ("bloch", 25.)])
+def test_cpml_fixed_k_shift_and_explicit_alpha_profiles(transverse, k_parallel):
+    from witwin.maxwell.fdtd.boundary.cpml import _CPML_VECTOR_ATTRS
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.02, 0.02),) * 3),
+        grid=mw.GridSpec.uniform(.01), device="cuda:0",
+        boundary=mw.BoundarySpec.faces(x=transverse, y=transverse, z="pml",
+            num_layers=2, bloch_wavevector=(0., k_parallel, 0.)),
+    )
+
+    def prepare(config):
+        return mw.Simulation.fdtd(scene, frequencies=(.8e9, 1.2e9), cpml_config=config, absorber="cpml",
+            run_time=mw.TimeConfig(time_steps=1)).prepare().solver
+
+    default = prepare({})
+    alpha = default.eps0 * (2. * np.pi * .8e9) if k_parallel else 0.
+    grade = 2. if k_parallel else 3.
+    q = default.c * k_parallel / (2. * np.pi * .8e9)
+    cosine = np.sqrt(1. - min(q, np.sqrt(1. - (4.2 / 8.) ** 2)) ** 2)
+    reflection = 10. ** (-4.2 / cosine) if k_parallel else 1e-6
+    explicit = prepare({"alpha_max": alpha, "grading_order": grade, "reflection": reflection})
+    assert default.cpml_config["alpha_max"] == alpha
+    assert default.cpml_config["grading_order"] == grade
+    assert default.cpml_config["reflection"] == reflection
+    for name in _CPML_VECTOR_ATTRS:
+        assert torch.equal(getattr(default, name), getattr(explicit, name)), name
+    unshifted = prepare({"alpha_max": 0., "grading_order": grade})
+    assert unshifted.cpml_config["alpha_max"] == 0.
+    if k_parallel:
+        assert not torch.equal(default.cpml_b_e_z, unshifted.cpml_b_e_z)
+        # Here twice the light line exceeds the band minimum, so alpha is constant.
+        # Check the physical DC stretch on both actual E/H sample clocks.
+        eta = (default.mu0 / default.eps0) ** .5
+        sigma_peak = -3 * np.log(reflection) / (2 * eta * .02) * 2
+        for letter, index, depth in (("e", 1, .5), ("h", 0, .75)):
+            direct = getattr(default, f"cpml_inv_kappa_{letter}_z")[index].double()
+            b = getattr(default, f"cpml_b_{letter}_z")[index].double()
+            c = getattr(default, f"cpml_c_{letter}_z")[index].double()
+            expected = direct.new_tensor(alpha / (sigma_peak * depth ** 2 + alpha))
+            torch.testing.assert_close(direct + c / (1 - b), expected, rtol=1e-5, atol=3e-7)
+        custom = prepare({"alpha_max": .037})
+        assert custom.cpml_config["alpha_max"] == .037
+        assert custom.cpml_config["grading_order"] == 3.
+        assert custom.cpml_config["reflection"] == 1e-6
+        assert not torch.equal(default.cpml_b_e_z, custom.cpml_b_e_z)
+        custom_grade = prepare({"grading_order": 4.})
+        assert custom_grade.cpml_config["alpha_max"] == alpha
+        assert custom_grade.cpml_config["grading_order"] == 4.
+        custom_reflection = prepare({"reflection": 1e-5})
+        assert custom_reflection.cpml_config["reflection"] == 1e-5
+    else:
+        for name in _CPML_VECTOR_ATTRS:
+            assert torch.equal(getattr(default, name), getattr(unshifted, name)), name
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_cpml_profiles_and_boundary_attenuation():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),

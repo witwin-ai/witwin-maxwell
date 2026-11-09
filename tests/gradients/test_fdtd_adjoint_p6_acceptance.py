@@ -31,7 +31,9 @@ def test_every_internal_variant_has_a_registered_native_runner():
     assert {variant.name for variant in _ReverseBackend} == set(NATIVE_ADJOINT_CAPABILITIES)
     assert set(_ReverseBackend) == set(_NATIVE_REVERSE_LABELS)
     assert set(_ReverseBackend) == set(_NATIVE_REVERSE_RUNNERS)
-    assert all(label.startswith("native_") for label in _NATIVE_REVERSE_LABELS.values())
+    assert _NATIVE_REVERSE_LABELS[_ReverseBackend.JOINT_MATERIAL] == "torch_cuda_joint_material"
+    assert all(label.startswith("native_") for variant, label in _NATIVE_REVERSE_LABELS.items()
+               if variant is not _ReverseBackend.JOINT_MATERIAL)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

@@ -291,11 +291,12 @@ def test_auto_grid_without_frequency_source_raises():
         prepare_scene(_auto_scene())
 
 
-def test_fdfd_rejects_auto_grid():
-    scene = _auto_scene(grid=mw.GridSpec.auto(wavelength=0.3))
-    simulation = mw.Simulation.fdfd(scene, frequency=1e9)
-    with pytest.raises(NotImplementedError, match="FDFD does not support nonuniform"):
-        simulation.prepare()
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fdfd_accepts_auto_grid():
+    scene = _auto_scene(grid=mw.GridSpec.auto(wavelength=0.3), device="cuda")
+    solver = mw.Simulation.fdfd(scene, frequency=1e9).prepare().solver
+    solver._ensure_system_matrix()
+    assert solver.scene.grid.is_custom
 
 
 def test_auto_scene_layer_refinement_and_override_resolution():

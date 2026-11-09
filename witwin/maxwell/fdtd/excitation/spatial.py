@@ -321,9 +321,11 @@ class AuxiliaryGrid1D:
         source_time,
         device,
         dtype,
-        absorber_cells=20,
+        absorber_cells=320,
+        extent64=None,
         source_buffer_cells=6,
         fdtd_module=None,
+        incident_reference=None,
     ):
         self.s_min = float(s_min)
         self.s_max = float(s_max)
@@ -337,6 +339,7 @@ class AuxiliaryGrid1D:
         self.absorber_cells = max(int(absorber_cells), 0)
         self.source_buffer_cells = max(int(source_buffer_cells), 0)
         self.fdtd_module = fdtd_module
+        self.incident_reference = incident_reference
 
         if self.ds <= 0.0:
             raise ValueError("AuxiliaryGrid1D ds must be > 0.")
@@ -347,15 +350,29 @@ class AuxiliaryGrid1D:
         if self.s_max <= self.s_min:
             raise ValueError("AuxiliaryGrid1D requires s_max > s_min.")
 
-        electric_cells = max(int(math.ceil((self.s_max - self.s_min) / self.ds)) + 1, 4)
+        # Snap only double-precision geometry roundoff before ceiling. The
+        # absorber is appended beyond this entire lossless sampling extent.
+        extent = self.s_max - self.s_min if extent64 is None else float(extent64)
+        x = extent / self.ds
+        nearest = round(x)
+        n = nearest if abs(x - nearest) <= 1e-9 * max(1.0, abs(x)) else math.ceil(x)
+        self.sampled_nodes = max(n + 1, 4)
+        self.absorber_order = 2
+        self.absorber_target = 1e-8
+        electric_cells = self.sampled_nodes + self.absorber_cells
         self.electric = torch.zeros(electric_cells, device=self.device, dtype=dtype)
         self.magnetic = torch.zeros(electric_cells - 1, device=self.device, dtype=dtype)
-        self.source_index = 0
+        self.source_index = (0 if incident_reference is None else
+                             round((incident_reference - self.s_min) / self.ds))
+        self._incident_boundary_h = torch.zeros(self.source_index, device=self.device, dtype=dtype)
+        self._incident_values = torch.zeros(self.source_index, device=self.device, dtype=dtype)
 
         self.eps = 1.0 / (self.impedance * self.wave_speed)
         self.mu = self.impedance / self.wave_speed
         self._build_loss_profiles()
         self.time_step = 0
+        # The initial entry E is at t=0, including waveforms with W(0) != 0.
+        self.electric[self.source_index] = self.source_value(-1)
 
     @property
     def electric_time(self):
@@ -380,25 +397,45 @@ class AuxiliaryGrid1D:
         return self.fdtd_module
 
     def _build_loss_profiles(self):
-        sigma_e = torch.zeros_like(self.electric)
-        sigma_h = torch.zeros_like(self.magnetic)
+        rate_e = torch.zeros_like(self.electric)
+        rate_h = torch.zeros_like(self.magnetic)
         edge_cells_e = min(self.absorber_cells, max(self.electric.numel() - 1, 0))
         edge_cells_h = min(self.absorber_cells, max(self.magnetic.numel(), 0))
+        # Matched electric/magnetic loss requires sigma_e/epsilon = sigma_m/mu.
+        # A shared rate preserves the incident-line impedance. Scale its
+        # qualified quadratic ramp by physical absorber thickness, so changing
+        # ds keeps the round-trip amplitude attenuation target fixed at 1e-8.
+        length = max(edge_cells_e, edge_cells_h) * self.ds
+        max_rate = -3.0 * self.wave_speed * math.log(1e-8) / (2.0 * length) if length > 0 else 0.0
         if edge_cells_e > 0:
-            max_sigma = 0.35
             ramp_e = ((torch.arange(edge_cells_e, device=self.device, dtype=self.dtype) + 1.0) / edge_cells_e) ** 2
-            sigma_e[-edge_cells_e:] = max_sigma * ramp_e
+            rate_e[-edge_cells_e:] = max_rate * ramp_e
         if edge_cells_h > 0:
-            max_sigma = 0.35
             ramp_h = ((torch.arange(edge_cells_h, device=self.device, dtype=self.dtype) + 0.5) / edge_cells_h) ** 2
-            sigma_h[-edge_cells_h:] = max_sigma * ramp_h
+            rate_h[-edge_cells_h:] = max_rate * ramp_h
 
-        sigma_factor_e = 0.5 * self.dt * sigma_e / max(self.eps, 1e-30)
-        sigma_factor_h = 0.5 * self.dt * sigma_h / max(self.mu, 1e-30)
-        self.electric_decay = (1.0 - sigma_factor_e) / (1.0 + sigma_factor_e)
-        self.electric_curl = (self.dt / (self.eps * self.ds)) / (1.0 + sigma_factor_e)
-        self.magnetic_decay = (1.0 - sigma_factor_h) / (1.0 + sigma_factor_h)
-        self.magnetic_curl = (self.dt / (self.mu * self.ds)) / (1.0 + sigma_factor_h)
+        loss_e = 0.5 * self.dt * rate_e
+        loss_h = 0.5 * self.dt * rate_h
+        self.electric_decay = (1.0 - loss_e) / (1.0 + loss_e)
+        self.electric_curl = (self.dt / (self.eps * self.ds)) / (1.0 + loss_e)
+        self.magnetic_decay = (1.0 - loss_h) / (1.0 + loss_h)
+        self.magnetic_curl = (self.dt / (self.mu * self.ds)) / (1.0 + loss_h)
+
+    def assert_lossless_samples(self, electric_terms, magnetic_terms):
+        """Validate every face gather while constructing its incident line."""
+        for terms, default_kind in ((electric_terms, "magnetic"), (magnetic_terms, "electric")):
+            for term in terms:
+                kind = term.get("sample_kind", default_kind)
+                decay = getattr(self, kind + "_decay")
+                if "sample_indices" in term:
+                    indices = term["sample_indices"].long()
+                else:
+                    origin = self.s_min + (0.5 * self.ds if kind == "magnetic" else 0.0)
+                    positions = term["sample_positions"].to(device=self.device, dtype=self.dtype)
+                    lower = torch.floor((positions - origin) / self.ds).long().reshape(-1)
+                    indices = torch.cat((lower, lower + 1))
+                assert bool(torch.all((indices >= 0) & (indices < len(decay)))), "TFSF sample outside auxiliary line"
+                assert bool(torch.all(decay[indices] == 1)), "TFSF sample overlaps auxiliary absorber"
 
     def _interpolate(self, field, *, origin, positions, out=None):
         positions_tensor = torch.as_tensor(positions, device=self.device, dtype=self.dtype)
@@ -418,8 +455,113 @@ class AuxiliaryGrid1D:
     def sample_h(self, positions, out=None):
         return self._interpolate(self.magnetic, origin=self.s_min + 0.5 * self.ds, positions=positions, out=out)
 
+    def source_value(self, step):
+        from .temporal import auxiliary_electric_time
+
+        return evaluate_source_time(self.source_time, auxiliary_electric_time(step, self.dt))
+
     def _apply_source(self):
-        self.electric[self.source_index] = evaluate_source_time(self.source_time, self.electric_time)
+        self.electric[self.source_index] = self.source_value(self.time_step)
+
+    def incident_boundary(self, electric, magnetic, source_value, next_value, *future_values):
+        """Continue the imposed entry-plane E through its upstream Yee stencil.
+
+        The E update gives H_left = H_right + (E_new - E_old) / Ce.
+        Applying the H update at that sample then determines the upstream E.
+        One further time level supplies the outer H needed by oblique faces.
+        No propagation delay or continuum phase-speed approximation is involved.
+        """
+        j = self.source_index
+        ce, ch = self.electric_curl[j], self.magnetic_curl[j]
+        if j > 2:
+            # Strongly anisotropic oblique faces can reach more than one
+            # incident-line cell upstream. Continue the same Yee identities
+            # through that finite ghost stencil, predicting only its time halo.
+            seeds = (source_value, next_value, *future_values)
+            future_e, future_h = electric, magnetic
+            right_h = []
+            for seed in seeds:
+                future_h = self.magnetic_decay * future_h - self.magnetic_curl * (
+                    future_e[1:] - future_e[:-1])
+                right_h.append(future_h[j])
+                updated = future_e.clone()
+                updated[1:-1] = self.electric_decay[1:-1] * future_e[1:-1] - self.electric_curl[1:-1] * (
+                    future_h[1:] - future_h[:-1])
+                updated[j], updated[-1] = seed, 0
+                future_e = updated
+            reference_e = [electric[j], *seeds]
+            ghost_e, ghost_h = [], []
+            for layer in range(1, j + 1):
+                left_h = [h + (new - old) / ce for h, old, new in
+                          zip(right_h, reference_e, reference_e[1:])]
+                ghost_h.append(left_h[0])
+                if layer < j:
+                    left_e = [e + (h - previous) / ch for e, h, previous in
+                              zip(reference_e, left_h, [magnetic[j - layer], *left_h[:-1]])]
+                    ghost_e.append(left_e[0])
+                    reference_e, right_h = left_e, left_h[:-1]
+            return (*ghost_e, *ghost_h)
+        right_h = magnetic[j] - ch * (electric[j + 1] - electric[j])
+        following_h = magnetic[j + 1] - ch * (electric[j + 2] - electric[j + 1])
+        right_e = electric[j + 1] - ce * (following_h - right_h)
+        next_right_h = right_h - ch * (right_e - source_value)
+        left_h = right_h + (source_value - electric[j]) / ce
+        next_left_h = next_right_h + (next_value - source_value) / ce
+        left_e = electric[j] + (left_h - magnetic[j - 1]) / ch
+        next_left_e = source_value + (next_left_h - left_h) / ch
+        outer_h = left_h + (next_left_e - left_e) / ce
+        return left_e, left_h, outer_h
+
+    def prepare_incident_boundary(self, values=None):
+        if self.incident_reference is None:
+            return
+        if values is None:
+            for n in range(self.source_index):
+                self._incident_values[n] = self.source_value(self.time_step + n)
+            values = self._incident_values
+        boundary = self.incident_boundary(self.electric, self.magnetic, *values)
+        for offset, value in enumerate(boundary[:self.source_index - 1], 1):
+            self.electric[self.source_index - offset] = value
+        for offset, value in enumerate(boundary[self.source_index - 1:]):
+            self._incident_boundary_h[offset] = value
+
+    def transpose_incident_boundary(self, adj_electric, adj_magnetic, *magnetic_grads):
+        """Transpose the local boundary continuation with the waveform held fixed."""
+        j = self.source_index
+        if j > 2:
+            ghost_e_grads = tuple(adj_electric[j - offset].clone() for offset in range(1, j))
+            adj_electric[1:j] = 0
+            # This small linear continuation remains a native GPU PyTorch VJP;
+            # the common two-cell stencil below has an explicit transpose.
+            with torch.enable_grad():
+                electric = torch.zeros_like(adj_electric, requires_grad=True)
+                magnetic = torch.zeros_like(adj_magnetic, requires_grad=True)
+                boundary = self.incident_boundary(electric, magnetic, *([0.] * j))
+                loss = sum(value * weight for value, weight in
+                           zip(boundary, (*ghost_e_grads, *magnetic_grads)))
+                electric_grad, magnetic_grad = torch.autograd.grad(loss, (electric, magnetic))
+            adj_electric.add_(electric_grad)
+            adj_magnetic.add_(magnetic_grad)
+            return
+        left_h_grad, outer_h_grad = magnetic_grads
+        ce, ch = self.electric_curl[j], self.magnetic_curl[j]
+        left_e_grad = adj_electric[j - 1].clone() - outer_h_grad / ce
+        adj_electric[j - 1] = 0
+        next_left_e_grad = outer_h_grad / ce
+        left_h_grad = left_h_grad + outer_h_grad - next_left_e_grad / ch + left_e_grad / ch
+        next_right_h_grad = next_left_e_grad / ch
+        adj_electric[j].add_(left_e_grad - left_h_grad / ce)
+        adj_magnetic[j - 1].sub_(left_e_grad / ch)
+        right_h_grad = left_h_grad + next_right_h_grad
+        right_e_grad = -ch * next_right_h_grad
+        adj_electric[j + 1].add_(right_e_grad)
+        following_h_grad = -ce * right_e_grad
+        right_h_grad = right_h_grad + ce * right_e_grad
+        adj_magnetic[j + 1].add_(following_h_grad)
+        adj_electric[j + 2].sub_(ch * following_h_grad)
+        adj_electric[j + 1].add_(ch * following_h_grad - ch * right_h_grad)
+        adj_magnetic[j].add_(right_h_grad)
+        adj_electric[j].add_(ch * right_h_grad)
 
     def _advance_magnetic_compiled(self):
         self._resolve_fdtd_module().updateAuxiliaryMagnetic1D(
@@ -430,7 +572,7 @@ class AuxiliaryGrid1D:
         ).launchRaw()
 
     def _advance_electric_compiled(self):
-        source_value = float(evaluate_source_time(self.source_time, self.electric_time))
+        source_value = float(self.source_value(self.time_step))
         self._resolve_fdtd_module().updateAuxiliaryElectric1D(
             Electric=self.electric,
             Magnetic=self.magnetic,
@@ -443,10 +585,12 @@ class AuxiliaryGrid1D:
     def advance_magnetic(self):
         if self._can_use_compiled_auxiliary():
             self._advance_magnetic_compiled()
-            return
-        if self.magnetic.numel() > 0:
+        elif self.magnetic.numel() > 0:
             curl_e = self.electric[1:] - self.electric[:-1]
             self.magnetic = self.magnetic_decay * self.magnetic - self.magnetic_curl * curl_e
+        if self.incident_reference is not None:
+            for offset in range(self.source_index):
+                self.magnetic[self.source_index - offset - 1] = self._incident_boundary_h[offset]
 
     def advance_electric(self):
         if self._can_use_compiled_auxiliary():
@@ -462,6 +606,7 @@ class AuxiliaryGrid1D:
         self.time_step += 1
 
     def advance(self):
+        self.prepare_incident_boundary()
         self.advance_magnetic()
         self.advance_electric()
 

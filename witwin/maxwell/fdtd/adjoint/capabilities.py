@@ -5,6 +5,7 @@ from __future__ import annotations
 NATIVE_ADJOINT_CAPABILITIES = {
     "STANDARD": {"complex": False, "cpml": False},
     "CPML": {"complex": False, "cpml": True},
+    "JOINT_MATERIAL": {"complex": False, "electric_conductivity": True, "electric_ade": True, "finite_foil": True, "torch_cuda": True},
     "CONDUCTIVE": {"complex": False, "cpml": True, "electric_conductivity": True},
     "KERR": {"complex": False, "cpml": True, "chi3": True},
     "GENERAL_NONLINEAR": {

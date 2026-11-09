@@ -21,7 +21,6 @@ from .stratton_chu import (
 _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
 _INDEX_TO_AXIS = ("x", "y", "z")
 _FIELD_NAMES = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
-_POWER_FLOOR = 1e-30
 
 
 def _mode_source_from_mode_spec(mode_spec: dict[str, object], *, frequency: float) -> ModeSource:
@@ -44,6 +43,10 @@ def _mode_source_from_mode_spec(mode_spec: dict[str, object], *, frequency: floa
     wave_family = mode_spec.get("wave_family")
     if wave_family is not None:
         object.__setattr__(source, "_wave_family", str(wave_family))
+    object.__setattr__(source,"_conductor_model",mode_spec.get("conductor_model"))
+    terminal_mode = mode_spec.get("terminal_mode")
+    if terminal_mode is not None:
+        object.__setattr__(source, "_terminal_mode", terminal_mode)
     return source
 
 
@@ -72,12 +75,15 @@ def _resolve_mode_source(scene, monitor=None, *, mode_source=None, frequency: fl
 
 def _mode_overlap_context(result):
     solver = getattr(result, "solver", None)
-    if solver is not None and hasattr(solver, "_compiled_material_model"):
+    if (solver is not None and hasattr(solver, "_compiled_material_model")
+            and solver.scene is result.prepared_scene):
         return solver
 
     scene = result.prepared_scene if hasattr(result, "prepared_scene") else prepare_scene(result.scene)
     device = torch.device(scene.device)
+    stats = result.stats()
     return SimpleNamespace(
+        dt=stats.get("dt"),
         scene=scene,
         Ex=torch.empty((1,), device=device, dtype=torch.float32),
         c=C_0,
@@ -185,12 +191,28 @@ def _reference_mode_fields(context, mode_source: ModeSource, monitor, *, frequen
             device=device,
             dtype=complex_dtype,
         )
+    if mode_data.get("beta_complex") is not None and mode_data.get("staggered_profiles"):
+        # Plane monitors interpolate the two native axial H half-nodes onto
+        # the electric plane. Match that observable rather than comparing its
+        # averaged H to a continuous collocated profile.
+        import cmath
+        nodes = getattr(context.scene, axis + "_nodes64")
+        plane_index = mode_data["plane_index"]
+        half_spacing = .5 * float(nodes[plane_index + 1] - nodes[plane_index])
+        magnetic = magnetic * cmath.cos(mode_data["beta_complex"] * half_spacing)
     return coords_a, coords_b, electric, magnetic, mode_data
 
 
 def _integrated_power(electric: torch.Tensor, magnetic: torch.Tensor, normal: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     density = 0.5 * torch.sum(torch.cross(electric, torch.conj(magnetic), dim=-1) * normal, dim=-1)
     return torch.sum(density * weights)
+
+
+def _power_reference(electric, magnetic, normal, weights):
+    """Absolute transverse products with the modal observable's own area weights."""
+    e, h = electric.abs(), magnetic.abs()
+    products = e[..., [1, 2, 0]] * h[..., [2, 0, 1]] + e[..., [2, 0, 1]] * h[..., [1, 2, 0]]
+    return 0.5 * torch.sum(torch.sum(products * normal.abs(), dim=-1) * weights)
 
 
 def _compute_mode_overlap_from_payload(
@@ -216,7 +238,21 @@ def _compute_mode_overlap_from_payload(
     complex_dtype = resolve_complex_dtype(*[monitor.get(name) for name in _FIELD_NAMES])
     coords_a = _as_1d_coords(coord_a, tangential_axes[0], device=device, dtype=real_dtype)
     coords_b = _as_1d_coords(coord_b, tangential_axes[1], device=device, dtype=real_dtype)
-    weights = _trapz_weights_1d(coords_a)[:, None] * _trapz_weights_1d(coords_b)[None, :]
+    cell_widths = monitor.get("cell_widths")
+    if cell_widths is None:
+        weights_a, weights_b = _trapz_weights_1d(coords_a), _trapz_weights_1d(coords_b)
+    else:
+        # Aligned Yee monitors represent cell-centered samples. Their physical
+        # widths cannot be recovered by trapezoidal integration of the centers,
+        # particularly across a transverse grid transition.
+        widths = []
+        for axis_label, coordinates in zip(tangential_axes, (coords_a, coords_b)):
+            width = torch.as_tensor(cell_widths[axis_label], device=device, dtype=real_dtype)
+            if width.shape != coordinates.shape or not bool(torch.all(torch.isfinite(width) & (width > 0))):
+                raise ValueError("Modal monitor cell widths must be finite, positive and match its coordinates.")
+            widths.append(width)
+        weights_a, weights_b = widths
+    weights = weights_a[:, None] * weights_b[None, :]
     normal = _surface_normal(
         axis,
         monitor.get("normal_direction", "+"),
@@ -253,33 +289,28 @@ def _compute_mode_overlap_from_payload(
 
     mode_power = _integrated_power(electric_ref, magnetic_ref, normal, weights)
     mode_power_abs = torch.abs(torch.real(mode_power))
-    if float(mode_power_abs.item()) <= _POWER_FLOOR:
+    reference = _power_reference(electric_ref, magnetic_ref, normal, weights)
+    if bool(mode_power_abs <= 64 * torch.finfo(mode_power_abs.dtype).eps * reference):
         raise ValueError("Reference mode power is numerically zero on the supplied monitor plane.")
 
-    plus_density = torch.sum(
-        (
-            torch.cross(electric_total, torch.conj(magnetic_ref), dim=-1)
-            + torch.cross(torch.conj(electric_ref), magnetic_total, dim=-1)
-        )
-        * normal,
-        dim=-1,
-    )
-    minus_density = torch.sum(
-        (
-            torch.cross(electric_total, torch.conj(magnetic_ref), dim=-1)
-            - torch.cross(torch.conj(electric_ref), magnetic_total, dim=-1)
-        )
-        * normal,
-        dim=-1,
-    )
-    amplitude_forward = torch.sum(plus_density * weights) / (4.0 * mode_power)
-    amplitude_backward = torch.sum(minus_density * weights) / (4.0 * mode_power)
+    # The two reciprocity terms have conjugate normalizations.  A complex
+    # characteristic impedance gives reactive reference power, so using a single
+    # denominator would mix an incident wave into the backward amplitude.
+    electric_overlap = torch.sum(torch.sum(
+        torch.cross(electric_total, torch.conj(magnetic_ref), dim=-1) * normal,
+        dim=-1) * weights) / (2.0 * mode_power)
+    magnetic_overlap = torch.sum(torch.sum(
+        torch.cross(torch.conj(electric_ref), magnetic_total, dim=-1) * normal,
+        dim=-1) * weights) / (2.0 * torch.conj(mode_power))
+    amplitude_forward = 0.5 * (electric_overlap + magnetic_overlap)
+    amplitude_backward = 0.5 * (electric_overlap - magnetic_overlap)
 
     total_power = _integrated_power(electric_total, magnetic_total, normal, weights)
     forward_power = torch.abs(amplitude_forward) ** 2 * mode_power_abs.to(dtype=amplitude_forward.real.dtype)
     backward_power = torch.abs(amplitude_backward) ** 2 * mode_power_abs.to(dtype=amplitude_backward.real.dtype)
     total_power_abs = torch.abs(torch.real(total_power))
-    if float(total_power_abs.item()) > _POWER_FLOOR:
+    total_reference = _power_reference(electric_total, magnetic_total, normal, weights)
+    if bool(total_power_abs > 64 * torch.finfo(total_power_abs.dtype).eps * total_reference):
         forward_fraction = forward_power / total_power_abs
         backward_fraction = backward_power / total_power_abs
     else:
@@ -296,6 +327,7 @@ def _compute_mode_overlap_from_payload(
         "polarization_axis": resolved_mode_source.polarization_axis,
         "effective_index": float(mode_data["effective_index"]),
         "beta": float(mode_data["beta"]),
+        "beta_complex": mode_data.get("beta_complex"),
         "mode_power": torch.real(mode_power),
         "total_power": torch.real(total_power),
         "amplitude_forward": amplitude_forward,

@@ -4,10 +4,11 @@
 
 WiTwin Maxwell is a differentiable full-wave electromagnetic solver with a **PyTorch-native interface** and a native CUDA FDTD runtime at its core. The FDTD field-update loops run as hand-written GPU kernels shipped in prebuilt platform wheels, while the entire workflow — scene definition, simulation dispatch, result access, and automatic differentiation — stays inside standard PyTorch through `SceneModule`, `MaterialRegion`, and adjoint backward support.
 
-The public solver workflow is `Scene -> Simulation -> Result` for both runtimes:
+The public solver workflow is `Scene -> Simulation -> Result` across runtimes:
 
 - `FDTD`: native-CUDA Yee-grid time-domain solver with CPML, multi-frequency DFT sampling, material dispersion and nonlinearity, and differentiable adjoint support
 - `FDFD` (limited/experimental): CUDA-only sparse single-frequency solver for linear isotropic or diagonal-electric media with `none`/PML boundaries. It does not yet match FDTD's material, boundary, nonuniform-grid, source, monitor, or adjoint coverage.
+- `MoM` (experimental): CUDA integral workflows for disjoint closed bodies, with scalar magnetic PMCHWT, explicitly configured tensor and surface-volume formulations, dense/hierarchical/FMM operators, native currents, physical queries and exact persistence. Material, periodic and backend combinations have explicit admission rules. See the [current implementation checkpoint](docs/memory/mom_gsp_execution_checkpoint.md); independent physical and resource qualification remains open.
 
 ## Get Started
 
@@ -47,6 +48,7 @@ For module-style inverse-design workflows, define a `SceneModule`, implement `to
 | Source time | `CW`, `GaussianPulse`, `RickerWavelet`, `CustomSourceTime` | Shared waveform vocabulary across public source APIs, including sampled or callable custom temporal signals. |
 | Boundaries | `none`, `pml`, `periodic`, `bloch`, `pec`, `pmc` | Per-axis and per-face mixed layouts are available through `BoundarySpec.faces(...)`, including x/y Bloch plus z PML for grating FDTD workflows. |
 | Materials | Isotropic and tensor electric/magnetic media; conductive, Debye, Drude, Lorentz, Sellmeier, gain, nonlinear, modulated, perturbation, custom dispersive, `Medium2D`, `Graphene`, and `LossyMetalMedium` | Compatible material effects compose in the same compiled Yee model. `MaterialRegion` is the primary differentiable design primitive; specialized combinations and adjoint limits are listed in `FEATURE_LIST.md`. |
+| Conductors | `Material.pec()`, `PlanarPEC`, conformal PEC, `LossyMetalMedium`, and two-face `CopperFoil` sheets | CopperFoil free-edge impedance (`edge_model='auto'`) is on by default; existing thick-foil scenes with free edges change Cu loss; use `edge_model='none'` for the legacy bare-rim model. See `FEATURE_LIST.md` for its validity limits. |
 | Geometry and grids | `Box`, `Sphere`, `Cylinder`, `Ellipsoid`, `Cone`, `Pyramid`, `Prism`, `Torus`, `HollowBox`, `Mesh`, `PolySlab`, custom/automatic/nonuniform grids, mesh overrides, and subpixel averaging | Shared geometry and `Structure` primitives are re-exported through `witwin.maxwell`; `Scene` owns device placement and compilation. |
 | Monitors | Point, plane, finite-plane, flux, time-domain, material/permittivity, mode, diffraction, dipole-emission, and closed-surface monitors | Frequency selection is available through `Result.at(...)`; closed surfaces feed equivalent-current and near-to-far postprocessing. |
 | Ports | `ModePort` | First-class modal port with S-parameter/modal-overlap workflows, including broadband, lossy, anisotropic, and bent-waveguide forward modes; still experimental. |
@@ -75,7 +77,7 @@ scene = mw.Scene(
     grid=mw.GridSpec.uniform(0.12),
     boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
     device="cuda",
-    subpixel_samples=5,
+    subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
 )
 scene.add_structure(
     mw.Structure(
@@ -122,7 +124,7 @@ result.plot.field(axis="y", position=0.0, component="abs", field_log_scale=True)
 
 This example is intentionally minimal and does not require wrapping the scene in a class.
 
-The current public backward path is for trainable inputs that contribute to compiled material tensors, such as `MaterialRegion.density` and supported trainable geometry parameters. Parameters that only affect source placement or other non-material branches are not yet part of the public adjoint path.
+The current public backward path is for trainable inputs that contribute to compiled material tensors, such as `MaterialRegion.density` and supported trainable geometry parameters. Density/topology optimization requires an explicit `SubpixelSpec(averaging="polarized")`; `SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")` preserves the previous default. The default `kottke_edge` rejects trainable MaterialRegion tensor fields, and `kottke_smooth` is not qualified for density gradients. Parameters that only affect source placement or other non-material branches are not yet part of the public adjoint path.
 
 ## Development and Validation
 

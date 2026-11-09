@@ -136,6 +136,7 @@ def test_fdtd_medium2d_sheet_matches_analytic_fresnel():
             half_width=0.4,
             fit_gap=0.08,
             fit_extent=0.6,
+            absorber="cpml",
         )
         t_exact = 2.0 / (2.0 + z0_sigma)
         r_exact = z0_sigma / (2.0 + z0_sigma)

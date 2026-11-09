@@ -25,7 +25,8 @@ def validate_material_channels(scene):
                     or float(getattr(material, "sigma_m", 0.)) != 0.
                     or getattr(material, "mu_tensor", None) is not None
                     or getattr(material, "sigma_e_tensor", None) is not None
-                    or getattr(material, "is_pec", False)):
+                    or getattr(material, "is_pec", False)
+                    or getattr(material, "is_pmc", False)):
                 raise NotImplementedError(
                     "Batch geometry adjoint requires nonmagnetic, nonconductive dielectric structures; "
                     "magnetic, conductivity and PEC occupancy gradient channels are not available.")
@@ -48,6 +49,11 @@ def freeze_solver(solver):
     """Detach mutable runtime tensors from every persistent execution buffer."""
     memo = {id(solver.scene): solver.scene,
             id(solver._compiled_material_model): solver._compiled_material_model}
+    # Runtime face descriptors refer back to these declarative materials.
+    # Keep their identity consistent with the already shared Scene; numerical
+    # coefficients and every evolving face state are still cloned below.
+    for structure in solver.scene.structures:
+        memo[id(structure.material)] = structure.material
     def share_material(value):
         if isinstance(value, torch.Tensor):
             memo[id(value)] = value
@@ -93,7 +99,12 @@ def freeze_solver(solver):
         memo[id(value)] = result
         return result
 
-    return freeze(solver)
+    frozen = freeze(solver)
+    # Tensor identity changes when a tape takes ownership. Rebuild the MNA
+    # device parameter lookup against the frozen circuit tensors, not old ids.
+    for runtime in getattr(frozen, "_circuit_runtimes", ()):
+        runtime.system._refresh_parameter_cache()
+    return frozen
 
 
 class BatchAdjointTape:

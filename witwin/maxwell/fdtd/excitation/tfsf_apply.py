@@ -3,11 +3,11 @@ from __future__ import annotations
 import torch
 
 from .tfsf_specs import reference_sample_axis_code
-from .temporal import apply_generic_source_terms
+from .temporal import apply_generic_source_terms, injection_time
 
 
 _REFERENCE_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned"}
-_AUXILIARY_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned", "plane_wave_aux"}
+_AUXILIARY_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned", "plane_wave_aux", "plane_wave_fixed_k"}
 
 _MAGNETIC_FIELD_NAMES = ("Hx", "Hy", "Hz")
 _ELECTRIC_FIELD_NAMES = ("Ex", "Ey", "Ez")
@@ -29,6 +29,7 @@ def _apply_batched_aux_terms(solver, batch, *, sample_kind, field_names):
         fieldY=getattr(solver, field_names[1]),
         fieldZ=getattr(solver, field_names[2]),
         coeffData=batch["coeff_data"],
+        sourceGather=batch["source_gather"],
         incidentField=sample_field,
         samplePositions=batch["sample_positions"],
         termStarts=batch["term_starts"],
@@ -53,6 +54,7 @@ def _apply_batched_reference_terms(solver, batch, *, sample_kind, field_names):
         fieldY=getattr(solver, field_names[1]),
         fieldZ=getattr(solver, field_names[2]),
         coeffData=batch["coeff_data"],
+        sourceGather=batch["source_gather"],
         incidentField=sample_field,
         termStarts=batch["term_starts"],
         termShapes=batch["term_shapes"],
@@ -139,6 +141,15 @@ def _apply_tfsf_terms(solver, *, term_key, sample_kind, time_value):
 
     provider = solver._tfsf_state.get("provider")
     terms = solver._tfsf_state[term_key]
+    if provider == "plane_wave_fixed_k":
+        aux = solver._tfsf_state["auxiliary_grid"]
+        incident = aux.electric if sample_kind == "electric" else aux.magnetic
+        for term in terms:
+            patch = term["coeff_patch"] * incident[term["component"], term["sample_index"]]
+            slices = tuple(slice(start, start + size) for start, size in zip(term["offsets"], patch.shape))
+            getattr(solver, term["field_name"])[slices].add_(patch.real)
+            getattr(solver, term["field_name"] + "_imag")[slices].add_(patch.imag)
+        return
     batch = solver._tfsf_state.get("magnetic_batch" if term_key == "magnetic_terms" else "electric_batch")
     field_names = _field_names_for_terms(term_key)
     if provider in _REFERENCE_PROVIDERS:
@@ -173,30 +184,18 @@ def _apply_tfsf_terms(solver, *, term_key, sample_kind, time_value):
     )
 
 
-# TFSF providers whose in-block correction both (1) reads the incident field from
-# the device-resident auxiliary 1D grid -- carrying no per-step host input -- and
-# (2) accumulates through the integer-indexed *reference* injection kernel, whose
-# warp-aggregated writes are collision-free for the axis-aligned face layout and
-# therefore bit-reproducible. This covers both injection modes of the axis-aligned
-# reference providers: the six-face box TFSF and the two-face (slab) TFSF share the
-# same auxiliary-line provider and reference kernels, so the non-periodic
-# normal-incidence slab captures identically to the box. The oblique auxiliary-line
-# provider (``plane_wave_aux``) is deliberately excluded: it accumulates through the
-# batched *interpolated* kernel, whose cross-warp atomic adds at the overlapping
-# oblique faces are not bit-reproducible run to run, so a captured graph could not
-# be proven bit-identical to the eager path. The grating-slab (``plane_wave_grating_
-# slab_cw``) and box-CW (``plane_wave_discrete_cw``) providers evaluate the incident
-# CW phasor on the host each step through ``apply_generic_source_terms`` and inject
-# it as a kernel launch scalar a captured graph would freeze, so they are excluded
-# too.
-_CAPTURABLE_TFSF_PROVIDERS = frozenset(_REFERENCE_PROVIDERS)
+# Preserve the qualified capture-provider whitelist. Both reference and oblique
+# source gathers are deterministic; oblique graph admission remains a separate
+# qualification. CW providers still carry per-step host phasors.
+# Fixed-k slabs use disjoint, direct tensor-slice additions and a device-only
+# magnetic line advance. Their source evaluation remains in the eager E hook.
+_CAPTURABLE_TFSF_PROVIDERS = frozenset(_REFERENCE_PROVIDERS | {"plane_wave_fixed_k"})
 
 
 def tfsf_incident_is_gpu_driven(solver) -> bool:
-    """True when an active TFSF source couples into the 3D field-update block only
-    by *reading* the device-resident auxiliary 1D incident grid through the
-    bit-reproducible reference injection kernel, so the block can be captured into a
-    CUDA graph and replayed bit-for-bit.
+    """True when the TFSF coupling is deterministic and device-driven in the
+    captured field-update block. Fixed-k slabs add disjoint complex tensor
+    patches; the axis-aligned providers use the reference injection kernel.
 
     The reference providers apply their in-block H correction with the batched /
     per-term reference kernels, which read ``aux.electric`` / ``aux.magnetic``
@@ -209,9 +208,8 @@ def tfsf_incident_is_gpu_driven(solver) -> bool:
     axis-aligned reference provider, so the non-periodic normal-incidence slab is
     capturable exactly like the box.
 
-    The oblique auxiliary-line provider (``plane_wave_aux``) is excluded because its
-    batched interpolated injection kernel accumulates through non-deterministic
-    cross-warp atomic adds (bit-identical capture parity is impossible). The
+    The oblique auxiliary-line provider (``plane_wave_aux``) now uses an ordered
+    deterministic gather, but remains outside the qualified capture whitelist. The
     grating-slab provider (``plane_wave_grating_slab_cw``, the Bloch-transverse
     oblique slab) and the box-CW provider (``plane_wave_discrete_cw``) each evaluate
     the incident CW phasor on the host every step via ``apply_generic_source_terms``
@@ -230,7 +228,7 @@ def apply_tfsf_h_correction(solver, time_value):
         solver,
         term_key="magnetic_terms",
         sample_kind="electric",
-        time_value=time_value,
+        time_value=injection_time("magnetic_current", time_value, solver.dt),
     )
 
 
@@ -239,7 +237,7 @@ def apply_tfsf_e_correction(solver, time_value):
         solver,
         term_key="electric_terms",
         sample_kind="magnetic",
-        time_value=time_value + 0.5 * float(solver.dt),
+        time_value=injection_time("equivalent_electric_current", time_value, solver.dt),
     )
 
 

@@ -438,6 +438,7 @@ class _ArrayColumnModel(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.04, 0.04),) * 3),
             grid=mw.GridSpec.uniform(0.005),
             boundary=mw.BoundarySpec.pml(num_layers=4),

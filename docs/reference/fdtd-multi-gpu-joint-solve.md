@@ -356,10 +356,10 @@ environment with the current native extension is acceptable.
 ```bash
 nvidia-smi topo -m
 
-/home/xingyu/miniconda3/envs/maxwell/bin/python -m pytest \
-  tests/fdtd/multi_gpu -q --basetemp=/tmp/witwin-mgpu-pytest
+python -m pytest \
+  tests/fdtd/multi_gpu -q --basetemp=<scratch>/witwin-mgpu-pytest
 
-/home/xingyu/miniconda3/envs/maxwell/bin/python \
+python \
   scripts/dev/fdtd/multi_gpu/bench_joint.py \
   --devices cuda:0 cuda:1 \
   --nodes-x 257 --nodes-y 257 --nodes-z 257 \

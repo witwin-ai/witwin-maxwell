@@ -225,11 +225,11 @@ class BreakdownStressAccumulator:
 
         # Contiguous-run bookkeeping: extend the active run where exceeding,
         # reset it to zero elsewhere, then fold into the longest observed run.
-        self._current_run = torch.where(
+        self._current_run.copy_(torch.where(
             exceed,
             self._current_run + self.dt,
             torch.zeros_like(self._current_run),
-        )
+        ))
         torch.maximum(self.longest_exceedance, self._current_run, out=self.longest_exceedance)
 
     def finalize(self, *, name: str = "", region_bounds=None, provenance_extra=None):

@@ -18,6 +18,8 @@ import math
 from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
+import torch
+from witwin.core import BooleanGeometry
 from witwin.core.material import VACUUM_PERMITTIVITY
 from ..fdtd.excitation.spatial import resolve_injection_axis, soft_plane_wave_coordinate
 
@@ -36,6 +38,18 @@ _TIDY3D_TFSF_UNIT_FIELD = math.sqrt(2.0 / (_C0 * VACUUM_PERMITTIVITY))
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def low_frequency_smoothing_to_tidy3d(spec, monitors):
+    """Map a LowFrequencySmoothingSpec to the reference spec for the named mode monitors."""
+    td = _ensure_tidy3d()
+    return td.LowFrequencySmoothingSpec(
+        monitors=tuple(monitors),
+        min_sampling_time=spec.min_sampling_time,
+        max_sampling_time=spec.max_sampling_time,
+        order=spec.order,
+        max_deviation=spec.max_deviation,
+    )
+
 
 def _ensure_tidy3d():
     """Import and return tidy3d, raising a clear error if missing."""
@@ -108,7 +122,7 @@ def _mode_candidate_count(mode_index: int) -> int:
 
 def _convert_source_time(source_time, td, *, amplitude_scale: float = 1.0):
     """Convert maxwell source_time to a Tidy3D SourceTime."""
-    from ..sources import CW, GaussianPulse, RickerWavelet
+    from ..sources import CW, BroadbandPulse, GaussianPulse, RickerWavelet
 
     if source_time is None:
         raise ValueError("source_time must be set for Tidy3D export.")
@@ -139,6 +153,37 @@ def _convert_source_time(source_time, td, *, amplitude_scale: float = 1.0):
             phase=phase,
             offset=offset,
             remove_dc_component=False,
+        )
+
+    if isinstance(source_time, BroadbandPulse):
+        # Tidy3D's BroadbandPulse waveform is computed by its licensed extension;
+        # export the shared declarative contract (band, in-band minimum relative
+        # amplitude, amplitude, phase, offset in units of 1/(2*pi*bandwidth)).
+        # Spectrally normalized results compare directly; raw time traces are
+        # implementation-defined on each side.
+        return td.BroadbandPulse(
+            freq_range=tuple(source_time.freq_range),
+            minimum_amplitude=source_time.minimum_amplitude,
+            amplitude=source_time.amplitude * amplitude_scale,
+            phase=source_time.phase,
+            offset=source_time.offset,
+        )
+
+    from ..sources import BasebandGaussianPulse, BasebandRectangularPulse
+
+    if isinstance(source_time, BasebandGaussianPulse):
+        return td.BasebandGaussianPulse(
+            twidth=source_time.twidth,
+            offset=source_time.offset,
+            amplitude=source_time.amplitude * amplitude_scale,
+        )
+
+    if isinstance(source_time, BasebandRectangularPulse):
+        return td.BasebandRectangularPulse(
+            rise_time=source_time.rise_time,
+            twidth=source_time.twidth,
+            offset=source_time.offset,
+            amplitude=source_time.amplitude * amplitude_scale,
         )
 
     if isinstance(source_time, RickerWavelet):
@@ -315,6 +360,12 @@ def _anisotropic_medium(material, td, length_scale: float):
     a full off-diagonal ``Tensor3x3`` exports as a non-dispersive
     ``td.FullyAnisotropicMedium``. A magnetic ``mu_tensor`` has no Tidy3D counterpart.
     """
+    from ..media import Tensor3x3
+    if isinstance(material.sigma_e_tensor, Tensor3x3):
+        raise NotImplementedError(
+            'Reference-backend export of full sigma_e_tensor is not implemented; '
+            'its off-diagonal conductivity must be preserved.'
+        )
     if material.mu_tensor is not None:
         raise NotImplementedError(
             "Tidy3D has no anisotropic magnetic medium: its AnisotropicMedium and "
@@ -355,6 +406,9 @@ def _nonlinear_spec(material, td, length_scale: float):
     public nonlinear API is the chi3/Kerr/TPA family only) and is rejected.
     """
     from ..media import TwoPhotonAbsorption
+
+    if getattr(material,'has_tensor_nonlinearity',False):
+        raise NotImplementedError('Tensor nonlinear susceptibility export is not supported')
 
     if not material.is_nonlinear:
         return None
@@ -571,9 +625,42 @@ def _lossy_metal_medium(material, td, length_scale: float, frequencies):
     f_min, f_max = min(freqs), max(freqs)
     if f_min == f_max:
         f_min, f_max = 0.5 * f_min, 2.0 * f_max
+    roughness = getattr(material, "roughness", None)
+    if roughness is None:
+        return td.LossyMetalMedium(
+            conductivity=float(material.conductivity) / length_scale,
+            frequency_range=(f_min, f_max),
+        )
     return td.LossyMetalMedium(
         conductivity=float(material.conductivity) / length_scale,
         frequency_range=(f_min, f_max),
+        roughness=_surface_roughness(roughness, td, length_scale),
+    )
+
+
+def _surface_roughness(roughness, td, length_scale: float):
+    """Convert a maxwell surface-roughness model to the matching Tidy3D roughness.
+
+    Both sides apply the same causal complex correction to the smooth surface
+    impedance; roughness lengths [m] are scaled to Tidy3D micrometres. Tidy3D's Huray
+    ``coeffs`` are ``(surface_ratio, sphere_radius)`` pairs. The real Groisse factor has
+    no Tidy3D counterpart and is rejected.
+    """
+    from ..roughness import HammerstadRoughness, HurayRoughness
+
+    if isinstance(roughness, HammerstadRoughness):
+        return td.HammerstadSurfaceRoughness(
+            rq=float(roughness.rms_height) * length_scale,
+            roughness_factor=float(roughness.roughness_factor),
+        )
+    if isinstance(roughness, HurayRoughness):
+        return td.HuraySurfaceRoughness(
+            relative_area=float(roughness.relative_area),
+            coeffs=((float(roughness.surface_ratio), float(roughness.sphere_radius) * length_scale),),
+        )
+    raise ValueError(
+        f"{type(roughness).__name__} has no Tidy3D LossyMetalMedium equivalent: Tidy3D "
+        "accepts only the causal Hammerstad and Huray roughness models."
     )
 
 
@@ -704,6 +791,10 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
         # as vacuum. Tidy3D models a perfect electric conductor with the
         # dedicated PECMedium (eps_model -> -inf), not a finite dielectric.
         return td.PECMedium()
+    if getattr(material, "is_pmc", False):
+        # The magnetic dual of the PEC branch: without it a PMC marker (eps_r = 1)
+        # would silently export as vacuum.
+        return td.PMCMedium()
     if getattr(material, "is_medium2d", False):
         return _medium2d(material, td, length_scale)
     if getattr(material, "is_lossy_metal", False):
@@ -871,11 +962,99 @@ def _poly_slab(geometry, td, s):
     )
 
 
+def _boolean_geometry(geometry, td, s):
+    """Convert a core boolean geometry to Tidy3D's boolean constructs.
+
+    A sharp ``Union`` maps to ``GeometryGroup``, ``Intersection`` to chained
+    ``ClipOperation("intersection")`` and ``Difference`` to
+    ``ClipOperation("difference")`` against the group of its tools; children
+    convert recursively, so analytic children stay analytic. A non-identity node
+    frame wraps the result in ``Transformed`` with the node rotation and the
+    length-scaled translation. Tidy3D booleans are sharp, so a smooth (blended)
+    node exports its own closed ``to_mesh()`` surface as a ``TriangleMesh``.
+    """
+    import torch  # local import, matching the lazy-torch convention in this module
+
+    if geometry.smooth:
+        return _triangle_mesh(geometry, td, s)
+
+    children = [_convert_geometry(child, td, s) for child in geometry.geometries]
+
+    def group(items):
+        return items[0] if len(items) == 1 else td.GeometryGroup(geometries=tuple(items))
+
+    if geometry.kind == "union":
+        converted = group(children)
+    elif geometry.kind == "intersection":
+        converted = children[0]
+        for child in children[1:]:
+            converted = td.ClipOperation(operation="intersection", geometry_a=converted, geometry_b=child)
+    elif geometry.kind == "difference":
+        converted = td.ClipOperation(operation="difference", geometry_a=children[0], geometry_b=group(children[1:]))
+    else:
+        return _triangle_mesh(geometry, td, s)
+
+    rotation = np.asarray(geometry._rotation_matrix_np(), dtype=np.float64)
+    translation = geometry.position.detach().cpu().to(dtype=torch.float64).numpy() * float(s)
+    if np.allclose(rotation, np.eye(3), rtol=0.0, atol=1e-12) and np.allclose(translation, 0.0, rtol=0.0, atol=0.0):
+        return converted
+    transform = np.eye(4)
+    transform[:3, :3] = rotation
+    transform[:3, 3] = translation
+    return td.Transformed(geometry=converted, transform=transform)
+
+
+def _planar_pec_rectangle(geometry, td=None, s=1.0):
+    """Zero-thickness reference Box of an axis-aligned rectangular PlanarPEC, or None."""
+    vertices = geometry.vertices.detach().cpu().double().numpy()
+    if vertices.shape[0] != 4:
+        return None
+    low, high = vertices.min(axis=0), vertices.max(axis=0)
+    corners = {(float(x), float(y)) for x, y in vertices}
+    if corners != {(low[0], low[1]), (high[0], low[1]), (high[0], high[1]), (low[0], high[1])}:
+        return None
+    if td is None:
+        return True
+    normal = "xyz".index(geometry.normal_axis)
+    transverse = [axis for axis in range(3) if axis != normal]
+    center = [0.0, 0.0, 0.0]
+    size = [0.0, 0.0, 0.0]
+    center[normal] = geometry.coordinate * s
+    for index, axis in enumerate(transverse):
+        center[axis] = 0.5 * (low[index] + high[index]) * s
+        size[axis] = (high[index] - low[index]) * s
+    return td.Box(center=tuple(center), size=tuple(size))
+
+
+def _pec_frame_record(structure):
+    metadata = getattr(structure, "metadata", None) or {}
+    return metadata.get("pec_frame") if "pec_frame" in tuple(getattr(structure, "tags", ()) or ()) else None
+
+
+def _rigid_transform(geometry, s):
+    """4x4 local-to-world transform of a rotated primitive, or None for the identity rotation."""
+    rotation = np.asarray(geometry._rotation_matrix_np(), dtype=np.float64)
+    if np.allclose(rotation, np.eye(3), rtol=0.0, atol=1e-12):
+        return None
+    transform = np.eye(4)
+    transform[:3, :3] = rotation
+    transform[:3, 3] = geometry.position.detach().cpu().to(dtype=torch.float64).numpy() * float(s)
+    return transform
+
+
 def _convert_geometry(geometry, td, s):
     """Convert maxwell geometry to a Tidy3D geometry (lengths x *s*)."""
     kind = geometry.kind
 
+    if isinstance(geometry, BooleanGeometry):
+        return _boolean_geometry(geometry, td, s)
+
     if kind == "box":
+        transform = _rigid_transform(geometry, s)
+        if transform is not None:
+            # Rotated boxes keep their exact analytic faces in the local frame.
+            return td.Transformed(geometry=td.Box(center=(0.0, 0.0, 0.0), size=_scale3(geometry.size, s)),
+                                  transform=transform)
         return td.Box(center=_scale3(geometry.position, s), size=_scale3(geometry.size, s))
 
     if kind == "sphere":
@@ -883,6 +1062,11 @@ def _convert_geometry(geometry, td, s):
 
     if kind == "cylinder":
         axis_idx = _axis_name_to_index(geometry.axis)
+        transform = _rigid_transform(geometry, s)
+        if transform is not None:
+            local = td.Cylinder(center=(0.0, 0.0, 0.0), radius=float(geometry.radius) * s,
+                                length=float(geometry.height) * s, axis=axis_idx)
+            return td.Transformed(geometry=local, transform=transform)
         return td.Cylinder(
             center=_scale3(geometry.position, s),
             radius=float(geometry.radius) * s,
@@ -923,6 +1107,9 @@ def _convert_geometry(geometry, td, s):
 
     if kind == "poly_slab":
         return _poly_slab(geometry, td, s)
+
+    if kind == "planar_pec" and not geometry.holes and _planar_pec_rectangle(geometry) is not None:
+        return _planar_pec_rectangle(geometry, td, s)
 
     if hasattr(geometry, "to_mesh"):
         # Any remaining primitive with no analytic Tidy3D equivalent (torus, pyramid,
@@ -1005,16 +1192,18 @@ def _tfsf_source(source, scene, td, s):
     wave of identical direction inject the same incident field.
     """
     injection = source.injection
-    # Convert Maxwell's physical V/m incident-field amplitude to the
-    # multiplier on Tidy3D's fixed 1 W/um^2 TFSF normalization.
-    td_source_time = _convert_source_time(
-        source.source_time,
-        td,
-        amplitude_scale=1.0 / (s * _TIDY3D_TFSF_UNIT_FIELD),
-    )
     direction = source.direction
     injection_axis = resolve_injection_axis(direction, source.injection_axis)
     axis_idx = _axis_name_to_index(injection_axis)
+    # Physical peak E gives normal power density |E|^2*cos(theta)/(2*eta0).
+    # The reference unit TFSF amplitude gives 1 W/um^2 along the injection
+    # axis, so equating powers requires multiplying by sqrt(|cos(theta)|),
+    # rather than dividing. At normal incidence this factor is exactly one.
+    td_source_time = _convert_source_time(
+        source.source_time,
+        td,
+        amplitude_scale=math.sqrt(abs(direction[axis_idx])) / (s * _TIDY3D_TFSF_UNIT_FIELD),
+    )
     inject_dir = "+" if direction[axis_idx] > 0 else "-"
     pol_angle, angle_theta, angle_phi = _direction_to_angles(
         direction, axis_idx, source.polarization
@@ -1411,6 +1600,189 @@ def _lumped_port_current_source(port, scene, td, s, source_time):
     )
 
 
+def _coaxial_ports(scene):
+    from ..ports import CoaxialLumpedPort
+
+    return [port for port in getattr(scene, "ports", ()) or () if isinstance(port, CoaxialLumpedPort)]
+
+
+def coaxial_lumped_port_to_tidy3d(port, *, length_scale: float = _M_TO_UM):
+    """Map a :class:`CoaxialLumpedPort` to the reference terminal-modeler coaxial port."""
+    td = _ensure_tidy3d()
+    from tidy3d.plugins.smatrix import CoaxialLumpedPort as ReferenceCoaxialLumpedPort
+
+    impedance = port.reference_impedance
+    if torch.is_tensor(impedance):
+        impedance = complex(impedance.detach().cpu().item())
+    return ReferenceCoaxialLumpedPort(
+        center=_scale3(port.center, length_scale),
+        outer_diameter=port.outer_diameter * length_scale,
+        inner_diameter=port.inner_diameter * length_scale,
+        normal_axis=_axis_name_to_index(port.normal_axis),
+        direction=port.direction,
+        name=port.name,
+        impedance=impedance,
+    )
+
+
+def _plane_vertices(points, axis_index, length_scale):
+    tangential = [index for index in range(3) if index != axis_index]
+    return [[float(point[index]) * length_scale for index in tangential] for point in points]
+
+
+def voltage_integral_to_tidy3d(integral, *, axis: str, length_scale: float = _M_TO_UM):
+    """Map a :class:`CustomVoltageIntegral` to the reference 2D voltage spec.
+
+    The reference evaluates ``V = phi(last) - phi(first)``; witwin integrates
+    ``E . dl`` from the first point, so the vertex order is reversed.
+    Composite voltage integrals have no reference equivalent and are rejected.
+    """
+    td = _ensure_tidy3d()
+    from ..path_integrals import CustomVoltageIntegral
+
+    if not isinstance(integral, CustomVoltageIntegral):
+        raise ValueError("Only CustomVoltageIntegral has a reference-adapter voltage equivalent.")
+    axis_index = _axis_name_to_index(axis)
+    points = tuple(reversed(integral.path.points))
+    return td.Custom2DVoltageIntegralSpec(
+        axis=axis_index,
+        position=float(points[0][axis_index]) * length_scale,
+        vertices=_plane_vertices(points, axis_index, length_scale),
+    )
+
+
+def _loop_spec(loop, axis_index, orientation, length_scale, td):
+    import numpy as np
+
+    vertices = np.asarray(_plane_vertices(loop.vertices(), axis_index, 1.0), dtype=np.float64)
+    area = 0.5 * float(np.sum(vertices[:, 0] * np.roll(vertices[:, 1], -1) - np.roll(vertices[:, 0], -1) * vertices[:, 1]))
+    if (area > 0) != (orientation > 0):
+        vertices = vertices[::-1]
+    vertices = np.vstack((vertices, vertices[:1])) * length_scale
+    return td.Custom2DCurrentIntegralSpec(
+        axis=axis_index,
+        position=float(loop.vertices()[0][axis_index]) * length_scale,
+        vertices=vertices.tolist(),
+    )
+
+
+def current_integral_to_tidy3d(integral, *, axis: str, direction: str, length_scale: float = _M_TO_UM):
+    """Map a custom or +/-1 composite current integral to the reference specs.
+
+    Loops are emitted right-handed about the propagation direction (witwin's
+    convention). A composite maps to a summed composite spec when every
+    coefficient is +1 or -1 (a -1 term reverses its loop).
+    """
+    td = _ensure_tidy3d()
+    from ..path_integrals import CompositeCurrentIntegral, CustomCurrentIntegral
+
+    axis_index = _axis_name_to_index(axis)
+    handed = -1 if axis_index == 1 else 1
+    orientation = handed * (1 if direction == "+" else -1)
+    if isinstance(integral, CustomCurrentIntegral):
+        return _loop_spec(integral.loop, axis_index, orientation, length_scale, td)
+    if not isinstance(integral, CompositeCurrentIntegral):
+        raise ValueError("current integral has no reference-adapter equivalent.")
+    specs = []
+    for coefficient, term in integral.terms:
+        if not isinstance(term, CustomCurrentIntegral) or coefficient not in (1.0, -1.0):
+            raise ValueError("Only flat composites with +/-1 coefficients map to the reference composite current.")
+        specs.append(_loop_spec(term.loop, axis_index, orientation * int(coefficient), length_scale, td))
+    return td.CompositeCurrentIntegralSpec(path_specs=tuple(specs), sum_spec="sum")
+
+
+def terminal_wave_port_to_tidy3d(port, *, length_scale: float = _M_TO_UM):
+    """Map a :class:`TerminalWavePort` to the reference terminal-driven wave port.
+
+    Each terminal becomes one custom impedance spec with its voltage path and
+    optional current loop. ``reference_impedance='characteristic'`` maps to
+    ``'Z0'`` and a uniform diagonal to a scalar; per-terminal or coupled
+    references, modal-basis ports and composite voltages have no reference
+    equivalent and are rejected rather than approximated.
+    """
+    td = _ensure_tidy3d()
+    from tidy3d.plugins.smatrix import TerminalWavePort as ReferenceTerminalWavePort
+    from ..path_integrals import AxisSegment, CustomVoltageIntegral
+
+    if port.basis != "terminal":
+        raise ValueError("A modal-basis TerminalWavePort has no reference-adapter equivalent.")
+    reference = port.reference_impedance
+    if reference == "characteristic":
+        impedance = "Z0"
+    else:
+        values = [[complex(item) for item in row] for row in reference]
+        count = len(values)
+        diagonal = [values[index][index] for index in range(count)]
+        if any(values[row][column] != 0 for row in range(count) for column in range(count) if row != column):
+            raise ValueError("A coupled reference-impedance matrix has no reference-adapter equivalent.")
+        if any(value != diagonal[0] for value in diagonal):
+            raise ValueError("Per-terminal reference impedances need reference terminal labels; use one value.")
+        impedance = diagonal[0].real if diagonal[0].imag == 0 else diagonal[0]
+    voltages = port.voltage_integrals
+    if voltages is None:
+        record = port._default_voltage_path
+        if record is None:
+            raise ValueError("TerminalWavePort default voltage path is unresolved; add it to a Scene first.")
+        start = list(port.position)
+        end = list(port.position)
+        for point, key in ((start, "start"), (end, "end")):
+            point["xyz".index(record["path_axis"])] = record[key]
+            point["xyz".index(record["offset_axis"])] = record["offset"]
+        voltages = (CustomVoltageIntegral(AxisSegment(tuple(start), tuple(end))),)
+    specs = []
+    for index, voltage in enumerate(voltages):
+        current = None if port.current_integrals is None else current_integral_to_tidy3d(
+            port.current_integrals[index], axis=port.normal_axis, direction=port.direction, length_scale=length_scale)
+        specs.append(td.CustomImpedanceSpec(
+            voltage_spec=voltage_integral_to_tidy3d(voltage, axis=port.normal_axis, length_scale=length_scale),
+            current_spec=current,
+        ))
+    return ReferenceTerminalWavePort(
+        center=_scale3(port.position, length_scale),
+        size=_scale3(port.size, length_scale),
+        name=port.name,
+        direction=port.direction,
+        reference_impedance=impedance,
+        terminal_specs=tuple(specs),
+    )
+
+
+def _coaxial_port_source(port, td, s, source_time):
+    return coaxial_lumped_port_to_tidy3d(port, length_scale=s).to_source(source_time)
+
+
+def _coaxial_port_monitors(port, td, s, frequencies):
+    reference = coaxial_lumped_port_to_tidy3d(port, length_scale=s)
+    return [reference.to_voltage_monitor(list(frequencies)), reference.to_current_monitor(list(frequencies))]
+
+
+def _convert_coaxial_lumped_elements(scene, td, s):
+    """Reference annular resistors: every coaxial port load plus standalone coaxial resistors."""
+    from ..lumped import CoaxialLumpedResistor
+
+    elements = [coaxial_lumped_port_to_tidy3d(port, length_scale=s).to_load() for port in _coaxial_ports(scene)]
+    for element in getattr(scene, "lumped_elements", ()) or ():
+        if isinstance(element, CoaxialLumpedResistor):
+            elements.append(td.CoaxialLumpedResistor(
+                center=_scale3(element.center, s),
+                outer_diameter=element.outer_diameter * s,
+                inner_diameter=element.inner_diameter * s,
+                normal_axis=_axis_name_to_index(element.normal_axis),
+                resistance=element.resistance,
+                name=element.name,
+            ))
+    return elements
+
+
+def _pec_frame_lengths(scene):
+    lengths = {}
+    for structure in getattr(scene, "structures", ()) or ():
+        record = _pec_frame_record(structure)
+        if record is not None:
+            lengths[record["port"]] = int(record["length"])
+    return lengths
+
+
 def _convert_ports_for_reference(scene, td, s, frequencies):
     """Map RF ports to (sources, monitors) for a runnable reference export."""
     from ..ports import LumpedPort, WavePort
@@ -1421,6 +1793,16 @@ def _convert_ports_for_reference(scene, td, s, frequencies):
     ports = list(getattr(scene, "ports", ()) or ())
     wave_ports = [port for port in ports if isinstance(port, WavePort)]
     lumped_ports = [port for port in ports if isinstance(port, LumpedPort)]
+    if not wave_ports and not lumped_ports and _coaxial_ports(scene):
+        if frequencies is None:
+            raise ValueError(
+                "Exporting a port-driven Scene requires frequencies for the reference drive."
+            )
+        coaxial = _coaxial_ports(scene)
+        return (
+            [_coaxial_port_source(coaxial[0], td, s, _port_source_time(td, frequencies))],
+            [monitor for port in coaxial for monitor in _coaxial_port_monitors(port, td, s, frequencies)],
+        )
     if not wave_ports and not lumped_ports:
         return [], []
     if frequencies is None:
@@ -1439,6 +1821,9 @@ def _convert_ports_for_reference(scene, td, s, frequencies):
     # Single documented drive convention: wave ports take precedence.
     if wave_ports:
         sources.append(_wave_port_mode_source(wave_ports[0], td, s, source_time))
+        frame = _pec_frame_lengths(scene).get(wave_ports[0].name)
+        if frame is not None:
+            sources[-1] = sources[-1].updated_copy(frame=td.PECFrame(length=frame))
     else:
         sources.append(
             _lumped_port_current_source(lumped_ports[0], scene, td, s, source_time)
@@ -1524,7 +1909,7 @@ def _plane_center_size(axis_idx, plane_position, domain_bounds, s):
     return center, size
 
 
-def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=None):
+def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=None, prepared_scene=None):
     """Convert a maxwell monitor to a Tidy3D monitor (lengths x *s*)."""
     from ..monitors import (
         DiffractionMonitor,
@@ -1536,6 +1921,18 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
         PlaneMonitor,
         PointMonitor,
     )
+
+    plane_position = None
+    if prepared_scene is not None and (
+        getattr(monitor, "compute_flux", False)
+        or getattr(monitor, "closure_planes", None) is not None
+        or isinstance(monitor, FluxTimeMonitor)
+    ):
+        from ..fdtd.observers import _flux_yee_plane_position
+
+        requested = monitor.position if isinstance(monitor, (PlaneMonitor, FluxTimeMonitor)) else monitor.plane_position
+        # Use the runtime resolver, including its tie-breaking and grid precision.
+        plane_position = _flux_yee_plane_position(prepared_scene, monitor.axis, requested)
 
     # Time-domain monitors sample the running field, not a frequency spectrum, so they
     # are converted before the frequency requirement below.
@@ -1554,7 +1951,7 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
     if isinstance(monitor, FluxTimeMonitor):
         time_scale = 1.0 if time_step is None else float(time_step)
         axis_idx = _axis_name_to_index(monitor.axis)
-        center, size = _plane_center_size(axis_idx, monitor.position, domain_bounds, s)
+        center, size = _plane_center_size(axis_idx, monitor.position if plane_position is None else plane_position, domain_bounds, s)
         return td.FluxTimeMonitor(
             center=tuple(center),
             size=tuple(size),
@@ -1592,7 +1989,7 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
         axis_idx = _axis_name_to_index(monitor.axis)
         center = list((lo + hi) / 2.0 * s for lo, hi in domain_bounds)
         size = [td.inf, td.inf, td.inf]
-        center[axis_idx] = float(monitor.plane_position) * s
+        center[axis_idx] = float(monitor.plane_position if plane_position is None else plane_position) * s
         size[axis_idx] = 0.0
         return td.DiffractionMonitor(
             center=tuple(center),
@@ -1616,6 +2013,8 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
         # solver must resolve at least mode_index + 1 modes to expose the requested order.
         axis_idx = _axis_name_to_index(monitor.normal_axis)
         center = list(_scale3(monitor.position, s))
+        if plane_position is not None:
+            center[axis_idx] = plane_position * s
         size = list(_scale3(monitor.size, s))
         size[axis_idx] = 0.0
         return td.ModeMonitor(
@@ -1630,7 +2029,10 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
         )
 
     if isinstance(monitor, FinitePlaneMonitor):
-        center = _scale3(monitor.position, s)
+        center = list(_scale3(monitor.position, s))
+        if plane_position is not None:
+            center[_axis_name_to_index(monitor.axis)] = plane_position * s
+        center = tuple(center)
         size = _scale3(monitor.size, s)
 
         if monitor.compute_flux:
@@ -1655,7 +2057,7 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
         axis_idx = _axis_name_to_index(monitor.axis)
         center = list((lo + hi) / 2.0 * s for lo, hi in domain_bounds)
         size = [(hi - lo) * s for lo, hi in domain_bounds]
-        center[axis_idx] = monitor.position * s
+        center[axis_idx] = (monitor.position if plane_position is None else plane_position) * s
         size[axis_idx] = 0.0
 
         if monitor.compute_flux:
@@ -1681,11 +2083,217 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
     )
 
 
+_TD_FACE_LABELS = {
+    "x_neg": "x-", "x_pos": "x+", "y_neg": "y-", "y_pos": "y+", "z_neg": "z-", "z_pos": "z+",
+}
+
+
+def _projection_surface_kwargs(monitor, frequencies, s):
+    monitor_frequencies = monitor.frequencies or frequencies
+    if not monitor_frequencies:
+        raise ValueError(
+            f"Monitor '{monitor.name}' has no frequencies and none were passed to to_tidy3d()."
+        )
+    kwargs = dict(
+        center=_scale3(monitor.position, s),
+        size=_scale3(monitor.size, s),
+        freqs=list(monitor_frequencies),
+        name=monitor.name,
+        custom_origin=_scale3(monitor.origin, s),
+    )
+    if monitor.surface_kind == "planar":
+        kwargs["normal_dir"] = monitor.normal_direction
+        if monitor.window_size is not None:
+            kwargs["window_size"] = tuple(monitor.window_size)
+    elif monitor.exclude_surfaces:
+        kwargs["exclude_surfaces"] = tuple(_TD_FACE_LABELS[label] for label in monitor.exclude_surfaces)
+    return kwargs
+
+
+def _convert_in_simulation_monitor(monitor, frequencies, td, s):
+    """Export a maxwell in-simulation monitor to its Tidy3D counterpart."""
+    from ..monitors import (
+        AngleProjectionMonitor,
+        AstigmaticGaussianOverlapMonitor,
+        CartesianProjectionMonitor,
+        GaussianOverlapMonitor,
+        KSpaceProjectionMonitor,
+    )
+
+    if isinstance(monitor, AngleProjectionMonitor):
+        return td.FieldProjectionAngleMonitor(
+            **_projection_surface_kwargs(monitor, frequencies, s),
+            theta=list(monitor.theta),
+            phi=list(monitor.phi),
+            proj_distance=monitor.radius * s,
+            far_field_approx=monitor.far_field_approx,
+        )
+    if isinstance(monitor, CartesianProjectionMonitor):
+        return td.FieldProjectionCartesianMonitor(
+            **_projection_surface_kwargs(monitor, frequencies, s),
+            proj_axis=_axis_name_to_index(monitor.axis),
+            proj_distance=monitor.distance * s,
+            x=[value * s for value in monitor.x],
+            y=[value * s for value in monitor.y],
+            far_field_approx=monitor.far_field_approx,
+        )
+    if isinstance(monitor, KSpaceProjectionMonitor):
+        planar_normal = monitor.surface_kind == "planar" and monitor.faces[0].axis == monitor.axis
+        expected = monitor.normal_direction if planar_normal else "+"
+        if monitor.hemisphere != expected:
+            raise NotImplementedError(
+                f"KSpaceProjectionMonitor '{monitor.name}' projects onto the {monitor.hemisphere!r} hemisphere; "
+                "the Tidy3D k-space monitor projects onto the hemisphere of its normal direction only."
+            )
+        return td.FieldProjectionKSpaceMonitor(
+            **_projection_surface_kwargs(monitor, frequencies, s),
+            proj_axis=_axis_name_to_index(monitor.axis),
+            proj_distance=monitor.radius * s,
+            ux=list(monitor.ux),
+            uy=list(monitor.uy),
+        )
+    if isinstance(monitor, (GaussianOverlapMonitor, AstigmaticGaussianOverlapMonitor)):
+        monitor_frequencies = monitor.frequencies or frequencies
+        if not monitor_frequencies:
+            raise ValueError(
+                f"Monitor '{monitor.name}' has no frequencies and none were passed to to_tidy3d()."
+            )
+        axis_index = _axis_name_to_index(monitor.axis)
+        if monitor.normal_direction != "+":
+            raise NotImplementedError(
+                f"Gaussian-overlap monitor '{monitor.name}' declares a beam travelling toward -{monitor.axis}; "
+                "this adapter does not map a -normal beam onto the Tidy3D overlap monitor's backward ('-') "
+                "amplitude, so export a +normal beam."
+            )
+        pol_angle, angle_theta, angle_phi = _direction_to_angles(
+            monitor.direction, axis_index, monitor.polarization
+        )
+        waist_distance = (
+            float(monitor.plane_position) - float(monitor.focus[axis_index])
+        ) / float(monitor.direction[axis_index])
+        common = dict(
+            center=_scale3(monitor.position, s),
+            size=_scale3(monitor.size, s),
+            freqs=list(monitor_frequencies),
+            name=monitor.name,
+            angle_theta=angle_theta,
+            angle_phi=angle_phi,
+            pol_angle=pol_angle,
+        )
+        if isinstance(monitor, AstigmaticGaussianOverlapMonitor):
+            return td.AstigmaticGaussianOverlapMonitor(
+                **common,
+                waist_sizes=(monitor.beam_waist[0] * s, monitor.beam_waist[1] * s),
+                waist_distances=(
+                    (waist_distance - monitor.focus_u) * s,
+                    (waist_distance - monitor.focus_v) * s,
+                ),
+            )
+        return td.GaussianOverlapMonitor(
+            **common,
+            waist_radius=monitor.beam_waist * s,
+            waist_distance=waist_distance * s,
+        )
+    raise TypeError(f"{type(monitor).__name__} is not an in-simulation projection or overlap monitor.")
+
+
+def _convert_surface_field_time_monitor(monitor, td, s, *, time_step):
+    """Export a surface field-time monitor as one Tidy3D field-time monitor per face.
+
+    Tidy3D's own surface field-time monitor samples PEC/lossy-metal structure
+    surfaces inside its box, which is a different observable; the declared
+    faces are recorded equivalently by planar field-time monitors.
+    """
+    time_scale = 1.0 if time_step is None else float(time_step)
+    return [
+        td.FieldTimeMonitor(
+            center=_scale3(face_position, s),
+            size=_scale3(face_size, s),
+            start=monitor.start * time_scale,
+            stop=None if monitor.stop is None else monitor.stop * time_scale,
+            interval=monitor.interval,
+            fields=list(monitor.components),
+            name=f"{monitor.name}_{label}",
+        )
+        for label, _, _, face_position, face_size in monitor.face_specs
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Boundary conversion (no length scaling)
 # ---------------------------------------------------------------------------
 
-def _convert_boundary(boundary, td, domain_bounds=None):
+def _convert_mur_abc(mur_abc, td):
+    """First-order MurABC -> ABCBoundary with an explicit propagation permittivity."""
+    if mur_abc.order != 1:
+        raise ValueError(
+            "Second-order Mur boundaries have no Tidy3D equivalent; Tidy3D ABCBoundary is first order."
+        )
+    # maxwell's default one-way speed is vacuum; Tidy3D's None would infer the
+    # permittivity from the boundary medium instead, so always pass it.
+    permittivity = 1.0 if mur_abc.permittivity is None else float(mur_abc.permittivity)
+    return td.ABCBoundary(permittivity=permittivity)
+
+
+def _convert_mode_abc(mode_abc, td, *, normal_axis, center, size):
+    """ModeABC -> ModeABCBoundary on the given (already scaled) cross-section."""
+    from ..sources import _resolve_mode_source_polarization_axis, polarization_vector
+
+    polarization_axis = _resolve_mode_source_polarization_axis(normal_axis, size, mode_abc.polarization)
+    if mode_abc.is_broadband:
+        # The reference backend fits its own pole-residue index model over the band;
+        # maxwell's Higdon order has no one-to-one counterpart and is not exported.
+        freq_spec = td.BroadbandModeABCSpec(
+            frequency_range=tuple(float(value) for value in mode_abc.frequency_range),
+        )
+    else:
+        freq_spec = None if mode_abc.frequency is None else float(mode_abc.frequency)
+    return td.ModeABCBoundary(
+        mode_spec=td.ModeSpec(
+            num_modes=_mode_candidate_count(mode_abc.mode_index),
+            sort_spec=_mode_sort_spec(td, normal_axis, polarization_vector(f"E{polarization_axis}")),
+        ),
+        mode_index=int(mode_abc.mode_index),
+        freq_spec=freq_spec,
+        plane=td.Box(center=tuple(center), size=tuple(size)),
+    )
+
+
+def _convert_mode_abc_face(boundary, td, domain_bounds, axis, side, length_scale):
+    if domain_bounds is None:
+        raise ValueError("ModeABC boundary export requires the physical domain bounds.")
+    axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+    center = []
+    size = []
+    for index, (low, high) in enumerate(domain_bounds):
+        if index == axis_index:
+            center.append((float(low) if side == "low" else float(high)) * length_scale)
+            size.append(0.0)
+        else:
+            center.append(0.5 * (float(low) + float(high)) * length_scale)
+            size.append((float(high) - float(low)) * length_scale)
+    return _convert_mode_abc(boundary.mode_abc, td, normal_axis=axis, center=center, size=size)
+
+
+def _convert_internal_absorber(absorber, td, s):
+    from ..absorbers import ModeABC
+
+    center = tuple(float(value) * s for value in absorber.position)
+    size = tuple(float(value) * s for value in absorber.size)
+    if isinstance(absorber.boundary, ModeABC):
+        spec = _convert_mode_abc(absorber.boundary, td, normal_axis=absorber.normal_axis, center=center, size=size)
+    else:
+        spec = _convert_mur_abc(absorber.boundary, td)
+    return td.InternalAbsorber(
+        center=center,
+        size=size,
+        direction=absorber.direction,
+        grid_shift=int(absorber.grid_shift),
+        boundary_spec=spec,
+    )
+
+
+def _convert_boundary(boundary, td, domain_bounds=None, length_scale=_M_TO_UM):
     """Convert maxwell BoundarySpec to Tidy3D BoundarySpec."""
     kind = boundary.kind
     if boundary.bloch_wavevector == "auto":
@@ -1731,8 +2339,8 @@ def _convert_boundary(boundary, td, domain_bounds=None):
         pec = td.PECBoundary()
         return td.BoundarySpec.all_sides(boundary=pec)
 
-    if kind == "mixed":
-        def convert_face(face_kind, axis):
+    if kind in ("mixed", "mur", "mode_abc"):
+        def convert_face(face_kind, axis, side):
             if face_kind == "pml":
                 return td.PML(num_layers=boundary.num_layers)
             if face_kind == "periodic":
@@ -1745,20 +2353,24 @@ def _convert_boundary(boundary, td, domain_bounds=None):
                 return td.BlochBoundary(bloch_vec=normalized_bloch_component(axis))
             if face_kind == "none":
                 return td.PECBoundary()
+            if face_kind == "mur":
+                return _convert_mur_abc(boundary.mur_abc, td)
+            if face_kind == "mode_abc":
+                return _convert_mode_abc_face(boundary, td, domain_bounds, axis, side, length_scale)
             raise ValueError(f"Unsupported boundary kind: {face_kind}")
 
         return td.BoundarySpec(
             x=td.Boundary(
-                minus=convert_face(boundary.face_kind("x", "low"), "x"),
-                plus=convert_face(boundary.face_kind("x", "high"), "x"),
+                minus=convert_face(boundary.face_kind("x", "low"), "x", "low"),
+                plus=convert_face(boundary.face_kind("x", "high"), "x", "high"),
             ),
             y=td.Boundary(
-                minus=convert_face(boundary.face_kind("y", "low"), "y"),
-                plus=convert_face(boundary.face_kind("y", "high"), "y"),
+                minus=convert_face(boundary.face_kind("y", "low"), "y", "low"),
+                plus=convert_face(boundary.face_kind("y", "high"), "y", "high"),
             ),
             z=td.Boundary(
-                minus=convert_face(boundary.face_kind("z", "low"), "z"),
-                plus=convert_face(boundary.face_kind("z", "high"), "z"),
+                minus=convert_face(boundary.face_kind("z", "low"), "z", "low"),
+                plus=convert_face(boundary.face_kind("z", "high"), "z", "high"),
             ),
         )
 
@@ -1796,8 +2408,10 @@ def _convert_grid(scene, td, s):
     * ``GridSpec.custom`` forwards its node arrays directly.
     * ``GridSpec.auto`` is first resolved through maxwell's own mesher
       (``resolve_auto_grid``), which honours the index-aware step targets,
-      ``override_structures`` and ``layer_refinement`` that a lossy parameter map to
-      Tidy3D's ``AutoGrid`` would drop. Exporting the resolved nodes reproduces the
+      ``override_structures`` and ``layer_refinement`` (including corner, gap and
+      layer-bounds refinement, the counterpart of Tidy3D ``LayerRefinementSpec`` /
+      ``GridRefinement`` / ``CornerFinderSpec``) that a lossy parameter map to
+      Tidy3D's ``AutoGrid`` would drop or re-mesh differently. Exporting the resolved nodes reproduces the
       maxwell mesh exactly rather than letting Tidy3D's AutoGrid pick a different one.
     """
     grid = scene.grid
@@ -1882,12 +2496,35 @@ def _validate_tidy3d_symmetry_equivalence(scene) -> None:
 # Main conversion
 # ---------------------------------------------------------------------------
 
+def _cw_steady_state_run_time(scene, run_time: float) -> float:
+    """Dilute CW ramp/propagation history without changing Fourier normalization."""
+    from ..sources import CW
+
+    # Time-modulated scenes keep the bounded observation window: no single steady state,
+    # and long periodic-cell runs expose late-time growth (see the benchmark assessment).
+    if any(getattr(structure.material, "modulation", None) is not None for structure in scene.structures):
+        return run_time
+    carriers = [
+        source.source_time
+        for source in scene.resolved_sources()
+        if isinstance(getattr(source, "source_time", None), CW)
+    ]
+    if not carriers:
+        return run_time
+    # ContinuousWave defaults to offset=5 and fwidth=0.1*frequency. A thousand
+    # diagonal crossings makes one vacuum transit's power deficit about 0.2%.
+    ramp_offset = max(5.0 / (2.0 * math.pi * 0.1 * carrier.frequency) for carrier in carriers)
+    crossing_time = math.sqrt(sum((hi - lo) ** 2 for lo, hi in scene.domain.bounds)) / _C0
+    return max(run_time, ramp_offset + 1000.0 * crossing_time)
+
+
 def scene_to_tidy3d(
     scene,
     *,
     frequencies: float | Sequence[float] | None = None,
     run_time: float | None = None,
     length_scale: float = _M_TO_UM,
+    cw_steady_state: bool = False,
     **kwargs,
 ) -> tidy3d.Simulation:
     """Convert a maxwell ``Scene`` to a ``tidy3d.Simulation``.
@@ -1904,6 +2541,11 @@ def scene_to_tidy3d(
     length_scale : float
         Factor to convert maxwell lengths (metres) to Tidy3D lengths.
         Default ``1e6`` (metres tomicrometres, the Tidy3D convention).
+    cw_steady_state : bool
+        Extend CW-driven runs to at least 1000 vacuum domain-diagonal crossing
+        times plus the source ramp offset, reducing finite-history phasor bias.
+        Time-modulated materials and pulse-only runs retain the requested duration.
+        Default False permits explicit short runs.
     **kwargs
         Extra keyword arguments forwarded to ``tidy3d.Simulation``.
 
@@ -1932,6 +2574,8 @@ def scene_to_tidy3d(
             b[1] - b[0] for b in scene.domain.bounds
         )
         run_time = 10.0 * max_extent_m / c0
+    if cw_steady_state:
+        run_time = _cw_steady_state_run_time(scene, run_time)
 
     # -- grid ------------------------------------------------------------------
     td_grid = None
@@ -1941,11 +2585,18 @@ def scene_to_tidy3d(
     # -- boundary --------------------------------------------------------------
     td_boundary = td.BoundarySpec.all_sides(boundary=td.PML())
     if scene.boundary is not None:
-        td_boundary = _convert_boundary(scene.boundary, td, scene.domain.bounds)
+        td_boundary = _convert_boundary(scene.boundary, td, scene.domain.bounds, length_scale=s)
 
     # -- structures ------------------------------------------------------------
     td_structures = []
+    from ..ports import WavePort as _WavePort
+
+    driven_wave = next((port.name for port in (scene.ports or []) if isinstance(port, _WavePort)), None)
     for structure in (scene.structures or []):
+        frame = _pec_frame_record(structure)
+        if frame is not None and frame["port"] == driven_wave:
+            # Exported as the reference mode source's own PECFrame.
+            continue
         td_structures.append(_convert_structure(structure, td, s, frequencies=frequencies))
     for region in (scene.material_regions or []):
         td_structures.append(_convert_material_region(region, td, s))
@@ -1966,12 +2617,50 @@ def scene_to_tidy3d(
     # -- monitors --------------------------------------------------------------
     td_monitors = []
     monitors = scene.resolved_monitors() if hasattr(scene, "resolved_monitors") else (scene.monitors or [])
-    from ..monitors import FieldTimeMonitor, FluxTimeMonitor
+    from ..monitors import (
+        GAUSSIAN_OVERLAP_MONITOR_TYPES,
+        PROJECTION_MONITOR_TYPES,
+        AuxFieldTimeMonitor,
+        FieldTimeMonitor,
+        FluxTimeMonitor,
+        SurfaceFieldTimeMonitor,
+    )
 
+    surface_owners = {
+        monitor.name: monitor
+        for monitor in (scene.monitors or [])
+        if isinstance(monitor, (*PROJECTION_MONITOR_TYPES, *GAUSSIAN_OVERLAP_MONITOR_TYPES))
+    }
+    exported_owners = set()
     time_step = None
-    if any(isinstance(monitor, (FieldTimeMonitor, FluxTimeMonitor)) for monitor in monitors):
+    prepared_scene = None
+    if any(isinstance(monitor, (FieldTimeMonitor, FluxTimeMonitor, SurfaceFieldTimeMonitor)) for monitor in monitors):
         time_step = _scene_time_step(scene, kwargs.get("courant", 0.99))
     for monitor in monitors:
+        owner_name = getattr(monitor, "surface_name", None)
+        if owner_name in surface_owners:
+            # Faces recorded for a projection / Gaussian-overlap monitor export
+            # as that single reference monitor.
+            if owner_name not in exported_owners:
+                exported_owners.add(owner_name)
+                td_monitors.append(_convert_in_simulation_monitor(surface_owners[owner_name], frequencies, td, s))
+            continue
+        if isinstance(monitor, SurfaceFieldTimeMonitor):
+            td_monitors.extend(_convert_surface_field_time_monitor(monitor, td, s, time_step=time_step))
+            continue
+        if isinstance(monitor, AuxFieldTimeMonitor):
+            raise NotImplementedError(
+                f"AuxFieldTimeMonitor '{monitor.name}' records dispersive ADE polarization state; the "
+                "Tidy3D auxiliary-field monitor only stores free-carrier densities, so there is no equivalent."
+            )
+        if prepared_scene is None and (
+            getattr(monitor, "compute_flux", False)
+            or getattr(monitor, "closure_planes", None) is not None
+            or isinstance(monitor, FluxTimeMonitor)
+        ):
+            from ..scene import prepare_scene
+
+            prepared_scene = prepare_scene(scene.clone(device="cpu"), lazy_meshgrid=True)
         td_monitors.append(
             _convert_monitor(
                 monitor,
@@ -1980,6 +2669,7 @@ def scene_to_tidy3d(
                 td,
                 s,
                 time_step=time_step,
+                prepared_scene=prepared_scene,
             )
         )
     td_monitors.extend(port_monitors)
@@ -1997,6 +2687,7 @@ def scene_to_tidy3d(
         )
 
     # -- build simulation ------------------------------------------------------
+    coaxial_elements = _convert_coaxial_lumped_elements(scene, td, s)
     sim_kwargs = dict(
         center=center,
         size=size,
@@ -2009,6 +2700,13 @@ def scene_to_tidy3d(
     )
     if td_grid is not None:
         sim_kwargs["grid_spec"] = td_grid
+    internal_absorbers = tuple(getattr(scene, "internal_absorbers", ()) or ())
+    if internal_absorbers:
+        sim_kwargs["internal_absorbers"] = tuple(
+            _convert_internal_absorber(absorber, td, s) for absorber in internal_absorbers
+        )
+    if coaxial_elements:
+        sim_kwargs["lumped_elements"] = coaxial_elements
     sim_kwargs.update(kwargs)
 
     return td.Simulation(**sim_kwargs)

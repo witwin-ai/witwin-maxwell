@@ -1,14 +1,9 @@
 """Conductivity-adjoint gates (B3): analytic d Z'/d sigma of a lossy thin wire.
 
-The finite-conductor recurrence coefficients come from a shared rational vector
-fit that is nondeterministic (B1) and not a differentiable map of sigma, so the
-field-coupled current sensitivity dI/dsigma cannot be certified by an exact
-reverse replay and fails closed. The deterministic conductivity adjoint that DOES
-ship is the closed-form sensitivity of the exact scaled-Bessel internal impedance
--- the dissipation channel d Re(Z'(f))/d sigma that the reported ohmic loss
-differentiates through. These gates check that closed form against a float64
-central difference of the analytic model (no fit involved) and exercise the
-PyTorch-native autograd path.
+The analytic reference derivative and its native autograd path remain exact.
+The realized passive fit projects that derivative through its NNLS active set;
+its dissipation-channel sensitivity is checked against a central refit difference.
+Field-coupled current/ADE reverse replay remains deferred.
 """
 
 from __future__ import annotations
@@ -139,20 +134,18 @@ def test_ohmic_loss_conductivity_gradient_matches_central_difference():
     assert abs(float(grad) - fd) <= 1.0e-6 * abs(fd)
 
 
-def test_lossy_segment_model_conductivity_gradient_matches_analytic():
-    """The built model's per-segment d Re(Z')/d sigma equals the analytic closed form."""
+def test_lossy_segment_model_conductivity_gradient_matches_refit():
+    """The realized passive fit derivative includes its NNLS and DC sensitivities."""
 
     model = _single_segment_model()
     freqs = torch.tensor([5.0e8, 1.0e9, 2.5e9], dtype=torch.float64)
     grad = model.conductivity_ac_resistance_gradient(freqs)
     assert grad.shape == (3, 1)
-    expected = internal_impedance_conductivity_gradient(
-        model.models[0].radius,
-        model.models[0].conductivity,
-        model.models[0].permeability,
-        freqs,
-    ).real
-    torch.testing.assert_close(grad[:, 0], expected.to(grad.dtype), rtol=1.0e-12, atol=0.0)
+    sigma = model.models[0].conductivity
+    def evaluate(value):
+        return _single_segment_model(sigma=value).ac_resistance_per_length(freqs)[:, 0]
+    expected = _central_difference(evaluate, sigma, rel_step=1.0e-5)
+    torch.testing.assert_close(grad[:, 0], expected, rtol=1.0e-5, atol=0.0)
 
 
 def test_pec_segment_conductivity_gradient_is_zero():

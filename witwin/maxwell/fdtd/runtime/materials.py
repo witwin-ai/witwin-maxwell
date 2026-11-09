@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -15,8 +16,21 @@ from ...compiler.materials import (
 from ..boundary import BOUNDARY_PERIODIC, has_complex_fields
 
 
+def validate_nonlinear_tensor_materials(scene):
+    """Reject unsupported FDTD combinations before loading native kernels."""
+    for structure in scene.structures:
+        material = structure.material
+        if (bool(getattr(material, "is_nonlinear", False))
+                and bool(getattr(material, "is_anisotropic", False))):
+            raise NotImplementedError(
+                "FDTD nonlinear anisotropic materials require a coupled field-dependent "
+                "tensor update; the current scalar nonlinear update does not implement it."
+            )
+
+
 def build_materials(solver, scene):
-    material_model = scene.compile_materials()
+    validate_nonlinear_tensor_materials(scene)
+    material_model = compile_forward_materials(scene, solver._compiled_sources)
     # A Bloch-periodic run carries complex phase-shifted field state. The
     # instantaneous |E|^2 nonlinearity, the additive off-diagonal anisotropic
     # curl correction, and the per-step modulation factor are all implemented on
@@ -108,6 +122,9 @@ def build_materials(solver, scene):
         solver.sigma_m_Hx = average_node_to_magnetic_component(solver, sigma_m_components["x"], "Hx")
         solver.sigma_m_Hy = average_node_to_magnetic_component(solver, sigma_m_components["y"], "Hy")
         solver.sigma_m_Hz = average_node_to_magnetic_component(solver, sigma_m_components["z"], "Hz")
+    for name, value in material_model.get("pole_edge_background", {}).items():
+        channel, vacuum = ("eps_", solver.eps0) if name[0] == "E" else ("mu_", solver.mu0)
+        setattr(solver, channel + name, (value * vacuum).contiguous())
     # Derive the conduction flags from the per-component fields actually installed
     # on the solver (edge-native or node->edge averaged), not from the node model,
     # so the flag provenance matches the coefficients the update kernels consume.
@@ -132,6 +149,18 @@ def build_materials(solver, scene):
     from .timestep import compile_fdtd_time_step
 
     compile_fdtd_time_step(solver, material_model)
+
+
+def compile_forward_materials(scene, sources):
+    """Retain the forward material graph for spatial mode-plane trainability."""
+    from ...adjoint_inputs import scene_trainable_material_tensors
+
+    if any(source["kind"] == "mode_source" for source in sources) and scene_trainable_material_tensors(scene):
+        # Native stepping runs under no_grad; only its single material compile
+        # needs a graph for the mode-plane probe. No cross-forward cache is used.
+        with torch.enable_grad():
+            return scene.compile_materials()
+    return scene.compile_materials()
 
 
 def build_material_update_coefficients(solver):
@@ -234,17 +263,19 @@ def build_nonlinear_channels(solver, material_model):
 def build_modulation(solver, material_model):
     """Set the space-time modulation flag and its per-edge quadrature fields.
 
-    The compiled ``modulation_cos`` / ``modulation_sin`` node fields
-    (``amplitude*cos(phase)`` and ``amplitude*sin(phase)``) are averaged onto the
-    Yee E edges once here; the per-step modulation factor
+    The compiler differentiates the static constitutive averaging with respect to
+    each absolute material quadrature, including harmonic normal components.
+    Normalize that variation by static edge epsilon only after averaging. The
+    per-step modulation factor
     ``m(t) = 1 + cos_field*cos(Omega*t) - sin_field*sin(Omega*t)`` is evaluated
     inside the modulated E-update kernels from these static fields and a persistent
-    two-element device clock, so no coefficient tensor or host phase is rebuilt per
-    step.
+    two-element FP64 device clock derived from an integer step, so no host phase
+    is rebuilt per step.
     """
     solver.modulation_enabled = bool(material_model_has_modulation(material_model))
     if not solver.modulation_enabled:
         solver._modulation_time = None
+        solver._modulation_step = None
         solver.mod_cos_Ex = None
         solver.mod_cos_Ey = None
         solver.mod_cos_Ez = None
@@ -256,25 +287,52 @@ def build_modulation(solver, material_model):
         solver.mod_omega_Ez = None
         return
     solver._modulation_time = torch.full(
-        (2,), -float(solver.dt), device=solver.device, dtype=solver.Ex.dtype
+        (2,), -float(solver.dt), device=solver.device, dtype=torch.float64
     )
-    modulation_cos = material_model["modulation_cos"]
-    modulation_sin = material_model["modulation_sin"]
+    # The next advance produces endpoints (-dt, 0), then (0, dt), and so on.
+    solver._modulation_step = torch.full((1,), -1, device=solver.device, dtype=torch.int64)
     modulation_omega = material_model["modulation_omega"]
-    solver.mod_cos_Ex = average_node_to_component(solver, modulation_cos, "Ex")
-    solver.mod_cos_Ey = average_node_to_component(solver, modulation_cos, "Ey")
-    solver.mod_cos_Ez = average_node_to_component(solver, modulation_cos, "Ez")
-    solver.mod_sin_Ex = average_node_to_component(solver, modulation_sin, "Ex")
-    solver.mod_sin_Ey = average_node_to_component(solver, modulation_sin, "Ey")
-    solver.mod_sin_Ez = average_node_to_component(solver, modulation_sin, "Ez")
+    for component in ("Ex", "Ey", "Ez"):
+        cosine, sine = _modulation_component_quadratures(material_model, component)
+        setattr(solver, f"mod_cos_{component}", cosine)
+        setattr(solver, f"mod_sin_{component}", sine)
     # Frequency is a per-cell label, not an amplitude: reduce it onto each Yee edge
     # with a MAX over the averaging stencil so a modulated/unmodulated interface
-    # edge keeps the modulated cell's full angular frequency (its quadrature depth
-    # already fades through the arithmetic cos/sin blend), letting disjoint
+    # edge keeps the modulated cell's full angular frequency (its constitutive
+    # variation already includes partial coverage), letting disjoint
     # structures modulate at independent frequencies in one run.
     solver.mod_omega_Ex = _max_node_to_electric_component(modulation_omega, "Ex")
     solver.mod_omega_Ey = _max_node_to_electric_component(modulation_omega, "Ey")
     solver.mod_omega_Ez = _max_node_to_electric_component(modulation_omega, "Ez")
+    for component, selected in material_model.get("pole_edge_modulation", {}).items():
+        name = "mod_omega_" + component
+        setattr(solver, name, torch.where(selected["mask"], selected["omega"], getattr(solver, name)).contiguous())
+
+
+def _modulation_component_quadratures(material_model, component):
+    """The same relative constitutive variation for E updates and step bounds."""
+    owner = material_model["modulation_owner"]
+    owner_min = _min_node_to_electric_component(owner, component)
+    owner_max = _max_node_to_electric_component(owner, component)
+    interior = (owner_min > 0) & (owner_min == owner_max)
+    edge = material_model["edge_components"]
+    axis = component[-1].lower()
+    eps = (edge["eps"][component] if edge is not None else
+           average_node_to_component(None, material_model["eps_components"][axis], component))
+    quadratures = []
+    for name in ("cos", "sin"):
+        delta = material_model["modulation_absolute"][name][component if edge is not None else axis]
+        if edge is None:
+            delta = average_node_to_component(None, delta, component)
+        relative = average_node_to_component(None, material_model[f"modulation_{name}"], component)
+        # Preserve the established interior interpolation and its gradients.
+        # Mixed edges normalize only after the constitutive variation is built.
+        quadrature = torch.where(interior, relative, delta / eps)
+        selected = material_model.get("pole_edge_modulation", {}).get(component)
+        if selected is not None:
+            quadrature = torch.where(selected["mask"], selected[name], quadrature)
+        quadratures.append(quadrature.contiguous())
+    return tuple(quadratures)
 
 
 def _symmetric3_inverse(a, b, c, d, e, f):
@@ -339,8 +397,9 @@ def build_full_anisotropy(solver, material_model):
             "FDTD full (off-diagonal) anisotropic media cannot be combined with nonlinear media."
         )
 
-    eps_components = material_model["eps_components"]
-    offdiag = material_model["eps_offdiag_components"]
+    pole_nodes = material_model.get("pole_tensor_nodes", {})
+    eps_components = pole_nodes.get("diagonal", material_model["eps_components"])
+    offdiag = pole_nodes.get("offdiag", material_model["eps_offdiag_components"])
     sigma_components = material_model["sigma_e_components"]
     node = {
         "xx": eps_components["x"],
@@ -366,6 +425,10 @@ def build_full_anisotropy(solver, material_model):
     solver._aniso_eps_eff = {}
     for target_axis, component_name in enumerate(("Ex", "Ey", "Ez")):
         diagonal_inverse = average_node_to_component(solver, inverse[diagonal_key[component_name]], component_name)
+        if component_name in material_model.get("pole_edge_masks", {}):
+            selected = pole_edge_inverse(material_model, component_name,
+                shift=conductive_shift if conductive else 0.)
+            diagonal_inverse = torch.where(material_model["pole_edge_masks"][component_name], selected, diagonal_inverse)
         if bool(torch.any(det <= 0).item()) or bool(torch.any(diagonal_inverse <= 0).item()):
             raise ValueError(
                 "The blended anisotropic permittivity tensor is not positive-definite on the "
@@ -442,6 +505,17 @@ def _max_node_to_electric_component(node_tensor, component_name):
         return torch.maximum(node_tensor[:, :-1, :], node_tensor[:, 1:, :]).contiguous()
     if component_name == "Ez":
         return torch.maximum(node_tensor[:, :, :-1], node_tensor[:, :, 1:]).contiguous()
+    raise ValueError(f"Unsupported electric field component {component_name!r}.")
+
+
+def _min_node_to_electric_component(node_tensor, component_name):
+    """Reduce a per-node field onto a Yee E edge with a MIN over its two endpoint nodes."""
+    if component_name == "Ex":
+        return torch.minimum(node_tensor[:-1, :, :], node_tensor[1:, :, :]).contiguous()
+    if component_name == "Ey":
+        return torch.minimum(node_tensor[:, :-1, :], node_tensor[:, 1:, :]).contiguous()
+    if component_name == "Ez":
+        return torch.minimum(node_tensor[:, :, :-1], node_tensor[:, :, 1:]).contiguous()
     raise ValueError(f"Unsupported electric field component {component_name!r}.")
 
 
@@ -551,6 +625,22 @@ _MAGNETIC_DISPERSIVE_FAMILY = _DispersiveFamily(
 )
 
 
+def pole_update_coefficients(pole, kind, vacuum, dt):
+    """Differentiable coefficients shared by native ADE setup and its pullback."""
+    if kind == "debye":
+        denominator = 2 * pole.tau + dt
+        return dict(decay=(2*pole.tau-dt)/denominator,
+                    drive=2*vacuum*pole.delta_eps*dt/denominator)
+    denominator = 2 + 2*np.pi*pole.gamma*dt
+    omega = 2*np.pi*(pole.plasma_frequency if kind == "drude" else pole.resonance_frequency)
+    values = dict(decay=(2-2*np.pi*pole.gamma*dt)/denominator,
+                  drive=2*vacuum*omega*omega*dt/denominator)
+    if kind == "lorentz":
+        values["restoring"] = 2*omega*omega*dt/denominator
+        values["drive"] = values["drive"] * pole.delta_eps
+    return values
+
+
 def _build_family_dispersive_templates(solver, material_model, family):
     if not any(material_model[f"{family.pole_prefix}{kind}_poles"]
                for kind in ("debye", "drude", "lorentz")):
@@ -570,52 +660,14 @@ def _build_family_dispersive_templates(solver, material_model, family):
     }
     vacuum = getattr(solver, family.vacuum_attr)
 
-    for entry in material_model[f"{family.pole_prefix}debye_poles"]:
-        pole = entry["pole"]
-        decay = (2.0 * pole.tau - solver.dt) / (2.0 * pole.tau + solver.dt)
-        base_scale = 2.0 * vacuum * pole.delta_eps * solver.dt / (2.0 * pole.tau + solver.dt)
-        for component_name in family.entry_components(entry):
-            weight = family.average(solver, entry["weight"], component_name)
-            templates[component_name]["debye"].append(
-                {
-                    "decay": float(decay),
-                    "drive": (weight * base_scale).contiguous(),
-                }
-            )
-
-    for entry in material_model[f"{family.pole_prefix}drude_poles"]:
-        pole = entry["pole"]
-        omega_p = 2.0 * np.pi * pole.plasma_frequency
-        gamma = 2.0 * np.pi * pole.gamma
-        denom = 2.0 + gamma * solver.dt
-        decay = (2.0 - gamma * solver.dt) / denom
-        base_scale = 2.0 * vacuum * omega_p * omega_p * solver.dt / denom
-        for component_name in family.entry_components(entry):
-            weight = family.average(solver, entry["weight"], component_name)
-            templates[component_name]["drude"].append(
-                {
-                    "decay": float(decay),
-                    "drive": (weight * base_scale).contiguous(),
-                }
-            )
-
-    for entry in material_model[f"{family.pole_prefix}lorentz_poles"]:
-        pole = entry["pole"]
-        omega_0 = 2.0 * np.pi * pole.resonance_frequency
-        gamma = 2.0 * np.pi * pole.gamma
-        denom = 2.0 + gamma * solver.dt
-        decay = (2.0 - gamma * solver.dt) / denom
-        restoring = 2.0 * omega_0 * omega_0 * solver.dt / denom
-        base_scale = 2.0 * vacuum * pole.delta_eps * omega_0 * omega_0 * solver.dt / denom
-        for component_name in family.entry_components(entry):
-            weight = family.average(solver, entry["weight"], component_name)
-            templates[component_name]["lorentz"].append(
-                {
-                    "decay": float(decay),
-                    "restoring": float(restoring),
-                    "drive": (weight * base_scale).contiguous(),
-                }
-            )
+    for kind in ("debye", "drude", "lorentz"):
+        for entry in material_model[f"{family.pole_prefix}{kind}_poles"]:
+            coefficients = pole_update_coefficients(entry["pole"], kind, vacuum, solver.dt)
+            for component_name in family.entry_components(entry):
+                weight = pole_component_weight(entry, component_name, family.average, solver)
+                values = {key: float(value) for key, value in coefficients.items() if key != "drive"}
+                values["drive"] = (weight * coefficients["drive"]).contiguous()
+                templates[component_name][kind].append(values)
 
     setattr(solver, family.templates_attr, templates)
     setattr(
@@ -627,6 +679,28 @@ def _build_family_dispersive_templates(solver, material_model, family):
             for model_name in ("debye", "drude", "lorentz")
         ),
     )
+
+
+def pole_component_weight(entry, component, average=average_node_to_component, solver=None):
+    """Use compiled pole weights, or the original node/surface gather."""
+    if "edge_weights" in entry:
+        return entry["edge_weights"][component]
+    return average(solver, entry["weight"], component)
+
+
+def pole_edge_inverse(model, component, *, shift=0.):
+    """Inverse diagonal of the complete centre-owned background tensor."""
+    tensor = model.get("pole_edge_tensors", {}).get(component)
+    if tensor is not None:
+        diagonal = [tensor[a+a] + shift*tensor["sigma_"+a] for a in "xyz"]
+        inverse, _ = _symmetric3_inverse(*diagonal, *(tensor[pair] for pair in ("xy", "xz", "yz")))
+        return inverse[component[-1].lower()*2]
+    edge = model["edge_components"]
+    if edge is not None:
+        return (edge["eps"][component] + shift*edge["sigma_e"][component]).reciprocal()
+    values = model["pole_edge_background"]
+    sigma = average_node_to_component(None, model["sigma_e_components"][component[-1].lower()], component)
+    return (values[component] + shift*sigma).reciprocal()
 
 
 def build_dispersive_templates(solver, material_model):
@@ -799,6 +873,10 @@ def _dispersive_current_coefficient(solver, component_name, component_templates)
             "Ez": solver.cez_curl_dynamic,
         }[component_name]
         return dynamic_curl, 1.0
+    if getattr(solver, "conductive_enabled", False) and not getattr(solver, "modulation_enabled", False):
+        # J_p is a current density, so it sees the same conductive response as
+        # curl(H). Dividing by eps alone omits the semi-implicit sigma shift.
+        return getattr(solver, f"c{component_name.lower()}_curl"), 1.0
     return component_templates["inv_eps"], solver.dt
 
 
@@ -1040,8 +1118,12 @@ def _magnetic_update_coefficients(solver, mu, sigma_m, pml_decay):
 def _pec_edge_open_fractions(solver):
     """Per-E-edge open fractions ``1 - fill``, or ``None`` when the scene has no PEC.
 
-    ``staircase`` mode thresholds the two-endpoint node->edge average of the smoothed
-    PEC occupancy at 0.5, so every edge is either a hard short or fully open.
+    ``staircase`` mode classifies conductor nodes (smoothed PEC union occupancy
+    ``>= 0.5``, i.e. inside or on the surface of any PEC body) and shorts exactly the
+    edges whose two endpoints are both conductor nodes, so every edge is either a hard
+    short or fully open and the shorted set is the edge set of a node set. A union of
+    abutting bodies is one conductor. On grid-aligned faces this equals the former
+    two-node-average threshold bit for bit.
 
     ``conformal`` mode consumes the compiler's per-edge coverage fraction
     (``pec_edge_fill``): the fraction of that Yee edge's length that lies inside the
@@ -1059,6 +1141,8 @@ def _pec_edge_open_fractions(solver):
     pec_occupancy = None if model is None else model.get("pec_occupancy")
     if pec_occupancy is None:
         return None
+    sheet_edges = model.get("pec_sheet_edges")
+    volume_occupancy = model.get("pec_volume_occupancy", pec_occupancy)
     mode = model.get("pec_mode", "staircase")
     edge_fill = model.get("pec_edge_fill") if mode == "conformal" else None
     open_fractions = {}
@@ -1066,10 +1150,40 @@ def _pec_edge_open_fractions(solver):
         if edge_fill is not None:
             fill = edge_fill[component_name]
         else:
-            fill = average_node_to_component(solver, pec_occupancy, component_name)
-            fill = (fill >= 0.5).to(fill.dtype)
+            if volume_occupancy is None:
+                fill = torch.zeros_like(sheet_edges[component_name])
+            else:
+                # Node-consistent staircase: an edge is shorted iff BOTH endpoint
+                # nodes are conductor nodes (inside or on the union surface).
+                # Thresholding the two-node average instead shorts edges that
+                # straddle a curved or off-grid surface, hanging zero-E edges off
+                # exterior nodes whose remaining edges stay free; those act as
+                # one-cell slots and slow the TEM wave of a round coax to ~0.93c.
+                conductor = (volume_occupancy >= 0.5).to(volume_occupancy.dtype)
+                fill = _min_node_to_electric_component(conductor, component_name)
+        if sheet_edges is not None:
+            fill = torch.maximum(fill, sheet_edges[component_name])
         open_fractions[component_name] = 1.0 - fill
     return open_fractions
+
+
+def _staircase_pec_shorted_edges(scene):
+    """Boolean per-E-edge staircase PEC shorts of a prepared scene, or ``None``.
+
+    The hard-mask solvers (FDFD) share the FDTD staircase rule through this helper:
+    an edge is shorted iff both endpoints are conductor nodes of the volume PEC
+    union, or a PlanarPEC sheet owns it.
+    """
+    from ...compiler.materials import _pec_occupancy
+    from ...compiler.planar_pec import attach_planar_pec, validate_legacy_thin_pec
+
+    validate_legacy_thin_pec(scene)
+    model = {"pec_occupancy": _pec_occupancy(scene), "pec_mode": "staircase"}
+    attach_planar_pec(scene, model)
+    opened = _pec_edge_open_fractions(SimpleNamespace(_compiled_material_model=model))
+    if opened is None:
+        return None
+    return {name: opened[name] == 0.0 for name in ("Ex", "Ey", "Ez")}
 
 
 def _apply_pec_edge_suppression(solver):
@@ -1111,6 +1225,42 @@ def _apply_pec_edge_suppression(solver):
         solver.cey_aniso_z = (solver.cey_aniso_z * open_fractions["Ey"][..., None]).contiguous()
         solver.cez_aniso_x = (solver.cez_aniso_x * open_fractions["Ez"][..., None]).contiguous()
         solver.cez_aniso_y = (solver.cez_aniso_y * open_fractions["Ez"][..., None]).contiguous()
+
+
+def _pmc_face_open_fractions(solver):
+    """Per-H-component open fractions ``1 - fill``, or ``None`` when the scene has no PMC.
+
+    The magnetic dual of the staircase branch of :func:`_pec_edge_open_fractions`:
+    the smoothed PMC node occupancy is averaged onto each H dual edge with the same
+    four-node stencil the permeability uses and thresholded at 0.5, so every H
+    component is either held at zero or fully open.
+    """
+    model = getattr(solver, "_compiled_material_model", None)
+    occupancy = None if model is None else model.get("pmc_occupancy")
+    if occupancy is None:
+        return None
+    open_fractions = {}
+    for component_name in ("Hx", "Hy", "Hz"):
+        fill = average_node_to_magnetic_component(solver, occupancy, component_name)
+        open_fractions[component_name] = 1.0 - (fill >= 0.5).to(fill.dtype)
+    return open_fractions
+
+
+def _apply_pmc_face_suppression(solver):
+    """Fold the PMC open fraction into the magnetic decay/curl coefficients.
+
+    ``H_new = open * (decay*H_old + curl*(-curlE - M))`` keeps every covered H
+    component exactly zero, the dual of the PEC tangential-E short.
+    """
+    open_fractions = _pmc_face_open_fractions(solver)
+    if open_fractions is None:
+        return
+    solver.chx_decay = (solver.chx_decay * open_fractions["Hx"]).contiguous()
+    solver.chx_curl = (solver.chx_curl * open_fractions["Hx"]).contiguous()
+    solver.chy_decay = (solver.chy_decay * open_fractions["Hy"]).contiguous()
+    solver.chy_curl = (solver.chy_curl * open_fractions["Hy"]).contiguous()
+    solver.chz_decay = (solver.chz_decay * open_fractions["Hz"]).contiguous()
+    solver.chz_curl = (solver.chz_curl * open_fractions["Hz"]).contiguous()
 
 
 _E_COMPONENTS = ("Ex", "Ey", "Ez")
@@ -1284,6 +1434,8 @@ def _configure_surface_impedance(solver):
                     "frequency."
                 )
             surface_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * metal.conductivity)))
+            if getattr(metal.material, "roughness", None) is not None:
+                surface_r = _rough_surface_resistance(surface_r, metal, omega0)
         else:
             key = id(metal.material)
             if key not in discrete_cache:
@@ -1329,6 +1481,16 @@ def _configure_surface_impedance(solver):
     solver.surface_impedance_enabled = True
 
 
+def _rough_surface_resistance(surface_r, metal, omega0):
+    """Scale a narrowband smooth surface resistance by the metal's roughness loss factor.
+
+    The order-0 surface realizes only the resistance ``R``; a roughness correction ``K``
+    on ``Z_s`` scales it by the loss factor ``Re(K * (1 - i))`` at the operating
+    frequency (``LossyMetalMedium.roughness_loss_factor``).
+    """
+    return surface_r * metal.material.roughness_loss_factor(omega0 / (2.0 * np.pi))
+
+
 def _surface_occupancy_interior_mask(solver, metal):
     """Zero the E-update coefficients inside a staircased (voxelized) good conductor.
 
@@ -1367,6 +1529,8 @@ def _voxel_surface_writes(solver, face, metal, axis, b, c, sn, omega0):
             "A narrowband good-conductor surface requires a positive operating frequency."
         )
     surface_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * metal.conductivity)))
+    if getattr(metal.material, "roughness", None) is not None:
+        surface_r = _rough_surface_resistance(surface_r, metal, omega0)
     node_mask = face.transverse_mask.to(device=solver.device)
     naxes = tuple(a for a in range(3) if a != axis)
     writes = []
@@ -1605,6 +1769,11 @@ def _store_coefficient_uniformity(solver) -> None:
 
 
 def build_update_coefficients(solver):
+    from ...compiler.accel.coefficients import try_build_update_coefficients
+    from ...compiler.accel.dispatch import UNCHANGED
+
+    if try_build_update_coefficients(solver) is not UNCHANGED:
+        return
     eps_ex, eps_ey, eps_ez = _electric_epsilon_tensors(solver)
     # Under full anisotropy eps_e* is the conductively-shifted effective permittivity,
     # so the diagonal decay/curl must use the aniso_shifted semi-implicit identity
@@ -1620,6 +1789,7 @@ def build_update_coefficients(solver):
         _store_nonlinear_external_decay(solver, None, None, None)
         _build_full_aniso_curl_coefficients(solver)
         _apply_pec_edge_suppression(solver)
+        _apply_pmc_face_suppression(solver)
         _configure_surface_impedance(solver)
         _store_coefficient_uniformity(solver)
         return
@@ -1687,6 +1857,7 @@ def build_update_coefficients(solver):
     _store_nonlinear_external_decay(solver, ex_decay, ey_decay, ez_decay)
     _build_full_aniso_curl_coefficients(solver)
     _apply_pec_edge_suppression(solver)
+    _apply_pmc_face_suppression(solver)
     _configure_surface_impedance(solver)
     _store_coefficient_uniformity(solver)
 

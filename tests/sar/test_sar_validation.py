@@ -2,12 +2,13 @@
 
 Checks the harness produces well-formed reports with the verbatim gate-classification
 taxonomy, that the RESULTS.md section writer is idempotent, and that the two
-solver-free runners (analytic 1 g cube, blocked antenna) produce the expected
+solver-free reports (analytic 1 g cube, unmeasured antenna) produce the expected
 gate/status without needing a GPU. The wave-level layered-slab convergence itself
 is covered by tests/sar/test_phantom_convergence.py.
 """
 
 import pytest
+import torch
 
 from benchmark import sar_validation as sv
 
@@ -35,20 +36,33 @@ def test_one_gram_cube_is_analytic_identity_and_matches_hand_computed_value():
     assert report.external_reference == sv.ANALYTIC_ONLY
 
 
-def test_antenna_near_phantom_is_reported_blocked():
-    report = sv.run_antenna_near_phantom()
-    assert report.status == "blocked"
-    # A blocked scene records no ACHIEVED gate class; its wave-level class is a
+def test_antenna_near_phantom_unmeasured_report_preserves_wave_qualification_gap():
+    report = sv.run_antenna_near_phantom(execute=False)
+    assert report.status == "gap"
+    # An unmeasured scene records no ACHIEVED gate class; its wave-level class is a
     # target only, so the row cannot read as a measured wave-level result.
     assert report.gate_class == ""
     assert report.target_gate_class == sv.WAVE_LEVEL
     assert report.target_gate_class in _TAXONOMY
-    assert "conductance-aware" in " ".join(report.notes)
-    # A blocked scene carries no measured headline metric.
+    assert "Conductive-material lumped-port coupling is available" in " ".join(report.notes)
+    # An unmeasured scene carries no measured headline metric.
     assert report.metrics == []
     # The rendered table cell marks it as a target, not an achieved class.
     section = sv._results_section([report])
-    assert "wave-level (target; blocked)" in section
+    assert "wave-level (target; gap)" in section
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(),reason="Functional antenna exposure requires CUDA.")
+def test_antenna_report_measures_functional_workflow_without_promoting_wave_accuracy():
+    report = sv.run_antenna_near_phantom()
+    assert report.status == "gap", report.notes
+    assert report.gate_class == sv.POSTPROCESS_ONLY
+    assert report.target_gate_class == sv.WAVE_LEVEL
+    assert len(report.metrics) == 4
+    assert all(metric["measured"] > 0 for metric in report.metrics)
+    section = sv._results_section([report])
+    assert "accepted_power" in section
+    assert "postprocess-only" in section
 
 
 def test_uniform_lossy_cube_closure_is_labelled_tautology():
@@ -69,7 +83,7 @@ def test_layered_slab_headline_is_wave_level():
 
 
 def test_results_section_writer_is_idempotent():
-    reports = [sv.run_one_gram_cube(), sv.run_antenna_near_phantom()]
+    reports = [sv.run_one_gram_cube(), sv.run_antenna_near_phantom(execute=False)]
     section = sv._results_section(reports)
     assert sv.SECTION_HEADER in section
     assert "sar/one_gram_cube" in section

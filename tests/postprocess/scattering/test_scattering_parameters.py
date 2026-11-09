@@ -189,10 +189,15 @@ def _build_half_space_scene(frequency, *, material=None):
         ],
     )
     if material is not None:
+        # The half-space continues through the transverse PML (domain y/z = +-0.4,
+        # PML to +-0.49). Ending its faces exactly at the PML interface leaves a
+        # vacuum shell inside the transverse PML and the port fluxes pick up
+        # spurious edge power: S21 = 0.11 inside 14.5 skin depths of metal and
+        # S21 > 1 for eps_r=4, independent of PML thickness (6/12/24 layers).
         scene.add_structure(
             mw.Structure(
                 name="half_space",
-                geometry=Box(position=(0.6, 0.0, 0.0), size=(1.2, 0.8, 0.8)),
+                geometry=Box(position=(0.6, 0.0, 0.0), size=(1.2, 1.2, 1.2)),
                 material=material,
             )
         )
@@ -427,7 +432,10 @@ def test_compute_s_parameters_dielectric_half_space_tracks_fresnel_reflection():
     # plain-plain observer was coincidental compensation, not a tighter extraction.
     # The tolerance therefore brackets the analytic value at the worst-case
     # standing-wave phase (~4 dB) at this resolution; the synthetic tests above pin
-    # the postprocessor algebra exactly.
+    # the postprocessor algebra exactly.  With the half-space continued through the
+    # transverse PML (2026-11-04) the measured S11 is -9.99 / -10.10 dB at 0.95 / 1.0 GHz
+    # and |S21| is 0.947 against the analytic 0.943; ending it at the PML interface had
+    # given -10.8 dB and an unphysical |S21| of 1.16.
     np.testing.assert_allclose(s_params["S11_db"], expected_s11_db, atol=4.5)
     assert torch.all(torch.isfinite(s_params["S21_mag"]))
     assert torch.all(s_params["S21_mag"] > 0.0)

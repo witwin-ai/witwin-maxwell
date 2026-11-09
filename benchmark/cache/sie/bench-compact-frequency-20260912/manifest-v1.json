@@ -1,0 +1,100 @@
+{
+  "scope": "Isolated compact metric and frequency mesh engineering; high-resolution numerical qualification not inferred",
+  "base_commit": "f112e8526511ce9d3cacf5df8d36bd8ba093dad6",
+  "files": {
+    "provider-compact-full-acceptance-v1.json": {
+      "bytes": 141830,
+      "sha256": "5861808200f18c8a5b50e519b446b46c90696249852b07e6453f632246d48102"
+    },
+    "provider-compact-full-acceptance-v1.xml": {
+      "bytes": 37429,
+      "sha256": "b8f2eba7080c90df81489b693133abd0d985e9db4a3f3b4f4c9800e0885bf0ba"
+    },
+    "provider_compact_full_acceptance.py": {
+      "bytes": 2525,
+      "sha256": "7092ed71e79d22315eeeceb9876a87609957464abd0808a7fdd1717b50fa498e"
+    },
+    "provider-compact-frequency-independent-audit-v1.md": {
+      "bytes": 7463,
+      "sha256": "62fbead5e5a2907787e9c1809c99ae1e6004464fb58e5b58efae02e2cd74d227"
+    },
+    "provider-compact-frequency-independent-audit-v1.json": {
+      "bytes": 2513,
+      "sha256": "22d2a8f359c63590c8e50080b73b0eda109a4838c954f36c74bc7ed557c8fed0"
+    },
+    "provider-full-regression-independent-supplement-v1.md": {
+      "bytes": 4334,
+      "sha256": "ea0e80e8e817dac6feeaf8b192039e69afb757e9267d46543f74462268403788"
+    },
+    "provider-full-regression-independent-audit-v2.json": {
+      "bytes": 38103,
+      "sha256": "f12f0063115c4e8381348cc31627ba9f445148e6ccc737fb9eafc79f2b15a218"
+    },
+    "provider_compact_restore_probe.py": {
+      "bytes": 2156,
+      "sha256": "b6677b6d87a3f1db67bf097e4d9f6af516fddab9838ecc87269236b89b5afb93"
+    },
+    "provider-compact-restore-probe-v1.json": {
+      "bytes": 843,
+      "sha256": "827c535a36586cd9718cbb9b53aa1d45be0aba56752bddf72636a9849dbc5597"
+    },
+    "provider-compact-restore-probe-v2.json": {
+      "bytes": 851,
+      "sha256": "92feb09e48b62dabac87d697956b62279d41298eb26703c9a74aa6d6dec2570d"
+    },
+    "frequency-mesh-gpu-acceptance-v1.json": {
+      "bytes": 1901,
+      "sha256": "0e7b4d2ace7895593c8a2bf16f58debf7543eab69014188d8fd2a1609fab3bce"
+    },
+    "frequency-mesh-gpu-acceptance-v1.xml": {
+      "bytes": 11251,
+      "sha256": "39a3925cd9ff0b53ef261ade967c120d1d281b8e888af8eb597565cdc17cfd81"
+    },
+    "frequency-mesh-gpu-acceptance-v1.log": {
+      "bytes": 179,
+      "sha256": "209260f552f7655787166f1e2e260ad8d1a97fb7bf012f97ec54c1ba83ee8681"
+    },
+    "compact-riesz-cuda-acceptance-v1.json": {
+      "bytes": 35946,
+      "sha256": "ff541d00acf15f59827f25105b06b221b31d26ee9418fe6c697bd75f941658d1"
+    },
+    "compact-riesz-cuda-acceptance-v2.json": {
+      "bytes": 35946,
+      "sha256": "ba4af70d8bef3736fedd187391ea288fa5711422c1777d96da63180420607ec8"
+    },
+    "compact-riesz-cuda-acceptance-v3.json": {
+      "bytes": 35946,
+      "sha256": "6afe24109a2dc64eedb4cd6e369078a22150faa6966aec43d63f18e6fcf4f845"
+    },
+    "compact-riesz-cuda-v1.xml": {
+      "bytes": 9199,
+      "sha256": "e1729a981028dd5340689ce9dccff3c1b34073f792eaf793cd088b38db3a26f7"
+    },
+    "compact-riesz-cuda-v2.xml": {
+      "bytes": 9828,
+      "sha256": "2c77e4fdd4a53ac7b1b041a41990c42fb8438beaa277ff03ff54b4b99339272a"
+    },
+    "compact-riesz-cuda-v3.xml": {
+      "bytes": 10619,
+      "sha256": "bde52966280a0589d0746c7c1710c675e8c05d7d47777d9ba1bdbd60a9171ca9"
+    },
+    "compact-riesz-cuda-v1.log": {
+      "bytes": 1564,
+      "sha256": "e1ddc0b270792783f3fb4e613a9e655c27542b6adfeaf2c4693745749b6750af"
+    },
+    "compact-riesz-cuda-v2.log": {
+      "bytes": 914,
+      "sha256": "b978ed45e6e241ecad5ca76f900450d0f988f8fa30b76b1a9c8943186d99c208"
+    },
+    "compact-riesz-cuda-v3.log": {
+      "bytes": 994,
+      "sha256": "422dabde87709b3c0dbda291565aa5c3d674e2e31ca908edcdde492fa4941d49"
+    },
+    "compact_riesz_cuda_acceptance_v3.py": {
+      "bytes": 1901,
+      "sha256": "514192c75d93bb75d46eab97f8ca18838011dcf834ff168ee7ce036c19bf7789"
+    }
+  },
+  "H2_G0": "not_passed",
+  "actual_finest_frequency_memory_fit": false
+}

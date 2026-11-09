@@ -1,0 +1,160 @@
+# Passive paired modal compression: master 96710a73 -> merged implementation 1b242d6d.
+# Every batch-1 copper quantity is remeasured against master, including the pulse-DFT and node-rule updates.
+# Old/new values are at the entry with maximum absolute change; topology changes record shapes.
+# Raw relative = max(abs(new-old))/max(abs(old)); spectral relative uses the same norm per frequency.
+# Copper spectra normalize each frequency and trace side independently. Modal response uses elementwise relative error.
+# N/A means changed latent topology or no recorded spectrum. Non-copper pins and leakage gates remain as on master.
+test	old_ref	quantity	flat_index	old_value_or_shape	new_value_or_shape	raw_max_relative_diff	in_band_max_relative_diff	in_band_quantity
+roughness	96710a73	foil.response.A	N/A	(17, 17)	(7, 7)	N/A (topology)	1.2457100607321403e-05	foil.response even/odd modal admittance at 0.5..2 GHz (1025 samples)
+roughness	96710a73	foil.response.B	N/A	(17, 2)	(7, 2)	N/A (topology)	1.2457100607321403e-05	foil.response even/odd modal admittance at 0.5..2 GHz (1025 samples)
+roughness	96710a73	foil.response.C	N/A	(2, 17)	(2, 7)	N/A (topology)	1.2457100607321403e-05	foil.response even/odd modal admittance at 0.5..2 GHz (1025 samples)
+roughness	96710a73	foil.response.D	0	1.4242017388255233	1.3080326924619428	0.081567830733994207	1.2457100607321403e-05	foil.response even/odd modal admittance at 0.5..2 GHz (1025 samples)
+roughness	96710a73	foil.response.rates	N/A	(17,)	(7,)	N/A (topology)	1.2457100607321403e-05	foil.response even/odd modal admittance at 0.5..2 GHz (1025 samples)
+roughness	96710a73	prepared.foil._copper_foils[0].B	N/A	(17, 2)	(7, 2)	N/A (topology)	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[0].D	0	1.4242017388255233	1.3080326924619428	0.081567830733994207	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[0].decay	N/A	(17,)	(7,)	N/A (topology)	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[0].drive	N/A	(17, 2)	(7, 2)	N/A (topology)	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[0].effective	0	14.153658061442311	14.140981498294101	0.00089563864643187247	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[0].inverse	0	0.14125527455179052	0.14138184716501753	0.00089605583670158073	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[0].rates	N/A	(17,)	(7,)	N/A (topology)	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[0].rhs_matrix	0	-7.0742748149359178	-7.0679365333618129	0.00089596202295150608	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[0].state	N/A	(17, 20)	(7, 20)	N/A (topology)	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[1].B	N/A	(17, 2)	(7, 2)	N/A (topology)	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[1].D	0	1.4242017388255233	1.3080326924619428	0.081567830733994207	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[1].decay	N/A	(17,)	(7,)	N/A (topology)	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[1].drive	N/A	(17, 2)	(7, 2)	N/A (topology)	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[1].effective	0	14.153658061442311	14.140981498294101	0.00089563864643187247	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[1].inverse	0	0.14125527455179052	0.14138184716501753	0.00089605583670158073	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[1].rates	N/A	(17,)	(7,)	N/A (topology)	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[1].rhs_matrix	0	-7.0742748149359178	-7.0679365333618129	0.00089596202295150608	N/A	none recorded for this quantity
+roughness	96710a73	prepared.foil._copper_foils[1].state	N/A	(17, 20)	(7, 20)	N/A (topology)	N/A	none recorded for this quantity
+roughness	96710a73	run.foil.Ex	444	-22.668729782104492	-22.669143676757812	4.6686321105848774e-06	1.2203304586677021e-07	run.foil.dft.EX at 1 GHz
+roughness	96710a73	run.foil.Ey	462	-0.0004710550419986248	-0.0005134402890689671	5.0146332407109606e-07	6.1255135045027889e-08	run.foil.dft.EY at 1 GHz
+roughness	96710a73	run.foil.Ez	467	-0.025266829878091812	-0.028145825490355492	2.791321307179797e-05	4.6177211889842455e-07	run.foil.dft.EZ at 1 GHz
+roughness	96710a73	run.foil.Hx	419	1.0367468348704278e-05	1.1821653970400803e-05	3.6466560163007694e-05	N/A	none recorded for this quantity
+roughness	96710a73	run.foil.Hy	395	-0.037575375288724899	-0.037572856992483139	5.6556112573770799e-05	N/A	none recorded for this quantity
+roughness	96710a73	run.foil.Hz	390	-0.0077739562839269638	-0.0077735986560583115	2.4118015479243811e-05	N/A	none recorded for this quantity
+roughness	96710a73	run.foil.dft.EX	444	(23.192428588867188-0.0572674423456192j)	(23.19243812561035-0.05727115273475647j)	1.2203304586677021e-07	1.2203304586677021e-07	run.foil.dft.EX at 1 GHz
+roughness	96710a73	run.foil.dft.EY	317	(-14.771411895751953+0.023587021976709366j)	(-14.771410942077637+0.023591963574290276j)	6.1255135045027889e-08	6.1255135045027889e-08	run.foil.dft.EY at 1 GHz
+roughness	96710a73	run.foil.dft.EZ	467	(0.0003644950338639319-0.00010954577010124922j)	(0.0004119464138057083-0.00010485704115126282j)	4.6177211889842455e-07	4.6177211889842455e-07	run.foil.dft.EZ at 1 GHz
+roughness	96710a73	run.foil.port.current	0	(0.0004355806588912028-0.0006702594674960395j)	(0.00043558063794825545-0.0006702594890398023j)	3.7587070965510563e-08	3.7587070965510563e-08	run.foil.port.current at 1 GHz
+roughness	96710a73	run.foil.port.voltage	0	(1.0149754899364654-0.018190299659207383j)	(1.014975489306195-0.018190298006930273j)	1.7420343883162556e-09	1.7420343883162556e-09	run.foil.port.voltage at 1 GHz
+port_step_graph	96710a73	copper_terminal/copper/0/cumulative_loss	0	1.2235672318272266e-24	1.2234135875778186e-24	0.00012557074544946849	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/copper/0/right_e	31	-5.4505238722413196e-07	-5.4517727221536916e-07	0.00011256535784460652	0.00012002230233526548	copper_terminal/copper/0/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/0/spectral_imag	31	0.00022758619592114424	0.00022760144615113301	6.7008589545788035e-05	0.00012002230233526548	copper_terminal/copper/0/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/0/spectral_real	115	-0.00031690275714140836	-0.00031692273180628161	6.3030896459948237e-05	0.00012002230233526548	copper_terminal/copper/0/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/0/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/copper/1/cumulative_loss	0	1.2235672318269227e-24	1.2234136141641412e-24	0.0001255490166666642	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/copper/1/right_e	22	-5.4505238722413196e-07	-5.4516209502253332e-07	9.8885362148425397e-05	0.00011976145512488324	copper_terminal/copper/1/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/1/spectral_imag	22	0.00022758619592114424	0.00022760147436802841	6.7132572880040261e-05	0.00011976145512488324	copper_terminal/copper/1/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/1/spectral_real	106	-0.00031690275714140836	-0.00031692277210437168	6.3158058780729911e-05	0.00011976145512488324	copper_terminal/copper/1/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/1/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/copper/2/cumulative_loss	0	1.2235672442762786e-24	1.2234136085865943e-24	0.00012556374846009948	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/copper/2/right_e	31	-1.7301776097156107e-05	-1.7302569176536053e-05	4.5838032783024624e-05	6.0192811853080343e-05	copper_terminal/copper/2/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/2/spectral_imag	73	-0.00022758614241666768	-0.00022760145223700481	6.7270441752556245e-05	0.00011942970278639924	copper_terminal/copper/2/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/2/spectral_real	157	0.00031690268373820558	0.00031692274367659977	6.3299995309479357e-05	0.00011942970278639924	copper_terminal/copper/2/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/2/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/copper/3/cumulative_loss	0	1.2235672442764674e-24	1.2234136286838284e-24	0.00012554732349827954	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/copper/3/right_e	19	1.7301776097156107e-05	1.730248004605528e-05	4.0686510750070021e-05	6.0048903743113973e-05	copper_terminal/copper/3/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/3/spectral_imag	64	-0.00022758614241666768	-0.00022760142335073391	6.7143517192952992e-05	0.00011950119688680591	copper_terminal/copper/3/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/3/spectral_real	148	0.00031690268373820558	0.00031692270327940056	6.3172520216094592e-05	0.00011950119688680591	copper_terminal/copper/3/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/copper/3/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/history/run0/port0/last_branch_current	300	7.8242901508929208e-06	7.8242883319035172e-06	2.3247979924904374e-07	2.0733022507077599e-08	copper_terminal/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/history/run0/port0/last_voltage_after	299	-0.0011090581538155675	-0.0011090582702308893	9.9523818338776293e-08	1.1071001615332879e-08	copper_terminal/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/history/run0/port0/last_voltage_before	294	-0.00017101959383580834	-0.00017101965204346925	1.8887886886489561e-07	1.1071001615332879e-08	copper_terminal/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/history/run0/port0/last_voltage_midpoint	287	-0.00052752759074792266	-0.00052752753254026175	5.1086653999901097e-08	1.1071001615332879e-08	copper_terminal/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/port_runtime/0/accumulator/_current_sum	0	(0.00011994821155266986-8.122450913226314e-05j)	(0.00011994820903431594-8.122450749566121e-05j)	2.0188143118584773e-08	2.0733022507077599e-08	copper_terminal/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/port_runtime/0/accumulator/_voltage_sum	0	(0.011851257505566126-0.00400423558278617j)	(0.011851257609408973-0.004004235674419789j)	9.688667175671804e-09	1.1071001615332879e-08	copper_terminal/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/port_runtime/0/lumped/last_branch_current	0	7.8242901508929208e-06	7.8242883319035172e-06	2.3247979924904374e-07	2.0733022507077599e-08	copper_terminal/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/port_runtime/0/lumped/last_voltage_after	0	-0.0011697232257574797	-0.0011697231093421578	9.9523818338776293e-08	1.1071001615332879e-08	copper_terminal/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/port_runtime/0/lumped/last_voltage_before	0	-0.00030817455262877047	-0.00030817461083643138	1.8887886886489561e-07	1.1071001615332879e-08	copper_terminal/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/ports/feed/current	0	(2.0790021880523663e-07-1.4078236767649062e-07j)	(2.079002144403001e-07-1.4078236483985058e-07j)	2.0188143128330998e-08	2.0733022507077599e-08	copper_terminal/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/ports/feed/voltage	0	(2.05411902072629e-05-6.940340693978686e-06j)	(2.0541190387248497e-05-6.940340852802642e-06j)	9.6886671316611929e-09	1.1071001615332879e-08	copper_terminal/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	copper_terminal/solver/Ex	7163	-0.0010888637043535709	-0.001088811201043427	1.9553077043542286e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/solver/Ey	6888	-0.0010888637043535709	-0.0010888127144426107	1.8989462849382531e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/solver/Ez	6899	-0.28804388642311096	-0.2880437970161438	2.905385820225766e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/solver/Hx	7740	0.0005295842420309782	0.00052958441665396094	2.4041570760833972e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/solver/Hy	6276	-0.0005295842420309782	-0.00052958435844630003	1.6027713840555982e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	copper_terminal/solver/Hz	7414	-1.9880002582794987e-05	-1.9879933461197652e-05	1.5684784050654918e-06	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/copper/0/cumulative_loss	0	1.2235672318272266e-24	1.2234135875778186e-24	0.00012557074544946849	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/copper/0/right_e	31	-5.4505238722413196e-07	-5.4517727221536916e-07	0.00011256535784460652	0.00012002230233526548	resume_copper_terminal_150/copper/0/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/0/spectral_imag	31	0.00022758619592114424	0.00022760144615113301	6.7008589545788035e-05	0.00012002230233526548	resume_copper_terminal_150/copper/0/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/0/spectral_real	115	-0.00031690275714140836	-0.00031692273180628161	6.3030896459948237e-05	0.00012002230233526548	resume_copper_terminal_150/copper/0/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/0/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/copper/1/cumulative_loss	0	1.2235672318269227e-24	1.2234136141641412e-24	0.0001255490166666642	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/copper/1/right_e	22	-5.4505238722413196e-07	-5.4516209502253332e-07	9.8885362148425397e-05	0.00011976145512488324	resume_copper_terminal_150/copper/1/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/1/spectral_imag	22	0.00022758619592114424	0.00022760147436802841	6.7132572880040261e-05	0.00011976145512488324	resume_copper_terminal_150/copper/1/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/1/spectral_real	106	-0.00031690275714140836	-0.00031692277210437168	6.3158058780729911e-05	0.00011976145512488324	resume_copper_terminal_150/copper/1/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/1/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/copper/2/cumulative_loss	0	1.2235672442762786e-24	1.2234136085865943e-24	0.00012556374846009948	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/copper/2/right_e	31	-1.7301776097156107e-05	-1.7302569176536053e-05	4.5838032783024624e-05	6.0192811853080343e-05	resume_copper_terminal_150/copper/2/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/2/spectral_imag	73	-0.00022758614241666768	-0.00022760145223700481	6.7270441752556245e-05	0.00011942970278639924	resume_copper_terminal_150/copper/2/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/2/spectral_real	157	0.00031690268373820558	0.00031692274367659977	6.3299995309479357e-05	0.00011942970278639924	resume_copper_terminal_150/copper/2/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/2/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/copper/3/cumulative_loss	0	1.2235672442764674e-24	1.2234136286838284e-24	0.00012554732349827954	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/copper/3/right_e	19	1.7301776097156107e-05	1.730248004605528e-05	4.0686510750070021e-05	6.0048903743113973e-05	resume_copper_terminal_150/copper/3/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/3/spectral_imag	64	-0.00022758614241666768	-0.00022760142335073391	6.7143517192952992e-05	0.00011950119688680591	resume_copper_terminal_150/copper/3/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/3/spectral_real	148	0.00031690268373820558	0.00031692270327940056	6.3172520216094592e-05	0.00011950119688680591	resume_copper_terminal_150/copper/3/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/copper/3/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/history/run0/port0/last_branch_current	144	-4.9672397750555319e-08	-4.9672390645127962e-08	1.2103321944309106e-07	2.0733022507077599e-08	resume_copper_terminal_150/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/history/run0/port0/last_voltage_after	133	6.5247577367699705e-06	6.5247586462646723e-06	7.5218215565176134e-08	1.1071001615332879e-08	resume_copper_terminal_150/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/history/run0/port0/last_voltage_before	146	4.9616783144301735e-06	4.9616792239248753e-06	1.6162671469781623e-07	1.1071001615332879e-08	resume_copper_terminal_150/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/history/run0/port0/last_voltage_midpoint	146	1.0613977792672813e-05	1.0613978702167515e-05	7.6610247815765221e-08	1.1071001615332879e-08	resume_copper_terminal_150/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/history/run1/port0/last_branch_current	150	7.8242901508929208e-06	7.8242883319035172e-06	2.3247979924904374e-07	2.0733022507077599e-08	resume_copper_terminal_150/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/history/run1/port0/last_voltage_after	149	-0.0011090581538155675	-0.0011090582702308893	9.9523818338776293e-08	1.1071001615332879e-08	resume_copper_terminal_150/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/history/run1/port0/last_voltage_before	144	-0.00017101959383580834	-0.00017101965204346925	1.8887886886489561e-07	1.1071001615332879e-08	resume_copper_terminal_150/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/history/run1/port0/last_voltage_midpoint	137	-0.00052752759074792266	-0.00052752753254026175	5.1086653999901097e-08	1.1071001615332879e-08	resume_copper_terminal_150/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/port_runtime/0/accumulator/_current_sum	0	(0.00011994821155266986-8.122450913226314e-05j)	(0.00011994820903431594-8.122450749566121e-05j)	2.0188143118584773e-08	2.0733022507077599e-08	resume_copper_terminal_150/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/port_runtime/0/accumulator/_voltage_sum	0	(0.011851257505566126-0.00400423558278617j)	(0.011851257609408973-0.004004235674419789j)	9.688667175671804e-09	1.1071001615332879e-08	resume_copper_terminal_150/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/port_runtime/0/lumped/last_branch_current	0	7.8242901508929208e-06	7.8242883319035172e-06	2.3247979924904374e-07	2.0733022507077599e-08	resume_copper_terminal_150/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/port_runtime/0/lumped/last_voltage_after	0	-0.0011697232257574797	-0.0011697231093421578	9.9523818338776293e-08	1.1071001615332879e-08	resume_copper_terminal_150/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/port_runtime/0/lumped/last_voltage_before	0	-0.00030817455262877047	-0.00030817461083643138	1.8887886886489561e-07	1.1071001615332879e-08	resume_copper_terminal_150/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/ports/feed/current	0	(2.0790021880523663e-07-1.4078236767649062e-07j)	(2.079002144403001e-07-1.4078236483985058e-07j)	2.0188143128330998e-08	2.0733022507077599e-08	resume_copper_terminal_150/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/ports/feed/voltage	0	(2.05411902072629e-05-6.940340693978686e-06j)	(2.0541190387248497e-05-6.940340852802642e-06j)	9.6886671316611929e-09	1.1071001615332879e-08	resume_copper_terminal_150/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_150/solver/Ex	7163	-0.0010888637043535709	-0.001088811201043427	1.9553077043542286e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/solver/Ey	6888	-0.0010888637043535709	-0.0010888127144426107	1.8989462849382531e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/solver/Ez	6899	-0.28804388642311096	-0.2880437970161438	2.905385820225766e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/solver/Hx	7740	0.0005295842420309782	0.00052958441665396094	2.4041570760833972e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/solver/Hy	6276	-0.0005295842420309782	-0.00052958435844630003	1.6027713840555982e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_150/solver/Hz	7414	-1.9880002582794987e-05	-1.9879933461197652e-05	1.5684784050654918e-06	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/copper/0/cumulative_loss	0	1.2235672318272266e-24	1.2234135875778186e-24	0.00012557074544946849	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/copper/0/right_e	31	-5.4505238722413196e-07	-5.4517727221536916e-07	0.00011256535784460652	0.00012002230233526548	resume_copper_terminal_96/copper/0/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/0/spectral_imag	31	0.00022758619592114424	0.00022760144615113301	6.7008589545788035e-05	0.00012002230233526548	resume_copper_terminal_96/copper/0/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/0/spectral_real	115	-0.00031690275714140836	-0.00031692273180628161	6.3030896459948237e-05	0.00012002230233526548	resume_copper_terminal_96/copper/0/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/0/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/copper/1/cumulative_loss	0	1.2235672318269227e-24	1.2234136141641412e-24	0.0001255490166666642	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/copper/1/right_e	22	-5.4505238722413196e-07	-5.4516209502253332e-07	9.8885362148425397e-05	0.00011976145512488324	resume_copper_terminal_96/copper/1/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/1/spectral_imag	22	0.00022758619592114424	0.00022760147436802841	6.7132572880040261e-05	0.00011976145512488324	resume_copper_terminal_96/copper/1/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/1/spectral_real	106	-0.00031690275714140836	-0.00031692277210437168	6.3158058780729911e-05	0.00011976145512488324	resume_copper_terminal_96/copper/1/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/1/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/copper/2/cumulative_loss	0	1.2235672442762786e-24	1.2234136085865943e-24	0.00012556374846009948	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/copper/2/right_e	31	-1.7301776097156107e-05	-1.7302569176536053e-05	4.5838032783024624e-05	6.0192811853080343e-05	resume_copper_terminal_96/copper/2/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/2/spectral_imag	73	-0.00022758614241666768	-0.00022760145223700481	6.7270441752556245e-05	0.00011942970278639924	resume_copper_terminal_96/copper/2/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/2/spectral_real	157	0.00031690268373820558	0.00031692274367659977	6.3299995309479357e-05	0.00011942970278639924	resume_copper_terminal_96/copper/2/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/2/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/copper/3/cumulative_loss	0	1.2235672442764674e-24	1.2234136286838284e-24	0.00012554732349827954	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/copper/3/right_e	19	1.7301776097156107e-05	1.730248004605528e-05	4.0686510750070021e-05	6.0048903743113973e-05	resume_copper_terminal_96/copper/3/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/3/spectral_imag	64	-0.00022758614241666768	-0.00022760142335073391	6.7143517192952992e-05	0.00011950119688680591	resume_copper_terminal_96/copper/3/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/3/spectral_real	148	0.00031690268373820558	0.00031692270327940056	6.3172520216094592e-05	0.00011950119688680591	resume_copper_terminal_96/copper/3/complex_trace_spectrum at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/copper/3/state	N/A	(257, 42)	(39, 42)	N/A (topology)	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/history/run0/port0/last_branch_current	93	-6.5417888883700925e-09	-6.541787556102463e-09	1.8616384391601355e-07	2.0733022507077599e-08	resume_copper_terminal_96/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/history/run0/port0/last_voltage_after	93	1.1203308076801477e-06	1.1203305803064723e-06	1.8446770828202826e-07	1.1071001615332879e-08	resume_copper_terminal_96/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/history/run0/port0/last_voltage_before	76	1.5686254073443706e-07	1.5686259757785592e-07	1.2785737254377996e-07	1.1071001615332879e-08	resume_copper_terminal_96/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/history/run0/port0/last_voltage_midpoint	93	1.0940528909486602e-06	1.0940530046354979e-06	9.4430846402562471e-08	1.1071001615332879e-08	resume_copper_terminal_96/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/history/run1/port0/last_branch_current	204	7.8242901508929208e-06	7.8242883319035172e-06	2.3247979924904374e-07	2.0733022507077599e-08	resume_copper_terminal_96/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/history/run1/port0/last_voltage_after	203	-0.0011090581538155675	-0.0011090582702308893	9.9523818338776293e-08	1.1071001615332879e-08	resume_copper_terminal_96/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/history/run1/port0/last_voltage_before	198	-0.00017101959383580834	-0.00017101965204346925	1.8887886886489561e-07	1.1071001615332879e-08	resume_copper_terminal_96/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/history/run1/port0/last_voltage_midpoint	191	-0.00052752759074792266	-0.00052752753254026175	5.1086653999901097e-08	1.1071001615332879e-08	resume_copper_terminal_96/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/port_runtime/0/accumulator/_current_sum	0	(0.00011994821155266986-8.122450913226314e-05j)	(0.00011994820903431594-8.122450749566121e-05j)	2.0188143118584773e-08	2.0733022507077599e-08	resume_copper_terminal_96/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/port_runtime/0/accumulator/_voltage_sum	0	(0.011851257505566126-0.00400423558278617j)	(0.011851257609408973-0.004004235674419789j)	9.688667175671804e-09	1.1071001615332879e-08	resume_copper_terminal_96/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/port_runtime/0/lumped/last_branch_current	0	7.8242901508929208e-06	7.8242883319035172e-06	2.3247979924904374e-07	2.0733022507077599e-08	resume_copper_terminal_96/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/port_runtime/0/lumped/last_voltage_after	0	-0.0011697232257574797	-0.0011697231093421578	9.9523818338776293e-08	1.1071001615332879e-08	resume_copper_terminal_96/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/port_runtime/0/lumped/last_voltage_before	0	-0.00030817455262877047	-0.00030817461083643138	1.8887886886489561e-07	1.1071001615332879e-08	resume_copper_terminal_96/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/ports/feed/current	0	(2.0790021880523663e-07-1.4078236767649062e-07j)	(2.079002144403001e-07-1.4078236483985058e-07j)	2.0188143128330998e-08	2.0733022507077599e-08	resume_copper_terminal_96/ports/feed/current at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/ports/feed/voltage	0	(2.05411902072629e-05-6.940340693978686e-06j)	(2.0541190387248497e-05-6.940340852802642e-06j)	9.6886671316611929e-09	1.1071001615332879e-08	resume_copper_terminal_96/ports/feed/voltage at 0.8/1.2 GHz
+port_step_graph	96710a73	resume_copper_terminal_96/solver/Ex	7163	-0.0010888637043535709	-0.001088811201043427	1.9553077043542286e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/solver/Ey	6888	-0.0010888637043535709	-0.0010888127144426107	1.8989462849382531e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/solver/Ez	6899	-0.28804388642311096	-0.2880437970161438	2.905385820225766e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/solver/Hx	7740	0.0005295842420309782	0.00052958441665396094	2.4041570760833972e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/solver/Hy	6276	-0.0005295842420309782	-0.00052958435844630003	1.6027713840555982e-07	N/A	none recorded for this quantity
+port_step_graph	96710a73	resume_copper_terminal_96/solver/Hz	7414	-1.9880002582794987e-05	-1.9879933461197652e-05	1.5684784050654918e-06	N/A	none recorded for this quantity

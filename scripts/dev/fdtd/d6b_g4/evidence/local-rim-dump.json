@@ -1,0 +1,564 @@
+{
+  "dl": 0.00375,
+  "duration": 3.9e-08,
+  "cases": [
+    {
+      "z": 0.05,
+      "tilt": 0.0,
+      "mode": "baseline",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 300,
+        "split_edges": 190,
+        "on_sheet_traces": 0,
+        "traces": 300,
+        "floored_subfaces": 300,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 300,
+      "partial_chords": 38,
+      "outside_endpoints": 38,
+      "chord_counts_by_face_normal": {
+        "-1": 0,
+        "0": 152,
+        "1": 148,
+        "2": 0
+      },
+      "outside_chord_length": 0.02992500000000026,
+      "chord_weighted_area": 0.004218749999999997,
+      "sheet_loop_area": 0.0015609374999999972,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.000203765625
+      ],
+      "min_split_mass_fraction": 0.04999999999999952,
+      "magnetic_area_ratio_min": 0.20853080568720278,
+      "phantom_normal_parent_count": 38,
+      "representative_phantom": {
+        "parent_index": [
+          69,
+          67,
+          50
+        ],
+        "position": [
+          0.0,
+          -0.007500000000000007,
+          0.0001875
+        ],
+        "side_lengths_cells": [
+          0.05000000000000003,
+          0.9500000000000015
+        ],
+        "side_masses_cells": [
+          0.049999999999999885,
+          0.9499999999999985
+        ],
+        "h_rows": [
+          {
+            "component": 1,
+            "index": [
+              68,
+              67,
+              50
+            ],
+            "area_cells": 1.0000000000000018,
+            "extra": -1,
+            "entries": [
+              {
+                "component": 2,
+                "side": -1,
+                "index": [
+                  68,
+                  67,
+                  50
+                ],
+                "coefficient_cells": 0.05000000000000003
+              },
+              {
+                "component": 2,
+                "side": 1,
+                "index": [
+                  68,
+                  67,
+                  50
+                ],
+                "coefficient_cells": 0.9500000000000015
+              },
+              {
+                "component": 0,
+                "side": 1,
+                "index": [
+                  68,
+                  67,
+                  51
+                ],
+                "coefficient_cells": 1.0000000000000004
+              },
+              {
+                "component": 2,
+                "side": -1,
+                "index": [
+                  69,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -0.05000000000000003
+              },
+              {
+                "component": 2,
+                "side": 1,
+                "index": [
+                  69,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -0.9500000000000015
+              },
+              {
+                "component": 0,
+                "side": -1,
+                "index": [
+                  68,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -1.0000000000000004
+              }
+            ]
+          },
+          {
+            "component": 1,
+            "index": [
+              69,
+              67,
+              50
+            ],
+            "area_cells": 0.9999999999999944,
+            "extra": -1,
+            "entries": [
+              {
+                "component": 2,
+                "side": -1,
+                "index": [
+                  69,
+                  67,
+                  50
+                ],
+                "coefficient_cells": 0.05000000000000003
+              },
+              {
+                "component": 2,
+                "side": 1,
+                "index": [
+                  69,
+                  67,
+                  50
+                ],
+                "coefficient_cells": 0.9500000000000015
+              },
+              {
+                "component": 0,
+                "side": 1,
+                "index": [
+                  69,
+                  67,
+                  51
+                ],
+                "coefficient_cells": 0.9999999999999929
+              },
+              {
+                "component": 2,
+                "side": -1,
+                "index": [
+                  70,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -0.05000000000000003
+              },
+              {
+                "component": 2,
+                "side": 1,
+                "index": [
+                  70,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -0.9500000000000015
+              },
+              {
+                "component": 0,
+                "side": -1,
+                "index": [
+                  69,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -0.9999999999999929
+              }
+            ]
+          }
+        ]
+      },
+      "arrays": "/tmp/d6b-complex-0.00375-0.05-0.0-baseline.npz",
+      "seconds": 2.815490245819092,
+      "memory_gib": 4.76837158203125e-06
+    },
+    {
+      "z": 0.05,
+      "tilt": 0.0,
+      "mode": "endpoints",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 262,
+        "split_edges": 152,
+        "on_sheet_traces": 0,
+        "traces": 262,
+        "floored_subfaces": 262,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 262,
+      "partial_chords": 0,
+      "outside_endpoints": 0,
+      "chord_counts_by_face_normal": {
+        "-1": 0,
+        "0": 114,
+        "1": 148,
+        "2": 0
+      },
+      "outside_chord_length": 0.0,
+      "chord_weighted_area": 0.003684374999999995,
+      "sheet_loop_area": 0.0015609374999999972,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.000203765625
+      ],
+      "min_split_mass_fraction": 0.04999999999999952,
+      "magnetic_area_ratio_min": 0.20853080568720278,
+      "phantom_normal_parent_count": 0,
+      "representative_phantom": null,
+      "arrays": "/tmp/d6b-complex-0.00375-0.05-0.0-endpoints.npz",
+      "seconds": 2.1508405208587646,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.5,
+      "tilt": 0.0,
+      "mode": "baseline",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 300,
+        "split_edges": 190,
+        "on_sheet_traces": 0,
+        "traces": 300,
+        "floored_subfaces": 0,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 300,
+      "partial_chords": 38,
+      "outside_endpoints": 38,
+      "chord_counts_by_face_normal": {
+        "-1": 0,
+        "0": 152,
+        "1": 148,
+        "2": 0
+      },
+      "outside_chord_length": 0.02992500000000026,
+      "chord_weighted_area": 0.004218749999999997,
+      "sheet_loop_area": 0.0015609374999999972,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.000203765625
+      ],
+      "min_split_mass_fraction": 0.4999999999999951,
+      "magnetic_area_ratio_min": 1.0,
+      "phantom_normal_parent_count": 38,
+      "representative_phantom": {
+        "parent_index": [
+          69,
+          67,
+          50
+        ],
+        "position": [
+          0.0,
+          -0.007500000000000007,
+          0.001875
+        ],
+        "side_lengths_cells": [
+          0.5000000000000003,
+          0.5000000000000012
+        ],
+        "side_masses_cells": [
+          0.4999999999999987,
+          0.4999999999999997
+        ],
+        "h_rows": [
+          {
+            "component": 1,
+            "index": [
+              68,
+              67,
+              50
+            ],
+            "area_cells": 1.0000000000000018,
+            "extra": -1,
+            "entries": [
+              {
+                "component": 2,
+                "side": -1,
+                "index": [
+                  68,
+                  67,
+                  50
+                ],
+                "coefficient_cells": 0.5000000000000003
+              },
+              {
+                "component": 2,
+                "side": 1,
+                "index": [
+                  68,
+                  67,
+                  50
+                ],
+                "coefficient_cells": 0.5000000000000012
+              },
+              {
+                "component": 0,
+                "side": 1,
+                "index": [
+                  68,
+                  67,
+                  51
+                ],
+                "coefficient_cells": 1.0000000000000004
+              },
+              {
+                "component": 2,
+                "side": -1,
+                "index": [
+                  69,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -0.5000000000000003
+              },
+              {
+                "component": 2,
+                "side": 1,
+                "index": [
+                  69,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -0.5000000000000012
+              },
+              {
+                "component": 0,
+                "side": -1,
+                "index": [
+                  68,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -1.0000000000000004
+              }
+            ]
+          },
+          {
+            "component": 1,
+            "index": [
+              69,
+              67,
+              50
+            ],
+            "area_cells": 0.9999999999999944,
+            "extra": -1,
+            "entries": [
+              {
+                "component": 2,
+                "side": -1,
+                "index": [
+                  69,
+                  67,
+                  50
+                ],
+                "coefficient_cells": 0.5000000000000003
+              },
+              {
+                "component": 2,
+                "side": 1,
+                "index": [
+                  69,
+                  67,
+                  50
+                ],
+                "coefficient_cells": 0.5000000000000012
+              },
+              {
+                "component": 0,
+                "side": 1,
+                "index": [
+                  69,
+                  67,
+                  51
+                ],
+                "coefficient_cells": 0.9999999999999929
+              },
+              {
+                "component": 2,
+                "side": -1,
+                "index": [
+                  70,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -0.5000000000000003
+              },
+              {
+                "component": 2,
+                "side": 1,
+                "index": [
+                  70,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -0.5000000000000012
+              },
+              {
+                "component": 0,
+                "side": -1,
+                "index": [
+                  69,
+                  67,
+                  50
+                ],
+                "coefficient_cells": -0.9999999999999929
+              }
+            ]
+          }
+        ]
+      },
+      "arrays": "/tmp/d6b-complex-0.00375-0.5-0.0-baseline.npz",
+      "seconds": 1.7103500366210938,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.5,
+      "tilt": 0.0,
+      "mode": "endpoints",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 262,
+        "split_edges": 152,
+        "on_sheet_traces": 0,
+        "traces": 262,
+        "floored_subfaces": 0,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 262,
+      "partial_chords": 0,
+      "outside_endpoints": 0,
+      "chord_counts_by_face_normal": {
+        "-1": 0,
+        "0": 114,
+        "1": 148,
+        "2": 0
+      },
+      "outside_chord_length": 0.0,
+      "chord_weighted_area": 0.003684374999999995,
+      "sheet_loop_area": 0.0015609374999999972,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.000203765625
+      ],
+      "min_split_mass_fraction": 0.4999999999999951,
+      "magnetic_area_ratio_min": 1.0,
+      "phantom_normal_parent_count": 0,
+      "representative_phantom": null,
+      "arrays": "/tmp/d6b-complex-0.00375-0.5-0.0-endpoints.npz",
+      "seconds": 1.6435966491699219,
+      "memory_gib": 9.5367431640625e-06
+    }
+  ]
+}

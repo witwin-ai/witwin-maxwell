@@ -17,7 +17,6 @@ from .stratton_chu import (
 )
 
 _FIELD_NAMES = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
-_POWER_FLOOR = 1e-30
 
 
 def enumerate_diffraction_orders(
@@ -171,8 +170,11 @@ def compute_diffraction_from_payload(
 
     propagating_power = sum(record["power"] for record in order_records if record["propagating"])
     denominator = incident_power if incident_power is not None else propagating_power
+    reference = (abs(incident_power) if incident_power is not None else
+                 sum(abs(record["power"]) for record in order_records if record["propagating"]))
+    threshold = 64 * torch.finfo(real_dtype).eps * reference
     for record in order_records:
-        if denominator is not None and abs(denominator) > _POWER_FLOOR:
+        if abs(denominator) > threshold:
             record["efficiency"] = record["power"] / denominator
         else:
             record["efficiency"] = None

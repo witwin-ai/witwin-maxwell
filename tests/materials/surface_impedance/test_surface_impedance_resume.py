@@ -136,7 +136,9 @@ def test_zeroing_captured_ade_state_breaks_resume():
     fix closes. If resume ignored the ADE state this would spuriously still match.
     """
     expected = _simulation().run()
-    checkpoint = _simulation().prepare().run_until(32)
+    # Observe the reset while the driven coating memory is still appreciable;
+    # an earlier reset can decay below this falsification threshold by step 64.
+    checkpoint = _simulation().prepare().run_until(48)
     keys = _surface_state_keys(checkpoint)
     assert keys
     for name in keys:

@@ -147,6 +147,7 @@ def test_complex_polyslab_hole_leaves_interior_empty():
 
 def test_polyslab_compiled_occupancy_propagates_gradients_through_vertices():
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.2),
         device="cpu",

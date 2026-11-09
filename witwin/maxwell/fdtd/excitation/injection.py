@@ -17,8 +17,8 @@ from .spatial import (
     source_plane_index,
 )
 from .modes import sample_mode_source_component, solve_mode_source_profile
-from .temporal import append_source_term, apply_compiled_source_terms, apply_generic_source_terms
-from .tfsf_common import build_term_from_profile, build_terms_from_specs, slice_coeff_patch, solve_numerical_wavenumber
+from .temporal import append_source_term, apply_compiled_source_terms, apply_generic_source_terms, injection_time, prepare_source_gathers
+from .tfsf_common import _component_roundoff_floor, build_term_from_profile, build_terms_from_specs, slice_coeff_patch, solve_numerical_wavenumber
 from .tfsf_specs import E_CURL_ATTR, H_CURL_ATTR, build_discrete_tfsf_specs, magnetic_physical_vector
 
 
@@ -39,7 +39,9 @@ def _normalized_point_dipole_profile(
     width_sq = 2.0 * float(width) ** 2
     profile = torch.exp(-dist_sq / width_sq)
     integrated_mass = torch.sum(profile * control_volumes)
-    return profile / torch.clamp(integrated_mass, min=torch.finfo(profile.dtype).eps)
+    if not integrated_mass > 0.0:
+        raise ValueError("Gaussian point-dipole profile must have strictly positive integrated mass.")
+    return profile / integrated_mass
 
 
 def _sample_control_widths(coords: torch.Tensor) -> torch.Tensor:
@@ -61,14 +63,22 @@ def _yee_component_control_volumes(solver, field_name: str) -> torch.Tensor:
     return widths[0][:, None, None] * widths[1][None, :, None] * widths[2][None, None, :]
 
 
-def _yee_component_coords(solver, field_name: str) -> tuple[torch.Tensor, ...]:
+def _yee_component_coords(solver, field_name: str, *, dtype=None) -> tuple[torch.Tensor, ...]:
     scene = solver.scene
-    coords = {
-        "Ex": (scene.x_half, scene.y, scene.z),
-        "Ey": (scene.x, scene.y_half, scene.z),
-        "Ez": (scene.x, scene.y, scene.z_half),
+    names = {
+        "Ex": ("x_half", "y", "z"),
+        "Ey": ("x", "y_half", "z"),
+        "Ez": ("x", "y", "z_half"),
+        "Hx": ("x", "y_half", "z_half"),
+        "Hy": ("x_half", "y", "z_half"),
+        "Hz": ("x_half", "y_half", "z"),
     }[field_name]
-    return tuple(axis.to(device=solver.device, dtype=solver.Ex.dtype) for axis in coords)
+    if dtype is None:
+        return tuple(getattr(scene, name).to(device=solver.device, dtype=solver.Ex.dtype) for name in names)
+    return tuple(torch.tensor(
+        getattr(scene, name + ("64" if name.endswith("_half") else "_nodes64")),
+        device=solver.device, dtype=dtype,
+    ) for name in names)
 
 
 def _symmetry_plane_source_scale(scene, field_name: str, position) -> float:
@@ -91,14 +101,18 @@ def _symmetry_plane_source_scale(scene, field_name: str, position) -> float:
     return scale
 
 
-def _axis_control_overlap(coords: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+def _axis_control_overlap(coords: torch.Tensor, lo: float, hi: float, *, bounds=None) -> torch.Tensor:
     """Fraction of every sample's dual control interval covered by ``[lo, hi]``."""
     count = int(coords.numel())
     if count <= 1:
+        if bounds is not None:
+            return torch.full_like(coords, max(0.0, min(hi, bounds[1]) - max(lo, bounds[0])) / (bounds[1] - bounds[0]))
         return torch.ones_like(coords) if lo <= float(coords[0]) <= hi else torch.zeros_like(coords)
     midpoints = 0.5 * (coords[:-1] + coords[1:])
     left = torch.cat((coords[:1] - 0.5 * (coords[1:2] - coords[:1]), midpoints))
     right = torch.cat((midpoints, coords[-1:] + 0.5 * (coords[-1:] - coords[-2:-1])))
+    if bounds is not None:
+        left[0], right[-1] = bounds
     overlap = torch.clamp(
         torch.minimum(right, torch.as_tensor(hi, device=coords.device, dtype=coords.dtype))
         - torch.maximum(left, torch.as_tensor(lo, device=coords.device, dtype=coords.dtype)),
@@ -107,12 +121,32 @@ def _axis_control_overlap(coords: torch.Tensor, lo: float, hi: float) -> torch.T
     return overlap / (right - left)
 
 
-def _yee_box_overlap(solver, field_name: str, lo, hi):
+def _yee_box_overlap(solver, field_name: str, lo, hi, *, current_dataset=False):
     """Return a compact Yee patch containing volume-averaged box indicator weights."""
-    axis_weights = tuple(
-        _axis_control_overlap(coords, float(lo[axis]), float(hi[axis]))
-        for axis, coords in enumerate(_yee_component_coords(solver, field_name))
-    )
+    if current_dataset and any(float(lo[a]) == float(hi[a]) for a in range(3)):
+        nearest, _ = _region_index_range(solver, field_name, lo, hi)
+    axis_weights = []
+    # Use declared grid coordinates for small fractional cells, whose coverage
+    # loses relative precision when subtracting nearby FP32 coordinates.
+    dtype = torch.float64 if current_dataset else None
+    for axis, coords in enumerate(_yee_component_coords(solver, field_name, dtype=dtype)):
+        if current_dataset and float(lo[axis]) == float(hi[axis]):
+            # A singleton retains the historical nearest-plane density measure.
+            weights = torch.zeros_like(coords)
+            weights[nearest[axis]] = 1.0
+        else:
+            lower, upper = float(lo[axis]), float(hi[axis])
+            if current_dataset:
+                bounds = solver.scene.domain.bounds[axis]
+                lower, upper = max(lower, bounds[0]), min(upper, bounds[1])
+            control_bounds = None
+            if current_dataset and solver._COMPONENT_HALF_OFFSET_AXES[field_name][axis]:
+                # A terminal half-step control cell ends at the grid boundary,
+                # including when adjacent nonuniform spacings differ.
+                nodes = getattr(solver.scene, "xyz"[axis] + "_nodes64")
+                control_bounds = (float(nodes[0]), float(nodes[-1]))
+            weights = _axis_control_overlap(coords, lower, upper, bounds=control_bounds)
+        axis_weights.append(weights)
     nonzero = tuple(torch.nonzero(weights > 0.0, as_tuple=False).flatten() for weights in axis_weights)
     if any(int(indices.numel()) == 0 for indices in nonzero):
         return None
@@ -211,6 +245,219 @@ def _axis_index_window(nodes64, lo_value, hi_value, size_cap):
     return lo_index, hi_index
 
 
+_WRAPPED_AXIS_KINDS = frozenset({"periodic", "bloch"})
+
+
+def _point_dipole_has_single_image(solver, position, cutoff) -> bool:
+    """Whether the unshifted source is the only periodic image inside the domain.
+
+    A shifted image ``position + n * L`` contributes only when its cutoff window
+    reaches the domain. When no ``n = +-1`` image does, compiling the unshifted
+    source alone is already the periodic profile and stays bit-identical.
+    """
+    scene = solver.scene
+    boundary = scene.boundary
+    nodes = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)
+    sizes = (solver.Nx, solver.Ny, solver.Nz)
+    for axis, name in enumerate("xyz"):
+        if boundary.axis_kind(name) not in _WRAPPED_AXIS_KINDS:
+            continue
+        length = scene.domain_range[2 * axis + 1] - scene.domain_range[2 * axis]
+        for shift in (-1, 1):
+            image = position[axis] + shift * length
+            start, stop = _axis_index_window(nodes[axis], image - cutoff, image + cutoff, sizes[axis])
+            if stop > start:
+                return False
+    return True
+
+
+def _bracket_weights(coords64: np.ndarray, position: float) -> tuple[list[int], list[float]]:
+    """Linear-interpolation weights of ``position`` between bracketing samples."""
+    upper = int(np.searchsorted(coords64, float(position), side="left"))
+    if upper <= 0:
+        return [0], [1.0]
+    if upper >= coords64.size:
+        return [int(coords64.size - 1)], [1.0]
+    lower = upper - 1
+    span = float(coords64[upper] - coords64[lower])
+    if span <= 0.0:
+        return [lower], [1.0]
+    fraction = (float(position) - float(coords64[lower])) / span
+    if fraction <= 1e-12:
+        return [lower], [1.0]
+    if fraction >= 1.0 - 1e-12:
+        return [upper], [1.0]
+    return [lower, upper], [1.0 - fraction, fraction]
+
+
+def _wrapped_axis_profile(nodes64, half64, staggered, position, cutoff, width, ideal, period_phase):
+    """Per-axis point-dipole factor on the unique samples of a periodic axis.
+
+    The source profile lives on the unbounded periodic lattice: every sample
+    ``c_u + n L`` of the same cutoff window as the open-boundary compile carries
+    its Gaussian (or linear ``ideal``) weight, and folds onto the unique in-domain
+    sample ``u`` with the Floquet factor ``exp(-i k n L)``. Each in-domain sample
+    therefore receives the summed weight once. The node at ``x_hi`` duplicates
+    the node at ``x_lo``; only the latter is a unique sample and the source
+    kernel copies it to its periodic partner.
+
+    Returns ``(start, factors)`` with complex factors on ``[start, start + len)``,
+    already divided by the axis mass (Gaussian) or the periodic control width
+    (``ideal``), or ``None`` when the window holds no sample.
+    """
+    nodes64 = np.asarray(nodes64, dtype=np.float64)
+    length = float(nodes64[-1] - nodes64[0])
+    unique = np.asarray(half64, dtype=np.float64) if staggered else nodes64[:-1]
+    count = int(unique.size)
+    origin = float(nodes64[0])
+    first_shift = int(math.floor((float(position) - cutoff - origin) / length)) - 1
+    last_shift = int(math.floor((float(position) + cutoff - origin) / length)) + 1
+    shifts = np.repeat(np.arange(first_shift, last_shift + 1, dtype=np.int64), count)
+    lattice_nodes = np.tile(nodes64[:-1], last_shift - first_shift + 1) + shifts * length
+    lattice_nodes = np.append(lattice_nodes, origin + (last_shift + 1) * length)
+    samples = np.tile(unique, last_shift - first_shift + 1) + shifts * length
+    unique_index = np.tile(np.arange(count, dtype=np.int64), last_shift - first_shift + 1)
+    # Periodic control width of every unique sample (no open-boundary half cells).
+    wrapped = np.concatenate((unique[-1:] - length, unique, unique[:1] + length))
+    unique_widths = 0.5 * (wrapped[2:] - wrapped[:-2])
+
+    if ideal:
+        indices, weights = _bracket_weights(samples, position)
+        indices = np.asarray(indices, dtype=np.int64)
+        values = np.asarray(weights, dtype=np.float64) / unique_widths[unique_index[indices]]
+    else:
+        # Node window of the open-boundary compile, applied on the lattice.
+        low = int(np.searchsorted(lattice_nodes, float(position) - cutoff, side="right")) - 1
+        high = int(np.searchsorted(lattice_nodes, float(position) + cutoff, side="left"))
+        indices = np.arange(low, high if staggered else high + 1, dtype=np.int64)
+        if indices.size == 0:
+            return None
+        gaussian = np.exp(-((samples[indices] - float(position)) ** 2) / (2.0 * float(width) ** 2))
+        mass = float(np.sum(gaussian * unique_widths[unique_index[indices]]))
+        if not mass > 0.0:
+            return None
+        # Per-axis mass is a length; no absolute floor, so sub-mm widths keep unit moment.
+        values = gaussian / mass
+
+    phases = np.power(complex(period_phase).conjugate(), shifts[indices].astype(np.float64))
+    factors = np.zeros(count, dtype=np.complex128)
+    np.add.at(factors, unique_index[indices], values * phases)
+    support = np.nonzero(factors != 0.0)[0]
+    if support.size == 0:
+        return None
+    if factors[0] != 0.0 and factors[-1] != 0.0:
+        return 0, factors
+    return int(support[0]), factors[int(support[0]) : int(support[-1]) + 1]
+
+
+def _open_axis_profile(nodes64, half64, staggered, size_cap, position, cutoff, width, ideal):
+    """Per-axis factor on a non-periodic axis, matching the per-image compile."""
+    start, stop = _axis_index_window(nodes64, position - cutoff, position + cutoff, size_cap)
+    if staggered:
+        stop = min(stop, size_cap - 1)
+    if stop <= start:
+        return None
+    coords = np.asarray(half64 if staggered else nodes64, dtype=np.float64)
+    count = int(coords.size)
+    widths = np.empty(count, dtype=np.float64)
+    if count <= 1:
+        widths[:] = 1.0
+    else:
+        diffs = coords[1:] - coords[:-1]
+        widths[0] = 0.5 * diffs[0]
+        widths[-1] = 0.5 * diffs[-1]
+        widths[1:-1] = 0.5 * (diffs[:-1] + diffs[1:])
+    window = coords[start:stop]
+    window_widths = widths[start:stop]
+    if ideal:
+        indices, weights = _bracket_weights(window, position)
+        factors = np.zeros(stop - start, dtype=np.float64)
+        for index, weight in zip(indices, weights):
+            factors[index] += weight / window_widths[index]
+    else:
+        gaussian = np.exp(-((window - float(position)) ** 2) / (2.0 * float(width) ** 2))
+        mass = float(np.sum(gaussian * window_widths))
+        if not mass > 0.0:
+            return None
+        factors = gaussian / mass
+    return start, factors.astype(np.complex128)
+
+
+def _prepare_wrapped_point_dipole_source(solver, source, *, source_index, cutoff):
+    """Compile a point dipole whose cutoff window wraps across a periodic face.
+
+    The profile is separable per axis, so periodic folding and Floquet phases are
+    applied to 1D factors and the component receives one patch (two for a complex
+    Bloch profile: real and imaginary parts) regardless of the period.
+    """
+    scene = solver.scene
+    boundary = scene.boundary
+    position = tuple(float(value) for value in source["position"])
+    width = float(source["width"])
+    ideal = source.get("profile", "gaussian") == "ideal"
+    polarization = source["polarization"]
+    source_time = source["source_time"]
+    source_omega = 2.0 * np.pi * float(source_time["frequency"])
+    dtype = solver.Ex.dtype
+    nodes = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)
+    halves = (scene.x_half64, scene.y_half64, scene.z_half64)
+    sizes = (solver.Nx, solver.Ny, solver.Nz)
+    wavevector = getattr(solver, "resolved_bloch_wavevector", None)
+    if wavevector is None:
+        wavevector = scene.bloch_wavevector
+    axis_kinds = tuple(boundary.axis_kind(name) for name in "xyz")
+    period_phases = []
+    for axis, kind in enumerate(axis_kinds):
+        length = scene.domain_range[2 * axis + 1] - scene.domain_range[2 * axis]
+        period_phases.append(np.exp(1j * float(wavevector[axis]) * length) if kind == "bloch" else 1.0 + 0.0j)
+
+    for field_name, component_axis in (("Ez", 2), ("Ex", 0), ("Ey", 1)):
+        component = polarization[component_axis]
+        if component == 0:
+            continue
+        profiles = []
+        for axis in range(3):
+            staggered = axis == component_axis
+            if axis_kinds[axis] in _WRAPPED_AXIS_KINDS:
+                profile = _wrapped_axis_profile(
+                    nodes[axis], halves[axis], staggered, position[axis], cutoff, width, ideal, period_phases[axis]
+                )
+            else:
+                profile = _open_axis_profile(
+                    nodes[axis], halves[axis], staggered, sizes[axis], position[axis], cutoff, width, ideal
+                )
+            if profile is None:
+                break
+            profiles.append(profile)
+        else:
+            offsets = tuple(start for start, _ in profiles)
+            fx, fy, fz = (factors for _, factors in profiles)
+            outer = fx[:, None, None] * fy[None, :, None] * fz[None, None, :]
+            region = tuple(slice(start, start + factors.size) for start, factors in profiles)
+            symmetry_scale = _symmetry_plane_source_scale(scene, field_name, position)
+            coefficient = (-solver.dt * component * symmetry_scale) / getattr(solver, "eps_" + field_name)[region]
+            for part, phase_real, phase_imag in ((outer.real, 1.0, 0.0), (outer.imag, 0.0, 1.0)):
+                if not np.any(part):
+                    continue
+                append_source_term(
+                    solver._source_terms,
+                    solver,
+                    field_name=field_name,
+                    offsets=offsets,
+                    patch=coefficient * torch.as_tensor(part, device=coefficient.device, dtype=dtype),
+                    phase_real=phase_real,
+                    phase_imag=phase_imag,
+                    source_index=source_index,
+                    source_position=position,
+                    source_symmetry_scale=symmetry_scale,
+                    source_time=source_time,
+                    omega=source_omega,
+                )
+                if not np.any(outer.imag):
+                    # Real folded factors let shard-interface rebuilds keep the wrap.
+                    solver._source_terms[-1]["axis_factors"] = (fx.real, fy.real, fz.real)
+
+
 def _prepare_point_dipole_source(solver, source, *, source_index):
     scene = solver.scene
     width = float(source["width"])
@@ -222,6 +469,9 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
         cutoff = 3.0 * POINT_DIPOLE_REFERENCE_WIDTH
     else:
         cutoff = 3.0 * max(width, 0.5 * POINT_DIPOLE_REFERENCE_WIDTH)
+    if not _point_dipole_has_single_image(solver, source["position"], cutoff):
+        _prepare_wrapped_point_dipole_source(solver, source, source_index=source_index, cutoff=cutoff)
+        return
     coord_dtype = solver.Ex.dtype
     control_volumes = {
         field_name: _yee_component_control_volumes(solver, field_name)
@@ -513,13 +763,17 @@ def _append_interpolated_current(
     source_index,
     term_list,
 ):
-    start, stop = _region_index_range(solver, field_name, region_lo, region_hi)
-    if any(stop[a] <= start[a] for a in range(3)):
+    overlap = _yee_box_overlap(solver, field_name, region_lo, region_hi, current_dataset=True)
+    if overlap is None:
         return
-    shape = tuple(stop[a] - start[a] for a in range(3))
-    positions = solver._component_positions(field_name, start, shape, dtype=solver.Ex.dtype)
-    sampled = _trilinear_sample(values, axes, positions)
-    if torch.max(torch.abs(sampled)).item() <= 1e-30:
+    start, stop, weights = overlap
+    query_axes = tuple(
+        coords[start[a]:stop[a]].clamp(region_lo[a], region_hi[a])
+        for a, coords in enumerate(_yee_component_coords(solver, field_name, dtype=torch.float64))
+    )
+    positions = torch.stack(torch.meshgrid(*query_axes, indexing="ij"), dim=-1).to(solver.Ex.dtype)
+    sampled = _trilinear_sample(values, axes, positions) * weights.to(solver.Ex.dtype)
+    if torch.max(torch.abs(sampled)).item() == 0:
         return
     denom_slice = denom_tensor[start[0]:stop[0], start[1]:stop[1], start[2]:stop[2]]
     source_patch = (-solver.dt / denom_slice) * sampled
@@ -567,6 +821,79 @@ def _prepare_custom_current_source(solver, source, *, source_index):
         )
 
 
+def _sheet_axis_quadrature(coords, bounds, lo, hi):
+    """Clipped control cells and their fractional physical-aperture coverage."""
+    mid = 0.5 * (coords[:-1] + coords[1:])
+    left = torch.cat((coords.new_tensor([bounds[0]]), mid))
+    right = torch.cat((mid, coords.new_tensor([bounds[1]])))
+    covered = (right.clamp(max=hi) - left.clamp(min=lo)).clamp(min=0.0)
+    indices = torch.nonzero(covered > 0.0).flatten()
+    start, stop = int(indices[0]), int(indices[-1]) + 1
+    return start, stop, covered[start:stop], (covered / (right - left))[start:stop]
+
+
+def _sheet_axis_modes(coords, widths, *, bounds, odd_faces=(False, False), period_phase=None):
+    """Device-native weighted modes on one aperture's control cells.
+
+    Reflecting the sampled profile at the aperture edge keeps continuation
+    inside its physical support. Full-span axes use their actual wall parity
+    or periodic phase. Uniform Yee axes recover the exact sine/cosine/Floquet
+    symbols, including nodal half cells and duplicated periodic endpoints.
+    """
+    root = widths.sqrt()
+    if period_phase is not None:
+        duplicate = bool(coords[0] == bounds[0] and coords[-1] == bounds[1])
+        unique = coords[:-1] if duplicate else coords
+        mass = widths[:-1].clone() if duplicate else widths
+        if duplicate:
+            mass[0] += widths[-1]
+        conductance = 1.0 / (unique[1:] - unique[:-1])
+        diagonal = torch.nn.functional.pad(conductance, (0, 1)) + torch.nn.functional.pad(conductance, (1, 0))
+        stiffness = (torch.diag(diagonal) - torch.diag(conductance, 1) - torch.diag(conductance, -1)).to(torch.complex128)
+        wrap = 1.0 / (bounds[1] - bounds[0] - unique[-1] + unique[0])
+        stiffness[0, 0] += wrap
+        stiffness[-1, -1] += wrap
+        stiffness[0, -1] -= complex(period_phase).conjugate() * wrap
+        stiffness[-1, 0] -= period_phase * wrap
+        eigenvalues, vectors = torch.linalg.eigh(stiffness / mass.sqrt()[:, None] / mass.sqrt()[None, :])
+        physical = vectors / mass.sqrt()[:, None]
+        if duplicate:
+            physical = torch.cat((physical, period_phase * physical[:1]), dim=0)
+        return eigenvalues.clamp(min=0.0), root[:, None] * physical, root
+
+    conductance = 1.0 / (coords[1:] - coords[:-1])
+    diagonal = torch.nn.functional.pad(conductance, (0, 1)) + torch.nn.functional.pad(conductance, (1, 0))
+    stiffness = torch.diag(diagonal) - torch.diag(conductance, 1) - torch.diag(conductance, -1)
+    start, stop = 0, len(coords)
+    for side, odd in enumerate(odd_faces):
+        if not odd:
+            continue
+        index = 0 if side == 0 else len(coords) - 1
+        distance = abs(float(coords[index]) - bounds[side])
+        if distance == 0.0:
+            if side == 0:
+                start = 1
+            else:
+                stop -= 1
+        else:
+            stiffness[index, index] += 1.0 / distance
+    active_root = root[start:stop]
+    eigenvalues, active = torch.linalg.eigh(stiffness[start:stop, start:stop] / active_root[:, None] / active_root[None, :])
+    vectors = torch.nn.functional.pad(active, (0, 0, start, len(coords) - stop))
+    return eigenvalues.clamp(min=0.0), vectors, root
+
+
+def _common_plane_sheet_weights(kh, fraction):
+    """Two-way Yee radiation weights for a bracketing sheet.
+
+    A unit Yee sheet radiates with the factor sec(k_z h/2). For bracketing
+    sheets a,b, w_a = sin(k_z (b-z0))/(2 sin(k_z h/2)) and its partner cancel
+    that factor and translate BOTH outgoing waves to z0. The sinc form also
+    includes grazing incidence without a singular quotient.
+    """
+    return fraction * torch.sinc(kh * fraction / math.pi) / torch.sinc(kh / (2.0 * math.pi))
+
+
 def _prepare_custom_field_source(solver, source, *, source_index):
     dataset = source["dataset"]
     normal_axis = source["normal_axis"]
@@ -576,72 +903,88 @@ def _prepare_custom_field_source(solver, source, *, source_index):
     region_lo, region_hi = _dataset_region_bounds(dataset)
     axis_index = _AXIS_TO_INDEX[normal_axis]
     plane_coord = 0.5 * (float(region_lo[axis_index]) + float(region_hi[axis_index]))
-    plane_coords = getattr(solver.scene, normal_axis)
-    plane_index = int(torch.argmin(torch.abs(plane_coords - plane_coord)).item())
+    transverse = [index for index in range(3) if index != axis_index]
+    scene = solver.scene
+    nodes = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)
+    halves = (scene.x_half64, scene.y_half64, scene.z_half64)
+    # The low-face specification fixes the physical J=n x H, M=-n x E signs.
+    electric, magnetic = build_discrete_tfsf_specs((1, 1, 1), (2, 2, 2))
+    specs = electric[_FACE_SPEC_RANGES[(normal_axis, "low")]] + magnetic[_FACE_SPEC_RANGES[(normal_axis, "low")]]
+    K = 2.0 * math.sin(source_omega * solver.dt / 2.0) / (solver.c * solver.dt)
 
-    lower = [0, 0, 0]
-    upper = [0, 0, 0]
-    for index, axis in enumerate("xyz"):
-        if axis == normal_axis:
-            lower[index] = plane_index
-            upper[index] = plane_index + 1
+    for template in specs:
+        incident = template["incident_name"]
+        if incident not in dataset.components:
             continue
-        nodes64 = (solver.scene.x_nodes64, solver.scene.y_nodes64, solver.scene.z_nodes64)[index]
-        size_cap = (solver.Nx, solver.Ny, solver.Nz)[index]
-        start, stop = _axis_index_window(
-            nodes64,
-            region_lo[index],
-            region_hi[index],
-            size_cap,
-        )
-        lower[index] = start
-        upper[index] = stop - 1
-
-    electric_specs, magnetic_specs = build_discrete_tfsf_specs(tuple(lower), tuple(upper))
-    face_side = "low"
-    electric_specs = electric_specs[_FACE_SPEC_RANGES[(normal_axis, face_side)]]
-    magnetic_specs = magnetic_specs[_FACE_SPEC_RANGES[(normal_axis, face_side)]]
-    component_values = {
-        name: torch.tensor(values, device=solver.device, dtype=solver.Ex.dtype)
-        for name, values in dataset.components.items()
-    }
-
-    def build_profile_term(spec, coeff_patch, _component_scale):
-        values = component_values[spec["incident_name"]]
-        positions = _surface_plane_spec_positions(solver, spec)
-        sampled = _trilinear_sample(values, axes, positions)
-        if spec["incident_name"].startswith("H"):
-            # The discrete face specification stores incident magnetic fields
-            # with the update-equation sign (``-k x E``), while FieldDataset
-            # exposes the physical ``H = k x E / eta`` convention.
-            sampled = -sampled
-        scale = spec["sign"] * sampled * coeff_patch
-        return build_term_from_profile(
-            solver,
-            field_name=spec["field_name"],
-            offsets=spec["offsets"],
-            scale=scale,
-            delay_patch=torch.zeros_like(scale),
-            activation_delay_patch=None,
-            source_time=source_time,
-            omega=source_omega,
-            source_index=source_index,
-        )
-
-    solver._electric_source_terms.extend(build_terms_from_specs(
-        solver,
-        electric_specs,
-        {name: (1.0 if name in component_values else 0.0) for name in ("Hx", "Hy", "Hz")},
-        E_CURL_ATTR,
-        build_profile_term,
-    ))
-    solver._magnetic_source_terms.extend(build_terms_from_specs(
-        solver,
-        magnetic_specs,
-        {name: (1.0 if name in component_values else 0.0) for name in ("Ex", "Ey", "Ez")},
-        H_CURL_ATTR,
-        build_profile_term,
-    ))
+        values = torch.as_tensor(dataset.components[incident], device=solver.device, dtype=solver.Ex.dtype)
+        field = template["field_name"]
+        field_axis = "xyz".index(field[-1].lower())
+        coordinates = tuple(torch.as_tensor(
+            halves[a] if (a == field_axis) == field.startswith("E") else nodes[a],
+            device=solver.device, dtype=torch.float64,
+        ) for a in range(3))
+        normal = coordinates[axis_index]
+        upper = int(torch.searchsorted(normal, normal.new_tensor(plane_coord)).clamp(1, len(normal) - 1))
+        lower = upper - 1
+        h = float(normal[upper] - normal[lower])
+        starts, stops, overlaps, modes = {}, {}, {}, []
+        for a in transverse:
+            start, stop, widths, overlap = _sheet_axis_quadrature(
+                coordinates[a], (nodes[a][0], nodes[a][-1]), region_lo[a], region_hi[a],
+            )
+            starts[a], stops[a], overlaps[a] = start, stop, overlap
+            bounds = (float(nodes[a][0]), float(nodes[a][-1]))
+            touches = (region_lo[a] <= bounds[0], region_hi[a] >= bounds[1])
+            kinds = scene.boundary.axis_face_kinds("xyz"[a])
+            even_pec = field.startswith("E") == (a == field_axis)
+            odd_faces = tuple(touch and ((kind == "pec" and not even_pec) or (kind == "pmc" and even_pec))
+                              for touch, kind in zip(touches, kinds))
+            phase = None
+            if all(touches) and scene.boundary.axis_kind("xyz"[a]) in _WRAPPED_AXIS_KINDS:
+                phase = (complex(float(solver.boundary_phase_cos[a]), float(solver.boundary_phase_sin[a]))
+                         if kinds[0] == "bloch" else 1.0 + 0.0j)
+            modes.append(_sheet_axis_modes(coordinates[a][start:stop], widths,
+                                          bounds=bounds, odd_faces=odd_faces, period_phase=phase))
+        query_axes = [None] * 3
+        for a in transverse:
+            # Boundary-cell quadrature uses the nearest point INSIDE the sample
+            # span. No dataset value is extrapolated outside the aperture.
+            query_axes[a] = coordinates[a][starts[a]:stops[a]].clamp(region_lo[a], region_hi[a]).to(solver.Ex.dtype)
+        query_axes[axis_index] = solver.Ex.new_tensor([plane_coord])
+        positions = torch.stack(torch.meshgrid(*query_axes, indexing="ij"), dim=-1)
+        sampled = _trilinear_sample(values, axes, positions).squeeze(axis_index).to(torch.float64)
+        if sampled.abs().max().item() == 0:
+            continue
+        la, va, ra = modes[0]
+        lb, vb, rb = modes[1]
+        va, vb = va.to(torch.complex128), vb.to(torch.complex128)
+        spectrum = va.mH @ (sampled * ra[:, None] * rb[None, :]).to(torch.complex128) @ vb.conj()
+        kh = 2.0 * torch.asin(torch.sqrt(((K * K - la[:, None] - lb[None, :]) * (h * h / 4.0)).to(torch.complex128)))
+        coverage = overlaps[transverse[0]][:, None] * overlaps[transverse[1]][None, :]
+        sign = template["sign"] * (-1.0 if incident.startswith("H") else 1.0)
+        curl_map = E_CURL_ATTR if field.startswith("E") else H_CURL_ATTR
+        term_list = solver._electric_source_terms if field.startswith("E") else solver._magnetic_source_terms
+        for index, distance in ((lower, float(normal[upper]) - plane_coord), (upper, plane_coord - float(normal[lower]))):
+            weights = _common_plane_sheet_weights(kh, distance / h)
+            profile = (va @ (spectrum * weights) @ vb.T) / ra[:, None] / rb[None, :]
+            profile = (profile * coverage).unsqueeze(axis_index)
+            offsets = tuple(index if a == axis_index else starts[a] for a in range(3))
+            spec = dict(template, offsets=offsets, shape=profile.shape)
+            coefficient = sign * slice_coeff_patch(solver, spec, curl_map)
+            patches = (profile.real.to(solver.Ex.dtype) * coefficient,
+                       profile.imag.to(solver.Ex.dtype) * coefficient)
+            # Real and quadrature channels use the existing delayed-waveform
+            # path, including table waveforms and the explicit adjoint replay.
+            for patch, delay in zip(patches, (0.0, math.pi / (2.0 * source_omega))):
+                term = build_term_from_profile(
+                    solver, field_name=field, offsets=offsets,
+                    scale=patch,
+                    delay_patch=torch.full_like(coefficient, delay), activation_delay_patch=None,
+                    source_time=source_time, omega=source_omega, source_index=source_index,
+                    profile_floor=0.0,
+                )
+                if term is not None:
+                    term_list.append(term)
 
 
 def _prepare_surface_source(solver, source, *, source_index):
@@ -805,6 +1148,8 @@ def _validate_soft_surface_source_boundary(boundary, direction, injection_axis: 
 
 
 def _prepare_power_normalized_surface_source(solver, source, *, source_index):
+    from ..runtime.stepping import electric_update_support
+
     source_time = source["source_time"]
     source_frequency = float(source_time["frequency"])
     source_omega = 2.0 * np.pi * source_frequency
@@ -853,6 +1198,22 @@ def _prepare_power_normalized_surface_source(solver, source, *, source_index):
     electric_specs, magnetic_specs = build_discrete_tfsf_specs(lower, upper)
     electric_specs = electric_specs[_FACE_SPEC_RANGES[(injection_axis, face_side)]]
     magnetic_specs = magnetic_specs[_FACE_SPEC_RANGES[(injection_axis, face_side)]]
+
+    # Keep the full launch aperture and magnetic sheet. Only electric rows
+    # outside the curl update support would accumulate a frozen sheet current.
+    supported_specs = []
+    for spec in electric_specs:
+        support = electric_update_support(solver, spec["field_name"])
+        offsets = tuple(max(start, lo) for start, (lo, _) in zip(spec["offsets"], support))
+        stops = tuple(min(start + size, hi) for start, size, (_, hi)
+                      in zip(spec["offsets"], spec["shape"], support))
+        shape = tuple(stop - start for start, stop in zip(offsets, stops))
+        if all(size > 0 for size in shape):
+            sample_offsets = tuple(sample + start - original for sample, start, original
+                                   in zip(spec["sample_offsets"], offsets, spec["offsets"]))
+            supported_specs.append({**spec, "offsets": offsets, "shape": shape,
+                                    "sample_offsets": sample_offsets, "sample_shape": shape})
+    electric_specs = supported_specs
 
     phase_speed = solver.c
     # Numerical-dispersion phase correction with the grid spacing local to the
@@ -939,7 +1300,10 @@ def _prepare_power_normalized_surface_source(solver, source, *, source_index):
             # waveform before t=0.  Remove only the common launch-plane delay;
             # transverse curvature and Gouy phase differences remain intact.
             delay_patch = delay_patch - beam_reference_delay
-        scale = spec["sign"] * component_scale * spatial_amplitude * coeff_patch
+        # Shared face templates encode the enclosure correction orientation;
+        # an open launch sheet needs the opposite sign for +E_inc, as in the
+        # TFSF counterpart in _set_tfsf_state.
+        scale = -spec["sign"] * component_scale * spatial_amplitude * coeff_patch
         return build_term_from_profile(
             solver,
             field_name=spec["field_name"],
@@ -968,7 +1332,7 @@ def _prepare_power_normalized_surface_source(solver, source, *, source_index):
     ))
 
 
-def _mode_normal_stagger_power_factor(solver, source, mode_data) -> float:
+def _mode_normal_stagger_power_factor(solver, source, mode_data) -> float | torch.Tensor:
     """Return the resolved-grid correction for axial Yee interpolation.
 
     A non-positive cosine means that the requested mode is beyond the normal-axis
@@ -983,7 +1347,23 @@ def _mode_normal_stagger_power_factor(solver, source, mode_data) -> float:
     half_axis = getattr(solver.scene, f"{normal_axis}_half")
     half_index = plane_index - 1 if direction_sign > 0 else plane_index
     normal_half_offset = abs(float(half_axis[half_index].item()) - float(plane_coordinate))
-    factor = math.cos(abs(float(mode_data["beta"])) * normal_half_offset)
+    beta_complex = mode_data.get("beta_complex")
+    if mode_data.get("mode_solver_kind") == "vector_dense_torch":
+        factor = torch.cos(mode_data["beta_tensor"].abs() * normal_half_offset)
+        return factor if float(factor.detach()) > 0.0 else 1.0
+    if beta_complex is not None:
+        from .modes.common import _discrete_mode_profile_power
+        profiles = mode_data["component_profiles"]
+        import cmath
+        multiplier = cmath.cos(beta_complex * normal_half_offset)
+        interpolated = {name: value * multiplier if name.startswith("H") else value
+                        for name, value in profiles.items()}
+        power_args = dict(coords_u=mode_data["coords_u"],coords_v=mode_data["coords_v"],
+                          normal_axis=normal_axis,staggered=mode_data.get("staggered_profiles",False))
+        factor = float((_discrete_mode_profile_power(interpolated,**power_args) /
+                        _discrete_mode_profile_power(profiles,**power_args)).item())
+    else:
+        factor = math.cos(abs(float(mode_data["beta"])) * normal_half_offset)
     if factor <= 0.0:
         return 1.0
     return float(factor)
@@ -1009,11 +1389,27 @@ def _prepare_mode_surface_source(solver, source, *, source_index):
     normal_axis_index = _AXIS_TO_INDEX[source["normal_axis"]]
     plane_coordinate = solver._plane_coordinate(source["normal_axis"], mode_data["plane_index"])
     direction_sign = int(source["direction_sign"])
-    phase_speed = source_omega / max(abs(float(mode_data["beta"])), 1.0e-30)
+    phase_speed = (source_omega / mode_data["beta_tensor"].abs()
+                   if mode_data.get("mode_solver_kind") == "vector_dense_torch"
+                   else source_omega / max(abs(float(mode_data["beta"])), 1.0e-30))
     normal_stagger_power_factor = _mode_normal_stagger_power_factor(solver, source, mode_data)
-    mode_injection_scale = 1.0 / math.sqrt(normal_stagger_power_factor)
-    source["normal_stagger_power_factor"] = float(normal_stagger_power_factor)
+    mode_injection_scale = (torch.rsqrt(normal_stagger_power_factor)
+                            if torch.is_tensor(normal_stagger_power_factor)
+                            else 1.0 / math.sqrt(normal_stagger_power_factor))
+    source["normal_stagger_power_factor"] = float(
+        normal_stagger_power_factor.detach() if torch.is_tensor(normal_stagger_power_factor)
+        else normal_stagger_power_factor)
     source["prepared_mode_power"] = 1.0
+    profiles = mode_data["component_profiles"]
+    # Mode builders already cast their float64/complex128 outputs to field dtype.
+    # Prune only roundoff from that original solve, using float64 epsilon.
+    profile_floors = {
+        family: mode_injection_scale * _component_roundoff_floor(
+            [profile for name, profile in profiles.items() if name.startswith(family)],
+            dtype=torch.float64,
+        )
+        for family in ("E", "H")
+    }
 
     def build_profile_term(spec, coeff_patch):
         positions = _surface_plane_spec_positions(solver, spec)
@@ -1027,14 +1423,19 @@ def _prepare_mode_surface_source(solver, source, *, source_index):
             # with the update-equation ``-k x E`` sign. Mode profiles expose
             # the physical ``H = k x E / eta`` field, so convert conventions.
             component_profile = -component_profile
-        if torch.max(torch.abs(component_profile)).item() <= 1e-12:
+        profile_floor = profile_floors[spec["incident_name"][0]]
+        if torch.max(torch.abs(component_profile)).item() <= profile_floor:
             return None
         delay_patch = (
             float(direction_sign)
             * (positions[..., normal_axis_index] - float(plane_coordinate))
-            / float(phase_speed)
+            / phase_speed
         )
         scale = spec["sign"] * component_profile * coeff_patch
+        beta_complex = mode_data.get("beta_complex")
+        if beta_complex is not None:
+            displacement = float(direction_sign) * (positions[..., normal_axis_index] - float(plane_coordinate))
+            scale = scale * torch.exp(-float(beta_complex.imag) * displacement)
         return build_term_from_profile(
             solver,
             field_name=spec["field_name"],
@@ -1189,26 +1590,37 @@ def initialize_source_terms(solver):
     for source_index, source in enumerate(compiled_sources):
         if source.get("injection", {}).get("kind") == "tfsf":
             continue
+        source["reference_waveform_kind"] = source["source_time"]["kind"]
         if source["kind"] == "point_dipole":
+            source["reference_provider_kind"] = "additive_J"
             _prepare_point_dipole_source(solver, source, source_index=source_index)
             continue
         if source["kind"] == "mode_source":
+            source["reference_provider_kind"] = "mode_surface"
             _prepare_mode_surface_source(solver, source, source_index=source_index)
             continue
         if source["kind"] in {"plane_wave", "gaussian_beam", "astigmatic_gaussian_beam"}:
+            source["reference_provider_kind"] = "soft_equivalent_sheet"
             _prepare_power_normalized_surface_source(solver, source, source_index=source_index)
             continue
         if source["kind"] == "uniform_current":
+            source["reference_provider_kind"] = "additive_J"
             _prepare_uniform_current_source(solver, source, source_index=source_index)
             continue
         if source["kind"] == "custom_current":
+            components = source["dataset"].components
+            source["reference_provider_kind"] = ("additive_J" if all(k.startswith("J") for k in components)
+                else "magnetic_M" if all(k.startswith("M") for k in components) else "mixed_JM")
             _prepare_custom_current_source(solver, source, source_index=source_index)
             continue
         if source["kind"] == "custom_field":
+            source["reference_provider_kind"] = "custom_field_surface"
             _prepare_custom_field_source(solver, source, source_index=source_index)
             continue
+        source["reference_provider_kind"] = "soft_equivalent_sheet"
         _prepare_surface_source(solver, source, source_index=source_index)
     _append_full_aniso_current_terms(solver, compiled_sources)
+    prepare_source_gathers(solver)
 
 
 def inject_source_terms(solver, n=None, signal=None, time_value=None):
@@ -1220,7 +1632,7 @@ def inject_source_terms(solver, n=None, signal=None, time_value=None):
     if time_value is None:
         if n is None:
             raise ValueError("Either n or time_value must be provided for source injection.")
-        time_value = n * solver.dt
+        time_value = injection_time("electric_current", n * solver.dt, solver.dt)
 
     apply_compiled_source_terms(
         solver,

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 import math
 
+import numpy as np
 import torch
 from witwin.core import Box
 
+from ._fixed_inputs import require_fixed_input
 from .lumped import ParallelRLC, SeriesRLC
 from .monitors import ModeMonitor, _normalize_frequencies, _normalize_normal_direction
 from .sources import (
@@ -108,6 +111,11 @@ class WirePortBinding:
         return cls("gap", negative=negative, positive=positive)
 
 
+def _fixed_reference_plane(value):
+    require_fixed_input(value, name="Port.reference_plane")
+    return float(value)
+
+
 def _normalize_reference_impedance(reference_impedance):
     if torch.is_tensor(reference_impedance):
         if reference_impedance.numel() != 1:
@@ -137,14 +145,34 @@ def _validate_termination(termination) -> None:
         raise TypeError("termination must be a SeriesRLC, ParallelRLC, or None.")
 
 
+def _coordinate_roundoff(value) -> tuple[float, ...]:
+    """Half an input ULP, retained before coordinates become Python floats."""
+    if torch.is_tensor(value):
+        tensor = value.detach().cpu()
+        if tensor.is_floating_point():
+            magnitude = tensor.abs()
+            ulp = torch.nextafter(magnitude, torch.full_like(magnitude, float("inf"))) - magnitude
+            return tuple(float(item) * 0.5 for item in ulp.to(torch.float64).flatten())
+        return (0.0,) * tensor.numel()
+    array = np.asarray(value)
+    if not np.issubdtype(array.dtype, np.floating):
+        return (0.0,) * array.size
+    return tuple(float(item) * 0.5 for item in np.spacing(np.abs(array)).flatten())
+
+
 @dataclass(frozen=True)
 class LumpedPort:
     """Declare a two-terminal lumped port with explicit discrete V/I geometry.
 
     Voltage is the line integral of E from ``negative`` to ``positive``.
-    Current is the right-hand circulation of H around ``current_surface`` with
-    the same orientation. Phasors are peak-valued, so average power is
+    Current into the field is minus the right-hand circulation of H around
+    ``current_surface``, oriented along that terminal arrow. Phasors are
+    peak-valued, so average power is
     ``0.5 * Re(V * conj(I))``.
+
+    An optional ``voltage_aperture`` Box distributes the voltage row over
+    parallel paths using normalized transverse dual-cell quadrature. Current
+    deposition uses the same row, preserving field/circuit power duality.
     """
 
     name: str
@@ -159,6 +187,9 @@ class LumpedPort:
     kind: str = "lumped_port"
     phasor_convention: str = "peak"
     power_convention: str = "0.5*Re(V*conj(I))"
+    _positive_roundoff: tuple[float, ...] = field(default=(), init=False, repr=False, compare=False)
+    _negative_roundoff: tuple[float, ...] = field(default=(), init=False, repr=False, compare=False)
+    voltage_aperture: Box | None = None
 
     def __init__(
         self,
@@ -172,12 +203,13 @@ class LumpedPort:
         reference_plane=None,
         termination=None,
         wire_binding=None,
+        voltage_aperture=None,
     ):
         if wire_binding is not None and not isinstance(wire_binding, WirePortBinding):
             raise TypeError("wire_binding must be a WirePortBinding or None.")
         has_geometry = any(
             value is not None
-            for value in (positive, negative, voltage_path, current_surface)
+            for value in (positive, negative, voltage_path, current_surface, voltage_aperture)
         )
         if wire_binding is not None:
             if has_geometry:
@@ -221,6 +253,12 @@ class LumpedPort:
                 raise ValueError("LumpedPort positive and negative terminals must be distinct along voltage_path.axis.")
 
         stored_impedance = _normalize_reference_impedance(reference_impedance)
+        if voltage_aperture is not None:
+            if not isinstance(voltage_aperture, Box):
+                raise TypeError("voltage_aperture must be an axis-aligned Box.")
+            if any(torch.is_tensor(v) and v.requires_grad for v in
+                   (voltage_aperture.position, voltage_aperture.size, voltage_aperture.rotation)):
+                raise NotImplementedError("Trainable aperture geometry changes discrete voltage support.")
 
         resolved_name = str(name)
         if not resolved_name:
@@ -230,16 +268,19 @@ class LumpedPort:
         object.__setattr__(self, "name", resolved_name)
         object.__setattr__(self, "positive", resolved_positive)
         object.__setattr__(self, "negative", resolved_negative)
+        object.__setattr__(self, "_positive_roundoff", () if positive is None else _coordinate_roundoff(positive))
+        object.__setattr__(self, "_negative_roundoff", () if negative is None else _coordinate_roundoff(negative))
         object.__setattr__(self, "voltage_path", voltage_path)
         object.__setattr__(self, "current_surface", current_surface)
         object.__setattr__(self, "reference_impedance", stored_impedance)
         object.__setattr__(
             self,
             "reference_plane",
-            None if reference_plane is None else float(reference_plane),
+            None if reference_plane is None else _fixed_reference_plane(reference_plane),
         )
         object.__setattr__(self, "termination", termination)
         object.__setattr__(self, "wire_binding", wire_binding)
+        object.__setattr__(self, "voltage_aperture", voltage_aperture)
         object.__setattr__(self, "kind", "lumped_port")
         object.__setattr__(self, "phasor_convention", "peak")
         object.__setattr__(self, "power_convention", "0.5*Re(V*conj(I))")
@@ -262,11 +303,13 @@ class TerminalRef:
 
 @dataclass(frozen=True)
 class TerminalPort:
-    """Declare a two-conductor port resolved from named PEC Box terminals.
+    """Declare a port between named PEC volumes or planar PEC/CopperFoil supports.
 
     Version 1 resolves the line path through the center of the terminals'
-    transverse footprint overlap. The current contour is that overlap placed
-    on ``reference_plane``. Once accepted by a :class:`Scene`, the port exposes
+    transverse footprint overlap. Optional ``current_surface`` selects the path
+    center and its current loop, including coplanar sheet gaps. An optional
+    ``voltage_aperture`` uses the same power-dual row as LumpedPort. Polygon
+    holes, connected return components and every native gap path are audited. Once accepted by a :class:`Scene`, the port exposes
     the same resolved geometry properties used by the lumped-port runtime.
     """
 
@@ -278,6 +321,9 @@ class TerminalPort:
     reference_impedance: complex | float | torch.Tensor
     termination: SeriesRLC | ParallelRLC | None = None
     wire_binding: WirePortBinding | None = None
+    voltage_aperture: Box | None = None
+    _declared_current_surface: Box | None = field(default=None,init=False,repr=False,compare=False)
+    _terminal_audit: dict = field(default_factory=dict,init=False,repr=False,compare=False)
     kind: str = "terminal_port"
     phasor_convention: str = "peak"
     power_convention: str = "0.5*Re(V*conj(I))"
@@ -299,6 +345,9 @@ class TerminalPort:
         repr=False,
         compare=False,
     )
+    _current_bound_roundoff: tuple[float, ...] = field(default=(), init=False, repr=False, compare=False)
+    _positive_roundoff: tuple[float, ...] = field(default=(), init=False, repr=False, compare=False)
+    _negative_roundoff: tuple[float, ...] = field(default=(), init=False, repr=False, compare=False)
 
     def __init__(
         self,
@@ -310,7 +359,15 @@ class TerminalPort:
         reference_impedance=50.0,
         termination=None,
         wire_binding=None,
+        *,
+        current_surface=None,
+        voltage_aperture=None,
     ):
+        for label,box in (("current_surface",current_surface),("voltage_aperture",voltage_aperture)):
+            if box is not None and not isinstance(box,Box):
+                raise TypeError(f"TerminalPort {label} must be a Box or None.")
+            if box is not None and any(torch.is_tensor(v) and v.requires_grad for v in (box.position,box.size,box.rotation)):
+                raise NotImplementedError("Trainable terminal integration geometry changes discrete support.")
         resolved_name = str(name)
         if not resolved_name:
             raise ValueError("TerminalPort name must not be empty.")
@@ -336,7 +393,7 @@ class TerminalPort:
                     f"TerminalPort {resolved_name!r} integration_path must be an AxisPath."
                 )
             try:
-                resolved_reference_plane = float(reference_plane)
+                resolved_reference_plane = _fixed_reference_plane(reference_plane)
             except (TypeError, ValueError) as error:
                 raise type(error)(
                     f"TerminalPort {resolved_name!r} reference_plane must be a real scalar."
@@ -348,7 +405,7 @@ class TerminalPort:
         else:
             if any(
                 value is not None
-                for value in (positive_terminal, negative_terminal, integration_path)
+                for value in (positive_terminal, negative_terminal, integration_path, current_surface, voltage_aperture)
             ):
                 raise ValueError(
                     f"TerminalPort {resolved_name!r} wire binding must not also specify "
@@ -357,7 +414,7 @@ class TerminalPort:
             if reference_plane is None:
                 resolved_reference_plane = None
             else:
-                resolved_reference_plane = float(reference_plane)
+                resolved_reference_plane = _fixed_reference_plane(reference_plane)
                 if not math.isfinite(resolved_reference_plane):
                     raise ValueError(
                         f"TerminalPort {resolved_name!r} reference_plane must be finite."
@@ -382,6 +439,11 @@ class TerminalPort:
         object.__setattr__(self, "_positive", None)
         object.__setattr__(self, "_negative", None)
         object.__setattr__(self, "_current_surface", None)
+        object.__setattr__(self, "_declared_current_surface", current_surface)
+        object.__setattr__(self, "voltage_aperture", voltage_aperture)
+        object.__setattr__(self, "_terminal_audit", {})
+        object.__setattr__(self, "_positive_roundoff", ())
+        object.__setattr__(self, "_negative_roundoff", ())
 
     @property
     def voltage_path(self) -> AxisPath | None:
@@ -417,6 +479,10 @@ class TerminalPort:
         positive: tuple[float, float, float],
         negative: tuple[float, float, float],
         current_surface: Box,
+        positive_roundoff=(),
+        negative_roundoff=(),
+        current_bound_roundoff=(),
+        terminal_audit=None,
     ) -> "TerminalPort":
         resolved = TerminalPort(
             self.name,
@@ -427,128 +493,26 @@ class TerminalPort:
             reference_impedance=self.reference_impedance,
             termination=self.termination,
             wire_binding=self.wire_binding,
+            current_surface=self._declared_current_surface,
+            voltage_aperture=self.voltage_aperture,
         )
+        object.__setattr__(resolved, "_terminal_audit", dict(terminal_audit or {}))
         object.__setattr__(resolved, "_positive", positive)
         object.__setattr__(resolved, "_negative", negative)
         object.__setattr__(resolved, "_current_surface", current_surface)
+        object.__setattr__(resolved, "_current_bound_roundoff", current_bound_roundoff)
+        object.__setattr__(resolved, "_positive_roundoff", positive_roundoff)
+        object.__setattr__(resolved, "_negative_roundoff", negative_roundoff)
         return resolved
 
 
 def _resolve_terminal_port(port: TerminalPort, structures, domain_bounds) -> TerminalPort:
-    """Resolve the v1 terminal geometry without performing Yee-grid snapping."""
-
-    def fail(message: str):
-        raise ValueError(f"TerminalPort {port.name!r}: {message}")
-
-    def find_structure(terminal: TerminalRef, label: str):
-        matches = [
-            structure
-            for structure in structures
-            if getattr(structure, "name", None) == terminal.structure_name
-        ]
-        if not matches:
-            fail(f"{label} terminal structure {terminal.structure_name!r} does not exist.")
-        if len(matches) != 1:
-            fail(
-                f"{label} terminal structure name {terminal.structure_name!r} is not unique."
-            )
-        structure = matches[0]
-        if not bool(getattr(structure, "enabled", True)):
-            fail(f"{label} terminal structure {terminal.structure_name!r} is disabled.")
-        if not isinstance(getattr(structure, "geometry", None), Box):
-            fail(f"{label} terminal structure {terminal.structure_name!r} must use a Box geometry.")
-        if not bool(getattr(getattr(structure, "material", None), "is_pec", False)):
-            fail(f"{label} terminal structure {terminal.structure_name!r} must be PEC.")
-        return structure
-
-    positive_structure = find_structure(port.positive_terminal, "positive")
-    negative_structure = find_structure(port.negative_terminal, "negative")
-
-    positions = []
-    sizes = []
-    domain_scale = max(
-        1.0,
-        *(abs(float(value)) for bounds in domain_bounds for value in bounds),
-    )
-    tolerance = 1.0e-12 * domain_scale
-    identity = torch.tensor((1.0, 0.0, 0.0, 0.0), dtype=torch.float64)
-    for label, structure in (
-        ("positive", positive_structure),
-        ("negative", negative_structure),
-    ):
-        geometry = structure.geometry
-        rotation = torch.as_tensor(geometry.rotation).detach().cpu().to(dtype=torch.float64)
-        if not torch.allclose(rotation, identity, rtol=0.0, atol=1.0e-12):
-            fail(
-                f"{label} terminal structure {structure.name!r} must be an unrotated axis-aligned Box."
-            )
-        position = torch.as_tensor(geometry.position).detach().cpu().to(dtype=torch.float64)
-        size = torch.as_tensor(geometry.size).detach().cpu().to(dtype=torch.float64)
-        if not bool(torch.all(torch.isfinite(position))) or not bool(torch.all(torch.isfinite(size))):
-            fail(f"{label} terminal structure {structure.name!r} must have finite Box geometry.")
-        if not bool(torch.all(size > 0.0)):
-            fail(f"{label} terminal structure {structure.name!r} must have positive Box extents.")
-        lower = position - 0.5 * size
-        upper = position + 0.5 * size
-        for axis, axis_lower, axis_upper, bounds in zip("xyz", lower, upper, domain_bounds):
-            domain_lower, domain_upper = (float(value) for value in bounds)
-            if float(axis_lower) < domain_lower - tolerance or float(axis_upper) > domain_upper + tolerance:
-                fail(
-                    f"{label} terminal structure {structure.name!r} lies outside the Scene domain along {axis}."
-                )
-        positions.append(position)
-        sizes.append(size)
-
-    positive_lower = positions[0] - 0.5 * sizes[0]
-    positive_upper = positions[0] + 0.5 * sizes[0]
-    negative_lower = positions[1] - 0.5 * sizes[1]
-    negative_upper = positions[1] + 0.5 * sizes[1]
-    axis_index = "xyz".index(port.integration_path.axis)
-
-    overlap_lower = torch.maximum(positive_lower, negative_lower)
-    overlap_upper = torch.minimum(positive_upper, negative_upper)
-    for transverse_index in range(3):
-        if transverse_index == axis_index:
-            continue
-        if float(overlap_upper[transverse_index] - overlap_lower[transverse_index]) <= tolerance:
-            fail("terminal transverse footprints do not overlap.")
-
-    positive_axis_lower = float(positive_lower[axis_index])
-    positive_axis_upper = float(positive_upper[axis_index])
-    negative_axis_lower = float(negative_lower[axis_index])
-    negative_axis_upper = float(negative_upper[axis_index])
-    if negative_axis_upper < positive_axis_lower - tolerance:
-        negative_axis_coordinate = negative_axis_upper
-        positive_axis_coordinate = positive_axis_lower
-    elif positive_axis_upper < negative_axis_lower - tolerance:
-        positive_axis_coordinate = positive_axis_upper
-        negative_axis_coordinate = negative_axis_lower
-    else:
-        fail(
-            f"terminal surfaces are not distinct facing faces along AxisPath({port.integration_path.axis!r})."
-        )
-
-    path_lower, path_upper = sorted((negative_axis_coordinate, positive_axis_coordinate))
-    if not path_lower + tolerance < port.reference_plane < path_upper - tolerance:
-        fail("reference_plane must lie strictly between the two facing terminal surfaces.")
-
-    overlap_center = 0.5 * (overlap_lower + overlap_upper)
-    positive = overlap_center.clone()
-    negative = overlap_center.clone()
-    positive[axis_index] = positive_axis_coordinate
-    negative[axis_index] = negative_axis_coordinate
-    surface_position = overlap_center.clone()
-    surface_position[axis_index] = port.reference_plane
-    surface_size = overlap_upper - overlap_lower
-    surface_size[axis_index] = 0.0
-    return port._with_resolved_geometry(
-        positive=tuple(float(value) for value in positive),
-        negative=tuple(float(value) for value in negative),
-        current_surface=Box(
-            position=tuple(float(value) for value in surface_position),
-            size=tuple(float(value) for value in surface_size),
-        ),
-    )
+    """Resolve fixed conductor support, including real polygon holes and contacts."""
+    from .geometry.terminal_support import resolve_named_terminals
+    try:
+        return port._with_resolved_geometry(**resolve_named_terminals(port,structures,domain_bounds))
+    except (TypeError,ValueError,NotImplementedError) as error:
+        raise type(error)(f"TerminalPort {port.name!r}: {error}") from error
 
 
 _WAVE_MODE_FAMILIES = {"tem", "te", "tm", "hybrid"}
@@ -607,11 +571,18 @@ class WaveModeSpec:
     """Select one RF waveguide mode and freeze its impedance definition.
 
     TEM and hybrid voltage/current definitions use peak phasors. The voltage
-    path is ordered ``(negative_point, positive_point)``. Its current contour
-    is the right-hand circulation around a planar, unrotated ``Box``.
+    path is ordered ``(start_point, end_point)`` and voltage is the signed
+    integral of E along that arrow. Choose its direction consistently with
+    the right-hand current circulation about the propagation axis, so a
+    passive forward mode has positive real V/I (typically signal to ground).
+    The current contour is a planar, unrotated ``Box``. ``conductor_model``
+    defaults to exact ideal-conductor geometry. Explicit ``"good_conductor"``
+    enables a controlled first-order finite-foil expansion with PEC-limit launch
+    fields; its applicability and approximation indicators ride in run metadata.
     """
 
     family: str
+    conductor_model: str | None
     mode_index: int
     name: str
     impedance_definition: str
@@ -622,6 +593,7 @@ class WaveModeSpec:
         tuple[float, float, float],
     ] | None = None
     current_contour: Box | None = None
+    _voltage_roundoff: tuple = field(default=(), init=False, repr=False, compare=False)
 
     def __init__(
         self,
@@ -633,6 +605,7 @@ class WaveModeSpec:
         impedance_definition=None,
         voltage_path=None,
         current_contour=None,
+        conductor_model=None,
     ):
         resolved_family = str(family).strip().lower()
         if resolved_family not in _WAVE_MODE_FAMILIES:
@@ -700,6 +673,11 @@ class WaveModeSpec:
                     f"WaveModeSpec hybrid {resolved_definition!r} requires current_contour."
                 )
 
+        if conductor_model not in (None,"good_conductor"):
+            raise ValueError("WaveModeSpec conductor_model must be None or 'good_conductor'.")
+        if conductor_model is not None and resolved_family != "tem":
+            raise ValueError("WaveModeSpec good_conductor requires family='tem'.")
+        object.__setattr__(self,"conductor_model",conductor_model)
         object.__setattr__(self, "family", resolved_family)
         object.__setattr__(self, "mode_index", resolved_index)
         object.__setattr__(self, "name", resolved_name)
@@ -711,6 +689,7 @@ class WaveModeSpec:
         )
         object.__setattr__(self, "polarization", resolved_polarization)
         object.__setattr__(self, "voltage_path", resolved_voltage_path)
+        object.__setattr__(self, "_voltage_roundoff", () if voltage_path is None else tuple(_coordinate_roundoff(point) for point in voltage_path))
         object.__setattr__(self, "current_contour", current_contour)
 
 
@@ -726,6 +705,9 @@ class WavePort:
     modes: tuple[WaveModeSpec, ...]
     normal_axis: str
     direction_sign: int
+    _position_roundoff: tuple = field(default=(), init=False, repr=False, compare=False)
+    _size_roundoff: tuple = field(default=(), init=False, repr=False, compare=False)
+    _reference_roundoff: float = field(default=0., init=False, repr=False, compare=False)
     kind: str = "wave_port"
     phasor_convention: str = "peak"
     power_convention: str = "0.5*Re(V*conj(I))"
@@ -768,7 +750,7 @@ class WavePort:
         except ValueError as error:
             raise ValueError(f"WavePort {resolved_name!r} direction must be '+' or '-'.") from error
         try:
-            resolved_reference_plane = float(reference_plane)
+            resolved_reference_plane = _fixed_reference_plane(reference_plane)
         except (TypeError, ValueError) as error:
             raise type(error)(
                 f"WavePort {resolved_name!r} reference_plane must be a real scalar."
@@ -776,7 +758,8 @@ class WavePort:
         if not math.isfinite(resolved_reference_plane):
             raise ValueError(f"WavePort {resolved_name!r} reference_plane must be finite.")
         normal_position = resolved_position[normal_index]
-        tolerance = 1.0e-12 * max(1.0, abs(normal_position), abs(resolved_reference_plane))
+        tolerance = (1.0e-12 * max(1.0, abs(normal_position), abs(resolved_reference_plane))
+                     + _coordinate_roundoff(position)[normal_index] + _coordinate_roundoff((reference_plane,))[0])
         if not math.isclose(
             normal_position,
             resolved_reference_plane,
@@ -816,6 +799,9 @@ class WavePort:
                     f"WavePort {resolved_name!r} mode {mode.name!r} polarization: {error}"
                 ) from error
         object.__setattr__(self, "name", resolved_name)
+        object.__setattr__(self, "_position_roundoff", _coordinate_roundoff(position))
+        object.__setattr__(self, "_size_roundoff", _coordinate_roundoff(size))
+        object.__setattr__(self, "_reference_roundoff", _coordinate_roundoff((reference_plane,))[0])
         object.__setattr__(self, "position", resolved_position)
         object.__setattr__(self, "size", resolved_size)
         object.__setattr__(self, "direction", resolved_direction)
@@ -831,6 +817,308 @@ class WavePort:
         if mode not in self.modes:
             raise ValueError(f"WaveModeSpec {mode.name!r} is not declared by WavePort {self.name!r}.")
         return f"{self.name}::{mode.name}"
+
+
+_TERMINAL_IMPEDANCE_DEFINITIONS = {
+    "power_voltage": "Zc = V V^H / (2 P)",
+    "power_current": "Zc = 2 P (I I^H)^-1",
+    "voltage_current": "Zc = V I^-1",
+}
+
+
+def _normalize_wave_aperture(label, name, position, size, direction, reference_plane):
+    """Validate one planar axis-aligned modal aperture (shared by terminal wave ports)."""
+    resolved_position = _require_length3("position", position)
+    resolved_size = _require_length3("size", size)
+    if any(not math.isfinite(value) for value in (*resolved_position, *resolved_size)):
+        raise ValueError(f"{label} {name!r} position and size must be finite.")
+    if any(value < 0.0 for value in resolved_size):
+        raise ValueError(f"{label} {name!r} size components must be >= 0.")
+    zero_indices = [
+        index for index, value in enumerate(resolved_size)
+        if math.isclose(value, 0.0, rel_tol=0.0, abs_tol=1.0e-12)
+    ]
+    if len(zero_indices) != 1:
+        raise ValueError(f"{label} {name!r} size must contain exactly one zero component.")
+    normal_index = zero_indices[0]
+    normalized_size = list(resolved_size)
+    normalized_size[normal_index] = 0.0
+    if any(value <= 0.0 for index, value in enumerate(normalized_size) if index != normal_index):
+        raise ValueError(f"{label} {name!r} tangential size components must be positive.")
+    try:
+        resolved_direction = _normalize_mode_direction(direction)
+    except ValueError as error:
+        raise ValueError(f"{label} {name!r} direction must be '+' or '-'.") from error
+    try:
+        resolved_reference_plane = _fixed_reference_plane(reference_plane)
+    except (TypeError, ValueError) as error:
+        raise type(error)(f"{label} {name!r} reference_plane must be a real scalar.") from error
+    if not math.isfinite(resolved_reference_plane):
+        raise ValueError(f"{label} {name!r} reference_plane must be finite.")
+    normal_position = resolved_position[normal_index]
+    tolerance = (1.0e-12 * max(1.0, abs(normal_position), abs(resolved_reference_plane))
+                 + _coordinate_roundoff(position)[normal_index] + _coordinate_roundoff((reference_plane,))[0])
+    if not math.isclose(normal_position, resolved_reference_plane, rel_tol=0.0, abs_tol=tolerance):
+        raise ValueError(f"{label} {name!r} reference_plane must equal the aperture plane.")
+    return resolved_position, tuple(normalized_size), resolved_direction, resolved_reference_plane, normal_index
+
+
+def _normalize_terminal_refs(label, name, value, *, role):
+    refs = (value,) if isinstance(value, TerminalRef) else value
+    try:
+        refs = tuple(refs)
+    except TypeError as error:
+        raise TypeError(f"{label} {name!r} {role} must be TerminalRef entries.") from error
+    if not refs or any(not isinstance(ref, TerminalRef) for ref in refs):
+        raise TypeError(f"{label} {name!r} {role} must be one or more TerminalRef entries.")
+    if len(set(refs)) != len(refs):
+        raise ValueError(f"{label} {name!r} {role} must reference distinct structures.")
+    return refs
+
+
+def _normalize_reference_impedance_matrix(label, name, value, count):
+    """Return an ``N x N`` reference-impedance matrix as nested Python numbers.
+
+    A scalar or length-N value is the diagonal special case. A full matrix couples
+    terminals (for example the terminal-basis image of differential/common
+    references) and must then be real, symmetric and positive definite so the
+    generalized power waves conserve power.
+    """
+    require_fixed_input(value, name=f"{label} reference_impedance")
+    raw = value.detach().cpu().numpy() if torch.is_tensor(value) else value
+    array = np.asarray(raw, dtype=np.complex128)
+    if array.ndim == 0:
+        matrix = np.diag(np.full(count, complex(array)))
+    elif array.shape == (count,):
+        matrix = np.diag(array)
+    elif array.shape == (count, count):
+        matrix = array.copy()
+    else:
+        raise ValueError(
+            f"{label} {name!r} reference_impedance must be a scalar, a length-{count} "
+            f"vector or a {count}x{count} matrix."
+        )
+    if not bool(np.all(np.isfinite(matrix))):
+        raise ValueError(f"{label} {name!r} reference_impedance must be finite.")
+    if not bool(np.all(np.real(np.diag(matrix)) > 0.0)):
+        raise ValueError(f"{label} {name!r} reference_impedance diagonal real parts must be positive.")
+    off_diagonal = matrix - np.diag(np.diag(matrix))
+    if bool(np.any(off_diagonal != 0.0)):
+        if bool(np.any(np.imag(matrix) != 0.0)):
+            raise ValueError(
+                f"{label} {name!r} a coupled (non-diagonal) reference_impedance matrix must be real."
+            )
+        real = np.real(matrix)
+        if not np.allclose(real, real.T, rtol=1.0e-12, atol=0.0):
+            raise ValueError(f"{label} {name!r} reference_impedance matrix must be symmetric.")
+        if not bool(np.all(np.linalg.eigvalsh(.5 * (real + real.T)) > 0.0)):
+            raise ValueError(f"{label} {name!r} reference_impedance matrix must be positive definite.")
+    return tuple(
+        tuple(float(item.real) if item.imag == 0.0 else complex(item) for item in row)
+        for row in matrix
+    )
+
+
+@dataclass(frozen=True)
+class TerminalWavePort:
+    """Declare a multi-conductor quasi-TEM wave port between named conductors.
+
+    ``terminals`` are the N signal conductors and ``reference`` the return
+    conductor(s); every conductor crossing the aperture must be one of them, and
+    the aperture boundary is grounded. The port solves the quasi-static terminal
+    capacitance matrices ``C`` / ``C0`` of the cross-section, launches the N
+    quasi-TEM modes of ``C v = eps_eff C0 v`` (``L = mu0 eps0 C0^-1``) as modal
+    fields, and recovers terminal voltages/currents from the modal amplitudes.
+
+    ``voltage_integrals[k]`` (``CustomVoltageIntegral`` / ``CompositeVoltageIntegral``)
+    defines terminal ``k``'s voltage on the actual mode field; declare each path
+    from the terminal to the reference. A default path is resolved only for one
+    signal over one reference conductor that are separated along exactly one
+    tangential axis and overlap along the other (microstrip, stripline half): the
+    straight segment from the signal surface to the reference surface through the
+    centre of the footprint overlap, snapped to the nearest Yee node. CPW, multiple
+    references and multiple terminals require explicit paths.
+
+    ``impedance_definition`` fixes the characteristic matrix from the actual mode
+    field: ``"power_voltage"`` (default, ``Zc = V V^H / 2`` per unit modal power),
+    ``"power_current"`` (needs ``current_integrals``) or ``"voltage_current"``
+    (needs both). The quasi-TEM ``C``/``C0`` impedance is reported as a cross-check.
+
+    ``basis="terminal"`` exposes channels ``"<port>::T<k>"`` (1-based) normalized
+    to ``reference_impedance`` (scalar, per-terminal vector or a full real
+    symmetric positive-definite matrix). ``basis="modal"`` exposes channels
+    ``"<port>::M<m>"`` as tracked one-watt modal power waves.
+    """
+
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    direction: str
+    reference_plane: float
+    terminals: tuple[TerminalRef, ...]
+    reference: tuple[TerminalRef, ...]
+    voltage_integrals: tuple | None
+    current_integrals: tuple | None
+    basis: str
+    reference_impedance: tuple | None
+    impedance_definition: str
+    conductor_model: str | None
+    normal_axis: str
+    direction_sign: int
+    _position_roundoff: tuple = field(default=(), init=False, repr=False, compare=False)
+    _size_roundoff: tuple = field(default=(), init=False, repr=False, compare=False)
+    _reference_roundoff: float = field(default=0., init=False, repr=False, compare=False)
+    _default_voltage_path: dict | None = field(default=None, init=False, repr=False, compare=False)
+    kind: str = "terminal_wave_port"
+    phasor_convention: str = "peak"
+    power_convention: str = "0.5*Re(V*conj(I))"
+
+    def __init__(
+        self,
+        name,
+        position,
+        size,
+        direction,
+        reference_plane,
+        terminals,
+        reference,
+        *,
+        voltage_integrals=None,
+        current_integrals=None,
+        basis="terminal",
+        reference_impedance=None,
+        impedance_definition="power_voltage",
+        conductor_model=None,
+    ):
+        from .path_integrals import CURRENT_INTEGRAL_TYPES, VOLTAGE_INTEGRAL_TYPES
+
+        label = "TerminalWavePort"
+        resolved_name = str(name).strip()
+        if not resolved_name:
+            raise ValueError("TerminalWavePort name must not be empty.")
+        if "::" in resolved_name:
+            raise ValueError("TerminalWavePort name must not contain the reserved '::' separator.")
+        position_value, size_value, direction_value, plane_value, normal_index = _normalize_wave_aperture(
+            label, resolved_name, position, size, direction, reference_plane)
+        terminal_refs = _normalize_terminal_refs(label, resolved_name, terminals, role="terminals")
+        reference_refs = _normalize_terminal_refs(label, resolved_name, reference, role="reference")
+        if set(terminal_refs) & set(reference_refs):
+            raise ValueError(f"{label} {resolved_name!r} terminals and reference must be distinct structures.")
+        count = len(terminal_refs)
+
+        def integrals(value, allowed, role):
+            if value is None:
+                return None
+            try:
+                resolved = tuple(value)
+            except TypeError as error:
+                raise TypeError(f"{label} {resolved_name!r} {role} must be a sequence.") from error
+            if len(resolved) != count:
+                raise ValueError(f"{label} {resolved_name!r} {role} must contain one entry per terminal.")
+            if any(not isinstance(item, allowed) for item in resolved):
+                raise TypeError(
+                    f"{label} {resolved_name!r} {role} entries must be "
+                    f"{' or '.join(kind.__name__ for kind in allowed)}."
+                )
+            return resolved
+
+        voltage_value = integrals(voltage_integrals, VOLTAGE_INTEGRAL_TYPES, "voltage_integrals")
+        current_value = integrals(current_integrals, CURRENT_INTEGRAL_TYPES, "current_integrals")
+        definition = str(impedance_definition).strip().lower()
+        if definition not in _TERMINAL_IMPEDANCE_DEFINITIONS:
+            raise ValueError(
+                f"{label} {resolved_name!r} impedance_definition must be 'power_voltage', "
+                "'power_current' or 'voltage_current'."
+            )
+        if definition in {"power_current", "voltage_current"} and current_value is None:
+            raise ValueError(f"{label} {resolved_name!r} {definition!r} requires current_integrals.")
+        if voltage_value is None and (count != 1 or len(reference_refs) != 1):
+            raise ValueError(
+                f"{label} {resolved_name!r} has {count} terminal(s) and {len(reference_refs)} "
+                "reference conductor(s); a default voltage path is defined only for one signal "
+                "over one reference. Supply explicit voltage_integrals (a polyline per terminal "
+                "for CPW and multi-ground lines)."
+            )
+        if definition == "voltage_current" and voltage_value is None:
+            raise ValueError(f"{label} {resolved_name!r} 'voltage_current' requires voltage_integrals.")
+        resolved_basis = str(basis).strip().lower()
+        if resolved_basis not in {"terminal", "modal"}:
+            raise ValueError(f"{label} {resolved_name!r} basis must be 'terminal' or 'modal'.")
+        if resolved_basis == "modal":
+            if reference_impedance is not None:
+                raise ValueError(
+                    f"{label} {resolved_name!r} modal basis channels are one-watt modal power "
+                    "waves; reference_impedance applies to the terminal basis only."
+                )
+            impedance_value = None
+        elif isinstance(reference_impedance, str):
+            if reference_impedance.strip().lower() != "characteristic":
+                raise ValueError(
+                    f"{label} {resolved_name!r} reference_impedance string must be 'characteristic'."
+                )
+            impedance_value = "characteristic"
+        else:
+            impedance_value = _normalize_reference_impedance_matrix(
+                label, resolved_name, 50.0 if reference_impedance is None else reference_impedance, count)
+        if conductor_model not in (None, "good_conductor"):
+            raise ValueError(f"{label} {resolved_name!r} conductor_model must be None or 'good_conductor'.")
+
+        object.__setattr__(self, "name", resolved_name)
+        object.__setattr__(self, "position", position_value)
+        object.__setattr__(self, "size", size_value)
+        object.__setattr__(self, "direction", direction_value)
+        object.__setattr__(self, "reference_plane", plane_value)
+        object.__setattr__(self, "terminals", terminal_refs)
+        object.__setattr__(self, "reference", reference_refs)
+        object.__setattr__(self, "voltage_integrals", voltage_value)
+        object.__setattr__(self, "current_integrals", current_value)
+        object.__setattr__(self, "basis", resolved_basis)
+        object.__setattr__(self, "reference_impedance", impedance_value)
+        object.__setattr__(self, "impedance_definition", definition)
+        object.__setattr__(self, "conductor_model", conductor_model)
+        object.__setattr__(self, "normal_axis", "xyz"[normal_index])
+        object.__setattr__(self, "direction_sign", 1 if direction_value == "+" else -1)
+        object.__setattr__(self, "_position_roundoff", _coordinate_roundoff(position))
+        object.__setattr__(self, "_size_roundoff", _coordinate_roundoff(size))
+        object.__setattr__(self, "_reference_roundoff", _coordinate_roundoff((reference_plane,))[0])
+        object.__setattr__(self, "_default_voltage_path", None)
+        object.__setattr__(self, "kind", "terminal_wave_port")
+        object.__setattr__(self, "phasor_convention", "peak")
+        object.__setattr__(self, "power_convention", "0.5*Re(V*conj(I))")
+
+    @property
+    def terminal_count(self) -> int:
+        return len(self.terminals)
+
+    @property
+    def channel_names(self) -> tuple[str, ...]:
+        prefix = "T" if self.basis == "terminal" else "M"
+        return tuple(f"{self.name}::{prefix}{index + 1}" for index in range(self.terminal_count))
+
+    @property
+    def mode_names(self) -> tuple[str, ...]:
+        return tuple(f"M{index + 1}" for index in range(self.terminal_count))
+
+    @property
+    def terminal_names(self) -> tuple[str, ...]:
+        return tuple(f"T{index + 1}" for index in range(self.terminal_count))
+
+    def _with_default_voltage_path(self, record) -> "TerminalWavePort":
+        resolved = copy.copy(self)
+        object.__setattr__(resolved, "_default_voltage_path", dict(record))
+        return resolved
+
+
+def _resolve_terminal_wave_port(port: TerminalWavePort, structures) -> TerminalWavePort:
+    """Check conductor support and resolve the documented default voltage path."""
+    from .geometry.terminal_support import resolve_wave_terminal_default_path, wave_terminal_supports
+    try:
+        wave_terminal_supports(port, structures)
+        if port.voltage_integrals is not None:
+            return port
+        return port._with_default_voltage_path(resolve_wave_terminal_default_path(port, structures))
+    except (TypeError, ValueError, NotImplementedError) as error:
+        raise type(error)(f"TerminalWavePort {port.name!r}: {error}") from error
 
 
 @dataclass(frozen=True)
@@ -930,3 +1218,163 @@ class ModePort:
             bend_radius=self.bend_radius,
             bend_axis=self.bend_axis,
         )
+
+
+@dataclass(frozen=True)
+class CoaxialLumpedPort:
+    """Annular lumped port between two concentric circles on a Yee node plane.
+
+    The port surface is the annulus ``inner_diameter / 2 < r < outer_diameter / 2``
+    in the plane normal to ``normal_axis`` through ``center``; that plane must be
+    a primal Yee node plane. The excitation is one radial current ``I`` with
+    surface density ``I / (2 pi r)``. The power-dual voltage ``V`` is the
+    azimuthal mean of the inner-to-outer radial line integral of E, which equals
+    the radial line voltage of a TEM coaxial field. Driven or terminated ports
+    report the coupled branch current entering the field network; a passive
+    observer port reports the H circulation around the inner conductor on the
+    ``direction`` side of the plane. Phasors are peak-valued and average power
+    is ``0.5 * Re(V * conj(I))``. Only series terminations are supported.
+    """
+
+    name: str
+    center: tuple[float, float, float]
+    inner_diameter: float
+    outer_diameter: float
+    normal_axis: str
+    direction: str
+    reference_impedance: complex | float | torch.Tensor
+    reference_plane: float | None = None
+    termination: SeriesRLC | None = None
+    kind: str = "coaxial_lumped_port"
+    phasor_convention: str = "peak"
+    power_convention: str = "0.5*Re(V*conj(I))"
+    _center_roundoff: tuple[float, ...] = field(default=(), init=False, repr=False, compare=False)
+
+    def __init__(
+        self,
+        name,
+        *,
+        center,
+        inner_diameter,
+        outer_diameter,
+        normal_axis,
+        direction="+",
+        reference_impedance=50.0,
+        reference_plane=None,
+        termination=None,
+    ):
+        from .lumped import _coaxial_annulus
+
+        resolved = _coaxial_annulus(
+            "CoaxialLumpedPort", name, center, inner_diameter, outer_diameter, normal_axis
+        )
+        try:
+            resolved_direction = _normalize_mode_direction(direction)
+        except ValueError as error:
+            raise ValueError(f"CoaxialLumpedPort {resolved[0]!r} direction must be '+' or '-'.") from error
+        if termination is not None and not isinstance(termination, SeriesRLC):
+            raise TypeError(
+                f"CoaxialLumpedPort {resolved[0]!r} termination must be a SeriesRLC or None."
+            )
+        object.__setattr__(self, "name", resolved[0])
+        object.__setattr__(self, "center", resolved[1])
+        object.__setattr__(self, "_center_roundoff", _coordinate_roundoff(center))
+        object.__setattr__(self, "inner_diameter", resolved[2])
+        object.__setattr__(self, "outer_diameter", resolved[3])
+        object.__setattr__(self, "normal_axis", resolved[4])
+        object.__setattr__(self, "direction", resolved_direction)
+        object.__setattr__(self, "reference_impedance", _normalize_reference_impedance(reference_impedance))
+        object.__setattr__(
+            self,
+            "reference_plane",
+            None if reference_plane is None else _fixed_reference_plane(reference_plane),
+        )
+        object.__setattr__(self, "termination", termination)
+        object.__setattr__(self, "kind", "coaxial_lumped_port")
+        object.__setattr__(self, "phasor_convention", "peak")
+        object.__setattr__(self, "power_convention", "0.5*Re(V*conj(I))")
+
+    @property
+    def direction_sign(self) -> int:
+        return 1 if self.direction == "+" else -1
+
+
+@dataclass(frozen=True)
+class PECFrame:
+    """Thin PEC frame around a modal injection aperture.
+
+    The frame is the four tangential side walls of the snapped aperture
+    rectangle, each an ideal zero-thickness :class:`PlanarPEC` sheet on a Yee
+    node plane, extending ``length`` primal cells from the aperture plane in the
+    injection direction. It matches a cross-section mode solved with PEC
+    aperture walls, so the launched field has no unsupported tangential E at the
+    aperture edge. ``structures`` materializes the frame for a declared
+    :class:`WavePort`, :class:`ModePort` or :class:`ModeSource`; add the returned
+    structures to the scene with ``Scene.add_structure``.
+    """
+
+    length: int = 2
+    kind: str = "pec_frame"
+
+    def __init__(self, length=2):
+        if isinstance(length, bool) or not isinstance(length, int):
+            raise TypeError("PECFrame length must be a positive integer number of cells.")
+        if length <= 0:
+            raise ValueError("PECFrame length must be a positive integer number of cells.")
+        object.__setattr__(self, "length", int(length))
+        object.__setattr__(self, "kind", "pec_frame")
+
+    def structures(self, port, scene) -> tuple:
+        """Return the named PlanarPEC wall structures for ``port`` on ``scene``'s grid."""
+        from witwin.core import Structure
+
+        from .compiler.ports import _snap_index
+        from .geometry.planar_pec import PlanarPEC
+        from .media import Material
+        from .scene import prepare_scene
+
+        name = getattr(port, "name", None)
+        position = getattr(port, "position", None)
+        size = getattr(port, "size", None)
+        direction = getattr(port, "direction", None)
+        if name is None or position is None or size is None or direction not in ("+", "-"):
+            raise TypeError("PECFrame requires a WavePort, ModePort or ModeSource with position, size and direction.")
+        position = _require_length3("position", position)
+        size = _require_length3("size", size)
+        zero = [index for index, value in enumerate(size) if value == 0.0]
+        if len(zero) != 1:
+            raise ValueError(f"PECFrame target {name!r} must be a planar aperture with one zero size component.")
+        normal = zero[0]
+        prepared = prepare_scene(scene)
+        nodes = [np.asarray(getattr(prepared, f"{axis}_nodes64"), dtype=np.float64) for axis in "xyz"]
+        plane = _snap_index(nodes[normal], position[normal], label=f"{'xyz'[normal]} PECFrame aperture plane")
+        sign = 1 if direction == "+" else -1
+        far = plane + sign * self.length
+        if not 0 <= far < nodes[normal].size:
+            raise ValueError(f"PECFrame of length {self.length} around {name!r} leaves the grid along {'xyz'[normal]}.")
+        normal_bounds = sorted((float(nodes[normal][plane]), float(nodes[normal][far])))
+        bounds = {}
+        for axis in range(3):
+            if axis == normal:
+                continue
+            lower = _snap_index(nodes[axis], position[axis] - 0.5 * size[axis],
+                                label=f"{'xyz'[axis]} PECFrame aperture lower bound")
+            upper = _snap_index(nodes[axis], position[axis] + 0.5 * size[axis],
+                                label=f"{'xyz'[axis]} PECFrame aperture upper bound")
+            bounds[axis] = (float(nodes[axis][lower]), float(nodes[axis][upper]))
+        result = []
+        for wall_axis in bounds:
+            other = next(axis for axis in bounds if axis != wall_axis)
+            extents = {other: bounds[other], normal: tuple(normal_bounds)}
+            first, second = sorted(extents)
+            (a0, a1), (b0, b1) = extents[first], extents[second]
+            vertices = ((a0, b0), (a1, b0), (a1, b1), (a0, b1))
+            for side, coordinate in zip(("-", "+"), bounds[wall_axis]):
+                result.append(Structure(
+                    PlanarPEC(vertices, normal_axis="xyz"[wall_axis], coordinate=coordinate),
+                    Material.pec(),
+                    name=f"{name}::pec_frame::{'xyz'[wall_axis]}{side}",
+                    tags=("pec_frame",),
+                    metadata={"pec_frame": {"port": name, "length": self.length, "direction": direction}},
+                ))
+        return tuple(result)

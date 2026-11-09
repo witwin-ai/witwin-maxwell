@@ -102,6 +102,7 @@ def _standard_scene(density, *, source_x, monitor_x, device):
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.custom(x, y, z),
         boundary=mw.BoundarySpec.none(),
@@ -130,6 +131,7 @@ def _cpml_scene(density, *, source_x, monitor_x, device):
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.custom(x, y, z),
         boundary=mw.BoundarySpec.pml(num_layers=4),

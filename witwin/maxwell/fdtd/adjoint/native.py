@@ -10,7 +10,8 @@ inside the compiled kernels.
 The mid-step magnetic field is still reconstructed with the shared Torch replay
 helper (``_forward_magnetic_fields`` / ``_forward_magnetic_fields_complex`` for the
 complex split-field Bloch runner); nativizing that replay is tracked separately
-under the native-replay work. The reverse *math* itself is fully native here.
+under the native-replay work. The fused runners below perform native reverse math. The joint linear material
+specialization is registered separately and uses GPU PyTorch autograd.
 """
 
 from __future__ import annotations
@@ -1036,7 +1037,7 @@ def _reverse_step_kerr_native(
     grad_eps / grad_chi3 coefficient sensitivities and emit the per-edge ``|E|^2``
     cotangent ``g_fsq``, while folding curl(H) into the mid-step H adjoint; (3) the
     linear CPML magnetic reverse (the Kerr term is electric-only); and (4) the
-    shared ``collocation_transpose`` scattering ``g_fsq`` back onto the pre-step
+    shared ``collocation_transpose`` gathering ``g_fsq`` back onto the pre-step
     fields. Launch order is load-bearing: the electric kernels *assign* the pre-step
     E adjoint before the magnetic forward-diff folds and the collocation transpose
     *accumulate* onto it, and all three electric kernels (and their curl(H) folds)
@@ -1210,7 +1211,7 @@ def _reverse_step_kerr_native(
     # Phase 2: linear CPML magnetic reverse (the Kerr term is electric-only).
     _reverse_cpml_magnetic_phase_native(solver, ctx, adjoint_state)
 
-    # Phase 3: scatter the |E|^2 cotangent back onto the pre-step fields (the exact
+    # Phase 3: gather the |E|^2 cotangent back onto the pre-step fields (the exact
     # transpose of the collocation, own-axis 2*E plus the 4-point off-axis average).
     # It accumulates onto the pre-step E adjoint the electric kernels already
     # assigned and the magnetic folds added, so it runs last.
@@ -1728,6 +1729,7 @@ def _reverse_step_mixed_bloch_cpml_native(
         solver, forward_state, time_value=time_value,
         eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez,
         capture_magnetic=captured,
+        resolved_source_terms=resolved_source_terms,
     )
     magnetic_fields = {name: tensor.contiguous() for name, tensor in captured[0].items()}
     dispersive_state = _adjoint._advance_dispersive_state(solver, forward_state)
@@ -1924,6 +1926,8 @@ def _apply_magnetic_ade_reverse_native(
                 AdjElectricPost=magnetic_output_adjoint[component + suffix],
                 Current=magnetic_state[current], Eps=mu[component], dt=float(solver.dt),
             )
+            _adjoint.accumulate_pole_coefficient_gradients(
+                solver, component, model, index, forward_state, adjoint_state, adj_current, suffix)
             if model == "debye":
                 polarization = _adjoint.dispersive_state_name(
                     component, model, index, "polarization"
@@ -2044,6 +2048,9 @@ def _reverse_step_bloch_dispersive_native(
                 Eps=eps_by_field[component_name],
                 dt=dt,
             )
+            _adjoint.accumulate_pole_coefficient_gradients(
+                solver, component_name, model_name, index, forward_state, adjoint_state,
+                adj_current_corrected, suffix)
             if model_name == "debye":
                 polarization_name = _adjoint.dispersive_state_name(component_name, model_name, index, "polarization") + suffix
                 _cuda_backend._reverse_debye_current(
@@ -2219,6 +2226,9 @@ def _reverse_step_dispersive_native(
             Eps=eps_by_field[component_name],
             dt=dt,
         )
+        _adjoint.accumulate_pole_coefficient_gradients(
+            solver, component_name, model_name, index, forward_state, adjoint_state,
+            adj_current_corrected)
         if model_name == "debye":
             polarization_name = _adjoint.dispersive_state_name(component_name, model_name, index, "polarization")
             _cuda_backend._reverse_debye_current(
@@ -2282,6 +2292,9 @@ def _reverse_step_dispersive_native(
                 Eps=mu_by_field[component_name],
                 dt=dt,
             )
+            _adjoint.accumulate_pole_coefficient_gradients(
+                solver, component_name, model_name, index, forward_state, adjoint_state,
+                adj_current_corrected)
             if model_name == "debye":
                 polarization_name = _adjoint.dispersive_state_name(
                     component_name, model_name, index, "polarization"
@@ -2341,15 +2354,8 @@ def _reverse_step_dispersive_native(
     )
 
 
-def _accumulate_tfsf_sample_adjoint_native(adj_aux, terms, adjoint_fields, *, origin, ds):
-    """Transpose the per-step TFSF incident injection into ``adj_aux`` via kernels.
-
-    Iterates the injection terms exactly like the forward per-term apply, slicing
-    the adjoint of the field the incident patch was written into and launching the
-    matching native sample-adjoint kernel (scalar / line / interpolated). The
-    ``adj_field_patch`` is materialized contiguous so the kernels can index it
-    linearly against the term coefficient patch.
-    """
+def _accumulate_tfsf_sample_adjoint_native(adj_aux, terms, adjoint_fields):
+    """Gather each prepared sample row in cell order; terms retain forward order."""
     for term in terms:
         offset_i, offset_j, offset_k = (int(offset) for offset in term["offsets"])
         coeff_patch = term["coeff_patch"]
@@ -2359,36 +2365,15 @@ def _accumulate_tfsf_sample_adjoint_native(adj_aux, terms, adjoint_fields, *, or
             offset_j : offset_j + shape_j,
             offset_k : offset_k + shape_k,
         ].contiguous()
-        component_scale = float(term["component_scale"])
-        if "sample_positions" in term:
-            _cuda_backend._accumulate_tfsf_interpolated_sample_adjoint(
-                AdjAuxField=adj_aux,
-                AdjFieldPatch=adj_field_patch,
-                CoeffPatch=coeff_patch,
-                SamplePositions=term["sample_positions"],
-                origin=origin,
-                ds=ds,
-                componentScale=component_scale,
-            )
-            continue
-        if term["scalar_sample_index"] is not None:
-            _cuda_backend._accumulate_tfsf_scalar_sample_adjoint(
-                AdjAuxField=adj_aux,
-                AdjFieldPatch=adj_field_patch,
-                CoeffPatch=coeff_patch,
-                sampleIndex=int(term["scalar_sample_index"]),
-                componentScale=component_scale,
-            )
-            continue
-        from ..excitation.tfsf_specs import reference_sample_axis_code
-
-        _cuda_backend._accumulate_tfsf_line_sample_adjoint(
+        offsets, cells, weights = term["adjoint_sample_plan"]
+        _cuda_backend._accumulate_tfsf_sample_adjoint(
             AdjAuxField=adj_aux,
             AdjFieldPatch=adj_field_patch,
             CoeffPatch=coeff_patch,
-            SampleIndices=term["sample_indices"],
-            sampleAxisCode=int(reference_sample_axis_code(term)),
-            componentScale=component_scale,
+            RowOffsets=offsets,
+            CellIndices=cells,
+            Weights=weights,
+            componentScale=float(term["component_scale"]),
         )
 
 
@@ -2421,17 +2406,11 @@ def _reverse_tfsf_auxiliary_state_native(solver, forward_state, adjoint_state, *
     adj_magnetic_prev = torch.empty_like(auxiliary_state["magnetic"])
     adj_magnetic_after = adjoint_state["tfsf_aux_magnetic"].detach().clone()
 
-    ds = float(auxiliary_grid.ds)
-    origin_electric = float(auxiliary_grid.s_min)
-    origin_magnetic = float(auxiliary_grid.s_min + 0.5 * ds)
-
     # (1) Electric incident injection samples the advanced magnetic grid.
     _accumulate_tfsf_sample_adjoint_native(
         adj_magnetic_after,
         tfsf_state.get("electric_terms", ()),
         adjoint_state,
-        origin=origin_magnetic,
-        ds=ds,
     )
     # (2) Electric auxiliary advance reverse.
     _cuda_backend._reverse_tfsf_auxiliary_electric(
@@ -2442,6 +2421,11 @@ def _reverse_tfsf_auxiliary_state_native(solver, forward_state, adjoint_state, *
         ElectricCurl=auxiliary_grid.electric_curl,
         sourceIndex=int(auxiliary_grid.source_index),
     )
+    boundary_grads = None
+    if tfsf_state.get("incident_reference") is not None:
+        j = auxiliary_grid.source_index
+        boundary_grads = tuple(adj_magnetic_after[j - offset].clone() for offset in range(1, j + 1))
+        adj_magnetic_after[:j] = 0
     # (3) Magnetic auxiliary advance reverse.
     _cuda_backend._reverse_tfsf_auxiliary_magnetic(
         AdjElectricPrev=adj_electric_prev,
@@ -2456,9 +2440,10 @@ def _reverse_tfsf_auxiliary_state_native(solver, forward_state, adjoint_state, *
         adj_electric_prev,
         tfsf_state.get("magnetic_terms", ()),
         magnetic_output_adjoint,
-        origin=origin_electric,
-        ds=ds,
     )
+    if boundary_grads is not None:
+        auxiliary_grid.transpose_incident_boundary(
+            adj_electric_prev, adj_magnetic_prev, *boundary_grads)
     return {
         "tfsf_aux_electric": adj_electric_prev,
         "tfsf_aux_magnetic": adj_magnetic_prev,
@@ -2748,6 +2733,11 @@ def _reverse_step_wire_cpml_native(solver, forward_state, adjoint_state, **kwarg
 
 def register_native_reverse_backends() -> None:
     """Register every available native CUDA reverse-step runner."""
+    from .joint_material import reverse_joint_material, qualifies_joint_material
+
+    register_native_reverse_backend(
+        _ReverseBackend.JOINT_MATERIAL, reverse_joint_material, qualifier=qualifies_joint_material,
+    )
     register_native_reverse_backend(
         _ReverseBackend.GENERAL_NONLINEAR,
         _reverse_step_nonlinear_native,

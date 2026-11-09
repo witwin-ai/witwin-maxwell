@@ -107,7 +107,7 @@ def _resolve_continuous_model(
         )
         z0 = block.network.z0
         tolerance = 256.0 * torch.finfo(z0.real.dtype).eps
-        scale = max(float(torch.max(torch.abs(z0)).item()), 1.0)
+        scale = float(torch.max(torch.abs(z0)).item())
         if float(torch.max(torch.abs(z0.imag)).item()) > tolerance * scale:
             raise ValueError("Explicit time-domain delay requires real reference impedances.")
         real_z0 = z0.real

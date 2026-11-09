@@ -44,6 +44,34 @@ def test_general_engines_converge_on_nonsymmetric_system(engine, preconditioned)
 
 
 @requires_cuda
+def test_tfqmr_honors_odd_half_step_budget_and_true_residual():
+    A, b = _manufactured(symmetric=False)
+    x, info = krylov.tfqmr(A, b, tol=1e-12, maxiter=3)
+    assert info == 3
+    assert bool(cp.all(cp.isfinite(x)))
+    assert float(cp.linalg.norm(A @ x - b) / cp.linalg.norm(b)) > 1e-12
+
+
+@requires_cuda
+def test_tfqmr_nonfinite_recurrence_returns_finite_failed_iterate():
+    # The first matvec is finite; the next auxiliary vector overflows. This
+    # models breakdown without permitting NaNs to escape into public fields.
+    calls = 0
+
+    def matvec(v):
+        nonlocal calls
+        calls += 1
+        return cp.arange(1, 9, dtype=cp.float32) * v if calls == 1 else cp.full_like(v, cp.nan)
+
+    b = cp.ones(8, dtype=cp.complex64)
+    A = cpl.LinearOperator((8, 8), matvec=matvec, dtype=b.dtype)
+    x, info = krylov.tfqmr(A, b, maxiter=9)
+    assert info != 0
+    assert bool(cp.all(cp.isfinite(x)))
+    assert float(cp.linalg.norm(x)) > 0.0  # retain the successful first half-step
+
+
+@requires_cuda
 @pytest.mark.parametrize("preconditioned", [False, True])
 def test_sqmr_converges_on_complex_symmetric_system(preconditioned):
     A, b = _manufactured(symmetric=True)
@@ -109,7 +137,7 @@ def test_double_precision_sqmr_ssor_converges_where_single_floors():
     assert stats["final_residual"] < 2e-6
     for name in ("EX", "EY", "EZ"):
         field = double.fields[name]
-        assert field.dtype == torch.complex64  # storage precision unchanged
+        assert field.dtype == torch.complex128  # Requested precision includes returned fields.
         assert torch.isfinite(field.abs()).all()
 
 

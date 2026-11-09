@@ -37,7 +37,7 @@ def test_spectral_observers_apply_the_yee_half_step_stagger():
       - E is advanced to integer steps: E^(n+1) is stored at physical time (n+1)dt.
       - H is advanced to half steps:    H^(n+1/2) is stored at physical time (n+1/2)dt.
     The running-DFT accumulator labels every sample with the plain step phase
-    2*pi*f*n*dt.  Keeping E on that phase (offset 0) and retarding H by an extra
+    2*pi*f*(n+1)*dt.  Keeping E on that phase (offset 0) and retarding H by an extra
     -0.5*omega*dt (offset -1/2 step) reproduces the physical +1/2-step E-H offset.
     In the time-averaged Poynting cross term S = 1/2 Re(E x H*) the common step
     phase cancels, so only the +1/2 *relative* offset is observable, and it is
@@ -54,8 +54,8 @@ def test_spectral_observers_apply_the_yee_half_step_stagger():
         "end_step": 2,
         "window_normalization": 0.0,
         "sample_count": 0,
-        "phase_cos": 1.0,
-        "phase_sin": 0.0,
+        "phase_cos": math.cos(2.0 * math.pi * frequency * dt),
+        "phase_sin": math.sin(2.0 * math.pi * frequency * dt),
         "phase_step_cos": math.cos(2.0 * math.pi * frequency * dt),
         "phase_step_sin": math.sin(2.0 * math.pi * frequency * dt),
         "h_offset_cos": math.cos(-0.5 * 2.0 * math.pi * frequency * dt),
@@ -104,10 +104,10 @@ def test_spectral_observers_apply_the_yee_half_step_stagger():
     # Electric observers stay on the plain step-index phase (offset 0), colocated
     # with the full-field DFT accumulator.  Magnetic observers carry an extra
     # -0.5*omega*dt phase, i.e. they sample at the half-step-retarded phase
-    # 2*pi*f*(n - 1/2)*dt.  Reverting H to the plain phase (plain-plain) would
+    # 2*pi*f*(n + 1/2)*dt.  Reverting H to the plain phase (plain-plain) would
     # collapse the two branches and destroy the physical Yee stagger.
-    step_phase = 2.0 * math.pi * frequency * (1.0 * dt)
-    magnetic_phase = 2.0 * math.pi * frequency * ((1.0 - 0.5) * dt)
+    step_phase = 2.0 * math.pi * frequency * (2.0 * dt)
+    magnetic_phase = 2.0 * math.pi * frequency * ((2.0 - 0.5) * dt)
     assert electric["weightedCos"] == pytest.approx(math.cos(step_phase))
     assert electric["weightedSin"] == pytest.approx(math.sin(step_phase))
     assert magnetic["weightedCos"] == pytest.approx(math.cos(magnetic_phase))
@@ -144,8 +144,8 @@ def test_observer_adjoint_schedule_is_exact_transpose_of_forward_yee_dft(
         "end_step": time_steps,
         "window_normalization": 0.0,
         "sample_count": 0,
-        "phase_cos": 1.0,
-        "phase_sin": 0.0,
+        "phase_cos": math.cos(2.0 * math.pi * frequency * dt),
+        "phase_sin": math.sin(2.0 * math.pi * frequency * dt),
         "phase_step_cos": math.cos(phase_step),
         "phase_step_sin": math.sin(phase_step),
         "h_offset_cos": math.cos(-0.5 * phase_step),
@@ -219,7 +219,7 @@ def test_observer_adjoint_schedule_is_exact_transpose_of_forward_yee_dft(
     )
 
     physical_times = (
-        torch.arange(time_steps, dtype=torch.float64) + time_offset
+        torch.arange(time_steps, dtype=torch.float64) + 1 + time_offset
     ) * dt
     expected_phase = 2.0 * math.pi * frequency * physical_times
     torch.testing.assert_close(

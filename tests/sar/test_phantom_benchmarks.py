@@ -4,8 +4,8 @@ Scenes live under ``benchmark/scenes/sar/``. The synthetic ``one_gram_cube`` gat
 is hand-computable (no solver); the plane-wave phantom gates run a compact
 deterministic FDTD and check exact power-conservation closure, physical structure
 (monotone mass-averaging, peak tissue), and a golden regression anchor. The
-``antenna_near_phantom`` gate pins the recorded conductive-media port blocker as
-fail-closed behaviour.
+``antenna_near_phantom`` checks a driven conductive-material exposure workflow;
+its absolute field/dosimetry convergence remains a separate qualification.
 """
 
 import math
@@ -154,22 +154,58 @@ def test_layered_slab_tissue_peak_and_golden():
 
 
 # --------------------------------------------------------------------------- #
-# antenna_near_phantom: recorded conductive-media port blocker (fail-closed).   #
+# antenna_near_phantom: actual driven conductive-material SAR workflow.        #
 # --------------------------------------------------------------------------- #
 
+def test_antenna_near_phantom_resolves_exact_feed_nodes_and_native_half_grid_contour():
+    scene = antenna_near_phantom.build_scene(device="cpu")
+    prepared = prepare_scene(scene,lazy_meshgrid=True)
+    port, = prepared.compile_ports(device="cpu")
+    assert port.voltage_indices.numel() > 0
+    assert all(indices.numel() > 0 for indices in port.current_indices)
+    assert scene.ports[0].positive[2] == .0025
+    assert scene.ports[0].negative[2] == -.0025
+    tissue = next(s for s in scene.structures if s.name == "phantom")
+    assert tissue.material.sigma_e == .99
+    assert tissue.material.eps_r == 42.
+    assert tissue.material.mass_density == 1000.
+
+
 @requires_cuda
-def test_antenna_near_phantom_fails_closed_on_conductive_media():
-    scene = antenna_near_phantom.build_scene(device="cuda")
-    simulation = mw.Simulation.fdtd(
-        scene,
-        frequencies=list(antenna_near_phantom.FREQUENCIES),
-        excitations=mw.PortExcitation(
-            "feed",
-            source_time=mw.GaussianPulse(
-                frequency=antenna_near_phantom.DESIGN_FREQUENCY, fwidth=1.5e9
-            ),
-        ),
-        full_field_dft=True,
-    )
-    with pytest.raises(NotImplementedError, match="conductive media|conductive background"):
-        simulation.prepare()
+@pytest.mark.parametrize("graph",(False,True))
+def test_antenna_near_phantom_driven_loss_normalized_sar_and_persistence(graph,tmp_path,record_property):
+    from benchmark.sar_validation import antenna_exposure_result
+    result = antenna_exposure_result(cuda_graph=graph)
+    assert bool(result.stats()["cuda_graph_active"]) == graph
+    accepted = result.port("feed").accepted_power
+    loss = result.power_loss("loss").conduction
+    assert bool(torch.all(torch.isfinite(accepted) & (accepted > 0)))
+    assert bool(torch.all(torch.isfinite(loss) & (loss > 0)))
+    averaging = mw.SARAveraging(mass=(1e-3,10e-3))
+    base = result.sar("loss",averaging=averaging)
+    normalization = mw.PowerNormalization.accepted_power("feed",1.)
+    scaled = result.sar("loss",normalization=normalization,averaging=averaging)
+    valid = base.valid[None].expand_as(base.point_sar("total"))
+    torch.testing.assert_close(scaled.point_sar("total")[valid],
+        (base.point_sar("total").to(scaled.point_sar("total"))
+            /accepted.to(scaled.point_sar("total")).reshape(-1,1,1,1))[valid],rtol=2e-5,atol=1e-12)
+    point = _nanpeak(scaled.point_sar("total"))
+    peaks = [float(scaled.peak(mass).sar[0]) for mass in (1e-3,10e-3)]
+    assert all(math.isfinite(value) and value > 0 for value in peaks)
+    assert peaks[1] <= peaks[0] <= point
+    assert _closure_residual(base) < 1e-5
+    normalized_absorbed = (scaled.absorbed_power_density["total"]*scaled.cell_volume[None]).sum()
+    torch.testing.assert_close(normalized_absorbed, (loss/accepted).sum().to(normalized_absorbed),rtol=2e-5,atol=1e-12)
+    path = tmp_path/"exposure.pt"
+    result.save(path)
+    loaded = mw.Result.load(path,scene=result.scene,map_location="cuda:0")
+    repeated = loaded.sar("loss",normalization=normalization,averaging=averaging)
+    for mass in (1e-3,10e-3):
+        torch.testing.assert_close(repeated.peak(mass).sar,scaled.peak(mass).sar,rtol=2e-5,atol=1e-12)
+    path = tmp_path/"sar.pt"
+    scaled.save(path)
+    typed = mw.SARResult.load(path)
+    torch.testing.assert_close(typed.peak(1e-3).sar,scaled.peak(1e-3).sar.cpu())
+    record_property("accepted_power_w",accepted.detach().cpu().tolist())
+    record_property("absorbed_power_w",loss.detach().cpu().tolist())
+    record_property("normalized_peak_sar_w_per_kg",peaks)

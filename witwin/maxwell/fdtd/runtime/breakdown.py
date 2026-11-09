@@ -349,7 +349,7 @@ def _node_extra_conductivity(runtime, step):
     """Per-node breakdown-induced extra conductivity (linear ramp, >= 0)."""
     state = runtime["state"]
     conducting = state == BREAKDOWN_STATE_CONDUCTING
-    elapsed = (float(step) - runtime["trigger_step"].to(torch.float32)) * runtime["dt"]
+    elapsed = (step - runtime["trigger_step"].to(torch.float32)) * runtime["dt"]
     frac = torch.clamp(elapsed / runtime["ramp_time"], 0.0, 1.0)
     target = torch.clamp(runtime["post_sigma"] - runtime["base_sigma"], min=0.0)
     extra = torch.where(conducting, frac * target, torch.zeros_like(target))
@@ -433,22 +433,22 @@ def advance_breakdown_state(solver, step):
         torch.where(exceeding, incremented, torch.zeros_like(timer)),
         timer,
     )
-    runtime["timer"] = new_timer
+    timer.copy_(new_timer)
 
     trigger = intact & exceeding & (new_timer >= runtime["minimum_duration"])
-    runtime["state"] = torch.where(
+    state.copy_(torch.where(
         trigger, torch.full_like(state, BREAKDOWN_STATE_CONDUCTING), state
-    )
-    runtime["trigger_step"] = torch.where(
-        trigger, torch.full_like(runtime["trigger_step"], int(step)), runtime["trigger_step"]
-    )
-    runtime["field_before"] = torch.where(
+    ))
+    runtime["trigger_step"].copy_(torch.where(
+        trigger, step, runtime["trigger_step"]
+    ))
+    runtime["field_before"].copy_(torch.where(
         trigger, magnitude, runtime["field_before"]
-    )
+    ))
     deposited = 0.5 * runtime["eps_abs"] * e2 * runtime["node_volume"]
-    runtime["deposited_at_trigger"] = torch.where(
+    runtime["deposited_at_trigger"].copy_(torch.where(
         trigger, deposited, runtime["deposited_at_trigger"]
-    )
+    ))
 
     node_extra = _node_extra_conductivity(runtime, step)
     _scatter_edge_coefficients(solver, runtime, node_extra)

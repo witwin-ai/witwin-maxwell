@@ -5,12 +5,14 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import torch
 from scipy import linalg as scipy_linalg
 from scipy import sparse
 from scipy.sparse import linalg as scipy_sparse_linalg
 
 from ....constants import ETA_0
 from .common import (
+    _require_lossless_vector_planes,
     _FULL_VECTOR_DENSE_LIMIT,
     _PEC_OCCUPANCY_THRESHOLD,
     _PEC_VECTOR_MATRIX_LIMIT,
@@ -30,6 +32,7 @@ from .vector import (
     _vector_mode_checkerboard_fraction_numpy,
     _vector_mode_polarization_fraction_numpy,
     _vector_mode_power_inner_product_numpy,
+    _vector_mode_power_overlap_numpy,
     _vector_mode_power_sign_numpy,
     _vector_mode_transverse_uniformity_numpy,
 )
@@ -452,7 +455,7 @@ def _select_yee_transverse_mode_numpy(
         value = eigenvalues[index]
         if not np.isfinite(value) or np.real(value) <= 0.0:
             continue
-        if abs(np.imag(value)) > 1.0e-6 * max(abs(np.real(value)), 1.0):
+        if abs(np.imag(value)) > 1.0e-6 * abs(np.real(value)):
             # A materially complex beta**2 is not a lossless propagating mode.
             continue
         beta2 = float(np.real(value))
@@ -471,7 +474,7 @@ def _select_yee_transverse_mode_numpy(
     while cursor < len(raw_candidates):
         reference = raw_candidates[cursor][1]
         stop = cursor + 1
-        tolerance = _VECTOR_DEGENERATE_RTOL * max(abs(reference), 1.0)
+        tolerance = _VECTOR_DEGENERATE_RTOL * abs(reference)
         while stop < len(raw_candidates) and abs(raw_candidates[stop][1] - reference) <= tolerance:
             stop += 1
         group = raw_candidates[cursor:stop]
@@ -533,8 +536,7 @@ def _select_yee_transverse_mode_numpy(
     for row, left in enumerate(independent):
         for col, right in enumerate(independent):
             power_gram[row, col] = _vector_mode_power_inner_product_numpy(left["profiles"], right["profiles"])
-    power_norm = np.sqrt(np.maximum(np.abs(np.real(np.diag(power_gram))), np.finfo(np.float64).eps))
-    overlap_matrix = np.abs(power_gram / power_norm[:, None] / power_norm[None, :])
+    overlap_matrix = _vector_mode_power_overlap_numpy(power_gram)
 
     retained_indices = []
     family_indices = []
@@ -560,7 +562,7 @@ def _select_yee_transverse_mode_numpy(
         prior_overlaps = [
             float(overlap_matrix[candidate_index, prior])
             for prior in retained_indices
-            if abs(beta - independent[prior]["beta"]) <= _VECTOR_DUPLICATE_BETA_RTOL * max(abs(beta), 1.0)
+            if abs(beta - independent[prior]["beta"]) <= _VECTOR_DUPLICATE_BETA_RTOL * abs(beta)
         ]
         max_near_duplicate_overlap = max(prior_overlaps, default=0.0)
 
@@ -587,7 +589,7 @@ def _select_yee_transverse_mode_numpy(
                 "candidate_index": candidate_index,
                 "beta_real": float(beta),
                 "beta_imag": 0.0,
-                "effective_index_real": float(beta / max(k0, 1e-30)),
+                "effective_index_real": float(beta / k0),
                 "effective_index_imag": 0.0,
                 "propagating": True,
                 "poynting_power": power,
@@ -956,3 +958,58 @@ def _solve_yee_transverse_pec_mode(
     diagnostics["connectivity"] = connectivity
     diagnostics["pec_active_count"] = int(np.count_nonzero(~active))
     return beta, component_arrays, diagnostics
+
+
+def _build_yee_transverse_operator_torch(eps_node_planes, *, k0, du, dv, source_name="<unnamed>"):
+    """Dense FP64 Yee operator and reconstruction maps, on the material device."""
+    _require_lossless_vector_planes(eps_node_planes, (), source_name=source_name)
+    eu, ev, ew = (value.real.to(torch.float64) for value in eps_node_planes)
+    nu, nv = eu.shape[0] - 1, eu.shape[1] - 1
+    device = eu.device
+    eye = lambda n: torch.eye(n, device=device, dtype=torch.float64)
+
+    def difference(n, spacing):
+        result = torch.zeros((n - 1, n), device=device, dtype=torch.float64)
+        i = torch.arange(n - 1, device=device)
+        result[i, i], result[i, i + 1] = -1 / spacing, 1 / spacing
+        return result
+
+    gu, gv = difference(nu, du), difference(nv, dv)
+    su, sv = -gu.T.contiguous(), -gv.T.contiguous()
+    gu_big, gv_big = torch.kron(gu, eye(nv - 1)), torch.kron(eye(nu - 1), gv)
+    su_big, sv_big = torch.kron(su, eye(nv - 1)), torch.kron(eye(nu - 1), sv)
+    eps_stag = (0.5 * (eu[:-1, 1:-1] + eu[1:, 1:-1]),
+                0.5 * (ev[1:-1, :-1] + ev[1:-1, 1:]), ew[1:-1, 1:-1])
+    eu_diag, ev_diag = (torch.diag(value.reshape(-1)) for value in eps_stag[:2])
+    ew_inv = torch.diag(1 / eps_stag[2].reshape(-1))
+    uu = torch.kron(eye(nu), gv @ sv) + k0**2 * eu_diag + su_big @ ew_inv @ gu_big @ eu_diag
+    vv = torch.kron(gu @ su, eye(nv)) + k0**2 * ev_diag + sv_big @ ew_inv @ gv_big @ ev_diag
+    uv = -torch.kron(su, gv) + su_big @ ew_inv @ gv_big @ ev_diag
+    vu = -torch.kron(gu, sv) + sv_big @ ew_inv @ gu_big @ eu_diag
+    operator = torch.cat((torch.cat((uu, uv), 1), torch.cat((vu, vv), 1)), 0)
+    meta = _yee_transverse_grids(nu, nv, du, dv)
+    meta.update(operator=operator, gu_big=gu_big, gv_big=gv_big, su_big=su_big,
+                sv_big=sv_big, k0=k0, du=du, dv=dv)
+    return operator, meta, eps_stag
+
+
+def _yee_reconstruct_node_profiles_torch(vector, *, beta, meta, eps_stag, field_names):
+    """Differentiable Gauss/curl reconstruction and node interpolation."""
+    eu, ev = vector[:meta['n_eu']], vector[meta['n_eu']:]
+    eps_u, eps_v, eps_w = (value.reshape(-1) for value in eps_stag)
+    maps = {key: meta[key].to(vector.dtype) for key in ('gu_big', 'gv_big', 'su_big', 'sv_big')}
+    ew = -(maps['gu_big'] @ (eps_u * eu) + maps['gv_big'] @ (eps_v * ev)) / beta / eps_w
+    hu = -(beta * ev + maps['sv_big'] @ ew) / (meta['k0'] * ETA_0)
+    hv = (beta * eu + maps['su_big'] @ ew) / (meta['k0'] * ETA_0)
+
+    def to_node(value, shape, half_axis):
+        value = value.reshape(shape).movedim(half_axis, 0)
+        value = torch.cat((value[:1], 0.5 * (value[:-1] + value[1:]), value[-1:]), 0)
+        value = value.movedim(0, half_axis).movedim(1 - half_axis, 0)
+        zero = torch.zeros_like(value[:1])
+        return torch.cat((zero, value, zero), 0).movedim(0, 1 - half_axis)
+
+    return dict(zip(field_names, (to_node(eu, meta['shape_eu'], 0),
+                                 to_node(ev, meta['shape_ev'], 1),
+                                 to_node(hu, meta['shape_ev'], 1),
+                                 to_node(hv, meta['shape_eu'], 0))))

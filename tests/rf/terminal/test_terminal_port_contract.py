@@ -47,6 +47,31 @@ def _scene(*, structures=None, port=None):
     )
 
 
+@pytest.mark.parametrize('parameter', ('position', 'size', 'rotation'))
+def test_lumped_port_rejects_trainable_voltage_aperture_support(parameter):
+    aperture = mw.Box(position=(.5, .5, .5), size=(.2, .2, .4))
+    arguments = dict(name='feed', positive=(.5, .5, .7), negative=(.5, .5, .3),
+                     voltage_path=mw.AxisPath('z'),
+                     current_surface=mw.Box(position=(.5, .5, .45), size=(.5, .5, 0.)),
+                     voltage_aperture=aperture)
+    assert mw.LumpedPort(**arguments).voltage_aperture is aperture
+    getattr(aperture, parameter).requires_grad_(True)
+    with pytest.raises(NotImplementedError, match='Trainable aperture geometry'):
+        mw.LumpedPort(**arguments)
+
+
+@pytest.mark.parametrize('label', ('current_surface', 'voltage_aperture'))
+@pytest.mark.parametrize('parameter', ('position', 'size', 'rotation'))
+def test_terminal_port_rejects_trainable_integration_support(label, parameter):
+    box = (mw.Box(position=(.5, .5, .45), size=(.3, .3, 0.)) if label == 'current_surface'
+           else mw.Box(position=(.5, .5, .5), size=(.3, .3, .4)))
+    fixed = _scene(port=_port(**{label: box})).ports[0]
+    assert getattr(fixed, label) is not None
+    getattr(box, parameter).requires_grad_(True)
+    with pytest.raises(NotImplementedError, match='Trainable terminal integration geometry'):
+        _port(**{label: box})
+
+
 def test_terminal_public_contract_and_scene_resolution():
     termination = mw.SeriesRLC(r=50.0)
     scene = _scene(port=_port(termination=termination))

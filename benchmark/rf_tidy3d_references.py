@@ -126,7 +126,7 @@ def _half_wave_dipole():
 def _patch():
     from benchmark.scenes.antenna.patch import patch_antenna_scene
 
-    freqs = tuple(f * 1e9 for f in (4.4, 4.8, 5.2, 5.6, 6.0))
+    freqs = tuple(f * 1e9 for f in (2.9, 3.0, 3.1, 3.2, 3.3, 3.4, 3.5))
     scene = patch_antenna_scene(frequencies=freqs, device="cpu")
     return scene, freqs
 

@@ -87,6 +87,9 @@ def _port_terms(port, eps_edge: torch.Tensor | None):
             0,
             field.linear_indices,
         )
+        if field.electric_response_shift is not None:
+            local_eps = local_eps + field.electric_response_shift
+            base_eps = base_eps + field.electric_response_shift
         injection = field.injection.detach() * base_eps / local_eps
         coupling_impedance = torch.dot(field.voltage_weights, injection)
     return injection, coupling_impedance

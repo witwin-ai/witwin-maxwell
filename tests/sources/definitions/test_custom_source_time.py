@@ -127,17 +127,124 @@ def test_point_dipole_compiles_custom_source_time_on_uniform_path():
     assert compiled[0]["source_time"]["kind_code"] == SOURCE_TIME_KIND_CUSTOM
 
 
-def test_plane_wave_rejects_custom_source_time():
+def test_surface_sources_compile_sampled_custom_source_time():
+    table = mw.CustomSourceTime((0.0, 1.0e-9, 2.0e-9), (0.0, 1.0, 0.0), interpolation="cubic")
     scene = _make_scene()
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=mw.CustomSourceTime((0.0, 1.0e-9, 2.0e-9), (0.0, 1.0, 0.0)),
-        )
-    )
-    with pytest.raises(ValueError, match="CustomSourceTime"):
+    scene.add_source(mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0), source_time=table))
+    scene.add_source(mw.GaussianBeam(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
+                                     beam_waist=0.3, source_time=table))
+    scene.add_source(mw.ModeSource(position=(0.0, 0.0, 0.0), size=(0.6, 0.6, 0.0), source_time=table))
+    scene.add_source(mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0), source_time=table,
+                                  injection=mw.TFSF(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3)))))
+
+    compiled = compile_fdtd_sources(scene, default_frequency=1.0e9)
+
+    for entry in compiled:
+        assert entry["source_time"]["kind_code"] == SOURCE_TIME_KIND_CUSTOM
+        assert entry["source_time"]["table"] is table.table
+        assert entry["source_time"]["interpolation"] == "cubic"
+
+
+@pytest.mark.parametrize(
+    "make_source",
+    [
+        lambda st: mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0), source_time=st),
+        lambda st: mw.GaussianBeam(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
+                                   beam_waist=0.3, source_time=st),
+        lambda st: mw.ModeSource(position=(0.0, 0.0, 0.0), size=(0.6, 0.6, 0.0), source_time=st),
+    ],
+)
+def test_time_shifted_surface_sources_reject_callable_custom_source_time(make_source):
+    scene = _make_scene()
+    callable_time = mw.CustomSourceTime(lambda t: np.sin(2.0e9 * t), characteristic_frequency=1.0e9)
+    scene.add_source(make_source(callable_time))
+    with pytest.raises(ValueError, match="Tabulate it explicitly"):
         compile_fdtd_sources(scene, default_frequency=1.0e9)
+
+
+def test_tfsf_plane_wave_keeps_callable_custom_source_time_on_auxiliary_line():
+    # The TFSF plane wave drives a 1D auxiliary line on the solver time grid.
+    scene = _make_scene()
+    callable_time = mw.CustomSourceTime(lambda t: np.sin(2.0e9 * t), characteristic_frequency=1.0e9)
+    scene.add_source(mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
+                                  source_time=callable_time,
+                                  injection=mw.TFSF(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3)))))
+    compiled = compile_fdtd_sources(scene, default_frequency=1.0e9)
+    assert compiled[0]["source_time"]["fn"] is not None
+
+
+def test_time_shifted_source_term_rejects_callable_before_stepping():
+    from witwin.maxwell.fdtd.excitation.temporal import build_source_term
+
+    callable_time = compile_source_time(
+        mw.CustomSourceTime(lambda t: 0.0, characteristic_frequency=1.0e9), default_frequency=1.0e9
+    )
+    patch = torch.ones((1, 2, 2))
+    with pytest.raises(ValueError, match="Tabulate it explicitly"):
+        build_source_term(None, field_name="Ex", offsets=(0, 0, 0), patch=patch,
+                          delay_patch=torch.zeros_like(patch), source_time=callable_time)
+    # Undelayed terms evaluate the callable on the solver grid.
+    term = build_source_term(None, field_name="Ex", offsets=(0, 0, 0), patch=patch, source_time=callable_time)
+    assert term["delay_patch"] is None
+
+
+def test_custom_source_time_cubic_spline_is_natural_and_interpolates_knots():
+    times = np.array([0.0, 0.3, 1.0, 1.4, 2.5])
+    values = np.array([0.0, 1.0, -0.5, 0.25, 0.0])
+    signal = mw.CustomSourceTime(times, values, interpolation="cubic")
+    for t, v in zip(times, values):
+        assert signal.evaluate(float(t)) == pytest.approx(float(v), abs=1e-12)
+    from scipy.interpolate import CubicSpline
+
+    reference = CubicSpline(times, values, bc_type="natural")
+    probes = np.linspace(0.0, 2.5, 97)
+    np.testing.assert_allclose([signal.evaluate(float(t)) for t in probes], reference(probes), atol=1e-12)
+    assert signal.evaluate(-1.0e-9) == 0.0
+    assert signal.evaluate(2.5 + 1.0e-9) == 0.0
+    assert signal.table.uniform is False
+
+
+def test_custom_source_time_table_torch_twin_matches_host_on_uniform_and_nonuniform_tables():
+    rng = np.random.default_rng(7)
+    uniform = np.linspace(-1.0, 3.0, 41)
+    nonuniform = np.sort(np.concatenate(([-1.0, 3.0], rng.uniform(-1.0, 3.0, 60))))
+    probes = np.linspace(-1.5, 3.5, 501)
+    for times in (uniform, nonuniform):
+        for interpolation in ("linear", "cubic"):
+            signal = mw.CustomSourceTime(times, np.cos(2.0 * times) * np.exp(-0.2 * times ** 2),
+                                         amplitude=1.5, interpolation=interpolation)
+            host = np.array([signal.evaluate(float(t)) for t in probes])
+            twin = 1.5 * signal.table.evaluate_torch(torch.as_tensor(probes, dtype=torch.float64)).numpy()
+            np.testing.assert_allclose(twin, host, atol=1e-12)
+        assert signal.table.uniform is (times is uniform)
+    # Linear tables keep the previous zero-outside linear interpolation.
+    linear = mw.CustomSourceTime(nonuniform, np.sin(nonuniform))
+    np.testing.assert_allclose([linear.evaluate(float(t)) for t in probes],
+                               np.interp(probes, nonuniform, np.sin(nonuniform), left=0.0, right=0.0), atol=1e-12)
+
+
+def test_cubic_table_reproduces_gaussian_pulse_far_better_than_linear():
+    pulse = mw.GaussianPulse(frequency=1.0e9, fwidth=0.4e9)
+    h = 2.5e-11
+    times = np.arange(0.0, pulse.settling_time, h)
+    values = np.array([pulse.evaluate(float(t)) for t in times])
+    probes = times[5:-5] + 0.37 * h
+    analytic = np.array([pulse.evaluate(float(t)) for t in probes])
+    errors = {}
+    for interpolation in ("linear", "cubic"):
+        signal = mw.CustomSourceTime(times, values, interpolation=interpolation)
+        errors[interpolation] = np.max(np.abs([signal.evaluate(float(t)) for t in probes] - analytic))
+    assert errors["cubic"] < 1e-5
+    assert errors["cubic"] < 0.01 * errors["linear"]
+
+
+def test_custom_source_time_validation():
+    with pytest.raises(ValueError, match="interpolation"):
+        mw.CustomSourceTime((0.0, 1.0), (0.0, 1.0), interpolation="spline")
+    with pytest.raises(ValueError, match="strictly increasing"):
+        mw.CustomSourceTime((0.0, 1.0, 1.0), (0.0, 1.0, 2.0))
+    with pytest.raises(ValueError, match="finite"):
+        mw.CustomSourceTime((0.0, 1.0), (0.0, float("nan")))
 
 
 # ---------------------------------------------------------------------------

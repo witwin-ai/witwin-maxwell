@@ -300,6 +300,7 @@ def _network_material_objective(*, logit_value: float, trainable: bool):
         requires_grad=trainable,
     )
     scene = _fdtd_scene(network=block)
+    scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
     scene.add_material_region(
         mw.MaterialRegion(
             name="near_terminal",
@@ -341,7 +342,7 @@ def test_rational_network_gradient_matches_three_step_central_difference(
     objective.backward()
     tensor = residues if parameter_name == "residues" else direct
     adjoint = float(tensor.grad.real.reshape(-1)[0])
-    assert abs(adjoint) > 1.0e-20
+    assert tensor.grad.isfinite().all() and adjoint != 0.0
 
     differences = []
     value_key = "residue_value" if parameter_name == "residues" else "direct_value"
@@ -373,7 +374,7 @@ def test_network_connected_material_gradient_matches_three_step_central_differen
     objective, logit = _network_material_objective(logit_value=0.1, trainable=True)
     objective.backward()
     adjoint = float(logit.grad)
-    assert abs(adjoint) > 1.0e-20
+    assert logit.grad.isfinite() and adjoint != 0.0
 
     differences = []
     for step in (2.0e-3, 5.0e-3, 1.0e-2):

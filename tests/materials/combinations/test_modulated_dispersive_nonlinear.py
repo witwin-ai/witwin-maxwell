@@ -116,6 +116,7 @@ def _prepare(scene):
     ).prepare().solver
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_scene_modulation_plus_dispersive_material_prepares():
     """The cross-material runtime guard is lifted: a modulated slab may share a Scene
     with a (disjoint) dispersive material and both feature flags stay enabled."""

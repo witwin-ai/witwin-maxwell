@@ -25,6 +25,9 @@ class ScenarioDefinition:
     spectral_reference_index: int | None = None
     compare_magnitude: bool = False
     comparison_components: tuple[str, ...] | None = None
+    # Simulation.fdtd absorber. "auto" is the solver default; rows whose validated
+    # results depend on the CPML path in closed-transverse PML topologies pin "cpml".
+    absorber: str = "auto"
 
 
 @dataclass
@@ -44,6 +47,10 @@ class ScenarioMetrics:
     material_source_plot: Path
     field_plot: Path
     updated_at: str
+    field_runtime_change: float | None = None
+    field_converged: bool | None = None
+    flux_runtime_change: float | None = None
+    flux_converged: bool | None = None
     maxwell_ms_per_step: float | None = None
     maxwell_steps_per_second: float | None = None
     maxwell_dft_samples: int | None = None

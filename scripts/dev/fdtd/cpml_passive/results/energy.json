@@ -1,0 +1,67 @@
+{
+  "grazing_TM": {
+    "storage_before": 0.5059718719475595,
+    "relative_increment": 0.00027049082021335516,
+    "electric_relative_work": -0.0004384136648642166,
+    "magnetic_relative_work": 0.0007089044850778196,
+    "relative_residual": -2.4776254006196857e-16,
+    "peak_positive_magnetic_z_m": -0.9230769230769229
+  },
+  "max_random_work_balance_residual": 4.604882249766721e-16,
+  "candidates": {
+    "current": {
+      "rho": 1.000135236265684,
+      "eigenmode_relative_increment": 0.0002704908202173398,
+      "max_random_relative_increment": 0.02399169555029392,
+      "max_increment_eigenvalue": 0.498463364159754,
+      "storage": "physical field norm plus unit-weight auxiliary norm",
+      "certified": false,
+      "no_coercive_storage": true
+    },
+    "c1": {
+      "rho": 1.0001568708053934,
+      "eigenmode_relative_increment": 0.0003137662192337409,
+      "max_random_relative_increment": 0.020358103742577422,
+      "max_increment_eigenvalue": 0.5423061475808594,
+      "storage": "physical field norm plus unit-weight auxiliary norm",
+      "certified": false,
+      "no_coercive_storage": true
+    },
+    "c2": {
+      "rho": 1.0001568708053918,
+      "eigenmode_relative_increment": 0.0003137662192326592,
+      "max_random_relative_increment": 0.03501542120064418,
+      "max_increment_eigenvalue": 0.6559557893184097,
+      "storage": "physical field norm plus unit-weight auxiliary norm",
+      "certified": false,
+      "no_coercive_storage": true
+    },
+    "c3_old": {
+      "rho": 1.000174125458746,
+      "eigenmode_relative_increment": 0.0003482812371617352,
+      "max_random_relative_increment": 0.019699368078939624,
+      "max_increment_eigenvalue": 0.5857700115395418,
+      "storage": "physical field norm plus unit-weight auxiliary norm",
+      "certified": false,
+      "no_coercive_storage": true
+    },
+    "c3_average": {
+      "rho": 1.0001577678518885,
+      "eigenmode_relative_increment": 0.0003155605944670158,
+      "max_random_relative_increment": 0.023880742705644685,
+      "max_increment_eigenvalue": 0.5382456674644837,
+      "storage": "physical field norm plus unit-weight auxiliary norm",
+      "certified": false,
+      "no_coercive_storage": true
+    },
+    "passive_control": {
+      "rho": 1.000000000000001,
+      "eigenmode_relative_increment": -1.266427878660211e-16,
+      "max_random_relative_increment": -0.025839898283300765,
+      "max_increment_eigenvalue": 4.568964047691992e-16,
+      "storage": "physical field norm",
+      "certified": true,
+      "no_coercive_storage": false
+    }
+  }
+}

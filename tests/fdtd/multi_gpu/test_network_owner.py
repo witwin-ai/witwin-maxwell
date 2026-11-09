@@ -608,14 +608,26 @@ def test_multiple_networks_per_distributed_scene_are_rejected(
         )
 
 
-def test_delayed_network_core_is_rejected_on_distributed_path(
+def test_delayed_network_owner_matches_single_gpu_fields_phases_and_ring_state(
     cuda_p2p_devices,
     cuda_memory_cleanup,
 ):
-    solver = DistributedFDTD(
-        _delayed_two_shard_network_scene(device=str(cuda_p2p_devices[0])),
-        frequency=_FREQUENCY,
-        parallel=FDTDParallelConfig(devices=cuda_p2p_devices),
-    )
-    with pytest.raises(ValueError, match=r"explicit.*per-port delay"):
-        solver.init_field()
+    scene=_delayed_two_shard_network_scene(device=str(cuda_p2p_devices[0]))
+    single,single_output=_run_single(scene)
+    distributed,output=_run_distributed(scene,cuda_p2p_devices)
+    for name in ('Ex','Ey','Ez','Hx','Hy','Hz'):
+        field=output[name] if name in output else distributed._gather_component(name,
+            tuple(getattr(shard.solver,name) for shard in distributed.shards))
+        torch.testing.assert_close(field,getattr(single,name),rtol=2e-5,atol=2e-7)
+    for name in ('left_port','right_port'):
+        torch.testing.assert_close(output['ports'][name].voltage,single_output['ports'][name].voltage,rtol=2e-5,atol=2e-8)
+        torch.testing.assert_close(output['ports'][name].current,single_output['ports'][name].current,rtol=2e-5,atol=2e-10)
+    actual=distributed._distributed_network.network_runtime
+    expected=single._network_runtimes[0]
+    assert actual.delay_runtime is not None
+    assert actual.delay_runtime.forward_ring.abs().max()>0
+    for name in ('forward_ring','reverse_ring','forward_previous_input','forward_previous_output',
+                 'reverse_previous_input','reverse_previous_output','cursor'):
+        torch.testing.assert_close(getattr(actual.delay_runtime,name),getattr(expected.delay_runtime,name),rtol=2e-5,atol=1e-10)
+    for name in ('port_energy','absorbed_energy','generated_energy'):
+        torch.testing.assert_close(getattr(actual,name),getattr(expected,name),rtol=2e-5,atol=1e-20)

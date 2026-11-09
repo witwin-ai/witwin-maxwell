@@ -83,8 +83,19 @@ def test_resume_rejects_changed_ferrite_bias_and_ignores_magnetization_history(t
 
 
 def _breakdown_scene(*, minimum_duration=2e-10):
-    return _material_scene(mw.Material(eps_r=2., breakdown=mw.DielectricBreakdown(
+    scene = _material_scene(mw.Material(eps_r=2., breakdown=mw.DielectricBreakdown(
         critical_field=1., minimum_duration=minimum_duration, post_breakdown_conductivity=0.1)))
+    # A changing conductivity needs a refreshed RF coupling operator, which is
+    # explicitly unsupported. Exercise the complete breakdown state separately.
+    return scene.clone(ports=(), networks=(), monitors=(
+        mw.PointMonitor("breakdown_field", (0., 0., 0.), fields=("Ez",)),))
+
+
+def test_dynamic_breakdown_rejects_a_stale_rf_coupling_operator():
+    scene = _material_scene(mw.Material(eps_r=2., breakdown=mw.DielectricBreakdown(
+        critical_field=1., minimum_duration=2e-10, post_breakdown_conductivity=0.1)))
+    with pytest.raises(NotImplementedError, match="refreshing.*coupled field/circuit"):
+        _simulation(scene, initial=_dc_initial()).prepare()
 
 
 @pytest.mark.parametrize("stop", [0, 12, 24, 34])
@@ -117,7 +128,8 @@ def test_breakdown_disk_resume_preserves_timer_ramp_events_and_energy(tmp_path, 
     assert int(actual.solver.breakdown_runtime["state"].sum()) > 0
     for name in ("state", "timer", "trigger_step", "field_before", "deposited_at_trigger", "dissipated_energy", "total_dissipated"):
         torch.testing.assert_close(actual.solver.breakdown_runtime[name], expected.solver.breakdown_runtime[name])
-    torch.testing.assert_close(actual.port("feed").voltage, expected.port("feed").voltage, rtol=0, atol=0)
+    torch.testing.assert_close(actual.monitor("breakdown_field")["data"],
+                               expected.monitor("breakdown_field")["data"], rtol=0, atol=0)
 
 
 def test_breakdown_resume_rejects_changed_duration_before_trigger():
@@ -135,7 +147,8 @@ def test_mur_network_material_gradient_matches_central_difference(objective_kind
     def evaluate(value, trainable=False):
         block, _, _ = _rational_network(residue_value=2e8, direct_value=1e-2, trainable=False)
         logit = torch.tensor(value, device="cuda", dtype=torch.float64, requires_grad=trainable)
-        scene = _fdtd_scene(network=block).clone(boundary=mw.BoundarySpec.mur())
+        scene = _fdtd_scene(network=block).clone(
+            boundary=mw.BoundarySpec.mur(), subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
         scene.add_material_region(mw.MaterialRegion(name="design",
             geometry=mw.Box(position=(0.005, 0., 0.005), size=(0.005,) * 3),
             density=torch.sigmoid(logit).reshape(1, 1, 1), eps_bounds=(1., 4.), mu_bounds=(1., 1.)))

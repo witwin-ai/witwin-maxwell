@@ -1,0 +1,1695 @@
+{
+  "before_summary": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "7",
+    "skipped": "36",
+    "tests": "216",
+    "time": "5964.249",
+    "timestamp": "2026-10-31T21:44:01.081037-07:00",
+    "hostname": "<host>"
+  },
+  "after_summary": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "11",
+    "skipped": "36",
+    "tests": "216",
+    "time": "6528.856",
+    "timestamp": "2026-10-31T21:45:01.679609-07:00",
+    "hostname": "<host>"
+  },
+  "feed_before_summary": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "7",
+    "time": "246.451",
+    "timestamp": "2026-10-31T23:26:02.089963-07:00",
+    "hostname": "<host>"
+  },
+  "feed_after_summary": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "7",
+    "time": "272.804",
+    "timestamp": "2026-10-31T23:31:28.831638-07:00",
+    "hostname": "<host>"
+  },
+  "effective_before": {
+    "passed": 180,
+    "failed": 0,
+    "skipped": 36,
+    "error": 0
+  },
+  "effective_after": {
+    "passed": 176,
+    "failed": 4,
+    "skipped": 36,
+    "error": 0
+  },
+  "cuda_hidden_feed_failures": {
+    "before": {
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[narrow-pec]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'pec', width_cells = 1\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7a797c4d0e90>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[narrow-copper]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'copper', width_cells = 1\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7a799053fd90>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[2-pec]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'pec', width_cells = 2\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7a798482b750>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[2-copper]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'copper', width_cells = 2\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7a7984123d10>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[4-pec]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'pec', width_cells = 4\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7a7990a169d0>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[4-copper]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'copper', width_cells = 4\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7a7990aa1550>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_feed_quadrature_partitions_the_physical_gap[single_column]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "kind = 'single_column'\n\n    @pytest.mark.parametrize(\"kind\", [\"aligned\", \"tilted\", \"one_cell\", \"rim\", \"single_column\"])\n    def test_feed_quadrature_partitions_the_physical_gap(kind):\n        from witwin.maxwell.fdtd.thin_sheet import _feed_quadrature\n        ends = ((-.0025, 0, .001), (.0025, 0, .001)) if kind == \"one_cell\" else (\n            (-.005, .01 if kind == \"rim\" else 0, .001), (.005, .01 if kind == \"rim\" else 0, .001))\n        c = _compile(_plate(tilted=kind == \"tilted\", width=CELL if kind == \"single_column\" else .02), _port(*ends))\n        feed, = c.feeds\n        length, width, columns = _feed_quadrature(c, feed)\n        assert np.dot(length, width) == pytest.approx(feed.length * feed.width, rel=1e-14)\n        assert np.sum(length * width) / (50 * feed.width * feed.length) == pytest.approx(1/50, rel=1e-14)\n        assert np.all(width[feed.open_chords] == 0)\n        for column in np.unique(columns[columns >= 0]):\n            assert length[columns == column].sum() == pytest.approx(feed.length, rel=1e-14)\n        if kind not in (\"tilted\", \"single_column\"):\n            np.testing.assert_allclose(length[~feed.open_chords], CELL, rtol=1e-14)\n            np.testing.assert_allclose(np.sort(np.unique(np.round(width[~feed.open_chords], 12))), [.0025, .005])\n        if kind == \"single_column\":\n            simulation = _simulation(steps=32, width=CELL)\n            simulation.scene.domain = mw.Domain(bounds=((-0.05, 0.05),)*3)\n>           result = simulation.run()\n                     ^^^^^^^^^^^^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:400: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      }
+    },
+    "after": {
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[narrow-pec]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'pec', width_cells = 1\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x75746b001250>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[narrow-copper]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'copper', width_cells = 1\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x757471b61dd0>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[2-pec]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'pec', width_cells = 2\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x75746a45b690>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[2-copper]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'copper', width_cells = 2\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x75747f5fb790>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[4-pec]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'pec', width_cells = 4\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x757471582150>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[4-copper]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "material = 'copper', width_cells = 4\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x757471033cd0>\n\n    @pytest.mark.parametrize(\"material\", [\"pec\", \"copper\"])\n    @pytest.mark.parametrize(\"width_cells\", [pytest.param(1, id=\"narrow\"), 2, 4])\n    def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):\n        from witwin.maxwell.fdtd import ports\n        samples = []\n        original = ports.accumulate_port_observers\n    \n        def observe(solver, **kwargs):\n            runtime, = solver._port_runtimes\n            if runtime.sheet_feed is not None:\n                v, i = runtime.sheet_feed.voltage, runtime.sheet_feed.current\n            else:\n                v, i = runtime.lumped.last_voltage_midpoint, -runtime.lumped.last_branch_current\n            samples.append(torch.stack((v, i)).detach().cpu().clone())\n            original(solver, **kwargs)\n    \n        monkeypatch.setattr(ports, \"accumulate_port_observers\", observe)\n        # stepping imports this function directly for the shared R1 block.\n        from witwin.maxwell.fdtd.runtime import stepping\n        monkeypatch.setattr(stepping, \"accumulate_port_observers\", observe)\n        errors_by_grid = []\n        cases = [(CELL, width_cells*CELL), (CELL/2, width_cells*CELL/2)]\n        if width_cells == 4:\n            cases.append((CELL/2, width_cells*CELL))\n        for cell, width in cases:\n            results, traces = [], []\n            for reference in (True, False):\n                samples.clear()\n                results.append(_simulation(material, reference=reference, cell=cell,\n                                           width=width,\n>                                          steps=round(1200*CELL/cell)).run())\n                                                                        ^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:351: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      },
+      "tests.materials.thin_sheet.test_thin_sheet_feeds::test_feed_quadrature_partitions_the_physical_gap[single_column]": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "kind = 'single_column'\n\n    @pytest.mark.parametrize(\"kind\", [\"aligned\", \"tilted\", \"one_cell\", \"rim\", \"single_column\"])\n    def test_feed_quadrature_partitions_the_physical_gap(kind):\n        from witwin.maxwell.fdtd.thin_sheet import _feed_quadrature\n        ends = ((-.0025, 0, .001), (.0025, 0, .001)) if kind == \"one_cell\" else (\n            (-.005, .01 if kind == \"rim\" else 0, .001), (.005, .01 if kind == \"rim\" else 0, .001))\n        c = _compile(_plate(tilted=kind == \"tilted\", width=CELL if kind == \"single_column\" else .02), _port(*ends))\n        feed, = c.feeds\n        length, width, columns = _feed_quadrature(c, feed)\n        assert np.dot(length, width) == pytest.approx(feed.length * feed.width, rel=1e-14)\n        assert np.sum(length * width) / (50 * feed.width * feed.length) == pytest.approx(1/50, rel=1e-14)\n        assert np.all(width[feed.open_chords] == 0)\n        for column in np.unique(columns[columns >= 0]):\n            assert length[columns == column].sum() == pytest.approx(feed.length, rel=1e-14)\n        if kind not in (\"tilted\", \"single_column\"):\n            np.testing.assert_allclose(length[~feed.open_chords], CELL, rtol=1e-14)\n            np.testing.assert_allclose(np.sort(np.unique(np.round(width[~feed.open_chords], 12))), [.0025, .005])\n        if kind == \"single_column\":\n            simulation = _simulation(steps=32, width=CELL)\n            simulation.scene.domain = mw.Domain(bounds=((-0.05, 0.05),)*3)\n>           result = simulation.run()\n                     ^^^^^^^^^^^^^^^^\n\ntests/materials/thin_sheet/test_thin_sheet_feeds.py:400: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nwitwin/maxwell/simulation.py:838: in run\n    return self._run_fdtd()\n           ^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1342: in _run_fdtd\n    return self._run_fdtd_from_solver(solver)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nwitwin/maxwell/simulation.py:1951: in _run_fdtd_from_solver\n    raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(\nwitwin/maxwell/simulation.py:1916: in _execute_fdtd_solve\n    raw_output = solver.solve(\nwitwin/maxwell/fdtd/solver.py:500: in solve\n    return solve_impl(\nwitwin/maxwell/fdtd/runtime/stepping.py:2337: in solve\n    next(iterator)\nwitwin/maxwell/fdtd/runtime/stepping.py:2488: in solve_steps\n    step_start_event.record()\n<site-packages>/torch/cuda/streams.py:207: in record\n    stream = torch.cuda.current_stream()\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<site-packages>/torch/cuda/__init__.py:1244: in current_stream\n    _lazy_init()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _lazy_init():\n        global _initialized, _queued_calls\n        if is_initialized() or hasattr(_tls, \"is_initializing\"):\n            return\n        with _initialization_lock:\n            # We be double-checked locking, boys!  This is OK because\n            # the above test was GIL protected anyway.  The inner test\n            # is for when a thread blocked on some other thread which was\n            # doing the initialization; when they get the lock, they will\n            # find there is nothing left to do.\n            if is_initialized():\n                return\n            # It is important to prevent other threads from entering _lazy_init\n            # immediately, while we are still guaranteed to have the GIL, because some\n            # of the C calls we make below will release the GIL\n            if _is_in_bad_fork():\n                raise RuntimeError(\n                    \"Cannot re-initialize CUDA in forked subprocess. To use CUDA with \"\n                    \"multiprocessing, you must use the 'spawn' start method\"\n                )\n            if not hasattr(torch._C, \"_cuda_getDeviceCount\"):\n                raise AssertionError(\"Torch not compiled with CUDA enabled\")\n            if _cudart is None:\n                raise AssertionError(\n                    \"libcudart functions unavailable. It looks like you have a broken build?\"\n                )\n            # This function throws if there's a driver initialization error, no GPUs\n            # are found or any other error occurs\n>           torch._C._cuda_init()\nE           RuntimeError: No CUDA GPUs are available\n\n<site-packages>/torch/cuda/__init__.py:529: RuntimeError"
+      }
+    }
+  },
+  "outcomes": [
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_ownership_routes_only_declared_sheets",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_cpu_solver_without_the_reference_backend_is_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_faceted_copper_mesh_prepares_with_folds",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_faceted_surface_mesh_copper_runs_with_two_sided_state",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_facets_narrower_than_a_cell_are_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_fold_sharper_than_ninety_degrees_is_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_inconsistently_oriented_mesh_is_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_trainable_copper_is_rejected_as_forward_only",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_trainable_surface_mesh_vertices_are_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_source_on_the_patch_is_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_checkpoint_capture_is_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_explicit_dt_above_the_cut_bound_is_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_patch_reaching_the_cpml_is_rejected",
+      "before": "passed",
+      "after": "failed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_third_material_in_the_cut_cells_is_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_monitor_on_split_unknowns_warns_about_the_side",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_execution_features[complex_fields_enabled]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_execution_features[full_aniso_enabled]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_execution_features[nonlinear_enabled]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_execution_features[modulation_enabled]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_execution_features[gyromagnetic_enabled]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_execution_features[breakdown_enabled]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_execution_features[dispersive_enabled]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_execution_features[magnetic_dispersive_enabled]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_execution_features[tfsf_enabled]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_periodic_boundaries[periodic]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_periodic_boundaries[bloch]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_scene_compositions[coordinates]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_scene_compositions[shards]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_unqualified_scene_compositions[wires]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_time_step_preparation_rejects_trainable_copper",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_side_materials_reject_unrepresented_media[inhomogeneous_ring]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_side_materials_reject_unrepresented_media[one_sided_third_medium]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_side_materials_reject_unrepresented_media[split_third_medium]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_patch_coefficients_reject_unqualified_updates[pec_suppression]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_patch_coefficients_reject_unqualified_updates[magnetic_decay]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_patch_coefficients_reject_unqualified_updates[permeability]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_other_conductor_owners[foil-axis-aligned CopperFoil]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_other_conductor_owners[cut-PEC cut-surface]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_other_conductor_owners[impedance-surface-impedance]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_runtime_rejects_other_conductor_owners[lumped-lumped elements]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_native_batch_admission_rejects_thin_sheet_state",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_explicit_cpu_reference_profile_rejects_unqualified_state[parallel-single-device]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_explicit_cpu_reference_profile_rejects_unqualified_state[trainable-forward-only]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_explicit_cpu_reference_profile_rejects_unqualified_state[cache-FDTDMaterialCache]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_explicit_cpu_reference_profile_rejects_unqualified_state[port_sweep-port sweeps]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_explicit_cpu_reference_profile_rejects_unqualified_state[waveport-wave-port]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_explicit_cpu_reference_profile_rejects_unqualified_state[initial-initial conditions]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_explicit_cpu_reference_profile_rejects_unqualified_state[absorber-CPML absorber only]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_explicit_cpu_reference_profile_rejects_unqualified_state[periodic-non-periodic]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_explicit_cpu_reference_profile_rejects_unqualified_state[coordinates-Cartesian coordinates]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_cpu_reference_difference_rejects_periodic_faces[low]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_cpu_reference_difference_rejects_periodic_faces[high]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_explicit_chord_bound_equals_pec[board]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_explicit_chord_bound_equals_pec[plate]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_explicit_chord_bound_equals_pec[prism]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_prism_held_chord_modes_equal_pec[10]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_prism_held_chord_modes_equal_pec[30]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_chord_implicit_inverse[copper-1.05-plate]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_chord_implicit_inverse[copper-1.05-prism]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_chord_implicit_inverse[resistive-6.0-plate]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_chord_implicit_inverse[resistive-6.0-prism]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_chord_implicit_inverse[transparent-12.0-plate]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_chord_implicit_inverse[transparent-12.0-prism]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_cuda_matches_cpu_reference[pec]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_cuda_matches_cpu_reference[copper]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_one_patch_step_matches_cpu_in_float64[pec]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_one_patch_step_matches_cpu_in_float64[copper]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_copper_crank_nicolson_solve_forward_error_on_both_devices",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_graph_replay_is_bit_identical_to_eager",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_cuda_tilted_pec_cavity_energy_for_twenty_thousand_steps",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_cuda_tilted_copper_cavity_is_passive_for_twenty_thousand_steps",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_cuda_cavity_spanning_pec_sheet_is_watertight",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_cuda_cavity_spanning_copper_leaks_only_through_the_copper_model",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_cuda_axis_aligned_mesh_reproduces_native_planar_paths[copper]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_cuda_axis_aligned_mesh_reproduces_native_planar_paths[pec]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_cuda_oblique_scattering_matches_thin_sheet_formulas[0.0013272093639924965-te]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_cuda_oblique_scattering_matches_thin_sheet_formulas[0.010617674911939972-tm]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_cuda_oblique_scattering_matches_thin_sheet_formulas[0.0-te]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_periodic_boundaries_are_rejected_on_cuda",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_native_batch_rejects_thin_sheets",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_cuda::test_trainable_copper_is_rejected_on_cuda",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_sheet_compiler_rejects_trainable_vertices",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_sheet_compiler_rejects_inconsistent_triangle_orientation",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_nearly_coplanar_chain_must_still_form_a_planar_facet",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_merged_facet_fold_must_lie_in_both_planes",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_segment_crossing_both_sides_of_a_prism_is_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_dual_volume_rejects_disconnected_or_mixed_fold_kinds[disconnected]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_dual_volume_rejects_disconnected_or_mixed_fold_kinds[inflection]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_sheet_compiler_rejects_dielectric_sheet_material",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_sheet_cut_edges_reject_open_domain_walls",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_two_crossings_inside_one_grid_edge_are_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_saddle_with_four_crossings_of_one_face_is_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_mass_partition_cannot_reach_across_a_nearby_prism_wall",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_facets_and_folds_are_extracted",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_fold_wedge_volumes_match_fine_quadrature",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_fold_crossing_a_box_corner_is_seen",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_planar_trace_widths_are_exact_strip_widths",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_spanning_faceted_complex_never_mixes_sides[pec-vee]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_spanning_faceted_complex_never_mixes_sides[pec-prism]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_spanning_faceted_complex_never_mixes_sides[copper-vee]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_spanning_faceted_complex_never_mixes_sides[copper-prism]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_faceted_circulations_are_exact_for_linear_fields[bent]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_faceted_circulations_are_exact_for_linear_fields[vee]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_faceted_circulations_are_exact_for_linear_fields[prism]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_preserves_pec_operator[plate]",
+      "before": "passed",
+      "after": "failed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_preserves_pec_operator[bent]",
+      "before": "passed",
+      "after": "failed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_preserves_pec_operator[vee]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_preserves_pec_operator[prism]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_structure_and_linear_circulations[plate]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_structure_and_linear_circulations[bent]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_structure_and_linear_circulations[vee]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_structure_and_linear_circulations[prism]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_on_grid_coincidences[aligned]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_on_grid_coincidences[grid_edge]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_vanishing_fold_converges_to_the_planar_sheet[pec]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_vanishing_fold_converges_to_the_planar_sheet[copper]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_bent_sheet_cavity_is_stable_for_twenty_thousand_steps[pec]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_bent_sheet_cavity_is_stable_for_twenty_thousand_steps[copper]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_closed_faceted_pec_prism_is_watertight",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_spanning_folded_pec_sheet_is_watertight",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_closed_faceted_copper_prism_leaks_only_through_the_copper_model",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_faceted_pec_cylinder_matches_the_bessel_series_and_converges[te]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_faceted_pec_cylinder_matches_the_bessel_series_and_converges[tm]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_faceted_copper_cylinder_matches_the_pec_sheet[te]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_faceted_copper_cylinder_matches_the_pec_sheet[tm]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_right_angle_fold_on_grid_lines_adds_no_phantom_sheet[pec]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_right_angle_fold_on_grid_lines_adds_no_phantom_sheet[copper]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_closed_right_angle_box_on_grid_lines_is_watertight",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feed_antennas::test_f2_rotation_invariance[normal0]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feed_antennas::test_f2_rotation_invariance[normal1]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feed_antennas::test_f2b_curved_self_convergence",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feed_antennas::test_f3_closed_box_power_balance[dipole]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feed_antennas::test_f3_closed_box_power_balance[patch]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feed_antennas::test_f3_closed_box_power_balance[curved]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_geometry_against_hand_values[aligned-pec]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_geometry_against_hand_values[aligned-copper]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_geometry_against_hand_values[tilted-pec]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_geometry_against_hand_values[tilted-copper]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_geometry_against_hand_values[cylinder-pec]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_geometry_against_hand_values[cylinder-copper]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_includes_exact_on_sheet_pairs[pec-False]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_includes_exact_on_sheet_pairs[pec-True]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_includes_exact_on_sheet_pairs[copper-False]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_includes_exact_on_sheet_pairs[copper-True]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_outline_must_cover_the_whole_rectangle[notch0]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_outline_must_cover_the_whole_rectangle[notch1]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_requires_one_cell_beyond_each_terminal[0.0-negative]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_requires_one_cell_beyond_each_terminal[0.0-positive]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_requires_one_cell_beyond_each_terminal[0.004-negative]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_gap_requires_one_cell_beyond_each_terminal[0.004-positive]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_fold_cannot_cross_gap_or_one_cell_margin[0.008]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_fold_cannot_cross_gap_or_one_cell_margin[0.011480502970952693]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_terminals_on_different_facets_are_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_terminals_on_different_sheets_are_rejected",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_subcell_gap_names_length_cell_size_and_fix",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_one_cell_gap_owns_one_chord_per_transverse_line[-1]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_one_cell_gap_owns_one_chord_per_transverse_line[1]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_width_below_two_cells_warns",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_transverse_rim_contact_and_exact_one_cell_arm_margin_are_allowed",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_sheet_roundoff_classification[0.5-True]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_sheet_roundoff_classification[2-False]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_sheet_feed_runtime_load_admission[circuit-NotImplementedError-circuits or embedded networks]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_sheet_feed_runtime_load_admission[reactive-NotImplementedError-purely resistive termination]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_sheet_feed_runtime_load_admission[resistance-ValueError-positive and finite]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_off_sheet_port_is_rejected_in_a_sheet_scene",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[narrow-pec]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[narrow-copper]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[2-pec]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[2-copper]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[4-pec]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f1_axis_aligned_feed_equivalence[4-copper]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_feed_quadrature_partitions_the_physical_gap[aligned]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_feed_quadrature_partitions_the_physical_gap[tilted]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_feed_quadrature_partitions_the_physical_gap[one_cell]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_feed_quadrature_partitions_the_physical_gap[rim]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_feed_quadrature_partitions_the_physical_gap[single_column]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f5_float64_patch_and_graph_replay[pec]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f5_float64_patch_and_graph_replay[copper]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f7_checkpoint_resume_includes_feed_and_column_spectra",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f4_loaded_unexcited_feed_for_twenty_thousand_steps",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f3_exact_field_side_power_with_variance_correction[pec]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f3_exact_field_side_power_with_variance_correction[copper]",
+      "before": "skipped",
+      "after": "skipped"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_tilted_pec_sheet_conserves_cavity_energy_for_twenty_thousand_steps",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_tilted_copper_foil_sheet_is_passive_for_twenty_thousand_steps",
+      "before": "passed",
+      "after": "failed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_cavity_spanning_tilted_pec_sheet_is_watertight",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_cavity_spanning_tilted_copper_leaks_only_through_the_copper_model",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_axis_aligned_mesh_reproduces_existing_planar_paths[copper]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_axis_aligned_mesh_reproduces_existing_planar_paths[pec]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_axis_aligned_operators_match_foil",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_compiled_complex_never_mixes_sides[pec]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_compiled_complex_never_mixes_sides[copper]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_subface_circulations_are_exact_for_linear_fields",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_normal_incidence_tilted_free_cut_matches_thin_sheet_formula[0.0013272093639924965]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_normal_incidence_tilted_free_cut_matches_thin_sheet_formula[0.010617674911939972]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_transmission_through_tilted_resistive_sheet[0.0013272093639924965-te]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_transmission_through_tilted_resistive_sheet[0.0013272093639924965-tm]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_transmission_through_tilted_resistive_sheet[0.010617674911939972-te]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_transmission_through_tilted_resistive_sheet[0.010617674911939972-tm]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_from_tilted_sheet[0.0013272093639924965-te]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_from_tilted_sheet[0.0013272093639924965-tm]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_from_tilted_sheet[0.010617674911939972-te]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_from_tilted_sheet[0.010617674911939972-tm]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_from_tilted_sheet[0-te]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_from_tilted_sheet[0-tm]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_tilted_pec_sheet_blocks_transmission[te]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_tilted_pec_sheet_blocks_transmission[tm]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_transmission_error_decreases_with_refinement",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_converges_with_observed_order[0]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_converges_with_observed_order[0.010617674911939972]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_normal_incidence_pec_reflection_fixes_the_sheet_position",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_sheet_on_dielectric_interface[te]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_sheet_on_dielectric_interface[tm]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_copper_matches_pec_reflection[0.015-te]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_copper_matches_pec_reflection[0.015-tm]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_copper_matches_pec_reflection[0.0075-te]",
+      "before": "passed",
+      "after": "passed"
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_copper_matches_pec_reflection[0.0075-tm]",
+      "before": "passed",
+      "after": "passed"
+    }
+  ],
+  "changed": [
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_explicit_dt_above_the_cut_bound_is_rejected",
+      "before": {
+        "status": "passed",
+        "stdout": "{'limit': 8.073361297562056e-12, 'maxwell_allowed': 8.666249213476034e-12, 'requested_dt': 8.369805255519044e-12, 'dt': 5.128205128205128e-12}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'limit': 8.08952439850403e-12, 'maxwell_allowed': 8.666249213476034e-12, 'requested_dt': 8.377886805990033e-12, 'dt': 5.128205128205128e-12}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_admission::test_patch_reaching_the_cpml_is_rejected",
+      "before": {
+        "status": "passed",
+        "stdout": "",
+        "failure": null
+      },
+      "after": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "def test_patch_reaching_the_cpml_is_rejected():\n        structure = mw.Structure(geometry=rectangle_mesh((0, 0, 0), NORMAL, 0.045, 0.045), material=_foil())\n        scene = mw.Scene(\n            domain=mw.Domain(bounds=((-.05, .05), (-.05, .05), (-.05, .05))), grid=mw.GridSpec.uniform(0.005),\n            boundary=mw.BoundarySpec.faces(default=\"pml\", num_layers=4), device=\"cpu\",\n            sources=[mw.PointDipole(position=(-0.03, 0.03, 0.03), polarization=\"Ez\", profile=\"ideal\",\n                                    source_time=mw.GaussianPulse(frequency=2e9, fwidth=1.5e9))],\n            structures=[structure], monitors=[mw.PointMonitor(\"p\", (0.03, -0.02, 0.01), fields=(\"Ez\",))])\n>       with pytest.raises(NotImplementedError, match=\"CPML absorber\"):\nE       AssertionError: Regex pattern did not match.\nE         Expected regex: 'CPML absorber'\nE         Actual message: 'A source overlaps a conformal thin-sheet patch; move the source away from the sheet.'\n\ntests/materials/thin_sheet/test_thin_sheet_admission.py:153: AssertionError"
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_explicit_chord_bound_equals_pec[board]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'scene': 'board', 'pec_radius': 8.182234779196446e+22, 'copper_explicit_radius': 8.182234779196446e+22, 'pec_bound': 6.9918809856659165e-12, 'dt_relative_to_pec': 1.0, 'added_newmark_dispersion': 0.0}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'scene': 'board', 'pec_radius': 8.18129910679345e+22, 'copper_explicit_radius': 8.18129910679345e+22, 'pec_bound': 6.992280795216814e-12, 'dt_relative_to_pec': 1.0, 'added_newmark_dispersion': 0.0}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_explicit_chord_bound_equals_pec[plate]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'scene': 'plate', 'pec_radius': 6.136930914809194e+22, 'copper_explicit_radius': 6.136930914809194e+22, 'pec_bound': 8.073361113764293e-12, 'dt_relative_to_pec': 1.0, 'added_newmark_dispersion': 0.0}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'scene': 'plate', 'pec_radius': 6.1124318874733195e+22, 'copper_explicit_radius': 6.1124318874733195e+22, 'pec_bound': 8.089524214321291e-12, 'dt_relative_to_pec': 1.0, 'added_newmark_dispersion': 0.0}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_chord_implicit_inverse[copper-1.05-plate]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'scene': 'plate', 'material': 'copper', 'min_eigenvalue': 2.2066997497343397e-06, 'condition': 1.0005130499025858, 'increment_error': 5.4632476552732e-16, 'step_increment_error': 2.494937910671372e-15, 'min_inverse_defect': 5.09037217758077e-16, 'degree': 3, 'added_newmark_phase_rad_per_step': -1.5590274713997432e-05}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'scene': 'plate', 'material': 'copper', 'min_eigenvalue': 2.208907818798057e-06, 'condition': 1.000515435399061, 'increment_error': 5.440622018238039e-16, 'step_increment_error': 2.4836497126286116e-15, 'min_inverse_defect': 4.514160427935318e-16, 'degree': 3, 'added_newmark_phase_rad_per_step': -1.568408904198404e-05}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_chord_implicit_inverse[resistive-6.0-plate]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'scene': 'plate', 'material': 'resistive', 'min_eigenvalue': 4.261135418751283e-10, 'condition': 2.9039657933608702, 'increment_error': 9.595182557271164e-12, 'step_increment_error': 8.205071397846224e-12, 'min_inverse_defect': -6.186537321028508e-12, 'degree': 12, 'added_newmark_phase_rad_per_step': -1.5590274713997432e-05}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'scene': 'plate', 'material': 'resistive', 'min_eigenvalue': 4.259358429722859e-10, 'condition': 2.921591939324866, 'increment_error': 1.2159775982884336e-11, 'step_increment_error': 8.742844533858127e-12, 'min_inverse_defect': -5.154522871860482e-12, 'degree': 12, 'added_newmark_phase_rad_per_step': -1.568408904198404e-05}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_chords::test_chord_implicit_inverse[transparent-12.0-plate]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'scene': 'plate', 'material': 'transparent', 'min_eigenvalue': 1.307844344568977e-10, 'condition': 4.863909275816397, 'increment_error': 1.1913060415139514e-13, 'step_increment_error': 1.6177529983732576e-13, 'min_inverse_defect': 8.877063290476461e-14, 'degree': 16, 'added_newmark_phase_rad_per_step': -1.5590274713997432e-05}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'scene': 'plate', 'material': 'transparent', 'min_eigenvalue': 1.3081849209169072e-10, 'condition': 4.93047348092463, 'increment_error': 1.8115314212855032e-14, 'step_increment_error': 3.078270505064795e-14, 'min_inverse_defect': 1.5511648168415336e-14, 'degree': 17, 'added_newmark_phase_rad_per_step': -1.568408904198404e-05}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_faceted_circulations_are_exact_for_linear_fields[bent]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'chords': 330, 'cut_faces': 330, 'promoted_traces': 0, 'subfaces': 660, 'sheet_faces': 288, 'held_chords': 0, 'subface_cartesian_rows_with_both_sides': 0, 'subface_error': np.float64(3.9727196301571135e-14), 'sheet_face_error': np.float64(7.842691403211375e-15)}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'chords': 313, 'cut_faces': 313, 'promoted_traces': 0, 'subfaces': 626, 'sheet_faces': 288, 'held_chords': 0, 'subface_cartesian_rows_with_both_sides': 0, 'subface_error': np.float64(3.9727196301571135e-14), 'sheet_face_error': np.float64(7.842691403211375e-15)}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_preserves_pec_operator[plate]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'kind': 'plate', 'historical_pec_digest': '234249265237c425f373a5ce01ba4534bbf62ed9be565fffb427c6a75df533a9', 'explicit_nnz': 62712, 'changed_pec_entries': 0, 'changed_explicit_entries': 0, 'changed_mass_entries': 0}",
+        "failure": null
+      },
+      "after": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "kind = 'plate'\n\n    @pytest.mark.parametrize(\"kind\", [\"plate\", \"bent\", \"vee\", \"prism\"])\n    def test_chord_complex_preserves_pec_operator(kind):\n        \"\"\"V2/V7 structural: unchanged historical PEC and identical held-chord operator.\"\"\"\n        complexes = []\n        for material in (\"pec\", \"copper\"):\n            scene = prepare_scene(runtime_tests._cavity(_chord_structure(kind, material)))\n            complexes.append(compile_thin_sheet(scene, scene.structures[0]))\n        pec, copper = complexes\n        arrays = (\"k_rows\", \"k_cols\", \"k_vals\", \"e_volume\", \"h_area\", \"h_true_area\", \"h_dual\")\n        digest = hashlib.sha256(b\"\".join(getattr(pec, name).tobytes() for name in arrays)).hexdigest()\n>       assert digest == PEC_COMPLEX_DIGESTS[kind]\nE       AssertionError: assert '98709eb97e57...98c4a1963a97a' == '234249265237...7c6a75df533a9'\nE         \nE         - 234249265237c425f373a5ce01ba4534bbf62ed9be565fffb427c6a75df533a9\nE         + 98709eb97e57f97b1fbf426a3e4abb948330b7ae52996083bc598c4a1963a97a\n\ntests/materials/thin_sheet/test_thin_sheet_faceted.py:339: AssertionError"
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_preserves_pec_operator[bent]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'kind': 'bent', 'historical_pec_digest': 'f547e39b5a17815ba84771784c89006c0627ba6a3ceca07c6d3432c5dc82c468', 'explicit_nnz': 40092, 'changed_pec_entries': 0, 'changed_explicit_entries': 0, 'changed_mass_entries': 0}",
+        "failure": null
+      },
+      "after": {
+        "status": "failed",
+        "stdout": "",
+        "failure": "kind = 'bent'\n\n    @pytest.mark.parametrize(\"kind\", [\"plate\", \"bent\", \"vee\", \"prism\"])\n    def test_chord_complex_preserves_pec_operator(kind):\n        \"\"\"V2/V7 structural: unchanged historical PEC and identical held-chord operator.\"\"\"\n        complexes = []\n        for material in (\"pec\", \"copper\"):\n            scene = prepare_scene(runtime_tests._cavity(_chord_structure(kind, material)))\n            complexes.append(compile_thin_sheet(scene, scene.structures[0]))\n        pec, copper = complexes\n        arrays = (\"k_rows\", \"k_cols\", \"k_vals\", \"e_volume\", \"h_area\", \"h_true_area\", \"h_dual\")\n        digest = hashlib.sha256(b\"\".join(getattr(pec, name).tobytes() for name in arrays)).hexdigest()\n>       assert digest == PEC_COMPLEX_DIGESTS[kind]\nE       AssertionError: assert 'b21858aa720a...886e6470e653c' == 'f547e39b5a17...432c5dc82c468'\nE         \nE         - f547e39b5a17815ba84771784c89006c0627ba6a3ceca07c6d3432c5dc82c468\nE         + b21858aa720a0e9bb32855652de196e883e5bfaf5eb6bad00f9886e6470e653c\n\ntests/materials/thin_sheet/test_thin_sheet_faceted.py:339: AssertionError"
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_structure_and_linear_circulations[plate]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'chords': 380, 'cut_faces': 380, 'promoted_traces': 0, 'subfaces': 760, 'sheet_faces': 318, 'held_chords': 0, 'subface_cartesian_rows_with_both_sides': 0, 'subface_error': np.float64(3.916840285748881e-14), 'sheet_face_error': np.float64(1.6759613734985848e-14)}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'chords': 337, 'cut_faces': 337, 'promoted_traces': 0, 'subfaces': 674, 'sheet_faces': 310, 'held_chords': 0, 'subface_cartesian_rows_with_both_sides': 0, 'subface_error': np.float64(3.916840285748881e-14), 'sheet_face_error': np.float64(1.6759613734985848e-14)}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_chord_complex_structure_and_linear_circulations[bent]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'chords': 330, 'cut_faces': 330, 'promoted_traces': 0, 'subfaces': 660, 'sheet_faces': 288, 'held_chords': 0, 'subface_cartesian_rows_with_both_sides': 0, 'subface_error': np.float64(3.9727196301571135e-14), 'sheet_face_error': np.float64(7.842691403211375e-15)}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'chords': 313, 'cut_faces': 313, 'promoted_traces': 0, 'subfaces': 626, 'sheet_faces': 288, 'held_chords': 0, 'subface_cartesian_rows_with_both_sides': 0, 'subface_error': np.float64(3.9727196301571135e-14), 'sheet_face_error': np.float64(7.842691403211375e-15)}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_vanishing_fold_converges_to_the_planar_sheet[pec]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'material': 'pec', 'changes': {0.0001: 0.001684264731631856, 1e-05: 0.00014199806342969645, 1e-06: 1.663333834610104e-05, 1e-07: 8.384967782810254e-06}}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'material': 'pec', 'changes': {0.0001: 0.0005196100713696441, 1e-05: 5.441432374268121e-05, 1e-06: 1.0377887100357906e-05, 1e-07: 6.44144716573939e-06}}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_vanishing_fold_converges_to_the_planar_sheet[copper]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'material': 'copper', 'changes': {0.0001: 0.0016813766900766183, 1e-05: 0.00014066985243745087, 1e-06: 1.5655667772019855e-05, 1e-07: 9.317223756267521e-06}}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'material': 'copper', 'changes': {0.0001: 0.0005163697646572416, 1e-05: 5.599573541569595e-05, 1e-06: 1.0350064021260563e-05, 1e-07: 6.999466926961994e-06}}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_bent_sheet_cavity_is_stable_for_twenty_thousand_steps[pec]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'material': 'pec', 'early': 0.0005701891928127837, 'late': 0.0005701017984066635, 'drift': -0.00015327264567925963, 'modified_early': 0.000570178157844316, 'modified_late': 0.0005701784315716704, 'modified_ratio': 1.0000004800733782, 'heat': 0.0, 'dt': 7.213529386403706e-12, 'limit': 7.323380087719499e-12, 'folds': 70, 'added_newmark_phase_rad_per_step': 0.0}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'material': 'pec', 'early': 0.0005701999706700237, 'late': 0.000570155089131748, 'drift': -7.87119266648651e-05, 'modified_early': 0.0005701745662400981, 'modified_late': 0.000570173966285069, 'modified_ratio': 0.9999989477695698, 'heat': 0.0, 'dt': 7.214031557022539e-12, 'limit': 7.323889905606638e-12, 'folds': 70, 'added_newmark_phase_rad_per_step': 0.0}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_faceted::test_bent_sheet_cavity_is_stable_for_twenty_thousand_steps[copper]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'material': 'copper', 'early': 0.0005701694087972036, 'late': 0.000569914149091879, 'drift': -0.00044769098690003906, 'modified_early': 0.0005701585863256095, 'modified_late': 0.0005699852192817306, 'modified_ratio': 0.9996959318897641, 'heat': 1.918966738979472e-07, 'dt': 7.213529386403706e-12, 'limit': 7.323380087719499e-12, 'folds': 70, 'added_newmark_phase_rad_per_step': -9.305947807430881e-05}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'material': 'copper', 'early': 0.0005701869811112533, 'late': 0.0005700241112988555, 'drift': -0.00028564281155703735, 'modified_early': 0.0005701613844070384, 'modified_late': 0.0005700394981738811, 'modified_ratio': 0.9997862250294552, 'heat': 1.357959667591068e-07, 'dt': 7.214031557022539e-12, 'limit': 7.323889905606638e-12, 'folds': 70, 'added_newmark_phase_rad_per_step': -9.307890784569783e-05}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_feeds::test_f4_loaded_unexcited_feed_for_twenty_thousand_steps",
+      "before": {
+        "status": "passed",
+        "stdout": "{'F4_steps': 20000, 'sample_interval': 100, 'modified_initial': 1.3560463141952453e-17, 'modified_max_over_initial': 1.0, 'modified_final_over_initial': 0.12150956743649603}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'F4_steps': 20000, 'sample_interval': 100, 'modified_initial': 1.1179499225228694e-17, 'modified_max_over_initial': 1.0, 'modified_final_over_initial': 0.16698711746100187}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_tilted_pec_sheet_conserves_cavity_energy_for_twenty_thousand_steps",
+      "before": {
+        "status": "passed",
+        "stdout": "{'early': 0.000567340724054594, 'late': 0.000567227109175063, 'drift': -0.00020025863597283985, 'dt': 7.952260878098625e-12, 'limit': 8.073361297562056e-12}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'early': 0.0005678997106462611, 'late': 0.0005680550779884998, 'drift': 0.00027358235851521797, 'dt': 7.96818153252647e-12, 'limit': 8.08952439850403e-12}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_tilted_copper_foil_sheet_is_passive_for_twenty_thousand_steps",
+      "before": {
+        "status": "passed",
+        "stdout": "{'early': 0.0005673213219551923, 'late': 0.0005670320378870703, 'ratio': 0.9994900877916504, 'modified_early': 0.0005672355041573314, 'modified_late': 0.0005670613652628133, 'modified_ratio': 0.9996930042403167, 'heat': 1.9402252786165255e-07, 'dt': 7.952260878098625e-12, 'added_newmark_phase_rad_per_step': -0.00012466407869189677}",
+        "failure": null
+      },
+      "after": {
+        "status": "failed",
+        "stdout": "{'early': 0.0005678905726785201, 'late': 0.0005679576624309134, 'ratio': 1.000118138521083, 'modified_early': 0.0005679679067149407, 'modified_late': 0.000567879224189275, 'modified_ratio': 0.9998438599705771, 'heat': 9.817739005862566e-08, 'dt': 7.96818153252647e-12, 'added_newmark_phase_rad_per_step': -0.00012541401030599642}",
+        "failure": "def test_tilted_copper_foil_sheet_is_passive_for_twenty_thousand_steps():\n>       check_copper_cavity_passivity()\n\ntests/materials/thin_sheet/test_thin_sheet_runtime.py:96: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\ndevice = 'cpu'\n\n    def check_copper_cavity_passivity(device=\"cpu\"):\n        foil = mw.CopperFoil(thickness=2e-6, frequency_range=(0.5e9, 4e9))\n        scene = _cavity(_plate(foil), device=device)\n        dt = pec_bound_dt(scene)\n        early = _run(scene, 2000, dt=dt)\n        late = _run(scene, 20000, dt=dt)\n        e0, e1 = thin_sheet_energy(early.solver), thin_sheet_energy(late.solver)\n        runtime = late.solver._thin_sheets[0]\n        m0 = thin_sheet_energy(early.solver, modified=True)\n        m1 = thin_sheet_energy(late.solver, modified=True)\n        print(dict(early=e0, late=e1, ratio=e1 / e0, modified_early=m0, modified_late=m1,\n                   modified_ratio=m1/m0, heat=runtime.cumulative_loss, dt=late.solver.dt,\n                   added_newmark_phase_rad_per_step=newmark_phase_error(late.solver.dt, 2e9)))\n        assert 0 < m1 <= m0*(1 + 1e-9)\n>       assert np.isfinite(e1) and 0 < e1 <= e0 * (1 + 1e-9)\nE       AssertionError: assert (np.True_ and 0.0005679576624309134 <= (0.0005678905726785201 * (1 + 1e-09)))\nE        +  where np.True_ = <ufunc 'isfinite'>(0.0005679576624309134)\nE        +    where <ufunc 'isfinite'> = np.isfinite\n\ntests/materials/thin_sheet/test_thin_sheet_runtime.py:90: AssertionError"
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_runtime::test_subface_circulations_are_exact_for_linear_fields",
+      "before": {
+        "status": "passed",
+        "stdout": "{'chords': 380, 'cut_faces': 380, 'promoted_traces': 0, 'subfaces': 760, 'sheet_faces': 318, 'held_chords': 0, 'subface_cartesian_rows_with_both_sides': 0, 'subface_error': np.float64(3.916840285748881e-14), 'sheet_face_error': np.float64(1.6759613734985848e-14)}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'chords': 337, 'cut_faces': 337, 'promoted_traces': 0, 'subfaces': 674, 'sheet_faces': 310, 'held_chords': 0, 'subface_cartesian_rows_with_both_sides': 0, 'subface_error': np.float64(3.916840285748881e-14), 'sheet_face_error': np.float64(1.6759613734985848e-14)}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_normal_incidence_tilted_free_cut_matches_thin_sheet_formula[0.0013272093639924965]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 0.5, 'angle': 0.0, 'pol': 'te', 'dl': 0.015, 'T': (0.8008092644371131-0.00596816481073056j), 'R': (-0.21576350868387142-0.00815943617182311j), 'dt_sheet': 2.599874764042791e-11, 'dt_free': 2.599874764042791e-11, 'chord_unknowns': 2396, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.0005439878765701456}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 0.5, 'angle': 0.0, 'pol': 'te', 'dl': 0.015, 'T': (0.8008092550631275-0.005968144489694722j), 'R': (-0.2157635070031527-0.008159449072029106j), 'dt_sheet': 2.599874764042791e-11, 'dt_free': 2.599874764042791e-11, 'chord_unknowns': 2384, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.0005439878765701456}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_normal_incidence_tilted_free_cut_matches_thin_sheet_formula[0.010617674911939972]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 4.0, 'angle': 0.0, 'pol': 'te', 'dl': 0.015, 'T': (0.334751658244884-0.00043749614644029625j), 'R': (-0.6727151259888042+1.1645872674628556e-05j), 'dt_sheet': 2.599874764042791e-11, 'dt_free': 2.599874764042791e-11, 'chord_unknowns': 2396, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.0005439878765701456}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 4.0, 'angle': 0.0, 'pol': 'te', 'dl': 0.015, 'T': (0.334751658244884-0.00043749614644029625j), 'R': (-0.6727151259888042+1.1645872674628556e-05j), 'dt_sheet': 2.599874764042791e-11, 'dt_free': 2.599874764042791e-11, 'chord_unknowns': 2384, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.0005439878765701456}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_transmission_through_tilted_resistive_sheet[0.0013272093639924965-te]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 0.5, 'angle': 30.0, 'pol': 'te', 'dl': 0.015, 'T': (0.7749965943584721-0.01977213801890327j), 'R': (-0.22303364747735807-0.022962265327920586j), 'dt_sheet': 1.982288848992932e-11, 'dt_free': 1.982288848992932e-11, 'chord_unknowns': 3256, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.00024128571004003452}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 0.5, 'angle': 30.0, 'pol': 'te', 'dl': 0.015, 'T': (0.7749965713344219-0.019772153443028722j), 'R': (-0.2230336467408758-0.022962242407398473j), 'dt_sheet': 1.9822888489907384e-11, 'dt_free': 1.9822888489907384e-11, 'chord_unknowns': 3244, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.0002412857100392296}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_transmission_through_tilted_resistive_sheet[0.0013272093639924965-tm]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 0.5, 'angle': 30.0, 'pol': 'tm', 'dl': 0.015, 'T': (0.8218595018292297+0.002847391973413859j), 'R': (-0.08776382068504714+0.0007913811502987318j), 'dt_sheet': 1.9563972416017965e-11, 'dt_free': 1.9563972416017965e-11, 'chord_unknowns': 3256, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.00023195980048797138}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 0.5, 'angle': 30.0, 'pol': 'tm', 'dl': 0.015, 'T': (0.8218594925544181+0.0028473975103314635j), 'R': (-0.08776380406825245+0.0007913964768602136j), 'dt_sheet': 1.9563972416022486e-11, 'dt_free': 1.9563972416022486e-11, 'chord_unknowns': 3244, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.0002319598004881379}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_transmission_through_tilted_resistive_sheet[0.010617674911939972-te]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 4.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.015, 'T': (0.3021933392116751-0.001945489861998023j), 'R': (-0.6946051634690303-0.0008907385132392412j), 'dt_sheet': 1.982288848992932e-11, 'dt_free': 1.982288848992932e-11, 'chord_unknowns': 3256, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.00024128571004003452}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 4.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.015, 'T': (0.3021933417053601-0.0019454869464416318j), 'R': (-0.6946051846290912-0.000890772791350716j), 'dt_sheet': 1.9822888489907384e-11, 'dt_free': 1.9822888489907384e-11, 'chord_unknowns': 3244, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.0002412857100392296}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_transmission_through_tilted_resistive_sheet[0.010617674911939972-tm]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 4.0, 'angle': 30.0, 'pol': 'tm', 'dl': 0.015, 'T': (0.366386153736691+0.001269338332431383j), 'R': (-0.3154601872963478+0.0011297171815642338j), 'dt_sheet': 1.9563972416017965e-11, 'dt_free': 1.9563972416017965e-11, 'chord_unknowns': 3256, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.00023195980048797138}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 4.0, 'angle': 30.0, 'pol': 'tm', 'dl': 0.015, 'T': (0.36638614031012345+0.0012693359104785093j), 'R': (-0.31546018862661074+0.0011297098915624417j), 'dt_sheet': 1.9563972416022486e-11, 'dt_free': 1.9563972416022486e-11, 'chord_unknowns': 3244, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.0002319598004881379}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_from_tilted_sheet[0-te]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 0.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.015, 'T': (-4.586622609451262e-09+6.423443990776932e-11j), 'R': (-0.9958567232685871+0.004396745535470021j), 'dt_sheet': 1.9822888489928326e-11, 'dt_free': 1.9822888489928326e-11, 'chord_unknowns': 0, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': 0.0}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 0.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.015, 'T': (-4.58662231130946e-09+6.423445723088738e-11j), 'R': (-0.9958567164147304+0.0043967647420698076j), 'dt_sheet': 1.9822888489907236e-11, 'dt_free': 1.9822888489907236e-11, 'chord_unknowns': 0, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': 0.0}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_from_tilted_sheet[0-tm]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 0.0, 'angle': 30.0, 'pol': 'tm', 'dl': 0.015, 'T': (-2.4994006598506682e-08-5.338203155996089e-09j), 'R': (-0.4982585345689687+0.001628828270624336j), 'dt_sheet': 1.956397241601781e-11, 'dt_free': 1.956397241601781e-11, 'chord_unknowns': 0, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': 0.0}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 0.0, 'angle': 30.0, 'pol': 'tm', 'dl': 0.015, 'T': (-3.3455578318615754e-08-1.177937460467933e-09j), 'R': (-0.49825852454170144+0.001628816847677262j), 'dt_sheet': 1.9563972416022137e-11, 'dt_free': 1.9563972416022137e-11, 'chord_unknowns': 0, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': 0.0}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_transmission_error_decreases_with_refinement",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 1.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.015, 'T': (0.6333282037556656-0.012366618634639519j), 'R': (-0.364198953614141-0.01499804796087782j), 'dt_sheet': 1.9844361962027654e-11, 'dt_free': 1.9844361962027654e-11, 'chord_unknowns': 2716, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.00024207018664934576}\n{'g': 1.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.0075, 'T': (0.6338882510152904-0.006094878876995894j), 'R': (-0.36572395421347714-0.008164453352925628j), 'dt_sheet': 9.911471457378991e-12, 'dt_free': 9.911471457378991e-12, 'chord_unknowns': 5444, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -3.0182756035231073e-05}\n{'g': 1.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.00375, 'T': (0.6339719529016908-0.0030332325401713186j), 'R': (-0.36587339131362173-0.0042075970963414595j), 'dt_sheet': 4.954912691669008e-12, 'dt_free': 4.954912691669008e-12, 'chord_unknowns': 10904, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -3.7716495920187e-06}\n{'errors': [0.012383500299463938, 0.006095490465816557, 0.003033233691930506], 'ratio': 0.4922267790537721, 'ratios': [0.4922267790537721, 0.49761929888018813]}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 1.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.015, 'T': (0.6333282171783351-0.01236661754234511j), 'R': (-0.3641989616177572-0.014998050971878979j), 'dt_sheet': 1.9844361962063562e-11, 'dt_free': 1.9844361962063562e-11, 'chord_unknowns': 2704, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.00024207018665065028}\n{'g': 1.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.0075, 'T': (0.6338882510152904-0.006094878876995894j), 'R': (-0.36572395421347714-0.008164453352925628j), 'dt_sheet': 9.911471457378991e-12, 'dt_free': 9.911471457378991e-12, 'chord_unknowns': 5444, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -3.0182756035231073e-05}\n{'g': 1.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.00375, 'T': (0.6339719529016908-0.0030332325401713186j), 'R': (-0.36587339131362173-0.0042075970963414595j), 'dt_sheet': 4.954912691669008e-12, 'dt_free': 4.954912691669008e-12, 'chord_unknowns': 10904, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -3.7716495920187e-06}\n{'errors': [0.01238349850803089, 0.006095490465816557, 0.003033233691930506], 'ratio': 0.49222685026073504, 'ratios': [0.49222685026073504, 0.49761929888018813]}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_converges_with_observed_order[0]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 0.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.0075, 'T': (-2.676225420828767e-09-1.627144166491131e-09j), 'R': (-0.9987767690610715-0.00045087786830316995j), 'dt_sheet': 9.915004700892093e-12, 'dt_free': 9.915004700892093e-12, 'chord_unknowns': 0, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': 0.0}\n{'g': 0.0, 'errors': [0.006041366846727912, 0.0013036812425119627], 'order': 2.212283827710359, 'orders': [2.212283827710359]}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 0.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.0075, 'T': (-2.6762254431150426e-09-1.6271442045034547e-09j), 'R': (-0.998776756119123-0.0004508775767295121j), 'dt_sheet': 9.915004700892226e-12, 'dt_free': 9.915004700892226e-12, 'chord_unknowns': 0, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': 0.0}\n{'g': 0.0, 'errors': [0.0060413855252808325, 0.0013036932849794685], 'order': 2.2122749616781308, 'orders': [2.2122749616781308]}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_oblique_reflection_converges_with_observed_order[0.010617674911939972]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 4.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.0075, 'T': (0.30215291212988254-0.0009414601558636361j), 'R': (-0.6968498319101811-0.0022143216090612797j), 'dt_sheet': 9.915004700891037e-12, 'dt_free': 9.915004700891037e-12, 'chord_unknowns': 6536, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -3.0215041001091514e-05}\n{'g': 4.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.00375, 'T': (0.3021997809994058-0.00047634407835922245j), 'R': (-0.6975934082980185-0.001422433485995785j), 'dt_sheet': 4.953490835910274e-12, 'dt_free': 4.953490835910274e-12, 'chord_unknowns': 13096, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -3.7684037305432683e-06}\n{'g': 4.0, 'errors': [0.0033460939431243938, 0.0024217701759358407, 0.0014420607948475133], 'order': 0.46641598935491835, 'orders': [0.46641598935491835, 0.7479299734687895]}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 4.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.0075, 'T': (0.30215291498041646-0.0009414463287997725j), 'R': (-0.6968498387442543-0.0022143220973107752j), 'dt_sheet': 9.915004700893166e-12, 'dt_free': 9.915004700893166e-12, 'chord_unknowns': 6524, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -3.021504100111233e-05}\n{'g': 4.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.00375, 'T': (0.3021997864321789-0.0004763402008319093j), 'R': (-0.6975933777443408-0.0014224295784136648j), 'dt_sheet': 4.953490835908304e-12, 'dt_free': 4.953490835908304e-12, 'chord_unknowns': 13084, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -3.7684037305363294e-06}\n{'g': 4.0, 'errors': [0.003346082671721105, 0.002421767854932316, 0.0014420619646008548], 'order': 0.46641251225854935, 'orders': [0.46641251225854935, 0.7479274205343701]}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_sheet_on_dielectric_interface[te]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 1.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.015, 'T': (0.7385021914216668+0.003442062543060326j), 'R': (0.06153250646667642+0.23235228123817672j), 'dt_sheet': 1.9830009401792823e-11, 'dt_free': 1.9830009401792823e-11, 'chord_unknowns': 3256, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.00024154566581348347}\n{'pol': 'te', 'T_rel': (0.7385021914216668+0.003442062543060326j), 'expected': 0.7372792863779725, 'error': 0.003652847012431819}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 1.0, 'angle': 30.0, 'pol': 'te', 'dl': 0.015, 'T': (0.738502152899559+0.003442012270327609j), 'R': (0.061532484817714575+0.2323522478934086j), 'dt_sheet': 1.9830009401773973e-11, 'dt_free': 1.9830009401773973e-11, 'chord_unknowns': 3244, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.00024154566581278958}\n{'pol': 'te', 'T_rel': (0.738502152899559+0.003442012270327609j), 'expected': 0.7372792863779725, 'error': 0.003652786744213654}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_sheet_on_dielectric_interface[tm]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 1.0, 'angle': 30.0, 'pol': 'tm', 'dl': 0.015, 'T': (0.7579166277739244+0.0034369425523919435j), 'R': (0.023992334876119327+0.12909643572796542j), 'dt_sheet': 1.9572482480384108e-11, 'dt_free': 1.9572482480384108e-11, 'chord_unknowns': 3256, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.00023226244145223285}\n{'pol': 'tm', 'T_rel': (0.7579166277739244+0.0034369425523919435j), 'expected': 0.7632865021318322, 'error': 0.0063755881868387855}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 1.0, 'angle': 30.0, 'pol': 'tm', 'dl': 0.015, 'T': (0.7579165882965396+0.003436972177546808j), 'R': (0.023992270591978837+0.12909642022149975j), 'dt_sheet': 1.957248248038405e-11, 'dt_free': 1.957248248038405e-11, 'chord_unknowns': 3244, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': -0.00023226244145223285}\n{'pol': 'tm', 'T_rel': (0.7579165882965396+0.003436972177546808j), 'expected': 0.7632865021318322, 'error': 0.006375637407169413}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_copper_matches_pec_reflection[0.015-te]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'V12': True, 'pol': 'te', 'dl': 0.015, 'R_copper': (-0.9959508594963+0.004182461368236351j), 'R_pec': (-0.9958567232685871+0.004396745535470021j), 'difference': 0.00023404985301223198, 'added_newmark_phase_rad_per_step': -0.00024128571004003452}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'V12': True, 'pol': 'te', 'dl': 0.015, 'R_copper': (-0.9959508599757265+0.004182463440943643j), 'R_pec': (-0.9958567164147304+0.0043967647420698076j), 'difference': 0.00023406848942435446, 'added_newmark_phase_rad_per_step': -0.0002412857100392296}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_copper_matches_pec_reflection[0.015-tm]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'V12': True, 'pol': 'tm', 'dl': 0.015, 'R_copper': (-0.4982333952559342+0.001603866038268345j), 'R_pec': (-0.4982585345689687+0.001628828270624336j), 'difference': 3.5427363774923865e-05, 'added_newmark_phase_rad_per_step': -0.00023195980048797138}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'V12': True, 'pol': 'tm', 'dl': 0.015, 'R_copper': (-0.4982333932517555+0.001603858198869198j), 'R_pec': (-0.49825852454170144+0.001628816847677262j), 'difference': 3.541914573606457e-05, 'added_newmark_phase_rad_per_step': -0.0002319598004881379}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_copper_matches_pec_reflection[0.0075-te]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'V12': True, 'pol': 'te', 'dl': 0.0075, 'R_copper': (-0.9987701972863574-0.0005358405110416017j), 'R_pec': (-0.9987767690610715-0.00045087786830316995j), 'difference': 8.521642379254737e-05, 'added_newmark_phase_rad_per_step': -3.0215041001091514e-05}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'V12': True, 'pol': 'te', 'dl': 0.0075, 'R_copper': (-0.9987701855762874-0.0005358344033585494j), 'R_pec': (-0.998776756119123-0.0004508775767295121j), 'difference': 8.52105300067466e-05, 'added_newmark_phase_rad_per_step': -3.021504100111233e-05}",
+        "failure": null
+      }
+    },
+    {
+      "test": "tests.materials.thin_sheet.test_thin_sheet_scattering::test_tilted_copper_matches_pec_reflection[0.0075-tm]",
+      "before": {
+        "status": "passed",
+        "stdout": "{'g': 0.0, 'angle': 30.0, 'pol': 'tm', 'dl': 0.0075, 'T': (-1.5794946011086102e-08-1.1106207583126171e-08j), 'R': (-0.49961254579666065-0.00042356588421351294j), 'dt_sheet': 9.786241240203964e-12, 'dt_free': 9.786241240203964e-12, 'chord_unknowns': 0, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': 0.0}\n{'V12': True, 'pol': 'tm', 'dl': 0.0075, 'R_copper': (-0.49958732768094144-0.00044848127167060277j), 'R_pec': (-0.49961254579666065-0.00042356588421351294j), 'difference': 3.545038635281919e-05, 'added_newmark_phase_rad_per_step': -2.9053260476814835e-05}",
+        "failure": null
+      },
+      "after": {
+        "status": "passed",
+        "stdout": "{'g': 0.0, 'angle': 30.0, 'pol': 'tm', 'dl': 0.0075, 'T': (-1.980561609178639e-08-1.2951304464858232e-08j), 'R': (-0.4996125407901119-0.0004235632443431972j), 'dt_sheet': 9.786241240200371e-12, 'dt_free': 9.786241240200371e-12, 'chord_unknowns': 0, 'foil_entries': 0, 'added_newmark_phase_rad_per_step': 0.0}\n{'V12': True, 'pol': 'tm', 'dl': 0.0075, 'R_copper': (-0.4995873230696231-0.0004484789383525363j), 'R_pec': (-0.4996125407901119-0.0004235632443431972j), 'difference': 3.545032065607216e-05, 'added_newmark_phase_rad_per_step': -2.905326047678708e-05}",
+        "failure": null
+      }
+    }
+  ]
+}

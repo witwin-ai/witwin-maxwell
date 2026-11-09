@@ -1,0 +1,278 @@
+{
+  "interpretation": "Initial audit: volume_cells and masses use requested dl^3, closed_cell_area and closed_cell_perimeter use requested dl. Closed-loop area is not total conductor support. See assessment addendum.",
+  "dl": 0.003747405725,
+  "steps": 6000,
+  "cases": [
+    {
+      "z": 0.05,
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 304,
+        "split_edges": 194,
+        "on_sheet_traces": 0,
+        "traces": 0,
+        "floored_subfaces": 304,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "n_e": 12426,
+      "n_h": 11586,
+      "volume_cells": 12027.28394887367,
+      "unique_parent_count": 12232,
+      "closed_cell_area": 0.001558778513121668,
+      "true_area": 0.0021135368289,
+      "closed_cell_perimeter": 0.299792458,
+      "true_perimeter": 0.31180491052000003,
+      "masses": [
+        {
+          "component": "x",
+          "z": 0.0,
+          "count": 111,
+          "volumes": [
+            0.540795142
+          ]
+        },
+        {
+          "component": "x",
+          "z": 0.9999999999999963,
+          "count": 111,
+          "volumes": [
+            1.425732646
+          ]
+        },
+        {
+          "component": "y",
+          "z": 0.0,
+          "count": 111,
+          "volumes": [
+            0.540795142
+          ]
+        },
+        {
+          "component": "y",
+          "z": 0.9999999999999963,
+          "count": 111,
+          "volumes": [
+            1.425732646
+          ]
+        },
+        {
+          "component": "z",
+          "z": 0.0,
+          "count": 388,
+          "volumes": [
+            0.049163195,
+            0.934100699
+          ]
+        }
+      ]
+    },
+    {
+      "z": 0.3,
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 304,
+        "split_edges": 194,
+        "on_sheet_traces": 0,
+        "traces": 0,
+        "floored_subfaces": 0,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "n_e": 12426,
+      "n_h": 11586,
+      "volume_cells": 12027.28394887367,
+      "unique_parent_count": 12232,
+      "closed_cell_area": 0.001558778513121668,
+      "true_area": 0.0021135368289,
+      "closed_cell_perimeter": 0.299792458,
+      "true_perimeter": 0.31180491052000003,
+      "masses": [
+        {
+          "component": "x",
+          "z": 0.0,
+          "count": 111,
+          "volumes": [
+            0.786611115
+          ]
+        },
+        {
+          "component": "x",
+          "z": 0.9999999999999963,
+          "count": 111,
+          "volumes": [
+            1.179916673
+          ]
+        },
+        {
+          "component": "y",
+          "z": 0.0,
+          "count": 111,
+          "volumes": [
+            0.786611115
+          ]
+        },
+        {
+          "component": "y",
+          "z": 0.9999999999999963,
+          "count": 111,
+          "volumes": [
+            1.179916673
+          ]
+        },
+        {
+          "component": "z",
+          "z": 0.0,
+          "count": 388,
+          "volumes": [
+            0.294979168,
+            0.688284726
+          ]
+        }
+      ]
+    },
+    {
+      "z": 0.5,
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 304,
+        "split_edges": 194,
+        "on_sheet_traces": 0,
+        "traces": 0,
+        "floored_subfaces": 0,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "n_e": 12426,
+      "n_h": 11586,
+      "volume_cells": 12027.28394887367,
+      "unique_parent_count": 12232,
+      "closed_cell_area": 0.001558778513121668,
+      "true_area": 0.0021135368289,
+      "closed_cell_perimeter": 0.299792458,
+      "true_perimeter": 0.31180491052000003,
+      "masses": [
+        {
+          "component": "z",
+          "z": 0.0,
+          "count": 388,
+          "volumes": [
+            0.491631947
+          ]
+        }
+      ]
+    },
+    {
+      "z": 0.75,
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 304,
+        "split_edges": 194,
+        "on_sheet_traces": 0,
+        "traces": 0,
+        "floored_subfaces": 0,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "n_e": 12426,
+      "n_h": 11586,
+      "volume_cells": 12027.28394887367,
+      "unique_parent_count": 12232,
+      "closed_cell_area": 0.001558778513121668,
+      "true_area": 0.0021135368289,
+      "closed_cell_perimeter": 0.299792458,
+      "true_perimeter": 0.31180491052000003,
+      "masses": [
+        {
+          "component": "x",
+          "z": 0.0,
+          "count": 111,
+          "volumes": [
+            1.229079867
+          ]
+        },
+        {
+          "component": "x",
+          "z": 0.9999999999999963,
+          "count": 111,
+          "volumes": [
+            0.73744792
+          ]
+        },
+        {
+          "component": "y",
+          "z": 0.0,
+          "count": 111,
+          "volumes": [
+            1.229079867
+          ]
+        },
+        {
+          "component": "y",
+          "z": 0.9999999999999963,
+          "count": 111,
+          "volumes": [
+            0.73744792
+          ]
+        },
+        {
+          "component": "z",
+          "z": 0.0,
+          "count": 388,
+          "volumes": [
+            0.245815973,
+            0.73744792
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -76,6 +76,25 @@ def test_finite_declared_time_scales_bound_resolution_without_infinite_jump_freq
     assert maximum_declared_frequency(_finite_circuit_scene(waveform), 3e9) == pytest.approx(expected, rel=2e-7)
 
 
+def test_pwl_resolution_is_invariant_under_collinear_resampling():
+    # A 1 ns ramp remains a 1 ns physical feature with 4001 table samples.
+    for samples in (2, 41, 4001):
+        times = torch.linspace(0., 1e-9, samples, dtype=torch.float64)
+        waveform = mw.PiecewiseLinearWaveform(times, times / 1e-9)
+        assert maximum_declared_frequency(_finite_circuit_scene(waveform), 1e8) == pytest.approx(1e9)
+    constant = mw.PiecewiseLinearWaveform([0., 1e-15, 1e-9], [3., 3., 3.])
+    assert maximum_declared_frequency(_finite_circuit_scene(constant), 1e8) == 1e8
+
+
+def test_dense_esd_table_uses_physical_rise_scale():
+    waveform = mw.ESDWaveform.iec_61000_4_2(8000.)
+    frequencies = [maximum_declared_frequency(
+        _finite_circuit_scene(waveform.to_circuit_waveform(t_end=1e-9, samples=samples)), 1e8
+    ) for samples in (401, 4001)]
+    assert frequencies[1] == pytest.approx(frequencies[0], rel=1e-3)
+    assert 1e9 < frequencies[1] < 1e10
+
+
 def _short_waveform(kind):
     if kind == "pulse":
         return mw.PulseWaveform(0., .01, delay=2e-12, rise=2e-13, width=2e-13, fall=2e-13, period=1e-9)

@@ -249,13 +249,13 @@ def run_fdfd(scene, frequency, max_iter=5000, tol=1e-6, restart=200):
     result = mw.Simulation.fdfd(
         scene,
         frequency=frequency,
-        solver=mw.GMRES(max_iter=max_iter, tol=tol, restart=restart),
+        solver=mw.GMRES(max_iter=max_iter, tol=tol, restart=restart, precision="double"),
         enable_plot=False,
         verbose=True,
     ).run()
     fdfd = result.solver
-    if not fdfd.converged:
-        print(f"WARNING: FDFD did not converge (residual={getattr(fdfd, 'final_residual', '?')})")
+    assert fdfd.converged, f"FDFD reference did not converge: residual={fdfd.final_residual}"
+    assert fdfd.final_residual <= tol, fdfd.final_residual
     fields = {name.title(): tensor.detach().cpu().numpy() for name, tensor in result.fields.items()}
     return fields, fdfd
 
@@ -316,11 +316,43 @@ def compare_fields(fdfd_fields, fdtd_fields, scene, name, label="",
 # Test cases
 # ---------------------------------------------------------------------------
 
+def test_cw_dipole_amplitude_agreement():
+    """One physical current moment gives the same CW field in both runtimes."""
+    frequency = 1.0e9
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.24, 0.24),) * 3),
+        grid=mw.GridSpec.uniform(0.03),
+        boundary=mw.BoundarySpec.pml(num_layers=6),
+        device="cuda",
+    )
+    scene.add_source(mw.PointDipole(
+        position=(0.0, 0.0, -0.09), polarization="Ex", width=0.03,
+        source_time=mw.CW(frequency=frequency, amplitude=2.3, phase=0.4),
+    ))
+    fdfd = mw.Simulation.fdfd(
+        scene, frequency=frequency,
+        solver=mw.GMRES(precision="double", max_iter=5000, tol=1e-7, restart=200),
+    ).run()
+    assert fdfd.stats()["converged"]
+    fdtd = mw.Simulation.fdtd(
+        scene, frequencies=(frequency,),
+        run_time=mw.TimeConfig.auto(steady_cycles=40, transient_cycles=30),
+        spectral_sampler=mw.SpectralSampler(normalize_source=True),
+        full_field_dft=True,
+    ).run()
+    plane_index = int(torch.argmin((fdfd.prepared_scene.z - 0.12).abs()))
+    actual = fdfd.tensor("Ex")[:, :, plane_index].abs()
+    reference = fdtd.tensor("Ex")[:, :, plane_index].abs()
+    relative_error = torch.linalg.vector_norm(actual - reference) / torch.linalg.vector_norm(reference)
+    assert relative_error < 0.05, relative_error.item()
+
+
 class TestFDFDvsFDTD:
     """Cross-validation: FDFD frequency-domain vs FDTD running-DFT."""
 
-    # Current thresholds with GMRES solver.
-    # GMRES convergence is the bottleneck -raise thresholds as solver improves.
+    # Preserve the historical physical-pattern limits and independently require
+    # a converged linear solve. The numerical PML settings use finite stretching:
+    # FDFD interprets strength directly, unlike FDTD's historical 1e6 sentinel.
     MIN_CORRELATION = 0.70
     MAX_PEAK_OFFSET = 12
 
@@ -339,7 +371,7 @@ class TestFDFDvsFDTD:
         freq = 1e9
         scene_fdfd, scene_fdtd = make_scene_pair(
             domain_half=0.64, resolution=0.04,
-            pml_thickness=8, pml_strength=1e6,
+            pml_thickness=8, pml_strength=4.0,
             source_pos=[0, 0, 0], source_width=0.05,
             source_amp=100.0, source_pol=[0, 0, 1],
             source_frequency=freq,
@@ -370,7 +402,7 @@ class TestFDFDvsFDTD:
 
         scene_fdfd, scene_fdtd = make_scene_pair(
             domain_half=0.64, resolution=0.04,
-            pml_thickness=8, pml_strength=1e6,
+            pml_thickness=8, pml_strength=4.0,
             source_pos=[0, 0, 0], source_width=0.05,
             source_amp=100.0, source_pol=[0, 0, 1],
             geometry_fn=add_cube,
@@ -390,10 +422,11 @@ class TestFDFDvsFDTD:
     def test_polarized_dielectric_consistency(self):
         """FDFD and FDTD stay consistent under polarized (Kottke) subpixel averaging.
 
-        Both solvers consume the same node-based normal-aware material components
-        (compiler emits them once; each solver re-averages node -> Yee edge with its
-        own arithmetic stencil), so enabling ``averaging="polarized"`` must keep the
-        two runtimes cross-consistent. This locks the FDFD-for-free path (design 6).
+        Both solvers consume the shared normal-aware material policy. FDFD
+        averages compiled node components onto edges; FDTD compiles components
+        directly on its Yee edges. Their finite-grid physical patterns must
+        remain consistent despite these distinct discretizations. The test uses
+        samples=2 because single-sample polarized averaging raises (2026-10-29).
         """
         freq = 1e9
 
@@ -408,12 +441,12 @@ class TestFDFDvsFDTD:
 
         scene_fdfd, scene_fdtd = make_scene_pair(
             domain_half=0.64, resolution=0.04,
-            pml_thickness=8, pml_strength=1e6,
+            pml_thickness=8, pml_strength=4.0,
             source_pos=[0, 0, 0], source_width=0.05,
             source_amp=100.0, source_pol=[0, 0, 1],
             geometry_fn=add_cube,
             source_frequency=freq,
-            subpixel_samples=mw.SubpixelSpec(averaging="polarized"),
+            subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
         )
         # Both scenes must actually carry the polarized policy.
         assert scene_fdfd.subpixel.averaging == "polarized"

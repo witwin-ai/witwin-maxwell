@@ -19,3 +19,14 @@ def pec_structures(scene) -> tuple[Any, ...]:
         if bool(getattr(structure, "enabled", True))
         and bool(getattr(getattr(structure, "material", None), "is_pec", False))
     )
+
+
+def pmc_structures(scene) -> tuple[Any, ...]:
+    """Enabled scene structures whose material is PMC, in scene order."""
+
+    return tuple(
+        structure
+        for structure in getattr(scene, "structures", ())
+        if bool(getattr(structure, "enabled", True))
+        and bool(getattr(getattr(structure, "material", None), "is_pmc", False))
+    )

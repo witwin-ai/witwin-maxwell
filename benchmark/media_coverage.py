@@ -187,6 +187,15 @@ def _pec() -> Material:
     return Material.pec()
 
 
+def _pmc() -> Material:
+    return Material.pmc()
+
+
+def _tensor_nonlinear() -> Material:
+    unit = tuple(tuple(tuple(float(i == j == k) for k in range(3)) for j in range(3)) for i in range(3))
+    return Material(eps_r=2.25, nonlinearity=(mw.TensorNonlinearSusceptibility(chi2=unit),))
+
+
 def _perturbation_uniform() -> Material:
     return PerturbationMedium(Material(eps_r=2.0), perturbation=torch.ones(2, 2, 2), eps_sensitivity=0.5)
 
@@ -251,6 +260,26 @@ MEDIA_VALIDATION: dict[str, MediumValidation] = {
     "is_pec": MediumValidation(
         "is_pec", TIDY3D, _ADAPTER_TEST, _pec, True,
         "Material.pec() exports as td.PECMedium.",
+    ),
+    "is_pmc": MediumValidation(
+        "is_pmc", FDTD_ANALYTIC, "tests/materials/pmc/test_pmc_medium.py", _pmc, True,
+        "PMC slab under a plane wave is the PEC dual (|r| = 1, r_PMC = -r_PEC, H_t = 0 "
+        "on the wall where PEC gives E_t = 0), matches the good-magnetic-conductor "
+        "sigma_m limit, and the FDFD PMC solve matches FDTD. Material.pmc() exports as "
+        "td.PMCMedium "
+        "(tests/api/adapters/tidy3d/test_media_pmc_sellmeier_perturbation_export.py).",
+    ),
+    "has_tensor_nonlinearity": MediumValidation(
+        "has_tensor_nonlinearity", FDTD_ANALYTIC,
+        "tests/mom/test_tensor_susceptibility_material.py", _tensor_nonlinear, False,
+        "Declaration-level evidence only: material-to-lab frame compilation is exact "
+        "against an einsum rotation reference with native gradients, the FDTD grid "
+        "compiler and the reference adapter reject the declaration instead of lowering it "
+        "to scalar chi2/chi3, and MoM harmonic coefficient sampling of the tensor "
+        "sources is exact against the same reference "
+        "(tests/mom/test_tensor_harmonic_material_coefficients.py). No "
+        "physical qualification is claimed; the reference backend has no tensor "
+        "nonlinear construct.",
     ),
     "is_medium2d": MediumValidation(
         "is_medium2d", TIDY3D, "static_medium2d_sheet", _medium2d, True,

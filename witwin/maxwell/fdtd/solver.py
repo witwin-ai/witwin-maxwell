@@ -223,13 +223,13 @@ class FDTD:
         add_plane_observer_impl(self, name, axis=axis, position=position, component=component)
 
     def _get_component_coords(self, component):
-        return get_component_coords_impl(self, component)
+        return get_component_coords_impl(self.scene, component)
 
     def _resolve_point_observer(self, observer):
         return resolve_point_observer_impl(self, observer)
 
     def _resolve_plane_observer(self, observer):
-        return resolve_plane_observer_impl(self, observer)
+        return resolve_plane_observer_impl(self.scene, observer)
 
     def _prepare_observers(self, frequencies, window_type, time_steps):
         prepare_observers_impl(self, frequencies, window_type, time_steps)

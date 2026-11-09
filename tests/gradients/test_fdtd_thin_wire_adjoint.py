@@ -28,6 +28,7 @@ def _wire_simulation(
 ):
     uses_pml = boundary is not None
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.20, 0.20),) * 3 if uses_pml else ((-0.12, 0.12),) * 3),
         grid=mw.GridSpec.uniform(0.04),
         boundary=mw.BoundarySpec.none() if boundary is None else boundary,

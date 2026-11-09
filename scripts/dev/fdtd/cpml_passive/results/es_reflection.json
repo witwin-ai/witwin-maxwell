@@ -1,0 +1,821 @@
+{
+  "layers": 12,
+  "metrics": {
+    "normal": {
+      "max_ratio": 1.0,
+      "failed_rows": 0
+    },
+    "60deg": {
+      "max_ratio": 1.4870695050676455,
+      "failed_rows": 13
+    },
+    "80deg": {
+      "max_ratio": 4.897622954880525,
+      "failed_rows": 2
+    },
+    "evanescent": {
+      "max_ratio": 0.6498257492164992,
+      "failed_rows": 0
+    }
+  },
+  "rows": [
+    {
+      "preset": "real",
+      "metric": "normal",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.0527290264193914e-05,
+      "R": 1.0527290264193914e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "normal",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.046131679070261e-05,
+      "R": 1.046131679070261e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "normal",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.0415053543219748e-05,
+      "R": 1.0415053543219748e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "normal",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.098554980579707e-05,
+      "R": 1.098554980579707e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "normal",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.164915932719808e-05,
+      "R": 1.164915932719808e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "60deg",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.00020749920883061883,
+      "R": 0.00020787672382238917,
+      "ratio": 1.0018193562948883,
+      "passes": false
+    },
+    {
+      "preset": "real",
+      "metric": "60deg",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.00020577905518875153,
+      "R": 0.00020748190311443022,
+      "ratio": 1.0082751275348054,
+      "passes": false
+    },
+    {
+      "preset": "real",
+      "metric": "60deg",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.00020208108605849578,
+      "R": 0.00020795613898794474,
+      "ratio": 1.0290727501719201,
+      "passes": false
+    },
+    {
+      "preset": "real",
+      "metric": "60deg",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.00019062775371079006,
+      "R": 0.00022702165497882486,
+      "ratio": 1.1909160684086413,
+      "passes": false
+    },
+    {
+      "preset": "real",
+      "metric": "60deg",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.0001839780237027957,
+      "R": 0.00027358810865103994,
+      "ratio": 1.4870695050676455,
+      "passes": false
+    },
+    {
+      "preset": "real",
+      "metric": "80deg",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.04725877349171895,
+      "R": 0.04738997574955458,
+      "ratio": 1.002776251860591,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "80deg",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.046787995843110324,
+      "R": 0.04730959069604855,
+      "ratio": 1.011148048629551,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "80deg",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.04569721996996188,
+      "R": 0.047125326119479435,
+      "ratio": 1.031251488612574,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "80deg",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.041017671371051036,
+      "R": 0.04636815704496362,
+      "ratio": 1.1304434282851266,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "80deg",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.03454837856073964,
+      "R": 0.04542275826372141,
+      "ratio": 1.3147580336907414,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "evanescent",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.5059372266632145,
+      "R": 0.2868731453099046,
+      "ratio": 0.5670133174463291,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "evanescent",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.25610220424389446,
+      "R": 0.08164763202315269,
+      "ratio": 0.31880878286153674,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "evanescent",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.10348804043282792,
+      "R": 0.014834845889821558,
+      "ratio": 0.14334840845160818,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "evanescent",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.010910100505379147,
+      "R": 0.00012205917081337388,
+      "ratio": 0.011187721941992513,
+      "passes": true
+    },
+    {
+      "preset": "real",
+      "metric": "evanescent",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.001190242173503707,
+      "R": 1.3728164252709203e-05,
+      "ratio": 0.011533925245059758,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "normal",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 5.721664307118213e-06,
+      "R": 5.721664307118213e-06,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "normal",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.4527842201093702e-05,
+      "R": 1.4527842201093702e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "normal",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 2.627466017804209e-05,
+      "R": 2.627466017804209e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "normal",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 5.539367795130154e-05,
+      "R": 5.539367795130154e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "normal",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 8.596724950504672e-05,
+      "R": 8.596724950504672e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "60deg",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 7.000509605615453e-05,
+      "R": 9.450216760087313e-05,
+      "ratio": 1.349932689544034,
+      "passes": false
+    },
+    {
+      "preset": "cfs",
+      "metric": "60deg",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 7.404660845491126e-06,
+      "R": 7.77335157980501e-06,
+      "ratio": 1.0497917111947657,
+      "passes": false
+    },
+    {
+      "preset": "cfs",
+      "metric": "60deg",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.2389416833514375e-05,
+      "R": 1.2445718301366727e-05,
+      "ratio": 1.004544319446905,
+      "passes": false
+    },
+    {
+      "preset": "cfs",
+      "metric": "60deg",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 2.605531642114042e-05,
+      "R": 2.5735556656302023e-05,
+      "ratio": 0.9877276575854994,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "60deg",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 3.998732355022056e-05,
+      "R": 3.879937380964854e-05,
+      "ratio": 0.970291841636261,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "80deg",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.040273116847097085,
+      "R": 0.046193815644094714,
+      "ratio": 1.147013672159432,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "80deg",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.005994409669810006,
+      "R": 0.008568815999704365,
+      "ratio": 1.429467866178715,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "80deg",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.0027845816369914205,
+      "R": 0.00476153427897601,
+      "ratio": 1.709963972943732,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "80deg",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.0015514381843705308,
+      "R": 0.0041719705850864625,
+      "ratio": 2.6890988162568443,
+      "passes": false
+    },
+    {
+      "preset": "cfs",
+      "metric": "80deg",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.0010189987226316333,
+      "R": 0.00499067153495462,
+      "ratio": 4.897622954880525,
+      "passes": false
+    },
+    {
+      "preset": "cfs",
+      "metric": "evanescent",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.0038161910966780918,
+      "R": 0.0024798592385521746,
+      "ratio": 0.6498257492164992,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "evanescent",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.013343877336620546,
+      "R": 0.004078122133532993,
+      "ratio": 0.3056174776383109,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "evanescent",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.017498618241801156,
+      "R": 0.0021671340906843843,
+      "ratio": 0.12384601233870443,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "evanescent",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.005680801954424991,
+      "R": 0.00014244661409768735,
+      "ratio": 0.025075088911827016,
+      "passes": true
+    },
+    {
+      "preset": "cfs",
+      "metric": "evanescent",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.0010969174030309357,
+      "R": 2.7698142022197203e-05,
+      "ratio": 0.02525089122085526,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "normal",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.0527290264193914e-05,
+      "R": 1.0527290264193914e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "normal",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.046131679070261e-05,
+      "R": 1.046131679070261e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "normal",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.0415053543219748e-05,
+      "R": 1.0415053543219748e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "normal",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.098554980579707e-05,
+      "R": 1.098554980579707e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "normal",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 1.164915932719808e-05,
+      "R": 1.164915932719808e-05,
+      "ratio": 1.0,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "60deg",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.00020749920883061883,
+      "R": 0.00020787672382238917,
+      "ratio": 1.0018193562948883,
+      "passes": false
+    },
+    {
+      "preset": "alpha0",
+      "metric": "60deg",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.00020577905518875153,
+      "R": 0.00020748190311443022,
+      "ratio": 1.0082751275348054,
+      "passes": false
+    },
+    {
+      "preset": "alpha0",
+      "metric": "60deg",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.00020208108605849578,
+      "R": 0.00020795613898794474,
+      "ratio": 1.0290727501719201,
+      "passes": false
+    },
+    {
+      "preset": "alpha0",
+      "metric": "60deg",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.00019062775371079006,
+      "R": 0.00022702165497882486,
+      "ratio": 1.1909160684086413,
+      "passes": false
+    },
+    {
+      "preset": "alpha0",
+      "metric": "60deg",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.0001839780237027957,
+      "R": 0.00027358810865103994,
+      "ratio": 1.4870695050676455,
+      "passes": false
+    },
+    {
+      "preset": "alpha0",
+      "metric": "80deg",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.04725877349171895,
+      "R": 0.04738997574955458,
+      "ratio": 1.002776251860591,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "80deg",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.046787995843110324,
+      "R": 0.04730959069604855,
+      "ratio": 1.011148048629551,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "80deg",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.04569721996996188,
+      "R": 0.047125326119479435,
+      "ratio": 1.031251488612574,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "80deg",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.041017671371051036,
+      "R": 0.04636815704496362,
+      "ratio": 1.1304434282851266,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "80deg",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.03454837856073964,
+      "R": 0.04542275826372141,
+      "ratio": 1.3147580336907414,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "evanescent",
+      "frequency_GHz": 0.3,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.5059372266632145,
+      "R": 0.2868731453099046,
+      "ratio": 0.5670133174463291,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "evanescent",
+      "frequency_GHz": 0.6,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.25610220424389446,
+      "R": 0.08164763202315269,
+      "ratio": 0.31880878286153674,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "evanescent",
+      "frequency_GHz": 1.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.10348804043282792,
+      "R": 0.014834845889821558,
+      "ratio": 0.14334840845160818,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "evanescent",
+      "frequency_GHz": 2.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.010910100505379147,
+      "R": 0.00012205917081337388,
+      "ratio": 0.011187721941992513,
+      "passes": true
+    },
+    {
+      "preset": "alpha0",
+      "metric": "evanescent",
+      "frequency_GHz": 3.0,
+      "polarizations": [
+        "TE",
+        "TM"
+      ],
+      "current_R": 0.001190242173503707,
+      "R": 1.3728164252709203e-05,
+      "ratio": 0.011533925245059758,
+      "passes": true
+    }
+  ],
+  "passes": false,
+  "limits": {
+    "normal": 1,
+    "60deg": 1,
+    "80deg": 2,
+    "evanescent": "strictly < 1"
+  },
+  "candidate": "AHK-family IMEX transverse-memory diffusion, nu=c0*hy/2, eta=0",
+  "input_sha256": {
+    "energy_stable.py": "efb9fe5d26bc1716fcbc7d857d25a1965d3d0fc4e6bfade8a227d3f3ca97f497",
+    "model.py": "c5d19a3bfdeb467a6b0767cb96588f7fcba61d51ad12fe16637b55b2c1156eb7",
+    "sweep.py": "c91b5ef97880d2943b7d1be8b3b2f9e3f1ae93037e791daf8c3d2273028a9667",
+    "bloch_sweep.py": "e4f1d4770b35a9a6c6fa305e19257d91c6795ed9ed02be68daec335d7397fd1e",
+    "reflection.py": "4d922efaa2618ccbf05446f87c78b6855d04dcf5f738fe3e2874550b41277c5a",
+    "energy.py": "dac708926b617ca881f57274c6a98e5632f92ef06747cacd78535ce912b851bc",
+    "power.py": "deef8d0216ad01a3149894eaf06c049b7e503c55ccc98161cd3b7c656b11d60f"
+  },
+  "cpu_only": true
+}

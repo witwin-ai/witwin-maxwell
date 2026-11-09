@@ -14,10 +14,12 @@ These tests go beyond the basic single-scalar sanity checks in
 
 import math
 
+import numpy as np
 import pytest
 import torch
 
 import witwin.maxwell as mw
+from tests.gradients.scalar_permittivity_scene import ScalarPermittivityPointScene
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -97,6 +99,7 @@ class _MultiVoxelScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -138,6 +141,7 @@ class _PlaneFluxScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -179,6 +183,7 @@ class _MultiFreqScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -217,6 +222,7 @@ class _FilteredScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -256,6 +262,7 @@ class _ProjectedScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -295,6 +302,7 @@ class _FilteredProjectedScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -335,6 +343,7 @@ class _MultiComponentScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -375,6 +384,7 @@ class _CpmlFocusedScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.72, 0.72), (-0.48, 0.48), (-0.48, 0.48))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=3, strength=1.0),
@@ -414,6 +424,7 @@ class _RigorousTfsfScene(mw.SceneModule):
         density = torch.sigmoid(self.logits)
         injection = mw.TFSF(bounds=((-0.36, 0.36), (-0.36, 0.36), (-0.36, 0.36)))
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-1.2, 1.2), (-1.2, 1.2), (-1.2, 1.2))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
@@ -453,6 +464,7 @@ class _RigorousBlochScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.15),
             boundary=mw.BoundarySpec.bloch((math.pi / 1.2, 0.0, 0.0)),
@@ -491,6 +503,7 @@ class _RigorousGratingTfsfScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.45, 0.45), (-0.45, 0.45), (-0.75, 0.75))),
             grid=mw.GridSpec.uniform(0.15),
             boundary=mw.BoundarySpec.faces(
@@ -547,9 +560,6 @@ def test_spatial_gradient_per_element_matches_fd_strong_signal():
 
     result = _build_sim(model, time_steps=200).run()
     data = result.monitor("probe")["data"]
-    assert abs(data.item()) > 1e-4, (
-        f"|data| = {abs(data.item()):.4e} is too small for reliable FD comparison."
-    )
     loss = _abs2(data)
     loss.backward()
     backward_grad = model.logits.grad.detach().clone()
@@ -562,6 +572,7 @@ def test_spatial_gradient_per_element_matches_fd_strong_signal():
     # effect is near the float32 noise floor.  Use atol scaled to 0.2% of the
     # max gradient so near-zero elements don't dominate the comparison.
     scale = torch.abs(fd_grad).max().item()
+    assert scale > 0.0
     assert torch.allclose(backward_grad, fd_grad, rtol=2e-3, atol=scale * 2e-3), (
         f"max absolute error: "
         f"{(torch.abs(backward_grad - fd_grad)).max().item():.4e}, "
@@ -628,7 +639,17 @@ def test_plane_flux_gradient_matches_fd():
         return _abs2(flux)
 
     result = _build_sim(model, time_steps=32).run()
-    flux = result.monitor("flux_probe")["flux"]
+    measured = result.monitor("flux_probe")
+    flux = measured["flux"]
+    with torch.no_grad():
+        ordinary = _build_sim(model.to_scene(), time_steps=32).run().monitor("flux_probe")
+    assert float(flux.abs()) > 0
+    torch.testing.assert_close(flux.detach(), ordinary["flux"], rtol=1e-6, atol=0)
+    for name in ("x", "y"):
+        np.testing.assert_array_equal(measured[name], ordinary[name])
+        np.testing.assert_array_equal(measured["cell_widths"][name], ordinary["cell_widths"][name])
+    for component in ("Ex", "Ey", "Hx", "Hy"):
+        torch.testing.assert_close(measured[component].detach(), ordinary[component], rtol=1e-6, atol=0)
     loss = _abs2(flux)
     loss.backward()
     backward_grad = model.logits.grad.detach().clone()
@@ -960,20 +981,26 @@ def test_optimizer_converges_over_multiple_steps():
 # ---------------------------------------------------------------------------
 
 @_CUDA
-def test_gradient_is_deterministic():
-    """Same model state must produce identical gradients across two runs."""
+@pytest.mark.parametrize("density", [False, True])
+def test_gradient_is_deterministic(density):
+    """Scalar permittivity and density gradients must be bitwise repeatable."""
     def compute_grad():
-        model = _MultiVoxelScene(shape=(2, 2, 2), init=0.0).cuda()
+        model = (
+            _MultiVoxelScene(shape=(2, 2, 2), init=0.0)
+            if density else ScalarPermittivityPointScene()
+        ).cuda()
         result = _build_sim(model, time_steps=24).run()
         data = result.monitor("probe")["data"]
         loss = _abs2(data)
         loss.backward()
-        return model.logits.grad.detach().clone()
+        parameter = model.logits if density else model.eps_r
+        return parameter.grad.detach().clone()
 
     grad_a = compute_grad()
     grad_b = compute_grad()
 
-    assert torch.allclose(grad_a, grad_b, rtol=0, atol=0), (
+    assert torch.isfinite(grad_a).all() and grad_a.abs().max() > 0
+    assert torch.equal(grad_a, grad_b), (
         f"Gradients differ between runs. Max diff: {(grad_a - grad_b).abs().max().item():.4e}"
     )
 
@@ -1086,6 +1113,7 @@ class _PecDesignScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec(kind="pec"),

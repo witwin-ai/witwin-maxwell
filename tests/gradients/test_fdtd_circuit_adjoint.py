@@ -53,6 +53,7 @@ def _series_circuit(*, resistance, inductance, capacitance, source_amplitude):
 
 def _one_port_scene(circuit, *, material_density=None, reference_impedance=50.0):
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.02, 0.02),) * 3),
         grid=mw.GridSpec.uniform(0.005),
         boundary=mw.BoundarySpec.none(),
@@ -225,7 +226,7 @@ class _SharedCircuitGeometryScene(mw.SceneModule):
             ports=(_port(),),
             circuits=(circuit,),
             device="cuda",
-            subpixel_samples=3,
+            subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
         )
         extent = 0.012 + 0.004 * torch.sigmoid(self.design)
         scene.add_structure(

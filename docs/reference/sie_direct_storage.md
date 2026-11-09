@@ -1,0 +1,22 @@
+# Explicit one-shot direct storage
+
+`StoppingRule(method='direct', direct_storage='sealed_host_restore_v1')` selects one CUDA LU for the complete RHS batch while temporarily storing the original matrix as immutable host bytes. `direct_storage='resident'` remains the default, including its existing LU cache. Select the rule through `SIEConfig(stopping=...)` and `Scene -> Simulation -> Result`; this mode adds no separate simulation API or numerical backend.
+
+This mode currently requires a full contiguous, plain complex128 CUDA matrix and Linux sealed-memory-file support. The pinned interpreter lacks the high-level memfd wrapper and seal constants, so the implementation calls the same libc `memfd_create` API with the constants specified by the local Linux UAPI headers. This is byte I/O only. No matrix arithmetic, solve, norm, reference calculation or field evaluation occurs on the CPU.
+
+Before mutation, the implementation checks host `MemAvailable` and every exposed ancestor limit in the current process's verified full-root cgroup-v2 mount. An unmapped current cgroup, hidden mount root or unreadable accounting rejects. It requires the full backup plus two32MiB transfer buffers and1GiB headroom; checks available headroom again after populating/sealing the backup. These are observations, not a reservation against concurrent host allocations. Limits outside the observed namespace cannot be independently inferred. Sealed backup bytes are reported separately from RSS because kernel-backed memory is not fully represented by that process counter.
+
+The lifecycle is:
+
+1. Acquire an exclusive matrix loan, wait for prior CUDA work, transfer original bytes in bounded chunks, verify their digest and apply all write/grow/shrink/seal seals.
+2. Factor the exact `A.mT` view in place using CUDA LU with explicit output aliases. Solve all RHS together using the right solve for `A.T`; no full conjugated matrix or separate resident LU is created.
+3. In `finally`, copy the sealed bytes back into the same CUDA tensor, synchronize and verify the original byte digest. Invalidate matrix-dependent caches, retain the unchanged Riesz factor, and only then allow true residuals, fields or later matrix applications.
+4. Close the process-local backup after successful restoration. A singular factorization remains a failed solve even when exact restoration succeeds.
+
+The caller must own a quiescent matrix and must not manipulate raw tensor aliases during the loan. Public numerical application, adjoint, metric, residual, diagnostics and correction calls track active operations: ordinary readers remain concurrent, while conflicting exclusive loans and poisoned matrices reject. Explicit mode rejects gradient-bearing matrix/RHS/initial guess/metric tensors and a current matrix already used by a public autograd operation. This restriction applies only to the selected storage mode; default gradients are unchanged. Fresh gradients may be built after successful restoration. Existing external raw-tensor graphs/aliases cannot be inspected, so they are outside this explicit ownership contract.
+
+`log['direct_storage']` records storage/state, byte counts and hashes, seals, original/restored versions, exact factor aliases, factor info, invalidated caches, measured phases and host accounting observations. Before-mutation failures use `failed_before_mutation`; restored failures use `failed_restored`; ordinary success uses `succeeded_restored`. Numerical tolerances and ordinary true-residual reasons remain unchanged.
+
+If restoration fails, all public numerical operations reject, and `handle.direct_storage_report` exposes the failed lifecycle, current operator state and still-open sealed descriptor. The descriptor is process-local; it is not durable evidence after process loss. `handle.restore_direct_storage()` explicitly retries original-byte restoration only. A successful retry does not rewrite the failed solve outcome or produce coefficients. Both failed and successful retry observations remain in the report. The backup is retained if a retry fails; discarding the handle eventually closes its descriptor.
+
+This storage mode alone does not establish a larger mesh fit. Assembly copies, metric allocation, backend workspace, host memory and full runtime peaks require actual measurement. The separate small alias and workspace-query probes do not constitute a large factorization or physical qualification.

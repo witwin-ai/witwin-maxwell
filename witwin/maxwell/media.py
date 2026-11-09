@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ._fixed_inputs import require_fixed_input
+
 import math
 import warnings
 from abc import ABC, abstractmethod
@@ -10,6 +12,7 @@ import numpy as np
 import torch
 
 from .rational import FitReport, RationalFitConfig, RationalModel, fit_rational
+from .roughness import SurfaceRoughness
 
 from witwin.core import (
     FrequencyMaterialSample,
@@ -121,14 +124,23 @@ def _validate_symmetric_positive_definite(tensor: "Tensor3x3", *, name: str) -> 
         )
 
 
+def _pole_scalar(value, validate, name):
+    if torch.is_tensor(value):
+        if value.ndim != 0:
+            raise ValueError(f"{name} must be a scalar pole parameter.")
+        validate(value.detach(), name=name)
+        return value
+    return validate(value, name=name)
+
+
 @dataclass(frozen=True)
 class DebyePole:
     delta_eps: float
     tau: float
 
     def __post_init__(self):
-        object.__setattr__(self, "delta_eps", _coerce_nonnegative(self.delta_eps, name="delta_eps"))
-        object.__setattr__(self, "tau", _coerce_positive(self.tau, name="tau"))
+        object.__setattr__(self, "delta_eps", _pole_scalar(self.delta_eps, _coerce_nonnegative, "delta_eps"))
+        object.__setattr__(self, "tau", _pole_scalar(self.tau, _coerce_positive, "tau"))
 
     def susceptibility(self, angular_frequency: float) -> complex:
         return self.delta_eps / (1.0 - 1j * float(angular_frequency) * self.tau)
@@ -143,8 +155,8 @@ class DrudePole:
     gamma: float
 
     def __post_init__(self):
-        object.__setattr__(self, "plasma_frequency", _coerce_frequency(self.plasma_frequency, name="plasma_frequency"))
-        object.__setattr__(self, "gamma", _coerce_nonnegative(self.gamma, name="gamma"))
+        object.__setattr__(self, "plasma_frequency", _pole_scalar(self.plasma_frequency, _coerce_frequency, "plasma_frequency"))
+        object.__setattr__(self, "gamma", _pole_scalar(self.gamma, _coerce_nonnegative, "gamma"))
 
     @property
     def plasma_angular_frequency(self) -> float:
@@ -180,15 +192,15 @@ class LorentzPole:
         # A negative oscillator strength (delta_eps < 0) inverts the resonance and
         # models linear gain instead of absorption. This is only permitted behind an
         # explicit opt-in so an accidental sign flip still fails validation loudly.
-        delta_eps = _coerce_real_scalar(self.delta_eps, name="delta_eps")
+        delta_eps = _pole_scalar(self.delta_eps, _coerce_real_scalar, "delta_eps")
         if delta_eps < 0.0 and not self.allow_gain:
             raise ValueError(
                 "LorentzPole delta_eps < 0 encodes a linear-gain (negative oscillator "
                 "strength) resonance; pass allow_gain=True to opt in explicitly."
             )
         object.__setattr__(self, "delta_eps", delta_eps)
-        object.__setattr__(self, "resonance_frequency", _coerce_frequency(self.resonance_frequency, name="resonance_frequency"))
-        object.__setattr__(self, "gamma", _coerce_nonnegative(self.gamma, name="gamma"))
+        object.__setattr__(self, "resonance_frequency", _pole_scalar(self.resonance_frequency, _coerce_frequency, "resonance_frequency"))
+        object.__setattr__(self, "gamma", _pole_scalar(self.gamma, _coerce_nonnegative, "gamma"))
         if delta_eps < 0.0:
             warnings.warn(
                 "LorentzPole with negative delta_eps models linear gain; gain media can "
@@ -242,8 +254,8 @@ class CustomPole:
     convention as ``MaterialRegion.density``: box faces select grid nodes
     lower-inclusive / upper-exclusive, and the grid is trilinearly resampled
     when its shape differs from the covered node count. The rasterized grid is
-    composed multiplicatively with the structure's soft geometry occupancy, so
-    it blends and overlaps with other structures exactly like a scalar pole.
+    sampled at each Yee centre and multiplied by binary constituent ownership.
+    Its fractional values describe physical strengths, not fractional geometry.
 
     Only the oscillator-strength parameter may vary per cell (``delta_eps`` for
     Debye/Lorentz, ``plasma_frequency`` for Drude); the rate parameters
@@ -262,7 +274,7 @@ class CustomDebyePole(CustomPole):
 
     def __post_init__(self):
         object.__setattr__(self, "delta_eps", _coerce_parameter_grid(self.delta_eps, name="delta_eps"))
-        object.__setattr__(self, "tau", _coerce_positive(self.tau, name="tau"))
+        object.__setattr__(self, "tau", _pole_scalar(self.tau, _coerce_positive, "tau"))
 
     @property
     def peak_delta_eps(self) -> float:
@@ -296,7 +308,7 @@ class CustomDrudePole(CustomPole):
             "plasma_frequency",
             _coerce_parameter_grid(self.plasma_frequency, name="plasma_frequency"),
         )
-        object.__setattr__(self, "gamma", _coerce_nonnegative(self.gamma, name="gamma"))
+        object.__setattr__(self, "gamma", _pole_scalar(self.gamma, _coerce_nonnegative, "gamma"))
 
     @property
     def peak_plasma_frequency(self) -> float:
@@ -338,9 +350,9 @@ class CustomLorentzPole(CustomPole):
         object.__setattr__(
             self,
             "resonance_frequency",
-            _coerce_frequency(self.resonance_frequency, name="resonance_frequency"),
+            _pole_scalar(self.resonance_frequency, _coerce_frequency, "resonance_frequency"),
         )
-        object.__setattr__(self, "gamma", _coerce_nonnegative(self.gamma, name="gamma"))
+        object.__setattr__(self, "gamma", _pole_scalar(self.gamma, _coerce_nonnegative, "gamma"))
 
     @property
     def peak_delta_eps(self) -> float:
@@ -395,14 +407,75 @@ class NonlinearSusceptibility:
 
 
 @dataclass(frozen=True)
+class TensorNonlinearSusceptibility:
+    """Explicit instantaneous material-frame Cartesian susceptibility.
+
+    chi2[i,j,k] has units m/V and chi3[i,j,k,l] has units m²/V², with no
+    factorial or implicit symmetrization. rotation maps material vectors to
+    lab vectors and defaults to identity; it does not rotate linear epsilon
+    or mu. Entries can be nested real tuples or native real Torch tensors.
+    Tensor inputs retain their autograd graph. Arbitrary coefficients are not
+    asserted conservative or passive. Public solver admission is separate.
+    """
+    chi2: object = None
+    chi3: object = None
+    rotation: object = None
+
+    def __post_init__(self):
+        def normalize(value,rank,name,allow_tensor=True):
+            if isinstance(value,torch.Tensor):
+                if not allow_tensor:raise ValueError(f'{name} requires one complete native tensor or nested real numbers')
+                if (value.shape!=(3,)*rank or value.dtype not in (torch.float32,torch.float64)
+                        or not bool(torch.isfinite(value).all())):
+                    raise ValueError(f'{name} requires a finite real tensor with shape {(3,)*rank}')
+                return value
+            if rank:
+                if not isinstance(value,(tuple,list)) or len(value)!=3:
+                    raise ValueError(f'{name} requires Cartesian axes of size three')
+                return tuple(normalize(v,rank-1,name,False) for v in value)
+            if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value):
+                raise ValueError(f'{name} requires finite real entries')
+            return float(value)
+        if self.chi2 is None and self.chi3 is None:
+            raise ValueError('TensorNonlinearSusceptibility requires chi2 or chi3')
+        for name,rank in (('chi2',3),('chi3',4),('rotation',2)):
+            value=getattr(self,name)
+            if value is not None:object.__setattr__(self,name,normalize(value,rank,name))
+
+    def compile_lab_tensors(self, *, device, dtype=torch.float64):
+        """Compile native CUDA coefficients without detaching trainable inputs."""
+        if torch.device(device).type!='cuda' or dtype not in (torch.float32,torch.float64):
+            raise ValueError('Tensor susceptibility compilation requires real CUDA precision')
+        from .mom.nonlinear import rotate_nonlinear_susceptibility
+        def tensor(value,rank):
+            if isinstance(value,torch.Tensor):
+                if (value.shape!=(3,)*rank or value.dtype not in (torch.float32,torch.float64)
+                        or not bool(torch.isfinite(value).all())):
+                    raise ValueError('Tensor susceptibility declaration changed shape, precision or finite entries')
+                return value.to(device=device,dtype=dtype)
+            return torch.tensor(value,device=device,dtype=dtype)
+        rotation=None if self.rotation is None else tensor(self.rotation,2)
+        result={}
+        for name in ('chi2','chi3'):
+            value=getattr(self,name)
+            if value is None:continue
+            value=tensor(value,3 if name=='chi2' else 4)
+            # Revalidate mutable tensor declarations at every compilation.
+            if not bool(torch.isfinite(value).all()):raise ValueError('Tensor susceptibility entries must remain finite')
+            result[name+'_tensor']=value if rotation is None else rotate_nonlinear_susceptibility(value,rotation)
+        return result
+
+
+@dataclass(frozen=True)
 class TwoPhotonAbsorption:
     """Two-photon absorption (TPA): intensity-dependent nonlinear loss.
 
     ``beta`` [m/W] is the TPA coefficient of ``dI/dz = -beta * I^2``. At runtime
     the loss enters the update as a field-dependent conductivity
     ``sigma_NL(x, t) = sigma_scale * |E(x, t)|^2`` folded into the semi-implicit
-    lossy decay term, with ``sigma_scale = (4/3) * beta * (n0 * eps0 * c0)^2``.
-    The 4/3 factor makes the cycle-averaged dissipation of a CW field
+    lossy decay term, with ``sigma_scale = (2/3) * beta * (n0 * eps0 * c0)^2``.
+    The 2/3 factor makes the cycle-averaged dissipation of a linearly polarized
+    real CW field
     (``<E^4> = 3/8 |E0|^4``) reproduce ``alpha = beta * I`` with
     ``I = 0.5 * n0 * eps0 * c0 * |E0|^2``. ``n0`` is the linear refractive index
     used in the intensity conversion and defaults to ``sqrt(eps_r)`` of the host
@@ -420,10 +493,10 @@ class TwoPhotonAbsorption:
     def sigma_scale(self, base_index: float) -> float:
         """The ``sigma_NL / |E|^2`` coefficient [S*m/V^2] for a host index."""
         index = float(base_index) if self.n0 is None else float(self.n0)
-        return (4.0 / 3.0) * self.beta * (index * VACUUM_PERMITTIVITY * _SPEED_OF_LIGHT) ** 2
+        return (2.0 / 3.0) * self.beta * (index * VACUUM_PERMITTIVITY * _SPEED_OF_LIGHT) ** 2
 
 
-_NONLINEAR_SPEC_TYPES = (NonlinearSusceptibility, TwoPhotonAbsorption)
+_NONLINEAR_SPEC_TYPES = (NonlinearSusceptibility, TensorNonlinearSusceptibility, TwoPhotonAbsorption)
 
 # Harmonic modulation depth cap. FDTD time-step preparation includes the lowest
 # instantaneous permittivity; the depth cap alone is not a Courant guarantee.
@@ -524,6 +597,29 @@ class Tensor3x3:
 
     def __init__(self, rows):
         object.__setattr__(self, "rows", _normalize_tensor_rows(rows, name="rows"))
+
+
+@dataclass(frozen=True)
+class ComplexTensor3x3:
+    """Homogeneous frequency-domain constitutive tensor declaration.
+
+    Passivity and declared transpose reciprocity are validated on CUDA by the
+    tensor compiler. This descriptor is not a real time-domain constitutive
+    model and cannot be silently rasterized as scalar/diagonal material.
+    """
+    rows: tuple
+    reciprocal: bool = True
+
+    def __init__(self, rows, *, reciprocal=True):
+        values = tuple(tuple(complex(value) for value in row) for row in rows)
+        if len(values) != 3 or any(len(row) != 3 for row in values):
+            raise ValueError('ComplexTensor3x3 requires exactly three rows and columns')
+        if not all(np.isfinite(value.real) and np.isfinite(value.imag) for row in values for value in row):
+            raise ValueError('ComplexTensor3x3 entries must be finite')
+        if type(reciprocal) is not bool:
+            raise TypeError('reciprocal must be boolean')
+        object.__setattr__(self, 'rows', values)
+        object.__setattr__(self, 'reciprocal', reciprocal)
 
 
 @dataclass(frozen=True)
@@ -628,8 +724,8 @@ class Material(CoreMaterial):
     mu_debye_poles: tuple[DebyePole, ...]
     mu_drude_poles: tuple[DrudePole, ...]
     mu_lorentz_poles: tuple[LorentzPole, ...]
-    epsilon_tensor: DiagonalTensor3 | Tensor3x3 | None
-    mu_tensor: DiagonalTensor3 | Tensor3x3 | None
+    epsilon_tensor: DiagonalTensor3 | Tensor3x3 | ComplexTensor3x3 | None
+    mu_tensor: DiagonalTensor3 | Tensor3x3 | ComplexTensor3x3 | None
     sigma_e_tensor: DiagonalTensor3 | Tensor3x3 | None
     sigma_m: float
     orientation: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] | None
@@ -637,6 +733,7 @@ class Material(CoreMaterial):
     nonlinearity: tuple
     modulation: ModulationSpec | None
     pec: bool
+    pmc: bool
     breakdown: DielectricBreakdown | None
     mass_density: float | torch.Tensor | None
 
@@ -654,19 +751,23 @@ class Material(CoreMaterial):
         mu_debye_poles=(),
         mu_drude_poles=(),
         mu_lorentz_poles=(),
-        epsilon_tensor: DiagonalTensor3 | Tensor3x3 | None = None,
-        mu_tensor: DiagonalTensor3 | Tensor3x3 | None = None,
+        epsilon_tensor: DiagonalTensor3 | Tensor3x3 | ComplexTensor3x3 | None = None,
+        mu_tensor: DiagonalTensor3 | Tensor3x3 | ComplexTensor3x3 | None = None,
         sigma_e_tensor: DiagonalTensor3 | Tensor3x3 | None = None,
         orientation=None,
         kerr_chi3: float | None = None,
         nonlinearity=None,
         modulation: ModulationSpec | None = None,
         pec: bool = False,
+        pmc: bool = False,
         breakdown: DielectricBreakdown | None = None,
         mass_density: float | torch.Tensor | None = None,
     ):
         super().__init__(eps_r=eps_r, mu_r=mu_r, sigma_e=sigma_e, name=name)
+        require_fixed_input(pec, name="Material.pec")
         object.__setattr__(self, "pec", bool(pec))
+        require_fixed_input(pmc, name="Material.pmc")
+        object.__setattr__(self, "pmc", bool(pmc))
         if breakdown is not None and not isinstance(breakdown, DielectricBreakdown):
             raise TypeError("Material.breakdown must be a DielectricBreakdown instance.")
         object.__setattr__(self, "breakdown", breakdown)
@@ -687,6 +788,7 @@ class Material(CoreMaterial):
         # adds a magnetic conduction current sigma_m * H to Faraday's law, folded
         # semi-implicitly into the H-update Da/Db coefficients exactly as sigma_e
         # folds into the E-update Ca/Cb coefficients.
+        require_fixed_input(sigma_m, name="Material.sigma_m")
         object.__setattr__(self, "sigma_m", _coerce_nonnegative(sigma_m, name="sigma_m"))
         object.__setattr__(self, "orientation", None if orientation is None else _normalize_tensor_rows(orientation, name="orientation"))
         object.__setattr__(self, "kerr_chi3", None if kerr_chi3 is None else _coerce_real_scalar(kerr_chi3, name="kerr_chi3"))
@@ -703,20 +805,25 @@ class Material(CoreMaterial):
                 "tensor rotated into the lab frame before compilation. Pass the already-rotated tensor as "
                 "Tensor3x3 rows (or an axis-aligned DiagonalTensor3) instead of an orientation matrix."
             )
-        for tensor_name, tensor_value in (
-            ("mu_tensor", self.mu_tensor),
-            ("sigma_e_tensor", self.sigma_e_tensor),
-        ):
-            if isinstance(tensor_value, Tensor3x3):
-                side = "H-field" if tensor_name == "mu_tensor" else "conduction-current"
-                raise NotImplementedError(
-                    f"Material.{tensor_name} accepts a DiagonalTensor3 (axis-aligned) tensor only. A full "
-                    f"off-diagonal Tensor3x3 would require a coupled per-edge 3x3 inverse on the {side} "
-                    "update, which only the electric permittivity update forms; supply an axis-aligned "
-                    "DiagonalTensor3, or move the off-diagonal coupling to epsilon_tensor."
-                )
-        if isinstance(self.epsilon_tensor, Tensor3x3):
-            _validate_symmetric_positive_definite(self.epsilon_tensor, name="epsilon_tensor")
+        if self.sigma_e_tensor is not None:
+            if isinstance(self.sigma_e_tensor, ComplexTensor3x3):
+                raise TypeError('ComplexTensor3x3 declares epsilon or mu, not conductivity')
+            if not isinstance(self.sigma_e_tensor, (DiagonalTensor3, Tensor3x3)):
+                raise TypeError('Material.sigma_e_tensor requires a real tensor descriptor')
+            if isinstance(self.sigma_e_tensor, Tensor3x3):
+                rows = self.sigma_e_tensor.rows
+                if not all(np.isfinite(value) for row in rows for value in row):
+                    raise ValueError('sigma_e_tensor must be finite')
+                if any(rows[i][j] != rows[j][i] for i in range(3) for j in range(3)):
+                    raise ValueError('sigma_e_tensor must be symmetric')
+                # The native tensor compiler validates PSD on its target CUDA
+                # precision. Zero eigenvalues are legal; no SPD projection is used.
+        for name in ('epsilon_tensor', 'mu_tensor'):
+            declaration = getattr(self, name)
+            if declaration is not None and not isinstance(declaration, (DiagonalTensor3, Tensor3x3, ComplexTensor3x3)):
+                raise TypeError(f'Material.{name} requires a tensor descriptor')
+            if isinstance(declaration, Tensor3x3):
+                _validate_symmetric_positive_definite(declaration, name=name)
         # A full (off-diagonal) Tensor3x3 permittivity combined with (diagonal)
         # electric conductivity is supported: the FDTD update folds the loss through
         # the exact semi-implicit tensor inverse B = dt * (eps_inf + dt/2 * diag(sigma))^-1
@@ -731,15 +838,11 @@ class Material(CoreMaterial):
         # polarization current. This diagonalizes exactly in the crystal principal
         # frame, reproducing n_o(omega) and n_e(omega) for a rotated birefringent
         # dispersive crystal.
-        if self.is_nonlinear and self.is_anisotropic:
-            raise NotImplementedError(
-                "A nonlinear Material cannot carry an anisotropic permittivity tensor: the instantaneous "
-                "Kerr/chi2/TPA channel updates the permittivity as a per-component field-dependent scalar, "
-                "whereas an anisotropic tensor applies a coupled per-edge tensor inverse. Composing them "
-                "would need a per-step re-inversion of a field-amplitude-dependent 3x3 tensor, which the "
-                "scalar nonlinear coefficient update does not form. Use an isotropic (scalar) permittivity "
-                "with the nonlinearity, or drop the tensor."
-            )
+        if self.is_anisotropic and any(
+            isinstance(spec, TwoPhotonAbsorption) and spec.n0 is None
+            for spec in self.nonlinearity
+        ):
+            raise ValueError("Tensor material TPA requires an explicit reference refractive index n0.")
 
         if self.modulation is not None:
             # A time-modulated Material may now carry dispersive poles (electric or
@@ -778,6 +881,25 @@ class Material(CoreMaterial):
                     "non-default eps/mu/sigma; its permittivity is not a finite number."
                 )
 
+        if self.pmc:
+            if self.pec:
+                raise ValueError("A Material cannot be both a perfect electric and a perfect magnetic conductor.")
+            if (
+                self.is_dispersive
+                or self.is_anisotropic
+                or self.is_nonlinear
+                or self.modulation is not None
+                or self.mass_density is not None
+                or float(self.eps_r) != 1.0
+                or float(self.mu_r) != 1.0
+                or float(self.sigma_e) != 0.0
+                or float(self.sigma_m) != 0.0
+            ):
+                raise ValueError(
+                    "A PMC Material must not carry dispersion, anisotropy, Kerr, modulation, mass "
+                    "density, or non-default eps/mu/sigma; its permeability is not a finite number."
+                )
+
         if self.breakdown is not None:
             # v1 deterministic breakdown drives the real-valued semi-implicit lossy
             # E-update through a scalar per-cell conductivity. It composes with a
@@ -785,9 +907,9 @@ class Material(CoreMaterial):
             # anisotropic/dispersive/nonlinear/modulated coefficient paths each own a
             # different per-edge coefficient representation the breakdown conductivity
             # scatter does not model yet.
-            if self.pec:
+            if self.pec or self.pmc:
                 raise NotImplementedError(
-                    "A PEC Material cannot carry dielectric breakdown: a perfect conductor "
+                    "A PEC/PMC Material cannot carry dielectric breakdown: a perfect conductor "
                     "has no finite field-duration threshold."
                 )
             if self.is_anisotropic:
@@ -862,7 +984,11 @@ class Material(CoreMaterial):
     @property
     def has_full_epsilon_tensor(self) -> bool:
         """Whether the permittivity is a full (potentially off-diagonal) 3x3 tensor."""
-        return isinstance(self.epsilon_tensor, Tensor3x3)
+        return isinstance(self.epsilon_tensor, (Tensor3x3, ComplexTensor3x3))
+
+    @property
+    def has_tensor_nonlinearity(self) -> bool:
+        return any(isinstance(spec,TensorNonlinearSusceptibility) for spec in self.nonlinearity)
 
     @property
     def nonlinear_chi2(self) -> float:
@@ -881,18 +1007,20 @@ class Material(CoreMaterial):
     @property
     def tpa_sigma_scale(self) -> float:
         """Total two-photon-absorption ``sigma_NL / |E|^2`` coefficient [S*m/V^2]."""
+        absorption = tuple(spec for spec in self.nonlinearity if isinstance(spec, TwoPhotonAbsorption))
+        if not absorption:
+            return 0.0
         base_index = float(np.sqrt(float(self.eps_r)))
         return float(
             sum(
                 spec.sigma_scale(base_index)
-                for spec in self.nonlinearity
-                if isinstance(spec, TwoPhotonAbsorption)
+                for spec in absorption
             )
         )
 
     @property
     def is_nonlinear(self) -> bool:
-        return self.nonlinear_chi2 != 0.0 or self.nonlinear_chi3 != 0.0 or self.tpa_sigma_scale != 0.0
+        return self.has_tensor_nonlinearity or self.nonlinear_chi2 != 0.0 or self.nonlinear_chi3 != 0.0 or self.tpa_sigma_scale != 0.0
 
     @property
     def is_modulated(self) -> bool:
@@ -901,6 +1029,10 @@ class Material(CoreMaterial):
     @property
     def is_pec(self) -> bool:
         return self.pec
+
+    @property
+    def is_pmc(self) -> bool:
+        return self.pmc
 
     @property
     def has_mass_density(self) -> bool:
@@ -931,6 +1063,21 @@ class Material(CoreMaterial):
         """Construct a perfect-electric-conductor marker material."""
         return cls(pec=True, name=name)
 
+    @classmethod
+    def pmc(cls, name: str | None = None) -> "Material":
+        """Construct a perfect-magnetic-conductor marker material.
+
+        A PMC structure is the electromagnetic dual of a PEC structure: inside its
+        geometry the magnetic field is forced to zero, so the tangential magnetic
+        field vanishes on its surface (``n x H = 0``) and the tangential electric
+        field is unconstrained. On the Yee grid every H component whose dual-edge
+        sample lies inside the structure (four-node occupancy average >= 0.5) is
+        held at zero by the FDTD magnetic update. The interface therefore sits on
+        the half-cell dual plane, exactly as the PEC interface sits on the primal
+        node plane.
+        """
+        return cls(pmc=True, name=name)
+
     def capabilities(self) -> MaterialCapabilities:
         base = super().capabilities()
         return MaterialCapabilities(
@@ -945,7 +1092,16 @@ class Material(CoreMaterial):
             dispersive=self.is_dispersive,
         )
 
+    @property
+    def requires_tensor_spectral_compiler(self) -> bool:
+        return (isinstance(self.mu_tensor, Tensor3x3)
+                or isinstance(self.sigma_e_tensor, Tensor3x3)
+                or any(isinstance(value, ComplexTensor3x3)
+                       for value in (self.epsilon_tensor, self.mu_tensor)))
+
     def evaluate_static(self) -> StaticMaterialSample:
+        if self.requires_tensor_spectral_compiler:
+            raise NotImplementedError('Complex epsilon/mu, full mu_tensor or full sigma_e_tensor requires a tensor-aware spectral compiler')
         return StaticMaterialSample(
             eps_r=self.epsilon_tensor if self.epsilon_tensor is not None else self.eps_r,
             mu_r=self.mu_tensor if self.mu_tensor is not None else self.mu_r,
@@ -971,6 +1127,8 @@ class Material(CoreMaterial):
         return complex(total)
 
     def evaluate_at_frequency(self, frequency: float) -> FrequencyMaterialSample:
+        if self.requires_tensor_spectral_compiler:
+            raise NotImplementedError('Complex epsilon/mu, full mu_tensor or full sigma_e_tensor requires a tensor-aware spectral compiler')
         if self.is_nonlinear:
             raise NotImplementedError("Nonlinear Material frequency evaluation is not defined without a field amplitude.")
         if self.is_dispersive and (self.has_full_epsilon_tensor or self.has_custom_poles):
@@ -1162,6 +1320,132 @@ class Material(CoreMaterial):
             lorentz_poles=tuple(poles),
         )
 
+    @classmethod
+    def custom_sellmeier(
+        cls,
+        *,
+        b_coefficients,
+        c_coefficients,
+        eps_inf: float = 1.0,
+        mu_r: float = 1.0,
+        sigma_e: float = 0.0,
+        name: str | None = None,
+    ) -> "Material":
+        """Construct a lossless Sellmeier dielectric with spatially varying coefficients.
+
+        The per-cell dispersion is ``n(x, lambda)^2 = eps_inf + sum_i B_i(x) * lambda^2 /
+        (lambda^2 - C_i(x))``. Each ``B_i`` is a non-negative 3D ``torch.Tensor`` (or a
+        scalar) and each ``C_i`` [meters^2] a positive scalar or 3D tensor; at least one
+        coefficient must be a tensor. Tensor grids follow the ``CustomPole`` convention:
+        they span the ``Box`` of the owning ``Structure`` and are trilinearly resampled
+        onto the covered nodes. Tensor coefficients of one term must share a shape.
+
+        Every term compiles to zero-damping ``CustomLorentzPole`` entries with
+        ``delta_eps = B_i(x)`` and ``resonance_frequency = c / sqrt(C_i)``, exactly the
+        mapping of :meth:`sellmeier`; spatially uniform coefficients therefore compile
+        to the same coefficients as :meth:`sellmeier`. The ADE recursion constants of a
+        pole are scalar, so a spatially varying ``C_i`` must be piecewise constant: each
+        distinct ``C_i`` level becomes its own pole whose ``delta_eps`` is ``B_i`` masked
+        to that level (at most ``_CUSTOM_SELLMEIER_MAX_LEVELS`` levels per term). A
+        continuously varying resonance would need per-cell ADE constants and is
+        rejected.
+
+        Coefficient grids are fixed inputs: per-cell pole strengths carry no gradient
+        channel in the solver reverse passes, so tensors with ``requires_grad`` are
+        rejected. Use ``PerturbationMedium`` for a differentiable permittivity field.
+        """
+        b_values = tuple(b_coefficients)
+        c_values = tuple(c_coefficients)
+        if len(b_values) != len(c_values):
+            raise ValueError("Sellmeier b_coefficients and c_coefficients must have equal length.")
+        if not b_values:
+            raise ValueError("Sellmeier material requires at least one (B, C) coefficient pair.")
+        if not any(torch.is_tensor(value) for value in (*b_values, *c_values)):
+            raise ValueError(
+                "Material.custom_sellmeier requires at least one tensor coefficient; use "
+                "Material.sellmeier for spatially uniform coefficients."
+            )
+        poles = []
+        for index, (b_value, c_value) in enumerate(zip(b_values, c_values)):
+            for label, value in (("b", b_value), ("c", c_value)):
+                if torch.is_tensor(value):
+                    if value.requires_grad:
+                        raise NotImplementedError(
+                            f"Material.custom_sellmeier {label}_coefficients[{index}] requires grad, but "
+                            "per-cell pole strengths and resonances carry no solver gradient channel. "
+                            "Use PerturbationMedium for a differentiable permittivity field."
+                        )
+                    if value.ndim != 3:
+                        raise ValueError(
+                            f"Sellmeier {label}_coefficients[{index}] must be a scalar or a 3D tensor, "
+                            f"got ndim={value.ndim}."
+                        )
+            if torch.is_tensor(b_value) and torch.is_tensor(c_value) and b_value.shape != c_value.shape:
+                raise ValueError(
+                    f"Sellmeier coefficient grids of term {index} must share a shape, got "
+                    f"{tuple(b_value.shape)} and {tuple(c_value.shape)}."
+                )
+            if torch.is_tensor(c_value):
+                with torch.no_grad():
+                    if not torch.isfinite(c_value).all() or bool((c_value <= 0).any()):
+                        raise ValueError(
+                            "Sellmeier c_coefficients must be finite and > 0 everywhere "
+                            "(squared resonance wavelength in meters^2)."
+                        )
+                    levels = torch.unique(c_value).tolist()
+            else:
+                c_scalar = float(c_value)
+                if c_scalar <= 0.0:
+                    raise ValueError("Sellmeier c_coefficients must be > 0 (squared resonance wavelength in meters^2).")
+                levels = [c_scalar]
+            if len(levels) > _CUSTOM_SELLMEIER_MAX_LEVELS:
+                raise NotImplementedError(
+                    f"Sellmeier c_coefficients[{index}] takes {len(levels)} distinct values; a spatially "
+                    "varying resonance compiles to one ADE pole per distinct C level because the pole "
+                    f"recursion constants are scalar, and at most {_CUSTOM_SELLMEIER_MAX_LEVELS} levels "
+                    "per term are supported. Quantize C to a few levels or keep it uniform."
+                )
+            for level in levels:
+                resonance_frequency = _SPEED_OF_LIGHT / np.sqrt(float(level))
+                if len(levels) == 1:
+                    strength = b_value
+                else:
+                    mask = c_value == level
+                    strength = (
+                        b_value * mask.to(b_value.dtype)
+                        if torch.is_tensor(b_value)
+                        else float(b_value) * mask.to(c_value.dtype)
+                    )
+                    with torch.no_grad():
+                        if float(strength.max()) == 0.0 and float(strength.min()) == 0.0:
+                            continue
+                if torch.is_tensor(strength):
+                    poles.append(
+                        CustomLorentzPole(
+                            delta_eps=strength,
+                            resonance_frequency=resonance_frequency,
+                            gamma=0.0,
+                        )
+                    )
+                else:
+                    poles.append(
+                        LorentzPole(
+                            delta_eps=float(strength),
+                            resonance_frequency=resonance_frequency,
+                            gamma=0.0,
+                        )
+                    )
+        return cls(
+            eps_r=eps_inf,
+            mu_r=mu_r,
+            sigma_e=sigma_e,
+            name=name,
+            lorentz_poles=tuple(poles),
+        )
+
+
+_CUSTOM_SELLMEIER_MAX_LEVELS = 16
+
 
 def _gyromagnetic_cross_matrix(bias_unit_vector: torch.Tensor) -> torch.Tensor:
     bx, by, bz = bias_unit_vector[0], bias_unit_vector[1], bias_unit_vector[2]
@@ -1199,30 +1483,37 @@ def gyromagnetic_polder_tensor(
     """
     real_dtype = torch.float64 if dtype == torch.complex128 else torch.float32
 
+    inputs = (omega, omega_0, omega_m, gilbert_damping, mu_infinity, bias_unit_vector)
+    devices = {value.device for value in inputs if isinstance(value, torch.Tensor) and value.device.type != 'cpu'}
+    if len(devices) > 1:
+        raise ValueError('Polder tensor parameters must share one accelerator device')
+    device = next(iter(devices), torch.device('cpu'))
+
     def _c(value):
         if isinstance(value, torch.Tensor):
-            return value.to(dtype)
-        return torch.as_tensor(value, dtype=real_dtype).to(dtype)
+            return value.to(device=device, dtype=dtype)
+        return torch.as_tensor(value, device=device, dtype=real_dtype).to(dtype)
 
     w = _c(omega)
     w0 = _c(omega_0)
     wm = _c(omega_m)
     alpha = _c(gilbert_damping)
     mu_inf = _c(mu_infinity)
-    i = torch.tensor(1j, dtype=dtype)
+    i = torch.tensor(1j, device=device, dtype=dtype)
     W = w0 - i * alpha * w
     D = W * W - w * w
     mu = mu_inf + wm * W / D
     kappa = wm * w / D
 
     if isinstance(bias_unit_vector, torch.Tensor):
-        b = bias_unit_vector.to(real_dtype)
+        b = bias_unit_vector.to(device=device, dtype=real_dtype)
     else:
-        b = torch.as_tensor(bias_unit_vector, dtype=real_dtype)
+        b = torch.as_tensor(bias_unit_vector, device=device, dtype=real_dtype)
     b = (b / torch.linalg.vector_norm(b)).to(dtype)
-    eye = torch.eye(3, dtype=dtype)
+    eye = torch.eye(3, device=device, dtype=dtype)
     bbT = torch.outer(b, b)
-    return mu * (eye - bbT) + mu_inf * bbT + i * kappa * _gyromagnetic_cross_matrix(b)
+    return (mu[..., None, None] * (eye - bbT) + mu_inf[..., None, None] * bbT
+            + i * kappa[..., None, None] * _gyromagnetic_cross_matrix(b))
 
 
 def gyromagnetic_state_space(omega_0, omega_m, gilbert_damping, *, dtype=torch.float64):
@@ -1327,8 +1618,8 @@ class GyromagneticFerrite(Material):
     with the scalar Polder components in
     :func:`gyromagnetic_polder_tensor`. The gyrotropy is carried by a local
     linearized Landau-Lifshitz-Gilbert magnetization ADE state (see the FDTD
-    runtime slices), never by widening ``mu_tensor`` -- the off-diagonal
-    ``mu_tensor`` guard stays in force. The full derivation, sign/unit
+    runtime slices), through its causal dispersion model; constant full ``mu_tensor``
+    declarations require the tensor-aware spectral compiler. The full derivation, sign/unit
     conventions, discretization, and acceptance budget are frozen in
     ``docs/reference/ferrite-physics-contract.md``.
 
@@ -1928,6 +2219,27 @@ class Graphene(Medium2D):
 
 _VACUUM_PERMEABILITY = 4.0e-7 * np.pi  # [H/m]
 
+# Broadband rough-surface envelope: the largest rough/smooth ratio of the direct term D
+# of the Z-form refit that the surface time-stepping update performs. Measured at
+# 50 S/m, band 0.5-5 GHz, order 6, normal incidence, 45 and 60 cells/wavelength:
+#   smooth                          D = 156.8 ohm  ratio 1.00  stable
+#   Hammerstad Rq=1.5 mm, RF=2      D = 315.3 ohm  ratio 2.01  stable
+#   Hammerstad Rq=1.5 mm, RF=3      D = 476.1 ohm  ratio 3.04  stable, absorption +3%
+#   Huray cannonball r=0.1 mm       D = 935.8 ohm  ratio 5.97  diverged
+#   Huray cannonball r=0.3 mm       D = 1180  ohm  ratio 7.53  diverged
+# A saturating roughness raises the refit's high-frequency impedance D, and the coupled
+# surface/Yee update loses stability; passivity of the fit does not prevent it. The band
+# maximum of |K| does not separate these cases (r=0.1 mm Huray has max|K| = 1.82 in band
+# yet diverged), so the guard measures D directly.
+# The bound is empirical, not a stability proof: the coupled update's stability depends
+# on resolution and time step, and it was calibrated only for the setup above.
+# TODO: the real fix is discrete stability of the broadband surface-impedance update at
+# a large direct term D. Repro: HurayRoughness.cannonball(0.1e-3) on a 50 S/m
+# LossyMetalMedium, rational_surface_impedance((0.5e9, 5e9), order=6) in a
+# SurfaceImpedanceMedium, normal incidence at 45 and 60 cells/wavelength diverges
+# (D ratio 5.97, D = 935.8 ohm).
+_BROADBAND_ROUGHNESS_MAX_DIRECT_RATIO = 3.1
+
 
 class LossyMetalMedium(Material):
     """Good-conductor metal intended for a surface-impedance boundary condition (SIBC).
@@ -1959,13 +2271,29 @@ class LossyMetalMedium(Material):
     lossless shortcut). The analytic helpers ``surface_impedance`` /
     ``surface_impedance_at_freq`` / ``skin_depth`` are exposed for validation and
     design work.
+
+    ``roughness`` (default ``None``, a smooth conductor) is an opt-in
+    :class:`~witwin.maxwell.roughness.SurfaceRoughness` correction ``K(delta)`` that
+    multiplies the smooth impedance, ``Z_rough = K * Z_s``. The narrowband surface
+    resistance is scaled by the roughness loss factor ``Re(K * (1 - i))`` at the
+    operating frequency; :meth:`rational_surface_impedance` fits the rough broadband
+    impedance as a passive rational model for a ``SurfaceImpedanceMedium``.
     """
 
-    def __init__(self, *, conductivity: float, name: str | None = None):
+    def __init__(
+        self,
+        *,
+        conductivity: float,
+        roughness: "SurfaceRoughness | None" = None,
+        name: str | None = None,
+    ):
         super().__init__(eps_r=1.0, mu_r=1.0, sigma_e=0.0, name=name)
         object.__setattr__(
             self, "conductivity", _coerce_positive(conductivity, name="conductivity")
         )
+        if roughness is not None and not isinstance(roughness, SurfaceRoughness):
+            raise TypeError("roughness must be a SurfaceRoughness instance or None.")
+        object.__setattr__(self, "roughness", roughness)
 
     @property
     def is_lossy_metal(self) -> bool:
@@ -1982,10 +2310,146 @@ class LossyMetalMedium(Material):
         if omega <= 0.0:
             raise ValueError("surface_impedance requires angular_frequency > 0.")
         magnitude = np.sqrt(omega * _VACUUM_PERMEABILITY / (2.0 * self.conductivity))
+        if self.roughness is not None:
+            factor = complex(self.roughness.impedance_factor(self.skin_depth(omega / (2.0 * np.pi))))
+            return factor * complex(magnitude, -magnitude)
         return complex(magnitude, -magnitude)
 
     def surface_impedance_at_freq(self, frequency: float) -> complex:
         return self.surface_impedance(2.0 * np.pi * _coerce_frequency(frequency, name="frequency"))
+
+    def roughness_loss_factor(self, frequency: float) -> float:
+        """Rough/smooth surface-resistance ratio at ``frequency`` [Hz] (1 when smooth)."""
+        if self.roughness is None:
+            return 1.0
+        return float(self.roughness.loss_factor(self.skin_depth(frequency)))
+
+    def surface_impedance_samples(self, frequencies) -> torch.Tensor:
+        """Rough (or smooth) ``Z_s`` [ohm] as a complex128 tensor at ``frequencies`` [Hz]."""
+        freqs = torch.as_tensor(frequencies, dtype=torch.float64)
+        if freqs.ndim != 1 or freqs.numel() == 0:
+            raise ValueError("frequencies must have non-empty shape [F].")
+        if not bool(torch.all(torch.isfinite(freqs))) or not bool(torch.all(freqs > 0.0)):
+            raise ValueError("frequencies must be finite and strictly positive.")
+        omega = 2.0 * np.pi * freqs
+        magnitude = torch.sqrt(omega * _VACUUM_PERMEABILITY / (2.0 * self.conductivity))
+        smooth = torch.complex(magnitude, -magnitude)
+        if self.roughness is None:
+            return smooth
+        skin_depth = torch.sqrt(2.0 / (omega * _VACUUM_PERMEABILITY * self.conductivity))
+        return self.roughness.impedance_factor(skin_depth) * smooth
+
+    def rational_surface_impedance(
+        self,
+        frequency_range,
+        *,
+        order: int = 6,
+        samples: int = 200,
+        representation: str = "Y",
+        max_relative_error: float = 1.0e-2,
+        enforce_passivity: bool = False,
+    ) -> "RationalSurfaceImpedance":
+        """Fit this (rough) conductor's ``Z_s`` over ``frequency_range`` as a passive model.
+
+        The analytic surface impedance, with the roughness correction applied before
+        fitting, is sampled log-uniformly over the band and fitted through
+        :meth:`RationalSurfaceImpedance.fit` (admittance form by default). The result is
+        fail-closed: it must be certified passive over the band (checked at
+        construction) and must reproduce the analytic ``Z_s`` on a dense in-band grid to
+        within ``max_relative_error`` (max ``|Z_fit - Z| / |Z|``). Wrap it in
+        ``SurfaceImpedanceMedium(impedance=...)`` for the broadband surface ADE.
+
+        Passivity of the fitted model does not imply stability of the coupled
+        surface-plus-Yee update: the time-stepping refit's direct (high-frequency) term
+        ``D`` grows with the saturated roughness, and a large one diverges. A rough fit
+        is therefore rejected (``ValueError``) when its refit ``D`` exceeds
+        ``_BROADBAND_ROUGHNESS_MAX_DIRECT_RATIO`` times the smooth conductor's, the
+        validated envelope; use the narrowband ``LossyMetalMedium`` surface (exact loss
+        factor) there.
+        """
+        if self.roughness is not None and not self.roughness.causal:
+            raise ValueError(
+                f"{type(self.roughness).__name__} is a real, non-causal loss factor with no "
+                "causal reactance partner, so no passive causal rational model reproduces "
+                "the rough impedance over a band; use HammerstadRoughness or HurayRoughness "
+                "for a broadband fit (the narrowband surface uses the exact loss factor)."
+            )
+        band = _coerce_frequency_range(frequency_range, name="frequency_range")
+        if representation not in ("Y", "Z"):
+            raise ValueError("representation must be 'Y' or 'Z'.")
+        if not isinstance(samples, int) or isinstance(samples, bool) or samples < 2:
+            raise ValueError("samples must be an integer of at least 2.")
+        tolerance = float(max_relative_error)
+        if not math.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError("max_relative_error must be finite and > 0.")
+        freqs = torch.logspace(math.log10(band[0]), math.log10(band[1]), samples, dtype=torch.float64)
+        impedance = self.surface_impedance_samples(freqs)
+        values = impedance if representation == "Z" else 1.0 / impedance
+        model = RationalSurfaceImpedance.fit(
+            freqs,
+            values,
+            order=order,
+            band=band,
+            representation=representation,
+            relative_tolerance=tolerance,
+            enforce_passivity=enforce_passivity,
+        )
+        check = torch.logspace(math.log10(band[0]), math.log10(band[1]), 4 * samples + 1, dtype=torch.float64)
+        target = self.surface_impedance_samples(check)
+        fitted = model.surface_impedance(check).to(device=target.device, dtype=torch.complex128)
+        error = float(((fitted - target).abs() / target.abs()).max())
+        if not math.isfinite(error) or error > tolerance:
+            raise ValueError(
+                "Rational surface-impedance fit misses the analytic conductor impedance: "
+                f"max relative error {error:.3g} exceeds {tolerance:.3g}; raise order or "
+                "narrow frequency_range."
+            )
+        if self.roughness is not None:
+            ratio = self._broadband_roughness_direct_ratio(
+                model, band, samples=samples, representation=representation,
+                max_relative_error=max_relative_error, enforce_passivity=enforce_passivity,
+            )
+            if not math.isfinite(ratio) or ratio > _BROADBAND_ROUGHNESS_MAX_DIRECT_RATIO:
+                raise ValueError(
+                    f"{type(self.roughness).__name__} over frequency_range {band} is outside "
+                    "the validated broadband rough-surface envelope: the time-stepping refit's "
+                    f"high-frequency impedance is {ratio:.3g}x the smooth conductor's (limit "
+                    f"{_BROADBAND_ROUGHNESS_MAX_DIRECT_RATIO}), where the surface update was "
+                    "observed to diverge. The limit is empirical, calibrated at 50 S/m, "
+                    "0.5-5 GHz, order 6, 40-60 cells/wavelength; it is not a stability proof, "
+                    "since the divergence depends on resolution. Use the narrowband surface "
+                    "instead: attach "
+                    "LossyMetalMedium(conductivity=..., roughness=...) directly to the "
+                    "structure (exact roughness loss factor at the source frequency), or "
+                    "narrow frequency_range."
+                )
+        return model
+
+    def _broadband_roughness_direct_ratio(self, model, band, **fit_options) -> float:
+        """Rough/smooth ratio of the runtime Z-form refit's direct term ``D``.
+
+        Reproduces the refit the surface time-stepping setup performs (resample ``Z_s``
+        at the model's sample frequencies, passive ``Z``-form fit of the same order) for
+        this rough model and for the smooth conductor fitted with identical options.
+        """
+        from .compiler.surface_impedance import fit_surface_impedance
+
+        smooth = LossyMetalMedium(conductivity=self.conductivity).rational_surface_impedance(
+            band, order=int(model.model.poles.numel()), **fit_options
+        )
+        directs = []
+        for fitted in (model, smooth):
+            frequencies = fitted.sample_frequencies
+            refit = fit_surface_impedance(
+                (frequencies, fitted.surface_impedance(frequencies)),
+                band=band,
+                order=int(fitted.model.poles.numel()),
+                representation="Z",
+            )
+            directs.append(float(refit.model.direct.real.reshape(-1)[0]))
+        if directs[1] <= 0.0:
+            return math.inf
+        return directs[0] / directs[1]
 
 
 def _coerce_frequency_range(value, *, name: str) -> tuple[float, float]:
@@ -2293,6 +2757,37 @@ class SurfaceImpedanceMedium(Material):
         return self.impedance.frequency_range
 
 
+def _perturbed_pole(pole, sensitivity: float, perturbation: torch.Tensor):
+    """Lower ``param + sensitivity * perturbation`` of one electric pole to a custom pole.
+
+    ``param`` is the oscillator strength: ``delta_eps`` for Debye/Lorentz and
+    ``plasma_frequency`` for Drude. A zero sensitivity returns the pole unchanged so
+    the unperturbed limit is the base material exactly.
+    """
+    if sensitivity == 0.0:
+        return pole
+    if isinstance(pole, LorentzPole) and pole.allow_gain:
+        raise NotImplementedError("PerturbationMedium cannot perturb a gain (allow_gain) Lorentz pole.")
+    is_drude = isinstance(pole, (DrudePole, CustomDrudePole))
+    strength = pole.plasma_frequency if is_drude else pole.delta_eps
+    if torch.is_tensor(strength) and tuple(strength.shape) != tuple(perturbation.shape):
+        raise ValueError(
+            "PerturbationMedium perturbing a custom pole requires the perturbation grid shape "
+            f"{tuple(perturbation.shape)} to match the pole grid shape {tuple(strength.shape)}."
+        )
+    grid = strength + sensitivity * perturbation
+    name = f"perturbed {type(pole).__name__} strength"
+    if isinstance(pole, (DebyePole, CustomDebyePole)):
+        return CustomDebyePole(delta_eps=_coerce_parameter_grid(grid, name=name), tau=pole.tau)
+    if is_drude:
+        return CustomDrudePole(plasma_frequency=_coerce_parameter_grid(grid, name=name), gamma=pole.gamma)
+    return CustomLorentzPole(
+        delta_eps=_coerce_parameter_grid(grid, name=name),
+        resonance_frequency=pole.resonance_frequency,
+        gamma=pole.gamma,
+    )
+
+
 class PerturbationMedium(Material):
     """A base material whose permittivity is shifted by an external perturbation field.
 
@@ -2310,6 +2805,21 @@ class PerturbationMedium(Material):
     with ``requires_grad=True`` is discovered as a trainable material input by
     the gradient bridges, so simulation outputs can be differentiated with
     respect to the perturbation field.
+
+    The same field can also perturb the oscillator strengths of the base
+    material's electric poles (the pole-residue perturbation of a temperature-
+    or carrier-dependent dispersive medium). ``debye_sensitivities`` and
+    ``lorentz_sensitivities`` give ``d(delta_eps_i)/dp`` per pole and
+    ``drude_sensitivities`` gives ``d(plasma_frequency_i)/dp`` [Hz] per pole,
+    one entry per base pole of that kind (or empty for none):
+    ``param_i(x) = param_i + sensitivity_i * perturbation(x)``. A perturbed pole
+    is lowered to the matching ``CustomPole`` with that per-cell strength, so it
+    shares the custom-pole rasterization and compiles through the existing ADE
+    kernels. The rate parameters (``tau``, ``gamma``, ``resonance_frequency``)
+    stay uniform because the ADE recursion constants are scalar. Pole strengths
+    are evaluated from ``perturbation`` at construction and have no solver
+    gradient channel, so a trainable perturbation is rejected when any pole
+    sensitivity is nonzero.
     """
 
     def __init__(
@@ -2318,6 +2828,9 @@ class PerturbationMedium(Material):
         *,
         perturbation: torch.Tensor,
         eps_sensitivity: float = 1.0,
+        debye_sensitivities=(),
+        drude_sensitivities=(),
+        lorentz_sensitivities=(),
         name: str | None = None,
     ):
         if not isinstance(base, CoreMaterial):
@@ -2331,6 +2844,8 @@ class PerturbationMedium(Material):
             )
         if bool(getattr(base, "is_pec", False)):
             raise ValueError("PerturbationMedium cannot wrap a PEC base material.")
+        if bool(getattr(base, "is_pmc", False)):
+            raise ValueError("PerturbationMedium cannot wrap a PMC base material.")
         if not torch.is_tensor(perturbation):
             raise TypeError("PerturbationMedium perturbation must be a torch.Tensor.")
         if perturbation.ndim != 3:
@@ -2341,15 +2856,45 @@ class PerturbationMedium(Material):
             if not torch.isfinite(perturbation).all():
                 raise ValueError("PerturbationMedium perturbation must be finite everywhere.")
         sensitivity = _coerce_real_scalar(eps_sensitivity, name="eps_sensitivity")
+        pole_sensitivities = {}
+        for kind, values in (
+            ("debye", debye_sensitivities),
+            ("drude", drude_sensitivities),
+            ("lorentz", lorentz_sensitivities),
+        ):
+            values = tuple(_coerce_real_scalar(v, name=f"{kind}_sensitivities") for v in values)
+            base_poles = getattr(base, f"{kind}_poles", ())
+            if values and len(values) != len(base_poles):
+                raise ValueError(
+                    f"PerturbationMedium {kind}_sensitivities has {len(values)} entries but the base "
+                    f"material has {len(base_poles)} {kind} poles."
+                )
+            pole_sensitivities[kind] = values or (0.0,) * len(base_poles)
+        perturbs_poles = any(v != 0.0 for values in pole_sensitivities.values() for v in values)
+        if perturbs_poles and perturbation.requires_grad:
+            raise NotImplementedError(
+                "PerturbationMedium pole sensitivities require a fixed perturbation: per-cell pole "
+                "strengths carry no solver gradient channel, so the pole-drive sensitivity would be "
+                "dropped. Keep the pole sensitivities zero to differentiate through eps_sensitivity."
+            )
 
         super().__init__(
             eps_r=base.eps_r,
             mu_r=base.mu_r,
             sigma_e=base.sigma_e,
             name=name if name is not None else base.name,
-            debye_poles=getattr(base, "debye_poles", ()),
-            drude_poles=getattr(base, "drude_poles", ()),
-            lorentz_poles=getattr(base, "lorentz_poles", ()),
+            debye_poles=tuple(
+                _perturbed_pole(pole, s, perturbation)
+                for pole, s in zip(getattr(base, "debye_poles", ()), pole_sensitivities["debye"])
+            ),
+            drude_poles=tuple(
+                _perturbed_pole(pole, s, perturbation)
+                for pole, s in zip(getattr(base, "drude_poles", ()), pole_sensitivities["drude"])
+            ),
+            lorentz_poles=tuple(
+                _perturbed_pole(pole, s, perturbation)
+                for pole, s in zip(getattr(base, "lorentz_poles", ()), pole_sensitivities["lorentz"])
+            ),
             mu_debye_poles=getattr(base, "mu_debye_poles", ()),
             mu_drude_poles=getattr(base, "mu_drude_poles", ()),
             mu_lorentz_poles=getattr(base, "mu_lorentz_poles", ()),
@@ -2362,6 +2907,9 @@ class PerturbationMedium(Material):
         )
         object.__setattr__(self, "perturbation", perturbation)
         object.__setattr__(self, "eps_sensitivity", sensitivity)
+        object.__setattr__(self, "debye_sensitivities", pole_sensitivities["debye"])
+        object.__setattr__(self, "drude_sensitivities", pole_sensitivities["drude"])
+        object.__setattr__(self, "lorentz_sensitivities", pole_sensitivities["lorentz"])
 
         if isinstance(self.epsilon_tensor, Tensor3x3):
             raise NotImplementedError(
@@ -2379,6 +2927,15 @@ class PerturbationMedium(Material):
                 "PerturbationMedium would produce a non-positive permittivity: base eps "
                 f"{eps_floor} + minimum perturbation contribution {delta_floor} <= 0."
             )
+
+    @property
+    def perturbs_poles(self) -> bool:
+        """Whether the perturbation shifts any dispersive pole strength."""
+        return any(
+            value != 0.0
+            for values in (self.debye_sensitivities, self.drude_sensitivities, self.lorentz_sensitivities)
+            for value in values
+        )
 
     def evaluate_at_frequency(self, frequency: float) -> FrequencyMaterialSample:
         raise NotImplementedError(

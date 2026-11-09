@@ -38,6 +38,10 @@ class DummyBoundarySolver:
         self.cpml_config = dict(DEFAULT_CPML_CONFIG)
         self.eps0 = 1.0
         self.mu0 = 1.0
+        self.c = 1.0
+        # Band floor for the complex fixed-k CFS-CPML shift; set by Simulation.prepare().
+        self._requested_port_frequencies = (0.1,)
+        self._cpml_config_keys = frozenset()
 
         self.Ex = torch.zeros((self.Nx - 1, self.Ny, self.Nz), dtype=torch.float32)
         self.Ey = torch.zeros((self.Nx, self.Ny - 1, self.Nz), dtype=torch.float32)

@@ -1,0 +1,50 @@
+{
+  "dl": 0.00375,
+  "steps": 6001,
+  "f0": 1000000000.0,
+  "cases": {
+    "pec": {
+      "0.0": {
+        "f_res": 915899344.1547616,
+        "decay": 754126149.2222526,
+        "f_peak": 943108891.7849066,
+        "peak": 0.5789406988509671,
+        "dt": 6.3569026448080684e-12,
+        "dt_empty": 6.499686910106996e-12,
+        "dt_loaded": 6.3632659107187876e-12,
+        "steps": 6136,
+        "seconds": 13.053361415863037,
+        "max_memory_gib": 0.47652435302734375,
+        "shift": 0.0,
+        "peak_ratio": 1.0
+      }
+    }
+  },
+  "worst_shift": 0.0,
+  "gate_pass": true,
+  "resolution": 80,
+  "kind": "sheet",
+  "zoff": 0.3,
+  "offset": [
+    0.37,
+    0.21
+  ],
+  "grid_wavelength": 0.3,
+  "requested_duration": 3.9e-08,
+  "grid_shape": [
+    139,
+    139,
+    101
+  ],
+  "actual_spacing": [
+    0.003750000000000002,
+    0.003750000000000002,
+    0.0037499999999999977
+  ],
+  "nearest_zero_node": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "trace_file": "/tmp/sheet-rim-phase1a-nominal/sheet-n80-z0.3.json"
+}

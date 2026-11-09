@@ -45,7 +45,7 @@ def _pole_rate(entries, background, kind):
     passive = True
     for entry in entries:
         pole = entry["pole"]
-        weight = _maximum(entry["weight"])
+        weight = max(map(_maximum, entry["edge_weights"].values())) if "edge_weights" in entry else _maximum(entry["weight"])
         if weight == 0:
             continue
         if kind == "drude":
@@ -71,16 +71,17 @@ def compile_fdtd_time_step(solver, material_model):
     """
     epsilon = min(_minimum(getattr(solver, "eps_" + name)) / solver.eps0 for name in ("Ex", "Ey", "Ez"))
     permeability = min(_minimum(getattr(solver, "mu_" + name)) / solver.mu0 for name in ("Hx", "Hy", "Hz"))
-    offdiagonal = material_model.get("eps_offdiag_components", {})
+    pole_nodes = material_model.get("pole_tensor_nodes", {})
+    offdiagonal = pole_nodes.get("offdiag", material_model.get("eps_offdiag_components", {}))
     if offdiagonal:
-        epsilon = min(epsilon, _tensor_lower_bound(material_model["eps_components"], offdiagonal))
+        epsilon = min(epsilon, _tensor_lower_bound(pole_nodes.get("diagonal", material_model["eps_components"]), offdiagonal))
     modulation = _maximum(torch.hypot(material_model["modulation_cos"], material_model["modulation_sin"]))
     if modulation:
-        from .materials import average_node_to_component
+        from .materials import _modulation_component_quadratures
 
         for name in ("Ex", "Ey", "Ez"):
-            cosine = average_node_to_component(solver, material_model["modulation_cos"], name)
-            sine = average_node_to_component(solver, material_model["modulation_sin"], name)
+            cosine, sine = _modulation_component_quadratures(material_model, name)
+            modulation = max(modulation, _maximum(torch.hypot(cosine, sine)))
             relative = getattr(solver, "eps_" + name) / solver.eps0
             epsilon = min(epsilon, _minimum(relative * (1 - torch.hypot(cosine, sine))))
     # Declared design bounds keep density perturbations on one discrete problem,

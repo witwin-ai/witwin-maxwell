@@ -18,14 +18,13 @@ def test_nonuniform_yee_centers_resolve_exact_primal_widths():
         dy_primal64=np.asarray([2.0]),
         dz_primal64=np.asarray([0.5]),
     )
-    solver = SimpleNamespace(scene=scene)
 
     np.testing.assert_allclose(
-        _exact_cell_center_widths(solver, "x", [0.5, 2.5]),
+        _exact_cell_center_widths(scene, "x", [0.5, 2.5]),
         [1.0, 3.0],
     )
     np.testing.assert_allclose(
-        _exact_cell_center_widths(solver, "y", [1.0]),
+        _exact_cell_center_widths(scene, "y", [1.0]),
         [2.0],
     )
 

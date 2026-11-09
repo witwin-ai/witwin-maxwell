@@ -5,7 +5,7 @@ import torch
 
 from benchmark.metrics import flux_incident_normalized_error
 from benchmark.runner import _pick_flux_error
-from benchmark.scenes import SCENARIOS
+from benchmark.scenes import CPML_PINNED_SCENARIOS, SCENARIOS
 from benchmark.scenes.coverage import COVERAGE_SCENARIOS
 from benchmark.validation_catalog import VALIDATION_CASES, inventory_markdown
 from witwin.maxwell.compiler.sources import compile_fdfd_sources
@@ -26,6 +26,12 @@ def test_every_coverage_scenario_is_registered_and_catalogued():
         assert scenario.name in SCENARIOS, scenario.name
         assert scenario.name in catalogued, scenario.name
         assert SCENARIOS[scenario.name] is scenario, scenario.name
+
+
+def test_reference_scenarios_pin_cpml_on_the_canonical_definitions():
+    assert len(CPML_PINNED_SCENARIOS) == 13
+    for name in CPML_PINNED_SCENARIOS:
+        assert SCENARIOS[name].absorber == "cpml", name
 
 
 def test_inventory_reports_every_planned_case_as_registered():

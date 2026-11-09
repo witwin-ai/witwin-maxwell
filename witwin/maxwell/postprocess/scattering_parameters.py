@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from ..constants import C_0, MU_0
+from ..fdtd.runtime.representation import spectral_scale
 from ..sources import CW, PlaneWave, TFSF, evaluate_source_time
 from .stratton_chu import _trapz_weights_1d
 
@@ -15,6 +16,16 @@ _COORD_NAMES = {
     "y": ("x", "z"),
     "z": ("x", "y"),
 }
+
+
+class _RatioOnlyScatteringData(dict):
+    """S parameters without undefined dimensional power entries."""
+
+    def __getitem__(self, key):
+        if key in {"P_incident", "P_reflected", "P_transmitted"}:
+            from ..fdtd.runtime.representation import require_absolute_spectra
+            require_absolute_spectra(True)
+        return super().__getitem__(key)
 
 
 def _result_frequencies(result) -> torch.Tensor:
@@ -153,10 +164,10 @@ def _broadband_plane_wave_incident_power(
 
     The monitor forms ``E_inc(f)`` with a windowed running DFT: for a non-CW
     waveform the solver forces ``window="none"`` and ``start_step=0`` (see
-    ``fdtd/runtime/spectral.py``), and the reported phasor is
-    ``(2/sum_w) * sum_n w(n) * field(n) * exp(i*w*n*dt)``. Reproducing that exact
-    discrete transform of the *known* injected waveform yields the reference
-    incident power without a second simulation: the injection-to-monitor
+    ``fdtd/runtime/spectral.py``), and the reported spectrum uses the shared
+    ``spectral_scale`` (``dt*f`` per bin for pulses, or ``2/sum_w`` for steady
+    state). Reproducing that transform of the *known* injected waveform yields
+    the reference incident power without a second simulation: the injection-to-monitor
     propagation delay only rotates a global phase, which the ``|.|^2`` magnitude
     discards. The reconstruction is co-located (the leading Yee E/H stagger
     factor ``cos(k~*d/2)`` the monitor applies is dropped), so the absolute power
@@ -222,7 +233,12 @@ def _broadband_plane_wave_incident_power(
                 dtype=np.float64,
             )
         phase = np.exp(1j * (2.0 * np.pi * float(frequency)) * step_slice * dt)
-        spectral_amplitude = (2.0 / norm) * np.sum(weights * signal * phase)
+        scale = spectral_scale(
+            norm, frequency=frequency, phasor_factor=entry.get("phasor_factor", 2.0),
+            integration_dt=solver._spectral_integration_dt,
+            reference_frequency=solver._spectral_reference_frequency,
+        )
+        spectral_amplitude = scale * np.sum(weights * signal * phase)
         powers.append(float(abs(spectral_amplitude) ** 2) / (2.0 * eta0) * area)
 
     return torch.as_tensor(powers, device=frequencies.device, dtype=frequencies.dtype)
@@ -304,8 +320,16 @@ def compute_s_parameters(
 
     The returned complex arrays currently place the magnitude on the real axis.
     Phase recovery requires field-based port decomposition and is left as future work.
+    Mixed ongoing/transient runs expose S ratios only; absolute P entries raise.
     """
 
+    from ..result import Result
+    mixed_absolute = isinstance(result, Result) and result._mixed_absolute_spectra
+    if isinstance(result, Result):
+        result = result._spectral_ratio_view()
+    if isinstance(reference_result, Result):
+        mixed_absolute |= reference_result._mixed_absolute_spectra
+        reference_result = reference_result._spectral_ratio_view()
     frequencies = _result_frequencies(result)
     incident_flux = _monitor_flux(result, incident_monitor, expected_frequencies=frequencies)
     if isinstance(incident_flux, torch.Tensor):
@@ -318,7 +342,7 @@ def compute_s_parameters(
         reference_result=reference_result,
         incident_power=incident_power,
     ).to(device=frequencies.device, dtype=frequencies.dtype)
-    if torch.any(incident_power_array <= _POWER_EPS):
+    if torch.any(incident_power_array <= 0):
         raise ValueError(
             "incident power must be strictly positive at every frequency. "
             "Check monitor orientation, source spectrum, or the supplied normalization."
@@ -353,18 +377,18 @@ def compute_s_parameters(
         "P_transmitted": None,
     }
 
-    if transmitted_monitor is None:
-        return output
+    if transmitted_monitor is not None:
+        transmitted_flux = _monitor_flux(result, transmitted_monitor, expected_frequencies=frequencies).to(
+            device=frequencies.device,
+            dtype=frequencies.dtype,
+        )
+        transmitted_power = torch.abs(transmitted_flux)
+        s21_mag = torch.sqrt(transmitted_power / incident_power_array)
 
-    transmitted_flux = _monitor_flux(result, transmitted_monitor, expected_frequencies=frequencies).to(
-        device=frequencies.device,
-        dtype=frequencies.dtype,
-    )
-    transmitted_power = torch.abs(transmitted_flux)
-    s21_mag = torch.sqrt(transmitted_power / incident_power_array)
-
-    output["S21"] = s21_mag.to(dtype=complex_dtype)
-    output["S21_mag"] = s21_mag
-    output["S21_db"] = _to_db(s21_mag)
-    output["P_transmitted"] = transmitted_power
+        output["S21"] = s21_mag.to(dtype=complex_dtype)
+        output["S21_mag"] = s21_mag
+        output["S21_db"] = _to_db(s21_mag)
+        output["P_transmitted"] = transmitted_power
+    if mixed_absolute:
+        return _RatioOnlyScatteringData((key, value) for key, value in output.items() if not key.startswith("P_"))
     return output

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 import sys
@@ -118,6 +119,7 @@ def test_source_normalized_tfsf_cache_uses_standard_spatial_unit_conversion():
     monitors = {
         "field": {
             "kind": "field",
+            "frequencies": SCENARIOS["periodic_grating"].frequencies,
             "position": 250_000.0,
             "x": np.array([-640_000.0, 640_000.0]),
             "fields": {"Ey": np.ones((2, 1), dtype=np.complex64)},
@@ -131,13 +133,65 @@ def test_source_normalized_tfsf_cache_uses_standard_spatial_unit_conversion():
         normalize_source=True,
     )
 
-    np.testing.assert_allclose(scaled["field"]["fields"]["Ey"], 1.0e6)
+    source_time = scene.resolved_sources()[0].source_time
+    from witwin.maxwell.adapters.tidy3d import _convert_source_time
+    import tidy3d as td
+    factor = benchmark_runner._source_normalization_bridge(
+        source_time, _convert_source_time(source_time, td), SCENARIOS["periodic_grating"].frequencies
+    )
+    np.testing.assert_allclose(scaled["field"]["fields"]["Ey"], np.ones((2, 1)) * 1.0e6 * factor)
     np.testing.assert_allclose(scaled["flux"]["flux"], 2.0)
     assert scaled["field"]["position"] == pytest.approx(0.25)
     np.testing.assert_allclose(scaled["field"]["x"], (-0.64, 0.64))
 
 
-def test_vector_field_comparison_uses_one_global_phase_and_area_weights():
+def test_gaussian_export_bridge_and_absolute_source_plane_comparison():
+    td = pytest.importorskip("tidy3d")
+    from witwin.maxwell.adapters.tidy3d import _convert_source_time
+
+    cw = mw.CW(frequency=2e9, amplitude=2.0, phase=0.73)
+    np.testing.assert_array_equal(
+        benchmark_runner._source_normalization_bridge(cw, _convert_source_time(cw, td), (2e9,)), 1.0
+    )
+    for name in ("dipole_vacuum", "dipole_offcenter", "dipole_two_freq", "uniform_current"):
+        scenario = SCENARIOS[name]
+        scene = build_scene(name)
+        source_time = scene.resolved_sources()[0].source_time
+        exported = _convert_source_time(source_time, td, amplitude_scale=17.0)
+        factor = benchmark_runner._source_normalization_bridge(source_time, exported, scenario.frequencies)
+        np.testing.assert_allclose(factor, np.exp(-1j * exported.phase), atol=1e-10)
+
+        frequencies = scenario.frequencies
+        monitors = {
+            "bridge_field": {"kind": "field", "frequencies": frequencies,
+                      "fields": {"Ez": np.ones((3, 3, 1, len(frequencies)), complex)}},
+            "mode": {"kind": "mode", "frequencies": frequencies,
+                     "scalars": {"amplitude_forward": np.ones(len(frequencies), complex),
+                                 "amplitude_backward": np.ones(len(frequencies), complex),
+                                 "effective_index": np.ones(len(frequencies))}},
+            "time": {"kind": "field_time", "fields": {"Ez": np.ones(5)}},
+            "flux": {"kind": "flux", "flux": np.ones(len(frequencies))},
+        }
+        converted = benchmark_runner._rescale_tidy3d_fields(monitors, scene=scene, normalize_source=True)
+        np.testing.assert_allclose(converted["bridge_field"]["fields"]["Ez"], np.ones((3, 3, 1, len(frequencies))) * 1e6 * factor)
+        for key in ("amplitude_forward", "amplitude_backward"):
+            np.testing.assert_allclose(converted["mode"]["scalars"][key], factor)
+        np.testing.assert_array_equal(converted["mode"]["scalars"]["effective_index"], 1.0)
+        np.testing.assert_array_equal(converted["time"]["fields"]["Ez"], 1e6)
+        np.testing.assert_array_equal(converted["flux"]["flux"], 1.0)
+
+    coords = np.linspace(-0.2, 0.2, 9)
+    reference = np.ones((9, 9), complex)
+    actual = reference * np.exp(0.4j)
+    scene = build_scene("dipole_vacuum")
+    for plane_position in (0.0, 0.08):
+        a, b = benchmark_runner._comparison_fields(
+            scene, "z", (coords, coords), actual, reference, monitor_position=plane_position,
+        )
+        assert benchmark_runner.field_l2_error(a, b) == pytest.approx(abs(np.exp(0.4j) - 1.0))
+
+
+def test_vector_field_comparison_uses_absolute_phase_and_area_weights():
     u = np.array([-0.4, -0.1, 0.2, 0.6])
     v = np.array([-0.3, 0.0, 0.5])
     reference = np.zeros((3, u.size, v.size), dtype=np.complex128)
@@ -153,6 +207,7 @@ def test_vector_field_comparison_uses_one_global_phase_and_area_weights():
     assert comparison["energy_ratio"] == pytest.approx(2.5)
     assert comparison["field_shape_l2"] == pytest.approx(0.0, abs=1.0e-14)
     assert comparison["phase"] == pytest.approx(np.exp(-0.4j))
+    assert comparison["field_l2"] == pytest.approx(abs(2.5 * np.exp(0.4j) - 1.0))
 
 
 def test_vector_field_comparison_detects_orthogonal_and_relative_phase_errors():
@@ -305,8 +360,9 @@ def test_mode_benchmark_cache_key_tracks_export_contract(monkeypatch):
     assert changed != original
 
 
-def test_mesh_benchmark_cache_key_tracks_export_contract(monkeypatch):
-    scene = build_scene("autogrid_ring")
+@pytest.mark.parametrize("scenario_name", ("autogrid_ring", "ellipsoid_scatter"))
+def test_mesh_benchmark_cache_key_tracks_export_contract(monkeypatch, scenario_name):
+    scene = build_scene(scenario_name)
     original = benchmark_runner._benchmark_cache_key(
         scene, frequencies=(2.0e9,), run_time_factor=8.0
     )
@@ -319,6 +375,31 @@ def test_mesh_benchmark_cache_key_tracks_export_contract(monkeypatch):
         scene, frequencies=(2.0e9,), run_time_factor=8.0
     )
     assert changed != original
+
+
+def test_ellipsoid_cache_key_tracks_actual_tessellation(monkeypatch):
+    scene = build_scene("ellipsoid_scatter")
+    geometry = scene.structures[0].geometry
+    to_mesh = type(geometry).to_mesh
+    original_mesh = geometry.to_mesh()
+    original = benchmark_runner._benchmark_cache_key(scene, (2.0e9,), 8.0)
+
+    monkeypatch.setattr(type(geometry), "to_mesh", lambda self: to_mesh(self, segments=24))
+    assert geometry.to_mesh()[1].shape != original_mesh[1].shape
+    assert benchmark_runner._benchmark_cache_key(scene, (2.0e9,), 8.0) != original
+
+
+def test_isotropic_ellipsoid_cache_uses_analytic_sphere_export(monkeypatch):
+    scene = build_scene("ellipsoid_scatter")
+    scene.structures[0].geometry.radii.fill_(0.12)
+    original = benchmark_runner._benchmark_cache_key(scene, (2.0e9,), 8.0)
+
+    def unexpected_mesh(self):
+        raise AssertionError("The analytic sphere export must not tessellate.")
+
+    monkeypatch.setattr(mw.Ellipsoid, "to_mesh", unexpected_mesh)
+    monkeypatch.setattr(benchmark_runner, "_MESH_EXPORT_CONTRACT_VERSION", 100)
+    assert benchmark_runner._benchmark_cache_key(scene, (2.0e9,), 8.0) == original
 
 
 def test_cone_benchmark_cache_key_tracks_geometry_export_contract(monkeypatch):
@@ -412,6 +493,109 @@ def test_normalized_tfsf_cache_key_tracks_source_export_contract(monkeypatch):
         normalize_source=True,
     )
     assert changed != original
+
+
+@pytest.fixture
+def cache_key_payload(monkeypatch):
+    payloads = []
+    sha256 = benchmark_runner.hashlib.sha256
+
+    def capture(encoded):
+        payloads.append(json.loads(encoded))
+        return sha256(encoded)
+
+    monkeypatch.setattr(benchmark_runner.hashlib, "sha256", capture)
+
+    def payload(scene):
+        benchmark_runner._benchmark_cache_key(scene, (2e9,), 15.0)
+        return payloads[-1]
+
+    return payload
+
+
+@pytest.mark.parametrize("name", ("tfsf_vacuum", "bloch_oblique", "bloch_oblique_te"))
+def test_tfsf_cache_key_records_only_changed_amplitude_factors(cache_key_payload, name):
+    scene = build_scene(name)
+    payload = cache_key_payload(scene)
+    factors = {}
+    for index, source in enumerate(scene.sources):
+        axis = benchmark_runner.resolve_injection_axis(source.direction, source.injection_axis)
+        factor = math.sqrt(abs(source.direction["xyz".index(axis)]))
+        if factor != 1.0:
+            factors[str(index)] = factor
+    assert payload["tfsf_source_export_contract_version"] == 1
+    if factors:
+        assert payload["tfsf_export_amplitude_factors"] == factors
+    else:
+        assert "tfsf_export_amplitude_factors" not in payload
+
+
+@pytest.mark.parametrize("on_grid", (False, True))
+@pytest.mark.parametrize("kind", ("flux", "closed_field", "flux_time", "mode", "diffraction", "field"))
+def test_power_plane_cache_key_records_only_changed_coordinates(cache_key_payload, on_grid, kind):
+    from witwin.maxwell.fdtd.observers import _flux_yee_plane_position
+
+    scene = mw.Scene(domain=mw.Domain(bounds=((-0.64, 0.64),) * 3),
+                     grid=mw.GridSpec.uniform(0.025), device="cpu")
+    prepared = prepare_scene(scene, lazy_meshgrid=True)
+    requested = float(prepared.z_nodes64[40]) if on_grid else 0.3
+    kwargs = dict(name="probe", position=(0, 0, requested), size=(0.8, 0.8, 0))
+    if kind == "flux":
+        monitor = mw.FluxMonitor(name="probe", axis="z", position=requested)
+    elif kind == "flux_time":
+        monitor = mw.FluxTimeMonitor(name="probe", axis="z", position=requested)
+    elif kind == "mode":
+        monitor = mw.ModeMonitor(**kwargs, polarization="Ex")
+    elif kind == "diffraction":
+        monitor = mw.DiffractionMonitor(**kwargs)
+    else:
+        closure = {"x": (-0.4, 0.4), "y": (-0.4, 0.4)} if kind == "closed_field" else None
+        monitor = mw.FinitePlaneMonitor(**kwargs, closure_planes=closure)
+    scene.add_monitor(monitor)
+    payload = cache_key_payload(scene)
+    assert "monitor_plane_export_contract_version" not in payload
+    if on_grid or kind == "field":
+        assert "monitor_export_plane_positions" not in payload
+    else:
+        assert payload["monitor_export_plane_positions"] == {
+            "probe": _flux_yee_plane_position(prepared, "z", requested) * benchmark_runner._M_TO_UM,
+        }
+
+
+def test_on_grid_benchmark_keeps_master_cache_key_bitwise():
+    scenario = SCENARIOS["nonuniform_custom_grid"]
+    scene = build_scene(scenario.name)
+    assert benchmark_runner._benchmark_cache_key(
+        scene, scenario.frequencies, scenario.run_time_factor,
+        normalize_source=benchmark_runner._resolve_source_normalization(scene, scenario.normalize_source),
+    ) == "e62e21973fd6d073334d5ed8fcb89f344b0430bab853e5db6fdbbaaa2b1215ba"
+
+
+def test_normal_tfsf_with_on_grid_monitor_keeps_master_cache_key_bitwise():
+    scenario = SCENARIOS["tfsf_vacuum"]
+    scene = build_scene(scenario.name)
+    prepared = prepare_scene(scene, lazy_meshgrid=True)
+    scene = scene.clone(monitors=[mw.FluxMonitor(
+        name="on_grid", axis="z", position=float(prepared.z_nodes64[40]),
+    )])
+    assert benchmark_runner._benchmark_cache_key(
+        scene, scenario.frequencies, scenario.run_time_factor,
+        normalize_source=benchmark_runner._resolve_source_normalization(scene, scenario.normalize_source),
+    ) == "61d12802a19ee9ac0eea991160f8409d57dd3eab9861c283213b6b95e9642cde"
+
+
+@pytest.mark.parametrize("name", (
+    "planewave_cw", "pec_cavity", "planewave_vacuum", "modulated_slab", "modulated_slab_phase",
+))
+def test_cw_horizon_cache_key_is_scoped_to_changed_exports(cache_key_payload, name):
+    scene = build_scene(name)
+    payload = cache_key_payload(scene)
+    requested = 15.0 * max(hi - lo for lo, hi in scene.domain.bounds) / benchmark_runner._C0
+    exported = benchmark_runner._cw_steady_state_run_time(scene, requested)
+    if exported == requested:
+        assert "cw_export_run_time" not in payload
+    else:
+        assert payload["cw_export_run_time"] == exported
 
 
 def test_continuous_wave_cache_key_tracks_source_time_export_contract(monkeypatch):
@@ -665,10 +849,46 @@ def test_directional_field_comparison_excludes_the_soft_source_stencil():
     )
 
     assert compared_actual.size == 2 * 2
-    np.testing.assert_allclose(compared_actual, compared_reference)
+    np.testing.assert_allclose(compared_actual, compared_reference * np.exp(0.4j))
 
 
-def test_tfsf_field_comparison_removes_only_the_global_reference_phase():
+@pytest.mark.parametrize("current_component", (None, "Jx", "Mz"))
+def test_volume_current_comparison_excludes_source_box_and_one_cell(current_component):
+    center = np.array((0.2, 0.3, -0.2))
+    if current_component is None:
+        source = mw.UniformCurrentSource(size=(0.2, 0.2, 0.2), center=center)
+    else:
+        dataset_coords = tuple((value - 0.1, value + 0.1) for value in center)
+        source = mw.CustomCurrentSource(
+            mw.CurrentDataset(dataset_coords, {current_component: np.ones((2, 2, 2))})
+        )
+    scene = mw.Scene(device="cpu").add_source(source)
+    offsets = np.array((-0.25, -0.15, 0.0, 0.15, 0.25))
+    coords = (center[0] + offsets, center[2] + offsets)
+    reference = np.arange(25).reshape(5, 5).astype(complex) + 1j
+    actual = reference * np.exp(0.4j)
+    exterior = np.ones((5, 5), dtype=bool)
+    exterior[1:4, 1:4] = False
+    actual[~exterior] = 100.0
+
+    compared_actual, compared_reference = benchmark_runner._comparison_fields(
+        scene, "y", coords, actual, reference, monitor_position=center[1]
+    )
+
+    np.testing.assert_array_equal(compared_actual, actual[exterior])
+    np.testing.assert_array_equal(compared_reference, reference[exterior])
+    # A plane beyond the expanded box retains every sample.
+    outside_actual, _ = benchmark_runner._comparison_fields(
+        scene, "y", coords, actual, reference, monitor_position=0.6
+    )
+    assert outside_actual.size == actual.size
+    dipole_scene = mw.Scene(device="cpu").add_source(mw.PointDipole(position=center))
+    assert benchmark_runner._volume_current_exterior_mask(
+        dipole_scene, "y", coords, center[1]
+    ) is None
+
+
+def test_tfsf_field_comparison_preserves_absolute_phase():
     scene = build_scene("periodic_grating")
     reference = np.array(
         ((1.0 + 0.5j, -0.5 + 0.25j), (0.2 - 0.1j, 2.0 - 0.5j)),
@@ -684,11 +904,11 @@ def test_tfsf_field_comparison_removes_only_the_global_reference_phase():
         reference,
     )
 
-    np.testing.assert_allclose(compared_actual, compared_reference)
+    np.testing.assert_allclose(compared_actual, compared_reference * np.exp(0.73j))
     assert compared_actual.size == reference.size
 
 
-def test_spectral_phase_anchor_preserves_sideband_relative_phase():
+def test_spectral_comparison_preserves_carrier_and_sideband_absolute_phase():
     scene = build_scene("periodic_grating")
     coords = (np.array((-0.1, 0.1)), np.array((-0.2, 0.2)))
     reference = np.ones((2, 2), dtype=np.complex128)
@@ -699,9 +919,8 @@ def test_spectral_phase_anchor_preserves_sideband_relative_phase():
         coords,
         carrier,
         reference,
-        align_phase=False,
     )
-    _, carrier_phase = phase_align_field(raw_carrier, selected_reference)
+    np.testing.assert_allclose(raw_carrier, selected_reference * np.exp(0.4j))
     upper_sideband = carrier * 1j
 
     independently_aligned, _ = benchmark_runner._comparison_fields(
@@ -711,25 +930,13 @@ def test_spectral_phase_anchor_preserves_sideband_relative_phase():
         upper_sideband,
         reference,
     )
-    carrier_anchored, anchored_reference = benchmark_runner._comparison_fields(
-        scene,
-        "y",
-        coords,
-        upper_sideband,
-        reference,
-        phase_factor=carrier_phase,
-    )
-
-    np.testing.assert_allclose(independently_aligned, reference.ravel())
-    np.testing.assert_allclose(carrier_anchored, 1j * anchored_reference)
-    assert np.linalg.norm(carrier_anchored - anchored_reference) > 1.0
+    np.testing.assert_allclose(independently_aligned, 1j * reference.ravel() * np.exp(0.4j))
 
 
-def test_explicit_phase_factor_applies_without_a_directional_source():
+def test_absolute_phase_is_preserved_without_a_directional_source():
     scene = mw.Scene(device="cpu")
     reference = np.ones((2, 2), dtype=np.complex128)
     actual = reference * np.exp(0.4j)
-    phase_factor = np.exp(-0.4j)
 
     compared_actual, compared_reference = benchmark_runner._comparison_fields(
         scene,
@@ -737,10 +944,9 @@ def test_explicit_phase_factor_applies_without_a_directional_source():
         (np.array((-0.1, 0.1)), np.array((-0.2, 0.2))),
         actual,
         reference,
-        phase_factor=phase_factor,
     )
 
-    np.testing.assert_allclose(compared_actual, compared_reference)
+    np.testing.assert_allclose(compared_actual, compared_reference * np.exp(0.4j))
 
 
 def test_resonance_diagnostic_uses_nearest_resonant_field_slice():
@@ -788,7 +994,7 @@ def test_point_source_field_comparison_excludes_the_singular_source_disk():
     )
 
     assert compared_actual.size < actual.size
-    np.testing.assert_allclose(compared_actual, compared_reference)
+    np.testing.assert_allclose(compared_actual, compared_reference * np.exp(0.3j))
 
 
 def test_point_source_field_comparison_excludes_reference_weak_field_noise():
@@ -811,7 +1017,7 @@ def test_point_source_field_comparison_excludes_reference_weak_field_noise():
     )
 
     assert compared_actual.size == 4
-    np.testing.assert_allclose(compared_actual, compared_reference)
+    np.testing.assert_allclose(compared_actual, compared_reference * np.exp(0.3j))
 
 
 def test_monitor_fields_can_be_normalized_to_one_spectral_reference():
@@ -1859,6 +2065,7 @@ def test_report_writer_updates_markdown(tmp_path, monkeypatch):
                 "frequency": 1.5e9,
                 "field_l2": 0.1,
                 "field_shape_l2": 0.01,
+                "field_phase_fit_rad": 0.052,
                 "field_linf": 0.2,
                 "field_corr": 0.99,
             }
@@ -1910,6 +2117,7 @@ def test_report_writer_updates_markdown(tmp_path, monkeypatch):
     assert "## Scalar observables" in content
     assert "| dipole_vacuum | 1.50000000e+09 | S21 |" in content
     assert "## Per-frequency field metrics" in content
+    assert "fitted global phase (rad, diagnostic only): 1.50000000e+09 Hz: +5.200000e-02" in content
     assert "| dipole_vacuum | 1.50000000e+09 | 1.0000e-01 |" in content
     assert "| planewave_vacuum | 1.50000000e+09 | 2.0000e-01 |" in content
 

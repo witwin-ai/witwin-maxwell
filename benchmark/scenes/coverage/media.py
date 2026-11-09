@@ -300,6 +300,7 @@ MEDIA_COVERAGE_SCENARIOS = (
             ),
         ),
         run_time_factor=RUN_TIME_FACTOR,
+        absorber="cpml",
     ),
     ScenarioDefinition(
         name="modulated_slab_phase",
@@ -314,6 +315,7 @@ MEDIA_COVERAGE_SCENARIOS = (
         normalize_source=False,
         spectral_reference_index=1,
         compare_flux=False,
+        absorber="cpml",
     ),
     _make(
         "static_medium2d_sheet",
@@ -335,5 +337,6 @@ MEDIA_COVERAGE_SCENARIOS = (
         "Lorentz dispersion composed with strong-drive Kerr response",
         _dispersive_kerr_scene,
         run_time_factor=RUN_TIME_FACTOR,
+        absorber="cpml",
     ),
 )

@@ -44,9 +44,16 @@ def compile_component(scene, component, *, selection=None):
 
 
 @pytest.mark.parametrize("component", ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"))
-@pytest.mark.parametrize("averaging,samples", [("arithmetic", 1), ("polarized", 1), ("polarized", 3)])
+@pytest.mark.parametrize("averaging,samples", [("arithmetic", 1), ("arithmetic", 3), ("polarized", 3)])
 @pytest.mark.parametrize("nonuniform", [False, True])
 def test_patch_values_and_density_gradients_match_full_component(component, averaging, samples, nonuniform):
+    """Patch compilation equals the full component, values and density gradients.
+
+    The former polarized samples=1 case is replaced by arithmetic samples=3
+    (2026-10-29): single-sample polarized averaging raises, and the multi-sample
+    arithmetic fill also exercises the coverage-fill spacing cropping on graded
+    grids.
+    """
     scene, rho = prepared_scene(averaging=averaging, samples=samples, nonuniform=nonuniform)
     full, full_sigma = compile_component(scene, component)
     selection = (slice(1, 5), slice(2, 6), slice(0, 3))

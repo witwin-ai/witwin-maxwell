@@ -72,9 +72,12 @@ def _scene_material_characteristic_frequency(scene) -> float:
 def maximum_declared_frequency(scene, base_frequency, excitations=()) -> float:
     """Carrier and finite temporal-scale bound used only for automatic sampling.
 
-    A finite ramp, pulse plateau, PWL segment or exponential envelope receives
-    the same samples-per-scale budget as a carrier period. Zero-duration ideal
-    jumps do not impose an infinite sampling frequency.
+    Finite ramps, pulse plateaus and exponential envelopes receive the same
+    samples-per-scale budget as a carrier period. PWL sampling uses its maximum
+    slope divided by its amplitude excursion: adding interpolation knots must
+    not shorten the physical time step. Zero-duration ideal jumps do not impose
+    an infinite sampling frequency. PWL breakpoints retain their separate MNA
+    integration-event handling.
     """
     from ...circuits import (
         CurrentSource, VoltageSource, SineWaveform, PulseWaveform, PiecewiseLinearWaveform,
@@ -98,13 +101,21 @@ def maximum_declared_frequency(scene, base_frequency, excitations=()) -> float:
                     if duration > 0:
                         frequency = max(frequency, 1.0 / duration)
             elif isinstance(waveform, PiecewiseLinearWaveform):
-                shortest_segment = float(torch.diff(waveform.times.detach()).amin())
-                frequency = max(frequency, 1.0 / shortest_segment)
+                values = waveform.values.detach().to(dtype=torch.float64)
+                excursion = values.amax() - values.amin()
+                if float(excursion) > 0.0:
+                    times = waveform.times.detach().to(dtype=torch.float64)
+                    slopes = torch.diff(values).abs() / torch.diff(times)
+                    frequency = max(frequency, float(slopes.amax() / excursion))
     return frequency
 
 
 def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_config=None):
-    require_cuda_scene(scene)
+    from .materials import validate_nonlinear_tensor_materials
+    validate_nonlinear_tensor_materials(scene)
+    cpu_reference = bool(getattr(scene, "_fdtd_cpu_reference", False))
+    if not cpu_reference:
+        require_cuda_scene(scene)
     solver.scene = scene
     solver.Nx = scene.Nx
     solver.Ny = scene.Ny
@@ -130,6 +141,12 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     )
     solver._source_time = None if solver._compiled_source is None else solver._compiled_source["source_time"]
     solver._normalization_source_time = solver._source_time
+    from .timeplan import source_time_offset
+    solver._source_time_offset = source_time_offset(solver._compiled_source)
+    solver._normalization_time_offset = solver._source_time_offset
+    solver._spectral_integration_dt = None
+    solver._spectral_reference_frequency = None
+    solver._requested_port_frequencies = (float(frequency),)
     time_step_frequency = max(
         maximum_declared_frequency(scene, frequency),
         max((
@@ -149,6 +166,7 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver.active_absorber_type = "none"
     solver.complex_fields_enabled = False
     solver.cpml_config = dict(DEFAULT_CPML_CONFIG)
+    solver._cpml_config_keys = frozenset(cpml_config or ())
     if cpml_config is not None:
         solver.cpml_config.update(cpml_config)
     solver._cpml_memory_mode_requested = str(solver.cpml_config.get("memory_mode", "auto")).strip().lower()
@@ -165,13 +183,18 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     # Per-axis spacing arrays: `_e` scales backward diffs in E updates (dual
     # spacing, length N); `_h` scales forward diffs in H updates (primal
     # spacing, length N-1). Reciprocals are computed in float64 then cast.
-    solver.inv_dx_e = torch.tensor(1.0 / scene.dx_dual64, dtype=torch.float32, device=solver.device)
-    solver.inv_dy_e = torch.tensor(1.0 / scene.dy_dual64, dtype=torch.float32, device=solver.device)
-    solver.inv_dz_e = torch.tensor(1.0 / scene.dz_dual64, dtype=torch.float32, device=solver.device)
-    solver.inv_dx_h = torch.tensor(1.0 / scene.dx_primal64, dtype=torch.float32, device=solver.device)
-    solver.inv_dy_h = torch.tensor(1.0 / scene.dy_primal64, dtype=torch.float32, device=solver.device)
-    solver.inv_dz_h = torch.tensor(1.0 / scene.dz_primal64, dtype=torch.float32, device=solver.device)
-    solver.fdtd_module = get_fdtd_module()
+    solver.inv_dx_e = torch.tensor(1.0 / scene.dx_dual64, dtype=scene.x.dtype, device=solver.device)
+    solver.inv_dy_e = torch.tensor(1.0 / scene.dy_dual64, dtype=scene.x.dtype, device=solver.device)
+    solver.inv_dz_e = torch.tensor(1.0 / scene.dz_dual64, dtype=scene.x.dtype, device=solver.device)
+    solver.inv_dx_h = torch.tensor(1.0 / scene.dx_primal64, dtype=scene.x.dtype, device=solver.device)
+    solver.inv_dy_h = torch.tensor(1.0 / scene.dy_primal64, dtype=scene.x.dtype, device=solver.device)
+    solver.inv_dz_h = torch.tensor(1.0 / scene.dz_primal64, dtype=scene.x.dtype, device=solver.device)
+    if cpu_reference:
+        from ..cpu_reference import get_cpu_reference_module
+        solver.fdtd_module = get_cpu_reference_module()
+    else:
+        solver.fdtd_module = get_fdtd_module()
+    solver.cpu_reference = cpu_reference
 
     solver.dft_enabled = False
     solver.dft_frequency = None

@@ -151,34 +151,46 @@ def series_rlc_scene(
     )
 
     scene.add_structure(
-        _HollowCylinder(
-            position=(0.0, 0.0, 0.0),
-            inner_radius=OUTER_RADIUS,
-            outer_radius=SHIELD_OUTER,
-            length=length,
-        ).with_material(mw.Material.pec(), name="shield")
+        mw.Structure(
+            _HollowCylinder(
+                position=(0.0, 0.0, 0.0),
+                inner_radius=OUTER_RADIUS,
+                outer_radius=SHIELD_OUTER,
+                length=length,
+            ),
+            mw.Material.pec(),
+            name="shield",
+        )
     )
 
     # Inner rod: two segments straddling a two-cell axial gap at the load plane.
     seg1_length = (LOAD_PLANE - dx) - left_edge
     seg1_center = 0.5 * (left_edge + LOAD_PLANE - dx)
     scene.add_structure(
-        mw.Cylinder(
-            position=(seg1_center, 0.0, 0.0),
-            radius=INNER_RADIUS,
-            height=seg1_length,
-            axis="x",
-        ).with_material(mw.Material.pec(), name="inner_feed_side")
+        mw.Structure(
+            mw.Cylinder(
+                position=(seg1_center, 0.0, 0.0),
+                radius=INNER_RADIUS,
+                height=seg1_length,
+                axis="x",
+            ),
+            mw.Material.pec(),
+            name="inner_feed_side",
+        )
     )
     seg2_length = right_edge - (LOAD_PLANE + dx)
     seg2_center = 0.5 * (LOAD_PLANE + dx + right_edge)
     scene.add_structure(
-        mw.Cylinder(
-            position=(seg2_center, 0.0, 0.0),
-            radius=INNER_RADIUS,
-            height=seg2_length,
-            axis="x",
-        ).with_material(mw.Material.pec(), name="inner_load_side")
+        mw.Structure(
+            mw.Cylinder(
+                position=(seg2_center, 0.0, 0.0),
+                radius=INNER_RADIUS,
+                height=seg2_length,
+                axis="x",
+            ),
+            mw.Material.pec(),
+            name="inner_load_side",
+        )
     )
 
     return scene

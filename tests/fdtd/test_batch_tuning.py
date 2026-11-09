@@ -148,7 +148,7 @@ def test_tuning_rejects_capacity_and_propagates_physics_errors():
         batch.prepare()
     batch.execution = replace(policy, memory_limit_bytes=128 * 1024**2)
     batch.outputs = mw.BatchOutput(materials=True)
-    with pytest.raises(NotImplementedError, match="material export"):
+    with pytest.raises(NotImplementedError, match="material snapshots"):
         batch.prepare()
 
 

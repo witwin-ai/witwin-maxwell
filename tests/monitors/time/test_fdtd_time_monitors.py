@@ -143,7 +143,7 @@ def test_time_monitor_sampling_controls():
     t = _to_numpy(payload["t"])
     assert t.shape == (len(expected_steps),)
     assert _to_numpy(payload["field"]).shape == (len(expected_steps),)
-    np.testing.assert_allclose(t, dt * np.asarray(expected_steps, dtype=float), rtol=1e-9, atol=1e-15)
+    np.testing.assert_allclose(t, dt * (np.asarray(expected_steps, dtype=float) + 1), rtol=1e-9, atol=1e-15)
     assert payload["start"] == start
     assert payload["stop"] == stop
     assert payload["interval"] == interval

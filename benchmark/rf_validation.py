@@ -46,7 +46,7 @@ from witwin.maxwell.waveport_sweep import resolve_waveport_run_manifest
 C0 = 299792458.0
 ETA0 = 376.730313668
 
-ARTIFACT_DIR = ROOT.parent / "docs" / "assessments" / "rf-wave-validation-2026-07-18"
+ARTIFACT_DIR = ROOT.parent / "docs" / "assessments" / "rf-wave-validation-2026-10-22"
 RESULTS_MD = ROOT / "RESULTS.md"
 
 # Gate taxonomy (docs/reference/gate-classification.md): the five verbatim
@@ -1769,7 +1769,7 @@ def run_patch() -> SceneReport:
         patch_antenna_scene,
     )
 
-    frequencies = tuple(f * 1e9 for f in (4.4, 4.8, 5.2, 5.6, 6.0))
+    frequencies = tuple(f * 1e9 for f in (2.9, 3.0, 3.1, 3.2, 3.3, 3.4, 3.5))
     dx = 1.0e-3
     f_cavity = cavity_resonance(
         eps_r=DEFAULT_PERMITTIVITY,
@@ -1781,18 +1781,18 @@ def run_patch() -> SceneReport:
         name="antenna/patch",
         description=(
             "Probe-fed rectangular patch on a finite grounded slab: real Result.antenna "
-            "pipeline over the NF2FF box; matched-broadside TM010 is a documented gap."
+            "matched-broadside radiation with a joint feed/power gate near its resonance."
         ),
         gate_class=WAVE_LEVEL,
         status="pending",
         reference=f"cavity model TM010 (f_r={f_cavity/1e9:.3f} GHz), broadside D >= 5 dBi",
         tidy3d_reference=_antenna_reference_status("antenna/patch"),
-        target="pipeline valid (6 NF2FF faces, p_rad>0, closure<0.05); broadside D>=5 dBi matched (GAP)",
+        target="same-frequency broadside D>=5 dBi, |S11|<=-10 dB, power closure<=3%",
     )
     try:
         scene = patch_antenna_scene(frequencies=frequencies, device=_device())
         result = _run_antenna_fdtd(
-            scene, frequencies, design_frequency=5.2e9, fwidth=2.2e9, physical_ns=16.0
+            scene, frequencies, design_frequency=3.2e9, fwidth=2.2e9, physical_ns=16.0
         )
         data = result.antenna(
             surface="radiation", driven_port="feed", theta_points=91, phi_points=73, radius=10.0
@@ -1804,7 +1804,8 @@ def run_patch() -> SceneReport:
 
     theta = data.theta[:, 0]
     broadside_index = int(torch.argmin(torch.abs(theta)))
-    broadside_dbi = float(data.directivity_db[:, broadside_index, :].amax())
+    broadside_by_frequency = data.directivity_db[:, broadside_index, :].amax(dim=-1)
+    broadside_dbi = float(broadside_by_frequency.max())
     reflection = result.port("feed").reflection_coefficient.abs()
     matched_db_best = float((20.0 * torch.log10(reflection)).min())
     closure = torch.abs(data.p_rad - data.p_accepted) / torch.abs(data.p_accepted)
@@ -1817,12 +1818,21 @@ def run_patch() -> SceneReport:
         and closure_min < 0.05
     )
 
+    incident = result.port("feed").a.abs()
+    valid = (incident > .01*incident.max()) & (data.p_accepted > 0)
+    joint = valid & (broadside_by_frequency >= 5) & (20*torch.log10(reflection) <= -10) & (closure <= .03)
+    report.raw = {"frequencies_hz": list(frequencies),
+                  "z_in_real_ohm": result.port("feed").z_in.real.cpu().tolist(),
+                  "z_in_imag_ohm": result.port("feed").z_in.imag.cpu().tolist(),
+                  "reflection_real": result.port("feed").reflection_coefficient.real.cpu().tolist(),
+                  "reflection_imag": result.port("feed").reflection_coefficient.imag.cpu().tolist(),
+                  "broadside_directivity_dbi": broadside_by_frequency.cpu().tolist(),
+                  "relative_power_closure": closure.cpu().tolist(), "valid_input": valid.cpu().tolist()}
     report.metrics.append(
         {"quantity": "broadside directivity (in-band max)", "measured": broadside_dbi,
          "reference": 5.0, "rel_error": _rel(broadside_dbi, 5.0), "unit": "dBi",
          "class": WAVE_LEVEL,
-         "note": "matched-broadside TM010 gate target; documented GAP on this thick "
-         "finite-ground slab"}
+         "note": "Nominal matched-broadside threshold; independent reference and convergence tracked separately."}
     )
     report.conservation = {
         "pipeline_valid": pipeline_valid,
@@ -1833,29 +1843,21 @@ def run_patch() -> SceneReport:
         "cavity_resonance_ghz": f_cavity / 1e9,
         "frequencies_hz": [float(f) for f in frequencies],
     }
+    report.conservation["joint_matched_broadside_power_gate"] = bool(torch.any(joint))
     report.tolerance_basis = (
-        "Two-part: (1) PIPELINE (pass) -- Result.antenna runs end to end over the "
-        "grounded slab, returns 6 air-exterior NF2FF faces per frequency, p_rad>0, and "
-        "a best radiated-vs-accepted closure < 0.05. (2) PHYSICS (gap) -- the probe on "
-        "this thick finite-ground slab is reactance-dominated (best |S11| ~ 0 dB) and "
-        "radiates off-broadside, so the matched-broadside TM010 D >= 5 dBi target is not "
-        "met and is a documented gap (strict xfail in the e2e test)."
+        "At one common frequency with valid incident energy: broadside D>=5 dBi, "
+        "|S11|<=-10 dB and radiated/accepted-power mismatch<=3%. "
+        "Six homogeneous-air NF2FF faces and finite positive power remain pipeline preconditions."
     )
     report.falsification = (
-        "EXECUTED (tests/rf/antenna/test_antenna_benchmark_e2e.py): the pipeline gate is "
-        "a real PASS; the physical matched-broadside gate genuinely xfails (broadside "
-        f"D max {broadside_dbi:.2f} dBi < 5 and best match {matched_db_best:.1f} dB > -10), "
-        "so its strict xfail is exercised, not vacuous."
+        "Executed same-geometry compiler rollback in docs/assessments/pec-boundary-roundoff-2026-10-22/: "
+        "omitting exact boundary ownership deletes the patch tangential edges and restores |Gamma|>0.99."
     )
-    # Pipeline passes; the physics gate is an honest, documented gap.
-    report.status = "gap"
+    report.status = "pass" if pipeline_valid and bool(torch.any(joint)) else "fail"
     report.notes.append(
-        f"Pipeline valid={pipeline_valid} (faces={faces}, closure_min={closure_min:.4f}); "
-        f"broadside D max {broadside_dbi:.2f} dBi, best match {matched_db_best:.1f} dB, cavity "
-        f"f_r ~ {f_cavity/1e9:.3f} GHz (outside the 4.4-6.0 GHz run band). The "
-        "matched-broadside TM010 physics + the external reference-solver cross-check remain "
-        "open (feed/ground redesign); reference is pending-generation (no lumped-feed adapter "
-        "mapping)."
+        f"Nominal geometry: broadside max {broadside_dbi:.2f} dBi, best match {matched_db_best:.2f} dB; "
+        f"cavity design estimate {f_cavity/1e9:.3f} GHz is approximate. "
+        "This nominal gate does not certify fixed-geometry mesh/time/PML convergence or an independent antenna reference."
     )
     return report
 
@@ -1931,23 +1933,16 @@ _RF_INTRO = (
 )
 
 _ANTENNA_INTRO = (
-    "FDTD antenna validation (plan-01 Phase 4, 2026-07-19). Each row is measured from a "
-    "real `Scene -> Simulation -> Result` run whose near-field-to-far-field transform is "
-    "consumed through `Result.antenna` with NO monkeypatch (the driven lumped feed "
-    "`PortData` and the `ClosedSurfaceMonitor` both come from the time-stepped solver). "
-    "`antenna/half_wave_dipole` is a radiation-physics PASS (broadside directivity in the "
-    "2.15 dBi band, E-plane sin^2 pattern, radiated-vs-accepted power closure, and the "
-    "radiation resistance sweeping through the thin-dipole 73 Ohm class; the input "
-    "reactance carries a documented delta-gap feed offset and is not gated). "
-    "`antenna/patch` is a PIPELINE pass with a documented PHYSICS gap: `Result.antenna` "
-    "runs end to end over the finite grounded slab (6 air-exterior NF2FF faces per "
-    "frequency, p_rad>0, closure<0.05), but the probe on the thick finite-ground slab is "
-    "reactance-dominated and radiates off-broadside, so the matched-broadside TM010 "
-    "D >= 5 dBi target is an open gap (strict xfail in the e2e test). The external "
-    "reference-solver cross-check is `pending-generation` for both: the adapter has no "
-    "lumped-feed source mapping, so the exported reference simulation is source-less "
-    "(see the RF/antenna external reference generation section). Reproduce with "
-    "`tests/rf/antenna/test_antenna_benchmark_e2e.py`."
+    "FDTD antenna nominal validation, updated 2026-10-22. Each reported value comes "
+    "from the real Scene -> Simulation -> Result.antenna path with six homogeneous-air "
+    "NF2FF faces and a driven feed. The patch's aligned PEC boundary correction restores "
+    "its conductor; a resonant-band run now jointly gates broadside D>=5 dBi, |S11|<=-10 dB "
+    "and radiated/accepted-power mismatch<=3% at one valid frequency. The half-wave dipole "
+    "retains its independent analytic radiation-pattern/directivity and resistance-class "
+    "control. Nominal matching is separate from fixed-geometry mesh/time/PML convergence "
+    "and independent antenna-reference qualification. New raw reports are stored under "
+    "docs/assessments/rf-wave-validation-2026-10-22/; older campaign artifacts remain intact. "
+    "Each row's external-reference status is authoritative."
 )
 
 

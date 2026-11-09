@@ -209,6 +209,7 @@ def test_run_rejects_trainable_prebias():
     ic = mw.ElectrostaticInitialCondition.from_result(dc)
     density = torch.rand((4, 4, 4), dtype=torch.float32, requires_grad=True)
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=BOUNDS),
         grid=mw.GridSpec.uniform(H),
         boundary=mw.BoundarySpec.periodic(),

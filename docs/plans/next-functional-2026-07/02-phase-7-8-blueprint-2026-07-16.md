@@ -2,7 +2,7 @@ I now have everything needed. Composing the final audit + blueprint.
 
 # PART A — Audit of plan 02 Phases 0–6 as landed on origin/master
 
-All paths below are under `/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/` unless absolute. Test evidence: `tests/fdtd/multi_gpu` run today on both A6000s (maxwell env, CUDA_HOME export pattern): **114 passed in 15.18 s** — matches the tracked acceptance record ("109 → 114" in `docs/reference/fdtd-multi-gpu-joint-solve.md:281-284`).
+All paths below are under `` unless absolute. Test evidence: `tests/fdtd/multi_gpu` run today on both A6000s (maxwell env, CUDA_HOME export pattern): **114 passed in 15.18 s** — matches the tracked acceptance record ("109 → 114" in `docs/reference/fdtd-multi-gpu-joint-solve.md:281-284`).
 
 ## A.1 Phase-by-phase exit-gate verdicts
 

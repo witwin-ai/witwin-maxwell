@@ -163,7 +163,7 @@ def test_subpixel_offsets_scale_with_local_dual_cell():
             domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
             grid=mw.GridSpec.custom(graded, graded, graded),
             device="cpu",
-            subpixel_samples=mw.SubpixelSpec(samples=(2, 1, 1)),
+            subpixel_samples=mw.SubpixelSpec(samples=(2, 1, 1), averaging="arithmetic"),
         )
     )
     width = _axis_averaging_width(scene, "x")
@@ -176,8 +176,13 @@ def test_subpixel_offsets_scale_with_local_dual_cell():
     offsets = _axis_sample_offsets(scene, "x", 2)
     assert len(offsets) == 2
     assert torch.is_tensor(offsets[0]) and torch.is_tensor(offsets[1])
-    torch.testing.assert_close(offsets[0], -0.25 * width, rtol=0.0, atol=0.0)
-    torch.testing.assert_close(offsets[1], +0.25 * width, rtol=0.0, atol=0.0)
+    # Quadrature spans the actual unequal left/right half-primal intervals.
+    primal = np.diff(scene.x_nodes64)
+    lower = -.5*np.r_[primal[0], primal]
+    upper = .5*np.r_[primal, primal[-1]]
+    for index, offset in enumerate(offsets):
+        expected = torch.tensor(lower+(index+.5)/2*(upper-lower), dtype=torch.float32)
+        torch.testing.assert_close(offset, expected, rtol=2e-6, atol=2e-8)
 
     # A uniform axis keeps the scalar (bit-exact) offset path.
     uniform = prepare_scene(
@@ -185,7 +190,7 @@ def test_subpixel_offsets_scale_with_local_dual_cell():
             domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
             grid=mw.GridSpec.uniform(0.1),
             device="cpu",
-            subpixel_samples=mw.SubpixelSpec(samples=(2, 1, 1)),
+            subpixel_samples=mw.SubpixelSpec(samples=(2, 1, 1), averaging="arithmetic"),
         )
     )
     scalar_offsets = _axis_sample_offsets(uniform, "x", 2)
@@ -202,7 +207,10 @@ def test_graded_grid_interface_arithmetic_and_polarized():
     zg = np.linspace(-0.5, 0.5, 11)
     node = (int(np.argmin(np.abs(xg))), 5, 5)
     eps_r = 12.0
-    arithmetic_mean = 0.5 * 1.0 + 0.5 * eps_r
+    # The physical dual cell spans [-0.025, 0.04], so its positive-side
+    # fraction is 0.08/(0.05+0.08), rather than a symmetric-window half.
+    fraction = .08/(.05+.08)
+    arithmetic_mean = (1-fraction) + fraction*eps_r
 
     def _eps(averaging, samples):
         scene = mw.Scene(
@@ -221,20 +229,19 @@ def test_graded_grid_interface_arithmetic_and_polarized():
         eps, _ = prepare_scene(scene).compile_material_components()
         return eps
 
-    # Arithmetic: the symmetric per-node window is half inside the slab on every
-    # axis, so all three components equal the arithmetic mean.
-    eps_arith = _eps("arithmetic", (2, 2, 2))
+    # Resolve the smooth interface inside its actual asymmetric dual volume.
+    eps_arith = _eps("arithmetic", (512, 1, 1))
     for axis in ("x", "y", "z"):
         assert abs(eps_arith[axis][node].item() - arithmetic_mean) < 1e-2
 
     # Polarized: the normal (x) component leans toward the harmonic mean while
     # the tangential (y) component stays arithmetic.
-    eps_pol = _eps("polarized", (6, 6, 6))
+    eps_pol = _eps("polarized", (512, 1, 1))
     eps_x = eps_pol["x"][node].item()
     eps_y = eps_pol["y"][node].item()
     assert abs(eps_y - arithmetic_mean) < 5e-2
     assert eps_x < eps_y - 0.1  # normal component pulled below arithmetic
-    harmonic_mean = 1.0 / (0.5 / 1.0 + 0.5 / eps_r)
+    harmonic_mean = 1.0 / ((1-fraction) + fraction/eps_r)
     assert eps_x == pytest.approx(harmonic_mean, abs=1e-4)
 
 

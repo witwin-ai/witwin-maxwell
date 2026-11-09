@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+
 import pytest
 import torch
 
@@ -35,10 +37,12 @@ def cuda_p2p_devices() -> tuple[torch.device, torch.device]:
 def cuda_memory_cleanup(cuda_p2p_devices):
     """Synchronize and release allocator caches around an isolated GPU test."""
 
+    gc.collect()
     for device in cuda_p2p_devices:
         torch.cuda.synchronize(device)
         torch.cuda.empty_cache()
     yield
+    gc.collect()
     for device in cuda_p2p_devices:
         torch.cuda.synchronize(device)
         torch.cuda.empty_cache()

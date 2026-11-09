@@ -20,62 +20,43 @@ with ``R0 = R_dc * length`` the segment series resistance and ``w`` the excess
 voltage from the ADE state ``x``. The excess state space is length-scaled
 (``Cs = length * Cd``, ``direct = length * Dd``) so ``w`` is a segment voltage.
 
-Companion discretization (dissipativity asserted via checked positive-real
-conditions, not by construction). Keep the leapfrog current at half steps and
-evaluate every loss term with the trapezoidal integer-step current
-``I_bar = (I^{n+1/2} + I^{n-1/2}) / 2``:
+The half-step current uses ``I_bar = (I_next + I)/2``. The shared bilinear
+realization supplies the midpoint loss voltage from the pre-step ADE state:
 
-    L (I^+ - I^-) / dt = e - R0 I_bar - (Cs x + direct I_bar)
-                       = e - Cs x - G I_bar,     G = R0 + direct
+    (L/dt + G/2) I_next = (L/dt - G/2) I + e - Cs x
+    x_next = Ad x + Bd I_bar,  G = R0 + length * Dd
 
-    x^+ = Ad x + Bd I_bar
+Then the node charge advances with the NEW current, exactly as in the PEC
+leapfrog: ``q_next = q - dt B I_next``, with grounded charge fixed to zero.
+The sampling/deposition pair and the pure-PEC CUDA path are unchanged.
 
-Because the excess state ``x`` is known from the previous step, ``I_bar`` couples
-only ``I^+`` and ``I^-`` and the current update stays explicit:
+At the final solver dt, preparation checks the installed branch coefficients,
+not just the continuous fit. For each diagonal RL state, ``|Ad| < 1`` and
+``Cs*Bd <= 0`` make its unit-circle resistance monotone in ``cos(theta)``.
+Its minimum is at DC; checking that endpoint certifies nonnegative resistance
+on the ENTIRE digital band ``0 <= theta <= pi`` (including Nyquist), with the
+actual ``I_bar`` centering. This is an analytic interval certificate, not a
+finite-band sample test.
 
-    (L/dt + G/2) I^+ = (L/dt - G/2) I^- + (e - Cs x)
+Preparation also forms the exact homogeneous ``[I; voltage; ADE]`` transition
+of the installed wire graph, including node capacitances, grounding, incidence,
+and the new-current charge update. Its spectral radius must be at most one
+(up to 1e-10 eigensolver roundoff), or preparation fails. Conserved charge and
+cycle modes can lie on the unit circle. This graph certificate excludes Maxwell
+and port states; their energy-paired coupling retains the existing joint CFL
+bound. Long-run coupled pulse decay is validated separately. No isolated
+current/ADE certificate is presented as a proof of full field/port stability.
 
-For ``G = 0`` (PEC) the update reduces bitwise to the lossless leapfrog and no
-ADE state is carried. The discrete inductor-energy identity is
-
-    Delta(1/2 L I^2)/dt = e I_bar - G I_bar^2 - Cs x I_bar,
-
-so ``e I_bar`` drives the segment and ``G I_bar^2 + Cs x I_bar`` is the power into
-the loss/storage branch.
-
-Stability certificate (important — not positive-real by construction). ``G`` is
-*not* guaranteed non-negative. ``G = R0 + length * Dd`` with ``Dd = D + (dt/2) Cd B``
-the discrete direct term of the shared rational excess fit, and ``Dd`` is not
-sign-definite: the skin-effect internal impedance is improper, so the fit carries
-an out-of-band direct term whose sign is not controlled. The realized loss-branch
-resistance ``Re(Z_branch)`` is positive across the fitting band (where the fit
-reproduces the passive analytic internal impedance) but can go negative out of
-band — the discrete companion is an active (negative-resistance) one-port outside
-the fitted band. The recurrence is therefore *not* certified passive by a
-positive-real realization argument.
-
-Instead, stability is certified numerically at build time: the combined ``[I; x]``
-linear transition of each segment companion is formed (``_companion_spectral_radius``)
-and the highest fit order whose spectral radius is ``< 1 - margin`` on every sharing
-segment is selected (``_fit_stable_order``); the build fails closed when no order in
-range qualifies. This is an *isolated* per-segment certificate (the wire decoupled
-from the Maxwell field). It bounds the homogeneous growth of each segment's own
-recurrence but does not by itself prove the field-coupled system (the wire exchanges
-energy with the grid every step via emf sampling and current deposition) is passive;
-empirical closed-run boundedness against the PEC reference is used to check the
-coupled behavior. The reported ohmic dissipation ``0.5 Re(Z') |I|^2`` uses the
-in-band series AC resistance and is additionally clamped non-negative
-(``ac_resistance_per_length``), so the monitored energy channel stays physical.
-
-The realized excess impedance ``Cs (zI - Ad)^{-1} Bd + direct`` equals the fitted
-continuous ``length * Z_excess(s)`` under the bilinear map ``s = (2/dt)(z-1)/(z+1)``,
-so the recurrence reproduces the analytic internal impedance within the fit error
-and the (in-band, small) bilinear frequency prewarp.
+The realized branch is the continuous Foster impedance under the bilinear map
+``s = (2/dt)(z-1)/(z+1)``. In-band accuracy therefore includes the usual frequency
+warping. Reported phasor loss uses the continuous fitted AC resistance; at finite
+dt, the midpoint current also differs from the half-step current by a cosine
+factor. Instantaneous branch power includes reversible ADE storage exchange.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 import torch
@@ -99,8 +80,9 @@ class _AnalyticACResistance(torch.autograd.Function):
     conductivity leaf flows through the wire's dissipation channel exactly. Only the
     scalar ``conductivity`` carries a gradient (radius/permeability/frequencies are
     fixed geometry passed as plain values); the analytic model is deterministic, so
-    this path is free of the shared rational fit's nondeterminism (B1) that blocks
-    the field-coupled current sensitivity.
+    this analytic reference path is independent of the passive fit. The realized
+    fit sensitivity is available on ``LossySegmentModel``; the field-coupled
+    current/ADE reverse replay remains unimplemented.
     """
 
     @staticmethod
@@ -156,7 +138,7 @@ class LossySegmentModel:
 
     All tensors are shape ``[S]`` (or ``[S, k]`` / ``[S, k, k]`` for the ADE
     state) over the network's physical segments. PEC segments carry ``R0 = 0``,
-    ``G = 0`` and zero ADE blocks, so they advance exactly like the lossless path.
+    ``G = 0`` and zero ADE blocks, so their mathematical update is lossless; pure PEC uses the original CUDA path.
     """
 
     inductance: torch.Tensor  # [S] external per-segment inductance L
@@ -172,8 +154,9 @@ class LossySegmentModel:
     band: tuple[float, float]
     order: int
     models: tuple[SeriesImpedanceModel, ...]
-    spectral_radius: float  # max certified combined companion spectral radius
-    model_orders: tuple[int, ...]  # adaptively selected fit order per unique model
+    spectral_radius: float  # certified current/charge/ADE graph spectral radius
+    model_orders: tuple[int, ...]  # fixed RL pole count per unique model
+    minimum_digital_resistance: float  # full-band lower bound, segment ohms
 
     @property
     def state_count(self) -> int:
@@ -232,9 +215,9 @@ class LossySegmentModel:
 
         ``v_loss = G I_bar + Cs x`` is the total voltage across the series
         resistance plus excess-impedance branch, and ``I_bar`` the trapezoidal
-        current. Its cycle average at a single tone equals ``0.5 Re(Z') |I|^2``
-        (the reported ohmic dissipation); the instantaneous value also carries the
-        reactive exchange with the ADE storage.
+        current. At a single digital frequency its cycle average is
+        ``0.5 Re(Z_discrete) |I_bar|^2``, including bilinear warping and midpoint
+        centering. The instantaneous value also includes ADE storage exchange.
         """
 
         current_bar = 0.5 * (current_next + current)
@@ -246,8 +229,8 @@ class LossySegmentModel:
         """Return ``Re(Z'(f))`` per unit length, shape ``[F, S]``.
 
         PEC segments return zeros. Finite segments evaluate the fitted total series
-        AC resistance ``R_dc + Re(excess_fit(f))`` (the resistance the recurrence
-        realizes, matching the analytic curve within the fit tolerance).
+        AC resistance ``R_dc + Re(excess_fit(f))`` at continuous frequency f.
+        The recurrence realizes this curve at the bilinear-warped frequency.
         """
 
         freqs = torch.as_tensor(frequencies, dtype=torch.float64).reshape(-1)
@@ -264,22 +247,17 @@ class LossySegmentModel:
             model = self.models[model_index]
             values = model.ac_resistance(freqs).to(dtype=resistance.dtype)
             resistance[:, segment] = values.to(device=resistance.device)
-        # The physical series AC resistance is non-negative; clamp the shared fit's
-        # occasional sub-tolerance undershoot so the reported ohmic dissipation
-        # 0.5 Re(Z') |I|^2 stays a valid (non-negative) energy accounting.
-        return resistance.clamp_min(0.0)
+        return resistance
 
     def conductivity_ac_resistance_gradient(
         self, frequencies: torch.Tensor
     ) -> torch.Tensor:
-        """Return the analytic ``d Re(Z'(f)) / d sigma`` per length, shape ``[F, S]``.
+        """Return ``d Re(Z_fit'(f))/d sigma``, shape ``[F, S]``.
 
-        The deterministic conductivity-adjoint channel: the closed-form derivative
-        of the exact scaled-Bessel AC resistance (compiler/wire_impedance.py),
-        evaluated at each segment's built ``(radius, sigma, mu)``. PEC segments
-        return zero. This is the sensitivity the reported ohmic dissipation
-        ``0.5 Re(Z') length |I|^2`` differentiates through with the current held
-        fixed; it does not require refitting the (nondeterministic) rational model.
+        The analytic Bessel derivative is projected through the fixed-pole NNLS
+        active-set equations, including relative-weight and exact DC derivatives.
+        Current is held fixed. This differentiates the realized fit's phasor
+        dissipation, rather than substituting the analytic reference sensitivity.
         """
 
         freqs = torch.as_tensor(frequencies, dtype=torch.float64).reshape(-1)
@@ -294,50 +272,61 @@ class LossySegmentModel:
             if model_index < 0:
                 continue
             model = self.models[model_index]
-            values = internal_impedance_conductivity_gradient(
-                model.radius, model.conductivity, model.permeability, freqs
-            ).real.to(dtype=gradient.dtype)
+            values = model.conductivity_gradient(freqs).real.to(dtype=gradient.dtype)
             gradient[:, segment] = values.to(device=gradient.device)
         return gradient
 
 
-def _companion_spectral_radius(
-    discrete,
-    resistance_dc_per_length: float,
-    inductance: float,
-    length: float,
-    dt: float,
-) -> float:
-    """Return the exact linear transition spectral radius of one segment companion.
+def _certify_discrete_graph(model, *, tail, head, node_capacitance, grounded):
+    """Certify the installed digital branch and actual charge-coupled graph.
 
-    The combined ``[I; x]`` update is linear; its spectral radius certifies whether
-    the passive lossy recurrence grows. A value ``< 1`` guarantees no numerical
-    growth over arbitrarily long runs (passivity). The leapfrog inductor and the
-    bilinear ADE realization are not jointly a positive-real realization when the
-    shared fit carries a large out-of-band direct term, so this certificate is the
-    build-time stability gate that drives the adaptive order selection.
+    Voltage coordinates eliminate unobservable constant node charge. ADE states
+    are similarity-scaled by Bd to avoid ill-conditioning from SI units. All
+    certificate algebra stays on the runtime device in float64.
     """
 
-    ad = discrete.A.to(dtype=torch.float64)
-    k = ad.shape[0]
-    bd = discrete.B.reshape(-1).to(dtype=torch.float64)
-    cs = length * discrete.C.reshape(-1).to(dtype=torch.float64)
-    r0 = resistance_dc_per_length * length
-    direct = length * float(discrete.D.reshape(()))
-    companion = r0 + direct
-    inductive = inductance / dt
-    half_g = 0.5 * companion
-    denom = inductive + half_g
-    a_ii = (inductive - half_g) / denom
-    a_ix = (-cs) / denom
-    bar_i = 0.5 * (a_ii + 1.0)
-    bar_x = 0.5 * a_ix
-    transition = torch.zeros(k + 1, k + 1, dtype=torch.float64)
-    transition[0, 0] = a_ii
-    transition[0, 1:] = a_ix
-    transition[1:, 0] = bd * bar_i
-    transition[1:, 1:] = ad + torch.outer(bd, bar_x)
-    return float(torch.linalg.eigvals(transition).abs().max().item())
+    ad = model.ade_transition.double()
+    poles = ad.diagonal(dim1=-2, dim2=-1)
+    bd = model.ade_input.double()
+    cb = model.ade_output.double() * bd
+    lossy = model.is_lossy
+    minimum = model.companion_conductance.double() + (cb / (1.0 - poles)).sum(-1)
+    if not bool(torch.all(poles.abs() < 1.0) & torch.all(cb <= 0.0)
+                & torch.all(minimum >= 0.0)):
+        raise RuntimeError("Lossy wire installed branch failed full-digital-band passivity.")
+
+    count, states = bd.shape
+    device = bd.device
+    incidence = torch.zeros(node_capacitance.numel(), count, device=device, dtype=torch.float64)
+    columns = torch.arange(count, device=device)
+    incidence[tail, columns] += 1.0
+    incidence[head, columns] -= 1.0
+    inverse_c = torch.where(grounded, 0.0, node_capacitance.double().reciprocal())
+    stiffness = incidence.T @ (inverse_c[:, None] * incidence)
+    # v = (V_tail - V_head)/(L/dt), y = x/Bd. Charge is updated AFTER I.
+    inductive = model.inductance.double() / model.dt
+    half_g = model.companion_conductance.double() / 2.0
+    denominator = inductive + half_g
+    dimension = count * (states + 2)
+    basis = torch.eye(dimension, device=device, dtype=torch.float64)
+    current, voltage = basis[:count], basis[count:2*count]
+    ade = basis[2*count:].reshape(count, states, dimension)
+    next_current = (
+        (inductive - half_g)[:, None] * current + inductive[:, None] * voltage
+        - torch.einsum("sk,skd->sd", cb, ade)
+    ) / denominator[:, None]
+    next_voltage = voltage - model.dt / inductive[:, None] * (stiffness @ next_current)
+    next_ade = torch.einsum("skj,sjd->skd", ad, ade) + (
+        lossy[:, None, None] * 0.5 * (next_current + current)[:, None, :]
+    )
+    transition = torch.cat((next_current, next_voltage, next_ade.flatten(0, 1)))
+    spectral_radius = float(torch.linalg.eigvals(transition).abs().max())
+    if not math.isfinite(spectral_radius) or spectral_radius > 1.0 + 1.0e-10:
+        raise RuntimeError(
+            f"Lossy wire current/charge/ADE spectral radius {spectral_radius:.12g} exceeds one."
+        )
+    return replace(model, spectral_radius=spectral_radius,
+                   minimum_digital_resistance=float(minimum[lossy].min()))
 
 
 def _segment_conductor(metadata, segment_wire_ids: torch.Tensor):
@@ -354,125 +343,28 @@ def _segment_conductor(metadata, segment_wire_ids: torch.Tensor):
     return seg_kinds, seg_sigma, seg_mu
 
 
-def _fit_stable_order(
-    a: float,
-    sigma: float,
-    mu: float,
-    *,
-    band: tuple[float, float],
-    dt: float,
-    samples: int,
-    device,
-    dtype,
-    segment_inductance: list[float],
-    segment_length: list[float],
-    order_max: int,
-    order_min: int,
-    stability_margin: float,
-) -> tuple[SeriesImpedanceModel, int, float]:
-    """Fit the highest order whose companion is certified stable on every segment.
-
-    Higher order improves the in-band impedance accuracy but degrades the joint
-    leapfrog/ADE conditioning (the shared fit's out-of-band direct term grows), so
-    the highest order with combined spectral radius ``< 1 - margin`` on all sharing
-    segments is the best accuracy that is provably non-growing. Fails closed when
-    no order in range qualifies (a genuine positive-real-realization blocker).
-    """
-
-    resistance_dc_per_length = float(dc_resistance(a, sigma).item())
-    best: tuple[SeriesImpedanceModel, int, float] | None = None
-    last_error: str | None = None
-    for order in range(order_max, order_min - 1, -1):
-        try:
-            # relative_tolerance here is deliberately loose (0.5, vs the fitter
-            # default 0.1). This is NOT the accuracy contract for the shipped
-            # model: the binding acceptance gates are downstream — (1) the in-band
-            # AC-resistance positivity check below, (2) the combined-companion
-            # spectral-radius stability certificate, and (3) the analytic
-            # AC-resistance sweep test (gate (a), ~8% on the certified config).
-            # We loosen the fitter's own fail-closed error ceiling so that when
-            # accuracy and stability trade off (high order fits accurately but can
-            # exceed the spectral-radius bound; low order is stable but less
-            # accurate), a stable lower-order fit is not rejected purely on the
-            # fitter's raw in-band error before the stability selection runs. The
-            # cost is that a config whose only stable fit has 10-50% in-band error
-            # runs instead of failing closed; such configs are surfaced by the
-            # analytic AC sweep gate rather than by this ceiling.
-            model = fit_series_impedance(
-                a,
-                sigma,
-                band=band,
-                permeability=mu,
-                order=order,
-                dt=dt,
-                samples=samples,
-                relative_tolerance=0.5,
-                device=device,
-                dtype=dtype,
-            )
-        except (RuntimeError, ValueError) as error:
-            last_error = f"order {order}: {error}"
-            continue
-        if model.discrete is None:
-            raise RuntimeError("Lossy wire fit did not produce a discrete ADE; dt must be set.")
-        # Physical quality gate: the realized in-band series AC resistance must be
-        # strictly positive (a passive conductor never has negative loss). The
-        # shared vector fit is nondeterministic (B1) and can occasionally dip
-        # non-positive in band; reject such an order so both the recurrence and the
-        # reported ohmic_loss stay physical.
-        band_samples = torch.logspace(
-            math.log10(band[0]), math.log10(band[1]), 24, dtype=torch.float64
-        )
-        min_ac = float(model.ac_resistance(band_samples).min().item())
-        if min_ac <= 0.0:
-            last_error = f"order {order}: in-band AC resistance dipped to {min_ac:.4g} <= 0"
-            continue
-        radius_spectral = max(
-            _companion_spectral_radius(
-                model.discrete,
-                resistance_dc_per_length,
-                inductance,
-                length,
-                dt,
-            )
-            for inductance, length in zip(segment_inductance, segment_length)
-        )
-        if radius_spectral < 1.0 - stability_margin:
-            return model, order, radius_spectral
-        last_error = f"order {order}: combined spectral radius {radius_spectral:.7g} >= 1"
-    raise RuntimeError(
-        "Lossy thin-wire recurrence could not be certified passive: no fit order in "
-        f"[{order_min}, {order_max}] yields a non-growing companion "
-        f"(radius a={a:g}, sigma={sigma:g}). The skin-effect impedance is improper and "
-        "the shared rational fit does not guarantee a positive-real realization; a "
-        "positive-real-preserving fit refinement is required. Last: "
-        f"{last_error}."
-    )
-
-
 def build_lossy_segment_model(
     *,
     inductance: torch.Tensor,
     radius: torch.Tensor,
     length: torch.Tensor,
     segment_wire_ids: torch.Tensor,
+    tail: torch.Tensor,
+    head: torch.Tensor,
+    node_capacitance: torch.Tensor,
+    grounded: torch.Tensor,
     metadata,
     band: tuple[float, float],
     dt: float,
     order: int = 13,
-    order_min: int = 6,
     samples: int = 240,
-    stability_margin: float = 1.0e-6,
 ) -> LossySegmentModel | None:
     """Build the per-segment companion, or ``None`` when every segment is PEC.
 
-    One passive rational ADE is fitted per unique ``(radius, sigma, mu)`` triple
-    (per the no-duplicate-pole-fitting rule the fit reuses the shared rational
-    stack) and shared across segments; the per-segment matrices are gathered from
-    those fits and length-scaled. ``order`` is the maximum fit order; the highest
-    order with a certified non-growing companion (see ``_fit_stable_order``) is
-    selected per unique model. ``band`` is the fitting/validity band and must
-    bracket the frequency content the run cares about.
+    One fixed-pole passive RL fit is shared per ``(radius, sigma, mu)`` triple.
+    The installed coefficients are certified over DC through Nyquist, and the
+    complete charge-coupled graph is checked at ``dt`` before returning. ``band``
+    sets the impedance accuracy band; it does not limit passivity.
     """
 
     conductor = _segment_conductor(metadata, segment_wire_ids)
@@ -486,24 +378,10 @@ def build_lossy_segment_model(
     dtype = inductance.dtype
     segment_count = int(inductance.shape[0])
     radius_cpu = radius.detach().cpu().to(dtype=torch.float64).tolist()
-    inductance_cpu = inductance.detach().cpu().to(dtype=torch.float64).tolist()
-    length_cpu = length.detach().cpu().to(dtype=torch.float64).tolist()
 
     unique_keys: dict[tuple[float, float, float], int] = {}
-    key_segments: dict[tuple[float, float, float], list[int]] = {}
-    for segment in range(segment_count):
-        if seg_kinds[segment] != "finite":
-            continue
-        key = (
-            round(float(radius_cpu[segment]), 15),
-            round(float(seg_sigma[segment]), 6),
-            round(float(seg_mu[segment]), 12),
-        )
-        key_segments.setdefault(key, []).append(segment)
-
     models: list[SeriesImpedanceModel] = []
     model_orders: list[int] = []
-    model_spectral: list[float] = []
     segment_model_index = [-1] * segment_count
     for segment in range(segment_count):
         if seg_kinds[segment] != "finite":
@@ -515,26 +393,20 @@ def build_lossy_segment_model(
         )
         model_index = unique_keys.get(key)
         if model_index is None:
-            members = key_segments[key]
-            model, selected_order, radius_spectral = _fit_stable_order(
+            model = fit_series_impedance(
                 float(radius_cpu[segment]),
                 float(seg_sigma[segment]),
-                float(seg_mu[segment]),
+                permeability=float(seg_mu[segment]),
                 band=band,
                 dt=dt,
                 samples=samples,
                 device=device,
                 dtype=dtype,
-                segment_inductance=[inductance_cpu[member] for member in members],
-                segment_length=[length_cpu[member] for member in members],
-                order_max=int(order),
-                order_min=int(order_min),
-                stability_margin=float(stability_margin),
+                order=order,
             )
             model_index = len(models)
             models.append(model)
-            model_orders.append(selected_order)
-            model_spectral.append(radius_spectral)
+            model_orders.append(order)
             unique_keys[key] = model_index
         segment_model_index[segment] = model_index
 
@@ -570,7 +442,7 @@ def build_lossy_segment_model(
         )
         is_lossy[segment] = True
 
-    return LossySegmentModel(
+    model = LossySegmentModel(
         inductance=inductance,
         resistance_dc=resistance_dc,
         companion_conductance=companion,
@@ -586,8 +458,12 @@ def build_lossy_segment_model(
         band=(float(band[0]), float(band[1])),
         order=int(order),
         models=tuple(models),
-        spectral_radius=max(model_spectral) if model_spectral else 0.0,
+        spectral_radius=0.0,
+        minimum_digital_resistance=0.0,
         model_orders=tuple(model_orders),
+    )
+    return _certify_discrete_graph(
+        model, tail=tail, head=head, node_capacitance=node_capacitance, grounded=grounded
     )
 
 
@@ -598,7 +474,7 @@ def resolve_lossy_band(
 ) -> tuple[float, float]:
     """Return the fitting band bracketing ``frequencies`` with a factor margin.
 
-    The lossy recurrence needs a finite validity band. It is derived from the
+    The lossy fit needs a finite accuracy band. It is derived from the
     frequencies the run monitors so the passive fit is accurate where the answer
     is read out. A lossy wire with no frequency content is a fail-closed error at
     the call site.

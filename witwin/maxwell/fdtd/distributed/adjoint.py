@@ -680,7 +680,10 @@ class _DistributedFDTDGradientBridge:
             require_distributed_adjoint_objective_support(distributed)
 
             time_steps = simulation._resolve_fdtd_time_steps(distributed, scene)
-            use_full_field_dft = config.full_field_dft or len(simulation.frequencies) > 1
+            from ...simulation import _resolve_full_field_dft
+
+            use_full_field_dft = _resolve_full_field_dft(
+                config.full_field_dft, simulation.frequencies, scene.ports)
             dft_request = (
                 simulation.frequency
                 if len(simulation.frequencies) == 1
@@ -1413,7 +1416,10 @@ class _NcclDistributedFDTDGradientBridge(_DistributedFDTDGradientBridge):
             require_distributed_adjoint_objective_support(distributed)
 
             time_steps = simulation._resolve_fdtd_time_steps(distributed, scene)
-            use_full_field_dft = config.full_field_dft or len(simulation.frequencies) > 1
+            from ...simulation import _resolve_full_field_dft
+
+            use_full_field_dft = _resolve_full_field_dft(
+                config.full_field_dft, simulation.frequencies, scene.ports)
             dft_request = (
                 simulation.frequency
                 if len(simulation.frequencies) == 1

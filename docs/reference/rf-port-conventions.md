@@ -21,6 +21,63 @@ be repaired later with an empirical phase rotation.
 All RF result objects retain an explicit frequency dimension, including a
 single-frequency result.
 
+Native FDTD ports record `PortData.metadata["port_role"]`:
+
+- `coupled`: excited, terminated, circuit-bound or network-bound ports report
+  midpoint voltage `(V[n-1] + V[n])/2` and branch current into the field, both
+  labelled at `(n - 1/2) dt`.
+- `probe`: open, unbound ports report the instantaneous E-edge line integral
+  at `n dt` and the Ampere H-loop integral at `(n - 1/2) dt`. The loop includes
+  displacement current; the probe does not modify the fields or open PEC.
+
+Mixing probe and coupled voltages carries a `cos(omega dt/2)` factor: the
+coupled voltage is that factor times the field-side voltage phasor (up to
+finite-window edge terms). Preparation rejects a probe whose voltage edges
+are all PEC-suppressed; add a termination to declare a feed gap, or move it.
+
+## Caller-Supplied Field Phasors
+
+`mw.port_voltage(prepared, name, fields)` gives the exact field-side voltage
+integral, without a time factor. `prepared` is a single-device
+`Simulation.prepare()` result. `fields` maps `Ex`, `Ey`, `Ez`, `Hx`, `Hy`, `Hz`
+to native Yee arrays with an optional trailing frequency axis. Result volume
+arrays use a leading frequency axis for multiple bins; move it to the end.
+The integral preserves gradients through supplied fields. Coaxial voltage uses
+the material-resolved discrete-harmonic row. An unbound `TerminalPort` resolves
+to a lumped gap and takes the lumped path.
+
+`mw.port_phasors(prepared, name, fields, frequencies=frequencies, dt=dt,
+drive=None, termination=None)` returns `(V, I)`. Supply the frequencies in the
+same order as the field bins, and the native FDTD time step for discrete time:
+
+- For coupled ports, `V = cos(omega dt/2) * port_voltage(...)`.
+- With a `PortDrive`, `I = (drive.source_spectrum - V) / drive.source_impedance`.
+  Obtain it using `result.port_drive(name)` on an excited port. Its prescribed
+  spectrum has the same bin order, per-bin reference period and source
+  normalization as `result.port(name)`; an unexcited port raises `ValueError`.
+  The drive is retained in Result metadata and survives Result snapshots.
+- For passive ports, `I = -V / conj(mw.trapezoidal_impedance(load, omega, dt))`.
+  The explicit `termination` overrides the scene load; a matched resistance is
+  `mw.SeriesRLC(r=z0)`.
+- For probes, `V = port_voltage(...)` and `I` is the Ampere-loop integral of H.
+
+Each field phasor must be labelled at its true sample time, as Result monitors
+provide it. No E/H half-step phase shift is applied. Finite-window midpoint and
+reactive branch identities have window-edge terms; use a tapered settled CW
+window, or put a pulse after a window ramp and retain its decayed tail. Native
+volume DFT records E; native H phasors can be recorded by plane monitors at the
+component's Yee planes.
+
+With `dt=None`, both roles use the exact field-side voltage, with no cosine
+factor. Passive current uses `-V / conj(load.impedance(omega))`, the continuous
+impedance. This supports FDFD and continuous neural fields without introducing
+an artificial time step. FDFD has no native `Result.port` output; continuous
+hook qualification compares independent field integrals on an actual FDFD run.
+
+Wire-bound ports need wire charge state; circuit/network ports need their
+branch states; mode/wave ports need modal projections; sheet-gap feeds need
+sheet trace fields. Both hooks raise `NotImplementedError` for these kinds.
+
 ## Port Orientation
 
 Voltage is the signed line integral from the negative terminal to the positive

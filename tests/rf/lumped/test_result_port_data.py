@@ -5,7 +5,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.network import PERSISTENCE_SCHEMA_VERSION, PortData
-from witwin.maxwell.result import RESULT_SNAPSHOT_SCHEMA_VERSION, Result
+from witwin.maxwell.result import RESULT_SNAPSHOT_SCHEMA_VERSION, Result, _RatioOnlyPortData
 
 
 def _iter_tensors(value):
@@ -92,6 +92,62 @@ def test_result_rejects_invalid_port_mapping_entries():
             frequencies=(1.0e9, 2.0e9),
             ports={"feed": object()},
         )
+
+
+@pytest.mark.parametrize("column_stats", [False, True])
+def test_mixed_port_views_and_persistence_keep_only_public_ratios(tmp_path, column_stats):
+    port = _port_data(requires_grad=True)
+    port.metadata.update(terminal_voltage=port.voltage, terminal_current=port.current)
+    stats = {"time_plan": {"mixed_sources": True}, "normalize_source": False}
+    if column_stats:
+        # Single-frequency sweep columns nest their per-run statistics in tuples.
+        stats = {"columns": ((stats,),)}
+    result = Result(
+        method="fdtd", scene=_scene(), frequencies=(1.e9, 2.e9),
+        ports={"feed": port}, solver_stats=stats, raw_output={"ports": {"feed": port}},
+    )
+    view = result.port("feed")
+    assert isinstance(view, _RatioOnlyPortData)
+    assert type(result._ports["feed"]) is PortData
+    assert "__getattribute__" not in PortData.__dict__
+    for name in ("z_in", "reflection_coefficient", "return_loss_db", "return_loss", "vswr"):
+        assert torch.equal(getattr(view, name), getattr(port, name))
+        assert getattr(view, name).requires_grad
+    assert view.port_name == "feed"
+    assert view.frequencies is port.frequencies and view.z0 is port.z0
+    assert view.metadata.keys() == port.metadata.keys() - {"terminal_voltage", "terminal_current"}
+    for read in (lambda: result.raw_output, lambda: result.embedded_networks,
+                 lambda: result.embedded_network("feed"),
+                 lambda: result._snapshot_payload(fields={}), lambda: view.save(tmp_path / "port.pt")):
+        with pytest.raises(ValueError, match="Absolute spectra of a run mixing ongoing"):
+            read()
+
+    path = tmp_path / "mixed.pt"
+    result.save(path)
+    payload = torch.load(path, weights_only=True)
+    assert payload["mixed_absolute_spectra"] is True
+    # The persisted restriction is independent of retained diagnostic statistics.
+    payload["solver_stats"] = {}
+    torch.save(payload, path)
+    restored = Result.load(path, scene=_scene())
+    restored.save(tmp_path / "mixed-again.pt")
+    restored_again = Result.load(tmp_path / "mixed-again.pt", scene=_scene())
+    for current in (result, restored, restored_again):
+        for public_port in current.ports.values():
+            assert isinstance(public_port, _RatioOnlyPortData)
+            assert "terminal_voltage" not in public_port.metadata
+            assert "terminal_current" not in public_port.metadata
+            for name in ("voltage", "current", "available_power", "a", "b", "incident_power",
+                         "reflected_power", "accepted_power", "delivered_power"):
+                with pytest.raises(ValueError, match="Absolute spectra of a run mixing ongoing"):
+                    getattr(public_port, name)
+            for name in ("z_in", "reflection_coefficient", "return_loss_db", "vswr"):
+                assert torch.equal(getattr(public_port, name), getattr(port, name))
+    normalized = Result(
+        method="fdtd", scene=_scene(), frequencies=(1.e9, 2.e9), ports={"feed": port},
+        solver_stats={"time_plan": {"mixed_sources": True}, "normalize_source": True},
+    )
+    assert normalized.port("feed") is port
 
 
 def test_result_save_embeds_detached_cpu_port_snapshots(tmp_path):

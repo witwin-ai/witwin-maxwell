@@ -25,6 +25,7 @@ _FREQUENCY = 1.0e9
 
 def _vacuum_scene(*, device, amplitude=1.0, trainable=False):
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.25, 0.25), (-0.25, 0.25))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.none(),

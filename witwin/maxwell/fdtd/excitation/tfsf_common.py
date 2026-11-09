@@ -4,6 +4,8 @@ import math
 
 import torch
 
+from .gather import build_source_gather
+
 from ..dispersion import solve_numerical_wavenumber
 from .spatial import beam_profile_from_source, plane_wave_profile
 from .tfsf_specs import AXIS_INDEX, reference_sample_axis_code
@@ -257,7 +259,7 @@ def _pack_batched_term_metadata(solver, terms):
         return None
 
     coeff_data = torch.cat(coeff_chunks).contiguous()
-    return {
+    metadata = {
         "coeff_data": coeff_data,
         "term_starts": torch.tensor(term_starts, device=solver.device, dtype=torch.int32),
         "term_shapes": torch.tensor(term_shapes, device=solver.device, dtype=torch.int32),
@@ -266,6 +268,9 @@ def _pack_batched_term_metadata(solver, terms):
         "field_codes_per_coeff": torch.cat(field_code_chunks).contiguous(),
         "field_offsets": torch.cat(field_offset_chunks).contiguous(),
     }
+
+    metadata["source_gather"] = build_source_gather(metadata["field_offsets"], metadata["field_codes_per_coeff"])
+    return metadata
 
 
 def build_batched_reference_terms(solver, terms):
@@ -334,15 +339,26 @@ def slice_coeff_patch(solver, spec, curl_attr_map):
     ] / delta
 
 
+def _component_roundoff_floor(components, *, dtype):
+    """Resolve roundoff against one vector or same-unit component-profile set."""
+    peak = max(
+        float(component.abs().max().item()) if isinstance(component, torch.Tensor) else abs(float(component))
+        for component in components
+    )
+    return 64 * torch.finfo(dtype).eps * peak
+
+
 def build_terms_from_specs(solver, specs, vector, curl_attr_map, term_factory):
     terms = []
+    # Incident vectors originate in Python-float trig and float64 cross products.
+    floor = _component_roundoff_floor(vector.values(), dtype=torch.float64)
     for spec in specs:
         component_scale = vector[spec["incident_name"]]
         coeff = float(spec["sign"]) * component_scale
         if isinstance(coeff, torch.Tensor):
-            if torch.max(torch.abs(coeff)).item() <= 1e-12:
+            if torch.max(torch.abs(coeff)).item() <= floor:
                 continue
-        elif abs(float(coeff)) <= 1e-12:
+        elif abs(float(coeff)) <= floor:
             continue
         coeff_patch = slice_coeff_patch(solver, spec, curl_attr_map)
         term = term_factory(spec, coeff_patch, component_scale)
@@ -362,21 +378,33 @@ def build_term_from_profile(
     source_time,
     omega,
     source_index=None,
+    profile_floor=None,
 ):
-    if torch.max(torch.abs(scale)).item() <= 1e-12:
+    if profile_floor is None:
+        profile_floor = _component_roundoff_floor((scale,), dtype=scale.dtype)
+    if torch.max(torch.abs(scale)).item() <= profile_floor:
         return None
     if source_time["kind"] == "cw" and activation_delay_patch is None:
         phase_shift = float(omega) * delay_patch
+        if scale.is_complex():
+            spatial = scale * torch.exp(1j * phase_shift)
+            cosine_patch = spatial.real.to(solver.Ex.dtype)
+            sine_patch = spatial.imag.to(solver.Ex.dtype)
+        else:
+            cosine_patch = scale * torch.cos(phase_shift)
+            sine_patch = scale * torch.sin(phase_shift)
         return build_source_term(
             solver,
             field_name=field_name,
             offsets=offsets,
-            cw_cos_patch=scale * torch.cos(phase_shift),
-            cw_sin_patch=scale * torch.sin(phase_shift),
+            cw_cos_patch=cosine_patch,
+            cw_sin_patch=sine_patch,
             source_index=source_index,
             source_time=source_time,
             omega=omega,
         )
+    if scale.is_complex():
+        raise NotImplementedError("Complex lossy modal profiles require a CW source.")
     return build_source_term(
         solver,
         field_name=field_name,

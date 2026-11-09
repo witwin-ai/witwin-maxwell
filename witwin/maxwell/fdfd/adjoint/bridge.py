@@ -5,10 +5,10 @@ A^T lam = conj(dL/dx*) yields material gradients without differentiating
 through the solver iterations. The permittivity enters A only on the
 diagonal (k0^2 * eps_face), so
 
-    dL/deps_face = -2 k0^2 Re[lam * x]   (per Yee face)
+    g_eps_face = -k0^2 conj(lam * x)   (PyTorch complex cotangent)
 
-which is pulled back to trainable scene inputs through the shared material
-compiler graph, exactly like the FDTD gradient bridge.
+which is pulled back through the same compiled Yee-edge material graph used
+by the FDFD matrix assembly.
 """
 
 from __future__ import annotations
@@ -17,12 +17,9 @@ import cupy as cp
 import torch
 
 from ...adjoint_inputs import material_dependent_inputs, scene_trainable_material_tensors
-from ...fdtd.material_pullback import pullback_material_input_gradients
 from ...result import Result
-
-# The FDFD matrix uses relative permittivity directly, so the pullback's
-# absolute-permittivity scaling is the identity.
-_RELATIVE_EPS_SCALE = 1.0
+from ...scene import prepare_scene
+from ..materials import compile_fdfd_materials
 
 
 def _unsupported_fdfd_adjoint_medium(scene):
@@ -72,6 +69,11 @@ class _FDFDGradientBridge:
         return material_dependent_inputs(scene, self._candidate_material_inputs())
 
     def forward(self, _material_inputs):
+        from ..magnetic import require_fixed_permeability
+        with torch.enable_grad():
+            graph_scene = prepare_scene(self._material_graph_scene())
+            _, permeability = compile_fdfd_materials(graph_scene, self.simulation.frequency, edges=True)
+            require_fixed_permeability(permeability,_material_inputs)
         solver = self.simulation._build_fdfd_solver()
         unsupported = _unsupported_fdfd_adjoint_medium(solver.scene)
         if unsupported is not None:
@@ -114,8 +116,8 @@ class _FDFDGradientBridge:
         # For real loss L, PyTorch hands us g = 2 dL/dx* (real-pair gradient
         # packed as complex). Solving A^T lam = conj(g) gives lam = 2 A^-T
         # dL/dx, and dL/deps_face = -2 k0^2 Re[(lam/2) x] = -k0^2 Re[lam x].
-        grad_x = torch.cat([grad.reshape(-1) for grad in resolved]).to(torch.complex64)
-        rhs = cp.from_dlpack(grad_x.conj().resolve_conj().contiguous()).astype(cp.complex64, copy=False)
+        grad_x = torch.cat([grad.reshape(-1) for grad in resolved]).to(solver.E_field[0].dtype)
+        rhs = cp.from_dlpack(grad_x.conj().resolve_conj().contiguous())
         lam = solver.solve_adjoint(
             rhs,
             max_iter=solver_cfg.max_iter,
@@ -126,7 +128,10 @@ class _FDFDGradientBridge:
         x = cp.from_dlpack(
             torch.cat([field.reshape(-1) for field in solver.E_field]).contiguous()
         )
-        grad_eps_flat = (-solver.k0**2) * (lam * x).real.astype(cp.float32, copy=False)
+        # PyTorch's complex cotangent contracts as Re(conj(g) * d_eps).
+        # Retaining its imaginary part also covers geometry that moves a lossy
+        # material, whose complex node permittivity changes in both components.
+        grad_eps_flat = (-solver.k0**2) * (lam * x).conj()
 
         N_ex, N_ey = scene.N_ex, scene.N_ey
         grad_eps_ex = torch.from_dlpack(
@@ -141,14 +146,25 @@ class _FDFDGradientBridge:
 
         with torch.enable_grad():
             graph_scene = self._material_graph_scene()
-            return pullback_material_input_gradients(
-                graph_scene,
-                inputs=material_inputs,
-                grad_eps_ex=grad_eps_ex,
-                grad_eps_ey=grad_eps_ey,
-                grad_eps_ez=grad_eps_ez,
-                eps0=_RELATIVE_EPS_SCALE,
-            )
+            prepared = prepare_scene(graph_scene)
+            try:
+                components, _ = compile_fdfd_materials(prepared, solver.frequency, edges=True)
+                edges = tuple(components[axis] for axis in 'xyz')
+                pairs = [
+                    (edge, (gradient if edge.is_complex() else gradient.real).to(edge))
+                    for edge, gradient in zip(edges, (grad_eps_ex, grad_eps_ey, grad_eps_ez))
+                    if edge.requires_grad
+                ]
+                gradients = torch.autograd.grad(
+                    [edge for edge, _ in pairs], material_inputs,
+                    grad_outputs=[gradient for _, gradient in pairs], allow_unused=True,
+                ) if pairs else (None,) * len(material_inputs)
+                return tuple(
+                    torch.zeros_like(value) if gradient is None else gradient.to(value)
+                    for value, gradient in zip(material_inputs, gradients)
+                )
+            finally:
+                prepared.release_meshgrid()
 
 
 class _FDFDMaterialGradientFunction(torch.autograd.Function):
@@ -175,6 +191,7 @@ def run_fdfd_with_gradient_bridge(simulation) -> Result:
         frequencies=simulation.frequencies,
         solver=bridge.solver,
         fields={"EX": Ex, "EY": Ey, "EZ": Ez},
+        monitors=simulation._fdfd_projection_monitors(bridge.solver, (Ex, Ey, Ez)),
         metadata=simulation.metadata,
         solver_stats=bridge.solver_stats,
     )

@@ -42,6 +42,8 @@ def _run(scene):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=list(layered_slab.FREQUENCIES),
+        # Periodic-transverse cells with thin PML: keep the CPML reference explicitly.
+        absorber="cpml",
         run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
         spectral_sampler=mw.SpectralSampler(normalize_source=True),
         full_field_dft=True,

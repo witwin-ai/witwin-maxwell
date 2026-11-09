@@ -18,7 +18,10 @@ residual ``<= tol``) and the iteration count otherwise.
 
 from __future__ import annotations
 
+import math
+
 import cupy as cp
+import torch
 
 
 def _matvec(operator):
@@ -143,8 +146,11 @@ def sqmr(A, b, M=None, tol=1e-6, maxiter=1000, callback=None):
 
 
 def tfqmr(A, b, M=None, tol=1e-6, maxiter=1000):
-    """Transpose-free QMR (Freund 1993), right-preconditioned so the
-    recurrence residual matches the true residual."""
+    """Right-preconditioned transpose-free QMR with a true-residual check.
+
+    ``maxiter`` counts QMR half-steps. Numerical breakdown returns a finite
+    iterate and nonzero information; it never switches iterative engines.
+    """
     matvec = _matvec(A)
     psolve = _matvec(M)
 
@@ -165,34 +171,50 @@ def tfqmr(A, b, M=None, tol=1e-6, maxiter=1000):
     v = Au1.copy()
     d = cp.zeros_like(b)
     tau = float(cp.linalg.norm(r))
-    theta = 0.0
-    eta = 0.0 + 0.0j
+    # Store theta**2 * eta as sin(rotation)**2 * alpha. Forming theta
+    # explicitly can overflow although the corresponding rotation is bounded.
+    direction_weight = 0.0 + 0.0j
     rho = complex(cp.vdot(r_shadow, r))
     iteration = 0
     while iteration < maxiter:
         sigma = complex(cp.vdot(r_shadow, v))
-        if sigma == 0.0 or rho == 0.0:
+        if (sigma == 0.0 or rho == 0.0
+                or not all(math.isfinite(value) for value in
+                           (sigma.real, sigma.imag, rho.real, rho.imag))):
             break
         alpha = rho / sigma
+        if alpha == 0.0 or not (math.isfinite(alpha.real) and math.isfinite(alpha.imag)):
+            break
         u2 = u1 - alpha * v
         Au2 = op(u2)
-        converged = False
+        stopped = False
         for u, Au in ((u1, Au1), (u2, Au2)):
-            w = w - alpha * Au
-            theta_next = float(cp.linalg.norm(w)) / tau
-            c = 1.0 / (1.0 + theta_next * theta_next) ** 0.5
-            tau = tau * theta_next * c
-            eta_next = c * c * alpha
-            d = u + (theta * theta * eta / alpha) * d
-            z = z + eta_next * d
-            theta = theta_next
-            eta = eta_next
-            iteration += 1
-            # tau * sqrt(iteration + 1) bounds the true residual
-            if tau * (iteration + 1) ** 0.5 <= target:
-                converged = True
+            if iteration >= maxiter:
+                stopped = True
                 break
-        if converged:
+            w = w - alpha * Au
+            w_norm = float(cp.linalg.norm(w))
+            rotation_norm = math.hypot(tau, w_norm)
+            if not math.isfinite(rotation_norm) or rotation_norm == 0.0:
+                stopped = True
+                break
+            c = tau / rotation_norm
+            sine = w_norm / rotation_norm
+            tau = w_norm * c
+            eta_next = c * c * alpha
+            d_next = u + (direction_weight / alpha) * d
+            z_next = z + eta_next * d_next
+            if not bool(cp.all(cp.isfinite(z_next))):
+                stopped = True
+                break
+            d, z = d_next, z_next
+            direction_weight = sine * sine * alpha
+            iteration += 1
+            # This auxiliary bound triggers a final true-residual check.
+            if tau * (iteration + 1) ** 0.5 <= target:
+                stopped = True
+                break
+        if stopped:
             break
         rho_next = complex(cp.vdot(r_shadow, w))
         beta = rho_next / rho
@@ -201,6 +223,10 @@ def tfqmr(A, b, M=None, tol=1e-6, maxiter=1000):
         v = Au1 + beta * (Au2 + beta * v)
         rho = rho_next
     x = psolve(z)
+    if not bool(cp.all(cp.isfinite(x))):
+        # A nonfinite preconditioner application cannot be a valid solution.
+        # The initial zero vector is the last known finite physical iterate.
+        return cp.zeros_like(b), max(iteration, 1)
     residual = float(cp.linalg.norm(b - matvec(x)))
     return x, 0 if residual <= target else max(iteration, 1)
 
@@ -224,7 +250,8 @@ def idr_s(A, b, M=None, tol=1e-6, maxiter=1000, s=4, seed=0):
     rng = cp.random.default_rng(seed)
     shadow = (rng.standard_normal((n, s), dtype=cp.float32)
               + 1j * rng.standard_normal((n, s), dtype=cp.float32)).astype(b.dtype)
-    shadow, _ = cp.linalg.qr(shadow)
+    shadow_torch, _ = torch.linalg.qr(torch.from_dlpack(shadow), mode="reduced")
+    shadow = cp.from_dlpack(shadow_torch)
 
     G = cp.zeros((n, s), dtype=b.dtype)
     U = cp.zeros((n, s), dtype=b.dtype)
@@ -237,7 +264,9 @@ def idr_s(A, b, M=None, tol=1e-6, maxiter=1000, s=4, seed=0):
     while r_norm > target and iteration < maxiter:
         f = shadow.conj().T @ r
         for k in range(s):
-            c = cp.linalg.solve(Ms[k:, k:], f[k:])
+            c = cp.from_dlpack(torch.linalg.solve(
+                torch.from_dlpack(Ms[k:, k:]), torch.from_dlpack(f[k:]),
+            ))
             v = r - G[:, k:] @ c
             v = psolve(v)
             U[:, k] = U[:, k:] @ c + omega * v

@@ -1,4 +1,3 @@
-#include <limits>
 #include <type_traits>
 
 #include "../launch.h"
@@ -52,11 +51,11 @@ void check_spacing_vector(
   STD_TORCH_CHECK(inv_delta.size(0) == field.size(axis), name, " length must match the field axis");
 }
 
-void check_int32_vector(const torch::stable::Tensor& tensor, const char* name) {
+void check_int64_vector(const torch::stable::Tensor& tensor, const char* name) {
   check_cuda_tensor(tensor, name);
   check_contiguous_tensor(tensor, name);
-  STD_TORCH_CHECK(tensor.scalar_type() == torch::headeronly::ScalarType::Int, name, " must be a contiguous int32 CUDA tensor");
-  STD_TORCH_CHECK(tensor.dim() == 1, name, " must be a contiguous 1D int32 CUDA tensor");
+  STD_TORCH_CHECK(tensor.scalar_type() == torch::headeronly::ScalarType::Long && tensor.dim() == 1,
+      name, " must be a contiguous int64 CUDA vector");
 }
 
 __device__ __forceinline__ bool is_valid_index_3d(int i, int j, int k, int nx, int ny, int nz) {
@@ -1451,242 +1450,28 @@ __global__ void reverse_magnetic_component_cpml_kernel(
   adj_d_neg[linear] = -inv_kappa_neg_value * adj_curl_e + c_neg_value * adj_psi_neg_candidate;
 }
 
-__device__ __forceinline__ float warp_reduce_sum(float value) {
-  value += __shfl_down_sync(0xffffffff, value, 16);
-  value += __shfl_down_sync(0xffffffff, value, 8);
-  value += __shfl_down_sync(0xffffffff, value, 4);
-  value += __shfl_down_sync(0xffffffff, value, 2);
-  value += __shfl_down_sync(0xffffffff, value, 1);
-  return value;
-}
-
-__device__ __forceinline__ float warp_reduce_sum_active(float value, unsigned int mask) {
-  const unsigned int lane = threadIdx.x & 31u;
-#pragma unroll
-  for (int delta = 16; delta > 0; delta >>= 1) {
-    const float other = __shfl_down_sync(mask, value, delta);
-    if ((lane + static_cast<unsigned int>(delta)) < 32u && ((mask >> (lane + delta)) & 1u) != 0u) {
-      value += other;
-    }
-  }
-  return value;
-}
-
-__global__ void accumulate_tfsf_scalar_sample_adjoint_kernel(
-    int64_t total,
-    int patch_ny,
-    int patch_nz,
-    int64_t sample_index,
-    float component_scale,
-    float* __restrict__ adj_aux_field,
-    const float* __restrict__ adj_field_patch,
-    const float* __restrict__ coeff_patch) {
-  __shared__ float warp_sums[32];
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  (void)patch_ny;
-  (void)patch_nz;
-  float value = linear < total
-      ? component_scale * adj_field_patch[linear] * coeff_patch[linear]
-      : 0.0f;
-  value = warp_reduce_sum(value);
-  const unsigned int lane = threadIdx.x & 31u;
-  const unsigned int warp = threadIdx.x >> 5;
-  if (lane == 0) {
-    warp_sums[warp] = value;
-  }
-  __syncthreads();
-  value = threadIdx.x < ((blockDim.x + 31u) >> 5) ? warp_sums[lane] : 0.0f;
-  if (warp == 0) {
-    value = warp_reduce_sum(value);
-  }
-  if (threadIdx.x == 0) {
-    atomicAdd(adj_aux_field + sample_index, value);
-  }
-}
-
-template <int SampleAxis>
-__global__ void accumulate_tfsf_line_sample_adjoint_kernel(
-    int patch_nx,
-    int patch_ny,
-    int patch_nz,
+// One writer per auxiliary sample. Prepared CSR rows retain ascending patch
+// cell order; separate term launches retain the forward term order.
+__global__ void accumulate_tfsf_sample_adjoint_kernel(
+    int64_t sample_count,
     float component_scale,
     float* __restrict__ adj_aux_field,
     const float* __restrict__ adj_field_patch,
     const float* __restrict__ coeff_patch,
-    const int* __restrict__ sample_indices) {
-  __shared__ float warp_sums[32];
-  const int sample_linear = static_cast<int>(blockIdx.x);
-  const int sample_count = SampleAxis == 0 ? patch_nx : (SampleAxis == 1 ? patch_ny : patch_nz);
-  if (sample_linear >= sample_count) {
+    const int64_t* __restrict__ row_offsets,
+    const int64_t* __restrict__ cell_indices,
+    const float* __restrict__ weights) {
+  const int64_t sample = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (sample >= sample_count) {
     return;
   }
-  float value = 0.0f;
-  if constexpr (SampleAxis == 0) {
-    const long long sample_base = static_cast<long long>(sample_linear) * patch_ny * patch_nz;
-    for (int j = static_cast<int>(threadIdx.y); j < patch_ny; j += static_cast<int>(blockDim.y)) {
-      long long linear = sample_base + static_cast<long long>(j) * patch_nz + threadIdx.x;
-      for (int k = static_cast<int>(threadIdx.x); k < patch_nz; k += static_cast<int>(blockDim.x)) {
-        value += adj_field_patch[linear] * coeff_patch[linear];
-        linear += blockDim.x;
-      }
-    }
-  } else if constexpr (SampleAxis == 1) {
-    const long long sample_offset = static_cast<long long>(sample_linear) * patch_nz;
-    for (int i = static_cast<int>(threadIdx.y); i < patch_nx; i += static_cast<int>(blockDim.y)) {
-      long long linear = static_cast<long long>(i) * patch_ny * patch_nz + sample_offset + threadIdx.x;
-      for (int k = static_cast<int>(threadIdx.x); k < patch_nz; k += static_cast<int>(blockDim.x)) {
-        value += adj_field_patch[linear] * coeff_patch[linear];
-        linear += blockDim.x;
-      }
-    }
-  } else {
-    for (int i = static_cast<int>(threadIdx.y); i < patch_nx; i += static_cast<int>(blockDim.y)) {
-      for (int j = static_cast<int>(threadIdx.x); j < patch_ny; j += static_cast<int>(blockDim.x)) {
-        const long long linear = offset3d(
-            static_cast<unsigned int>(i),
-            static_cast<unsigned int>(j),
-            static_cast<unsigned int>(sample_linear),
-            static_cast<unsigned int>(patch_ny),
-            static_cast<unsigned int>(patch_nz));
-        value += adj_field_patch[linear] * coeff_patch[linear];
-      }
-    }
+  float sum = adj_aux_field[sample];
+  for (int64_t entry = row_offsets[sample]; entry < row_offsets[sample + 1]; ++entry) {
+    const int64_t cell = cell_indices[entry];
+    const float value = __fmul_rn(__fmul_rn(component_scale, adj_field_patch[cell]), coeff_patch[cell]);
+    sum = __fadd_rn(sum, __fmul_rn(value, weights[entry]));
   }
-  value *= component_scale;
-  value = warp_reduce_sum(value);
-  const unsigned int thread_linear = threadIdx.y * blockDim.x + threadIdx.x;
-  const unsigned int lane = thread_linear & 31u;
-  const unsigned int warp = thread_linear >> 5;
-  if (lane == 0) {
-    warp_sums[warp] = value;
-  }
-  __syncthreads();
-  value = thread_linear < ((blockDim.x * blockDim.y + 31u) >> 5) ? warp_sums[lane] : 0.0f;
-  if (warp == 0) {
-    value = warp_reduce_sum(value);
-  }
-  if (thread_linear == 0) {
-    const int sample_index = sample_indices[sample_linear];
-    atomicAdd(adj_aux_field + sample_index, value);
-  }
-}
-
-template <int SampleAxis>
-void launch_tfsf_line_sample_adjoint(
-    int patch_nx,
-    int patch_ny,
-    int patch_nz,
-    float component_scale,
-    float* __restrict__ adj_aux_field,
-    const float* __restrict__ adj_field_patch,
-    const float* __restrict__ coeff_patch,
-    const int* __restrict__ sample_indices) {
-  const dim3 block(8, 32, 1);
-  const int sample_count = SampleAxis == 0 ? patch_nx : (SampleAxis == 1 ? patch_ny : patch_nz);
-  accumulate_tfsf_line_sample_adjoint_kernel<SampleAxis><<<sample_count, block, 0, current_cuda_stream()>>>(
-      patch_nx,
-      patch_ny,
-      patch_nz,
-      component_scale,
-      adj_aux_field,
-      adj_field_patch,
-      coeff_patch,
-      sample_indices);
-}
-
-__global__ void accumulate_tfsf_interpolated_sample_adjoint_kernel(
-    int64_t total,
-    int64_t adj_aux_count,
-    float origin,
-    float inv_ds,
-    float component_scale,
-    float* __restrict__ adj_aux_field,
-    const float* __restrict__ adj_field_patch,
-    const float* __restrict__ coeff_patch,
-    const float* __restrict__ sample_positions) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total || adj_aux_count <= 0) {
-    return;
-  }
-  const int64_t last_index = adj_aux_count - 1;
-  float coord = inv_ds > 0.0f ? (sample_positions[linear] - origin) * inv_ds : 0.0f;
-  coord = fminf(fmaxf(coord, 0.0f), static_cast<float>(last_index));
-  const int64_t lower = static_cast<int64_t>(coord);
-  const int64_t upper = lower + 1 < last_index ? lower + 1 : last_index;
-  const float frac = coord - static_cast<float>(lower);
-  const float value = component_scale * adj_field_patch[linear] * coeff_patch[linear];
-  atomicAdd(adj_aux_field + lower, value * (1.0f - frac));
-  if (upper != lower) {
-    atomicAdd(adj_aux_field + upper, value * frac);
-  }
-}
-
-__device__ __forceinline__ void warp_atomic_add_adjacent_repeats(
-    float* __restrict__ values,
-    int index,
-    float value) {
-  const unsigned int mask = __activemask();
-  const unsigned int lane = threadIdx.x & 31u;
-  const int prev_index = __shfl_up_sync(mask, index, 1);
-  const int next_index = __shfl_down_sync(mask, index, 1);
-  const bool adjacent_repeat =
-      ((lane > 0u) && (prev_index == index))
-      || ((lane < 31u) && (next_index == index));
-  if (!__any_sync(mask, adjacent_repeat)) {
-    atomicAdd(values + index, value);
-    return;
-  }
-
-  const unsigned int peers = __match_any_sync(mask, index);
-  if ((peers & (peers - 1u)) == 0u) {
-    atomicAdd(values + index, value);
-    return;
-  }
-  if (peers == mask) {
-    const float sum = warp_reduce_sum_active(value, mask);
-    if (lane == static_cast<unsigned int>(__ffs(peers) - 1)) {
-      atomicAdd(values + index, sum);
-    }
-    return;
-  }
-
-  float sum = 0.0f;
-  unsigned int remaining = peers;
-  while (remaining != 0u) {
-    const int source_lane = __ffs(remaining) - 1;
-    sum += __shfl_sync(peers, value, source_lane);
-    remaining &= remaining - 1u;
-  }
-  if (static_cast<int>(lane) == (__ffs(peers) - 1)) {
-    atomicAdd(values + index, sum);
-  }
-}
-
-__global__ void accumulate_tfsf_interpolated_sample_adjoint_warp_kernel(
-    int64_t total,
-    int adj_aux_count,
-    float origin,
-    float inv_ds,
-    float component_scale,
-    float* __restrict__ adj_aux_field,
-    const float* __restrict__ adj_field_patch,
-    const float* __restrict__ coeff_patch,
-    const float* __restrict__ sample_positions) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total || adj_aux_count <= 0) {
-    return;
-  }
-  const int last_index = adj_aux_count - 1;
-  float coord = inv_ds > 0.0f ? (sample_positions[linear] - origin) * inv_ds : 0.0f;
-  coord = fminf(fmaxf(coord, 0.0f), static_cast<float>(last_index));
-  const int lower = static_cast<int>(coord);
-  const int upper = lower + 1 < last_index ? lower + 1 : last_index;
-  const float frac = coord - static_cast<float>(lower);
-  const float value = component_scale * adj_field_patch[linear] * coeff_patch[linear];
-  warp_atomic_add_adjacent_repeats(adj_aux_field, lower, value * (1.0f - frac));
-  if (upper != lower) {
-    warp_atomic_add_adjacent_repeats(adj_aux_field, upper, value * frac);
-  }
+  adj_aux_field[sample] = sum;
 }
 
 __global__ void reverse_tfsf_auxiliary_magnetic_kernel(
@@ -1764,40 +1549,41 @@ __global__ void seed_inject_dense_kernel(
   adj_field[cell] += value;
 }
 
-template <typename IndexT>
+template <typename SeedT>
 __global__ void seed_inject_point_kernel(
-    int point_count,
+    int64_t cell_count,
+    int64_t point_count,
     int entries,
     int steps,
     int step,
-    unsigned int ny,
-    unsigned int nz,
     float* __restrict__ adj_field,
-    const float* __restrict__ grad_real,
-    const float* __restrict__ grad_imag,
-    const IndexT* __restrict__ point_i,
-    const IndexT* __restrict__ point_j,
-    const IndexT* __restrict__ point_k,
-    const float* __restrict__ cos_pack,
-    const float* __restrict__ sin_pack) {
-  const int p = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (p >= point_count) {
+    const SeedT* __restrict__ grad_real,
+    const SeedT* __restrict__ grad_imag,
+    const int64_t* __restrict__ cells,
+    const int64_t* __restrict__ cell_offsets,
+    const int64_t* __restrict__ point_order,
+    const SeedT* __restrict__ cos_pack,
+    const SeedT* __restrict__ sin_pack) {
+  const int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (row >= cell_count) {
     return;
   }
-  float value = 0.0f;
-  for (int e = 0; e < entries; ++e) {
-    const float weight_cos = cos_pack[e * steps + step];
-    const float weight_sin = sin_pack[e * steps + step];
-    const long long grad_index = static_cast<long long>(e) * point_count + p;
-    value += grad_real[grad_index] * weight_cos + grad_imag[grad_index] * weight_sin;
+  const int64_t cell = cells[row];
+  float sum = adj_field[cell];
+  // One writer per unique cell, points in ascending original point order,
+  // then frequencies in ascending entry order. Round each point to field dtype.
+  for (int64_t item = cell_offsets[row]; item < cell_offsets[row + 1]; ++item) {
+    const int64_t p = point_order[item];
+    SeedT value = 0;
+    for (int e = 0; e < entries; ++e) {
+      const int64_t grad_index = static_cast<int64_t>(e) * point_count + p;
+      const int64_t schedule_index = static_cast<int64_t>(e) * steps + step;
+      value += grad_real[grad_index] * cos_pack[schedule_index]
+          + grad_imag[grad_index] * sin_pack[schedule_index];
+    }
+    sum = __fadd_rn(sum, static_cast<float>(value));
   }
-  const long long cell = offset3d(
-      static_cast<unsigned int>(point_i[p]),
-      static_cast<unsigned int>(point_j[p]),
-      static_cast<unsigned int>(point_k[p]),
-      ny,
-      nz);
-  atomicAdd(&adj_field[cell], value);
+  adj_field[cell] = sum;
 }
 
 template <int Axis>
@@ -1881,156 +1667,91 @@ __device__ __forceinline__ int clamp_axis_index(int value, int size) {
   return value;
 }
 
-// Transpose (VJP) of the electric-field collocation that forms
-// |E|^2 = e_own^2 + off_a^2 + off_b^2 on each Yee edge (see the Torch replica
-// ``_collocated_field_square`` and the forward device stencil
-// ``collocate_electric_components``). Given the per-edge cotangent
-// ``g = d(loss)/d(|E|^2)`` for the ``Component`` edge grid, scatter the field
-// adjoint onto the three E-edge tensors. The own axis reads the direct value
-// (weight 1); each off axis is a 4-point average of the surrounding off-axis
-// edges (weight 0.25) with index clamping at the domain faces, so a clamped
-// out-of-range neighbour folds its weight onto the boundary row automatically
-// via the repeated atomic add. Chain rule per contributing cell:
-// ``adj_E += 2 * E_collocated * weight * g``. The three component launches all
-// accumulate into ``adj_ex/adj_ey/adj_ez`` (the caller zero-initializes them),
-// so every write is an atomic add. This is the shared building block the Kerr
-// and general-nonlinear reverses reuse to flow the |E|^2 cotangent back to the
-// fields.
-template <int Component>
+// Invert one source-component stencil onto a target edge. Candidate source
+// points are visited in C order. Each matching corner is added separately, so
+// clamping duplicates retain the scatter's per-term rounding (no multiplicity
+// folding). Explicit round-to-nearest operations prevent contraction with sum.
+template <int Source, int Target>
+__device__ __forceinline__ float gather_collocation_component(
+    const int* target_coord,
+    const int* source_shape,
+    const int* target_shape,
+    const float* __restrict__ g,
+    const float* __restrict__ field,
+    float sum) {
+  if constexpr (Source == Target) {
+    const long long cell = offset3d(target_coord[0], target_coord[1], target_coord[2], target_shape[1], target_shape[2]);
+    const float grad = g[cell];
+    if (grad != 0.0f) {
+      sum = __fadd_rn(sum, __fmul_rn(__fmul_rn(2.0f, field[cell]), grad));
+    }
+  } else {
+    int begin[3] = {target_coord[0], target_coord[1], target_coord[2]};
+    int end[3] = {target_coord[0], target_coord[1], target_coord[2]};
+    begin[Source] -= 1;
+    end[Target] += 1;
+    for (int i = max(0, begin[0]); i <= min(end[0], source_shape[0] - 1); ++i) {
+      for (int j = max(0, begin[1]); j <= min(end[1], source_shape[1] - 1); ++j) {
+        for (int k = max(0, begin[2]); k <= min(end[2], source_shape[2] - 1); ++k) {
+          const float grad = g[offset3d(i, j, k, source_shape[1], source_shape[2])];
+          if (grad == 0.0f) {
+            continue;
+          }
+          const int coord[3] = {i, j, k};
+          long long corners[4];
+#pragma unroll
+          for (int outer = 0; outer < 2; ++outer) {
+#pragma unroll
+            for (int inner = 0; inner < 2; ++inner) {
+              int corner[3] = {coord[0], coord[1], coord[2]};
+              corner[Source] += outer;
+              corner[Target] = clamp_axis_index(coord[Target] - 1 + inner, target_shape[Target]);
+              corners[2 * outer + inner] = offset3d(corner[0], corner[1], corner[2], target_shape[1], target_shape[2]);
+            }
+          }
+          const float col = __fmul_rn(0.25f,
+              __fadd_rn(__fadd_rn(__fadd_rn(field[corners[0]], field[corners[1]]), field[corners[2]]), field[corners[3]]));
+          const float weight = __fmul_rn(__fmul_rn(0.5f, col), grad);
+          const long long target = offset3d(target_coord[0], target_coord[1], target_coord[2], target_shape[1], target_shape[2]);
+#pragma unroll
+          for (int corner = 0; corner < 4; ++corner) {
+            if (corners[corner] == target) {
+              sum = __fadd_rn(sum, weight);
+            }
+          }
+        }
+      }
+    }
+  }
+  return sum;
+}
+
+// Each launch owns one target component, and each thread owns one Yee edge.
+// Source components are accumulated Ex, Ey, Ez, with no competing writers.
+template <int Target>
 __global__ void collocation_transpose_kernel(
     int ex_x, int ex_y, int ex_z,
     int ey_x, int ey_y, int ey_z,
     int ez_x, int ez_y, int ez_z,
-    const float* __restrict__ g,
-    const float* __restrict__ ex,
-    const float* __restrict__ ey,
-    const float* __restrict__ ez,
-    float* __restrict__ adj_ex,
-    float* __restrict__ adj_ey,
-    float* __restrict__ adj_ez) {
-  int own_x = ex_x;
-  int own_y = ex_y;
-  int own_z = ex_z;
-  if constexpr (Component == 1) {
-    own_x = ey_x;
-    own_y = ey_y;
-    own_z = ey_z;
-  } else if constexpr (Component == 2) {
-    own_x = ez_x;
-    own_y = ez_y;
-    own_z = ez_z;
-  }
-  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
-  const int i = static_cast<int>(i_u);
-  const int j = static_cast<int>(j_u);
-  const int k = static_cast<int>(k_u);
-  if (i >= own_x || j >= own_y || k >= own_z) {
+    const float* __restrict__ g_ex,
+    const float* __restrict__ g_ey,
+    const float* __restrict__ g_ez,
+    const float* __restrict__ field,
+    float* __restrict__ adj_field) {
+  const int shapes[3][3] = {{ex_x, ex_y, ex_z}, {ey_x, ey_y, ey_z}, {ez_x, ez_y, ez_z}};
+  const int coord[3] = {
+      static_cast<int>(blockIdx.z * blockDim.z + threadIdx.z),
+      static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y),
+      static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x)};
+  if (coord[0] >= shapes[Target][0] || coord[1] >= shapes[Target][1] || coord[2] >= shapes[Target][2]) {
     return;
   }
-  const float g_value = g[offset3d(i_u, j_u, k_u, own_y, own_z)];
-  if (g_value == 0.0f) {
-    return;
-  }
-
-  if constexpr (Component == 0) {
-    // Own axis: ex[i,j,k] direct.
-    const float own = ex[offset3d(i_u, j_u, k_u, ex_y, ex_z)];
-    atomicAdd(&adj_ex[offset3d(i_u, j_u, k_u, ex_y, ex_z)], 2.0f * own * g_value);
-    // ey_on_ex: 0.25 * (ey[i, cj(j-1), k] + ey[i, cj(j), k]
-    //                 + ey[i+1, cj(j-1), k] + ey[i+1, cj(j), k]); j clamped in ey_y.
-    const int jm = clamp_axis_index(j - 1, ey_y);
-    const int jc = clamp_axis_index(j, ey_y);
-    const long long ey00 = offset3d(static_cast<unsigned int>(i), static_cast<unsigned int>(jm), k_u, ey_y, ey_z);
-    const long long ey01 = offset3d(static_cast<unsigned int>(i), static_cast<unsigned int>(jc), k_u, ey_y, ey_z);
-    const long long ey10 = offset3d(static_cast<unsigned int>(i + 1), static_cast<unsigned int>(jm), k_u, ey_y, ey_z);
-    const long long ey11 = offset3d(static_cast<unsigned int>(i + 1), static_cast<unsigned int>(jc), k_u, ey_y, ey_z);
-    const float ey_col = 0.25f * (ey[ey00] + ey[ey01] + ey[ey10] + ey[ey11]);
-    const float wy = 0.5f * ey_col * g_value;  // 2 * ey_col * 0.25 * g
-    atomicAdd(&adj_ey[ey00], wy);
-    atomicAdd(&adj_ey[ey01], wy);
-    atomicAdd(&adj_ey[ey10], wy);
-    atomicAdd(&adj_ey[ey11], wy);
-    // ez_on_ex: 0.25 * (ez[i, j, ck(k-1)] + ez[i, j, ck(k)]
-    //                 + ez[i+1, j, ck(k-1)] + ez[i+1, j, ck(k)]); k clamped in ez_z.
-    const int km = clamp_axis_index(k - 1, ez_z);
-    const int kc = clamp_axis_index(k, ez_z);
-    const long long ez00 = offset3d(static_cast<unsigned int>(i), j_u, static_cast<unsigned int>(km), ez_y, ez_z);
-    const long long ez01 = offset3d(static_cast<unsigned int>(i), j_u, static_cast<unsigned int>(kc), ez_y, ez_z);
-    const long long ez10 = offset3d(static_cast<unsigned int>(i + 1), j_u, static_cast<unsigned int>(km), ez_y, ez_z);
-    const long long ez11 = offset3d(static_cast<unsigned int>(i + 1), j_u, static_cast<unsigned int>(kc), ez_y, ez_z);
-    const float ez_col = 0.25f * (ez[ez00] + ez[ez01] + ez[ez10] + ez[ez11]);
-    const float wz = 0.5f * ez_col * g_value;
-    atomicAdd(&adj_ez[ez00], wz);
-    atomicAdd(&adj_ez[ez01], wz);
-    atomicAdd(&adj_ez[ez10], wz);
-    atomicAdd(&adj_ez[ez11], wz);
-  } else if constexpr (Component == 1) {
-    // Own axis: ey[i,j,k] direct.
-    const float own = ey[offset3d(i_u, j_u, k_u, ey_y, ey_z)];
-    atomicAdd(&adj_ey[offset3d(i_u, j_u, k_u, ey_y, ey_z)], 2.0f * own * g_value);
-    // ex_on_ey: 0.25 * (ex[ci(i-1), j, k] + ex[ci(i), j, k]
-    //                 + ex[ci(i-1), j+1, k] + ex[ci(i), j+1, k]); i clamped in ex_x.
-    const int im = clamp_axis_index(i - 1, ex_x);
-    const int ic = clamp_axis_index(i, ex_x);
-    const long long ex00 = offset3d(static_cast<unsigned int>(im), j_u, k_u, ex_y, ex_z);
-    const long long ex01 = offset3d(static_cast<unsigned int>(ic), j_u, k_u, ex_y, ex_z);
-    const long long ex10 = offset3d(static_cast<unsigned int>(im), static_cast<unsigned int>(j + 1), k_u, ex_y, ex_z);
-    const long long ex11 = offset3d(static_cast<unsigned int>(ic), static_cast<unsigned int>(j + 1), k_u, ex_y, ex_z);
-    const float ex_col = 0.25f * (ex[ex00] + ex[ex01] + ex[ex10] + ex[ex11]);
-    const float wx = 0.5f * ex_col * g_value;
-    atomicAdd(&adj_ex[ex00], wx);
-    atomicAdd(&adj_ex[ex01], wx);
-    atomicAdd(&adj_ex[ex10], wx);
-    atomicAdd(&adj_ex[ex11], wx);
-    // ez_on_ey: 0.25 * (ez[i, j, ck(k-1)] + ez[i, j, ck(k)]
-    //                 + ez[i, j+1, ck(k-1)] + ez[i, j+1, ck(k)]); k clamped in ez_z.
-    const int km = clamp_axis_index(k - 1, ez_z);
-    const int kc = clamp_axis_index(k, ez_z);
-    const long long ez00 = offset3d(i_u, j_u, static_cast<unsigned int>(km), ez_y, ez_z);
-    const long long ez01 = offset3d(i_u, j_u, static_cast<unsigned int>(kc), ez_y, ez_z);
-    const long long ez10 = offset3d(i_u, static_cast<unsigned int>(j + 1), static_cast<unsigned int>(km), ez_y, ez_z);
-    const long long ez11 = offset3d(i_u, static_cast<unsigned int>(j + 1), static_cast<unsigned int>(kc), ez_y, ez_z);
-    const float ez_col = 0.25f * (ez[ez00] + ez[ez01] + ez[ez10] + ez[ez11]);
-    const float wz = 0.5f * ez_col * g_value;
-    atomicAdd(&adj_ez[ez00], wz);
-    atomicAdd(&adj_ez[ez01], wz);
-    atomicAdd(&adj_ez[ez10], wz);
-    atomicAdd(&adj_ez[ez11], wz);
-  } else {
-    // Own axis: ez[i,j,k] direct.
-    const float own = ez[offset3d(i_u, j_u, k_u, ez_y, ez_z)];
-    atomicAdd(&adj_ez[offset3d(i_u, j_u, k_u, ez_y, ez_z)], 2.0f * own * g_value);
-    // ex_on_ez: 0.25 * (ex[ci(i-1), j, k] + ex[ci(i), j, k]
-    //                 + ex[ci(i-1), j, k+1] + ex[ci(i), j, k+1]); i clamped in ex_x.
-    const int im = clamp_axis_index(i - 1, ex_x);
-    const int ic = clamp_axis_index(i, ex_x);
-    const long long ex00 = offset3d(static_cast<unsigned int>(im), j_u, k_u, ex_y, ex_z);
-    const long long ex01 = offset3d(static_cast<unsigned int>(ic), j_u, k_u, ex_y, ex_z);
-    const long long ex10 = offset3d(static_cast<unsigned int>(im), j_u, static_cast<unsigned int>(k + 1), ex_y, ex_z);
-    const long long ex11 = offset3d(static_cast<unsigned int>(ic), j_u, static_cast<unsigned int>(k + 1), ex_y, ex_z);
-    const float ex_col = 0.25f * (ex[ex00] + ex[ex01] + ex[ex10] + ex[ex11]);
-    const float wx = 0.5f * ex_col * g_value;
-    atomicAdd(&adj_ex[ex00], wx);
-    atomicAdd(&adj_ex[ex01], wx);
-    atomicAdd(&adj_ex[ex10], wx);
-    atomicAdd(&adj_ex[ex11], wx);
-    // ey_on_ez: 0.25 * (ey[i, cj(j-1), k] + ey[i, cj(j), k]
-    //                 + ey[i, cj(j-1), k+1] + ey[i, cj(j), k+1]); j clamped in ey_y.
-    const int jm = clamp_axis_index(j - 1, ey_y);
-    const int jc = clamp_axis_index(j, ey_y);
-    const long long ey00 = offset3d(i_u, static_cast<unsigned int>(jm), k_u, ey_y, ey_z);
-    const long long ey01 = offset3d(i_u, static_cast<unsigned int>(jc), k_u, ey_y, ey_z);
-    const long long ey10 = offset3d(i_u, static_cast<unsigned int>(jm), static_cast<unsigned int>(k + 1), ey_y, ey_z);
-    const long long ey11 = offset3d(i_u, static_cast<unsigned int>(jc), static_cast<unsigned int>(k + 1), ey_y, ey_z);
-    const float ey_col = 0.25f * (ey[ey00] + ey[ey01] + ey[ey10] + ey[ey11]);
-    const float wy = 0.5f * ey_col * g_value;
-    atomicAdd(&adj_ey[ey00], wy);
-    atomicAdd(&adj_ey[ey01], wy);
-    atomicAdd(&adj_ey[ey10], wy);
-    atomicAdd(&adj_ey[ey11], wy);
-  }
+  const long long cell = offset3d(coord[0], coord[1], coord[2], shapes[Target][1], shapes[Target][2]);
+  float sum = adj_field[cell];
+  sum = gather_collocation_component<0, Target>(coord, shapes[0], shapes[Target], g_ex, field, sum);
+  sum = gather_collocation_component<1, Target>(coord, shapes[1], shapes[Target], g_ey, field, sum);
+  sum = gather_collocation_component<2, Target>(coord, shapes[2], shapes[Target], g_ez, field, sum);
+  adj_field[cell] = sum;
 }
 
 // Forward |E|^2 collocated onto each electric Yee edge, the exact value the Kerr
@@ -2228,21 +1949,19 @@ void collocation_transpose_cuda(
   const int ez_y = static_cast<int>(ez.size(1));
   const int ez_z = static_cast<int>(ez.size(2));
   const dim3 block = field_block3d();
-  auto launch = [&](auto component_tag, const torch::stable::Tensor& g, int nx, int ny, int nz) {
+  auto launch = [&](auto component_tag, const torch::stable::Tensor& field, torch::stable::Tensor& adj) {
     constexpr int component_value = decltype(component_tag)::value;
-    collocation_transpose_kernel<component_value><<<field_grid3d(nx, ny, nz, block), block, 0, current_cuda_stream()>>>(
+    collocation_transpose_kernel<component_value><<<field_grid3d(field.size(0), field.size(1), field.size(2), block), block, 0, current_cuda_stream()>>>(
         ex_x, ex_y, ex_z, ey_x, ey_y, ey_z, ez_x, ez_y, ez_z,
-        g.mutable_data_ptr<float>(),
-        ex.mutable_data_ptr<float>(),
-        ey.mutable_data_ptr<float>(),
-        ez.mutable_data_ptr<float>(),
-        adj_ex.mutable_data_ptr<float>(),
-        adj_ey.mutable_data_ptr<float>(),
-        adj_ez.mutable_data_ptr<float>());
+        g_ex.mutable_data_ptr<float>(),
+        g_ey.mutable_data_ptr<float>(),
+        g_ez.mutable_data_ptr<float>(),
+        field.mutable_data_ptr<float>(),
+        adj.mutable_data_ptr<float>());
   };
-  launch(std::integral_constant<int, 0>{}, g_ex, ex_x, ex_y, ex_z);
-  launch(std::integral_constant<int, 1>{}, g_ey, ey_x, ey_y, ey_z);
-  launch(std::integral_constant<int, 2>{}, g_ez, ez_x, ez_y, ez_z);
+  launch(std::integral_constant<int, 0>{}, ex, adj_ex);
+  launch(std::integral_constant<int, 1>{}, ey, adj_ey);
+  launch(std::integral_constant<int, 2>{}, ez, adj_ez);
   WITWIN_CUDA_CHECK();
 }
 
@@ -4241,127 +3960,35 @@ void reverse_dispersive_correction_cuda(
   WITWIN_CUDA_CHECK();
 }
 
-void accumulate_tfsf_scalar_sample_adjoint_cuda(
+void accumulate_tfsf_sample_adjoint_cuda(
     torch::stable::Tensor adj_aux_field,
     const torch::stable::Tensor& adj_field_patch,
     const torch::stable::Tensor& coeff_patch,
-    int64_t sample_index,
+    const torch::stable::Tensor& row_offsets,
+    const torch::stable::Tensor& cell_indices,
+    const torch::stable::Tensor& weights,
     double component_scale) {
   check_vector(adj_aux_field, "adj_aux_field");
   check_field(adj_field_patch, "adj_field_patch");
   check_same_cuda_device(adj_aux_field, adj_field_patch, "adj_field_patch");
   check_matching_field(adj_field_patch, coeff_patch, "coeff_patch");
-  STD_TORCH_CHECK(sample_index >= 0 && sample_index < adj_aux_field.numel(), "sample_index is out of range");
-  const torch::stable::accelerator::DeviceGuard device_guard(adj_aux_field.get_device_index());
-  const int64_t total = adj_field_patch.numel();
-  constexpr int block_size = 512;
-  accumulate_tfsf_scalar_sample_adjoint_kernel<<<
-      linear_grid(total, block_size),
-      block_size,
-      0,
-      current_cuda_stream()>>>(
-      total,
-      static_cast<int>(adj_field_patch.size(1)),
-      static_cast<int>(adj_field_patch.size(2)),
-      sample_index,
-      static_cast<float>(component_scale),
-      adj_aux_field.mutable_data_ptr<float>(),
-      adj_field_patch.mutable_data_ptr<float>(),
-      coeff_patch.mutable_data_ptr<float>());
-  WITWIN_CUDA_CHECK();
-}
-
-void accumulate_tfsf_line_sample_adjoint_cuda(
-    torch::stable::Tensor adj_aux_field,
-    const torch::stable::Tensor& adj_field_patch,
-    const torch::stable::Tensor& coeff_patch,
-    const torch::stable::Tensor& sample_indices,
-    int64_t sample_axis_code,
-    double component_scale) {
-  check_vector(adj_aux_field, "adj_aux_field");
-  check_field(adj_field_patch, "adj_field_patch");
-  check_same_cuda_device(adj_aux_field, adj_field_patch, "adj_field_patch");
-  check_matching_field(adj_field_patch, coeff_patch, "coeff_patch");
-  check_int32_vector(sample_indices, "sample_indices");
-  check_same_cuda_device(adj_aux_field, sample_indices, "sample_indices");
-  STD_TORCH_CHECK(sample_axis_code >= 0 && sample_axis_code < 3, "sample_axis_code must be in [0, 3)");
-  STD_TORCH_CHECK(sample_indices.numel() == adj_field_patch.size(sample_axis_code), "sample_indices length must match the selected patch axis");
-  const torch::stable::accelerator::DeviceGuard device_guard(adj_aux_field.get_device_index());
-  if (sample_axis_code == 0) {
-    launch_tfsf_line_sample_adjoint<0>(
-        static_cast<int>(adj_field_patch.size(0)),
-        static_cast<int>(adj_field_patch.size(1)),
-        static_cast<int>(adj_field_patch.size(2)),
-        static_cast<float>(component_scale),
-        adj_aux_field.mutable_data_ptr<float>(),
-        adj_field_patch.mutable_data_ptr<float>(),
-        coeff_patch.mutable_data_ptr<float>(),
-        sample_indices.mutable_data_ptr<int>());
-  } else if (sample_axis_code == 1) {
-    launch_tfsf_line_sample_adjoint<1>(
-        static_cast<int>(adj_field_patch.size(0)),
-        static_cast<int>(adj_field_patch.size(1)),
-        static_cast<int>(adj_field_patch.size(2)),
-        static_cast<float>(component_scale),
-        adj_aux_field.mutable_data_ptr<float>(),
-        adj_field_patch.mutable_data_ptr<float>(),
-        coeff_patch.mutable_data_ptr<float>(),
-        sample_indices.mutable_data_ptr<int>());
-  } else {
-    launch_tfsf_line_sample_adjoint<2>(
-        static_cast<int>(adj_field_patch.size(0)),
-        static_cast<int>(adj_field_patch.size(1)),
-        static_cast<int>(adj_field_patch.size(2)),
-        static_cast<float>(component_scale),
-        adj_aux_field.mutable_data_ptr<float>(),
-        adj_field_patch.mutable_data_ptr<float>(),
-        coeff_patch.mutable_data_ptr<float>(),
-        sample_indices.mutable_data_ptr<int>());
-  }
-  WITWIN_CUDA_CHECK();
-}
-
-void accumulate_tfsf_interpolated_sample_adjoint_cuda(
-    torch::stable::Tensor adj_aux_field,
-    const torch::stable::Tensor& adj_field_patch,
-    const torch::stable::Tensor& coeff_patch,
-    const torch::stable::Tensor& sample_positions,
-    double origin,
-    double ds,
-    double component_scale) {
-  check_vector(adj_aux_field, "adj_aux_field");
-  check_field(adj_field_patch, "adj_field_patch");
-  check_same_cuda_device(adj_aux_field, adj_field_patch, "adj_field_patch");
-  check_matching_field(adj_field_patch, coeff_patch, "coeff_patch");
-  check_matching_field(adj_field_patch, sample_positions, "sample_positions");
-  const torch::stable::accelerator::DeviceGuard device_guard(adj_aux_field.get_device_index());
-  const int64_t total = adj_field_patch.numel();
-  const int64_t adj_aux_count = adj_aux_field.numel();
-  const float inv_ds = ds > 0.0 ? static_cast<float>(1.0 / ds) : 0.0f;
-  if (adj_aux_count <= static_cast<int64_t>(std::numeric_limits<int>::max())) {
-    accumulate_tfsf_interpolated_sample_adjoint_warp_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-        total,
-        static_cast<int>(adj_aux_count),
-        static_cast<float>(origin),
-        inv_ds,
-        static_cast<float>(component_scale),
-        adj_aux_field.mutable_data_ptr<float>(),
-        adj_field_patch.mutable_data_ptr<float>(),
-        coeff_patch.mutable_data_ptr<float>(),
-        sample_positions.mutable_data_ptr<float>());
-    WITWIN_CUDA_CHECK();
+  check_int64_vector(row_offsets, "row_offsets");
+  check_int64_vector(cell_indices, "cell_indices");
+  check_vector(weights, "weights");
+  check_same_cuda_device(adj_aux_field, row_offsets, "row_offsets");
+  check_same_cuda_device(adj_aux_field, cell_indices, "cell_indices");
+  check_same_cuda_device(adj_aux_field, weights, "weights");
+  STD_TORCH_CHECK(row_offsets.numel() == adj_aux_field.numel() + 1, "row_offsets length must be sample count + 1");
+  STD_TORCH_CHECK(cell_indices.numel() == weights.numel(), "cell_indices and weights must match");
+  if (adj_aux_field.numel() == 0) {
     return;
   }
-  accumulate_tfsf_interpolated_sample_adjoint_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      adj_aux_count,
-      static_cast<float>(origin),
-      inv_ds,
-      static_cast<float>(component_scale),
-      adj_aux_field.mutable_data_ptr<float>(),
-      adj_field_patch.mutable_data_ptr<float>(),
-      coeff_patch.mutable_data_ptr<float>(),
-      sample_positions.mutable_data_ptr<float>());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_aux_field.get_device_index());
+  accumulate_tfsf_sample_adjoint_kernel<<<linear_grid(adj_aux_field.numel()), 256, 0, current_cuda_stream()>>>(
+      adj_aux_field.numel(), static_cast<float>(component_scale),
+      adj_aux_field.mutable_data_ptr<float>(), adj_field_patch.mutable_data_ptr<float>(),
+      coeff_patch.mutable_data_ptr<float>(), row_offsets.mutable_data_ptr<int64_t>(),
+      cell_indices.mutable_data_ptr<int64_t>(), weights.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
@@ -4484,52 +4111,58 @@ void seed_inject_point_cuda(
     torch::stable::Tensor adj_field,
     const torch::stable::Tensor& grad_real,
     const torch::stable::Tensor& grad_imag,
-    const torch::stable::Tensor& point_i,
-    const torch::stable::Tensor& point_j,
-    const torch::stable::Tensor& point_k,
+    const torch::stable::Tensor& cells,
+    const torch::stable::Tensor& cell_offsets,
+    const torch::stable::Tensor& point_order,
     const torch::stable::Tensor& cos_pack,
     const torch::stable::Tensor& sin_pack,
     int64_t step) {
   check_field(adj_field, "adj_field");
-  check_float32_tensor(grad_real, "grad_real");
-  check_contiguous_tensor(grad_real, "grad_real");
-  check_float32_tensor(grad_imag, "grad_imag");
-  check_contiguous_tensor(grad_imag, "grad_imag");
-  STD_TORCH_CHECK(grad_real.dim() == 2, "grad_real must be a contiguous 2D (entry, point) tensor");
-  STD_TORCH_CHECK(grad_real.sizes().equals(grad_imag.sizes()), "grad_imag must match grad_real shape");
+  STD_TORCH_CHECK(grad_real.scalar_type() == torch::headeronly::ScalarType::Float ||
+      grad_real.scalar_type() == torch::headeronly::ScalarType::Double, "point seeds must be float32 or float64");
+  STD_TORCH_CHECK(grad_real.dim() == 2, "grad_real must be a 2D (entry, point) tensor");
   const int64_t entries = grad_real.size(0);
   const int64_t point_count = grad_real.size(1);
-  check_int32_vector(point_i, "point_i");
-  check_int32_vector(point_j, "point_j");
-  check_int32_vector(point_k, "point_k");
-  STD_TORCH_CHECK(point_i.size(0) == point_count, "point_i length must match the point gradient batch");
-  STD_TORCH_CHECK(point_j.size(0) == point_count, "point_j length must match the point gradient batch");
-  STD_TORCH_CHECK(point_k.size(0) == point_count, "point_k length must match the point gradient batch");
-  check_same_cuda_device(adj_field, grad_real, "grad_real");
-  check_same_cuda_device(adj_field, point_i, "point_i");
-  check_seed_schedule_pack(cos_pack, entries, step, "cos_pack");
-  check_seed_schedule_pack(sin_pack, entries, step, "sin_pack");
-  check_same_cuda_device(adj_field, cos_pack, "cos_pack");
-  if (entries == 0 || point_count == 0) {
+  auto check_seed = [&](const torch::stable::Tensor& tensor, const char* name) {
+    check_same_cuda_device(adj_field, tensor, name);
+    check_contiguous_tensor(tensor, name);
+    STD_TORCH_CHECK(tensor.scalar_type() == grad_real.scalar_type(), name, " must match seed dtype");
+  };
+  check_seed(grad_real, "grad_real");
+  check_seed(grad_imag, "grad_imag");
+  check_seed(cos_pack, "cos_pack");
+  check_seed(sin_pack, "sin_pack");
+  STD_TORCH_CHECK(grad_real.sizes().equals(grad_imag.sizes()), "grad_imag must match grad_real shape");
+  STD_TORCH_CHECK(cos_pack.dim() == 2 && cos_pack.size(0) == entries, "cos_pack must have one row per entry");
+  STD_TORCH_CHECK(cos_pack.sizes().equals(sin_pack.sizes()), "sin_pack must match cos_pack shape");
+  STD_TORCH_CHECK(step >= 0 && step < cos_pack.size(1), "step is out of schedule range");
+  check_int64_vector(cells, "cells");
+  check_int64_vector(cell_offsets, "cell_offsets");
+  check_int64_vector(point_order, "point_order");
+  check_same_cuda_device(adj_field, cells, "cells");
+  check_same_cuda_device(adj_field, cell_offsets, "cell_offsets");
+  check_same_cuda_device(adj_field, point_order, "point_order");
+  STD_TORCH_CHECK(cell_offsets.numel() == cells.numel() + 1, "cell_offsets length must be unique cell count + 1");
+  STD_TORCH_CHECK(point_order.numel() == point_count, "point_order length must match point count");
+  if (entries == 0 || cells.numel() == 0) {
     return;
   }
   const torch::stable::accelerator::DeviceGuard device_guard(adj_field.get_device_index());
-  const int block_size = 256;
-  seed_inject_point_kernel<int><<<linear_grid(point_count, block_size), block_size, 0, current_cuda_stream()>>>(
-      static_cast<int>(point_count),
-      static_cast<int>(entries),
-      static_cast<int>(cos_pack.size(1)),
-      static_cast<int>(step),
-      static_cast<unsigned int>(adj_field.size(1)),
-      static_cast<unsigned int>(adj_field.size(2)),
-      adj_field.mutable_data_ptr<float>(),
-      grad_real.mutable_data_ptr<float>(),
-      grad_imag.mutable_data_ptr<float>(),
-      point_i.mutable_data_ptr<int>(),
-      point_j.mutable_data_ptr<int>(),
-      point_k.mutable_data_ptr<int>(),
-      cos_pack.mutable_data_ptr<float>(),
-      sin_pack.mutable_data_ptr<float>());
+  auto launch = [&](auto seed_tag) {
+    using SeedT = decltype(seed_tag);
+    seed_inject_point_kernel<SeedT><<<linear_grid(cells.numel()), 256, 0, current_cuda_stream()>>>(
+        cells.numel(), point_count, static_cast<int>(entries),
+        static_cast<int>(cos_pack.size(1)), static_cast<int>(step),
+        adj_field.mutable_data_ptr<float>(), grad_real.mutable_data_ptr<SeedT>(),
+        grad_imag.mutable_data_ptr<SeedT>(), cells.mutable_data_ptr<int64_t>(),
+        cell_offsets.mutable_data_ptr<int64_t>(), point_order.mutable_data_ptr<int64_t>(),
+        cos_pack.mutable_data_ptr<SeedT>(), sin_pack.mutable_data_ptr<SeedT>());
+  };
+  if (grad_real.scalar_type() == torch::headeronly::ScalarType::Double) {
+    launch(double{});
+  } else {
+    launch(float{});
+  }
   WITWIN_CUDA_CHECK();
 }
 

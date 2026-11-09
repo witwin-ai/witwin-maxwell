@@ -47,7 +47,8 @@ def _analytic_tem_fields(scene, *, voltage=3.0, current=3.0):
     y = torch.as_tensor(scene.y_nodes64, dtype=torch.float64)
     y_half = torch.as_tensor(scene.y_half64, dtype=torch.float64)
     z_half = torch.as_tensor(scene.z_half64, dtype=torch.float64)
-    coefficient = current / (2.0 * 0.5 * 0.5)
+    # RF current into the field opposes the impressed source current along E.
+    coefficient = -current / (2.0 * 0.5 * 0.5)
     fields["Hx"] = (-coefficient * (y_half - 0.5))[None, :, None].expand(
         x.numel(), y_half.numel(), z_half.numel()
     ).clone()

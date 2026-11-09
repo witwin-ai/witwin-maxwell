@@ -1,0 +1,8 @@
+{
+  "schema": "provider-v3-historical-cost-input-v1",
+  "scope": "Historical phase times only; different source/device sharing, no v3 measurements or performance comparison.",
+  "source": {
+    "path": "<evidence-root>/pcb-fdtd-artifacts-20261028/final-maintained-939352918a5b00e5a58c876bb634f0d3ca29cc46/ordered/results/node-outcomes.json",
+    "sha256": "9c235d18ab29901f9578bbd49065665c3a018568e6a7a3223052ee7528cd6c1c"
+  }
+}

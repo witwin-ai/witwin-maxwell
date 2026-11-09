@@ -3,16 +3,16 @@ import torch
 
 from .boundary import combine_complex_spectral_components
 from .coords import centered_cell_coords
+from .runtime.representation import spectral_phasor_factor, spectral_scale
 
 
-def _build_frequency_solution_from_fields(fields, *, sample_count, window_normalization, source_spectrum=None):
+def _build_frequency_solution_from_fields(fields, *, frequency, sample_count, window_normalization, source_spectrum=None, phasor_factor=2.0, integration_dt=None, reference_frequency=None):
     if sample_count == 0:
         raise ValueError("No DFT samples recorded. Run solve() with dft_frequency first.")
 
-    if window_normalization > 0:
-        scale = 2.0 / window_normalization
-    else:
-        scale = 2.0 / sample_count
+    scale = spectral_scale(window_normalization if window_normalization > 0 else sample_count,
+                           phasor_factor=phasor_factor, integration_dt=integration_dt,
+                           reference_frequency=reference_frequency, frequency=frequency)
 
     result = {}
     for component_name in fields:
@@ -57,6 +57,10 @@ def _legacy_frequency_solution(solver):
         fields,
         sample_count=solver.dft_sample_count,
         window_normalization=solver.dft_window_normalization,
+        phasor_factor=spectral_phasor_factor(solver),
+        integration_dt=solver._spectral_integration_dt,
+        reference_frequency=solver._spectral_reference_frequency,
+        frequency=solver.dft_frequency,
     )
 
 
@@ -64,7 +68,8 @@ def _entry_source_spectrum(entry, scale):
     """Compute complex source spectrum from a DFT entry's accumulated source DFT."""
     sr = entry.get("source_dft_real", 0.0)
     si = entry.get("source_dft_imag", 0.0)
-    return (sr + 1j * si) * scale
+    from .runtime.spectral import convert_source_spectrum
+    return convert_source_spectrum(entry, (sr + 1j * si) * scale)
 
 
 def _solver_source_spectrum(solver, entry):
@@ -75,12 +80,12 @@ def _solver_source_spectrum(solver, entry):
         return None
     wn = entry.get("window_normalization", 0.0)
     sc = entry.get("sample_count", 0)
-    if wn > 0:
-        scale = 2.0 / wn
-    elif sc > 0:
-        scale = 2.0 / sc
-    else:
+    if sc == 0:
         return None
+    scale = spectral_scale(wn if wn > 0 else sc,
+                           phasor_factor=entry.get("phasor_factor", spectral_phasor_factor(solver)),
+                           integration_dt=solver._spectral_integration_dt,
+                           reference_frequency=solver._spectral_reference_frequency, frequency=entry["frequency"])
     return _entry_source_spectrum(entry, scale)
 
 
@@ -123,6 +128,10 @@ def get_frequency_solution(solver, *, frequency=None, freq_index=None, all_frequ
                 sample_count=entry["sample_count"],
                 window_normalization=entry["window_normalization"],
                 source_spectrum=_solver_source_spectrum(solver, entry),
+                phasor_factor=entry.get("phasor_factor", spectral_phasor_factor(solver)),
+                integration_dt=solver._spectral_integration_dt,
+                reference_frequency=solver._spectral_reference_frequency,
+                frequency=entry["frequency"],
             )
             if getattr(solver, "verbose", False):
                 print(
@@ -137,6 +146,10 @@ def get_frequency_solution(solver, *, frequency=None, freq_index=None, all_frequ
                 sample_count=entry["sample_count"],
                 window_normalization=entry["window_normalization"],
                 source_spectrum=_solver_source_spectrum(solver, entry),
+                phasor_factor=entry.get("phasor_factor", spectral_phasor_factor(solver)),
+                integration_dt=solver._spectral_integration_dt,
+                reference_frequency=solver._spectral_reference_frequency,
+                frequency=entry["frequency"],
             )
             for entry in entries
         ]
@@ -157,6 +170,10 @@ def get_frequency_solution(solver, *, frequency=None, freq_index=None, all_frequ
             sample_count=entry["sample_count"],
             window_normalization=entry["window_normalization"],
             source_spectrum=_solver_source_spectrum(solver, entry),
+            phasor_factor=entry.get("phasor_factor", spectral_phasor_factor(solver)),
+            integration_dt=solver._spectral_integration_dt,
+            reference_frequency=solver._spectral_reference_frequency,
+            frequency=entry["frequency"],
         )
         sample_count = entry["sample_count"]
 

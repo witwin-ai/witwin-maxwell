@@ -155,6 +155,8 @@ def mesh_axis(
     override_regions=(),
     layer_min_cells=None,
     pml_cells=(0, 0),
+    snap_points=(),
+    refine_regions=(),
 ) -> np.ndarray:
     """Mesh one axis of the domain ``[lo, hi]`` into float64 node coordinates.
 
@@ -164,6 +166,12 @@ def mesh_axis(
     thickness in cells at the low / high domain edge; those bands are
     uniformized piecewise between hard faces (see
     ``_uniformize_boundary_band``).
+
+    Opt-in layer refinement adds ``snap_points`` ``(coordinate, merge_tol)``,
+    hard faces dropped when closer than ``merge_tol`` to another face, and
+    ``refine_regions`` ``(lo, hi, max_dl)``, soft windows whose edges are moved
+    outward onto nearby faces so they never leave a sliver interval (see
+    ``_place_refine_regions``). With both empty the mesh is unchanged.
     """
     lo, hi = float(lo), float(hi)
     if hi <= lo:
@@ -180,6 +188,13 @@ def mesh_axis(
         faces += [r_lo, r_hi]
         constraints.append((float(r_lo), float(r_hi), float(dl)))
     boundaries = _collect_boundaries(lo, hi, faces)
+    if snap_points or refine_regions:
+        faces = faces + _accepted_snaps(boundaries, lo, hi, snap_points)
+        boundaries = _collect_boundaries(lo, hi, faces)
+        regions, edges = _place_refine_regions(boundaries, lo, hi, refine_regions)
+        faces = faces + edges
+        constraints = constraints + regions
+        boundaries = _collect_boundaries(lo, hi, faces)
     targets = _interval_targets(boundaries, base_dl, constraints, layer_min_cells)
     estimate = float(np.ceil(np.diff(boundaries) / targets).sum())
     if not math.isfinite(estimate) or estimate > _MAX_AXIS_CELLS:
@@ -192,7 +207,111 @@ def mesh_axis(
     return _uniformize_boundary_band(nodes, boundaries, *pml_cells)
 
 
+def _accepted_snaps(boundaries, lo, hi, snap_points) -> list[float]:
+    """Snap faces inside ``[lo, hi]`` farther than their merge tolerance from
+    every existing or previously accepted face (processed in ascending order)."""
+    tolerance = _axis_tolerance(lo, hi)
+    current = sorted(float(b) for b in boundaries)
+    accepted = []
+    for coord, merge_tol in sorted((float(c), float(t)) for c, t in snap_points):
+        if not lo < coord < hi:
+            continue
+        index = int(np.searchsorted(current, coord))
+        nearest = min(
+            abs(current[j] - coord) for j in (index - 1, index) if 0 <= j < len(current)
+        )
+        if nearest > max(merge_tol, tolerance):
+            current.insert(index, coord)
+            accepted.append(coord)
+    return accepted
+
+
+def _merge_refine_regions(lo, hi, refine_regions):
+    """Clip windows to the domain and fuse same-step windows that overlap or sit
+    closer than one step apart."""
+    regions = sorted(
+        (max(float(r_lo), lo), min(float(r_hi), hi), float(dl))
+        for r_lo, r_hi, dl in refine_regions
+        if float(r_hi) > lo and float(r_lo) < hi and float(dl) > 0.0
+    )
+    merged = []
+    for r_lo, r_hi, dl in regions:
+        for k, (m_lo, m_hi, m_dl) in enumerate(merged):
+            if m_dl == dl and r_lo <= m_hi + dl and r_hi >= m_lo - dl:
+                merged[k] = (min(m_lo, r_lo), max(m_hi, r_hi), dl)
+                break
+        else:
+            merged.append((r_lo, r_hi, dl))
+    return merged
+
+
+def _place_refine_regions(boundaries, lo, hi, refine_regions):
+    """Place soft refinement windows on an axis without creating sliver cells.
+
+    Each window edge is moved outward (never inward, so the requested window is
+    always covered): onto the nearest face within one window step outside it,
+    or, when a face lies less than one step inside it, to one step beyond that
+    face (and then onto any face within a step outside). Every accepted edge is
+    therefore either an existing face or at least one window step away from all
+    faces, so the ratio fill grades smoothly into the window. An edge that falls
+    inside a strictly finer window is not added as a face. Returns the placed
+    windows and the new face coordinates.
+    """
+    edges = sorted(float(b) for b in boundaries)
+
+    def place(edge, step, outward):
+        def near(a, b):
+            return [face for face in edges if a <= face <= b]
+
+        if outward < 0:
+            outside = near(edge - step, edge)
+            if outside:
+                return max(outside)
+            inside = [face for face in edges if edge < face < edge + step]
+            if inside:
+                edge = min(inside) - step
+                outside = near(edge - step, edge)
+                if outside:
+                    return max(outside)
+            return max(edge, lo)
+        outside = near(edge, edge + step)
+        if outside:
+            return min(outside)
+        inside = [face for face in edges if edge - step < face < edge]
+        if inside:
+            edge = max(inside) + step
+            outside = near(edge, edge + step)
+            if outside:
+                return min(outside)
+        return min(edge, hi)
+
+    regions = _merge_refine_regions(lo, hi, refine_regions)
+    placed, added = [], []
+    for r_lo, r_hi, dl in regions:
+        new_lo = place(r_lo, dl, -1)
+        new_hi = place(r_hi, dl, +1)
+        for edge in (new_lo, new_hi):
+            covered = any(o_lo < edge < o_hi and o_dl < dl for o_lo, o_hi, o_dl in regions)
+            if not covered and edge not in edges:
+                edges.append(edge)
+                edges.sort()
+                added.append(edge)
+        placed.append((new_lo, new_hi, dl))
+    return placed, added
+
+
 def _geometry_aabb(geometry):
+    from ...geometry.planar_pec import PlanarPEC
+    if isinstance(geometry, PlanarPEC):
+        # Mesh vertices are float32 visualization data. Preserve the physical
+        # float64 plane so auto meshing inserts precisely the declared support.
+        points = geometry.vertices.detach().cpu().numpy()
+        normal = "xyz".index(geometry.normal_axis)
+        transverse = [d for d in range(3) if d != normal]
+        lo = np.full(3, geometry.coordinate, dtype=np.float64)
+        hi = lo.copy()
+        lo[transverse], hi[transverse] = points.min(axis=0), points.max(axis=0)
+        return lo, hi
     try:
         vertices, _ = geometry.to_mesh()
     except NotImplementedError as error:
@@ -277,6 +396,108 @@ def _uniformize_boundary_band(
     return out
 
 
+def _layer_features(scene, specs, vacuum_dl):
+    """Per-axis snap points, soft refinement windows and hard regions of the
+    located ``LayerRefinementSpec`` entries (corners, gaps, layer bounds)."""
+    from . import corners as cg
+
+    snaps = ([], [], [])
+    soft = ([], [], [])
+    hard = ([], [], [])
+    bounds = [tuple(map(float, pair)) for pair in scene.domain.bounds]
+    structures = [s for s in scene.structures if getattr(s, "enabled", True)]
+    for spec in specs:
+        if not spec.is_layer:
+            continue
+        axis = "xyz".index(spec.axis)
+        b_lo, b_hi = spec.bounds
+        length = b_hi - b_lo
+        steps_dl = math.inf
+        if spec.min_steps_along_axis is not None and length > 0.0:
+            steps_dl = length / spec.min_steps_along_axis
+            hard[axis].append((b_lo, b_hi, steps_dl))
+        planes = {
+            None: (), "lower": (b_lo,), "upper": (b_hi,),
+            "center": (0.5 * (b_lo + b_hi),), "bounds": (b_lo, b_hi) if length > 0.0 else (b_lo,),
+        }[spec.bounds_snapping]
+        snaps[axis].extend((plane, 0.0) for plane in planes)
+        if spec.bounds_refinement is not None:
+            step = spec.bounds_refinement.grid_size(vacuum_dl)
+            if step < steps_dl:
+                half = 0.5 * spec.bounds_refinement.num_cells * step
+                for plane in ((b_lo, b_hi) if length > 0.0 else (b_lo,)):
+                    soft[axis].append((plane - half, plane + half, step))
+        if spec.corner_finder is None and not spec.dl_min_from_gap_width:
+            continue
+        u, v = cg.inplane_axes(axis)
+        coord = 0.5 * (b_lo + b_hi)
+        tol = _axis_tolerance(*bounds[axis])
+        sections = []
+        for structure in structures:
+            loops = cg.cross_section_loops(structure.geometry, axis, coord, tol)
+            if loops:
+                sections.append((cg.is_metal(structure), cg.orient_loops(loops)))
+        if spec.corner_finder is not None:
+            _corner_features(spec, sections, bounds, (u, v), vacuum_dl, snaps, soft)
+        if spec.dl_min_from_gap_width:
+            metal = [loops for is_metal, loops in sections if is_metal]
+            for along, index in ((0, u), (1, v)):
+                for g_lo, g_hi in cg.scanline_gaps(metal, along, 2.0 * vacuum_dl, bounds[index]):
+                    # Two cells across the gap, nodes on both metal edges.
+                    hard[index].append((g_lo, g_hi, 0.5 * (g_hi - g_lo)))
+    return snaps, soft, hard
+
+
+def _corner_features(spec, sections, bounds, plane_axes, vacuum_dl, snaps, soft):
+    from . import corners as cg
+
+    finder = spec.corner_finder
+    medium = finder.medium
+    chosen = [
+        loops for is_metal, loops in sections
+        if medium == "all" or is_metal == (medium == "metal")
+    ]
+    refinement = spec.corner_refinement
+    step = refinement.grid_size(vacuum_dl) if refinement is not None else vacuum_dl
+    merge = max(0.25 * step, finder.distance_threshold or 0.0)
+    u, v = plane_axes
+    tolerances = (_axis_tolerance(*bounds[u]), _axis_tolerance(*bounds[v]))
+    resolutions = (
+        (finder.convex_resolution, lambda a, b: a & b),
+        (finder.concave_resolution, lambda a, b: ~(a | b)),
+        (finder.mixed_resolution, lambda a, b: a ^ b),
+    )
+    for owner, loops in enumerate(chosen):
+        for loop in loops:
+            points, convex = cg.find_corners(loop, finder.angle_threshold, finder.distance_threshold)
+            for res, select in resolutions:
+                if res is None or points.shape[0] < 2:
+                    continue
+                following = np.roll(points, -1, axis=0)
+                lengths = np.linalg.norm(following - points, axis=1)
+                mask = select(convex, np.roll(convex, -1))
+                for start, end, length in zip(points[mask], following[mask], lengths[mask]):
+                    for along, index in ((0, u), (1, v)):
+                        lo, hi = sorted((start[along], end[along]))
+                        if hi - lo > tolerances[along]:
+                            soft[index].append((lo, hi, length / res))
+            points, convex = cg.drop_covered_corners(points, convex, owner, chosen, max(tolerances))
+            for point in points:
+                inside = all(
+                    bounds[index][0] - tolerances[along] <= point[along] <= bounds[index][1] + tolerances[along]
+                    for along, index in ((0, u), (1, v))
+                )
+                if spec.refinement_inside_sim_only and not inside:
+                    continue
+                for along, index in ((0, u), (1, v)):
+                    coord = float(point[along])
+                    if spec.corner_snapping:
+                        snaps[index].append((coord, merge))
+                    if refinement is not None:
+                        half = 0.5 * refinement.num_cells * step
+                        soft[index].append((coord - half, coord + half, step))
+
+
 def resolve_auto_grid(scene):
     """Materialize a ``GridSpec.auto`` scene grid into per-axis node arrays.
 
@@ -307,12 +528,38 @@ def resolve_auto_grid(scene):
         aabb_lo, aabb_hi = _geometry_aabb(override.geometry)
         override_regions.append((aabb_lo, aabb_hi, override.dl))
     layer = grid.layer_refinement
+    if isinstance(layer, tuple):
+        layer_specs, layer = layer, None
+    else:
+        layer_specs = ()
+    features = None
+    if any(spec.is_layer for spec in layer_specs) or (layer is not None and layer.is_layer):
+        features = _layer_features(
+            scene,
+            layer_specs if layer is None else (layer,),
+            wavelength / float(grid.min_steps_per_wavelength),
+        )
     nodes = []
     for axis_index, (axis_lo, axis_hi) in enumerate(scene.domain.bounds):
         axis = "xyz"[axis_index]
-        layer_min_cells = (
-            layer.min_cells if layer is not None and layer.covers(axis) else None
-        )
+        if layer_specs:
+            counts = [spec.min_cells for spec in layer_specs if spec.covers(axis)]
+            layer_min_cells = max(counts) if counts else None
+        else:
+            layer_min_cells = (
+                layer.min_cells if layer is not None and layer.covers(axis) else None
+            )
+        extra = {}
+        if features is not None:
+            snaps, soft, hard = features
+            extra = {"snap_points": snaps[axis_index], "refine_regions": soft[axis_index]}
+            override_axis = [
+                (lo[axis_index], hi[axis_index], dl[axis_index]) for lo, hi, dl in override_regions
+            ] + hard[axis_index]
+        else:
+            override_axis = [
+                (lo[axis_index], hi[axis_index], dl[axis_index]) for lo, hi, dl in override_regions
+            ]
         axis_nodes = mesh_axis(
             axis_lo,
             axis_hi,
@@ -322,14 +569,12 @@ def resolve_auto_grid(scene):
             index_regions=[
                 (lo[axis_index], hi[axis_index], index) for lo, hi, index in index_regions
             ],
-            override_regions=[
-                (lo[axis_index], hi[axis_index], dl[axis_index])
-                for lo, hi, dl in override_regions
-            ],
+            override_regions=override_axis,
             layer_min_cells=layer_min_cells,
             # Domain is physical. PreparedScene appends the PML cells outside
             # these nodes, so the physical auto mesh has no internal PML band.
             pml_cells=(0, 0),
+            **extra,
         )
         nodes.append(axis_nodes)
     return tuple(nodes)

@@ -124,7 +124,7 @@ def _path_group_delay(
     phase_mean = torch.sum(magnitude_squared * phase) / weight_sum
     centered_omega = omega - omega_mean
     denominator = torch.sum(magnitude_squared * centered_omega.square())
-    if float(denominator.item()) <= torch.finfo(frequencies.dtype).eps:
+    if float(denominator.item()) == 0:
         raise ValueError("Delay extraction requires a nonzero frequency span.")
     slope = torch.sum(magnitude_squared * centered_omega * (phase - phase_mean)) / denominator
     fitted_phase = phase_mean + slope * centered_omega

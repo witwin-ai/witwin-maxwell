@@ -22,6 +22,7 @@ from witwin.maxwell.fdtd.wire_lossy import (
     MU_0,
     build_lossy_segment_model,
     resolve_lossy_band,
+    _certify_discrete_graph,
 )
 
 
@@ -47,6 +48,7 @@ def _single_segment_model(
     band=_BAND,
     dt=_DT,
     order=_ORDER,
+    capacitance=3.163380744419103e-14,
 ):
     metadata = {
         "conductor": {
@@ -61,12 +63,68 @@ def _single_segment_model(
         radius=torch.tensor([radius], dtype=torch.float64),
         length=torch.tensor([length], dtype=torch.float64),
         segment_wire_ids=torch.tensor([0], dtype=torch.int64),
+        tail=torch.tensor([0]),
+        head=torch.tensor([1]),
+        node_capacitance=torch.tensor([capacitance, capacitance], dtype=torch.float64),
+        grounded=torch.tensor([False, False]),
         metadata=metadata,
         band=band,
         dt=dt,
         order=order,
         samples=_SAMPLES,
     )
+
+
+def test_finite_wire_charge_coupled_spectral_radius():
+    # One open segment from the n=64, 19-segment-per-arm dipole, without a port
+    # or Maxwell field. Each endpoint owns half the segment capacitance.
+    model = _single_segment_model(
+        radius=0.12 * 1.6 * 299792458.0 / 2.4e9 / 64,
+        length=0.0014956749510020018,
+        inductance=3.9341541135939906e-10,
+        dt=3.526029508432074e-12,
+        band=(1.2e9, 4.8e9),
+    )
+    assert model.spectral_radius < 1.0
+    capacitance = 3.163380744419103e-14
+    inductive = model.inductance / model.dt
+    state_scale = model.ade_input.reshape(-1)
+
+    def advance(state):
+        current, ade = model.advance_current(
+            state[:1],
+            (state[2:] * state_scale).reshape(1, -1),
+            inductive * state[1:2],
+        )
+        # V = (q_tail - q_head) / C, q_tail -= dt I, q_head += dt I.
+        voltage = state[1:2] - 2.0 * model.dt * current / (capacitance * inductive)
+        return torch.cat((current, voltage, ade.reshape(-1) / state_scale))
+
+    basis = torch.eye(model.state_count + 2, dtype=torch.float64)
+    transition = torch.stack([advance(column) for column in basis], dim=1)
+    radius = float(torch.linalg.eigvals(transition).abs().max())
+    assert radius <= 1.0 + 1.0e-10, f"charge-coupled spectral radius = {radius:.12g}"
+
+
+def test_passive_fit_full_band_and_charge_certificate_fail_closed():
+    from dataclasses import replace
+
+    model = _single_segment_model()
+    fit = model.models[0]
+    assert bool(torch.all(fit.model.poles.real < 0.0))
+    assert bool(torch.all(fit.model.residues.real <= 0.0))
+    assert model.minimum_digital_resistance > 0.0
+    # Make the installed branch active; the broadband certificate must reject it.
+    active = replace(model, companion_conductance=-model.companion_conductance)
+    with pytest.raises(RuntimeError, match="full-digital-band passivity"):
+        _certify_discrete_graph(
+            active, tail=torch.tensor([0]), head=torch.tensor([1]),
+            node_capacitance=torch.full((2,), 3.163380744419103e-14),
+            grounded=torch.tensor([False, False]),
+        )
+    # A passive branch cannot cure a violated charge CFL; check the graph too.
+    with pytest.raises(RuntimeError, match="current/charge/ADE spectral radius"):
+        _single_segment_model(capacitance=1.0e-20)
 
 
 def _drive_current_sinusoid(model, frequency, *, periods=40, steps_per_period=400):
@@ -156,14 +214,11 @@ def test_analytic_ac_resistance_sweep(lossy_model):
     # time-stepping the ADE, not just reading the fit) tracks the analytic
     # scaled-Bessel curve across the band.
     #
-    # Pre-registered tolerance: 8% (compile-layer relative-max gate class). The
-    # shared complex vector fit recovers Re(Z') only to ~1-6% and *nondeterministically*
-    # (blocker B1, recorded in the finite-conductivity memory: identical config
-    # flipped 1.4%/2.48%); the stability certificate here further caps the usable
-    # fit order (13 here), so a strict 2% or 5% gate flips run-to-run. 8% is the
-    # robust envelope and matches the compile layer's relative_max<=10% fit class.
-    # bilinear warping at dt=1e-12 is negligible (< 1e-4). The separate
-    # realized-vs-fitted test carries the tight recurrence-correctness proof.
+    # Tolerance 1e-3: the passive NNLS Foster/RL fit is deterministic and its measured
+    # worst error over this sweep is 4.1e-5 (2026-10-30), so the gate keeps a ~25x margin
+    # while still catching a real fit regression. Bilinear warping at dt=1e-12 is
+    # negligible (< 1e-4). The separate realized-vs-fitted test carries the tight
+    # recurrence-correctness proof.
     frequencies = [5.0e8, 1.0e9, 1.5e9, 2.0e9, 2.5e9]
     errors = []
     for frequency in frequencies:
@@ -173,7 +228,7 @@ def test_analytic_ac_resistance_sweep(lossy_model):
             internal_impedance(_RADIUS, _SIGMA, MU_0, [frequency]).real.item()
         )
         errors.append(float(abs(realized - analytic) / analytic))
-    assert max(errors) < 0.08, dict(zip(frequencies, errors))
+    assert max(errors) < 1.0e-3, dict(zip(frequencies, errors))
 
 
 def test_realized_matches_fitted_model(lossy_model):

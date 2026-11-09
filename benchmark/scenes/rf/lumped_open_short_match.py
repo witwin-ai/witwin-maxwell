@@ -131,12 +131,16 @@ def coax_sol_scene(
 
     # Outer shield runs the full padded length through both PMLs for every standard.
     scene.add_structure(
-        _HollowCylinder(
-            position=(0.0, 0.0, 0.0),
-            inner_radius=OUTER_RADIUS,
-            outer_radius=SHIELD_OUTER,
-            length=length,
-        ).with_material(mw.Material.pec(), name="shield")
+        mw.Structure(
+            _HollowCylinder(
+                position=(0.0, 0.0, 0.0),
+                inner_radius=OUTER_RADIUS,
+                outer_radius=SHIELD_OUTER,
+                length=length,
+            ),
+            mw.Material.pec(),
+            name="shield",
+        )
     )
 
     if standard == "open":
@@ -145,22 +149,30 @@ def coax_sol_scene(
         rod_length = LOAD_PLANE - left_edge
         rod_center = 0.5 * (left_edge + LOAD_PLANE)
         scene.add_structure(
-            mw.Cylinder(
-                position=(rod_center, 0.0, 0.0),
-                radius=INNER_RADIUS,
-                height=rod_length,
-                axis="x",
-            ).with_material(mw.Material.pec(), name="inner_conductor")
+            mw.Structure(
+                mw.Cylinder(
+                    position=(rod_center, 0.0, 0.0),
+                    radius=INNER_RADIUS,
+                    height=rod_length,
+                    axis="x",
+                ),
+                mw.Material.pec(),
+                name="inner_conductor",
+            )
         )
     else:
         # matched / short: inner rod runs the full padded length.
         scene.add_structure(
-            mw.Cylinder(
-                position=(0.0, 0.0, 0.0),
-                radius=INNER_RADIUS,
-                height=length,
-                axis="x",
-            ).with_material(mw.Material.pec(), name="inner_conductor")
+            mw.Structure(
+                mw.Cylinder(
+                    position=(0.0, 0.0, 0.0),
+                    radius=INNER_RADIUS,
+                    height=length,
+                    axis="x",
+                ),
+                mw.Material.pec(),
+                name="inner_conductor",
+            )
         )
 
     if standard == "short":
@@ -168,12 +180,16 @@ def coax_sol_scene(
         plug_length = 0.5 * length - LOAD_PLANE
         plug_center = 0.5 * (LOAD_PLANE + 0.5 * length)
         scene.add_structure(
-            mw.Cylinder(
-                position=(plug_center, 0.0, 0.0),
-                radius=OUTER_RADIUS,
-                height=plug_length,
-                axis="x",
-            ).with_material(mw.Material.pec(), name="short_plug")
+            mw.Structure(
+                mw.Cylinder(
+                    position=(plug_center, 0.0, 0.0),
+                    radius=OUTER_RADIUS,
+                    height=plug_length,
+                    axis="x",
+                ),
+                mw.Material.pec(),
+                name="short_plug",
+            )
         )
 
     return scene

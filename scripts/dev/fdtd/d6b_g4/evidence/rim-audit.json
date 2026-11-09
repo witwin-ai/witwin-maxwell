@@ -1,0 +1,582 @@
+{
+  "dl": 0.00375,
+  "duration": 3.9e-08,
+  "cases": [
+    {
+      "z": 0.05,
+      "tilt": 0.0,
+      "mode": "baseline",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 300,
+        "split_edges": 190,
+        "on_sheet_traces": 0,
+        "traces": 300,
+        "floored_subfaces": 300,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 300,
+      "partial_chords": 38,
+      "outside_endpoints": 38,
+      "outside_chord_length": 0.02992500000000026,
+      "chord_weighted_area": 0.004218749999999997,
+      "sheet_loop_area": 0.0015609374999999972,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.000203765625
+      ],
+      "min_split_mass_fraction": 0.04999999999999952,
+      "magnetic_area_ratio_min": 0.20853080568720278,
+      "seconds": 1.976776123046875,
+      "memory_gib": 4.76837158203125e-06
+    },
+    {
+      "z": 0.05,
+      "tilt": 0.0,
+      "mode": "endpoints",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 262,
+        "split_edges": 152,
+        "on_sheet_traces": 0,
+        "traces": 262,
+        "floored_subfaces": 262,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 262,
+      "partial_chords": 0,
+      "outside_endpoints": 0,
+      "outside_chord_length": 0.0,
+      "chord_weighted_area": 0.003684374999999995,
+      "sheet_loop_area": 0.0015609374999999972,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.000203765625
+      ],
+      "min_split_mass_fraction": 0.04999999999999952,
+      "magnetic_area_ratio_min": 0.20853080568720278,
+      "seconds": 1.3066625595092773,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.05,
+      "tilt": 1.432096184,
+      "mode": "baseline",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 338,
+        "split_edges": 228,
+        "on_sheet_traces": 0,
+        "traces": 338,
+        "floored_subfaces": 338,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 338,
+      "partial_chords": 76,
+      "outside_endpoints": 76,
+      "outside_chord_length": 0.030112447311184686,
+      "chord_weighted_area": 0.004331021591503996,
+      "sheet_loop_area": 0.0015614252167747925,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.000203765625
+      ],
+      "min_split_mass_fraction": 0.006301250003358405,
+      "magnetic_area_ratio_min": 0.027562500057214973,
+      "seconds": 1.3125691413879395,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.05,
+      "tilt": 1.432096184,
+      "mode": "endpoints",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 262,
+        "split_edges": 152,
+        "on_sheet_traces": 0,
+        "traces": 262,
+        "floored_subfaces": 262,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 262,
+      "partial_chords": 0,
+      "outside_endpoints": 0,
+      "outside_chord_length": 0.0,
+      "chord_weighted_area": 0.0036842258123962997,
+      "sheet_loop_area": 0.0015614252167747925,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.00020376562499999998
+      ],
+      "min_split_mass_fraction": 0.006301250003358405,
+      "magnetic_area_ratio_min": 0.041635759415734434,
+      "seconds": 1.2808232307434082,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.05,
+      "tilt": 30.0,
+      "mode": "baseline",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          46
+        ],
+        "box_upper": [
+          92,
+          74,
+          55
+        ],
+        "active_split_faces": 375,
+        "split_edges": 228,
+        "on_sheet_traces": 0,
+        "traces": 375,
+        "floored_subfaces": 151,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 375,
+      "partial_chords": 38,
+      "outside_endpoints": 38,
+      "outside_chord_length": 0.009535239827086628,
+      "chord_weighted_area": 0.003991943678071347,
+      "sheet_loop_area": 0.0014632297978616061,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002610351562499999,
+        0.0002425781249999999,
+        0.00024015234374999986
+      ],
+      "min_split_mass_fraction": 0.08067729915157354,
+      "magnetic_area_ratio_min": 0.5208916464738607,
+      "seconds": 1.594604253768921,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.05,
+      "tilt": 30.0,
+      "mode": "endpoints",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          46
+        ],
+        "box_upper": [
+          92,
+          74,
+          55
+        ],
+        "active_split_faces": 337,
+        "split_edges": 190,
+        "on_sheet_traces": 0,
+        "traces": 337,
+        "floored_subfaces": 151,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 337,
+      "partial_chords": 0,
+      "outside_endpoints": 0,
+      "outside_chord_length": 0.0,
+      "chord_weighted_area": 0.0033749005778749334,
+      "sheet_loop_area": 0.0014632297978616061,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002610351562499999,
+        0.0002425781249999999,
+        0.00024015234374999983
+      ],
+      "min_split_mass_fraction": 0.18318619885870513,
+      "magnetic_area_ratio_min": 0.5208916464738607,
+      "seconds": 1.3990612030029297,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.5,
+      "tilt": 0.0,
+      "mode": "baseline",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 300,
+        "split_edges": 190,
+        "on_sheet_traces": 0,
+        "traces": 300,
+        "floored_subfaces": 0,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 300,
+      "partial_chords": 38,
+      "outside_endpoints": 38,
+      "outside_chord_length": 0.02992500000000026,
+      "chord_weighted_area": 0.004218749999999997,
+      "sheet_loop_area": 0.0015609374999999972,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.000203765625
+      ],
+      "min_split_mass_fraction": 0.4999999999999951,
+      "magnetic_area_ratio_min": 1.0,
+      "seconds": 1.2133758068084717,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.5,
+      "tilt": 0.0,
+      "mode": "endpoints",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 262,
+        "split_edges": 152,
+        "on_sheet_traces": 0,
+        "traces": 262,
+        "floored_subfaces": 0,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 262,
+      "partial_chords": 0,
+      "outside_endpoints": 0,
+      "outside_chord_length": 0.0,
+      "chord_weighted_area": 0.003684374999999995,
+      "sheet_loop_area": 0.0015609374999999972,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.000203765625
+      ],
+      "min_split_mass_fraction": 0.4999999999999951,
+      "magnetic_area_ratio_min": 1.0,
+      "seconds": 1.4155168533325195,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.5,
+      "tilt": 1.432096184,
+      "mode": "baseline",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 300,
+        "split_edges": 190,
+        "on_sheet_traces": 0,
+        "traces": 300,
+        "floored_subfaces": 0,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 300,
+      "partial_chords": 38,
+      "outside_endpoints": 38,
+      "outside_chord_length": 0.030023398690083847,
+      "chord_weighted_area": 0.004218767778499383,
+      "sheet_loop_area": 0.0015614252167747925,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.000203765625
+      ],
+      "min_split_mass_fraction": 0.4447500000063515,
+      "magnetic_area_ratio_min": 1.0,
+      "seconds": 1.2131929397583008,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.5,
+      "tilt": 1.432096184,
+      "mode": "endpoints",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          47
+        ],
+        "box_upper": [
+          92,
+          75,
+          54
+        ],
+        "active_split_faces": 262,
+        "split_edges": 152,
+        "on_sheet_traces": 0,
+        "traces": 262,
+        "floored_subfaces": 0,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 262,
+      "partial_chords": 0,
+      "outside_endpoints": 0,
+      "outside_chord_length": 0.0,
+      "chord_weighted_area": 0.0036842258123962997,
+      "sheet_loop_area": 0.0015614252167747925,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.0002278125,
+        0.0002134687499999999,
+        0.000203765625
+      ],
+      "min_split_mass_fraction": 0.4552500000051441,
+      "magnetic_area_ratio_min": 1.0,
+      "seconds": 1.4222173690795898,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.5,
+      "tilt": 30.0,
+      "mode": "baseline",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          46
+        ],
+        "box_upper": [
+          92,
+          74,
+          55
+        ],
+        "active_split_faces": 413,
+        "split_edges": 266,
+        "on_sheet_traces": 0,
+        "traces": 413,
+        "floored_subfaces": 188,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 413,
+      "partial_chords": 76,
+      "outside_endpoints": 76,
+      "outside_chord_length": 0.08817930687617266,
+      "chord_weighted_area": 0.004340296429505418,
+      "sheet_loop_area": 0.0012472866998893004,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.00026103515624999993,
+        0.0002425781249999999,
+        0.00024015234374999983
+      ],
+      "min_split_mass_fraction": 0.0957839297655339,
+      "magnetic_area_ratio_min": 0.08342512233663373,
+      "seconds": 1.4696660041809082,
+      "memory_gib": 9.5367431640625e-06
+    },
+    {
+      "z": 0.5,
+      "tilt": 30.0,
+      "mode": "endpoints",
+      "statistics": {
+        "box_lower": [
+          47,
+          64,
+          46
+        ],
+        "box_upper": [
+          92,
+          74,
+          55
+        ],
+        "active_split_faces": 337,
+        "split_edges": 190,
+        "on_sheet_traces": 0,
+        "traces": 337,
+        "floored_subfaces": 188,
+        "facets": 1,
+        "folds": 0,
+        "fold_faces": 0,
+        "stiffness_ratio": 2.0,
+        "minimum_area": 0.02
+      },
+      "spacing": [
+        0.003750000000000002,
+        0.003750000000000002,
+        0.0037499999999999977
+      ],
+      "chords": 337,
+      "partial_chords": 0,
+      "outside_endpoints": 0,
+      "outside_chord_length": 0.0,
+      "chord_weighted_area": 0.00315312117995743,
+      "sheet_loop_area": 0.0012472866998893004,
+      "true_area": 0.0021135368289,
+      "electric_volume_by_component": [
+        0.00026103515624999993,
+        0.0002425781249999999,
+        0.00024015234374999986
+      ],
+      "min_split_mass_fraction": 0.0957839297655339,
+      "magnetic_area_ratio_min": 0.08342512233663373,
+      "seconds": 1.484666109085083,
+      "memory_gib": 9.5367431640625e-06
+    }
+  ]
+}

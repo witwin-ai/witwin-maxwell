@@ -1,0 +1,50 @@
+{
+  "dl": 0.00749481145,
+  "steps": 3003,
+  "f0": 1000000000.0,
+  "cases": {
+    "pec": {
+      "0.0": {
+        "f_res": 938515378.1621768,
+        "decay": 719505286.9680468,
+        "f_peak": 962493119.2762443,
+        "peak": 0.5779631874038946,
+        "dt": 1.2977390385975968e-11,
+        "dt_empty": 1.2990380766742711e-11,
+        "dt_loaded": 1.2990380766742711e-11,
+        "steps": 3007,
+        "seconds": 5.617689609527588,
+        "max_memory_gib": 0.10692405700683594,
+        "shift": 0.0,
+        "peak_ratio": 1.0
+      }
+    }
+  },
+  "worst_shift": 0.0,
+  "gate_pass": true,
+  "resolution": 40,
+  "kind": "sheet",
+  "zoff": 0.5,
+  "offset": [
+    0.37,
+    0.21
+  ],
+  "requested_duration": 3.9e-08,
+  "trace_file": "/tmp/sheet-rim-phase1a/sheet-n40-z0.5.json",
+  "grid_wavelength": 0.299792458,
+  "grid_shape": [
+    81,
+    81,
+    61
+  ],
+  "actual_spacing": [
+    0.007494811449999997,
+    0.007494811449999997,
+    0.007494811449999995
+  ],
+  "nearest_zero_node": [
+    0.0,
+    0.0,
+    0.0
+  ]
+}

@@ -25,6 +25,7 @@ class _DensityModeSourceScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
+            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-0.72, 0.72), (-0.60, 0.60), (-0.60, 0.60))),
             grid=mw.GridSpec.uniform(0.12),
             boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
@@ -144,3 +145,59 @@ def test_fdtd_gradient_bridge_mode_source_supports_sparse_implicit_mode_solver(m
         rel=1e-2,
         abs=1e-6,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_mode_source_replay_resolves_once_per_backward_and_refreshes_material(monkeypatch):
+    from witwin.maxwell.fdtd.adjoint import core
+
+    model = _DensityModeSourceScene().cuda()
+    original = core._resolved_source_term_lists
+    material_snapshots = []
+    backward_snapshots = []
+
+    def recorded(solver, ex, ey, ez):
+        material_snapshots.append(ez.detach().clone())
+        return original(solver, ex, ey, ez)
+
+    monkeypatch.setattr(core, "_resolved_source_term_lists", recorded)
+    for value in (0., .4):
+        with torch.no_grad():
+            model.logits.fill_(value)
+        model.logits.grad = None
+        _, _, loss = _mode_probe_loss(model)
+        before = len(material_snapshots)
+        loss.backward()
+        # One differentiable source graph serves every segment and reverse step.
+        assert len(material_snapshots) - before == 1
+        backward_snapshots.append(material_snapshots[-1])
+        assert torch.isfinite(model.logits.grad).all() and bool(model.logits.grad.abs().max() > 0)
+    assert not torch.equal(backward_snapshots[0], backward_snapshots[1])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_mode_source_segment_reuse_matches_independent_step_rebuilds(monkeypatch):
+    from witwin.maxwell.fdtd.adjoint import core
+    from witwin.maxwell.fdtd.checkpoint import clone_checkpoint_tensors
+
+    model = _DensityModeSourceScene().cuda()
+    bridge = _FDTDGradientBridge(_build_mode_simulation(model, time_steps=8))
+    bridge.forward(tuple(bridge.material_inputs))
+    solver, checkpoint = bridge._last_solver, bridge._last_checkpoints[0]
+    original, calls = core._resolved_source_term_lists, []
+
+    def recorded(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(core, "_resolved_source_term_lists", recorded)
+    cached = core._replay_segment_states(solver, checkpoint, 0, 8)
+    assert len(calls) == 1
+    with torch.no_grad():
+        current = clone_checkpoint_tensors(checkpoint)
+        for step in range(8):
+            current = core._step_state(solver, current, time_value=step*solver.dt,
+                eps_ex=solver.eps_Ex, eps_ey=solver.eps_Ey, eps_ez=solver.eps_Ez, step_index=step)
+            for name, tensor in current.items():
+                torch.testing.assert_close(tensor, cached[step+1][name], rtol=1e-6, atol=1e-7)
+    assert len(calls) == 9  # independent rebuilds remain available to direct callers

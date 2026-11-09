@@ -10,7 +10,10 @@ from witwin.maxwell.fdtd.boundary import BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_P
 from tests.fdtd.cuda._parity_backend import backend
 
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for native FDTD backend tests.")
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for native FDTD backend tests."),
+    pytest.mark.usefixtures("native_cuda_extension"),
+]
 
 
 def _seeded(shape: tuple[int, int, int], generator: torch.Generator, *, scale: float = 1.0) -> torch.Tensor:

@@ -1,6 +1,7 @@
 #include "../launch.h"
 #include "../tensors.h"
 #include "common.cuh"
+#include "modulation.cuh"
 
 namespace {
 
@@ -98,7 +99,7 @@ __global__ void apply_polarization_modulated_kernel(
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
     const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
+    const double* __restrict__ modulation_time,
     float dt,
     float* __restrict__ electric) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -109,7 +110,7 @@ __global__ void apply_polarization_modulated_kernel(
   // angular frequency so a dispersive cell divides by the SAME m_next its modulated
   // curl(H) update used, even when the scene mixes several modulation frequencies.
   float sin_next, cos_next;
-  sincosf(mod_omega[index] * modulation_time[1], &sin_next, &cos_next);
+  modulation_sincos(mod_omega[index], modulation_time[1], sin_next, cos_next);
   const float m_next =
       fmaxf(1.0f + mod_cos[index] * cos_next - mod_sin[index] * sin_next, 1.0e-6f);
   electric[index] -= dt * current[index] * inv_permittivity[index] / m_next;
@@ -702,12 +703,14 @@ void apply_polarization_current_modulated_cuda(
   check_matching_field(electric, mod_cos, "mod_cos");
   check_matching_field(electric, mod_sin, "mod_sin");
   check_matching_field(electric, mod_omega, "mod_omega");
-  check_float32_tensor(modulation_time, "modulation_time");
+  check_cuda_tensor(modulation_time, "modulation_time");
+  STD_TORCH_CHECK(modulation_time.scalar_type() == torch::headeronly::ScalarType::Double,
+                  "modulation_time must be float64");
   check_contiguous_tensor(modulation_time, "modulation_time");
   check_same_cuda_device(electric, modulation_time, "modulation_time");
   STD_TORCH_CHECK(
       modulation_time.dim() == 1 && modulation_time.numel() == 2,
-      "modulation_time must be a contiguous float32 CUDA tensor with two elements");
+      "modulation_time must be a contiguous float64 CUDA tensor with two elements");
   torch::stable::accelerator::DeviceGuard guard(electric.get_device_index());
   apply_polarization_modulated_kernel<<<linear_grid(electric.numel()), 256, 0, current_cuda_stream()>>>(
       electric.numel(),
@@ -716,7 +719,7 @@ void apply_polarization_current_modulated_cuda(
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
-      modulation_time.mutable_data_ptr<float>(),
+      modulation_time.mutable_data_ptr<double>(),
       static_cast<float>(dt),
       electric.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();

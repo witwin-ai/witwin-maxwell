@@ -44,6 +44,35 @@ def _broadcast_radius(radius, shape: tuple[int, ...], *, device: torch.device, d
     return torch.broadcast_to(radii, shape).clone()
 
 
+def _transform_electric_spectrum(transformers, directions, radii, batch_size):
+    """Share one direction batch's geometry across frequencies, with bounded memory."""
+    first = transformers[0]
+    direction_tensor = _normalize_directions(directions).to(device=first.device, dtype=first.coord_dtype)
+    radius_tensors = []
+    for radius in radii:
+        radius_tensor = (
+            radius_tensors[0] if radius_tensors and radius is radii[0]
+            else _broadcast_radius(
+                radius, direction_tensor.shape[:-1], device=first.device, dtype=first.coord_dtype
+            ).reshape(-1)
+        )
+        radius_tensors.append(radius_tensor)
+    e_batches = [[] for _ in transformers]
+    for start in range(0, direction_tensor.shape[0], batch_size):
+        stop = min(start + batch_size, direction_tensor.shape[0])
+        direction_real = direction_tensor[start:stop]
+        direction_complex = direction_real.to(dtype=first.field_dtype)
+        projection = torch.matmul(direction_real, first._src_points.transpose(0, 1)).to(dtype=first.field_dtype)
+        for index, transformer in enumerate(transformers):
+            prefactor, cross_s_n, cross_s_l = transformer._radiation_vectors(
+                direction_complex, projection, radius_tensors[index][start:stop]
+            )
+            e_batches[index].append(prefactor * (
+                transformer.eta * torch.cross(direction_complex, cross_s_n, dim=-1) + cross_s_l
+            ))
+    return tuple(torch.cat(batches, dim=0) for batches in e_batches)
+
+
 class NearFieldFarFieldTransformer:
     def __init__(
         self,
@@ -56,6 +85,8 @@ class NearFieldFarFieldTransformer:
         background_eps_r: complex | float | None = None,
         background_mu_r: complex | float | None = None,
         device: str | torch.device | None = None,
+        _geometry=None,
+        _weighted_currents=None,
     ):
         self.currents = currents
         self._surfaces = _normalize_currents_collection(currents)
@@ -86,18 +117,46 @@ class NearFieldFarFieldTransformer:
             eta_vacuum=self.eta0,
         )
 
+        if _geometry is not None:
+            self._quadrature_weights = _geometry._quadrature_weights
+            self._src_points = _geometry._src_points
+            self._J_w, self._M_w = _weighted_currents
+            return
+
         source_points = []
         weighted_j = []
         weighted_m = []
+        self._quadrature_weights = []
         for surface in self._surfaces:
             points, surface_j, surface_m = surface.quadrature()
             source_points.append(points.reshape(-1, 3))
+            self._quadrature_weights.append(surface._quadrature_weights())
             weighted_j.append(surface_j.reshape(-1, 3))
             weighted_m.append(surface_m.reshape(-1, 3))
 
         self._src_points = torch.cat(source_points, dim=0).to(device=self.device, dtype=self.coord_dtype)
         self._J_w = torch.cat(weighted_j, dim=0).to(device=self.device, dtype=self.field_dtype)
         self._M_w = torch.cat(weighted_m, dim=0).to(device=self.device, dtype=self.field_dtype)
+
+    @classmethod
+    def _from_current_spectrum(cls, currents, **options):
+        """Batch pointwise weights on shared geometry; preserve integral GEMMs."""
+        first = cls(currents[0], **options)
+        if len(currents) == 1:
+            return (first,)
+        surfaces = [_normalize_currents_collection(current) for current in currents[1:]]
+        weighted_j, weighted_m = [], []
+        for index, weights in enumerate(first._quadrature_weights):
+            j_field = torch.stack([surface[index].J for surface in surfaces])
+            m_field = torch.stack([surface[index].M for surface in surfaces])
+            weighted_j.append((j_field * weights).reshape(len(surfaces), -1, 3))
+            weighted_m.append((m_field * weights.to(dtype=m_field.dtype)).reshape(len(surfaces), -1, 3))
+        j_weighted = torch.cat(weighted_j, dim=1).to(device=first.device, dtype=first.field_dtype)
+        m_weighted = torch.cat(weighted_m, dim=1).to(device=first.device, dtype=first.field_dtype)
+        return (first,) + tuple(
+            cls(current, _geometry=first, _weighted_currents=(j_weighted[index], m_weighted[index]), **options)
+            for index, current in enumerate(currents[1:])
+        )
 
     def _transform_batch(
         self,
@@ -107,8 +166,21 @@ class NearFieldFarFieldTransformer:
         direction_real = directions.to(device=self.device, dtype=self.coord_dtype)
         radius_real = radius.to(device=self.device, dtype=self.coord_dtype)
         direction_complex = direction_real.to(dtype=self.field_dtype)
+        projection = torch.matmul(direction_real, self._src_points.transpose(0, 1)).to(dtype=self.field_dtype)
+        prefactor, cross_s_n, cross_s_l = self._radiation_vectors(direction_complex, projection, radius_real)
+        e_field = prefactor * (
+            self.eta * torch.cross(direction_complex, cross_s_n, dim=-1)
+            + cross_s_l
+        )
+        h_field = prefactor * (
+            (1.0 / self.eta) * torch.cross(direction_complex, cross_s_l, dim=-1)
+            - cross_s_n
+        )
+        return e_field, h_field
+
+    def _radiation_vectors(self, direction_complex, projection, radius_real):
         phase = torch.exp(
-            -1j * self.k * torch.matmul(direction_real, self._src_points.transpose(0, 1)).to(dtype=self.field_dtype)
+            -1j * self.k * projection
         )
         n_vector = torch.matmul(phase, self._J_w)
         l_vector = torch.matmul(phase, self._M_w)
@@ -123,15 +195,7 @@ class NearFieldFarFieldTransformer:
             / (4.0 * math.pi * radius_complex)
         )[:, None]
 
-        e_field = prefactor * (
-            self.eta * torch.cross(direction_complex, cross_s_n, dim=-1)
-            + cross_s_l
-        )
-        h_field = prefactor * (
-            (1.0 / self.eta) * torch.cross(direction_complex, cross_s_l, dim=-1)
-            - cross_s_n
-        )
-        return e_field, h_field
+        return prefactor, cross_s_n, cross_s_l
 
     def transform_directions(
         self,

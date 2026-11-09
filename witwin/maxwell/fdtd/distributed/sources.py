@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from ...fdtd_parallel import FDTDShardLayout
+from ..excitation.temporal import prepare_source_gathers
 
 
 _CELL_COMPONENTS = frozenset(("Ex", "Hy", "Hz"))
@@ -53,6 +54,8 @@ def _crop_term_to_owned_x(term: dict, layout: FDTDShardLayout) -> dict | None:
 
     local_x = slice(owned_begin - offset_x, owned_end - offset_x)
     cropped = dict(term)
+    # The prepared periodic gather indexes the uncropped patch; it is rebuilt below.
+    cropped.pop("source_gather", None)
     cropped["offsets"] = (owned_begin, *tuple(term["offsets"])[1:])
     for key in _PAYLOAD_KEYS:
         value = term.get(key)
@@ -72,6 +75,7 @@ def crop_solver_source_terms_to_owned_x(solver, layout: FDTDShardLayout) -> None
             if owned_term is not None:
                 cropped.append(owned_term)
         setattr(solver, attribute, cropped)
+    prepare_source_gathers(solver)
 
 
 __all__ = ["crop_solver_source_terms_to_owned_x"]

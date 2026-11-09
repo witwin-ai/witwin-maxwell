@@ -147,14 +147,19 @@ def estimate_scene_footprint_bytes(
 def estimate_simulation_footprint_bytes(simulation) -> int | None:
     """Estimate the resident footprint of a prepared ``Simulation`` task."""
 
+    from ..simulation import _resolve_full_field_dft
+
     scene = getattr(simulation, "scene", None)
     if not isinstance(scene, Scene):
         return None
     config = getattr(simulation, "config", None)
-    full_field_dft = bool(getattr(config, "full_field_dft", False))
+    frequencies = getattr(simulation, "frequencies", None)
+    full_field_dft = _resolve_full_field_dft(
+        getattr(config, "full_field_dft", False), frequencies, scene.ports
+    )
     return estimate_scene_footprint_bytes(
         scene,
-        frequencies=getattr(simulation, "frequencies", None),
+        frequencies=frequencies,
         full_field_dft=full_field_dft,
     )
 

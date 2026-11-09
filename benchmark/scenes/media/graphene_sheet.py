@@ -88,4 +88,5 @@ SCENARIO = ScenarioDefinition(
     display_monitor="plot_field_y",
     display_component="Ex",
     run_time_factor=20.0,
+    absorber="cpml",
 )

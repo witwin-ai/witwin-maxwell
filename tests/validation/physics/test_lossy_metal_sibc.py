@@ -77,7 +77,7 @@ def _run(frequency, *, kind, dx, x_lo=-0.5, x_hi=0.5, surface=0.1, source_x=-0.3
             material=material)],
     )
     result = mw.Simulation.fdtd(
-        scene,
+        scene, absorber="cpml",
         frequencies=[frequency],
         run_time=run_time,
         full_field_dft=True,

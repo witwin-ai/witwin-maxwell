@@ -65,6 +65,8 @@ def scene_trainable_material_tensors(scene) -> tuple[torch.Tensor, ...]:
                 value for value in vars(geometry).values() if isinstance(value, torch.Tensor) and value.requires_grad
             )
         material = getattr(structure, "material", None)
+        candidates.extend(getattr(material, name, None) for name in ("eps_r", "sigma_e", "thickness", "conductivity"))
+        candidates.extend(material_pole_tensors(material))
         perturbation = getattr(material, "perturbation", None)
         if isinstance(perturbation, torch.Tensor) and perturbation.requires_grad:
             candidates.append(perturbation)
@@ -73,6 +75,12 @@ def scene_trainable_material_tensors(scene) -> tuple[torch.Tensor, ...]:
         if isinstance(density, torch.Tensor) and density.requires_grad:
             candidates.append(density)
     return unique_trainable_tensors(candidates)
+
+
+def material_pole_tensors(material):
+    return tuple(value for prefix in ("", "mu_") for kind in ("debye", "drude", "lorentz")
+                 for pole in getattr(material, prefix + kind + "_poles", ())
+                 for value in vars(pole).values() if torch.is_tensor(value))
 
 
 def scene_trainable_rf_tensors(scene) -> tuple[torch.Tensor, ...]:
@@ -188,10 +196,23 @@ def material_dependent_inputs(scene, candidates) -> tuple[torch.Tensor, ...]:
     prepared_scene = prepare_scene(scene)
     try:
         with torch.enable_grad():
-            eps_r, _mu_r = prepared_scene.compile_material_tensors()
-            if eps_r.requires_grad:
+            model = prepared_scene.compile_materials()
+            outputs = [model["eps_components"][axis] for axis in ("x", "y", "z")]
+            outputs += [model["sigma_e_components"][axis] for axis in ("x", "y", "z")]
+            for prefix in ("", "mu_"):
+                for kind in ("debye", "drude", "lorentz"):
+                    for entry in model[prefix+kind+"_poles"]:
+                        outputs.extend(entry.get("edge_weights", {}).values())
+                        outputs.extend(v for v in vars(entry["pole"]).values() if torch.is_tensor(v))
+            from .compiler.copper_foil import compile_copper_response
+            for structure in prepared_scene.structures:
+                if getattr(structure.material, "is_copper_foil", False):
+                    response = compile_copper_response(structure.material)
+                    outputs.extend((response.rates, response.state_space.B, response.state_space.D))
+            probe = sum(value.sum() for value in outputs if value.requires_grad)
+            if isinstance(probe, torch.Tensor):
                 dependencies = torch.autograd.grad(
-                    eps_r.sum(),
+                    probe,
                     inputs,
                     allow_unused=True,
                     # Direct scenes reuse their geometry graph during semantic

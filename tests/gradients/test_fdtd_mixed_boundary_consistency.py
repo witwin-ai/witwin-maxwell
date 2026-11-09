@@ -17,7 +17,7 @@ def _scene(density, axis):
     wavevector = [math.pi / 2.4] * 3
     wavevector[normal] = 0.0
     boundary = {a: "pml" if a == axis else "bloch" for a in "xyz"}
-    scene = mw.Scene(domain=mw.Domain(bounds=tuple(bounds)), grid=mw.GridSpec.uniform(0.15),
+    scene = mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=tuple(bounds)), grid=mw.GridSpec.uniform(0.15),
                      boundary=mw.BoundarySpec.faces(default="pml", num_layers=2,
                          bloch_wavevector=tuple(wavevector), **boundary), device="cuda")
     scene.add_material_region(mw.MaterialRegion(name="design",

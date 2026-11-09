@@ -13,6 +13,7 @@ from ..compiler.materials import _scene_has_dispersive_material
 from ..compiler.sources import compile_fdfd_sources
 from ..scene import prepare_scene
 from ..sources import CW, POINT_DIPOLE_REFERENCE_WIDTH, PointDipole
+from .materials import _evaluate_components, _evaluate_edge_components
 from .plotting import (
     plot_cross_section as plot_cross_section_impl,
     plot_isotropic_3views as plot_isotropic_3views_impl,
@@ -23,14 +24,20 @@ from .postprocess import (
 )
 
 
-# The FDFD ideal-delta path is calibrated against its Gaussian reference
-# profile independently of the FDTD source-injection normalization.
-_FDFD_IDEAL_POINT_DIPOLE_PROFILE_SCALE = 0.75
-
 # Iterative-refinement steps for the cuDSS direct solver. The complex64 LU of
-# the strongly PML-graded operator loses several digits; refinement recovers
+# the indefinite curl-curl operator loses several digits; refinement recovers
 # them at ~one matvec + one reuse-solve per step.
 FDFD_DIRECT_IR_STEPS = 10
+
+
+def _hybrid_min_device_memory(direct):
+    # nvmath 1.0.0 (cuDSS 0.8.0.10) initialises cudss_data_ifc._tls.size_written only in the thread
+    # that imports nvmath.sparse, so data reads from other threads (e.g. autograd backward) fail.
+    # Initialise it for the current thread; remove when nvmath fixes the module-import thread-local.
+    from nvmath.sparse._internal import cudss_data_ifc
+    if not hasattr(cudss_data_ifc._tls, "size_written"):
+        cudss_data_ifc._tls.size_written = np.empty((1,), dtype=np.uint64)
+    return int(direct.plan_info.memory_estimates.hybrid_min_device_memory)
 
 
 def print_gpu_memory(prefix=""):
@@ -41,18 +48,13 @@ def print_gpu_memory(prefix=""):
     print(f"{prefix} GPU Memory Usage: Used {used/1024**3:.2f} GB / Total {total/1024**3:.2f} GB")
 
 
-def _normalize_point_dipole_profile_gpu(profile, dist_sq, width, mask=None):
-    if np.isclose(width, POINT_DIPOLE_REFERENCE_WIDTH):
-        return cp.where(mask, profile, 0.0) if mask is not None else profile
-
-    reference_width_sq = 2.0 * POINT_DIPOLE_REFERENCE_WIDTH ** 2
-    if mask is not None:
-        profile = cp.where(mask, profile, 0.0)
-        reference_profile = cp.where(mask, cp.exp(-dist_sq / reference_width_sq), 0.0)
-    else:
-        reference_profile = cp.exp(-dist_sq / reference_width_sq)
-    current_sum = cp.maximum(profile.sum(), np.finfo(np.float32).eps)
-    return profile * (reference_profile.sum() / current_sum)
+def _sample_control_widths_gpu(coords):
+    """Widths of the Yee sample control volumes, matching FDTD injection."""
+    widths = cp.empty_like(coords)
+    widths[0] = 0.5 * (coords[1] - coords[0])
+    widths[-1] = 0.5 * (coords[-1] - coords[-2])
+    widths[1:-1] = 0.5 * (coords[2:] - coords[:-2])
+    return widths
 
 
 def _nearest_axis_index_gpu(coords, center):
@@ -71,13 +73,14 @@ def _add_point_dipole_component_gpu(b_component, x_coords, y_coords, z_coords,
                                     position, amplitude, width, profile_kind):
     """Accumulate one polarization component of a point dipole into the 3D view
     of the source vector, restricted to the cutoff support slice."""
+    control_widths = tuple(_sample_control_widths_gpu(coords)
+                           for coords in (x_coords, y_coords, z_coords))
     if profile_kind == 'ideal':
         ix = _nearest_axis_index_gpu(x_coords, position[0])
         iy = _nearest_axis_index_gpu(y_coords, position[1])
         iz = _nearest_axis_index_gpu(z_coords, position[2])
-        b_component[ix, iy, iz] += amplitude * _ideal_point_dipole_mass_gpu(
-            x_coords, y_coords, z_coords, position
-        )
+        volume = control_widths[0][ix] * control_widths[1][iy] * control_widths[2][iz]
+        b_component[ix, iy, iz] += amplitude / volume
         return
 
     cutoff = 3 * max(width, 0.5 * POINT_DIPOLE_REFERENCE_WIDTH)
@@ -98,25 +101,12 @@ def _add_point_dipole_component_gpu(b_component, x_coords, y_coords, z_coords,
         + (local_z[None, None, :] - position[2]) ** 2
     )
     profile = cp.exp(-dist_sq / (2.0 * width ** 2))
-    profile = _normalize_point_dipole_profile_gpu(profile, dist_sq, width)
+    volumes = (control_widths[0][ix0:ix1, None, None]
+               * control_widths[1][None, iy0:iy1, None]
+               * control_widths[2][None, None, iz0:iz1])
+    # The declared amplitude is an integrated current moment (A m), as in FDTD.
+    profile /= cp.sum(profile * volumes)
     b_component[ix0:ix1, iy0:iy1, iz0:iz1] += amplitude * profile
-
-
-def _ideal_point_dipole_mass_gpu(x_coords, y_coords, z_coords, position):
-    cutoff = 3.0 * POINT_DIPOLE_REFERENCE_WIDTH
-    ix_start, ix_end = _support_slice_gpu(x_coords, position[0], cutoff)
-    iy_start, iy_end = _support_slice_gpu(y_coords, position[1], cutoff)
-    iz_start, iz_end = _support_slice_gpu(z_coords, position[2], cutoff)
-    local_x = x_coords[ix_start:ix_end]
-    local_y = y_coords[iy_start:iy_end]
-    local_z = z_coords[iz_start:iz_end]
-    dist_sq = (
-        (local_x[:, None, None] - position[0]) ** 2
-        + (local_y[None, :, None] - position[1]) ** 2
-        + (local_z[None, None, :] - position[2]) ** 2
-    )
-    reference_width_sq = 2.0 * POINT_DIPOLE_REFERENCE_WIDTH ** 2
-    return _FDFD_IDEAL_POINT_DIPOLE_PROFILE_SCALE * cp.exp(-dist_sq / reference_width_sq).sum()
 
 
 def _require_cuda_scene(scene):
@@ -125,26 +115,7 @@ def _require_cuda_scene(scene):
         raise ValueError(f"FDFD requires scene.device to be CUDA, got {device}.")
     if not cp.cuda.is_available():
         raise RuntimeError("FDFD requires CUDA/CuPy, but no CUDA-capable device is available.")
-
-
-def _require_uniform_grid(scene):
-    if getattr(scene, "grid", None) is None:
-        return
-    if not bool(getattr(scene.grid, "is_uniform", False)):
-        raise ValueError("FDFD currently requires a uniform GridSpec with dx == dy == dz.")
-
-
-def _is_nonvacuum_magnetic_material(material) -> bool:
-    if bool(getattr(material, "mu_debye_poles", ()) or getattr(material, "mu_drude_poles", ()) or getattr(material, "mu_lorentz_poles", ())):
-        return True
-    if getattr(material, "mu_tensor", None) is not None:
-        return True
-    # Static magnetic conductivity makes the permeability complex (mu_c = mu0 -
-    # i sigma_m/omega); it is a magnetically-lossy medium the FDFD system does not
-    # model, so it must be rejected rather than silently dropped.
-    if float(getattr(material, "sigma_m", 0.0)) != 0.0:
-        return True
-    return not np.isclose(float(getattr(material, "mu_r", 1.0)), 1.0)
+    cp.cuda.Device(scene.x.device.index).use()
 
 
 def _validate_supported_fdfd_materials(scene):
@@ -152,6 +123,18 @@ def _validate_supported_fdfd_materials(scene):
         material = getattr(structure, "material", None)
         if material is None:
             continue
+        if material is not None and bool(getattr(material, "is_gyromagnetic", False)):
+            # The static material compile lowers a GyromagneticFerrite to its
+            # diagonal background (eps_r, mu_infinity, sigma_e) only; the
+            # non-reciprocal off-diagonal Polder permeability is carried by the
+            # FDTD magnetization-ADE runtime, which the FDFD solver never runs.
+            # Fail closed rather than silently solving a reciprocal medium.
+            raise NotImplementedError(
+                "FDFD does not support GyromagneticFerrite media: the frequency-domain "
+                "solver would ingest only the diagonal background permeability and silently "
+                "drop the non-reciprocal off-diagonal Polder gyrotropy. Use FDTD, whose "
+                "magnetization-ADE runtime carries the gyromagnetic tensor."
+            )
         if bool(getattr(material, "is_nonlinear", False)):
             raise NotImplementedError(
                 "FDFD static parity for Kerr nonlinear media is deferred (user decision 2026-07-11): a "
@@ -164,12 +147,6 @@ def _validate_supported_fdfd_materials(scene):
                 "(user decision 2026-07-11): the curl-curl operator assembly here forms only per-axis "
                 "diagonal material components. Use FDTD, which models the coupled tensor."
             )
-        if _is_nonvacuum_magnetic_material(material):
-            raise NotImplementedError(
-                "FDFD static parity for magnetic media and magnetic dispersion is deferred (user decision "
-                "2026-07-11): this solver assembles an electric-only operator with mu_r = 1. Use FDTD, "
-                "which models magnetic response."
-            )
 
 
 
@@ -180,7 +157,7 @@ class FDFD:
     """
     def __init__(self, scene, frequency=2.0e9, solver_type='gmres', preconditioner='jacobi',
                  precision='single', ssor_omega=0.8,
-                 enable_plot=True, tqdm_position=None, verbose=False):
+                 enable_plot=True, tqdm_position=None, verbose=False, device_memory_limit_bytes=None):
         """
         Initialize the 3D FDFD solver.
 
@@ -195,18 +172,14 @@ class FDFD:
                 ('none', 'jacobi', 'ssor', 'ilu'). 'ilu' is ILU(0) and is
                 known to be unstable on the indefinite curl-curl operator;
                 see benchmark/FDFD_PERFORMANCE.md.
-            precision: Working precision of the iterative solve ('single' or
-                'double'). Assembly and returned fields stay complex64;
-                'double' casts the system and preconditioner to complex128
-                for the Krylov recurrences, which removes the float32
-                round-off stagnation (e.g. sqmr+ssor converges to 1e-7 at
-                48^3 where single precision stalls at ~2e-2). Ignored by
-                the 'direct' backend, which has its own iterative refinement.
+            precision: Working precision of assembly, solve and fields
+                ('single' or 'double'), including the direct backend.
             ssor_omega: Relaxation factor for the 'ssor' preconditioner
                 (measured plateau of best convergence at 0.6-0.8).
             enable_plot: Whether to enable plotting (set False for batch data generation)
             tqdm_position: tqdm progress bar position (for multi-GPU parallelism, set different values per GPU)
             verbose: Whether to print detailed debug information
+            device_memory_limit_bytes: Device budget for hybrid direct factors, in bytes
         """
         self.scene = prepare_scene(scene)
         self.frequency = frequency
@@ -219,17 +192,16 @@ class FDFD:
                 self.scene.boundary.face_kind(axis, side)
                 for axis in ("x", "y", "z")
                 for side in ("low", "high")
-                if self.scene.boundary.face_kind(axis, side) not in {"none", "pml"}
+                if self.scene.boundary.face_kind(axis, side) not in {"none", "pml", "pec"}
             }
         )
         if unsupported_face_kinds:
             raise ValueError(
-                "FDFD currently supports only per-face 'none' and 'pml' boundaries."
+                "FDFD supports per-face 'none', 'pml' and 'pec' boundaries."
             )
         if getattr(self.scene, "has_symmetry", False):
             raise ValueError("FDFD currently does not support Scene(symmetry=...).")
         _require_cuda_scene(self.scene)
-        _require_uniform_grid(self.scene)
         self.use_gpu = True
 
         if solver_type not in ['cg', 'gmres', 'direct', 'bicgstab', 'tfqmr', 'idr', 'sqmr']:
@@ -240,10 +212,13 @@ class FDFD:
         if preconditioner not in ['none', 'jacobi', 'ssor', 'ilu', 'ams']:
             raise ValueError("preconditioner must be 'none', 'jacobi', 'ssor', 'ilu', or 'ams'")
         self.preconditioner = preconditioner
+        if preconditioner == 'ams' and not self.scene.grid.is_uniform:
+            raise ValueError("AMS requires a uniform auxiliary grid; use jacobi, ssor or direct for graded grids.")
         if precision not in ['single', 'double']:
             raise ValueError("precision must be 'single' or 'double'")
         self.precision = precision
         self.ssor_omega = float(ssor_omega)
+        self.device_memory_limit_bytes = device_memory_limit_bytes
 
         # Physical constants
         self.c0 = 299792458.0
@@ -259,8 +234,9 @@ class FDFD:
         self._matrix_frequency = None  # Frequency the cached A_matrix was built for
         self._preconditioner_op = None  # Cached preconditioner for the cached A_matrix
         self._direct_solver = None  # Cached cuDSS factorization for the cached A_matrix
-        self._sym_scale = None  # Symmetrizing diagonal d = sqrt(sx*sy*sz), grid/PML-only
+        self._sym_scale = None  # Symmetrizing diagonal d = sqrt(sx*sy*sz); depends on grid, PML and frequency
         self._iteration_matrix_cache = None  # complex128 copy of A for precision='double'
+        self._pec_mask = None
         self.material_eps_r = None
         self.material_mu_r = None
         self.material_eps_components = None
@@ -289,8 +265,13 @@ class FDFD:
         self._matrix_frequency = None
         self._preconditioner_op = None
         self._iteration_matrix_cache = None
+        self._sym_scale = None  # PML stretch s = kappa + i sigma/(omega eps0) is frequency dependent
         self._release_direct_solver()
-        if _scene_has_dispersive_material(self.scene):
+        conductive = any(float(getattr(s.material, 'sigma_e', 0.)) != 0
+                         or float(getattr(s.material, 'sigma_m', 0.)) != 0
+                         or getattr(s.material, 'sigma_e_tensor', None) is not None
+                         for s in self.scene.structures)
+        if _scene_has_dispersive_material(self.scene) or conductive:
             self.material_eps_components = None
             self.material_mu_components = None
             self.material_eps_r = None
@@ -299,29 +280,10 @@ class FDFD:
     def _ensure_material_components(self):
         if self.material_eps_components is not None:
             return
-        for structure in self.scene.structures:
-            material = getattr(structure, "material", None)
-            if material is not None and bool(getattr(material, "is_pec", False)):
-                raise NotImplementedError(
-                    "FDFD static parity for in-domain PEC materials is deferred (user decision 2026-07-11): "
-                    "the in-domain Dirichlet/mask handling for a perfect conductor is unimplemented here. Use "
-                    "FDTD for PEC-material scenes."
-                )
-            if material is not None and bool(getattr(material, "is_gyromagnetic", False)):
-                # The static material compile lowers a GyromagneticFerrite to its
-                # diagonal background (eps_r, mu_infinity, sigma_e) only; the
-                # non-reciprocal off-diagonal Polder permeability is carried by the
-                # FDTD magnetization-ADE runtime, which the FDFD solver never runs.
-                # Fail closed rather than silently solving a reciprocal medium.
-                raise NotImplementedError(
-                    "FDFD does not support GyromagneticFerrite media: the frequency-domain "
-                    "solver would ingest only the diagonal background permeability and silently "
-                    "drop the non-reciprocal off-diagonal Polder gyrotropy. Use FDTD, whose "
-                    "magnetization-ADE runtime carries the gyromagnetic tensor."
-                )
-        self.material_eps_components, self.material_mu_components = self.scene.compile_material_components(
-            frequency=self.frequency
-        )
+        _validate_supported_fdfd_materials(self.scene)
+        model = self.scene.compile_materials()
+        self.material_eps_components, self.material_mu_components = _evaluate_components(model, self.frequency)
+        self.material_eps_edges, self.material_mu_edges = _evaluate_edge_components(model, self.frequency)
         self.material_eps_r = (
             self.material_eps_components["x"]
             + self.material_eps_components["y"]
@@ -341,7 +303,12 @@ class FDFD:
             return
         self._ensure_material_components()
         self.scene.release_meshgrid()
-        self.A_matrix = self._build_matrix_gpu_yee_3d()
+        from ..compiler.structures import pmc_structures
+        if pmc_structures(self.scene) or any(bool((component != 1).any()) for component in self.material_mu_edges.values()):
+            from .magnetic import assemble_magnetic_operator
+            self.A_matrix = assemble_magnetic_operator(self)
+        else:
+            self.A_matrix = self._build_matrix_gpu_yee_3d()
         self._matrix_frequency = self.frequency
         self._preconditioner_op = None
         self._iteration_matrix_cache = None
@@ -366,19 +333,29 @@ class FDFD:
     def _build_direct_solver(self, matrix, rhs):
         """Plan and factorize a cuDSS direct solver for the given matrix.
 
-        The LU is complex64; iterative refinement recovers most of the
-        accuracy lost to the strongly graded PML scaling. Hybrid memory mode
-        keeps factor storage partially in host memory: it sidesteps
-        device-allocation failures for the large factor blocks and measures
-        faster than pure-device factorization on Windows/WDDM.
+        LU follows the requested matrix precision and uses iterative refinement.
+        Local responses require GPU-resident factors. The ordinary solver's
+        existing hybrid storage option can retain factor blocks in host memory.
         """
         from nvmath.sparse.advanced import DirectSolver, ExecutionCUDA, HybridMemoryModeOptions
 
-        execution = ExecutionCUDA(
-            hybrid_memory_mode_options=HybridMemoryModeOptions(hybrid_memory_mode=True)
-        )
+        limit = self.device_memory_limit_bytes
+        if limit is None:
+            execution = (ExecutionCUDA() if getattr(self, 'gpu_only', False) else ExecutionCUDA(
+                hybrid_memory_mode_options=HybridMemoryModeOptions(hybrid_memory_mode=True)
+            ))
+        else:
+            execution = ExecutionCUDA(hybrid_memory_mode_options=HybridMemoryModeOptions(
+                hybrid_memory_mode=True, hybrid_device_memory_limit=limit))
         direct = DirectSolver(matrix, rhs, execution=execution)
         direct.plan()
+        if limit is not None:
+            minimum = _hybrid_min_device_memory(direct)
+            if limit < minimum:
+                direct.free()
+                raise ValueError(
+                    f"device_memory_limit_bytes={limit} is below the cuDSS hybrid minimum "
+                    f"of {minimum} bytes for this system")
         direct.factorize()
         direct.solution_config.ir_num_steps = FDFD_DIRECT_IR_STEPS
         return direct
@@ -387,9 +364,25 @@ class FDFD:
         """Solve Ax = b with cuDSS, factorizing once and reusing across RHS."""
         if self._direct_solver is None:
             self._direct_solver = self._build_direct_solver(self.A_matrix, b)
-        else:
-            self._direct_solver.reset_operands(b=b)
-        return self._direct_solver.solve()
+            self._direct_rhs_shape = b.shape
+            return self._direct_solver.solve()
+        # cuDSS retains the original RHS descriptor. Pad short blocks and split
+        # wider ones instead of refactorizing when the caller changes nrhs.
+        shape = self._direct_rhs_shape
+        capacity = 1 if len(shape) == 1 else shape[1]
+        columns = b[:, None] if b.ndim == 1 else b
+        output = cp.empty_like(columns)
+        for start in range(0, columns.shape[1], capacity):
+            stop = min(start + capacity, columns.shape[1])
+            padded = cp.zeros(shape, dtype=self.A_matrix.dtype, order='F')
+            if len(shape) == 1:
+                padded[:] = columns[:, start]
+            else:
+                padded[:, :stop-start] = columns[:, start:stop]
+            self._direct_solver.reset_operands(b=padded)
+            solved = self._direct_solver.solve()
+            output[:, start:stop] = solved[:, None] if len(shape) == 1 else solved[:, :stop-start]
+        return output[:, 0] if b.ndim == 1 else output
 
     def solve_adjoint(self, rhs, max_iter=1000, tol=1e-6, restart=100):
         """Solve the adjoint system A^T lam = rhs for a flat complex64 RHS.
@@ -410,14 +403,14 @@ class FDFD:
             A_iter = self._iteration_matrix()
             rhs_iter = rhs_scaled.astype(self._iteration_dtype(), copy=False)
             if self.solver_type == 'cg':
-                y, _info = cupy_cg(A_iter, rhs_iter, M=M, maxiter=max_iter, tol=tol)
+                y, _info = cupy_cg(A_iter, rhs_iter, M=M, maxiter=max_iter, rtol=tol, atol=0.0)
             elif self.solver_type in ('bicgstab', 'tfqmr', 'idr', 'sqmr'):
                 from . import krylov
                 y, _info = krylov.solve(self.solver_type, A_iter, rhs_iter, M=M,
                                         tol=tol, maxiter=max_iter)
             else:
-                y, _info = cupy_gmres(A_iter, rhs_iter, M=M, maxiter=max_iter, tol=tol, restart=restart)
-            y = y.astype(cp.complex64, copy=False)
+                y, _info = cupy_gmres(A_iter, rhs_iter, M=M, maxiter=max_iter, rtol=tol, atol=0.0, restart=restart)
+            y = y.astype(self._iteration_dtype(), copy=False)
         return y * scale
 
     def _ensure_preconditioner(self):
@@ -476,38 +469,124 @@ class FDFD:
 
         return operator
 
-    def _create_pml_3d(self):
-        """Create PML complex stretching factors on main grid nodes"""
-        Nx, Ny, Nz = self.scene.Nx, self.scene.Ny, self.scene.Nz
-        s_x = torch.ones(Nx, dtype=torch.complex64, device=self.scene.device)
-        s_y = torch.ones(Ny, dtype=torch.complex64, device=self.scene.device)
-        s_z = torch.ones(Nz, dtype=torch.complex64, device=self.scene.device)
+    def _stretched_metrics(self):
+        """Primal and dual lengths including complex coordinate stretching.
 
-        if self.scene.boundary.uses_kind("pml"):
-            pml_thickness = self.scene.pml_thickness
-            pml_strength = self.scene.pml_strength
-            # Quadratic grading profile
-            profile = torch.linspace(0, 1, pml_thickness, device=self.scene.device)**2 * pml_strength
-            if self.scene.boundary_face_kind("x", "low") == "pml":
-                width = min(pml_thickness, Nx)
-                s_x[:width] = 1 + 1j * torch.flip(profile[:width], [0])
-            if self.scene.boundary_face_kind("x", "high") == "pml":
-                width = min(pml_thickness, Nx)
-                s_x[-width:] = 1 + 1j * profile[:width]
-            if self.scene.boundary_face_kind("y", "low") == "pml":
-                width = min(pml_thickness, Ny)
-                s_y[:width] = 1 + 1j * torch.flip(profile[:width], [0])
-            if self.scene.boundary_face_kind("y", "high") == "pml":
-                width = min(pml_thickness, Ny)
-                s_y[-width:] = 1 + 1j * profile[:width]
-            if self.scene.boundary_face_kind("z", "low") == "pml":
-                width = min(pml_thickness, Nz)
-                s_z[:width] = 1 + 1j * torch.flip(profile[:width], [0])
-            if self.scene.boundary_face_kind("z", "high") == "pml":
-                width = min(pml_thickness, Nz)
-                s_z[-width:] = 1 + 1j * profile[:width]
+        Normalize by one reference length to preserve uniform-grid scaling.
+        Primal metrics belong to half nodes; dual metrics to main nodes. Each
+        stretch is sampled at its own Yee position, never averaged.
+        """
+        reference = float(self.scene.dx_primal64[0] if self.scene.grid.is_custom else self.scene.grid.dx)
+        real_dtype = cp.float64 if self.precision == 'double' else cp.float32
+        main, half = [], []
+        for axis, (stretch_main, stretch_half) in zip("xyz", self._pml_stretch()):
+            primal = cp.asarray(getattr(self.scene, f"d{axis}_primal64") / reference, dtype=real_dtype)
+            dual = cp.asarray(getattr(self.scene, f"d{axis}_dual64") / reference, dtype=real_dtype)
+            main.append(stretch_main.astype(self._iteration_dtype()) * dual)
+            half.append(stretch_half.astype(self._iteration_dtype()) * primal)
+        return main, half
 
-        return s_x, s_y, s_z
+    def _ensure_pec_mask(self):
+        """Exact zero tangential E constraints on voxelized PEC and domain faces."""
+        if self._pec_mask is not None:
+            return self._pec_mask
+        # The same node-consistent staircase short set as the FDTD runtime.
+        from ..fdtd.runtime.materials import _staircase_pec_shorted_edges
+        shorted = _staircase_pec_shorted_edges(self.scene)
+        masks = []
+        for component, axis in zip(("Ex", "Ey", "Ez"), "xyz"):
+            shape = tuple(getattr(self.scene, f"N{a}_{component.lower()}") for a in "xyz")
+            mask = (cp.asarray(shorted[component]).copy() if shorted is not None
+                    else cp.zeros(shape, dtype=cp.bool_))
+            for normal, boundary_axis in enumerate("xyz"):
+                if boundary_axis == axis:
+                    continue
+                for side, index in (("low", 0), ("high", -1)):
+                    if self.scene.boundary.face_kind(boundary_axis, side) == "pec":
+                        selection = [slice(None)] * 3
+                        selection[normal] = index
+                        mask[tuple(selection)] = True
+            masks.append(mask.ravel())
+        self._pec_mask = cp.concatenate(masks)
+        return self._pec_mask
+
+    def solve_physical_rhs(self, rhs, *, tol=1e-6, max_iter=1000, restart=100):
+        """Checked CUDA solve for one or multiple physical-space RHS columns.
+
+        Returns owned PyTorch storage. Explicit RHS must not excite eliminated
+        PEC degrees of freedom. Direct factors are shared across calls.
+        """
+        if not isinstance(rhs, torch.Tensor) or not rhs.is_cuda:
+            raise ValueError("FDFD RHS must be a CUDA PyTorch tensor.")
+        if rhs.device != self.scene.x.device:
+            raise ValueError("RHS and FDFD operator must reside on the same GPU.")
+        self._ensure_system_matrix()
+        if rhs.ndim not in (1, 2) or rhs.shape[0] != self.A_matrix.shape[0]:
+            raise ValueError("RHS must have shape (N,) or (N, nrhs).")
+        if rhs.ndim == 2 and rhs.shape[1] == 0:
+            raise ValueError("RHS needs at least one column.")
+        values = cp.from_dlpack(rhs.detach().resolve_conj().contiguous()).astype(self.A_matrix.dtype)
+        vector = values.ndim == 1
+        values = values[:, None] if vector else values
+        if not bool(cp.isfinite(values).all()):
+            raise ValueError("RHS must be finite.")
+        if bool(cp.any(values[self._ensure_pec_mask()] != 0)):
+            raise ValueError("RHS excites constrained PEC degrees of freedom.")
+        scale = self._ensure_symmetrization_scale()[:, None]
+        scaled = cp.asfortranarray(values * scale)
+        if self.solver_type == 'direct':
+            solution = self._solve_direct(scaled).copy()
+        else:
+            columns = []
+            for column in scaled.T:
+                if not bool(cp.any(column)):
+                    columns.append(cp.zeros_like(column))
+                    continue
+                matrix, preconditioner = self._iteration_matrix(), self._ensure_preconditioner()
+                if self.solver_type == 'cg':
+                    solution_column, info = cupy_cg(matrix, column, M=preconditioner,
+                        rtol=tol, atol=0.0, maxiter=max_iter)
+                elif self.solver_type == 'gmres':
+                    solution_column, info = cupy_gmres(matrix, column, M=preconditioner,
+                        rtol=tol, atol=0.0, maxiter=max_iter, restart=restart)
+                else:
+                    from . import krylov
+                    solution_column, info = krylov.solve(self.solver_type, matrix, column,
+                        M=preconditioner, tol=tol, maxiter=max_iter)
+                if info != 0:
+                    raise RuntimeError(f"Background {self.solver_type} failed with info={info}.")
+                columns.append(solution_column)
+            solution = cp.column_stack(columns)
+        residual = cp.linalg.norm((self.A_matrix @ solution - scaled) / scale, axis=0)
+        denominator = cp.linalg.norm(values, axis=0)
+        relative = residual / cp.maximum(denominator, cp.finfo(denominator.dtype).tiny)
+        if not bool(cp.isfinite(solution).all()) or bool(cp.any(relative > tol)):
+            raise RuntimeError(f"FDFD physical RHS residual exceeds tolerance {tol}: {float(relative.max())}")
+        self.rhs_residuals = torch.from_dlpack(relative.copy())
+        fields = solution / scale
+        return torch.from_dlpack((fields[:, 0] if vector else fields).copy())
+
+    def _pml_stretch(self):
+        """Complex coordinate stretch per axis as (primal-node, half-node)
+        complex128 arrays at the current frequency; 1 outside the PML.
+
+        See fdfd/pml.py for the profile and the BoundarySpec.strength
+        reading shared with the FDTD CPML."""
+        from .pml import stretch_profile_1d
+
+        scene = self.scene
+        stretches = []
+        for axis in "xyz":
+            nodes = getattr(scene, f"{axis}_nodes64")
+            layers = (scene.pml_thickness_for_face(axis, "low"), scene.pml_thickness_for_face(axis, "high"))
+            stretches.append(tuple(
+                cp.asarray(stretch_profile_1d(
+                    positions, nodes, *layers, omega=self.omega, eps0=self.eps0,
+                    eta0=self.mu0 * self.c0, strength=scene.pml_strength,
+                ))
+                for positions in (nodes, getattr(scene, f"{axis}_half64"))
+            ))
+        return stretches
 
     def _build_matrix_gpu_yee_3d(self):
         """
@@ -520,7 +599,7 @@ class FDFD:
         system; solves must scale b -> d*b and unscale x -> x/d (see
         _ensure_symmetrization_scale).
         """
-        ds = float(self.scene.dx)
+        ds = float(self.scene.dx_primal64[0] if self.scene.grid.is_custom else self.scene.grid.dx)
         k0 = self.k0
 
         Nx_ex, Ny_ex, Nz_ex = self.scene.Nx_ex, self.scene.Ny_ex, self.scene.Nz_ex
@@ -531,23 +610,20 @@ class FDFD:
 
         if self.verbose:
             print("Preparing PML and permittivity for Yee grid...")
-        s_x_main, s_y_main, s_z_main = self._create_pml_3d()
-        s_x_main, s_y_main, s_z_main = cp.asarray(s_x_main), cp.asarray(s_y_main), cp.asarray(s_z_main)
-        s_x_half = (s_x_main[:-1] + s_x_main[1:]) / 2
-        s_y_half = (s_y_main[:-1] + s_y_main[1:]) / 2
-        s_z_half = (s_z_main[:-1] + s_z_main[1:]) / 2
+        (s_x_main, s_y_main, s_z_main), (s_x_half, s_y_half, s_z_half) = self._stretched_metrics()
         # Half-grid stretch factors padded at the walls so boundary rows reuse
         # the edge value; index m addresses position (m - 1/2), m+1 -> (m + 1/2)
         s_x_half_pad = cp.concatenate([s_x_half[:1], s_x_half, s_x_half[-1:]])
         s_y_half_pad = cp.concatenate([s_y_half[:1], s_y_half, s_y_half[-1:]])
         s_z_half_pad = cp.concatenate([s_z_half[:1], s_z_half, s_z_half[-1:]])
         self._ensure_material_components()
-        eps_x_main = cp.asarray(self.material_eps_components["x"])
-        eps_y_main = cp.asarray(self.material_eps_components["y"])
-        eps_z_main = cp.asarray(self.material_eps_components["z"])
-        eps_r_x = (eps_x_main[:-1, :, :] + eps_x_main[1:, :, :]) / 2
-        eps_r_y = (eps_y_main[:, :-1, :] + eps_y_main[:, 1:, :]) / 2
-        eps_r_z = (eps_z_main[:, :, :-1] + eps_z_main[:, :, 1:]) / 2
+        eps_r_x = cp.asarray(self.material_eps_edges["x"])
+        eps_r_y = cp.asarray(self.material_eps_edges["y"])
+        eps_r_z = cp.asarray(self.material_eps_edges["z"])
+        if self.precision == 'double':
+            eps_r_x = eps_r_x.astype(cp.complex128)
+            eps_r_y = eps_r_y.astype(cp.complex128)
+            eps_r_z = eps_r_z.astype(cp.complex128)
 
         if self.verbose:
             print("Building 3D Yee grid sparse matrix...")
@@ -556,7 +632,7 @@ class FDFD:
         max_nnz = N_vec * 13
         rows = cp.zeros(max_nnz, dtype=cp.int32)
         cols = cp.zeros(max_nnz, dtype=cp.int32)
-        data = cp.zeros(max_nnz, dtype=cp.complex64)
+        data = cp.zeros(max_nnz, dtype=self._iteration_dtype())
         nnz = 0
 
         ds2 = ds**2
@@ -714,7 +790,13 @@ class FDFD:
         data[:nnz] *= scale[rows[:nnz]]
         data[:nnz] /= scale[cols[:nnz]]
 
-        A = cpsp.coo_matrix((data[:nnz], (rows[:nnz], cols[:nnz])), shape=(N_vec, N_vec))
+        mask = self._ensure_pec_mask()
+        keep = ~(mask[rows[:nnz]] | mask[cols[:nnz]])
+        constrained = cp.flatnonzero(mask).astype(cp.int32)
+        # Eliminate both rows and columns so reciprocity and adjoint reuse survive.
+        A = cpsp.coo_matrix((cp.concatenate((data[:nnz][keep], cp.ones(constrained.size, dtype=data.dtype))),
+                            (cp.concatenate((rows[:nnz][keep], constrained)),
+                             cp.concatenate((cols[:nnz][keep], constrained)))), shape=(N_vec, N_vec))
         return A.tocsr()
 
     def _ensure_symmetrization_scale(self):
@@ -722,44 +804,46 @@ class FDFD:
         location. With the symmetric UPML stencil, D A D^-1 is exactly
         complex-symmetric; the solver works on the scaled system throughout
         (b -> d*b at source build, x -> x/d when fields are extracted). The
-        weight depends only on grid + PML, not frequency or materials."""
+        weight depends on grid, PML and frequency, not on materials."""
         if self._sym_scale is not None:
             return self._sym_scale
-        s_x, s_y, s_z = self._create_pml_3d()
-        s_x, s_y, s_z = cp.asarray(s_x), cp.asarray(s_y), cp.asarray(s_z)
-        s_x_half = (s_x[:-1] + s_x[1:]) / 2
-        s_y_half = (s_y[:-1] + s_y[1:]) / 2
-        s_z_half = (s_z[:-1] + s_z[1:]) / 2
+        (s_x, s_y, s_z), (s_x_half, s_y_half, s_z_half) = self._stretched_metrics()
         d_ex = cp.sqrt(s_x_half[:, None, None] * s_y[None, :, None] * s_z[None, None, :])
         d_ey = cp.sqrt(s_x[:, None, None] * s_y_half[None, :, None] * s_z[None, None, :])
         d_ez = cp.sqrt(s_x[:, None, None] * s_y[None, :, None] * s_z_half[None, None, :])
         self._sym_scale = cp.concatenate(
             [d_ex.ravel(), d_ey.ravel(), d_ez.ravel()]
-        ).astype(cp.complex64)
+        ).astype(self._iteration_dtype())
         return self._sym_scale
 
     def _build_source_vector_yee(self):
         """Build the total b vector for the Yee grid from the scene source list. Uses broadcasting instead of meshgrid to save memory."""
-        b = cp.zeros(self.scene.N_vector_total, dtype=cp.complex64)
+        b = cp.zeros(self.scene.N_vector_total, dtype=self._iteration_dtype())
         compiled_sources = compile_fdfd_sources(self.scene, default_frequency=self.frequency)
         if not compiled_sources:
             return b
 
-        dx, dy, dz = self.scene.grid_spacing
         const = -1j * self.omega * self.mu0
 
         # Prepare coordinate data on GPU (1D arrays, using broadcasting)
-        x_ex = cp.asarray(self.scene.x[:-1] + dx / 2.0, dtype=cp.float32)
+        # Uniform axes use the same arithmetic as the source cutoff stencil;
+        # reconstructing from float64 masters can change cutoff-plane inclusion.
+        if self.scene.grid.is_custom:
+            half = [getattr(self.scene, a + '_half') for a in 'xyz']
+        else:
+            half = [getattr(self.scene, a)[:-1] + spacing / 2
+                    for a, spacing in zip('xyz', self.scene.grid_spacing)]
+        x_ex = cp.asarray(half[0], dtype=cp.float32)
         y_ex = cp.asarray(self.scene.y, dtype=cp.float32)
         z_ex = cp.asarray(self.scene.z, dtype=cp.float32)
 
         x_ey = cp.asarray(self.scene.x, dtype=cp.float32)
-        y_ey = cp.asarray(self.scene.y[:-1] + dy / 2.0, dtype=cp.float32)
+        y_ey = cp.asarray(half[1], dtype=cp.float32)
         z_ey = cp.asarray(self.scene.z, dtype=cp.float32)
 
         x_ez = cp.asarray(self.scene.x, dtype=cp.float32)
         y_ez = cp.asarray(self.scene.y, dtype=cp.float32)
-        z_ez = cp.asarray(self.scene.z[:-1] + dz / 2.0, dtype=cp.float32)
+        z_ez = cp.asarray(half[2], dtype=cp.float32)
 
         # 3D views into b, one per field component (reshape of contiguous slices)
         N_ex, N_ey = self.scene.N_ex, self.scene.N_ey
@@ -768,6 +852,22 @@ class FDFD:
         b_ez = b[N_ex + N_ey:].reshape(self.scene.Nx_ez, self.scene.Ny_ez, self.scene.Nz_ez)
 
         for source in compiled_sources:
+            if source.get('kind') == 'lumped_current':
+                from .observations import gap_layout
+                indices, lengths, area = gap_layout(self.scene, source['start'], source['end'])
+                b[cp.from_dlpack(indices)] += const * source['current'] * cp.sign(cp.from_dlpack(lengths)) / area
+                continue
+            if source.get('kind') == 'uniform_current':
+                for field, coords, amplitude in zip((b_ex,b_ey,b_ez),
+                        ((x_ex,y_ex,z_ex),(x_ey,y_ey,z_ey),(x_ez,y_ez,z_ez)), source['polarization']):
+                    mask = cp.ones(field.shape, dtype=cp.bool_)
+                    for axis, (coordinate, center, size) in enumerate(zip(coords,source['center'],source['size'])):
+                        selected = (cp.abs(coordinate-center) <= size*.5 if size else
+                                    cp.arange(coordinate.size) == cp.abs(coordinate-center).argmin())
+                        shape = [1,1,1]; shape[axis] = -1
+                        mask &= selected.reshape(shape)
+                    field += const * amplitude * mask
+                continue
             pos = source['position']
             width = float(source['width'])
             profile_kind = source.get('profile', 'gaussian')
@@ -784,10 +884,18 @@ class FDFD:
                                                 const * pol[2], width, profile_kind)
 
         # The assembled system is the symmetrized D A D^-1; scale the RHS to match
-        b *= self._ensure_symmetrization_scale()
+        b = b.astype(self._iteration_dtype()) * self._ensure_symmetrization_scale()
+        b[self._ensure_pec_mask()] = 0
         return b
 
     def solve(self, max_iter=1000, tol=1e-6, restart=100):
+        self.E_field = None
+        self.E_field_raw = None
+        self.solver_info = None
+        self.converged = None
+        self.final_residual = None
+        self.solver_residuals = None
+
         start_time = time.time()
 
         self._ensure_system_matrix()
@@ -799,80 +907,77 @@ class FDFD:
             print_gpu_memory("Before solve")
         solve_start = time.time()
 
-        try:
-            if self.solver_type != 'direct':
-                M = self._ensure_preconditioner()
-                A_iter = self._iteration_matrix()
-                b_iter = b.astype(self._iteration_dtype(), copy=False)
-            if self.solver_type == 'cg':
-                x_gpu, info = cupy_cg(A_iter, b_iter, M=M, maxiter=max_iter, tol=tol)
-            elif self.solver_type in ('bicgstab', 'tfqmr', 'idr', 'sqmr'):
-                from . import krylov
-                x_gpu, info = krylov.solve(self.solver_type, A_iter, b_iter, M=M,
-                                           tol=tol, maxiter=max_iter)
-                self.final_residual = float(cp.linalg.norm(A_iter @ x_gpu - b_iter) / cp.linalg.norm(b_iter))
-                self.solver_residuals = [self.final_residual]
-            elif self.solver_type == 'gmres':
-                residuals = []
-                # GMRES(m) params: restart is the number of Arnoldi iterations before each restart
-                # callback is called at each restart, so total restarts = max_iter // restart
-                num_restarts = max(1, max_iter // restart)
+        if self.solver_type != 'direct':
+            M = self._ensure_preconditioner()
+            A_iter = self._iteration_matrix()
+            b_iter = b.astype(self._iteration_dtype(), copy=False)
+        if self.solver_type == 'cg':
+            x_gpu, info = cupy_cg(A_iter, b_iter, M=M, maxiter=max_iter, rtol=tol, atol=0.0)
+        elif self.solver_type in ('bicgstab', 'tfqmr', 'idr', 'sqmr'):
+            from . import krylov
+            x_gpu, info = krylov.solve(self.solver_type, A_iter, b_iter, M=M,
+                                       tol=tol, maxiter=max_iter)
+            self.final_residual = float(cp.linalg.norm(A_iter @ x_gpu - b_iter) / cp.linalg.norm(b_iter))
+            self.solver_residuals = [self.final_residual]
+        elif self.solver_type == 'gmres':
+            residuals = []
+            # GMRES(m) params: restart is the number of Arnoldi iterations before each restart
+            # callback is called at each restart, so total restarts = max_iter // restart
+            num_restarts = max(1, max_iter // restart)
 
-                # In multi-GPU mode (position!=None), use leave=False to avoid inter-process interference
-                pbar = tqdm(total=num_restarts, desc="GMRES", unit="restart",
-                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {postfix}]',
-                            position=self.tqdm_position,
-                            leave=(self.tqdm_position is None))
+            # In multi-GPU mode (position!=None), use leave=False to avoid inter-process interference
+            pbar = tqdm(total=num_restarts, desc="GMRES", unit="restart",
+                        bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {postfix}]',
+                        position=self.tqdm_position,
+                        leave=(self.tqdm_position is None))
 
-                def callback(rk):
-                    res_val = float(cp.asnumpy(rk))
-                    residuals.append(res_val)
-                    pbar.update(1)
-                    pbar.set_postfix({'residual': f'{res_val:.2e}'})
+            def callback(rk):
+                res_val = float(cp.asnumpy(rk))
+                residuals.append(res_val)
+                pbar.update(1)
+                pbar.set_postfix({'residual': f'{res_val:.2e}'})
 
-                x_gpu, info = cupy_gmres(A_iter, b_iter, M=M, maxiter=max_iter, tol=tol, restart=restart, callback=callback)
-                pbar.close()
+            x_gpu, info = cupy_gmres(A_iter, b_iter, M=M, maxiter=max_iter, rtol=tol, atol=0.0,
+                                   restart=restart, callback=callback, callback_type='pr_norm')
+            pbar.close()
 
-                # Save residual info
-                self.solver_residuals = residuals
-                self.final_residual = residuals[-1] if residuals else None
+            # Save residual info
+            self.solver_residuals = residuals
+            self.final_residual = residuals[-1] if residuals else None
 
-                if self.enable_plot:
-                    plt.figure(figsize=(6, 4))
-                    plt.semilogy(residuals, marker='o')
-                    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-                    plt.xlabel("Iteration")
-                    plt.ylabel("Residual ||r||")
-                    plt.title("GMRES Convergence")
-                    plt.tight_layout()
-                    plt.show()
-                x_gpu = x_gpu  # Keep consistent
-            elif self.solver_type == 'direct':
-                # cuDSS sparse direct solve; factorization cached across RHS
-                if self.verbose:
-                    reuse = "cached factorization" if self._direct_solver is not None else "factorize + solve"
-                    print(f"Direct solve ({reuse}, matrix size: {self.A_matrix.shape[0]:,})...")
-                x_gpu = self._solve_direct(b)
-                info = 0
-                residual = cp.linalg.norm(self.A_matrix @ x_gpu - b) / cp.linalg.norm(b)
-                self.final_residual = float(cp.asnumpy(residual))
-                self.solver_residuals = [self.final_residual]
-                if self.verbose:
-                    print(f"Direct solve complete, relative residual: {self.final_residual:.2e}")
-            solve_time = time.time() - solve_start
+            if self.enable_plot:
+                plt.figure(figsize=(6, 4))
+                plt.semilogy(residuals, marker='o')
+                plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+                plt.xlabel("Iteration")
+                plt.ylabel("Residual ||r||")
+                plt.title("GMRES Convergence")
+                plt.tight_layout()
+                plt.show()
+            x_gpu = x_gpu  # Keep consistent
+        elif self.solver_type == 'direct':
+            # cuDSS sparse direct solve; factorization cached across RHS
             if self.verbose:
-                print(f"GPU solve complete, elapsed: {solve_time:.2f}s")
-                print(f"Solver convergence info: {info}")
-        except Exception as e:
-            print(f"GPU solve failed: {e}. Note that memory may be the limiting factor for large problems.")
-            return
+                reuse = "cached factorization" if self._direct_solver is not None else "factorize + solve"
+                print(f"Direct solve ({reuse}, matrix size: {self.A_matrix.shape[0]:,})...")
+            x_gpu = self._solve_direct(b)
+            info = 0
+            residual = cp.linalg.norm(self.A_matrix @ x_gpu - b) / cp.linalg.norm(b)
+            self.final_residual = float(cp.asnumpy(residual))
+            self.solver_residuals = [self.final_residual]
+            if self.verbose:
+                print(f"Direct solve complete, relative residual: {self.final_residual:.2e}")
+        solve_time = time.time() - solve_start
+        if self.verbose:
+            print(f"GPU solve complete, elapsed: {solve_time:.2f}s")
+            print(f"Solver convergence info: {info}")
 
         total_time = time.time() - start_time
         if self.verbose:
             print(f"Total solve time: {total_time:.2f}s")
 
-        # Back to storage precision, then undo the symmetrization scaling
-        x_gpu = x_gpu.astype(cp.complex64, copy=False)
+        # Preserve working precision, then undo the symmetrization scaling.
+        x_gpu = x_gpu.astype(self._iteration_dtype(), copy=False)
         x_gpu = x_gpu / self._ensure_symmetrization_scale()
 
         # Reshape results into 3D field components on the Yee grid
@@ -882,7 +987,7 @@ class FDFD:
         Nx_ez, Ny_ez, Nz_ez = self.scene.Nx_ez, self.scene.Ny_ez, self.scene.Nz_ez
 
         # Zero-copy CuPy -> torch via DLPack; slice/reshape stay on device
-        x = torch.from_dlpack(x_gpu).to(dtype=torch.complex64)
+        x = torch.from_dlpack(x_gpu)
         Ex = x[:N_ex].reshape((Nx_ex, Ny_ex, Nz_ex))
         Ey = x[N_ex:N_ex+N_ey].reshape((Nx_ey, Ny_ey, Nz_ey))
         Ez = x[N_ex+N_ey:].reshape((Nx_ez, Ny_ez, Nz_ez))
@@ -1022,7 +1127,8 @@ def solve_isotropic(self, source_pos, source_width, source_amplitude, max_iter=1
         x_gpu, info = cupy_gmres(self._iteration_matrix(),
                                  b_gpu.astype(self._iteration_dtype(), copy=False),
                                  M=self._ensure_preconditioner(),
-                                 maxiter=max_iter, tol=tol, restart=restart, callback=iso_callback)
+                                 maxiter=max_iter, rtol=tol, atol=0.0, restart=restart,
+                                 callback=iso_callback, callback_type='pr_norm')
         x_gpu = x_gpu.astype(cp.complex64, copy=False) / self._ensure_symmetrization_scale()
         pbar.close()
         if verbose:

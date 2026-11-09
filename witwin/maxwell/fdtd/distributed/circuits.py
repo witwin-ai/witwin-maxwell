@@ -13,13 +13,14 @@ from ..circuits import (
     prepare_circuit_runtimes,
     prepare_circuit_time_series,
 )
-from ..lumped import FieldPortCoupling, prepare_field_port_coupling
+from ..lumped import FieldPortCoupling, prepare_field_port_coupling, add_electric_history_voltage
 from ..ports import (
     PreparedPortRuntime,
     _edge_control_volume,
     _open_declared_pec_terminal_edges,
     _validate_local_update_coefficient,
     _validate_supported_field_coupling,
+    _electric_history_currents,
     accumulate_port_observers,
     finalize_port_data,
     prepare_port_spectral_accumulators,
@@ -318,6 +319,8 @@ class DistributedCircuitRuntime:
                         shard.solver,
                         f"eps_{local_geometry.voltage_component}",
                     ),
+                    electric_update_coefficient=getattr(shard.solver, "c" + local_geometry.voltage_component.lower() + "_curl"),
+                    electric_history_currents=_electric_history_currents(shard.solver, local_geometry),
                     yee_control_volume=_edge_control_volume(
                         shard.solver,
                         local_geometry.voltage_component,
@@ -370,12 +373,12 @@ class DistributedCircuitRuntime:
                     electric_time=torch.as_tensor(
                         owner_shard.solver.dt,
                         device=owner_device,
-                        dtype=owner_shard.solver.Ex.dtype,
+                        dtype=torch.float64,
                     ),
                     magnetic_time=torch.as_tensor(
                         0.5 * owner_shard.solver.dt,
                         device=owner_device,
-                        dtype=owner_shard.solver.Ex.dtype,
+                        dtype=torch.float64,
                     ),
                 )
             remote = port_plan.owner_rank != plan.owner_rank
@@ -471,6 +474,7 @@ class DistributedCircuitRuntime:
         )
         torch.mul(field.edge_buffer, field.voltage_weights, out=field.edge_buffer)
         torch.sum(field.edge_buffer, dim=0, out=field.last_voltage_before)
+        add_electric_history_voltage(field, field.last_voltage_before)
 
     @staticmethod
     def _apply_current(

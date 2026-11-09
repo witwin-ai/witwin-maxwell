@@ -278,7 +278,7 @@ def test_nonlinear_flavor_rejects_anisotropy(flavor):
     physics-worded reason (the field-dependent scalar permittivity cannot be a
     coupled tensor inverse)."""
     with pytest.raises(NotImplementedError) as excinfo:
-        _nonlinear_material(flavor, {"epsilon_tensor": _rotated_uniaxial(2.0, 2.0, 3.0)})
+        _run_material(_nonlinear_material(flavor, {"epsilon_tensor": _rotated_uniaxial(2.0, 2.0, 3.0)}))
     message = str(excinfo.value).lower()
     assert "not implemented yet" not in message
     assert "nonlinear" in message and "anisotropic" in message

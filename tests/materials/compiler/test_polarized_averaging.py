@@ -8,19 +8,21 @@ def _slab_components(averaging, eps_r=12.0):
     # Domain [0,1]^3, grid 0.25 -> nodes at 0, 0.25, 0.5, 0.75, 1.0.
     # A slab thick enough that its low face lands on the interior node x=0.25 while
     # the neighbouring node x=0.5 is strictly interior, so the node-based
-    # finite-difference normal at x=0.25 resolves cleanly along x.
+    # finite-difference normal at x=0.25 resolves cleanly along x. The slab
+    # overhangs the domain in y/z so no transverse face sits on a boundary node
+    # (multi-sample polarized estimates the normal from the averaged material).
     domain = mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)))
     grid = mw.GridSpec.uniform(0.25)
     scene = mw.Scene(
         domain=domain,
         grid=grid,
         device="cpu",
-        subpixel_samples=mw.SubpixelSpec(averaging=averaging),
+        subpixel_samples=mw.SubpixelSpec(samples=4, averaging=averaging),
     )
     scene.add_structure(
         mw.Structure(
             name="slab",
-            geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 1.0, 1.0)),
+            geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 2.0, 2.0)),
             material=mw.Material(eps_r=eps_r),
         )
     )
@@ -29,6 +31,15 @@ def _slab_components(averaging, eps_r=12.0):
 
 
 def test_polarized_normal_axis_uses_harmonic_mean():
+    """Normal component harmonic, tangential arithmetic, at a face on a node.
+
+    Re-anchored 2026-10-29. The test now uses samples=4, because single-sample
+    polarized averaging raises (a point sample is binary and would reproduce
+    the staircase). The slab now overhangs the domain in y/z: multi-sample
+    polarized averaging takes its normal from the averaged-material gradient,
+    and the old slab put transverse faces on boundary nodes, which tilts that
+    normal. The physical expectations are unchanged.
+    """
     eps_r = 12.0
     eps = _slab_components("polarized", eps_r=eps_r)
     node = (1, 1, 1)  # x = 0.25 interface node, normal along x.

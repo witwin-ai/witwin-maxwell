@@ -256,7 +256,7 @@ class _WaveformBase(abc.ABC):
     def to_source_time(self, *, samples: int = 4001) -> CustomSourceTime:
         """Dense analytic table suitable for additive current injection.
 
-        The FDTD scalar-injection path point-samples this table at ``n*dt``.
+        The FDTD scalar-injection path point-samples this table at ``(n+1/2)*dt``.
         Because the analytic ESD current is smooth and the table is dense, the
         injected samples reproduce the target current within tabulation error.
         Charge-conserving grid resampling is provided separately by

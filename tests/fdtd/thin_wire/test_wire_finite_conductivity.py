@@ -182,7 +182,7 @@ def test_ohmic_loss_density_is_half_r_abs_i_squared_and_grows_with_frequency():
 
 def _fit(order=16, band=(4e8, 3e9), dt=8e-13):
     return wi.fit_series_impedance(
-        RADIUS, COPPER, band=band, order=order, dt=dt, samples=240, iterations=20
+        RADIUS, COPPER, band=band, order=order, dt=dt, samples=240
     )
 
 

@@ -18,7 +18,7 @@ def _run_pec_slab(pec_mode, boundary):
         grid=grid,
         boundary=boundary,
         device="cuda",
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode),
+        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
     )
     scene.add_structure(
         mw.Structure(

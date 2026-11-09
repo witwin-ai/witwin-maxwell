@@ -1,0 +1,3 @@
+# Linear complex scalar material admission
+
+A linear `mw.Material(eps_r=2+.05j,mu_r=1.3+.02j)` without TwoPhotonAbsorption declarations now compiles its existing finite-frequency scalar MoM contract through Scene/Simulation. No unused real nonlinear host index is sampled. Electric/magnetic base loss and conductivity combine once under the existing passive outgoing branch; imaginary constitutive values remain intact. Existing gain/background refusal and active-TPA formulas are unchanged. This correction does not admit general complex DC or complex TPA, grant continuum physics, or certify resources/scaling/production. See the phase assessment for exact original failed-context recovery and new public/native checks.

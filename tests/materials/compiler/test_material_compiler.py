@@ -49,6 +49,69 @@ def _cube_mesh(*, size=0.6, requires_grad=False):
     return vertices, faces
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_mesh_subsample_pruning_is_bit_identical():
+    from types import SimpleNamespace
+    from witwin.maxwell.compiler.subpixel import _subsample_fill_fraction
+
+    vertices, faces = _cube_mesh(size=0.6)
+    mesh = mw.Mesh(vertices.numpy(), faces.numpy(), recenter=False, fill_mode="solid",
+                   topology_diagnostics=True, device="cuda")
+    coords = torch.meshgrid(*(torch.linspace(-1, 1, 19, device="cuda") + shift
+                              for shift in (.013, -.017, .009)), indexing="ij")
+    # The adapter retains exactly the original full-grid seven-query formula.
+    full = SimpleNamespace(signed_distance=mesh.signed_distance)
+    expected = _subsample_fill_fraction(full, *coords, (.04, .03, .05))
+    actual = _subsample_fill_fraction(mesh, *coords, (.04, .03, .05))
+    assert torch.equal(actual, expected)
+    assert torch.count_nonzero((actual > 0) & (actual < 1)) > 0
+    assert torch.count_nonzero(actual == 0) > 0
+
+
+def test_mesh_subsample_reuses_exact_node_and_edge_points(monkeypatch):
+    from contextlib import nullcontext
+    from witwin.maxwell.compiler import materials
+
+    vertices, faces = _cube_mesh()
+    mesh = mw.Mesh(vertices.numpy(), faces.to(torch.int32), recenter=False, fill_mode="solid",
+                   topology_diagnostics=False)
+    scene = mw.Scene(domain=mw.Domain(bounds=((-0.73, 0.81),) * 3),
+                     grid=mw.GridSpec.uniform(0.19), device="cpu",
+                     subpixel_samples=mw.SubpixelSpec(samples=4, averaging="polarized"),
+                     structures=[mw.Structure(mesh, mw.Material(eps_r=4, sigma_e=.03))])
+    prepared = _prepared_scene(scene)
+    queries = []
+    signed_distance = mw.Mesh.signed_distance
+
+    def counted(self, xx, yy, zz):
+        queries.append(xx.numel())
+        return signed_distance(self, xx, yy, zz)
+
+    monkeypatch.setattr(mw.Mesh, "signed_distance", counted)
+    actual = materials.compile_material_model(prepared, subpixel=scene.subpixel)
+    reused_points = sum(queries)
+    queries.clear()
+    monkeypatch.setattr(materials, "_mesh_fill_cache", lambda *args: nullcontext())
+    expected = materials.compile_material_model(prepared, subpixel=scene.subpixel)
+
+    def equal(a, b):
+        if torch.is_tensor(a):
+            assert torch.equal(a, b)
+        elif isinstance(a, dict):
+            assert a.keys() == b.keys()
+            for key in a:
+                equal(a[key], b[key])
+        elif isinstance(a, (tuple, list)):
+            assert len(a) == len(b)
+            for x, y in zip(a, b):
+                equal(x, y)
+        else:
+            assert a == b
+
+    equal(actual, expected)
+    assert reused_points < sum(queries) / 2
+
+
 def test_shared_material_compiler_matches_rotated_box_scene_grid():
     scene = _build_scene()
     scene.add_structure(
@@ -128,33 +191,21 @@ def test_soft_occupancy_returns_fractional_interface_fill_without_subpixel_sampl
     assert abs(interface_value - 3.0) < 0.35
 
 
-def test_soft_occupancy_polarized_normal_component_uses_harmonic_mean():
-    # Domain [0,1]^3, grid 0.25 -> nodes at 0, 0.25, 0.5, 0.75, 1.0. The slab low face
-    # lands on the interior node x=0.25 with a neighbouring interior node at x=0.5, so
-    # the node-based finite-difference normal at x=0.25 resolves along x.
-    domain = mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)))
-    grid = mw.GridSpec.uniform(0.25)
+def test_single_sample_polarized_averaging_is_rejected():
+    """Single-sample polarized averaging raises.
 
-    scene = mw.Scene(
-        domain=domain,
-        grid=grid,
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(averaging="polarized"),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="slab",
-            geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 1.0, 1.0)),
-            material=mw.Material(eps_r=5.0),
+    Replaces the former samples=1 harmonic-mean check (2026-10-29). One point
+    sample per cell has a binary fill, so a normal projection would silently
+    reproduce the staircase. The harmonic behaviour itself is covered by
+    test_multisample_polarized_interface_preserves_normal_harmonic_mean.
+    """
+    with pytest.raises(ValueError, match="more than one subpixel sample"):
+        mw.Scene(
+            domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
+            grid=mw.GridSpec.uniform(0.25),
+            device="cpu",
+            subpixel_samples=mw.SubpixelSpec(averaging="polarized", samples=1),
         )
-    )
-
-    eps, _ = _prepared_scene(scene).compile_material_components()
-    node = (1, 1, 1)
-    harmonic = 1.0 / (0.5 / 1.0 + 0.5 / 5.0)
-    assert abs(eps["x"][node].item() - harmonic) < 1e-2
-    assert abs(eps["y"][node].item() - 3.0) < 1e-2
-    assert abs(eps["z"][node].item() - 3.0) < 1e-2
 
 
 @pytest.mark.parametrize("samples", [2, 3, 4, 5])
@@ -302,6 +353,7 @@ def test_subpixel_sphere_average_is_closer_to_analytic_volume_fraction():
 
 def test_compile_material_tensors_propagate_gradients_through_box_parameters():
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.2),
         device="cpu",
@@ -329,6 +381,7 @@ def test_compile_material_tensors_propagate_gradients_through_box_parameters():
 
 def test_compile_material_tensors_propagate_gradients_through_mesh_vertices():
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.2),
         device="cpu",
@@ -353,6 +406,7 @@ def test_compile_material_tensors_propagate_gradients_through_mesh_vertices():
 
 def test_compile_materials_recomputes_for_trainable_geometry_without_manual_cache_invalidation():
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
         device="cpu",
@@ -448,6 +502,14 @@ def _uniform_material_region_scene(*, use_region: bool, samples: int, averaging:
 @pytest.mark.parametrize("samples", [1, 3])
 @pytest.mark.parametrize("averaging", ["arithmetic", "polarized"])
 def test_uniform_material_region_matches_equivalent_subpixel_structure(samples, averaging):
+    """A uniform MaterialRegion matches the equivalent structure.
+
+    The polarized samples=1 case now asserts the ValueError (2026-10-29).
+    """
+    if averaging == "polarized" and samples == 1:
+        with pytest.raises(ValueError, match="more than one subpixel sample"):
+            _uniform_material_region_scene(use_region=True, samples=samples, averaging=averaging)
+        return
     region_model = _uniform_material_region_scene(
         use_region=True,
         samples=samples,
@@ -479,6 +541,7 @@ def test_uniform_material_region_matches_equivalent_subpixel_structure(samples, 
 
 def test_material_region_preserves_tensor_device_dtype_and_gradients():
     scene = mw.Scene(
+        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
         device="cpu",
@@ -631,17 +694,9 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
             ),
             "orientation",
         ),
-        (
-            lambda: mw.Material(
-                eps_r=2.0,
-                epsilon_tensor=mw.DiagonalTensor3(2.0, 2.5, 3.0),
-                kerr_chi3=1.0e-10,
-            ),
-            "nonlinear Material cannot carry an anisotropic permittivity tensor",
-        ),
     ],
 )
-def test_medium_rejects_unsupported_tensor_and_nonlinear_combinations(factory, message):
+def test_medium_rejects_unsupported_tensor_orientation(factory, message):
     with pytest.raises(NotImplementedError, match=message):
         factory()
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import copy
 from dataclasses import dataclass, fields
 from pathlib import Path
+from io import BytesIO
 from typing import Any
 
 import numpy as np
@@ -17,6 +19,7 @@ from .monitors import (
     PermittivityMonitor,
     PowerLossMonitor,
 )
+from .monitors import GAUSSIAN_OVERLAP_MONITOR_TYPES, PROJECTION_MONITOR_TYPES
 from .network import (
     EmbeddedNetworkData,
     NetworkData,
@@ -24,6 +27,7 @@ from .network import (
     _validate_safe_persistence,
 )
 from .rational import FitReport, NetworkFitReport
+from .ports_postprocess import PortDrive
 from .scene import prepare_scene
 from .thin_wire import WireData
 from .visualization import extract_orthogonal_slice, plot_slice_image
@@ -38,15 +42,89 @@ def _clone_mapping(data: dict[str, Any]) -> dict[str, Any]:
     return dict(data) if data is not None else {}
 
 
-def _cpu_serializable(value: Any):
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu()
-    if isinstance(value, Mapping):
-        return {key: _cpu_serializable(item) for key, item in value.items()}
+def _mixed_absolute_spectral_stats(stats):
+    """Sweep columns may group single-frequency runs into tuples."""
+    if isinstance(stats, (tuple, list)):
+        return any(_mixed_absolute_spectral_stats(column) for column in stats)
+    return (stats.get("time_plan", {}).get("mixed_sources", False)
+            and not stats.get("normalize_source", False)) or any(
+        _mixed_absolute_spectral_stats(column) for column in stats.get("columns", ()))
+
+
+class _RatioOnlyPortData:
+    """Live port ratios computed from private common-scale V/I samples."""
+
+    __slots__ = ("_port",)
+
+    def __init__(self, port: PortData):
+        self._port = port
+
+    def __getattr__(self, name):
+        if name == "metadata":
+            return {key: value for key, value in self._port.metadata.items()
+                    if key not in {"terminal_voltage", "terminal_current"}}
+        if name in {
+            "voltage", "current", "available_power", "a", "b",
+            "incident_power", "reflected_power", "accepted_power", "delivered_power",
+            "save",
+        }:
+            from .fdtd.runtime.representation import require_absolute_spectra
+            require_absolute_spectra(True)
+        if name in {
+            "z_in", "reflection_coefficient", "return_loss_db", "return_loss", "vswr",
+            "z0", "frequencies", "port_name", "mode_names", "direction",
+            "reference_plane", "beta", "characteristic_impedance", "tracking_confidence",
+            "phasor_convention", "power_wave_convention", "schema_version",
+        }:
+            return getattr(self._port, name)
+        raise AttributeError(name)
+
+
+def _copy_monitor_containers(value):
+    """Give callers independent payload containers while sharing live tensors."""
+    if isinstance(value, dict):
+        return {key: _copy_monitor_containers(item) for key, item in value.items()}
     if isinstance(value, list):
-        return [_cpu_serializable(item) for item in value]
+        return [_copy_monitor_containers(item) for item in value]
     if isinstance(value, tuple):
-        return tuple(_cpu_serializable(item) for item in value)
+        return tuple(_copy_monitor_containers(item) for item in value)
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    return value
+
+
+def _clone_conductor_diagnostics(value):
+    """Return independent diagnostic ownership without detaching live tensors."""
+    if isinstance(value, torch.Tensor):
+        return value.clone()
+    if isinstance(value, Mapping):
+        return {key: _clone_conductor_diagnostics(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clone_conductor_diagnostics(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_conductor_diagnostics(item) for item in value)
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    return value
+
+
+def _cpu_serializable(value: Any, *, _memo=None):
+    # Monitor payloads expose the same GPU Tensor under several schema keys.
+    # Preserve that identity while copying; distinct views stay distinct. Keep
+    # source references alive so temporary objects cannot reuse a cached id.
+    if _memo is None:
+        _memo = {}
+    if isinstance(value, torch.Tensor):
+        key = id(value)
+        if key not in _memo:
+            _memo[key] = (value, value.detach().cpu())
+        return _memo[key][1]
+    if isinstance(value, Mapping):
+        return {key: _cpu_serializable(item, _memo=_memo) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_cpu_serializable(item, _memo=_memo) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_cpu_serializable(item, _memo=_memo) for item in value)
     return value
 
 
@@ -540,6 +618,8 @@ def _select_monitor_frequency(payload: dict[str, Any], frequencies: tuple[float,
         selected["samples"] = _slice_monitor_samples(payload["samples"], len(frequencies), index)
     if "data" in payload:
         selected["data"] = _slice_frequency_axis(payload["data"], len(frequencies), index)
+    if payload.get("kind") == "linear_projection" and "value" in payload:
+        selected["value"] = _slice_frequency_axis(payload["value"], len(frequencies), index)
     if "flux" in payload:
         selected["flux"] = _slice_frequency_axis(payload["flux"], len(frequencies), index)
     if "power" in payload:
@@ -739,19 +819,156 @@ def _slice_plane_samples(values, u_indices, v_indices):
     return array
 
 
-def _crop_plane_monitor_payload(payload: dict[str, Any], monitor: FinitePlaneMonitor) -> dict[str, Any]:
+def _finite_plane_cell_selection(coords, widths, lower, upper, *, whole_cells=False):
+    """Intersect physical rectangles, including cells with exterior centers.
+
+    ``whole_cells`` applies to node-aligned (closed-surface) bounds: every cell
+    lies entirely inside or outside them, so cells are selected by center and
+    kept whole, without round-off slivers from reconstructed cell edges.
+    """
+    tensor = isinstance(coords, torch.Tensor)
+    points = coords if tensor else np.asarray(coords, dtype=float)
+    span = (torch.as_tensor(widths, device=points.device, dtype=points.dtype)
+            if tensor else np.asarray(widths, dtype=float))
+    if span.shape != points.shape:
+        raise ValueError("Finite plane cell widths must match their coordinates.")
+    if whole_cells:
+        inside = (points > lower) & (points < upper)
+        indices = (torch.nonzero(inside, as_tuple=False).flatten() if tensor else np.flatnonzero(inside))
+        if len(indices) == 0:
+            raise ValueError("Closed-surface face bounds do not contain any retained physical cells.")
+        return indices, points[indices], span[indices]
+    if tensor:
+        left = torch.maximum(points - span / 2, points.new_tensor(lower))
+        right = torch.minimum(points + span / 2, points.new_tensor(upper))
+        indices = torch.nonzero(right > left, as_tuple=False).flatten()
+    else:
+        left = np.maximum(points - span / 2, lower)
+        right = np.minimum(points + span / 2, upper)
+        indices = np.flatnonzero(right > left)
+    if len(indices) == 0:
+        raise ValueError("Finite monitor bounds do not intersect any retained physical cells.")
+    clipped_widths = (right - left)[indices]
+    centers = ((right + left) / 2)[indices]
+    # Preserve all unchanged native coordinates exactly, including roundoff.
+    full = ((points - span / 2 >= lower) & (points + span / 2 <= upper))[indices]
+    if tensor:
+        centers = torch.where(full, points[indices], centers)
+    else:
+        centers = np.where(full, points[indices], centers)
+    return indices, centers, clipped_widths
+
+
+def _resample_plane_samples(values, native_coords, target_coords):
+    """Differentiable bilinear evaluation of aligned plane fields."""
+    result = values
+    for offset, (native, target) in enumerate(zip(native_coords, target_coords)):
+        axis = result.ndim - 2 + offset
+        if isinstance(result, torch.Tensor):
+            source = torch.as_tensor(native, device=result.device, dtype=torch.float64)
+            points = torch.as_tensor(target, device=result.device, dtype=torch.float64)
+            if len(source) == 1:
+                low = high = torch.zeros(len(points), device=result.device, dtype=torch.long)
+                fraction = torch.zeros_like(points)
+            else:
+                high = torch.searchsorted(source.contiguous(), points.contiguous()).clamp(1, len(source)-1)
+                low = high - 1
+                fraction = (points-source[low])/(source[high]-source[low])
+            shape = [1]*result.ndim
+            shape[axis] = len(points)
+            weight = fraction.to(dtype=result.real.dtype).reshape(shape)
+            result = result.index_select(axis, low)*(1-weight) + result.index_select(axis, high)*weight
+        else:
+            source, points = np.asarray(native), np.asarray(target)
+            if len(source) == 1:
+                low = high = np.zeros(len(points), dtype=int)
+                fraction = np.zeros_like(points)
+            else:
+                high = np.clip(np.searchsorted(source, points), 1, len(source)-1)
+                low = high-1
+                fraction = (points-source[low])/(source[high]-source[low])
+            shape = [1]*result.ndim
+            shape[axis] = len(points)
+            weight = fraction.reshape(shape)
+            result = np.take(result, low, axis=axis)*(1-weight) + np.take(result, high, axis=axis)*weight
+    return result
+
+
+def _crop_cell_centered_plane_payload(payload, monitor, coord_names, bounds):
+    native = tuple(payload[name] for name in coord_names)
+    selections = [_finite_plane_cell_selection(payload[name], payload["cell_widths"][name],
+                  *bounds[name], whole_cells=monitor.closure_planes is not None) for name in coord_names]
+    coordinates = tuple(selection[1] for selection in selections)
+    selected = dict(payload)
+    selected['native_components'] = payload.get('native_components', payload.get('components', {}))
+    selected.update(zip(coord_names, coordinates))
+    selected["coords"] = coordinates
+    selected["cell_widths"] = {name: selection[2] for name, selection in zip(coord_names, selections)}
+    selected["finite_cell_selection"] = {
+        "source_indices": dict(zip(coord_names, (selection[0] for selection in selections))),
+        "source_coords": dict(zip(coord_names, native)),
+        "rule": ("watertight_closure_at_snapped_adjacent_planes" if monitor.closure_planes is not None
+                 else "intersected_rectangles_at_clipped_midpoints"),
+    }
+    # Top-level fields are already collocated; native component payloads retain
+    # staggered support and cannot be sliced using aligned-grid indices.
+    components = {}
+    for name in payload.get("fields", ()):
+        if name not in payload:
+            continue
+        value = _resample_plane_samples(payload[name], native, coordinates)
+        selected[name] = value
+        component = dict(payload.get("components", {}).get(name, {}))
+        component.update(data=value, coords=coordinates, collocated=True)
+        components[name] = component
+    if "data" in payload:
+        selected["data"] = _resample_plane_samples(payload["data"], native, coordinates)
+    selected["components"] = components
+    selected["collocated"] = True
+    selected.update(monitor_type="finite_plane", center=monitor.position, size=monitor.size)
+    _record_plane_bounds(selected, monitor, bounds)
+    for name in ("face_label", "surface_name"):
+        if getattr(monitor, name) is not None:
+            selected[name] = getattr(monitor, name)
+    if selected.get("compute_flux"):
+        from .fdtd.observers import _compute_plane_flux
+        selected["flux"] = selected["power"] = _compute_plane_flux(selected)
+    return selected
+
+
+def _record_plane_bounds(selected, monitor, bounds):
+    selected["tangential_bounds"] = dict(bounds)
+    if monitor.closure_planes is not None:
+        selected["declared_tangential_bounds"] = dict(monitor.tangential_bounds)
+        selected["closure_planes"] = dict(monitor.closure_planes)
+
+
+def _crop_plane_monitor_payload(
+    payload: dict[str, Any],
+    monitor: FinitePlaneMonitor,
+    bounds: dict[str, tuple[float, float]] | None = None,
+) -> dict[str, Any]:
+    """Restrict a plane payload to its integration rectangle.
+
+    ``bounds`` defaults to the declared rectangle. Closed-surface faces pass the
+    grid-resolved watertight rectangle from ``finite_plane_integration_bounds``.
+    """
     coord_u_name, coord_v_name = _plane_coord_names(monitor.axis)
     if coord_u_name not in payload or coord_v_name not in payload:
         return dict(payload)
+    bounds = dict(monitor.tangential_bounds) if bounds is None else dict(bounds)
 
-    u_indices = _select_coord_indices(payload[coord_u_name], *monitor.tangential_bounds[coord_u_name])
-    v_indices = _select_coord_indices(payload[coord_v_name], *monitor.tangential_bounds[coord_v_name])
+    if "cell_widths" in payload:
+        return _crop_cell_centered_plane_payload(payload, monitor, (coord_u_name, coord_v_name), bounds)
+
+    u_indices = _select_coord_indices(payload[coord_u_name], *bounds[coord_u_name])
+    v_indices = _select_coord_indices(payload[coord_v_name], *bounds[coord_v_name])
     if u_indices is None and v_indices is None:
         selected = dict(payload)
         selected["monitor_type"] = "finite_plane"
         selected["center"] = monitor.position
         selected["size"] = monitor.size
-        selected["tangential_bounds"] = dict(monitor.tangential_bounds)
+        _record_plane_bounds(selected, monitor, bounds)
         if monitor.face_label is not None:
             selected["face_label"] = monitor.face_label
         if monitor.surface_name is not None:
@@ -797,7 +1014,7 @@ def _crop_plane_monitor_payload(payload: dict[str, Any], monitor: FinitePlaneMon
     selected["monitor_type"] = "finite_plane"
     selected["center"] = monitor.position
     selected["size"] = monitor.size
-    selected["tangential_bounds"] = dict(monitor.tangential_bounds)
+    _record_plane_bounds(selected, monitor, bounds)
     if monitor.face_label is not None:
         selected["face_label"] = monitor.face_label
     if monitor.surface_name is not None:
@@ -943,8 +1160,17 @@ def _build_material_monitor_payload(result: "Result", monitor, *, frequency, fre
 
 def _build_closed_surface_payload(result: "Result", monitor: ClosedSurfaceMonitor, *, frequency, freq_index):
     faces = {}
+    complete_flux=True
     for face in monitor.faces:
-        face_payload = result.raw_monitor(face.name, frequency=frequency, freq_index=freq_index)
+        face_payload = result._native_raw_monitor(face.name, frequency=frequency, freq_index=freq_index)
+        from .monitors import required_flux_fields
+        if all(component in face_payload for component in required_flux_fields(face.axis)):
+            if "flux" not in face_payload:
+                from .fdtd.quadrature import _compute_plane_flux
+                face_payload=dict(face_payload)
+                face_payload["flux"]=face_payload["power"]=_compute_plane_flux(face_payload)
+        else:
+            complete_flux=False
         faces[face.face_label or face.name] = face_payload
 
     first_face = next(iter(faces.values()))
@@ -959,6 +1185,9 @@ def _build_closed_surface_payload(result: "Result", monitor: ClosedSurfaceMonito
         "frequencies": frequencies,
         "bounds": monitor.bounds,
     }
+    if complete_flux:
+        payload["flux"]=payload["power"]=sum(face["flux"] for face in faces.values())
+        payload["power_unit"]="W"
     return payload
 
 
@@ -980,6 +1209,7 @@ class ResultFieldAccessor:
         return self.selection.tensor(f"{self.family}z")
 
     def as_dict(self) -> dict[str, torch.Tensor]:
+        self.selection.result._require_frequency_volume_fields()
         tensors: dict[str, torch.Tensor] = {}
         for axis in ("x", "y", "z"):
             field_name = f"{self.family}{axis}".upper()
@@ -1059,10 +1289,12 @@ class ResultSelection:
 
     @property
     def E(self) -> ResultFieldAccessor:
+        self.result._require_frequency_volume_fields()
         return ResultFieldAccessor(self, "E")
 
     @property
     def H(self) -> ResultFieldAccessor:
+        self.result._require_frequency_volume_fields()
         return ResultFieldAccessor(self, "H")
 
     @property
@@ -1176,6 +1408,24 @@ class ResultPlotter:
 
 
 class Result:
+    @classmethod
+    def from_fields(
+        cls, scene, *, frequencies, kernel: str, fields=None, monitors=None,
+        ports=None, network=None, metadata=None, prepared_scene=None,
+    ) -> "Result":
+        """Wrap externally computed Yee fields and payloads in a standard Result."""
+        if not isinstance(kernel, str) or not kernel:
+            raise ValueError("kernel must be a non-empty string.")
+        metadata = dict(metadata) if metadata is not None else {}
+        if "kernel" in metadata and metadata["kernel"] != kernel:
+            raise ValueError("metadata kernel must match kernel.")
+        metadata["kernel"] = kernel
+        return cls(
+            method="external", scene=scene, prepared_scene=prepared_scene,
+            frequencies=frequencies, fields=fields, monitors=monitors,
+            ports=ports, network=network, metadata=metadata,
+        )
+
     def __init__(
         self,
         *,
@@ -1196,15 +1446,34 @@ class Result:
         solver_stats: dict[str, Any] | None = None,
         raw_output: Any = None,
         breakdown=None,
+        surface_data=None,
+        harmonic_data=None,
     ):
         self.method = method
+        if surface_data is not None:
+            from .mom.runtime import SURFACE_DATA_TYPES
+            if method != "mom" or not isinstance(surface_data, SURFACE_DATA_TYPES):
+                raise TypeError("surface_data requires an MoM Result and SurfaceData payload")
+        if harmonic_data is not None:
+            from .mom.harmonic_runtime import HarmonicData
+            if method != "mom" or not isinstance(harmonic_data,HarmonicData) or surface_data is not None:
+                raise TypeError("harmonic_data requires an MoM Result with only a HarmonicData payload")
+        self._harmonic_data = harmonic_data
+        if method == "mom" and ((surface_data is None and harmonic_data is None) or fields):
+            raise ValueError("MoM Results require native surface data and cannot carry Yee field arrays")
+        self._surface_data = surface_data
         self.scene = scene
         self._prepared_scene = prepared_scene
         self.frequencies = _resolve_result_frequencies(frequency=frequency, frequencies=frequencies)
         self.frequency = self.frequencies[0]
+        if harmonic_data is not None:
+            harmonic_data.state.assert_current()
+            if self.frequencies != tuple(float(f) for f in harmonic_data.state.frequencies):
+                raise ValueError("Result frequencies must match the actual coupled harmonic state")
         self.solver = solver
         self._fields = _clone_mapping(fields)
         self._monitors = _normalize_monitor_data_mapping(monitors)
+        self._closed_surface_payload_cache = {}
         self._ports = _normalize_port_data_mapping(ports)
         self._circuits = _normalize_circuit_data_mapping(circuits)
         self._embedded_networks = _normalize_embedded_network_mapping(embedded_networks)
@@ -1213,11 +1482,110 @@ class Result:
         self._network = network
         self._array_run_data = array_run_data
         self._metadata = _clone_mapping(metadata)
+        if solver is not None and getattr(solver, "_port_drives", None):
+            self._metadata["port_drives"] = _clone_mapping(solver._port_drives)
+        coordinates=getattr(scene,"coordinates",None)
+        if coordinates is not None:
+            from .coordinates import FieldFrame
+            frame=FieldFrame("covariant_chart",coordinates).snapshot()
+            previous=self._metadata.get("field_frame")
+            if previous is not None and previous!=frame:
+                raise ValueError("Result field frame differs from the supplied physical coordinate chart.")
+            self._metadata["field_frame"]=frame
+        elif self._metadata.get("field_frame",{}).get("kind")=="covariant_chart":
+            raise ValueError("Covariant chart field data requires its matching coordinate Scene.")
+        if method == "fdtd" and (getattr(solver, "_copper_foils", ())
+                                or raw_output is not None and "conductor_losses" in raw_output):
+            from .fdtd.copper_foil import copper_loss_report
+            self._metadata["conductor_losses"] = (
+                _clone_mapping(raw_output["conductor_losses"])
+                if raw_output is not None and "conductor_losses" in raw_output else copper_loss_report(solver)
+            )
         self._solver_stats = _clone_mapping(solver_stats)
+        if method == "fdtd":
+            columns = self._solver_stats.get("columns", ())
+            if ("execution_path" not in self._solver_stats and columns
+                    and all("execution_path" in column for column in columns)):
+                self._solver_stats.update(
+                    execution_path="core" if all(column["execution_path"] == "core" for column in columns) else "existing",
+                    fallback_reason=next((column["fallback_reason"] for column in columns
+                                          if column.get("fallback_reason") is not None), None),
+                )
+            if "execution_path" in self._solver_stats:
+                self._solver_stats.setdefault("fallback_reason", None)
+                self._metadata.update(execution_path=self._solver_stats["execution_path"],
+                                      fallback_reason=self._solver_stats["fallback_reason"])
+        self._mixed_absolute_spectra = method == "fdtd" and _mixed_absolute_spectral_stats(self._solver_stats)
+        self._allow_spectral_ratios = False
         self._sharded_manifest = None
         self._shard_paths: tuple[Path, ...] = ()
-        self.raw_output = raw_output
+        self._raw_output = raw_output
         self._breakdown = breakdown
+
+    def _require_absolute_spectra(self):
+        from .fdtd.runtime.representation import require_absolute_spectra
+        if not self._allow_spectral_ratios:
+            require_absolute_spectra(self._mixed_absolute_spectra)
+
+    def _spectral_ratio_view(self):
+        """Internal zero-copy samples for reductions that return only ratios."""
+        result = copy(self)
+        result._allow_spectral_ratios = True
+        return result
+
+    def _public_port(self, port):
+        if self._mixed_absolute_spectra and not self._allow_spectral_ratios:
+            return _RatioOnlyPortData(port)
+        return port
+
+    def _require_monitor_spectra(self, name):
+        if not self._mixed_absolute_spectra or self._allow_spectral_ratios:
+            return
+        payload = self._monitors.get(name)
+        if isinstance(payload, dict) and payload.get("kind", "").endswith("_time"):
+            return
+        if isinstance(_find_scene_monitor(self.scene, name), (PermittivityMonitor, MediumMonitor)):
+            return
+        self._require_absolute_spectra()
+
+    @property
+    def raw_output(self):
+        self._require_absolute_spectra()
+        return self._raw_output
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """The Result's mutable metadata mapping."""
+        return self._metadata
+
+    def release_solver(self):
+        """Free solver-held direct factors and drop the solver; dependent accessors behave as on a loaded Result.
+        Trimming allocator pools is the caller's choice."""
+        if hasattr(self.solver, "_release_direct_solver"):
+            self.solver._release_direct_solver()
+        self.solver = None
+
+    @property
+    def conductor_losses(self):
+        """Independent copies of per-foil energy (J), spectral work (W) and geometry.
+
+        Native spectral tile work is detached diagnostic data. Copying a tensor
+        preserves any separately supplied live graph rather than detaching it.
+        The energy_representation identifies physical real-field joules versus
+        combined complex-bank algorithmic work/state, not real transient heat.
+        """
+        self._require_absolute_spectra()
+        return _clone_conductor_diagnostics(self._metadata.get("conductor_losses", {}))
+
+    @property
+    def conductor_loss_columns(self):
+        """Sweep losses keyed by excitation port, then foil name (joules/watts).
+
+        Each column retains the single-run scalar energies and [F] surface
+        powers; independent excitation runs are never summed into one loss.
+        """
+        self._require_absolute_spectra()
+        return _clone_conductor_diagnostics(self._metadata.get("conductor_loss_columns", {}))
 
     @property
     def plot(self):
@@ -1243,9 +1611,239 @@ class Result:
         return self._breakdown.events
 
     @property
+    def surface_currents(self):
+        """Typed scattered RWG coefficients plus the exact incident carrier."""
+        if self._surface_data is None:
+            raise ValueError("This Result has no native surface currents")
+        return self._surface_data
+
+    @property
+    def harmonic_state(self):
+        """Coupled DC/AC surface and volume unknowns with their actual frequency axis."""
+        if self._harmonic_data is None:
+            raise ValueError("This Result has no coupled harmonic state")
+        self._harmonic_data.state.assert_current()
+        return self._harmonic_data.state
+
+    def compare_harmonic_cutoff(self, previous, *, relative_tolerance=1e-4,
+                                absolute_tolerance=1e-10, tail_absolute_tolerance=1e-8):
+        """Compare fixed-grid cell fields and added harmonic amplitudes in V/m.
+
+        This is an empirical cutoff estimate, not spatial or physical qualification.
+        """
+        if not isinstance(previous,Result) or previous._harmonic_data is None or self._harmonic_data is None:
+            raise ValueError("Harmonic cutoff comparison requires two coupled harmonic Results")
+        from .mom.harmonic_convergence import compare_harmonic_cells
+        return compare_harmonic_cells(previous._harmonic_data,self._harmonic_data,
+            relative_tolerance=relative_tolerance,absolute_tolerance=absolute_tolerance,
+            tail_absolute_tolerance=tail_absolute_tolerance)
+
+    def refine_harmonic_power(self, control_surface, *, surface_orders=(2,4,8), volume_orders=(2,4,8),
+                              relative_tolerance=1e-4, absolute_tolerance=1e-20, query_config=None,
+                              query_batch_size=None, progress_callback=None):
+        """Refine power quadrature; optional callbacks receive detached CPU step reports."""
+        if self._harmonic_data is None:
+            raise ValueError("This Result has no coupled harmonic power balance")
+        from .mom.harmonic_observables import harmonic_power_refinement
+        return harmonic_power_refinement(self._harmonic_data,control_surface,surface_orders=surface_orders,
+            volume_orders=volume_orders,relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,query_config=query_config,
+            query_batch_size=query_batch_size,progress_callback=progress_callback)
+
+    def harmonic_power_balance(self, control_surface, *, surface_order=3, volume_order=3, query_config=None,query_batch_size=None):
+        """Integrate exterior flux and regional work for a coupled harmonic Result."""
+        if self._harmonic_data is None:
+            raise ValueError("This Result has no coupled harmonic power balance")
+        from .mom.harmonic_observables import harmonic_power_balance
+        return harmonic_power_balance(self._harmonic_data,control_surface,surface_order=surface_order,
+                                      volume_order=volume_order,query_config=query_config,query_batch_size=query_batch_size)
+
+    def query_dc(self, points, *, region_id):
+        """Return the DC scalar potential part [V] and full real electric field [V/m]."""
+        if self._harmonic_data is None:
+            raise ValueError("This Result has no harmonic DC field")
+        return self._harmonic_data.query_dc(points,region_id)
+
+    def query_dc_magnetic(self, points, *, region_id):
+        """Return recovered static H [A/m] and B [T] at physical points."""
+        if self._harmonic_data is None:
+            raise ValueError("This Result has no harmonic DC magnetic field")
+        return self._harmonic_data.query_dc_magnetic(points,region_id)
+
+    def query_dc_dual(self, points, *, region_id):
+        """Return coupled DC E/H, scalar potential parts and magnetic flux data.
+
+        Conductive interiors report the residue lim(omega*B)=i*sigma_m*H
+        in T/s and no finite B value. Vacuum exterior B remains finite.
+        """
+        if self._harmonic_data is None:
+            raise ValueError('This Result has no coupled harmonic DC state')
+        return self._harmonic_data.query_dc_dual(points,region_id)
+
+    def query_fields(self, points, *, region_id, field_kind, trace_side=None, reference=None, query_config=None,
+                     harmonic=None, coordinates="world", components=None, frequencies=None,
+                     owner=None, representation=None):
+        """Evaluate complex E/H at physical points in metres.
+
+        MoM decodes native currents. FDTD interpolates recorded spectral Yee
+        values; all interpolation stencil samples must be retained as full
+        fields or PointMonitors. FDTD incident/scattered queries require an
+        explicit matched empty-background Result. Its running-DFT amplitude
+        and phase are preserved, including the observer H half-step correction.
+        CopperFoil interface points require trace_side='negative' or 'positive',
+        relative to increasing chart/native normal coordinate. Tangential E uses
+        the actual saved side spectrum. Near the sheet H_t and E_n use the two
+        nearest native half nodes on that side, with linear extrapolation to the
+        interface; this is a convergent reconstruction, not an exact charge jump.
+
+        Explicit components=("Ey",) activates the selected-component contract:
+        a dict of complex tensors [selected frequencies, points], including
+        singleton axes. Selected geometry is fixed (points.requires_grad=False);
+        field/head gradients remain live. frequencies selects recorded values in output
+        order. This mode uses float64 geometry, raw source normalization and
+        the none window, with full fields, Points or exact native Planes.
+        Copper Et requires explicit owner, trace_side and actual saved sampling
+        provenance from a real time-domain field bank. The spectra remain
+        complex and mean E(t)=Re(a*exp(-i*omega*t)). The DFT accumulator uses
+        exp(+i*omega*n*dt), which is a separate sign convention. Complex
+        time-domain banks require a separate clock contract.
+        representation="constitutive" uses the actual side head;
+        "published_native" selects only the negative native primitive. Native
+        C64 values may be promoted by float64 interpolation weights. Default
+        components=None preserves the existing six-field/single-frequency tuple.
+        """
+        self._require_absolute_spectra()
+        if components is None and any(value is not None for value in (frequencies, owner, representation)):
+            raise ValueError("frequencies/owner/representation selectors require explicit components.")
+        if components is not None and self.method != "fdtd":
+            raise ValueError("components selects FDTD native fields; MoM uses its existing E/H query result.")
+        if harmonic is not None and self._harmonic_data is None:
+            raise ValueError("harmonic selects fields only on a coupled harmonic Result")
+        if coordinates not in ("world","chart"):
+            raise ValueError("Field query positions use coordinates='world' or 'chart'.")
+        if self.method == "mom":
+            if coordinates!="world":
+                raise ValueError("MoM physical queries require world Cartesian coordinates.")
+            if reference is not None:
+                raise ValueError("MoM incident fields are defined by its source; reference is only for FDTD")
+            if self._harmonic_data is not None:
+                return self._harmonic_data.query_fields(points,region_id,field_kind,trace_side,
+                    harmonic=harmonic,query_config=query_config)
+            data = self.surface_currents
+            return data.query_fields(points, region_id, field_kind, trace_side, query_config=query_config)
+        if self.method != "fdtd":
+            raise NotImplementedError("Physical E/H queries currently support MoM and FDTD Results")
+        if query_config is not None:
+            raise ValueError("query_config controls MoM quadrature and does not apply to FDTD interpolation")
+        if trace_side not in (None, "negative", "positive"):
+            raise ValueError("FDTD trace_side must be 'negative', 'positive', or None.")
+        if region_id not in (0, 1, "exterior", "interior") or isinstance(region_id, bool):
+            raise ValueError("region_id must identify exterior or interior")
+        if field_kind not in ("total", "incident", "scattered"):
+            raise ValueError("field_kind must be total, incident, or scattered")
+        if region_id in (1, "interior") and field_kind != "total":
+            raise ValueError("Interior field queries require field_kind='total'")
+        if components is not None and field_kind in ("incident", "scattered"):
+            raise NotImplementedError("Selected native incident or scattered fields need qualified matched-reference frequency and sampling records.")
+        if components is None and len(self.frequencies) != 1:
+            raise NotImplementedError("FDTD physical queries currently require one recorded frequency")
+        if not isinstance(points, torch.Tensor) or points.device.type != "cuda" or points.dtype not in (torch.float32, torch.float64) or points.ndim != 2 or points.shape[1] != 3 or not bool(torch.isfinite(points).all()):
+            raise ValueError("Physical queries require finite CUDA real points of shape [N, 3]")
+        input_points=points
+        chart=getattr(self.scene,"coordinates",None)
+        point_roundoff=0.
+        if chart is not None and coordinates=="world":
+            points=chart.inverse(points,bounds=self.scene.domain.bounds)
+            scale=max(float(input_points.detach().abs().max()),
+                      max(abs(value) for value in chart.origin),
+                      max(abs(value) for bound in self.scene.domain.bounds for value in bound))
+            point_roundoff=16*torch.finfo(input_points.dtype).eps*scale
+            spacing=min(float(np.min(np.diff(getattr(self.prepared_scene,axis+"_nodes64")))) for axis in "xyz")
+            if point_roundoff > spacing/32:
+                raise ValueError("World-coordinate precision cannot resolve the native query grid; use float64 points or coordinates='chart'.")
+        inside = torch.zeros(len(points), dtype=torch.bool, device=points.device)
+        for structure in self.scene.structures:
+            if structure.enabled:
+                from .geometry.surface_mesh import SurfaceMesh
+                if isinstance(structure.geometry, SurfaceMesh):
+                    interior, contact = structure.geometry.classify_query_points(points)
+                    if bool(contact.any()):
+                        raise ValueError("FDTD interpolation does not define a one-sided field on a SurfaceMesh triangle.")
+                    inside |= interior
+                else:
+                    inside |= structure.geometry.signed_distance(*points.unbind(-1)) < 0
+        if bool((inside != (region_id in (1, "interior"))).any()):
+            raise ValueError("Query geometry does not match region_id")
+        if field_kind in ("incident", "scattered"):
+            _validate_fdtd_query_reference(self, reference)
+            incident = reference.query_fields(input_points, region_id="exterior", field_kind="total",coordinates=coordinates)
+            if field_kind == "incident":
+                return incident
+        if components is not None:
+            from .postprocess.selected_query import query_selected
+            return query_selected(self, points, components=components, frequencies=frequencies,
+                trace_side=trace_side, owner=owner,
+                representation="constitutive" if representation is None else representation,
+                point_roundoff=point_roundoff)
+        from .postprocess.yee_interpolation import copper_query_faces
+        copper_faces=copper_query_faces(self,device=points.device if points.requires_grad else "cpu")
+        values = [_interpolate_fdtd_component(self, points, component, trace_side=trace_side,
+                      point_roundoff=point_roundoff, copper_faces=copper_faces)
+                  for component in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")]
+        result = (torch.stack(values[:3], -1), torch.stack(values[3:], -1))
+        if chart is not None:
+            result=tuple(chart.physical_field(points,value) for value in result)
+        if field_kind == "scattered":
+            return tuple(value - baseline for value, baseline in zip(result, incident))
+        return result
+
+    def far_field(self, directions, *, harmonic=None):
+        """MoM complex amplitudes with E,H ~ exp(i k r) F / r."""
+        if self._harmonic_data is not None:
+            return self._harmonic_data.far_field(directions,harmonic=harmonic)
+        if harmonic is not None:
+            raise ValueError("harmonic selects far fields only on a coupled harmonic Result")
+        data = self.surface_currents
+        return data.far_field(directions)
+
+    def rayleigh_orders(self, orders, *, side, plane_offset, quadrature_order=6):
+        """2D periodic total plane amplitudes and signed outward order flux."""
+        return self.surface_currents.rayleigh_orders(orders, side=side,
+            plane_offset=plane_offset, quadrature_order=quadrature_order)
+
+    def cylindrical_orders(self, orders, directions, *, quadrature_order=6):
+        """1D periodic scattered cylindrical amplitudes and power per radian."""
+        return self.surface_currents.cylindrical_orders(orders, directions,
+            quadrature_order=quadrature_order)
+
+    def bloch_spectrum(self, orders, *, quadrature_order=6):
+        """3D homogeneous-exterior equivalent-current potential coefficients.
+
+        These coefficients are not body-interior physical fields or incident
+        fields. Spectral poles reject ordinary forced resolvent evaluation.
+        """
+        return self.surface_currents.bloch_spectrum(orders, quadrature_order=quadrature_order)
+
+    def _require_volume_fields(self):
+        if self.method == "mom":
+            raise NotImplementedError("MoM Results contain RWG currents; use query_fields for E/H instead of Yee field access")
+
+    def _require_frequency_volume_fields(self):
+        self._require_absolute_spectra()
+        if (self.method == "fdtd" and len(self.frequencies) > 1
+                and self._solver_stats.get("full_field_dft") is False
+                and self._solver_stats.get("full_field_dft_source") == "explicit"):
+            raise RuntimeError(
+                "This FDTD run did not record frequency-domain volume fields "
+                "(full_field_dft=False); pass full_field_dft=True."
+            )
+
+    @property
     def prepared_scene(self):
+        self._require_volume_fields()
         if self._prepared_scene is None:
-            self._prepared_scene = prepare_scene(self.scene)
+            dtype = torch.float64 if self._solver_stats.get("field_dtype") == "torch.float64" else torch.float32
+            self._prepared_scene = prepare_scene(self.scene, material_dtype=dtype)
         return self._prepared_scene
 
     def at(
@@ -1268,10 +1866,18 @@ class Result:
 
     @property
     def fields(self) -> dict[str, torch.Tensor]:
+        self._require_frequency_volume_fields()
+        if getattr(self.scene,"coordinates",None) is not None:
+            raise ValueError("Mapped arrays require the explicit result.chart_fields frame.")
+        self._require_volume_fields()
         return dict(self._fields)
 
     @property
     def monitors(self) -> dict[str, Any]:
+        for name in self._monitors:
+            self._require_monitor_spectra(name)
+        if getattr(self.scene,"coordinates",None) is not None:
+            return {name:self.raw_monitor(name) for name in self._monitors}
         return dict(self._monitors)
 
     def _esd_sources(self):
@@ -1519,8 +2125,8 @@ class Result:
         )
 
     @property
-    def ports(self) -> dict[str, PortData]:
-        return dict(self._ports)
+    def ports(self) -> dict[str, PortData | _RatioOnlyPortData]:
+        return {name: self._public_port(port) for name, port in self._ports.items()}
 
     @property
     def circuits(self) -> dict[str, CircuitData]:
@@ -1532,6 +2138,7 @@ class Result:
 
     @property
     def embedded_networks(self) -> dict[str, EmbeddedNetworkData]:
+        self._require_absolute_spectra()
         return dict(self._embedded_networks)
 
     @property
@@ -1603,6 +2210,8 @@ class Result:
         frequency: float | None = None,
         freq_index: int | None = None,
     ):
+        self._require_frequency_volume_fields()
+        self._require_volume_fields()
         key = name.upper()
         if key in {"E", "H"}:
             component_names = tuple(field_name for field_name in (f"{key}X", f"{key}Y", f"{key}Z") if field_name in self._fields)
@@ -1630,6 +2239,20 @@ class Result:
         frequency: float | None = None,
         freq_index: int | None = None,
     ) -> torch.Tensor:
+        if getattr(self.scene,"coordinates",None) is not None:
+            raise ValueError("Mapped native arrays are covariant chart fields; use result.chart_fields.tensor('E_s') or world query_fields().")
+        return self._native_tensor(name,expand_symmetry=expand_symmetry,frequency=frequency,freq_index=freq_index)
+
+    @property
+    def chart_fields(self):
+        from .coordinates import FramedFieldData
+        if getattr(self.scene,"coordinates",None) is None:
+            raise ValueError("chart_fields requires an explicit Scene coordinate chart.")
+        return FramedFieldData(self)
+
+    def _native_tensor(self,name,*,expand_symmetry=False,frequency=None,freq_index=None):
+        self._require_frequency_volume_fields()
+        self._require_volume_fields()
         key = name.upper()
         if key not in self._fields:
             raise KeyError(f"Field {name!r} is not available in this result.")
@@ -1642,8 +2265,26 @@ class Result:
         return _expand_tensor_with_symmetry(tensor, self.prepared_scene, component=key)
 
     def raw_monitor(self, name: str, *, frequency: float | None = None, freq_index: int | None = None):
+        payload=self._native_raw_monitor(name,frequency=frequency,freq_index=freq_index)
+        if getattr(self.scene,"coordinates",None) is not None and isinstance(payload,dict):
+            from .coordinates import _frame_monitor_payload
+            return _frame_monitor_payload(payload,self.chart_fields.frame)
+        return payload
+
+    def _native_raw_monitor(self, name: str, *, frequency: float | None = None, freq_index: int | None = None):
+        self._require_monitor_spectra(name)
         public_monitor = _find_scene_monitor(self.scene, name)
-        if isinstance(public_monitor, ClosedSurfaceMonitor):
+        if isinstance(public_monitor, (ClosedSurfaceMonitor, *PROJECTION_MONITOR_TYPES)):
+            # Projection monitors expose their recorded Huygens faces as one
+            # closed-surface payload; monitor() projects it.
+            # Keep selected-frequency reductions on their original scalar path;
+            # the full-spectrum payload is shared by antenna frequency slices.
+            if frequency is None and freq_index is None:
+                if name not in self._closed_surface_payload_cache:
+                    self._closed_surface_payload_cache[name] = _copy_monitor_containers(
+                        _build_closed_surface_payload(self, public_monitor, frequency=None, freq_index=None)
+                    )
+                return _copy_monitor_containers(self._closed_surface_payload_cache[name])
             return _build_closed_surface_payload(self, public_monitor, frequency=frequency, freq_index=freq_index)
         if isinstance(public_monitor, (PermittivityMonitor, MediumMonitor)):
             return _build_material_monitor_payload(self, public_monitor, frequency=frequency, freq_index=freq_index)
@@ -1670,10 +2311,17 @@ class Result:
         else:
             selected = _select_monitor_frequency(payload, monitor_frequencies, selected_index)
 
+        if getattr(self.scene, "coordinates", None) is not None:
+            selected["native_product_disabled"] = True
         resolved_monitor = _find_resolved_scene_monitor(self.scene, name)
         if isinstance(resolved_monitor, FinitePlaneMonitor):
-            return _crop_plane_monitor_payload(selected, resolved_monitor)
-        return selected
+            bounds = None
+            if resolved_monitor.closure_planes is not None and self.method != "mom":
+                from .fdtd.observers import finite_plane_integration_bounds
+                bounds = finite_plane_integration_bounds(self.prepared_scene, resolved_monitor)
+            selected = _crop_plane_monitor_payload(selected, resolved_monitor, bounds)
+        from .fdtd.plane_product import enrich_plane_flux
+        return enrich_plane_flux(self, selected)
 
     def monitor(
         self,
@@ -1683,6 +2331,7 @@ class Result:
         freq_index: int | None = None,
         resolve_modal: bool = True,
     ):
+        self._require_monitor_spectra(name)
         payload = self._monitors.get(name)
         if isinstance(payload, WireData):
             if frequency is not None or freq_index is not None:
@@ -1699,6 +2348,14 @@ class Result:
                     "full typed result and select its tensors explicitly."
                 )
             return self.power_loss(name)
+        if isinstance(public_monitor, PROJECTION_MONITOR_TYPES) and resolve_modal:
+            from .postprocess.field_projection import project_monitor
+
+            return project_monitor(self, public_monitor, frequency=frequency, freq_index=freq_index)
+        if isinstance(public_monitor, GAUSSIAN_OVERLAP_MONITOR_TYPES) and resolve_modal:
+            from .postprocess.gaussian_overlap import compute_gaussian_overlap
+
+            return compute_gaussian_overlap(self, public_monitor, frequency=frequency, freq_index=freq_index)
         payload = self.raw_monitor(name, frequency=frequency, freq_index=freq_index)
         if not resolve_modal or _monitor_payload_is_closed_surface(payload):
             return payload
@@ -1745,7 +2402,7 @@ class Result:
         modal["plane"] = payload
         return modal
 
-    def port(self, name: str) -> PortData:
+    def port(self, name: str) -> PortData | _RatioOnlyPortData:
         port_name = str(name)
         if port_name not in self._ports:
             choices = tuple(self._ports)
@@ -1753,7 +2410,20 @@ class Result:
                 f"Port {port_name!r} is not available in this result. "
                 f"Choices: {choices}."
             )
-        return self._ports[port_name]
+        return self._public_port(self._ports[port_name])
+
+    def port_drive(self, name: str) -> PortDrive:
+        """Return the prescribed, run-normalized drive in this port's bin order.
+
+        Raises ValueError for a port with no recorded excitation. The spectrum
+        uses the same per-bin reference period and source normalization as V/I.
+        """
+        self._require_absolute_spectra()
+        self.port(name)
+        drives = self._metadata.get("port_drives", {})
+        if name not in drives:
+            raise ValueError(f"Port {name!r} has no recorded excitation.")
+        return PortDrive(**drives[name])
 
     def circuit(self, name: str) -> CircuitData:
         circuit_name = str(name)
@@ -1766,6 +2436,7 @@ class Result:
         return self._circuits[circuit_name]
 
     def embedded_network(self, name: str) -> EmbeddedNetworkData:
+        self._require_absolute_spectra()
         network_name = str(name)
         if network_name not in self._embedded_networks:
             choices = tuple(self._embedded_networks)
@@ -1858,9 +2529,15 @@ class Result:
     ):
         """Compute typed power-loss channels for a declared loss monitor."""
 
+        self._require_absolute_spectra()
+        if self._solver_stats.get("field_dtype") == "torch.float64":
+            raise ValueError("FP64 native forward does not yet retain frequency-domain volume fields for PowerLossMonitor; use its qualified spectral surface outputs.")
         monitor = _find_scene_monitor(self.scene, name)
         if not isinstance(monitor, PowerLossMonitor):
             raise KeyError(f"PowerLossMonitor {name!r} is not declared in this Scene.")
+        if getattr(self.scene,"coordinates",None) is not None and any(value is not None for value in
+                (electric_fields,volume_channels,integrated_channels,surface_channels,face_areas,line_channels,line_lengths)):
+            raise NotImplementedError("Mapped PowerLossMonitor currently requires automatic native conduction fields; explicit density inputs need an explicit frame.")
         if self.method != "fdtd":
             raise NotImplementedError(
                 "Automatic PowerLossMonitor field colocation currently supports FDTD results only."
@@ -1870,6 +2547,13 @@ class Result:
         from .postprocess.power_loss import compute_power_loss_data
 
         compiled = compile_power_loss_monitor(self.prepared_scene, monitor)
+        loss_materials = (self.raw_output or {}).get("loss_materials", {})
+        if compiled.conductivity is not None and loss_materials:
+            # Static loss prefactors participate in the same custom VJP as the
+            # fields, including the direct derivative of sigma times |E|^2.
+            from dataclasses import replace
+            compiled = replace(compiled, conductivity={component:values[compiled.component_masks[component]]
+                for component,values in loss_materials.items()})
         selected_frequencies = (
             tuple(self.frequencies)
             if monitor.frequencies is None
@@ -1881,7 +2565,10 @@ class Result:
             dtype=torch.float64,
         )
         resolved_fields = electric_fields
-        if resolved_fields is None and "conduction" in monitor.channels:
+        automatic_dispersion = ("electric_dispersion" in monitor.channels
+            and "electric_dispersion" not in (volume_channels or {})
+            and "electric_dispersion" not in (integrated_channels or {}))
+        if resolved_fields is None and ("conduction" in monitor.channels or automatic_dispersion):
             missing = tuple(
                 component
                 for component in ("Ex", "Ey", "Ez")
@@ -1889,23 +2576,42 @@ class Result:
             )
             if missing:
                 raise RuntimeError(
-                    "PowerLossMonitor conduction requires frequency-domain Ex/Ey/Ez fields; "
-                    "run FDTD with full_field_dft=True."
+                    "Automatic electric PowerLossMonitor channels require frequency-domain Ex/Ey/Ez fields; "
+                    "run FDTD with full_field_dft=True or pass electric_fields=... explicitly."
                 )
             resolved_fields = {
                 component: torch.stack(
                     [
-                        self.tensor(component, frequency=frequency)
+                        self._native_tensor(component, frequency=frequency)
                         for frequency in selected_frequencies
                     ],
                     dim=0,
                 )
                 for component in ("Ex", "Ey", "Ez")
             }
-        return compute_power_loss_data(
+        if automatic_dispersion:
+            from .postprocess.power_loss import _validate_electric_fields
+            resolved_fields = _validate_electric_fields(resolved_fields,
+                frequency_count=len(selected_frequencies), compiled=compiled)
+        records = self.conductor_losses
+        if resolved_fields is not None and not any(record.get("bulk_electric_traces") for record in records.values()):
+            from .compiler.copper_foil import compile_copper_faces
+            for face in compile_copper_faces(self.prepared_scene, device=compiled.device):
+                component = "E" + "xyz"[face.component]
+                if bool(compiled.component_masks[component][tuple(face.indices.T)].any()):
+                    raise NotImplementedError("Split-foil bulk loss requires retained side electric spectra, which are unavailable for this result.")
+        from .postprocess.fdtd_loss import automatic_electric_dispersion_density, apply_split_trace_densities
+        if automatic_dispersion:
+            dt = self.stats().get("dt")
+            if dt is None:
+                raise RuntimeError("Automatic electric-dispersion loss requires the recorded FDTD time step.")
+            volume_channels = dict(volume_channels or {})
+            volume_channels["electric_dispersion"] = automatic_electric_dispersion_density(
+                self.prepared_scene, compiled, frequency_tensor, resolved_fields, dt)
+        data = compute_power_loss_data(
             compiled,
             frequency_tensor,
-            electric_fields=resolved_fields,
+            electric_fields=resolved_fields if "conduction" in monitor.channels else None,
             volume_channels=volume_channels,
             integrated_channels=integrated_channels,
             surface_channels=surface_channels,
@@ -1917,6 +2623,24 @@ class Result:
             geometry_ids=geometry_ids,
             source_result_fingerprint=f"runtime-result:{id(self):x}",
         )
+        if resolved_fields is not None:
+            data = apply_split_trace_densities(data, compiled, resolved_fields, records,
+                                              correct_dispersion=automatic_dispersion)
+        chart=getattr(self.scene,"coordinates",None)
+        if chart is not None:
+            from dataclasses import replace
+            from .fdtd.coords import component_coords
+            metric={}
+            for component,mask in compiled.component_masks.items():
+                u=torch.as_tensor(component_coords(self.prepared_scene,component)[1],device=mask.device,dtype=torch.float64)
+                metric[component]=(1-chart.curvature*u)[None,:,None].expand(mask.shape)[mask]
+            data=replace(data,
+                component_volumes={key:value*metric[key].to(value) for key,value in data.component_volumes.items()},
+                volume_density={channel:{key:value/metric[key].to(value) for key,value in densities.items()}
+                                for channel,densities in data.volume_density.items()},
+                coordinate_frame=self.chart_fields.frame.snapshot(),
+                collocation="Covariant s/u/z Yee samples; metric-weighted physical dual volumes; selector bounds in chart metres")
+        return data
 
     def incident_power_density(
         self,
@@ -2016,6 +2740,8 @@ class Result:
         )
 
     def material(self, name: str = "eps_r", *, expand_symmetry: bool = False) -> torch.Tensor:
+        if getattr(self.scene,"coordinates",None) is not None:
+            raise ValueError("Mapped constitutive arrays have a chart tensor frame; unframed scalar material views require a qualified physical material query.")
         prepared_scene = self.prepared_scene
         key = name.lower()
         if key in {"eps", "eps_r", "permittivity"}:
@@ -2057,11 +2783,13 @@ class Result:
     def _snapshot_payload(self, *, fields: Mapping[str, torch.Tensor]) -> dict[str, Any]:
         """Build and validate the detached payload before any I/O side effect."""
 
+        self._require_absolute_spectra()
         return {
             "schema_version": RESULT_SNAPSHOT_SCHEMA_VERSION,
             "data_type": "ResultSnapshot",
             "format_version": 1,
             "method": self.method,
+            "mixed_absolute_spectra": self._mixed_absolute_spectra,
             "frequency": self.frequency,
             "frequencies": self.frequencies,
             "fields": {
@@ -2101,7 +2829,16 @@ class Result:
         saving when delayed embedded-pattern reuse is required.
         """
 
-        payload = self._snapshot_payload(fields=self._fields)
+        payload = self._spectral_ratio_view()._snapshot_payload(fields=self._fields)
+        if self._surface_data is not None:
+            payload["surface_data"] = self._surface_data.snapshot()
+            if payload["surface_data"].get("schema_version") == 20:
+                # Field queries can update native diagnostic metadata after the
+                # solve. Persist one validated surface/volume representation.
+                payload["metadata"] = dict(payload["metadata"],
+                    **payload["surface_data"]["representation"])
+        if self._harmonic_data is not None:
+            payload["harmonic_data"] = self._harmonic_data.snapshot()
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(payload, output_path)
@@ -2123,7 +2860,7 @@ class Result:
             )
         from .fdtd.distributed.persistence import write_sharded_result
 
-        payload = self._snapshot_payload(fields={})
+        payload = self._spectral_ratio_view()._snapshot_payload(fields={})
         shard_artifacts = exporter()
         return write_sharded_result(
             destination,
@@ -2135,13 +2872,16 @@ class Result:
     @classmethod
     def load(
         cls,
-        path: str | Path,
+        path: str | Path | BytesIO,
         *,
         scene,
         prepared_scene=None,
         map_location: Any = "cpu",
     ) -> "Result":
         """Load detached inference data saved by :meth:`save`.
+
+        A BytesIO stream allows restoration from caller-verified snapshot bytes
+        without reopening a mutable filesystem path.
 
         The declarative scene is supplied by the caller because runtime solvers,
         prepared scenes, and transport state are intentionally not persisted.
@@ -2150,19 +2890,58 @@ class Result:
         """
 
         payload = torch.load(
-            Path(path),
+            path if isinstance(path,BytesIO) else Path(path),
             map_location=map_location,
             weights_only=False,
         )
         if not isinstance(payload, dict):
             raise ValueError("Result checkpoint must contain a mapping payload.")
         _validate_result_snapshot_payload(payload, sharded=False)
+        chart=getattr(scene,"coordinates",None)
+        field_frame=payload.get("metadata",{}).get("field_frame")
+        if chart is not None:
+            from .coordinates import FieldFrame
+            if field_frame!=FieldFrame("covariant_chart",chart).snapshot():
+                raise ValueError("Mapped Result snapshot lacks the matching coordinate field frame.")
+        elif field_frame is not None and field_frame.get("kind")=="covariant_chart":
+            raise ValueError("Mapped Result snapshot requires its coordinate Scene.")
         missing = {"method", "fields", "monitors"}.difference(payload)
         if missing:
             names = ", ".join(sorted(missing))
             raise ValueError(f"Result checkpoint is missing required keys: {names}.")
 
-        return cls(
+        surface_data,harmonic_data = None,None
+        if payload["method"] == "mom":
+            if ("surface_data" in payload) == ("harmonic_data" in payload):
+                raise ValueError("MoM snapshot requires exactly one native surface or harmonic payload")
+            if "harmonic_data" in payload:
+                from .mom.harmonic_snapshot import restore
+                harmonic_data = restore(payload["harmonic_data"],scene)
+                if payload['harmonic_data'].get('schema_version') in (21,22,23):
+                    from .mom.tensor_harmonic_runtime import validate_result_metadata
+                    validate_result_metadata(harmonic_data,payload.get('metadata'),payload.get('solver_stats'))
+            else:
+                from .mom.runtime import SurfaceData
+                surface_data = SurfaceData.restore(payload["surface_data"], scene, payload["frequency"])
+                if payload['surface_data'].get('schema_version') == 20:
+                    from .mom.runtime import _same_metadata
+                    expected = surface_data.representation_metadata()
+                    metadata = payload.get('metadata')
+                    if not isinstance(metadata, dict) or any(
+                            not _same_metadata(metadata.get(k), v) for k, v in expected.items()):
+                        raise ValueError('Linear coupled Result metadata differs from its native identity')
+                elif (surface_data.config.periodic is not None or surface_data.config.dyadic_integration is not None
+                        or surface_data.config.operator_backend in ('hmatrix', 'h2', 'direct_h2', 'fmm')):
+                    from .mom.runtime import _same_metadata, _representation_identity
+                    metadata = payload.get('metadata')
+                    expected = surface_data.handle.metadata
+                    keys = (*_representation_identity(surface_data.config), 'operator_identity',
+                            'rhs_identity', 'kernel_version', 'physical_qualification')
+                    if not isinstance(metadata, dict) or any(
+                            not _same_metadata(metadata.get(key), expected.get(key)) for key in keys):
+                        raise ValueError('MoM Result metadata does not match its native solution identity')
+        result = cls(
+            surface_data=surface_data,harmonic_data=harmonic_data,
             method=payload["method"],
             scene=scene,
             prepared_scene=prepared_scene,
@@ -2185,6 +2964,8 @@ class Result:
             metadata=payload.get("metadata"),
             solver_stats=payload.get("solver_stats"),
         )
+        result._mixed_absolute_spectra |= payload.get("mixed_absolute_spectra", False)
+        return result
 
     @classmethod
     def load_sharded(
@@ -2236,6 +3017,144 @@ class Result:
             metadata=payload.get("metadata"),
             solver_stats=payload.get("solver_stats"),
         )
+        result._mixed_absolute_spectra |= payload.get("mixed_absolute_spectra", False)
         result._sharded_manifest = loaded.manifest
         result._shard_paths = loaded.shard_paths
         return result
+
+
+def _validate_fdtd_query_reference(result, reference):
+    if not isinstance(reference, Result) or reference.method != 'fdtd':
+        raise ValueError('FDTD incident/scattered queries require a matched empty-background reference Result')
+    left,right=getattr(result.scene,"coordinates",None),getattr(reference.scene,"coordinates",None)
+    if (None if left is None else left.snapshot())!=(None if right is None else right.snapshot()):
+        raise ValueError("FDTD reference must share the same physical coordinate chart.")
+    if reference.frequencies != result.frequencies or any(s.enabled for s in reference.scene.structures) or reference.scene.material_regions:
+        raise ValueError('FDTD reference must be empty background at the same frequency')
+    for name in ('thin_wires', 'ports', 'networks', 'lumped_elements', 'circuits', 'electrostatic_terminals', 'charge_densities'):
+        if getattr(reference.scene, name, ()):
+            raise ValueError(f'FDTD reference must be empty background without Scene.{name}')
+    required = {'normalize_source', 'dt', 'time_steps', 'steps_run', 'dft_window', 'observer_sample_counts'}
+    if not required.issubset(result._solver_stats) or not required.issubset(reference._solver_stats):
+        raise ValueError('FDTD reference subtraction requires explicit recording and normalization provenance')
+    for name in ('domain', 'grid', 'boundary', 'sources', 'symmetry'):
+        if repr(getattr(reference.scene, name)) != repr(getattr(result.scene, name)):
+            raise ValueError(f'FDTD reference must share Scene.{name}')
+    for key in ('dt', 'time_steps', 'steps_run', 'time_plan', 'dft_window', 'normalize_source', 'reference_frequency',
+                'dft_sample_counts', 'observer_sample_counts', 'full_field_dft'):
+        if reference._solver_stats.get(key) != result._solver_stats.get(key):
+            raise ValueError(f'FDTD reference must share {key}')
+
+
+def _interpolate_fdtd_component(result, points, component, *, trace_side=None, point_roundoff=0., copper_faces=None,
+                                selected_frequency_index=None, selected_representation=None):
+    """Trilinear interpolation on each component's actual Yee coordinates."""
+    from .fdtd.coords import component_coords
+    axes = [torch.as_tensor(axis, device=points.device, dtype=points.dtype)
+            for axis in component_coords(result.prepared_scene, component)]
+    if any(len(axis) < 2 for axis in axes):
+        raise ValueError('Physical field interpolation requires at least two nodes per axis')
+    from .postprocess.yee_interpolation import interpolation_stencil, normalized_trace_values
+    stencil = interpolation_stencil(result, points, component, axes, trace_side=trace_side, point_roundoff=point_roundoff, faces=copper_faces)
+    if selected_frequency_index is not None:
+        from .postprocess.selected_query import native_sampler
+        selected_sampler = []
+        def sample_native(indices, *, required=True):
+            if not selected_sampler:
+                selected_sampler.append(native_sampler(result, points, component, axes, selected_frequency_index))
+            return selected_sampler[0](indices, required=required)
+    else:
+        dense = result._fields.get(component.upper())
+        if dense is not None and not dense.is_complex():
+            dense = None
+        if dense is not None and dense.shape != tuple(len(axis) for axis in axes):
+            raise ValueError('Stored spectral field shape does not match its Yee coordinates')
+        samples = {}
+        if dense is None:
+            for monitor in result._monitors.values():
+                if not isinstance(monitor, dict) or monitor.get('kind') != 'point':
+                    continue
+                index = monitor.get('field_indices', {}).get(component)
+                value = monitor.get('components', {}).get(component)
+                if index is not None and value is not None:
+                    flat = (int(index[0]) * len(axes[1]) + int(index[1])) * len(axes[2]) + int(index[2])
+                    samples.setdefault(flat, value)
+            ids = sorted(samples)
+            sample_ids = torch.tensor(ids, device=points.device, dtype=torch.long)
+            sample_values = (torch.stack([torch.as_tensor(samples[i], device=points.device).reshape(()) for i in ids])
+                             if ids else torch.empty(0, device=points.device, dtype=torch.complex128))
+            if not sample_values.is_complex():
+                raise ValueError('FDTD queries require complex spectral samples, not instantaneous fields')
+        def sample_native(indices, *, required=True):
+            indices=indices.to(device=points.device)
+            if dense is not None:
+                return dense[tuple(indices.T)], torch.ones(len(indices), device=points.device, dtype=torch.bool)
+            if not len(sample_ids):
+                if required:
+                    raise ValueError(f'No spectral {component} samples are retained; record its PointMonitor interpolation stencil')
+                return torch.zeros(len(indices), device=points.device, dtype=torch.complex128), torch.zeros(len(indices), device=points.device, dtype=torch.bool)
+            flat = (indices[:, 0]*len(axes[1])+indices[:, 1])*len(axes[2])+indices[:, 2]
+            position = torch.searchsorted(sample_ids, flat).clamp_max(len(sample_ids)-1)
+            present = sample_ids[position] == flat
+            if required and not bool(present.all()):
+                raise ValueError(f'Missing {component} interpolation stencil samples; prepare PointMonitors at surrounding Yee nodes')
+            return sample_values[position], present
+    trace_values = {}
+    values = torch.zeros(len(points), device=points.device, dtype=torch.complex128 if points.dtype == torch.float64 else torch.complex64)
+    for indices, weight, overrides in stencil:
+        index = tuple(indices.T)
+        # A TFSF runtime stores scattered fields outside its injection box.
+        # Do not interpolate across that representation discontinuity or label
+        # those samples as a physical total field.
+        from .sources import TFSF
+        for source in result.scene.sources:
+            injection = getattr(source, 'injection', None)
+            if isinstance(injection, TFSF):
+                bounds_by_axis = injection.bounds
+                if bounds_by_axis is None:
+                    bounds_by_axis = tuple(injection.axis_bounds if axis == injection.axis else None for axis in 'xyz')
+                for dim, bounds in enumerate(bounds_by_axis):
+                    if bounds is not None:
+                        coordinate = axes[dim][index[dim]]
+                        outside = (coordinate <= bounds[0]) | (coordinate >= bounds[1])
+                        if bool((outside & (weight != 0)).any()):
+                            raise NotImplementedError('FDTD query stencils must lie strictly inside the TFSF total-field box; exterior reconstruction is not implemented')
+        replaced = torch.zeros(len(points), device=points.device, dtype=torch.bool)
+        for selected, _, _ in overrides:
+            replaced = replaced | selected
+        need = (weight != 0) & ~replaced
+        sampled = torch.zeros(len(points), device=points.device, dtype=values.dtype)
+        if bool(need.any()):
+            sampled[need] = sample_native(indices[need])[0].to(values.dtype)
+        for selected, positive, face in overrides:
+            if selected_frequency_index is not None:
+                selected = selected & (weight != 0)
+                if not bool(selected.any()):
+                    continue
+                if selected_representation == 'published_native':
+                    # Gather only the requested primitive; no fictitious positive
+                    # published bank or entire-plane requirement is introduced.
+                    sampled = sampled.clone()
+                    sampled[selected] = sample_native(indices[selected])[0].to(sampled.dtype)
+                    continue
+            key = id(face)
+            if key not in trace_values:
+                if selected_frequency_index is not None:
+                    # Sampling provenance was validated before this gather.
+                    # The actual side heads are already in the recorded units.
+                    trace_values[key] = face['electric_fields'].to(device=points.device)
+                else:
+                    trace_values[key] = normalized_trace_values(face, sample_native,
+                        normalized=bool(result.stats().get('normalize_source', False)))
+            support = face['indices'].to(device=points.device)
+            shape = tuple(len(axis) for axis in axes)
+            def flatten(location):
+                return (location[:, 0]*shape[1]+location[:, 1])*shape[2]+location[:, 2]
+            ordered, order = torch.sort(flatten(support))
+            position = torch.searchsorted(ordered, flatten(indices[selected]))
+            offset = order[position]
+            selected_values = trace_values[key][positive[selected].long(), offset]
+            sampled = sampled.clone()
+            sampled[selected] = selected_values.to(sampled.dtype)
+        values = values + weight * sampled
+    return values

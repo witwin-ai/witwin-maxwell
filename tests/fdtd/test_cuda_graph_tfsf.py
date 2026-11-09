@@ -133,11 +133,10 @@ def test_cuda_graph_tfsf_matches_non_graph_bitexact(scene_factory, expected_prov
         assert np.array_equal(field, got[component]), component
 
 
-# Providers that cannot satisfy bit-identical capture parity must stay on the
-# eager path: the oblique auxiliary-line provider (plane_wave_aux) accumulates
-# through non-deterministic atomic adds, and the oblique-CW provider
-# (plane_wave_discrete_cw) evaluates the incident phasor on the host each step and
-# injects it as a kernel launch scalar a captured graph would freeze.
+# Preserve the qualified provider whitelist: deterministic oblique auxiliary
+# gathers still await capture qualification. The oblique-CW provider evaluates
+# the incident phasor on the host each step and injects it as a launch scalar
+# that a captured graph would freeze.
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
 @pytest.mark.parametrize(
     ("scene_factory", "expected_provider"),

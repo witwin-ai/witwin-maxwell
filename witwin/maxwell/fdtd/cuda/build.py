@@ -10,8 +10,15 @@ from pathlib import Path
 import torch
 from torch.utils.cpp_extension import load
 
-STABLE_ABI_VERSION = "stable_abi_v3"
+STABLE_ABI_VERSION = "stable_abi_v13"
 _REQUIRED_STABLE_OPS = (
+    "trilinear_border_forward",
+    "trilinear_border_entries",
+    "trilinear_border_backward",
+    "trilinear_border_grid_backward",
+    "accumulate_point_observers_indexed",
+    "seed_inject_point",
+    "accumulate_tfsf_sample_adjoint",
     "update_magnetic_hx_standard_bounded",
     "update_magnetic_hy_standard_bounded",
     "update_magnetic_hz_standard_bounded",
@@ -21,6 +28,21 @@ _REQUIRED_STABLE_OPS = (
     "sample_wire_emf",
     "update_wire_state",
     "deposit_wire_current",
+    "plane_flux_reduce",
+    "add_table_time_shifted_source_patch",
+    "advance_copper_electric",
+    "begin_copper_step",
+    "correct_copper_magnetic",
+    "accumulate_copper_spectra",
+    "thin_sheet_gather",
+    "thin_sheet_scatter",
+    "thin_sheet_copper_rhs",
+    "thin_sheet_chord_forcing",
+    "thin_sheet_copper_state",
+    "thin_sheet_chord_residual",
+    "thin_sheet_chord_initialize",
+    "thin_sheet_chord_matvec",
+    "thin_sheet_chord_direction",
 )
 
 
@@ -204,7 +226,10 @@ def extension_sources() -> list[Path]:
         root / "kernels" / "spectral.cu",
         root / "kernels" / "observers.cu",
         root / "kernels" / "wire.cu",
+        root / "kernels" / "copper.cu",
+        root / "kernels" / "thin_sheet.cu",
         root / "kernels" / "adjoint.cu",
+        root / "kernels" / "trilinear.cu",
     ]
 
 
@@ -287,6 +312,16 @@ def _load_prebuilt_extension(build_directory: Path):
             f"WITWIN_MAXWELL_FDTD_CUDA_PREBUILT=1 but {module_path} does not exist; "
             "run a normal build first."
         )
+    # A binary from another ABI registers operators with mismatched schemas;
+    # loading it would silently pair stale kernels with current Python bindings.
+    marker_path = prebuilt_abi_marker_path(module_path)
+    found = marker_path.read_text(encoding="utf-8").strip() if marker_path.exists() else None
+    if found != STABLE_ABI_VERSION:
+        raise ImportError(
+            f"WITWIN_MAXWELL_FDTD_CUDA_PREBUILT=1 but {module_path} has ABI marker "
+            f"{found!r} at {marker_path}, expected {STABLE_ABI_VERSION!r}; rebuild it with "
+            "a normal (non-prebuilt) run of this source tree."
+        )
     return _load_extension_file(module_path)
 
 
@@ -327,4 +362,7 @@ def build_extension(*, verbose: bool = False):
         is_python_module=False,
         verbose=verbose,
     )
+    # Mark every JIT build directory, including an overridden one, so a later
+    # prebuilt load can verify which ABI produced the library.
+    prebuilt_abi_marker_path(Path(library_path)).write_text(f"{STABLE_ABI_VERSION}\n", encoding="utf-8")
     return _StableOpsModule(Path(library_path))

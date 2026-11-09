@@ -98,7 +98,7 @@ def test_order_cutoff_shifts_with_bloch_offset():
 # ---------------------------------------------------------------------------
 
 _PERIOD = 0.6
-_TRANSMISSION_Z = 0.55
+_TRANSMISSION_Z = 0.30
 _REFLECTION_Z = -0.55
 _TFSF_BOUNDS = (-0.4, 0.4)
 _FREQUENCY = 1.0e9
@@ -107,7 +107,7 @@ _FREQUENCY = 1.0e9
 def _grating_scene(*, with_grating: bool):
     boundary = mw.BoundarySpec.faces(
         default="pml",
-        num_layers=4,
+        num_layers=24,
         strength=1.0,
         x="bloch",
         y="bloch",
@@ -185,8 +185,8 @@ def _diffraction_metrics(with_grating: bool):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_FREQUENCY],
-        run_time=mw.TimeConfig(time_steps=224),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        run_time=mw.TimeConfig.auto(transient_cycles=40, steady_cycles=20),
+        spectral_sampler=mw.SpectralSampler(window="hanning"),
         absorber="cpml",
     ).run()
 
@@ -260,8 +260,8 @@ def test_propagating_order_flags_match_light_cone():
 def test_grating_redistributes_power_into_first_orders():
     # The order decomposition is normalized against the direct plane-flux
     # integral (see test_diffraction_decomposition_conserves_plane_flux), so the
-    # physically meaningful, run-length-independent quantity is each order's
-    # share of the transmitted plane power. Absolute cross-run power balance is
+    # physically meaningful quantity after CW settling is each order's share
+    # of the transmitted plane power. Absolute cross-run power balance is
     # governed by the FDTD spectral-monitor steady-state normalization, not by
     # the DiffractionMonitor, and is deliberately not asserted here.
     empty = _diffraction_metrics(False)
@@ -309,26 +309,13 @@ def test_diffraction_power_matches_independent_flux_primitive():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Absolute energy conservation (T + R ~= 1 vs a reference-run incident "
-        "power) is not recoverable here: the FDTD spectral-monitor CW "
-        "normalization is a steady-state/ratio quantity, not an absolute "
-        "conserved power. The summed order power is not Poynting-continuous "
-        "along z even in vacuum and its absolute scale drifts ~1/N with the "
-        "step count (confirmed identically for the trusted FluxMonitor), so the "
-        "cross-run incident normalization does not cancel. This tripwire asserts "
-        "the true physical expectation and will XPASS if the spectral "
-        "normalization is ever made absolute."
-    ),
-)
-def test_diffraction_energy_conservation_is_normalization_limited():
+def test_diffraction_energy_conservation_against_empty_reference():
     empty = _diffraction_metrics(False)
     grating = _diffraction_metrics(True)
     incident = empty["propagating_power"]
     transmission = grating["propagating_power"] / incident
     reflection = grating["reflected_power"] / incident
-    # Lossless (real eps_r) grating: transmitted plus reflected power should sum
-    # to the incident power. It does not, by construction of the CW normalization.
+    # Transmission is the total field above the grating inside the TFSF slab;
+    # reflection is the scattered field below it. The source owns each native
+    # periodic representative exactly once. No normalization exception is needed.
     assert transmission + reflection == pytest.approx(1.0, rel=0.1)

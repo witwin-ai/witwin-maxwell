@@ -125,9 +125,9 @@ def _solve_counted(A, b, solver_type: str, max_iter: int, tol: float, restart: i
 
     A_op = cupy_linalg.LinearOperator(A.shape, matvec=matvec, dtype=A.dtype)
     if solver_type == "gmres":
-        x, info = cupy_linalg.gmres(A_op, b, M=M, maxiter=max_iter, tol=tol, restart=restart)
+        x, info = cupy_linalg.gmres(A_op, b, M=M, maxiter=max_iter, rtol=tol, atol=0.0, restart=restart)
     elif solver_type == "cg":
-        x, info = cupy_linalg.cg(A_op, b, M=M, maxiter=max_iter, tol=tol)
+        x, info = cupy_linalg.cg(A_op, b, M=M, maxiter=max_iter, rtol=tol, atol=0.0)
     elif solver_type in ("bicgstab", "tfqmr", "idr", "sqmr"):
         from witwin.maxwell.fdfd import krylov
 

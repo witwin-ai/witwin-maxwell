@@ -1575,15 +1575,19 @@ def _add_cw_phased_source_patch(
     _scatter_patch(field, sourcePatchCos, (offsetI, offsetJ, offsetK), values)
 
 
-def _evaluate_source_time_sample(timeKind, sample_time, frequency, fwidth, amplitude, phase, delay):
+def _evaluate_source_time_sample(timeKind, sample_time, frequency, fwidth, amplitude, phase, delay,
+                                 pedestal=0.0, pedestalFwidth=0.0):
     two_pi = 2.0 * math.pi
     if int(timeKind) == 0:
         return float(amplitude) * torch.cos(two_pi * float(frequency) * sample_time + float(phase))
-    if int(timeKind) == 1:
+    if int(timeKind) in (1, 4):
         sigma_t = 1.0 / max(two_pi * float(fwidth), 1.0e-30)
         tau = sample_time - float(delay)
         envelope = torch.exp(-0.5 * (tau / sigma_t) ** 2)
-        return float(amplitude) * envelope * torch.cos(two_pi * float(frequency) * tau + float(phase))
+        signal = envelope * torch.cos(two_pi * float(frequency) * tau + float(phase))
+        if int(timeKind) == 4:
+            signal = signal - float(pedestal) * torch.exp(-0.5 * (tau * two_pi * float(pedestalFwidth)) ** 2)
+        return float(amplitude) * signal
     tau = sample_time - float(delay)
     alpha = math.pi * float(frequency) * tau
     alpha_sq = alpha * alpha
@@ -1607,13 +1611,53 @@ def _add_time_shifted_source_patch(
     phase,
     delay,
     causalGate,
+    pedestal=0.0,
+    pedestalFwidth=0.0,
 ):
     sample_time = float(time) - delayPatch
-    signal = _evaluate_source_time_sample(timeKind, sample_time, frequency, fwidth, amplitude, phase, delay)
+    signal = _evaluate_source_time_sample(
+        timeKind, sample_time, frequency, fwidth, amplitude, phase, delay, pedestal, pedestalFwidth
+    )
     values = signal * sourcePatch
     if int(causalGate) != 0:
         values = torch.where(float(time) >= activationDelayPatch, values, torch.zeros_like(values))
     _scatter_patch(field, sourcePatch, (offsetI, offsetJ, offsetK), values)
+
+
+def _add_table_time_shifted_source_patch(
+    *,
+    field,
+    sourcePatch,
+    delayPatch,
+    activationDelayPatch,
+    knots,
+    values,
+    curvature,
+    offsetI,
+    offsetJ,
+    offsetK,
+    time,
+    timeOffset,
+    invStep,
+    amplitude,
+    uniform,
+    causalGate,
+):
+    # Independent float64 evaluation of the normalized-knot cubic segment.
+    u = ((float(timeOffset) - delayPatch.double()) * float(invStep)).reshape(-1)
+    knots64, values64, curvature64 = knots.double(), values.double(), curvature.double()
+    index = (torch.searchsorted(knots64, u, right=True) - 1).clamp(0, knots64.numel() - 2)
+    u0 = knots64[index]
+    h = knots64[index + 1] - u0
+    b = (u - u0) / h
+    a = 1.0 - b
+    signal = (a * values64[index] + b * values64[index + 1]
+              + ((a**3 - a) * curvature64[index] + (b**3 - b) * curvature64[index + 1]) * h * h / 6.0)
+    signal = torch.where((u >= 0.0) & (u <= knots64[-1]), signal, torch.zeros_like(signal))
+    patch_values = (float(amplitude) * signal).reshape(sourcePatch.shape).to(sourcePatch.dtype) * sourcePatch
+    if int(causalGate) != 0:
+        patch_values = torch.where(float(time) >= activationDelayPatch, patch_values, torch.zeros_like(patch_values))
+    _scatter_patch(field, sourcePatch, (offsetI, offsetJ, offsetK), patch_values)
 
 
 def _add_source_patch_periodic(*, signal, sourcePatch, offsetI, offsetJ, offsetK, wrapAxisA, wrapAxisB, **kwargs):
@@ -1660,6 +1704,7 @@ def _add_source_patch_bloch(
     phaseSinB,
     wrapAxisA=1,
     wrapAxisB=1,
+    sourceGather=None,
 ):
     wrap_a = int(wrapAxisA) != 0
     wrap_b = int(wrapAxisB) != 0
@@ -1706,6 +1751,7 @@ def _add_cw_phased_source_patch_bloch(
     phaseSinB,
     wrapAxisA=1,
     wrapAxisB=1,
+    sourceGather=None,
 ):
     wrap_a = int(wrapAxisA) != 0
     wrap_b = int(wrapAxisB) != 0
@@ -1865,6 +1911,7 @@ def _add_batched_reference_source_patches(
     fieldCodesPerCoeff=None,
     fieldOffsets=None,
     sampleIndicesPerCoeff=None,
+    sourceGather=None,
 ):
     if fieldCodesPerCoeff is None or fieldOffsets is None or sampleIndicesPerCoeff is None:
         fieldCodesPerCoeff, fieldOffsets, sampleIndicesPerCoeff = _legacy_batched_flat_metadata(
@@ -1912,6 +1959,7 @@ def _add_batched_interpolated_source_patches(
     fieldOffsets=None,
     origin,
     ds,
+    sourceGather=None,
 ):
     if fieldCodesPerCoeff is None or fieldOffsets is None:
         fieldCodesPerCoeff, fieldOffsets, _ = _legacy_batched_flat_metadata(
@@ -2722,15 +2770,11 @@ def _seed_inject_dense(*, AdjField, GradReal, GradImag, CosPack, SinPack, step):
     AdjField.add_(_seed_batch_contribution(GradReal, GradImag, CosPack, SinPack, step))
 
 
-def _seed_inject_point(*, AdjField, GradReal, GradImag, PointI, PointJ, PointK, CosPack, SinPack, step):
-    if GradReal.shape[0] == 0 or GradReal.shape[1] == 0:
-        return
+def _seed_inject_point(*, AdjField, GradReal, GradImag, Cells, CellOffsets, PointOrder, CosPack, SinPack, step):
     contribution = _seed_batch_contribution(GradReal, GradImag, CosPack, SinPack, step)
-    AdjField.index_put_(
-        (PointI.to(torch.long), PointJ.to(torch.long), PointK.to(torch.long)),
-        contribution,
-        accumulate=True,
-    )
+    for row, cell in enumerate(Cells.tolist()):
+        for item in range(int(CellOffsets[row]), int(CellOffsets[row + 1])):
+            AdjField.view(-1)[cell].add_(contribution[PointOrder[item]].to(AdjField.dtype))
 
 
 def _seed_inject_plane(*, AdjField, GradReal, GradImag, CosPack, SinPack, axis, planeIndex, step):
@@ -3079,47 +3123,13 @@ def _reverse_dispersive_correction(
     GradEps.add_(Current * dt_adj_over_eps * inv_eps)
 
 
-def _accumulate_tfsf_scalar_sample_adjoint(*, AdjAuxField, AdjFieldPatch, CoeffPatch, sampleIndex, componentScale):
-    AdjAuxField[int(sampleIndex)].add_(float(componentScale) * torch.sum(AdjFieldPatch * CoeffPatch))
-
-
-def _accumulate_tfsf_line_sample_adjoint(
-    *,
-    AdjAuxField,
-    AdjFieldPatch,
-    CoeffPatch,
-    SampleIndices,
-    sampleAxisCode,
-    componentScale,
+def _accumulate_tfsf_sample_adjoint(
+    *, AdjAuxField, AdjFieldPatch, CoeffPatch, RowOffsets, CellIndices, Weights, componentScale,
 ):
-    sample_indices = SampleIndices.to(device=AdjAuxField.device, dtype=torch.int32).contiguous()
-    axis = int(sampleAxisCode)
-    weighted = (float(componentScale) * AdjFieldPatch * CoeffPatch).movedim(axis, 0).reshape(sample_indices.numel(), -1)
-    AdjAuxField.index_add_(0, sample_indices.to(dtype=torch.long), weighted.sum(dim=1))
-
-
-def _accumulate_tfsf_interpolated_sample_adjoint(
-    *,
-    AdjAuxField,
-    AdjFieldPatch,
-    CoeffPatch,
-    SamplePositions,
-    origin,
-    ds,
-    componentScale,
-):
-    if AdjAuxField.numel() == 0:
-        return
-    coord = (SamplePositions.to(device=AdjAuxField.device, dtype=AdjAuxField.dtype) - float(origin)) / float(ds) if float(ds) > 0.0 else torch.zeros_like(SamplePositions)
-    coord = torch.clamp(coord, min=0.0, max=max(AdjAuxField.numel() - 1, 0))
-    lower = torch.floor(coord).to(dtype=torch.long).reshape(-1)
-    upper = torch.clamp(lower + 1, max=max(AdjAuxField.numel() - 1, 0))
-    frac = (coord.reshape(-1) - lower.to(dtype=AdjAuxField.dtype))
-    value = (float(componentScale) * AdjFieldPatch * CoeffPatch).reshape(-1)
-    AdjAuxField.index_add_(0, lower, value * (1.0 - frac))
-    upper_weight = value * frac
-    if upper_weight.numel() > 0:
-        AdjAuxField.index_add_(0, upper, upper_weight)
+    values = (float(componentScale) * AdjFieldPatch * CoeffPatch).flatten()
+    for sample in range(AdjAuxField.numel()):
+        for entry in range(int(RowOffsets[sample]), int(RowOffsets[sample + 1])):
+            AdjAuxField[sample].add_(values[CellIndices[entry]] * Weights[entry])
 
 
 def _reverse_tfsf_auxiliary_electric(
@@ -3237,6 +3247,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "addSourcePatch3D": _add_source_patch,
     "addCwPhasedSourcePatch3D": _add_cw_phased_source_patch,
     "addTimeShiftedSourcePatch3D": _add_time_shifted_source_patch,
+    "addTableTimeShiftedSourcePatch3D": _add_table_time_shifted_source_patch,
     "addSourcePatchExPeriodic3D": _add_source_patch_periodic,
     "addSourcePatchEyPeriodic3D": _add_source_patch_periodic,
     "addSourcePatchEzPeriodic3D": _add_source_patch_periodic,
@@ -3294,9 +3305,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "reverseDrudeCurrent3D": _reverse_drude_current,
     "reverseLorentzCurrent3D": _reverse_lorentz_current,
     "reverseDispersiveCorrection3D": _reverse_dispersive_correction,
-    "accumulateTfsfScalarSampleAdjoint3D": _accumulate_tfsf_scalar_sample_adjoint,
-    "accumulateTfsfLineSampleAdjoint3D": _accumulate_tfsf_line_sample_adjoint,
-    "accumulateTfsfInterpolatedSampleAdjoint3D": _accumulate_tfsf_interpolated_sample_adjoint,
+    "accumulateTfsfSampleAdjoint3D": _accumulate_tfsf_sample_adjoint,
     "reverseTfsfAuxiliaryElectric1D": _reverse_tfsf_auxiliary_electric,
     "reverseTfsfAuxiliaryMagnetic1D": _reverse_tfsf_auxiliary_magnetic,
     "clampFieldFace3D": _clamp_field_face,

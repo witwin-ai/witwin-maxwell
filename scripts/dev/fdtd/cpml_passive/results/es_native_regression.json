@@ -1,0 +1,74 @@
+{
+  "passed": true,
+  "cases": [
+    {
+      "case": "q1_TM",
+      "reference_rho": 1.0001352599793165,
+      "float64": {
+        "rho": 1.0001352583369676,
+        "frequency_GHz": 0.23179458456592317,
+        "all_rho": 1.0001352583369678
+      },
+      "float32_replay": {
+        "rho": 1.0001352599805269,
+        "frequency_GHz": 0.23179458275350884,
+        "all_rho": 1.0001352599805269
+      },
+      "float64_rho_error": 1.6423489235251054e-09,
+      "float64_max_entry_error": 1.4168437423300873e-08,
+      "replay_max_entry_error": 9.118610977409958e-09,
+      "replay_frobenius_error": 1.9584579663570403e-08,
+      "passed": true
+    },
+    {
+      "case": "q1",
+      "reference_rho": 0.999963662082867,
+      "float64": {
+        "rho": 0.9999636621692127,
+        "frequency_GHz": 0.21731679838886495,
+        "all_rho": 1.0000000444008859
+      },
+      "float32_replay": {
+        "rho": 0.9999636598026976,
+        "frequency_GHz": 0.21731680727371072,
+        "all_rho": 1.0000000444008834
+      },
+      "float64_rho_error": 8.634570836107969e-11,
+      "float64_max_entry_error": 1.4749599097640953e-08,
+      "replay_max_entry_error": 9.103086173745112e-09,
+      "replay_frobenius_error": 6.461171472716957e-08,
+      "passed": true
+    },
+    {
+      "case": "q0",
+      "reference_rho": 0.9999480673476152,
+      "float64": {
+        "rho": 0.999948067717421,
+        "frequency_GHz": 3.89778958955448,
+        "all_rho": 1.0000000358719057
+      },
+      "float32_replay": {
+        "rho": 0.9999480673476169,
+        "frequency_GHz": 3.8977895466638133,
+        "all_rho": 1.0000000593439002
+      },
+      "float64_rho_error": 3.6980574158462787e-10,
+      "float64_max_entry_error": 4.1814950835217246e-08,
+      "replay_max_entry_error": 1.1102230246251565e-16,
+      "replay_frobenius_error": 1.582317204486199e-16,
+      "passed": true
+    }
+  ],
+  "python": "python",
+  "numpy": "2.4.6",
+  "input_sha256": {
+    "<evidence-root>/instamax-line-modulated-growth-20261101/native_matrix_default_q0.npy": "14e18e305ad0b553799876c5b4d2c3292c334013dd7ff9f5a00408988388e790",
+    "<evidence-root>/instamax-line-modulated-growth-20261101/native_matrix_default_q1.npy": "88d0d3334cd8435b8c6cef638c573acc1c7715ee9e0a50d2bacbb716094be92d",
+    "<evidence-root>/instamax-line-modulated-growth-20261101/native_matrix_default_q1_TM.npy": "36fa88a31d7b84250f845709b60d5618a418c7fff8993f5a582e2bd7338db05f",
+    "<evidence-root>/instamax-line-modulated-growth-20261101/native_matrix.py": "e6508e5c258066a0042cfe5d017b1ffe44b6b460848228d5b37541c1348971f5",
+    "<evidence-root>/instamax-line-modulated-growth-20261101/REPORT.md": "a123fd6c2d7a5f2debcdd90d0b87f4072cfb67ad468790069073a98612602ba8",
+    "witwin/maxwell/fdtd/boundary/cpml.py": "ac99d616eeaf0af4e8be385b60f144384330f26c4f96e7feeb14720919501030",
+    "witwin/maxwell/fdtd/cuda/kernels/electric.cu": "09f3d8558ba55a93e9ed317c6e922942cf3933be2f7355a92c3536e6ccbbb196",
+    "witwin/maxwell/fdtd/cuda/kernels/magnetic.cu": "f9da00820ba9a1b0f1a95c1034a10142059ec761772af9e14afac85602794664"
+  }
+}

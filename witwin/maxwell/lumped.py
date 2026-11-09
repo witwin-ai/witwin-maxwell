@@ -520,8 +520,88 @@ def trapezoidal_impedance(model, angular_frequency, dt) -> torch.Tensor:
     return model.impedance(mapped_omega)
 
 
+def _coaxial_annulus(label, name, center, inner_diameter, outer_diameter, normal_axis):
+    """Validate fixed concentric-circle geometry shared by coaxial lumped objects."""
+    from ._fixed_inputs import require_fixed_input
+
+    resolved_name = str(name).strip()
+    if not resolved_name:
+        raise ValueError(f"{label} name must not be empty.")
+    if "::" in resolved_name:
+        raise ValueError(f"{label} name must not contain the reserved '::' separator.")
+    require_fixed_input((center, inner_diameter, outer_diameter), name=f"{label} geometry")
+    resolved_center = _require_length3("center", center)
+    if any(not math.isfinite(value) for value in resolved_center):
+        raise ValueError(f"{label} {resolved_name!r} center must be finite.")
+    inner = float(inner_diameter)
+    outer = float(outer_diameter)
+    if not (math.isfinite(inner) and math.isfinite(outer)) or inner <= 0.0:
+        raise ValueError(f"{label} {resolved_name!r} diameters must be positive and finite.")
+    if inner >= outer:
+        raise ValueError(
+            f"{label} {resolved_name!r} inner_diameter must be smaller than outer_diameter."
+        )
+    if isinstance(normal_axis, bool):
+        raise TypeError(f"{label} normal_axis must be 'x', 'y', 'z' or 0, 1, 2.")
+    if isinstance(normal_axis, int):
+        if normal_axis not in (0, 1, 2):
+            raise ValueError(f"{label} normal_axis must be 'x', 'y', 'z' or 0, 1, 2.")
+        axis = "xyz"[normal_axis]
+    else:
+        axis = str(normal_axis).strip().lower()
+        if axis not in ("x", "y", "z"):
+            raise ValueError(f"{label} normal_axis must be 'x', 'y', 'z' or 0, 1, 2.")
+    return resolved_name, resolved_center, inner, outer, axis
+
+
+@dataclass(frozen=True)
+class CoaxialLumpedResistor:
+    """Passive annular resistor between two concentric circles on a Yee node plane.
+
+    The annulus ``inner_diameter / 2 < r < outer_diameter / 2`` lies in the
+    plane normal to ``normal_axis`` through ``center``. The FDTD runtime couples
+    one radial current ``I`` with surface density ``I / (2 pi r)`` to the
+    annular voltage row ``V`` (the azimuthal mean of the inner-to-outer radial
+    line integral of E) and enforces ``V = R I`` with the implicit midpoint rule
+    of the rectangular lumped elements. Both conductors are modelled by the
+    scene; tangential edges suppressed by PEC are excluded from the row.
+    """
+
+    name: str
+    center: tuple[float, float, float]
+    inner_diameter: float
+    outer_diameter: float
+    normal_axis: str
+    resistance: float
+    kind: str = "coaxial_resistor"
+
+    def __init__(self, name, *, center, inner_diameter, outer_diameter, normal_axis, resistance):
+        from ._fixed_inputs import require_fixed_input
+
+        resolved = _coaxial_annulus(
+            "CoaxialLumpedResistor", name, center, inner_diameter, outer_diameter, normal_axis
+        )
+        require_fixed_input(resistance, name="CoaxialLumpedResistor.resistance")
+        value = float(resistance)
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("CoaxialLumpedResistor resistance must be positive and finite.")
+        object.__setattr__(self, "name", resolved[0])
+        object.__setattr__(self, "center", resolved[1])
+        object.__setattr__(self, "inner_diameter", resolved[2])
+        object.__setattr__(self, "outer_diameter", resolved[3])
+        object.__setattr__(self, "normal_axis", resolved[4])
+        object.__setattr__(self, "resistance", value)
+        object.__setattr__(self, "kind", "coaxial_resistor")
+
+    @property
+    def sheet_conductance(self) -> float:
+        """Equivalent isotropic sheet conductance ``ln(b/a) / (2 pi R)`` in siemens."""
+        return math.log(self.outer_diameter / self.inner_diameter) / (2.0 * math.pi * self.resistance)
+
+
 __all__ = [
     "Capacitor",
+    "CoaxialLumpedResistor",
     "Inductor",
     "ParallelRLC",
     "PortExcitation",

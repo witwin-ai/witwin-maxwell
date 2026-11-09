@@ -45,6 +45,16 @@ _REGISTERED = (
     *COVERAGE_SCENARIOS,
 )
 
+# Real-field closed-transverse PML rows whose reference comparisons were validated on
+# CPML. The solver default absorber="auto" selects the graded absorber (>= 40 layers)
+# for this topology; these rows pin CPML, which keeps their results bit-unchanged and
+# runs them under the fail-closed passivity guard.
+CPML_PINNED_SCENARIOS = frozenset({
+    "planewave_periodic_vacuum", "periodic_slab", "periodic_grating", "grating_diffraction",
+    "diffraction_normal_orders", "mixed_faces", "modulated_slab", "modulated_slab_phase",
+    "kerr_slab", "kerr_slab_strong", "dispersive_kerr_slab", "tpa_slab", "graphene_sheet",
+})
+
 _DUPLICATES = sorted(
     {
         scenario.name
@@ -56,6 +66,9 @@ if _DUPLICATES:
     raise RuntimeError(f"Duplicate benchmark scenario names: {_DUPLICATES}")
 
 SCENARIOS = {scenario.name: scenario for scenario in _REGISTERED}
+_UNKNOWN_PINS = sorted(CPML_PINNED_SCENARIOS - SCENARIOS.keys())
+if _UNKNOWN_PINS:
+    raise RuntimeError(f"CPML-pinned benchmark scenarios are not registered: {_UNKNOWN_PINS}")
 
 
 def build_scene(name: str):

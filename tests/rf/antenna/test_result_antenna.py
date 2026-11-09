@@ -1,3 +1,4 @@
+import dataclasses
 import math
 from types import SimpleNamespace
 
@@ -232,6 +233,18 @@ def test_result_antenna_rejects_frequency_and_grid_contract_violations(monkeypat
         result.antenna(surface="nf2ff", driven_port=port, theta_points=2)
 
 
+def test_result_antenna_rejects_a_lossy_exterior(monkeypatch):
+    result, port, currents, _, _, _, _ = _result_with_differentiable_surface(monkeypatch)
+    lossy = dataclasses.replace(currents, background_eps_r=2.0 - 0.1j)
+    monkeypatch.setattr(
+        "witwin.maxwell.postprocess.stratton_chu.equivalent_surface_currents_from_monitor",
+        lambda result, name, **kwargs: lossy,
+    )
+
+    with pytest.raises(NotImplementedError, match="homogeneous lossless exterior"):
+        result.antenna(surface="nf2ff", driven_port=port, theta_points=3, phi_points=2)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_result_antenna_keeps_the_complete_workflow_on_one_cuda_device(monkeypatch):
     result, _, _, _, _, _, _ = _result_with_differentiable_surface(
@@ -251,3 +264,21 @@ def test_result_antenna_keeps_the_complete_workflow_on_one_cuda_device(monkeypat
     for value in data.__dict__.values():
         if isinstance(value, torch.Tensor):
             assert value.device.type == "cuda"
+
+
+@pytest.mark.parametrize("length", [1., 1e-6])
+def test_exterior_loss_check_does_not_mix_impedance_and_wavenumber_units(monkeypatch, length):
+    result, _, currents, a, b, _, _ = _result_with_differentiable_surface(monkeypatch)
+    frequency = 1e9 / length
+    # Opposite small losses leave k real but eta complex: a large k must not
+    # enlarge the allowed imaginary impedance when the aperture shrinks.
+    lossy = dataclasses.replace(currents, frequency=frequency, u=currents.u*length,
+                                v=currents.v*length, background_eps_r=1-1e-8j,
+                                background_mu_r=1+1e-8j)
+    monkeypatch.setattr("witwin.maxwell.postprocess.stratton_chu.equivalent_surface_currents_from_monitor",
+                        lambda *args, **kwargs: lossy)
+    port = mw.PortData.from_power_waves(port_name="feed", frequencies=torch.tensor([frequency], dtype=torch.float64), a=a, b=b, z0=50.)
+    scaled = mw.Result(method="fdtd", scene=result.scene, frequency=frequency,
+                       solver=result.solver, ports={"feed":port})
+    with pytest.raises(NotImplementedError, match="homogeneous lossless exterior"):
+        scaled.antenna(surface="nf2ff", driven_port="feed", theta_points=3, phi_points=2)

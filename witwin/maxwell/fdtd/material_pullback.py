@@ -115,7 +115,19 @@ def _pullback_region_density(scene, region, *, layout: _RegionLayout, grad_eps_p
     projected_clamped = projected.clamp(0.0, 1.0)
 
     grad_density = grad_eps_patch * float(region.eps_bounds[1] - region.eps_bounds[0])
-    if projected_clamped.shape != layout.target_shape:
+    if hasattr(region, "_pml_density_geometry"):
+        from ..compiler.materials import _sample_material_region_density
+
+        # Transpose the forward's physical-coordinate border sampling, keeping
+        # the texture on the original design box throughout the enlarged PML.
+        coords = torch.meshgrid(
+            scene.x[layout.x_slice], scene.y[layout.y_slice], scene.z[layout.z_slice], indexing="ij"
+        )
+        with torch.enable_grad():
+            texture = projected_clamped.detach().requires_grad_(True)
+            sampled = _sample_material_region_density(scene, region, texture, coords=coords)
+            grad_density, = torch.autograd.grad(sampled, texture, grad_density)
+    elif projected_clamped.shape != layout.target_shape:
         grad_density = torch.ops.aten.upsample_trilinear3d_backward(
             grad_density[None, None, ...].contiguous(),
             list(layout.target_shape),
@@ -271,6 +283,12 @@ def pullback_material_input_gradients(
     grad_eps_ey: torch.Tensor,
     grad_eps_ez: torch.Tensor,
     eps0: float,
+    dt: float | None = None,
+    grad_pole_coefficients: dict | None = None,
+    grad_copper_coefficients: tuple[dict[str, torch.Tensor], ...] | None = None,
+    grad_sigma_ex: torch.Tensor | None = None,
+    grad_sigma_ey: torch.Tensor | None = None,
+    grad_sigma_ez: torch.Tensor | None = None,
     grad_chi3_ex: torch.Tensor | None = None,
     grad_chi3_ey: torch.Tensor | None = None,
     grad_chi3_ez: torch.Tensor | None = None,
@@ -290,16 +308,41 @@ def pullback_material_input_gradients(
     edge_components = model.get("edge_components")
     outputs = []
     grad_outputs = []
+    if grad_pole_coefficients:
+        from .runtime.materials import (pole_update_coefficients, pole_component_weight,
+            average_node_to_component, average_node_to_magnetic_component)
+        from ..constants import MU_0
+        for prefix, field, vacuum, average in (("", "E", eps0, average_node_to_component),
+                                               ("mu_", "H", MU_0, average_node_to_magnetic_component)):
+            for kind in ("debye", "drude", "lorentz"):
+                counts = dict.fromkeys("xyz", 0)
+                for entry in model[prefix+kind+"_poles"]:
+                    coefficients = pole_update_coefficients(entry["pole"], kind, vacuum, dt)
+                    for axis in entry.get("axes") or "xyz":
+                        component = field + axis
+                        gradients = grad_pole_coefficients[(component, kind, counts[axis])]
+                        counts[axis] += 1
+                        for key, value in coefficients.items():
+                            if key == "drive":
+                                value = value * pole_component_weight(entry, component, average)
+                            if torch.is_tensor(value) and value.requires_grad:
+                                outputs.append(value)
+                                grad_outputs.append(gradients[key].to(value))
     from ..compiler.materials import material_model_has_full_anisotropy
 
     if material_model_has_full_anisotropy(model):
-        from .runtime.materials import _symmetric3_inverse, average_node_to_component
+        from .runtime.materials import _symmetric3_inverse, average_node_to_component, pole_edge_inverse
 
-        diagonal, offdiagonal = model["eps_components"], model["eps_offdiag_components"]
+        pole_nodes = model.get("pole_tensor_nodes", {})
+        diagonal = pole_nodes.get("diagonal", model["eps_components"])
+        offdiagonal = pole_nodes.get("offdiag", model["eps_offdiag_components"])
         inverse, _ = _symmetric3_inverse(diagonal["x"], diagonal["y"], diagonal["z"],
                                         offdiagonal["xy"], offdiagonal["xz"], offdiagonal["yz"])
         for name, axis, grad_edge in (("Ex", "xx", grad_eps_ex), ("Ey", "yy", grad_eps_ey), ("Ez", "zz", grad_eps_ez)):
-            component = average_node_to_component(None, inverse[axis], name).reciprocal()
+            diagonal_inverse = average_node_to_component(None, inverse[axis], name)
+            if name in model.get("pole_edge_masks", {}):
+                diagonal_inverse = torch.where(model["pole_edge_masks"][name], pole_edge_inverse(model, name), diagonal_inverse)
+            component = diagonal_inverse.reciprocal()
             if component.requires_grad:
                 outputs.append(component)
                 grad_outputs.append((grad_edge * eps0).to(component))
@@ -307,14 +350,20 @@ def pullback_material_input_gradients(
             if inverse[pair].requires_grad:
                 outputs.append(inverse[pair])
                 grad_outputs.append(gradient.to(inverse[pair]))
-    elif edge_components is not None:
+    elif edge_components is not None or model.get("pole_edge_background"):
         # Edge-native forward: the relative permittivity was evaluated directly at
         # each Yee edge, so the sensitivity flows through the edge fields with no
         # node->edge transpose. ``eps_E<c> = eps_edge<c> * eps0`` gives the relative
         # edge gradient ``grad_eps_e<c> * eps0``. Autograd then carries it through
         # the same SDF / density sampling the forward used, which stays consistent
         # for any geometry, region density or subpixel/polarized blend.
-        eps_edge = edge_components["eps"]
+        if edge_components is not None:
+            eps_edge = edge_components["eps"]
+        else:
+            from .runtime.materials import average_node_to_component
+            eps_edge = {name: model.get("pole_edge_background", {}).get(name,
+                average_node_to_component(None, model["eps_components"][name[-1].lower()], name))
+                for name in ("Ex", "Ey", "Ez")}
         for component_name, grad_edge in (
             ("Ex", grad_eps_ex),
             ("Ey", grad_eps_ey),
@@ -346,6 +395,51 @@ def pullback_material_input_gradients(
                 continue
             outputs.append(component)
             grad_outputs.append(component_gradients[axis].to(device=component.device, dtype=component.dtype))
+
+    if grad_copper_coefficients:
+        from ..compiler.copper_foil import compile_copper_response
+        for gradients in grad_copper_coefficients:
+            material = prepared_scene.structures[gradients["structure_index"]].material
+            response = compile_copper_response(material)
+            for key, value in (("B", response.state_space.B), ("rates", response.rates), ("D", response.state_space.D)):
+                alpha = gradients.get("response_alpha", 1.)
+                if alpha != 1.:
+                    if key == "B":
+                        value = value * alpha**.5
+                    elif key == "D":
+                        value = value * alpha
+                if value.requires_grad:
+                    outputs.append(value)
+                    grad_outputs.append(gradients[key].to(value))
+            # The free-edge impedance factor depends on the thickness, and through
+            # its smooth edge weight also on the skin-depth ratio.
+            geometry = gradients.get("edge_geometry")
+            if geometry is not None and any(torch.is_tensor(value) and value.requires_grad
+                                            for value in (material.thickness, material.conductivity)):
+                from ..compiler.copper_foil import copper_edge_scale_from_geometry
+                device = geometry["width"].device
+                scale = copper_edge_scale_from_geometry(geometry, material,
+                    thickness=torch.as_tensor(material.thickness, dtype=torch.float64).to(device),
+                    conductivity=torch.as_tensor(material.conductivity, dtype=torch.float64).to(device))
+                if scale.requires_grad:
+                    outputs.append(scale)
+                    grad_outputs.append(gradients["admittance_scale"].to(scale))
+
+    if grad_sigma_ex is not None:
+        sigma_gradients = {"Ex": grad_sigma_ex, "Ey": grad_sigma_ey, "Ez": grad_sigma_ez}
+        if edge_components is not None:
+            for name, gradient in sigma_gradients.items():
+                component = edge_components["sigma_e"][name]
+                if component.requires_grad:
+                    outputs.append(component)
+                    grad_outputs.append(gradient.to(component))
+        else:
+            from .runtime.materials import average_node_to_component
+            for name, axis in zip(("Ex", "Ey", "Ez"), ("x", "y", "z")):
+                component = average_node_to_component(None, model["sigma_e_components"][axis], name)
+                if component.requires_grad:
+                    outputs.append(component)
+                    grad_outputs.append(sigma_gradients[name].to(component))
 
     if grad_chi3_ex is not None:
         # Kerr channel: the compiled chi3 node field feeds all three Yee-edge
