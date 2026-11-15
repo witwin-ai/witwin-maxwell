@@ -14,9 +14,9 @@ def test_cutoff_keeps_internal_initial_model_and_public_single_use(failure,tmp_p
     original,config,_=runpy.run_path('tests/mom/test_harmonic_public.py')['setup']()
     scene=mw.Scene(structures=[mw.Structure(geometry=original.structures[0].geometry,
         material=mw.Material(eps_r=2.))],sources=original.sources)
-    policy=mw.HarmonicCutoffConfig(max_harmonics=2,successive_passes=1 if failure=='record' else 2,failure=failure)
+    policy=mw.mom.HarmonicCutoffConfig(max_harmonics=2,successive_passes=1 if failure=='record' else 2,failure=failure)
     config=replace(config,harmonic_balance=replace(config.harmonic_balance,harmonics=1,pump_scales=(1.,),cutoff=policy))
-    prepared=mw.Simulation.mom(scene,frequency=3e8,config=config).prepare()
+    prepared=mw.Simulation.mom(scene,frequencies=3e8,config=config).prepare()
     runtime=prepared.solver;model,initial=runtime.model,runtime.prepared
     seed=.3*model.background
     for repeat in range(2):
@@ -27,8 +27,8 @@ def test_cutoff_keeps_internal_initial_model_and_public_single_use(failure,tmp_p
         else:
             result=run(initial_harmonic_electric=seed)
             assert result.frequencies==(0.,3e8,6e8)
-            assert result.solver_stats['cutoff']['initial_harmonics']==1
-            assert result.solver_stats['continuation_harmonics']==1
+            assert result.stats()['cutoff']['initial_harmonics']==1
+            assert result.stats()['continuation_harmonics']==1
             assert result._harmonic_data.config.harmonic_balance.harmonics==2
             assert result._metadata['reused_positive_harmonics']==1
             result.save(tmp_path/f'repeat{repeat}.pt')

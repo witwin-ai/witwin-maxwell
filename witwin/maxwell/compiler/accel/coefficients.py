@@ -7,7 +7,7 @@ from .dispatch import UNCHANGED, eligible
 
 def try_build_update_coefficients(solver):
     scene = solver.scene
-    if not eligible(scene, 1., 1., scene.subpixel, coefficients=True):
+    if not eligible(scene, 1., 1., scene.scene.subpixel, coefficients=True):
         return UNCHANGED
     if any(getattr(solver, name, False) for name in (
             'full_aniso_enabled', 'dispersive_enabled', 'nonlinear_enabled',

@@ -1,6 +1,6 @@
 """Historical streamed dual admission checks for HB and cutoff ownership."""
 import math
-from dataclasses import asdict
+from .options import option_asdict
 import torch
 from .static_projector_snapshot import _validate_bound
 
@@ -13,7 +13,7 @@ def validate_dual_receipts(records,*,rule,column_batch,cell_count,dtype):
         raise ValueError('Invalid dual DC receipts')
     iterations=nonlinear.get('iterations');checks=nonlinear.get('tangent_checks')
     if (nonlinear.get('linear_solver')!='streamed_dual_checked_gmres'
-            or nonlinear.get('streamed_rule')!=asdict(rule)
+            or nonlinear.get('streamed_rule')!=option_asdict(rule)
             or nonlinear.get('streamed_column_batch')!=column_batch
             or nonlinear.get('converged') is not True or nonlinear.get('failure_reason') is not None
             or type(iterations) is not int or not 0<=iterations<=30

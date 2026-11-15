@@ -105,24 +105,23 @@ def _measure_incident_power_ratio(
     analytic power through the central window is its area fraction.
     """
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half_span, half_span),) * 3),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pml(num_layers=pml),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=mw.GaussianPulse(frequency=frequency, fwidth=0.25 * frequency),
-            name="pw",
-        )
-    )
+                domain=mw.Domain(bounds=((-half_span, half_span),) * 3),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.pml(num_layers=pml),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization=(1.0, 0.0, 0.0),
+                source_time=mw.GaussianPulse(frequency=frequency, fwidth=0.25 * frequency),
+                name="pw",
+            ),
+            ),
+            )
 
-    prepared = mw.Simulation.fdtd(scene, frequency=frequency).prepare()
+    prepared = mw.Simulation.fdtd(scene, frequencies=frequency).prepare()
     solver = prepared.solver
     grid = solver.scene
-    src_index = soft_plane_wave_index(grid, "z", 1.0)
+    src_index = soft_plane_wave_index(grid, "z", 1.0, device=grid.device)
     z_nodes = grid.z.detach().cpu().numpy()
     # Probe ~0.6 wavelengths forward of the launch plane: past the immediate near
     # field of the truncated aperture, before edge diffraction reaches the centre,
@@ -131,8 +130,8 @@ def _measure_incident_power_ratio(
     cells_forward = max(6, int(round(0.6 * (C0 / frequency) / dx)))
     z_probe = float(z_nodes[min(src_index + cells_forward, len(z_nodes) - 1)])
 
-    lo_x, hi_x = physical_interior_indices(grid, "x")
-    lo_y, hi_y = physical_interior_indices(grid, "y")
+    lo_x, hi_x = physical_interior_indices(grid, "x", device=grid.device)
+    lo_y, hi_y = physical_interior_indices(grid, "y", device=grid.device)
     x_nodes = grid.x.detach().cpu().numpy()
     y_nodes = grid.y.detach().cpu().numpy()
     x_lo, x_hi = float(x_nodes[lo_x]), float(x_nodes[hi_x])
@@ -146,23 +145,26 @@ def _measure_incident_power_ratio(
     half_wx = 0.5 * aperture_fraction * (x_hi - x_lo)
     half_wy = 0.5 * aperture_fraction * (y_hi - y_lo)
 
-    scene.add_monitor(
+    scene = scene.updated(monitors=(
+        *scene.monitors,
         mw.PlaneMonitor(
             name="probe",
             axis="z",
             position=z_probe,
             fields=("Ex", "Hy"),
             frequencies=(frequency,),
-        )
-    )
+        ),
+    ))
     result = mw.Simulation.fdtd(
         scene,
         frequencies=(frequency,),
-        run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
-        spectral_sampler=mw.SpectralSampler(normalize_source=True),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True),
+        ),
     ).run()
 
-    components = result.monitor("probe")["components"]
+    components = result.raw_monitor("probe")["components"]
     ex = components["Ex"]["data"].detach().cpu().numpy()
     hy = components["Hy"]["data"].detach().cpu().numpy()
     x_coords = np.asarray(components["Ex"]["coords"][0])

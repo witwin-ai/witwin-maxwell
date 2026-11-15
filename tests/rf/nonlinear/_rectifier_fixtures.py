@@ -31,7 +31,7 @@ import math
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.compiler.nonlinear_devices import (
+from tests.oracles.nonlinear_devices import (
     NonlinearMNASystem,
     compile_nonlinear_devices,
 )
@@ -67,14 +67,14 @@ def _linear_cap():
 def build_half_wave_system() -> tuple[NonlinearMNASystem, callable, int]:
     """Return ``(system, source_injection, output_index)`` for the half-wave cell."""
 
-    circuit = mw.Circuit("half_wave")
+    circuit = mw.circuits.Circuit("half_wave")
     src = circuit.node("src")
     out = circuit.node("out")
     node_index = {"src": 0, "out": 1}
-    diode = mw.Diode(
+    diode = mw.circuits.Diode(
         "d1", src, out, saturation_current=SATURATION_CURRENT, ideality=IDEALITY
     )
-    cap = mw.VoltageDependentCapacitor("cs", out, circuit.ground, q_coefficients=_linear_cap())
+    cap = mw.circuits.VoltageDependentCapacitor("cs", out, circuit.ground, q_coefficients=_linear_cap())
     compiled = compile_nonlinear_devices([diode, cap], node_index, dtype=DTYPE, device="cpu")
 
     gs = 1.0 / SOURCE_RESISTANCE
@@ -93,17 +93,17 @@ def build_half_wave_system() -> tuple[NonlinearMNASystem, callable, int]:
 def build_full_wave_system(*, device="cpu") -> tuple[NonlinearMNASystem, callable, int]:
     """Return ``(system, source_injection, output_index)`` for the center-tapped cell."""
 
-    circuit = mw.Circuit("full_wave")
+    circuit = mw.circuits.Circuit("full_wave")
     a = circuit.node("a")
     b = circuit.node("b")
     top = circuit.node("top")
     node_index = {"a": 0, "b": 1, "top": 2}
     gnd = circuit.ground
     diodes = [
-        mw.Diode("d1", a, top, saturation_current=SATURATION_CURRENT, ideality=IDEALITY),
-        mw.Diode("d2", b, top, saturation_current=SATURATION_CURRENT, ideality=IDEALITY),
+        mw.circuits.Diode("d1", a, top, saturation_current=SATURATION_CURRENT, ideality=IDEALITY),
+        mw.circuits.Diode("d2", b, top, saturation_current=SATURATION_CURRENT, ideality=IDEALITY),
     ]
-    cap = mw.VoltageDependentCapacitor("cs", top, gnd, q_coefficients=_linear_cap())
+    cap = mw.circuits.VoltageDependentCapacitor("cs", top, gnd, q_coefficients=_linear_cap())
     compiled = compile_nonlinear_devices([*diodes, cap], node_index, dtype=DTYPE, device=device)
 
     gs = 1.0 / SOURCE_RESISTANCE

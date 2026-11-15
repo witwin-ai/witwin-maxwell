@@ -7,6 +7,9 @@ import witwin.maxwell as mw
 from witwin.maxwell.fdtd.adjoint import core
 from witwin.maxwell.fdtd.runtime.stepping import electric_update_support
 
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="needs CUDA for trainable FDTD preparation")
+
 
 @pytest.fixture(autouse=True)
 def _single_cpu_thread():
@@ -16,26 +19,26 @@ def _single_cpu_thread():
     torch.set_num_threads(previous)
 
 
-def _prepare_solver(source_kind, face, waveform, device):
+def _prepare_solver(source_kind, face, waveform):
     boundary = mw.BoundarySpec.pml(num_layers=4)
     if face == "pec":
         boundary = boundary.with_faces(y_low="pec")
+    # Preparation uses a trainable scene; the replay rebuilds using trainable epsilon leaves.
+    density = torch.full((1, 1, 1), 0.4, device="cuda", requires_grad=True)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
-        grid=mw.GridSpec.uniform(0.025),
-        boundary=boundary,
-        subpixel_samples=mw.SubpixelSpec(samples=1, averaging="arithmetic"),
-        device=device,
-    )
-    # CPU preparation is forward-only. The native cases also exercise preparation
-    # with a trainable scene; both devices rebuild using trainable epsilon leaves.
-    density = torch.full((1, 1, 1), 0.4, device=device, requires_grad=device == "cuda")
-    scene.add_material_region(mw.MaterialRegion(
-        name="design",
-        geometry=mw.Box(position=(0.03, 0.0, 0.0), size=(0.10, 0.12, 0.12)),
-        density=density,
-        eps_bounds=(1.0, 4.0),
-    ))
+                domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
+                grid=mw.GridSpec.uniform(0.025),
+                boundary=boundary,
+                subpixel=mw.SubpixelSpec(samples=1, averaging="arithmetic"),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.03, 0.0, 0.0), size=(0.10, 0.12, 0.12)),
+                density=density,
+                eps_bounds=(1.0, 4.0),
+            ),
+            ),
+            )
     source_time = (mw.CW(frequency=1e9, phase=0.37) if waveform == "cw" else
                    mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, phase=0.37))
     kwargs = dict(
@@ -47,19 +50,19 @@ def _prepare_solver(source_kind, face, waveform, device):
     elif source_kind == "gaussian_beam":
         source = mw.GaussianBeam(beam_waist=0.16, focus=(0.03, 0.02, -0.01), **kwargs)
     else:
-        source = mw.AstigmaticGaussianBeam(
+        source = mw.sources.AstigmaticGaussianBeam(
             beam_waist=(0.16, 0.22), focus=(0.03, 0.02, -0.01),
             focus_u=0.02, focus_v=-0.03, **kwargs,
         )
-    scene.add_source(source)
+    scene = scene.updated(sources=(*scene.sources, source))
     simulation = mw.Simulation.fdtd(
-        scene, frequency=1e9, backend="cpu_reference" if device == "cpu" else "native",
-        cuda_graph=False, full_field_dft=False, run_time=mw.TimeConfig(time_steps=2),
+        scene, frequencies=1e9,
+        config=mw.FDTDConfig(cuda_graph=False, full_field_dft=False, run_time=mw.TimeConfig(time_steps=2)),
     )
     # prepare() initializes source terms through init_field(), exactly
     # as the forward launch does; no separate test-only source initialization.
     solver = simulation.prepare().solver
-    assert simulation.has_trainable_parameters == (device == "cuda")
+    assert simulation.has_trainable_parameters
     assert solver._compiled_sources[0]["kind"] == source_kind
     assert source_kind in core._SOURCE_REPLAY_REBUILD_KINDS
     assert solver._compiled_sources[0]["injection"]["kind"] == "soft"
@@ -103,16 +106,11 @@ def _assert_terms_equal(forward_terms, replay_terms, waveform):
             assert replay["cw_cos_patch"] is replay["cw_sin_patch"] is None
 
 
-@pytest.mark.parametrize("device", [
-    "cpu",
-    pytest.param("cuda", marks=pytest.mark.skipif(
-        not torch.cuda.is_available(), reason="needs CUDA for trainable FDTD preparation")),
-])
 @pytest.mark.parametrize("waveform", ("cw", "pulse"))
 @pytest.mark.parametrize("face", ("pml", "pec"), ids=("all-pml", "transverse-pec"))
 @pytest.mark.parametrize("source_kind", ("plane_wave", "gaussian_beam", "astigmatic_gaussian_beam"))
-def test_soft_sheet_replay_matches_forward(source_kind, face, waveform, device, monkeypatch):
-    solver = _prepare_solver(source_kind, face, waveform, device)
+def test_soft_sheet_replay_matches_forward(source_kind, face, waveform, monkeypatch):
+    solver = _prepare_solver(source_kind, face, waveform)
     namespaces = []
     build = core._build_source_replay_solver
 
@@ -151,7 +149,7 @@ def test_soft_sheet_replay_matches_forward(source_kind, face, waveform, device, 
 
 
 def test_soft_sheet_replay_requires_boundary_codes(monkeypatch):
-    solver = _prepare_solver("plane_wave", "pec", "cw", "cpu")
+    solver = _prepare_solver("plane_wave", "pec", "cw")
     namespace = core.SimpleNamespace
 
     def missing_boundary_code(**kwargs):

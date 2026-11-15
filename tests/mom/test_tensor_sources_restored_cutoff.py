@@ -15,11 +15,11 @@ def test_saved_h5_native_query_replay(tmp_path,monkeypatch):
     if not source:
         pytest.skip('Requires a previously collected native H5 continuation artifact')
     scene,_,point=setup()
-    scene.structures[0]=replace(scene.structures[0],material=mw.Material(eps_r=2.,mu_r=1.3))
+    scene = scene.updated(structures=(replace(scene.structures[0],material=mw.Material(eps_r=2.,mu_r=1.3)), *scene.structures[1:]))
     axis=point.new_tensor([1.,2.,3.]);axis=axis/axis.norm()
-    scene.structures[1]=replace(scene.structures[1],material=mw.Material(eps_r=2.,nonlinearity=
-        mw.TensorNonlinearSusceptibility(chi2=.002*torch.einsum('i,j,k->ijk',axis,axis,axis),
-            chi3=.001*torch.einsum('i,j,k,l->ijkl',axis,axis,axis,axis))))
+    scene = scene.updated(structures=(*scene.structures[:1], replace(scene.structures[1],material=mw.Material(eps_r=2.,nonlinearity=
+        mw.media.TensorNonlinearSusceptibility(chi2=.002*torch.einsum('i,j,k->ijk',axis,axis,axis),
+            chi3=.001*torch.einsum('i,j,k,l->ijkl',axis,axis,axis,axis)))), *scene.structures[2:]))
     from witwin.maxwell.mom.tensor_harmonic_runtime import restore,snapshot
     from witwin.maxwell.mom.runtime import SystemOperator
     from witwin.maxwell.mom.static_tensor_interface import StaticTensorInterfaceOperator
@@ -31,12 +31,12 @@ def test_saved_h5_native_query_replay(tmp_path,monkeypatch):
         patch.setattr(StaticTensorInterfaceOperator,'__init__',forbidden)
         patch.setattr(torch.linalg,'solve',forbidden)
         patch.setattr(FixedSurfaceInverse,'_solve',forbidden)
-        original=restore(torch.load(source,weights_only=False),scene)
+        original=restore(torch.load(source,weights_only=False),scene,'cuda')
         assert original.state.cell_electric.shape[0]==6
         fields={h:original.query_fields(point,region_id=2,field_kind='total',harmonic=h)
                 for h in (4,5)}
         path=tmp_path/'native-replay.pt';torch.save(snapshot(original),path)
-        replay=restore(torch.load(path,weights_only=False),scene)
+        replay=restore(torch.load(path,weights_only=False),scene,'cuda')
         for h,expected in fields.items():
             actual=replay.query_fields(point,region_id=2,field_kind='total',harmonic=h)
             for a,b in zip(actual,expected):
@@ -47,27 +47,27 @@ def test_saved_h5_native_query_replay(tmp_path,monkeypatch):
 
 def test_restored_tensor_sources_extend_only_h4_h5(tmp_path,monkeypatch):
     scene,config,point=setup()
-    scene.structures[0]=replace(scene.structures[0],material=mw.Material(eps_r=2.,mu_r=1.3))
+    scene = scene.updated(structures=(replace(scene.structures[0],material=mw.Material(eps_r=2.,mu_r=1.3)), *scene.structures[1:]))
     axis=point.new_tensor([1.,2.,3.]);axis=axis/axis.norm()
-    scene.structures[1]=replace(scene.structures[1],material=mw.Material(eps_r=2.,nonlinearity=
-        mw.TensorNonlinearSusceptibility(chi2=.002*torch.einsum('i,j,k->ijk',axis,axis,axis),
-            chi3=.001*torch.einsum('i,j,k,l->ijkl',axis,axis,axis,axis))))
+    scene = scene.updated(structures=(*scene.structures[:1], replace(scene.structures[1],material=mw.Material(eps_r=2.,nonlinearity=
+        mw.media.TensorNonlinearSusceptibility(chi2=.002*torch.einsum('i,j,k->ijk',axis,axis,axis),
+            chi3=.001*torch.einsum('i,j,k,l->ijkl',axis,axis,axis,axis)))), *scene.structures[2:]))
     config=replace(config,harmonic_balance=replace(config.harmonic_balance,harmonics=1,
-        cutoff=mw.HarmonicCutoffConfig(max_harmonics=3,failure='record')))
+        cutoff=mw.mom.HarmonicCutoffConfig(max_harmonics=3,failure='record')))
     source=os.environ.get('GSP_TENSOR_CUTOFF_PREFIX')
     if not source:
-        source=tmp_path/'prefix.pt';mw.Simulation.mom(scene,frequency=3e8,config=config).run().save(source)
+        source=tmp_path/'prefix.pt';mw.Simulation.mom(scene,frequencies=3e8,config=config).run().save(source)
     result=mw.Result.load(source,scene=scene)
     native=result._harmonic_data;prefix=native.decoder.prepared
     previous=copy.deepcopy(prefix['receipt'])
-    assert result.solver_stats['cutoff']['failure_reason']=='harmonic_budget_exhausted'
+    assert result.stats()['cutoff']['failure_reason']=='harmonic_budget_exhausted'
     policy=replace(native.config.harmonic_balance.cutoff,max_harmonics=5)
     continued_config=replace(native.config,harmonic_balance=replace(native.config.harmonic_balance,cutoff=policy))
     from witwin.maxwell.mom.tensor_harmonic_runtime import MixedTensorHarmonicRuntime,snapshot,restore
     # Test-only adapter: all ownership comes from the validated restored data.
     # This does not provide or exercise a public resume API.
     runtime=object.__new__(MixedTensorHarmonicRuntime)
-    runtime.simulation=mw.Simulation.mom(scene,frequency=3e8,config=continued_config)
+    runtime.simulation=mw.Simulation.mom(scene,frequencies=3e8,config=continued_config)
     runtime.config=continued_config;runtime.signature=native.scene_signature
     import witwin.maxwell.mom.tensor_harmonic_preparation as preparation
     from witwin.maxwell.mom.static_tensor_interface import StaticTensorInterfaceOperator
@@ -88,7 +88,7 @@ def test_restored_tensor_sources_extend_only_h4_h5(tmp_path,monkeypatch):
     assert prepared['static'] is prefix['static']
     for key in ('harmonics','operators','bindings'):
         assert all(a is b for a,b in zip(prepared[key][:3],prefix[key]))
-    from witwin.maxwell.mom.harmonic_state import preparation_signature
+    from witwin.maxwell.mom.harmonic_recovery import preparation_signature
     assert prefix['receipt']==previous and preparation_signature(prefix)==prefix['_signature']
     assert extended.config.harmonic_balance.cutoff==policy
     path=tmp_path/'extended-native.pt';torch.save(snapshot(extended),path)
@@ -97,7 +97,7 @@ def test_restored_tensor_sources_extend_only_h4_h5(tmp_path,monkeypatch):
         patch.setattr(SystemOperator,'__init__',forbidden)
         patch.setattr(StaticTensorInterfaceOperator,'__init__',forbidden)
         patch.setattr(torch.linalg,'solve',forbidden)
-        replay=restore(torch.load(path,weights_only=False),scene)
+        replay=restore(torch.load(path,weights_only=False),scene,'cuda')
     assert replay.decoder.prepared['receipt']['cutoff']==receipt
     for name in ('cell_electric','polarization','total_volume_current'):
         torch.testing.assert_close(getattr(replay.state,name),getattr(extended.state,name),rtol=0,atol=0)

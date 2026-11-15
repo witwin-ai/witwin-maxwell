@@ -6,34 +6,37 @@ from benchmark.scenes.rf.printed_lines import printed_line_scene
 from witwin.maxwell.compiler.sources import _compile_mode_source
 from witwin.maxwell.fdtd.excitation.modes import solve_mode_source_profile
 from witwin.maxwell.waveport_sweep import _mode_context, _mode_source
+from witwin.maxwell.scene import place_scene
+from witwin.maxwell.compiler import compile_waveports
+from witwin.maxwell.scene import prepare_scene
 
 
 def _foil_scene(*,thickness=35e-6,model='good_conductor',conductivity=5.8e7,mode_count=None):
-    scene=printed_line_scene('stripline',device='cpu')
+    scene=printed_line_scene('stripline')
     structures=[]
     for item in scene.structures:
-        if isinstance(item.geometry,mw.PlanarPEC):
+        if isinstance(item.geometry,mw.geometry.PlanarPEC):
             geometry=item.geometry
             lower,upper=geometry.vertices.min(0).values,geometry.vertices.max(0).values
             position=torch.tensor((float((lower[0]+upper[0])/2),float((lower[1]+upper[1])/2),geometry.coordinate),dtype=torch.float64)
             size=torch.tensor((float(upper[0]-lower[0]),float(upper[1]-lower[1]),0.),dtype=torch.float64)
-            item=mw.Structure(mw.Box(position=position,size=size),mw.CopperFoil(thickness=thickness,
+            item=mw.Structure(mw.Box(position=position,size=size),mw.media.CopperFoil(thickness=thickness,
                 conductivity=conductivity,frequency_range=(.8e9,1.2e9),mode_count=mode_count),name=item.name)
         structures.append(item)
     ports=[]
     for port in scene.ports:
         original=port.modes[0]
-        mode=mw.WaveModeSpec(original.family,polarization=original.polarization,voltage_path=original.voltage_path,current_contour=original.current_contour,conductor_model=model)
-        ports.append(mw.WavePort(port.name,position=port.position,size=port.size,direction=port.direction,
+        mode=mw.rf.WaveModeSpec(original.family,polarization=original.polarization,voltage_path=original.voltage_path,current_contour=original.current_contour,conductor_model=model)
+        ports.append(mw.rf.WavePort(port.name,position=port.position,size=port.size,direction=port.direction,
             reference_plane=port.reference_plane,modes=(mode,)))
-    return scene.clone(structures=structures,ports=ports)
+    return scene.updated(structures=structures, ports=ports)
 
 
 def _solve(scene,frequency=1e9):
-    context=_mode_context(scene)
+    context=_mode_context(scene,device="cpu")
     context.dt=2e-12
     port=scene.ports[0]
-    compiled=context.scene.compile_waveports()[0]
+    compiled=compile_waveports(context.scene, device="cpu")[0]
     source=_compile_mode_source(_mode_source(port,compiled.modes[0],frequency=frequency),default_frequency=frequency)
     return context,solve_mode_source_profile(context,source)
 
@@ -76,9 +79,9 @@ def test_modal_surface_work_matches_actual_split_ampere_forcing_at_foil_edges():
         apply_good_conductor_perturbation, prepare_good_conductor_context,
     )
     scene=_foil_scene()
-    context=_mode_context(scene)
+    context=_mode_context(scene,device="cpu")
     context.dt=2e-12
-    compiled=context.scene.compile_waveports()[0]
+    compiled=compile_waveports(context.scene, device="cpu")[0]
     source=_compile_mode_source(_mode_source(scene.ports[0],compiled.modes[0],frequency=1e9),default_frequency=1e9)
     proxy=prepare_good_conductor_context(context,source)
     base=solve_mode_source_profile(proxy,source)
@@ -149,9 +152,9 @@ def test_good_conductor_rejects_trainable_modal_foil_material():
 
 def test_good_conductor_public_api_rejects_invalid_family_and_model():
     with pytest.raises(ValueError,match='requires family'):
-        mw.WaveModeSpec('te',conductor_model='good_conductor')
+        mw.rf.WaveModeSpec('te',conductor_model='good_conductor')
     with pytest.raises(ValueError,match='conductor_model must'):
-        mw.WaveModeSpec('te',conductor_model='silent_pec')
+        mw.rf.WaveModeSpec('te',conductor_model='silent_pec')
 
 
 @pytest.mark.parametrize('dtype',(torch.float32,torch.complex64))
@@ -169,16 +172,18 @@ def test_native_float32_profile_nodes_sample_exactly_without_foil_boundary_leak(
 
 @pytest.mark.skipif(not torch.cuda.is_available(),reason='Native finite-Cu FDTD requires CUDA')
 def test_good_conductor_native_launch_graph_parity_and_persistence(tmp_path):
-    scene=_foil_scene().clone(device='cuda:0')
-    scene=scene.clone(ports=(scene.ports[0],))
+    scene=place_scene(_foil_scene(), 'cuda:0')
+    scene=scene.updated(ports=(scene.ports[0],))
     results=[]
     for graph in (False,True):
-        result=mw.Simulation.fdtd(scene,frequencies=(1e9,),excitations=mw.PortExcitation('in'),
-            run_time=mw.TimeConfig.auto(transient_cycles=2,steady_cycles=1),
-            spectral_sampler=mw.SpectralSampler(window='hanning'),full_field_dft=False,cuda_graph=graph).run()
+        result=mw.Simulation.fdtd(scene,frequencies=(1e9,),excitations=mw.rf.PortExcitation('in'),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(transient_cycles=2,steady_cycles=1),
+                spectral_sampler=mw.fdtd.SpectralSampler(window='hanning'),full_field_dft=False,cuda_graph=graph,
+            )).run()
         results.append(result)
         assert result.port('in').beta.imag.item()>0
-        assert sum(float(value['surface_power'].sum()) for value in result.conductor_losses.values())>0
+        assert sum(float(value['surface_power'].sum()) for value in mw.rf.conductor_losses(result).values())>0
         approximation=result.stats()['waveport_excitation']['conductor_approximations']['in'][0][0]
         assert approximation['launch']=='PEC-limit tangential Et=0'
         assert approximation['relative_propagation_correction']<.01
@@ -202,14 +207,14 @@ def _cyclic_scene(scene, permutation):
     for port in scene.ports:
         modes=[]
         for original in port.modes:
-            modes.append(mw.WaveModeSpec(original.family,polarization=('E'+'xyz'[permutation.index('xyz'.index(original.polarization[-1].lower()))] if isinstance(original.polarization,str) else vector(original.polarization)),
+            modes.append(mw.rf.WaveModeSpec(original.family,polarization=('E'+'xyz'[permutation.index('xyz'.index(original.polarization[-1].lower()))] if isinstance(original.polarization,str) else vector(original.polarization)),
                 voltage_path=tuple(vector(point) for point in original.voltage_path),
                 current_contour=box(original.current_contour),conductor_model=original.conductor_model))
         axis=vector(port.size).index(0.)
-        ports.append(mw.WavePort(port.name,position=vector(port.position),size=vector(port.size),
+        ports.append(mw.rf.WavePort(port.name,position=vector(port.position),size=vector(port.size),
             direction=port.direction,reference_plane=vector(port.position)[axis],modes=modes))
     grids=(scene.grid.x_coords,scene.grid.y_coords,scene.grid.z_coords)
-    return scene.clone(domain=mw.Domain(bounds=vector(scene.domain.bounds)),grid=mw.GridSpec.custom(*vector(grids)),structures=structures,ports=ports)
+    return scene.updated(domain=mw.Domain(bounds=vector(scene.domain.bounds)), grid=mw.GridSpec.custom(*vector(grids)), structures=structures, ports=ports)
 
 
 @pytest.mark.parametrize('permutation',[(0,1,2),(2,0,1),(1,2,0)])
@@ -217,7 +222,7 @@ def _cyclic_scene(scene, permutation):
 def test_good_conductor_mode_cyclic_rotation_and_direction_invariance(permutation,direction):
     base=_foil_scene()
     if direction=='-':
-        base=base.clone(ports=tuple(reversed(base.ports)))
+        base=base.updated(ports=tuple(reversed(base.ports)))
     _,reference=_solve(base)
     _,rotated=_solve(_cyclic_scene(base,permutation))
     assert rotated['beta_complex']==pytest.approx(reference['beta_complex'],rel=2e-7)
@@ -230,15 +235,17 @@ def test_good_conductor_mode_cyclic_rotation_and_direction_invariance(permutatio
 @pytest.mark.skipif(not torch.cuda.is_available(),reason='Native finite-Cu FDTD requires CUDA')
 @pytest.mark.parametrize('direction',['+','-'])
 def test_native_good_conductor_launch_cyclic_field_rotation(direction):
-    scene=_foil_scene().clone(device='cuda:0')
+    scene=place_scene(_foil_scene(), 'cuda:0')
     selected=scene.ports[0] if direction=='+' else scene.ports[1]
-    scene=scene.clone(ports=(selected,))
+    scene=scene.updated(ports=(selected,))
     reference=None
     for permutation in ((0,1,2),(2,0,1),(1,2,0)):
         rotated=_cyclic_scene(scene,permutation)
-        result=mw.Simulation.fdtd(rotated,frequencies=(1e9,),excitations=mw.PortExcitation(selected.name),
-            run_time=mw.TimeConfig(time_steps=64),spectral_sampler=mw.SpectralSampler(window='none'),
-            full_field_dft=False,cuda_graph=True).run()
+        result=mw.Simulation.fdtd(rotated,frequencies=(1e9,),excitations=mw.rf.PortExcitation(selected.name),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=64),spectral_sampler=mw.fdtd.SpectralSampler(window='none'),
+                full_field_dft=False,cuda_graph=True,
+            )).run()
         if reference is None:
             reference=result
             continue
@@ -267,4 +274,4 @@ def test_good_conductor_rejects_foil_end_at_aperture_stencil():
     position[0]=scene.ports[0].position[0]-.01
     structures[foil]=mw.Structure(mw.Box(position=position,size=size),original.material,name=original.name)
     with pytest.raises(NotImplementedError,match='foil end or axial discontinuity'):
-        _solve(scene.clone(structures=structures))
+        _solve(scene.updated(structures=structures))

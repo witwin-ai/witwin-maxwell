@@ -1,10 +1,13 @@
+from dataclasses import replace
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.fdtd import calculate_required_steps
-from witwin.maxwell.fdtd.boundary import expand_cpml_memory_tensor
+from witwin.maxwell.fdtd.solver import calculate_required_steps
+from witwin.maxwell.fdtd.boundary.cpml import _resolve_cpml_memory_mode
 from witwin.maxwell.fdtd.checkpoint import capture_checkpoint_state
 
 
@@ -15,29 +18,28 @@ def test_cpml_fixed_k_shift_and_explicit_alpha_profiles(transverse, k_parallel):
 
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.02, 0.02),) * 3),
-        grid=mw.GridSpec.uniform(.01), device="cuda:0",
-        boundary=mw.BoundarySpec.faces(x=transverse, y=transverse, z="pml",
+        grid=mw.GridSpec.uniform(.01), boundary=mw.BoundarySpec.faces(x=transverse, y=transverse, z="pml",
             num_layers=2, bloch_wavevector=(0., k_parallel, 0.)),
     )
 
-    def prepare(config):
-        return mw.Simulation.fdtd(scene, frequencies=(.8e9, 1.2e9), cpml_config=config, absorber="cpml",
-            run_time=mw.TimeConfig(time_steps=1)).prepare().solver
+    def prepare(**config):
+        return mw.Simulation.fdtd(scene, frequencies=(.8e9, 1.2e9), config=mw.FDTDConfig(cpml=mw.fdtd.CPMLConfig(**config), absorber="cpml",
+            run_time=mw.TimeConfig(time_steps=1))).prepare().solver
 
-    default = prepare({})
+    default = prepare()
     alpha = default.eps0 * (2. * np.pi * .8e9) if k_parallel else 0.
     grade = 2. if k_parallel else 3.
     q = default.c * k_parallel / (2. * np.pi * .8e9)
     cosine = np.sqrt(1. - min(q, np.sqrt(1. - (4.2 / 8.) ** 2)) ** 2)
     reflection = 10. ** (-4.2 / cosine) if k_parallel else 1e-6
-    explicit = prepare({"alpha_max": alpha, "grading_order": grade, "reflection": reflection})
-    assert default.cpml_config["alpha_max"] == alpha
-    assert default.cpml_config["grading_order"] == grade
-    assert default.cpml_config["reflection"] == reflection
+    explicit = prepare(alpha_max=alpha, grading_order=grade, reflection=reflection)
+    assert default.cpml_grading.alpha_max == alpha
+    assert default.cpml_grading.grading_order == grade
+    assert default.cpml_grading.reflection == reflection
     for name in _CPML_VECTOR_ATTRS:
         assert torch.equal(getattr(default, name), getattr(explicit, name)), name
-    unshifted = prepare({"alpha_max": 0., "grading_order": grade})
-    assert unshifted.cpml_config["alpha_max"] == 0.
+    unshifted = prepare(alpha_max=0., grading_order=grade)
+    assert unshifted.cpml_grading.alpha_max == 0.
     if k_parallel:
         assert not torch.equal(default.cpml_b_e_z, unshifted.cpml_b_e_z)
         # Here twice the light line exceeds the band minimum, so alpha is constant.
@@ -50,16 +52,16 @@ def test_cpml_fixed_k_shift_and_explicit_alpha_profiles(transverse, k_parallel):
             c = getattr(default, f"cpml_c_{letter}_z")[index].double()
             expected = direct.new_tensor(alpha / (sigma_peak * depth ** 2 + alpha))
             torch.testing.assert_close(direct + c / (1 - b), expected, rtol=1e-5, atol=3e-7)
-        custom = prepare({"alpha_max": .037})
-        assert custom.cpml_config["alpha_max"] == .037
-        assert custom.cpml_config["grading_order"] == 3.
-        assert custom.cpml_config["reflection"] == 1e-6
+        custom = prepare(alpha_max=.037)
+        assert custom.cpml_grading.alpha_max == .037
+        assert custom.cpml_grading.grading_order == 3.
+        assert custom.cpml_grading.reflection == 1e-6
         assert not torch.equal(default.cpml_b_e_z, custom.cpml_b_e_z)
-        custom_grade = prepare({"grading_order": 4.})
-        assert custom_grade.cpml_config["alpha_max"] == alpha
-        assert custom_grade.cpml_config["grading_order"] == 4.
-        custom_reflection = prepare({"reflection": 1e-5})
-        assert custom_reflection.cpml_config["reflection"] == 1e-5
+        custom_grade = prepare(grading_order=4.)
+        assert custom_grade.cpml_grading.alpha_max == alpha
+        assert custom_grade.cpml_grading.grading_order == 4.
+        custom_reflection = prepare(reflection=1e-5)
+        assert custom_reflection.cpml_grading.reflection == 1e-5
     else:
         for name in _CPML_VECTOR_ATTRS:
             assert torch.equal(getattr(default, name), getattr(unshifted, name)), name
@@ -68,31 +70,34 @@ def test_cpml_fixed_k_shift_and_explicit_alpha_profiles(transverse, k_parallel):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_cpml_profiles_and_boundary_attenuation():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1e9, amplitude=100.0),
-            name="src",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ez",)))
-    scene.add_monitor(mw.PointMonitor("inner_x", (0.24, 0.0, 0.0), fields=("Ez",)))
-    scene.add_monitor(mw.PointMonitor("pml_mid_x", (0.72, 0.0, 0.0), fields=("Ez",)))
-    scene.add_monitor(mw.PointMonitor("pml_outer_x", (0.88, 0.0, 0.0), fields=("Ez",)))
+                domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1e9, amplitude=100.0),
+                name="src",
+            ),
+            ),
+                monitors=(
+            mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ez",)),
+            mw.PointMonitor("inner_x", (0.24, 0.0, 0.0), fields=("Ez",)),
+            mw.PointMonitor("pml_mid_x", (0.72, 0.0, 0.0), fields=("Ez",)),
+            mw.PointMonitor("pml_outer_x", (0.88, 0.0, 0.0), fields=("Ez",)),
+            ),
+            )
 
     sim = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     )
     prepared = sim.prepare()
     fdtd = prepared.solver
@@ -117,13 +122,15 @@ def test_fdtd_cpml_profiles_and_boundary_attenuation():
         transient_cycles=15,
         domain_size=1.28,
     )
-    prepared.simulation.config.run_time = mw.TimeConfig(time_steps=steps)
+    prepared.simulation.config = replace(prepared.simulation.config, run_time=mw.TimeConfig(time_steps=steps))
     result = prepared.run()
-    observers = result.monitors
-    center_mag = abs(observers["center"]["data"])
-    inner_mag = abs(observers["inner_x"]["data"])
-    pml_mid_mag = abs(observers["pml_mid_x"]["data"])
-    pml_outer_mag = abs(observers["pml_outer_x"]["data"])
+    def magnitude(name):
+        return abs(result.monitor(name, freq_index=0).isel(component=0).values)
+
+    center_mag = magnitude("center")
+    inner_mag = magnitude("inner_x")
+    pml_mid_mag = magnitude("pml_mid_x")
+    pml_outer_mag = magnitude("pml_outer_x")
 
     assert center_mag > 0.0
     assert inner_mag < center_mag
@@ -134,23 +141,22 @@ def test_fdtd_cpml_profiles_and_boundary_attenuation():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_simple_pml_and_cpml_both_run():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1e9, amplitude=100.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1e9, amplitude=100.0),
+                name="src",
+            ),
+            ),
+            )
 
-    cpml_solver = mw.Simulation.fdtd(scene, frequencies=[1e9], absorber="cpml").prepare().solver
-    pml_solver = mw.Simulation.fdtd(scene, frequencies=[1e9], absorber="pml").prepare().solver
+    cpml_solver = mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(absorber="cpml")).prepare().solver
+    pml_solver = mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(absorber="pml")).prepare().solver
 
     assert cpml_solver.cex_decay.shape == pml_solver.cex_decay.shape
     assert torch.all(cpml_solver.cpml_kappa_e_x >= 1.0)
@@ -162,27 +168,28 @@ def test_fdtd_simple_pml_and_cpml_both_run():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_custom_cpml_config_changes_profile():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1e9, amplitude=100.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1e9, amplitude=100.0),
+                name="src",
+            ),
+            ),
+            )
 
-    default_solver = mw.Simulation.fdtd(scene, frequencies=[1e9], absorber="cpml").prepare().solver
+    default_solver = mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(absorber="cpml")).prepare().solver
     tuned_solver = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        absorber="cpml",
-        cpml_config={"kappa_max": 8.0, "alpha_max": 0.10},
+        config=mw.FDTDConfig(
+            absorber="cpml",
+            cpml=mw.fdtd.CPMLConfig(kappa_max=8.0, alpha_max=0.10),
+        ),
     ).prepare().solver
 
     assert float(tuned_solver.cpml_kappa_e_x.max()) > float(default_solver.cpml_kappa_e_x.max())
@@ -192,26 +199,27 @@ def test_fdtd_custom_cpml_config_changes_profile():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_cpml_psi_is_slab_allocated_but_checkpoints_expand_dense():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1e9, amplitude=100.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1e9, amplitude=100.0),
+                name="src",
+            ),
+            ),
+            )
 
     solver = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        absorber="cpml",
-        cpml_config={"memory_mode": "slab"},
+        config=mw.FDTDConfig(
+            absorber="cpml",
+            cpml=mw.fdtd.CPMLConfig(memory_mode="slab"),
+        ),
     ).prepare().solver
     compiled_scene = solver.scene
     thickness = int(scene.boundary.num_layers)
@@ -230,207 +238,90 @@ def test_fdtd_cpml_psi_is_slab_allocated_but_checkpoints_expand_dense():
     assert torch.count_nonzero(checkpoint.tensors["psi_ex_y"]).item() == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
+_MIB = 1024 * 1024
+
+
+def _force_one_mib_free(monkeypatch):
+    """Make the card look nearly full; the auto CPML decision must not notice."""
+    calls = []
+
+    def nearly_full(device=None):
+        calls.append(device)
+        return _MIB, 48 * 1024 * _MIB
+
+    monkeypatch.setattr(torch.cuda, "mem_get_info", nearly_full)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("dense_bytes", "expected"),
+    [(2 * _MIB, "dense"), (64 * _MIB, "dense"), (64 * _MIB + 1, "slab")],
+)
+def test_cpml_auto_memory_mode_depends_only_on_dense_bytes(monkeypatch, dense_bytes, expected):
+    calls = _force_one_mib_free(monkeypatch)
+    solver = SimpleNamespace(cpml=mw.fdtd.CPMLConfig(), device=torch.device("cuda:0"))
+
+    assert _resolve_cpml_memory_mode(solver, dense_bytes) == expected
+    assert solver._cpml_memory_mode_requested == "auto"
+    assert solver._cpml_dense_memory_limit_bytes == 64 * _MIB
+    assert calls == []
+
+
+def _cubic_cpml_scene(half_width):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1e9, amplitude=1.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-half_width, half_width),) * 3),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1e9, amplitude=1.0),
+                name="src",
+            ),
+            ),
+            )
+    return scene
 
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+@pytest.mark.parametrize(("half_width", "expected"), [(0.48, "dense"), (7.2, "slab")])
+def test_fdtd_cpml_auto_ignores_free_memory(monkeypatch, half_width, expected):
+    _force_one_mib_free(monkeypatch)
     solver = mw.Simulation.fdtd(
-        scene,
-        frequencies=[1e9],
-        absorber="cpml",
-        cpml_config={"memory_mode": "slab"},
+        _cubic_cpml_scene(half_width), frequencies=[1e9], config=mw.FDTDConfig(absorber="cpml")
     ).prepare().solver
-    module = solver.fdtd_module
 
-    torch.manual_seed(0)
-    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-        getattr(solver, name).copy_(torch.randn_like(getattr(solver, name)))
-    for name in solver._cpml_memory_layouts:
-        getattr(solver, name).copy_(torch.randn_like(getattr(solver, name)))
-
-    initial_state = {
-        name: getattr(solver, name).clone()
-        for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz", *solver._cpml_memory_layouts.keys())
-    }
-    dense_psi = {
-        name: expand_cpml_memory_tensor(solver, name).clone()
-        for name in solver._cpml_memory_layouts
-    }
-
-    ref_ex = initial_state["Ex"].clone()
-    ref_ey = initial_state["Ey"].clone()
-    ref_ez = initial_state["Ez"].clone()
-    ref_hx = initial_state["Hx"].clone()
-    ref_hy = initial_state["Hy"].clone()
-    ref_hz = initial_state["Hz"].clone()
-
-    module.updateMagneticFieldHx3D(
-        Hx=ref_hx,
-        Ey=ref_ey,
-        Ez=ref_ez,
-        HxDecay=solver.chx_decay,
-        HxCurl=solver.chx_curl,
-        PsiHxY=dense_psi["psi_hx_y"],
-        PsiHxZ=dense_psi["psi_hx_z"],
-        InvKappaHxY=solver.cpml_inv_kappa_h_y,
-        ByHxY=solver.cpml_b_h_y,
-        CyHxY=solver.cpml_c_h_y,
-        InvKappaHxZ=solver.cpml_inv_kappa_h_z,
-        ByHxZ=solver.cpml_b_h_z,
-        CyHxZ=solver.cpml_c_h_z,
-        invDy=solver.inv_dy_h,
-        invDz=solver.inv_dz_h,
-    ).launchRaw()
-    module.updateMagneticFieldHy3D(
-        Hy=ref_hy,
-        Ex=ref_ex,
-        Ez=ref_ez,
-        HyDecay=solver.chy_decay,
-        HyCurl=solver.chy_curl,
-        PsiHyX=dense_psi["psi_hy_x"],
-        PsiHyZ=dense_psi["psi_hy_z"],
-        InvKappaHyX=solver.cpml_inv_kappa_h_x,
-        ByHyX=solver.cpml_b_h_x,
-        CyHyX=solver.cpml_c_h_x,
-        InvKappaHyZ=solver.cpml_inv_kappa_h_z,
-        ByHyZ=solver.cpml_b_h_z,
-        CyHyZ=solver.cpml_c_h_z,
-        invDx=solver.inv_dx_h,
-        invDz=solver.inv_dz_h,
-    ).launchRaw()
-    module.updateMagneticFieldHz3D(
-        Hz=ref_hz,
-        Ex=ref_ex,
-        Ey=ref_ey,
-        HzDecay=solver.chz_decay,
-        HzCurl=solver.chz_curl,
-        PsiHzX=dense_psi["psi_hz_x"],
-        PsiHzY=dense_psi["psi_hz_y"],
-        InvKappaHzX=solver.cpml_inv_kappa_h_x,
-        ByHzX=solver.cpml_b_h_x,
-        CyHzX=solver.cpml_c_h_x,
-        InvKappaHzY=solver.cpml_inv_kappa_h_y,
-        ByHzY=solver.cpml_b_h_y,
-        CyHzY=solver.cpml_c_h_y,
-        invDx=solver.inv_dx_h,
-        invDy=solver.inv_dy_h,
-    ).launchRaw()
-
-    module.updateElectricFieldExCpml3D(
-        Ex=ref_ex,
-        Hy=ref_hy,
-        Hz=ref_hz,
-        ExDecay=solver.cex_decay,
-        ExCurl=solver.cex_curl,
-        PsiExY=dense_psi["psi_ex_y"],
-        PsiExZ=dense_psi["psi_ex_z"],
-        InvKappaExY=solver.cpml_inv_kappa_e_y,
-        BExY=solver.cpml_b_e_y,
-        CExY=solver.cpml_c_e_y,
-        InvKappaExZ=solver.cpml_inv_kappa_e_z,
-        BExZ=solver.cpml_b_e_z,
-        CExZ=solver.cpml_c_e_z,
-        invDy=solver.inv_dy_e,
-        invDz=solver.inv_dz_e,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw()
-    module.updateElectricFieldEyCpml3D(
-        Ey=ref_ey,
-        Hx=ref_hx,
-        Hz=ref_hz,
-        EyDecay=solver.cey_decay,
-        EyCurl=solver.cey_curl,
-        PsiEyX=dense_psi["psi_ey_x"],
-        PsiEyZ=dense_psi["psi_ey_z"],
-        InvKappaEyX=solver.cpml_inv_kappa_e_x,
-        BEyX=solver.cpml_b_e_x,
-        CEyX=solver.cpml_c_e_x,
-        InvKappaEyZ=solver.cpml_inv_kappa_e_z,
-        BEyZ=solver.cpml_b_e_z,
-        CEyZ=solver.cpml_c_e_z,
-        invDx=solver.inv_dx_e,
-        invDz=solver.inv_dz_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw()
-    module.updateElectricFieldEzCpml3D(
-        Ez=ref_ez,
-        Hx=ref_hx,
-        Hy=ref_hy,
-        EzDecay=solver.cez_decay,
-        EzCurl=solver.cez_curl,
-        PsiEzX=dense_psi["psi_ez_x"],
-        PsiEzY=dense_psi["psi_ez_y"],
-        InvKappaEzX=solver.cpml_inv_kappa_e_x,
-        BEzX=solver.cpml_b_e_x,
-        CEzX=solver.cpml_c_e_x,
-        InvKappaEzY=solver.cpml_inv_kappa_e_y,
-        BEzY=solver.cpml_b_e_y,
-        CEzY=solver.cpml_c_e_y,
-        invDx=solver.inv_dx_e,
-        invDy=solver.inv_dy_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-    ).launchRaw()
-
-    for name, value in initial_state.items():
-        getattr(solver, name).copy_(value)
-
-    solver._update_magnetic_fields_cpml(solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
-    solver._update_electric_fields_cpml(solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
-
-    for name, reference in (("Ex", ref_ex), ("Ey", ref_ey), ("Ez", ref_ez), ("Hx", ref_hx), ("Hy", ref_hy), ("Hz", ref_hz)):
-        assert torch.allclose(getattr(solver, name), reference, atol=1.0e-2, rtol=1.0e-2)
-    for name, reference in dense_psi.items():
-        slab_dense = expand_cpml_memory_tensor(solver, name)
-        assert torch.allclose(slab_dense, reference, atol=1.0e-2, rtol=1.0e-2)
+    assert (solver._cpml_dense_memory_bytes <= 64 * _MIB) == (expected == "dense")
+    assert solver._cpml_memory_mode == expected
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_cpml_auto_prefers_dense_small_grids_and_dense_mode_is_full_shape():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.48, 0.48))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1e9, amplitude=1.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.48, 0.48))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1e9, amplitude=1.0),
+                name="src",
+            ),
+            ),
+            )
 
-    auto_solver = mw.Simulation.fdtd(scene, frequencies=[1e9], absorber="cpml").prepare().solver
+    auto_solver = mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(absorber="cpml")).prepare().solver
     dense_solver = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        absorber="cpml",
-        cpml_config={"memory_mode": "dense"},
+        config=mw.FDTDConfig(
+            absorber="cpml",
+            cpml=mw.fdtd.CPMLConfig(memory_mode="dense"),
+        ),
     ).prepare().solver
 
     assert auto_solver._cpml_memory_mode == "dense"

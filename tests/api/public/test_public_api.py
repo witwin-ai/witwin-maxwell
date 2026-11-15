@@ -1,17 +1,24 @@
+import dataclasses
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.fdtd.evaluation import compute_steps
-from witwin.maxwell.fdtd import FDTD
+from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.result import Result
+from witwin.maxwell.scene import prepare_scene
+
+from tests._fresh_interpreter import ROOT
+from tests.support.public_api import public_objects
 
 
 def test_top_level_exports_are_available():
     assert mw.Scene.__module__ == "witwin.maxwell.scene"
     assert mw.BoundaryKind is not None
-    assert mw.ClosedSurfaceMonitor is not None
+    assert mw.monitors.ClosedSurfaceMonitor is not None
     assert mw.DebyePole is not None
     assert mw.DiagonalTensor3 is not None
     assert mw.DrudePole is not None
@@ -24,13 +31,13 @@ def test_top_level_exports_are_available():
     assert mw.Scene is not None
     assert mw.SceneModule is not None
     assert mw.SimulationMethod.FDTD.value == "fdtd"
-    assert mw.SpectralWindowKind.NONE.value == "none"
-    assert mw.AbsorberKind.CPML.value == "cpml"
+    assert mw.fdtd.SpectralWindowKind.NONE.value == "none"
+    assert mw.fdtd.AbsorberKind.CPML.value == "cpml"
     assert mw.FDFDConfig().solver.solver_type == "gmres"
-    assert isinstance(mw.FDTDConfig().spectral_sampler, mw.SpectralSampler)
-    assert mw.GMRES().solver_type == "gmres"
+    assert isinstance(mw.FDTDConfig().spectral_sampler, mw.fdtd.SpectralSampler)
+    assert mw.fdfd.FDFDSolverConfig().solver_type == "gmres"
     assert mw.TimeConfig.auto().time_steps is None
-    assert mw.SpectralSampler(window="none").window == mw.SpectralWindowKind.NONE
+    assert mw.fdtd.SpectralSampler(window="none").window == mw.fdtd.SpectralWindowKind.NONE
     assert mw.CW(frequency=1e9).kind == "cw"
     assert mw.PlaneWave(source_time=mw.CW(frequency=1e9)).kind == "plane_wave"
     assert mw.GaussianBeam(source_time=mw.CW(frequency=1e9)).kind == "gaussian_beam"
@@ -41,7 +48,7 @@ def test_top_level_exports_are_available():
     assert mw.Material is not None
     assert mw.Material.drude(plasma_frequency=2e15, gamma=5e13).is_dispersive
     assert mw.PolySlab is not None
-    assert mw.ComplexPolySlab is not None
+    assert mw.geometry.ComplexPolySlab is not None
     assert not hasattr(mw, "FDFD")
     assert not hasattr(mw, "FDTD")
     assert not hasattr(mw, "FieldMonitor")
@@ -53,6 +60,92 @@ def test_top_level_exports_are_available():
     import witwin.core as wc
 
     assert not hasattr(wc, "SceneBase")
+
+
+def test_each_public_object_has_one_home():
+    objects = public_objects()  # asserts that no name is listed twice
+    assert len(mw.__all__) == len(set(mw.__all__))
+    for name in ("PortData", "CPMLConfig", "LossyMetalMedium", "fit_dispersion", "fit_rational", "Cone"):
+        assert name in objects and not hasattr(mw, name)
+    assert mw.rf.PortData is objects["PortData"]
+    assert mw.rf.rational.fit_rational is objects["fit_rational"]
+    assert mw.media.fit.fit_dispersion is objects["fit_dispersion"]
+    assert mw.media.library.library_material is objects["library_material"]
+    assert not hasattr(mw.fdtd, "FDTDCoreFallbackWarning")  # removed in 0.7.0 (W7 row 16c)
+    with pytest.raises(AttributeError):
+        mw.not_a_namespace
+    with pytest.raises(AttributeError):
+        mw.rf.Scene  # noqa: B018  (each object has exactly one public home)
+
+
+def test_removed_public_names_are_absent():
+    for name in ("run", "BJT", "MOSFET"):
+        assert not hasattr(mw, name)
+    assert not hasattr(mw.circuits, "BJT")
+    assert not hasattr(mw.fdtd, "FDTD") and not hasattr(mw.fdtd, "calculate_required_steps")
+    assert not hasattr(mw.fdfd, "FDFD")
+
+
+def test_namespaces_load_on_first_access():
+    code = ("import sys, witwin.maxwell as mw\n"
+            "assert 'witwin.maxwell.rf' not in sys.modules\n"
+            "mw.rf.PortData\n"
+            "assert 'witwin.maxwell.rf' in sys.modules\n")
+    process = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
+    assert process.returncode == 0, process.stdout + process.stderr
+
+
+@pytest.mark.parametrize("config, name, value", [
+    (mw.FDTDConfig(), "reference_frequency", 1e9),
+    (mw.FDFDConfig(), "verbose", True),
+    (mw.fdtd.SpectralSampler(), "normalize_source", True),
+])
+def test_solver_configs_are_frozen(config, name, value):
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        setattr(config, name, value)
+    assert getattr(dataclasses.replace(config, **{name: value}), name) == value
+    with pytest.raises(TypeError, match="run_time"):
+        dataclasses.replace(mw.FDTDConfig(), run_time=None)
+
+
+def test_fdtd_config_owns_reference_frequency_and_material_cache():
+    scene = mw.Scene(domain=mw.Domain(bounds=((-0.5, 0.5),) * 3), grid=mw.GridSpec.uniform(0.25))
+    cache = mw.fdtd.FDTDMaterialCache()
+    simulation = mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(reference_frequency=2e9, material_cache=cache, device="cpu"))
+    assert simulation.config.reference_frequency == 2e9
+    assert simulation.config.material_cache is cache
+    assert not hasattr(simulation, "material_cache")
+    for name, value in (("reference_frequency", 2e9), ("material_cache", cache)):
+        with pytest.raises(TypeError, match=name):
+            mw.Simulation(scene=scene, method="fdtd", frequencies=(1e9,), **{name: value})
+    with pytest.raises(TypeError, match="FDTDMaterialCache"):
+        mw.FDTDConfig(material_cache=object())
+
+
+def test_factories_take_one_configuration_entry():
+    import inspect
+
+    assert list(inspect.signature(mw.Simulation.fdtd).parameters) == ["scene", "frequencies", "excitations", "config"]
+    assert list(inspect.signature(mw.Simulation.fdfd).parameters) == ["scene", "frequencies", "config"]
+    assert not hasattr(mw, "GMRES")
+    scene = mw.Scene(domain=mw.Domain(bounds=((-0.5, 0.5),) * 3), grid=mw.GridSpec.uniform(0.25))
+    for factory, config, (option, value) in (
+            (mw.Simulation.fdtd, mw.FDTDConfig(full_field_dft=True), ("run_time", mw.TimeConfig())),
+            (mw.Simulation.fdfd, mw.FDFDConfig(verbose=True), ("solver", mw.fdfd.FDFDSolverConfig()))):
+        simulation = factory(scene, frequencies=1e9, config=config)
+        assert simulation.frequencies == (1e9,) and simulation.config is config
+        assert factory(scene, frequencies=(1e9, 2e9)).frequencies == (1e9, 2e9)
+        assert factory(scene, frequencies=1e9).config == type(config)()
+        with pytest.raises(TypeError, match="frequency"):
+            factory(scene, frequency=1e9)
+        with pytest.raises(TypeError, match="frequencies"):
+            factory(scene)
+        with pytest.raises(TypeError, match=option):  # a config field is not a factory keyword
+            factory(scene, frequencies=1e9, **{option: value})
+    with pytest.raises(TypeError, match="FDTDConfig"):
+        mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDFDConfig(device="cpu"))
+    with pytest.raises(TypeError, match="FDFDSolverConfig"):
+        mw.FDFDConfig(solver=object())
 
 
 def test_geometry_with_material_builds_core_structure():
@@ -106,7 +199,7 @@ def test_material_relative_permeability_and_nonlinear_flags():
 
 def test_scene_rejects_bool_subpixel_samples():
     with pytest.raises(TypeError, match="not bool"):
-        mw.Scene(subpixel_samples=True, device="cpu")
+        mw.Scene(subpixel=True)
 
 
 def test_grid_spec_spacing_is_always_a_3_tuple():
@@ -118,12 +211,12 @@ def test_grid_spec_spacing_is_always_a_3_tuple():
     assert anisotropic.spacing == (0.1, 0.2, 0.3)
     assert anisotropic.is_uniform is False
 
-    scene = mw.Scene(grid=anisotropic, device="cpu")
-    assert scene.grid_spacing == (0.1, 0.2, 0.3)
+    scene = mw.Scene(grid=anisotropic)
+    assert scene.grid.spacing == (0.1, 0.2, 0.3)
 
 
 def test_scene_keeps_compiled_grid_state_off_public_object():
-    scene = mw.Scene(grid=mw.GridSpec.uniform(0.25), device="cpu")
+    scene = mw.Scene(grid=mw.GridSpec.uniform(0.25))
 
     assert not hasattr(scene, "x")
     assert not hasattr(scene, "Nx")
@@ -131,8 +224,8 @@ def test_scene_keeps_compiled_grid_state_off_public_object():
     assert not hasattr(scene, "compile_materials")
 
 
-def test_scene_uses_add_mutators_without_with_aliases():
-    scene = mw.Scene(device="cpu")
+def test_scene_is_immutable_and_updated_without_with_aliases():
+    scene = mw.Scene()
     structure = mw.Structure(
         geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
         material=mw.Material(eps_r=2.0),
@@ -147,48 +240,25 @@ def test_scene_uses_add_mutators_without_with_aliases():
         eps_bounds=(1.0, 4.0),
     )
 
-    returned = (
-        scene.add_structure(structure)
-        .add_source(source)
-        .add_monitor(monitor)
-        .add_port(port)
-        .add_material_region(material_region)
-    )
+    updated = scene.updated(structures=(structure,), sources=(source,), monitors=(monitor,), ports=(port,),
+                            material_regions=(material_region,))
 
-    assert returned is scene
-    assert scene.structures == [structure]
-    assert scene.sources == [source]
-    assert scene.monitors == [monitor]
-    assert scene.ports == [port]
-    assert scene.material_regions == [material_region]
+    assert updated is not scene and scene.structures == ()
+    assert updated.structures == (structure,)
+    assert updated.sources == (source,)
+    assert updated.monitors == (monitor,)
+    assert updated.ports == (port,)
+    assert updated.material_regions == (material_region,)
+    assert updated.domain is scene.domain and updated.grid is scene.grid
+    for name in ("add_structure", "add_source", "add_monitor", "add_port", "add_material_region", "clone", "to_tidy3d"):
+        assert not hasattr(scene, name)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        updated.structures = ()
     assert not hasattr(scene, "with_structure")
     assert not hasattr(scene, "with_source")
     assert not hasattr(scene, "with_monitor")
     assert not hasattr(scene, "with_port")
     assert not hasattr(scene, "with_material_region")
-
-
-def test_fdtd_evaluation_compute_steps_accepts_public_scene(monkeypatch):
-    captured = {}
-
-    def fake_required_steps(**kwargs):
-        captured.update(kwargs)
-        return 17
-
-    monkeypatch.setattr("witwin.maxwell.fdtd.evaluation.calculate_required_steps", fake_required_steps)
-
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-1.0, 1.0), (-0.25, 0.25))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    steps = compute_steps(scene, dt=0.1, c=2.0, frequency=1e9, num_cycles=3, transient_cycles=4)
-
-    assert steps == 17
-    assert captured["domain_size"] == pytest.approx(2.0)
-    assert captured["dt"] == pytest.approx(0.1)
-    assert captured["c"] == pytest.approx(2.0)
-    assert captured["frequency"] == pytest.approx(1e9)
 
 
 def test_simulation_fdfd_wraps_solver(monkeypatch):
@@ -215,25 +285,25 @@ def test_simulation_fdfd_wraps_solver(monkeypatch):
             self.solve_calls.append((max_iter, tol, restart))
 
     monkeypatch.setattr("witwin.maxwell.simulation.FDFD", FakeFDFD, raising=False)
-    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda scene, method: None)
+    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_device", lambda scene, method: None)
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        # Three cells per axis: the Yee shapes (3, 4, 4), (4, 3, 4), (4, 4, 3) of the stand-in arrays.
+        domain=mw.Domain(bounds=((-0.375, 0.375),) * 3),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
     )
     sim = mw.Simulation.fdfd(
         scene,
-        frequency=1e9,
-        solver=mw.GMRES(max_iter=12, tol=1e-5, restart=7),
+        frequencies=1e9,
+        config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(max_iter=12, tol=1e-5, restart=7), device="cpu"),
     )
 
-    result = mw.run(sim)
+    result = sim.run()
 
     assert result.method == "fdfd"
-    assert result.E.x.shape == (3, 4, 4)
-    assert result.E.y.shape == (4, 3, 4)
-    assert result.E.z.shape == (4, 4, 3)
+    assert result.E.x.isel(f=0).values.shape == (3, 4, 4)
+    assert result.E.y.isel(f=0).values.shape == (4, 3, 4)
+    assert result.E.z.isel(f=0).values.shape == (4, 4, 3)
     stats = result.stats()
     assert stats["solver"]["type"] == "gmres"
     assert stats["solver"]["max_iter"] == 12
@@ -261,24 +331,24 @@ def test_simulation_accepts_scene_module_and_detects_trainable_parameters(monkey
 
         def to_scene(self):
             return mw.Scene(
-                subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
                 domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
                 grid=mw.GridSpec.uniform(0.25),
-                device="cpu",
-            ).add_material_region(
-                mw.MaterialRegion(
-                    name="lens",
-                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
-                    density=self.rho,
-                    eps_bounds=(1.0, 5.0),
-                )
+                material_regions=(
+                    mw.MaterialRegion(
+                        name="lens",
+                        geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+                        density=self.rho,
+                        eps_bounds=(1.0, 5.0),
+                    ),
+                ),
             )
 
     monkeypatch.setattr("witwin.maxwell.simulation.FDFD", FakeFDFD, raising=False)
-    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda scene, method: None)
+    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_device", lambda scene, method: None)
 
     model = DensityScene()
-    sim = mw.Simulation.fdfd(model, frequency=1e9)
+    sim = mw.Simulation.fdfd(model, frequencies=1e9, config=mw.FDFDConfig(device="cpu"))
     result = sim.run()
 
     assert sim.scene_input is model
@@ -291,16 +361,16 @@ def test_simulation_accepts_scene_module_and_detects_trainable_parameters(monkey
 
 def test_result_structured_field_accessors_expose_e_and_h_components():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        # Three cells per axis: the Yee shapes (3, 4, 4), (4, 3, 4), (4, 4, 3) of the stand-in arrays.
+        domain=mw.Domain(bounds=((-0.375, 0.375),) * 3),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
     )
     ex = torch.ones((3, 4, 4), dtype=torch.complex64)
     ey = torch.full((4, 3, 4), 2.0 + 0j, dtype=torch.complex64)
     ez = torch.full((4, 4, 3), 3.0 + 0j, dtype=torch.complex64)
-    hx = torch.full((3, 4, 4), 4.0 + 0j, dtype=torch.complex64)
-    hy = torch.full((4, 3, 4), 5.0 + 0j, dtype=torch.complex64)
-    hz = torch.full((4, 4, 3), 6.0 + 0j, dtype=torch.complex64)
+    hx = torch.full((4, 3, 3), 4.0 + 0j, dtype=torch.complex64)
+    hy = torch.full((3, 4, 3), 5.0 + 0j, dtype=torch.complex64)
+    hz = torch.full((3, 3, 4), 6.0 + 0j, dtype=torch.complex64)
     result = Result(
         method="fdtd",
         scene=scene,
@@ -315,31 +385,30 @@ def test_result_structured_field_accessors_expose_e_and_h_components():
         },
     )
 
-    assert result.E.x.data_ptr() == ex.data_ptr()
-    assert result.E.y.data_ptr() == ey.data_ptr()
-    assert result.E.z.data_ptr() == ez.data_ptr()
-    assert result.H.x.data_ptr() == hx.data_ptr()
-    assert result.H.y.data_ptr() == hy.data_ptr()
-    assert result.H.z.data_ptr() == hz.data_ptr()
+    assert result.E.x.isel(f=0).values.data_ptr() == ex.data_ptr()
+    assert result.E.y.isel(f=0).values.data_ptr() == ey.data_ptr()
+    assert result.E.z.isel(f=0).values.data_ptr() == ez.data_ptr()
+    assert result.H.x.isel(f=0).values.data_ptr() == hx.data_ptr()
+    assert result.H.y.isel(f=0).values.data_ptr() == hy.data_ptr()
+    assert result.H.z.isel(f=0).values.data_ptr() == hz.data_ptr()
 
 
 def test_result_material_exposes_component_specific_tensors():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
-            material=mw.Material(
-                eps_r=1.0,
-                mu_r=1.0,
-                epsilon_tensor=mw.DiagonalTensor3(2.0, 4.0, 8.0),
-                mu_tensor=mw.DiagonalTensor3(1.5, 2.5, 3.5),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+                material=mw.Material(
+                    eps_r=1.0,
+                    mu_r=1.0,
+                    epsilon_tensor=mw.DiagonalTensor3(2.0, 4.0, 8.0),
+                    mu_tensor=mw.DiagonalTensor3(1.5, 2.5, 3.5),
+                ),
             ),
-        )
-    )
+            ),
+            )
     result = Result(method="fdtd", scene=scene, frequency=1.0e9)
     center_index = (
         result.prepared_scene.Nx // 2,
@@ -360,12 +429,12 @@ def test_result_material_exposes_component_specific_tensors():
 
 def test_simulation_fdtd_wraps_solver(monkeypatch):
     class FakeFDTD:
-        def __init__(self, scene, frequency, absorber_type, cpml_config):
+        def __init__(self, scene, frequency, absorber_type, cpml):
             self.scene = scene
             self._compiled_sources = []
             self.frequency = frequency
             self.absorber_type = absorber_type
-            self.cpml_config = cpml_config
+            self.cpml = cpml
             self._compiled_sources = ()
             self.Ex = torch.zeros((3, 4, 4), dtype=torch.float32)
             self.c = 10.0
@@ -405,31 +474,40 @@ def test_simulation_fdtd_wraps_solver(monkeypatch):
                 "Ex": self.ex,
                 "Ey": self.ey,
                 "Ez": self.ez,
-                "observers": {"center": {"data": np.complex64(1.0 + 2.0j)}},
+                "observers": {"center": {
+                    "kind": "point", "fields": ("Ez",), "components": {"Ez": np.complex64(1.0 + 2.0j)},
+                    "field_indices": {"Ez": (1, 1, 1)}, "samples": 6, "frequency": 1e9, "frequencies": (1e9,),
+                    "position": (0.0, 0.0, 0.0), "component": "ez", "Ez": np.complex64(1.0 + 2.0j),
+                }},
             }
 
     monkeypatch.setattr("witwin.maxwell.simulation._resolve_fdtd_backend", lambda: (FakeFDTD, None))
-    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda scene, method: None)
+    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_device", lambda scene, method: None)
+    # The stand-in solver has no fields to bind the core launches to.
+    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.core_path.activate_core_path", lambda solver: None)
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        # Three cells per axis: the Yee shapes (3, 4, 4), (4, 3, 4), (4, 4, 3) of the stand-in arrays.
+        domain=mw.Domain(bounds=((-0.375, 0.375),) * 3),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
     )
     sim = mw.Simulation.fdtd(
         scene,
-        frequency=1e9,
-        run_time=mw.TimeConfig(time_steps=21, steady_cycles=6, transient_cycles=4),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        absorber="cpml",
+        frequencies=1e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=21, steady_cycles=6, transient_cycles=4),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            absorber="cpml", device="cpu",
+        ),
     )
 
     result = sim.run()
 
     assert result.method == "fdtd"
-    assert result.E.x.dtype == torch.complex64
-    assert result.E.x.data_ptr() == result.solver.ex.data_ptr()
-    assert result.at().monitor("center")["data"] == np.complex64(1.0 + 2.0j)
+    # A single-frequency run without the volume DFT keeps only its last-step fields.
+    assert result.time_snapshot["EX"].values.dtype == torch.complex64
+    assert result.time_snapshot["EX"].values.data_ptr() == result.solver.ex.data_ptr()
+    assert result.at(freq_index=0).monitor("center").sel(component="Ez").values.item() == 1.0 + 2.0j
     stats = result.stats()
     assert stats["time_steps"] == 21
     assert stats["dft_window"] == "none"
@@ -442,12 +520,12 @@ def test_simulation_fdtd_wraps_solver(monkeypatch):
 
 def test_simulation_fdtd_multi_frequency_wraps_solver(monkeypatch):
     class FakeFDTD:
-        def __init__(self, scene, frequency, absorber_type, cpml_config):
+        def __init__(self, scene, frequency, absorber_type, cpml):
             self.scene = scene
             self._compiled_sources = []
             self.frequency = frequency
             self.absorber_type = absorber_type
-            self.cpml_config = cpml_config
+            self.cpml = cpml
             self._compiled_sources = ()
             self.Ex = torch.zeros((3, 4, 4), dtype=torch.float32)
             self.c = 10.0
@@ -518,36 +596,40 @@ def test_simulation_fdtd_multi_frequency_wraps_solver(monkeypatch):
                         "frequencies": (0.9e9, 1.1e9),
                         "position": (0.0, 0.0, 0.0),
                         "component": "ez",
-                        "data": np.array([1.0 + 2.0j, 3.0 + 4.0j], dtype=np.complex64),
+                        "Ez": np.array([1.0 + 2.0j, 3.0 + 4.0j], dtype=np.complex64),
                     }
                 },
             }
 
     monkeypatch.setattr("witwin.maxwell.simulation._resolve_fdtd_backend", lambda: (FakeFDTD, None))
-    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda scene, method: None)
+    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_device", lambda scene, method: None)
+    # The stand-in solver has no fields to bind the core launches to.
+    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.core_path.activate_core_path", lambda solver: None)
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        # Three cells per axis: the Yee shapes (3, 4, 4), (4, 3, 4), (4, 4, 3) of the stand-in arrays.
+        domain=mw.Domain(bounds=((-0.375, 0.375),) * 3),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
     )
     sim = mw.Simulation.fdtd(
         scene,
         frequencies=[0.9e9, 1.1e9],
-        run_time=mw.TimeConfig(time_steps=24, steady_cycles=6, transient_cycles=4),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=24, steady_cycles=6, transient_cycles=4),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            absorber="cpml", device="cpu",
+        ),
     )
 
     result = sim.run()
 
     assert result.frequencies == (0.9e9, 1.1e9)
-    assert result.E.x.shape == (2, 3, 4, 4)
-    assert result.E.x.data_ptr() == result.solver.ex.data_ptr()
-    assert result.at(frequency=1.1e9).E.x.shape == (3, 4, 4)
-    np.testing.assert_allclose(result.at(freq_index=0).E.y.cpu().numpy(), 3.0)
-    assert result.at().monitor("center")["data"].shape == (2,)
-    assert result.at(frequency=1.1e9).monitor("center")["data"] == np.complex64(3.0 + 4.0j)
+    assert result.E.x.values.shape == (2, 3, 4, 4)
+    assert result.E.x.values.data_ptr() == result.solver.ex.data_ptr()
+    assert result.at(frequency=1.1e9).E.x.values.shape == (3, 4, 4)
+    np.testing.assert_allclose(result.at(freq_index=0).E.y.values.cpu().numpy(), 3.0)
+    assert result.at().monitor("center").sel(component="Ez").values.shape == (2,)
+    assert result.at(frequency=1.1e9).monitor("center").sel(component="Ez").values.item() == 3.0 + 4.0j
     stats = result.stats()
     assert stats["num_frequencies"] == 2
     assert stats["dft_sample_counts"] == (6, 5)
@@ -601,7 +683,7 @@ def test_mode_monitor_and_mode_port_resolve_first_class_modal_specs():
     assert monitor.fields == ("Ex", "Ez", "Hx", "Hz")
     assert monitor.normal_direction == "-"
 
-    scene = mw.Scene(device="cpu").add_port(port)
+    scene = mw.Scene(ports=(port,))
     resolved_source = scene.resolved_sources()[0]
     resolved_monitor = scene.resolved_monitors()[0]
 
@@ -628,13 +710,13 @@ def test_finite_plane_and_closed_surface_monitors_resolve_first_class_huygens_wo
     assert finite.plane_position == pytest.approx(0.15)
     assert finite.tangential_bounds == pytest.approx({"y": (-0.2, 0.2), "z": (-0.3, 0.3)})
 
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "huygens",
         position=(0.0, 0.0, 0.0),
         size=(0.4, 0.6, 0.8),
         frequencies=(1.0e9,),
     )
-    scene = mw.Scene(device="cpu").add_monitor(surface)
+    scene = mw.Scene(monitors=(surface,))
     resolved = scene.resolved_monitors()
 
     assert surface.kind == "closed_surface"
@@ -654,13 +736,13 @@ def test_finite_plane_and_closed_surface_monitors_resolve_first_class_huygens_wo
 
 
 def test_result_reassembles_closed_surface_monitor_payloads_from_resolved_faces():
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "huygens",
         position=(0.0, 0.0, 0.0),
         size=(0.4, 0.4, 0.4),
         frequencies=(1.0e9,),
     )
-    scene = mw.Scene(device="cpu").add_monitor(surface)
+    scene = mw.Scene(monitors=(surface,))
 
     coords = np.linspace(-0.3, 0.3, 7)
     monitors = {}
@@ -701,16 +783,21 @@ def test_result_reassembles_closed_surface_monitor_payloads_from_resolved_faces(
         monitors=monitors,
     )
 
-    face_payload = result.monitor("huygens::z_pos")
+    face_payload = result.raw_monitor("huygens::z_pos")
     np.testing.assert_allclose(face_payload["x"], np.linspace(-0.2, 0.2, 5))
     np.testing.assert_allclose(face_payload["y"], np.linspace(-0.2, 0.2, 5))
     assert face_payload["monitor_type"] == "finite_plane"
     assert face_payload["surface_name"] == "huygens"
 
-    surface_payload = result.monitor("huygens")
+    surface_payload = result.raw_monitor("huygens")
     assert surface_payload["kind"] == "closed_surface"
     assert set(surface_payload["faces"]) == {"x_neg", "x_pos", "y_neg", "y_pos", "z_neg", "z_pos"}
     np.testing.assert_allclose(surface_payload["faces"]["z_pos"]["x"], np.linspace(-0.2, 0.2, 5))
+
+
+def _x_profile(values, shape):
+    """A Yee component of ``shape`` that varies along x only (the symmetry axis of these tests)."""
+    return torch.tensor(values)[:, None, None].expand(shape).contiguous()
 
 
 def test_result_can_expand_low_face_symmetry_back_to_full_domain():
@@ -718,26 +805,27 @@ def test_result_can_expand_low_face_symmetry_back_to_full_domain():
         domain=mw.Domain(bounds=((0.0, 0.75), (0.0, 0.5), (0.0, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
         symmetry=("PMC", None, None),
-        device="cpu",
     )
     result = Result(
         method="fdtd",
         scene=scene,
         frequency=1e9,
         fields={
-            "EX": torch.tensor([[[1.0]], [[2.0]], [[3.0]]]),
-            "EY": torch.tensor([[[10.0]], [[20.0]], [[30.0]], [[40.0]]]),
-            "EZ": torch.tensor([[[100.0]], [[200.0]], [[300.0]], [[400.0]]]),
+            "EX": _x_profile((1.0, 2.0, 3.0), (3, 3, 3)),
+            "EY": _x_profile((10.0, 20.0, 30.0, 40.0), (4, 2, 3)),
+            "EZ": _x_profile((100.0, 200.0, 300.0, 400.0), (4, 3, 2)),
         },
     )
 
     expanded = result.at(expand_symmetry=True)
-    expanded_ex = expanded.E.x
-    expanded_ey = expanded.E.y
+    expanded_ex = expanded.E.x.isel(f=0).values
+    expanded_ey = expanded.E.y.isel(f=0).values
     expanded_eps = expanded.materials.eps.scalar
 
     assert expanded_ex[:, 0, 0].tolist() == [-3.0, -2.0, -1.0, 1.0, 2.0, 3.0]
     assert expanded_ey[:, 0, 0].tolist() == [40.0, 30.0, 20.0, 10.0, 20.0, 30.0, 40.0]
+    assert expanded.E.x.coords["x"].tolist() == [-0.625, -0.375, -0.125, 0.125, 0.375, 0.625]
+    assert expanded.E.y.coords["x"].tolist() == [-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75]
     assert expanded_eps.shape == (7, 3, 3)
 
 
@@ -749,19 +837,18 @@ def test_fdtd_initialization_builds_dispersive_state(monkeypatch):
     monkeypatch.setattr("witwin.maxwell.fdtd.solver._require_cuda_scene", lambda scene: None)
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="debye_box",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
-            material=mw.Material.debye(eps_inf=2.0, delta_eps=3.0, tau=1.0e-9),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                name="debye_box",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+                material=mw.Material.debye(eps_inf=2.0, delta_eps=3.0, tau=1.0e-9),
+            ),
+            ),
+            )
 
-    solver = FDTD(scene, frequency=2.0e9, absorber_type="cpml")
+    solver = FDTD(prepare_scene(scene, device="cpu"), frequency=2.0e9, absorber_type="cpml")
     solver.init_field()
 
     assert solver.dispersive_enabled is True
@@ -775,20 +862,19 @@ def test_result_expands_pec_symmetry_with_even_normal_component():
         domain=mw.Domain(bounds=((0.0, 0.75), (0.0, 0.5), (0.0, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
         symmetry=("PEC", None, None),
-        device="cpu",
     )
     result = Result(
         method="fdtd",
         scene=scene,
         frequency=1e9,
         fields={
-            "EX": torch.tensor([[[1.0]], [[2.0]], [[3.0]]]),
-            "EZ": torch.tensor([[[10.0]], [[20.0]], [[30.0]], [[40.0]]]),
+            "EX": _x_profile((1.0, 2.0, 3.0), (3, 3, 3)),
+            "EZ": _x_profile((10.0, 20.0, 30.0, 40.0), (4, 3, 2)),
         },
     )
 
-    expanded_ex = result.tensor("Ex", expand_symmetry=True)
-    expanded_ez = result.tensor("Ez", expand_symmetry=True)
+    expanded_ex = result.field("Ex", expand_symmetry=True).isel(f=0).values
+    expanded_ez = result.field("Ez", expand_symmetry=True).isel(f=0).values
 
     assert expanded_ex[:, 0, 0].tolist() == [3.0, 2.0, 1.0, 1.0, 2.0, 3.0]
     assert expanded_ez[:, 0, 0].tolist() == [-40.0, -30.0, -20.0, 10.0, 20.0, 30.0, 40.0]
@@ -798,19 +884,17 @@ def test_simulation_fdfd_rejects_non_cuda_scene():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
     )
 
-    with pytest.raises(ValueError, match="requires scene.device to be CUDA"):
-        mw.Simulation.fdfd(scene, frequency=1e9).prepare()
+    with pytest.raises(ValueError, match="requires config.device to be CUDA"):
+        mw.Simulation.fdfd(scene, frequencies=1e9, config=mw.FDFDConfig(device="cpu")).prepare()
 
 
 def test_simulation_fdtd_rejects_non_cuda_scene():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
     )
 
-    with pytest.raises(ValueError, match="requires scene.device to be CUDA"):
-        mw.Simulation.fdtd(scene, frequency=1e9).prepare()
+    with pytest.raises(ValueError, match="requires config.device to be CUDA"):
+        mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(device="cpu")).prepare()

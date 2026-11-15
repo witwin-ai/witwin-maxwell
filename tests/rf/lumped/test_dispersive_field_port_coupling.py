@@ -59,14 +59,14 @@ def _scene(kind, sigma, remote, mna):
     port = mw.LumpedPort(name="feed", positive=(0., 0., .005), negative=(0., 0., -.005),
                          voltage_path=mw.AxisPath("z"), current_surface=mw.Box(
                              position=(0., 0., -.0025), size=(.015, .015, 0.)),
-                         termination=None if mna else mw.SeriesRLC(r=25., l=.5e-9, c=1.e-12))
+                         termination=None if mna else mw.rf.SeriesRLC(r=25., l=.5e-9, c=1.e-12))
     circuits = ()
     if mna:
-        network = mw.Circuit("load")
+        network = mw.circuits.Circuit("load")
         a, b, c = network.node("a"), network.node("b"), network.node("c")
-        network.add(mw.Resistor("r", a, b, 25.))
-        network.add(mw.Inductor("l", b, c, .5e-9))
-        network.add(mw.Capacitor("c", c, network.ground, 1.e-12))
+        network.add(mw.rf.Resistor("r", a, b, 25.))
+        network.add(mw.rf.Inductor("l", b, c, .5e-9))
+        network.add(mw.rf.Capacitor("c", c, network.ground, 1.e-12))
         network.bind_port("feed", positive=a, negative=network.ground)
         circuits = (network,)
     return mw.Scene(domain=mw.Domain(bounds=((-0.02, .02),) * 3), grid=mw.GridSpec.uniform(.005),
@@ -74,7 +74,7 @@ def _scene(kind, sigma, remote, mna):
                     structures=(mw.Structure(geometry=mw.Box(
                         position=(.0125, 0., 0.) if remote else (0., 0., 0.),
                         size=(.005, .02, .02) if remote else (.03, .03, .03)),
-                        material=_material(kind, sigma)),), device="cuda")
+                        material=_material(kind, sigma)),))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -86,7 +86,7 @@ def test_gpu_anticipated_history_matches_apply_material_first_reference(kind, si
     from witwin.maxwell.fdtd.circuits import prepare_circuit_time_series
     from witwin.maxwell.fdtd.ports import apply_port_runtimes
     from witwin.maxwell.fdtd.runtime.stepping import _field_update_block
-    solvers = [mw.Simulation.fdtd(_scene(kind, sigma, remote, mna), frequency=3.e9).prepare().solver
+    solvers = [mw.Simulation.fdtd(_scene(kind, sigma, remote, mna), frequencies=3.e9).prepare().solver
                for _ in range(2)]
     production, reference = solvers
     for solver in solvers:
@@ -127,12 +127,14 @@ def test_public_dispersive_lossy_source_run_returns_nonzero_power(kind):
     scene = _scene(kind, .2, False, False)
     # Use an un-terminated source port with the same geometric support.
     old = scene.ports[0]
-    scene.ports = (mw.LumpedPort(name=old.name, positive=old.positive, negative=old.negative,
-                                voltage_path=old.voltage_path, current_surface=old.current_surface),)
+    scene = scene.updated(ports=(mw.LumpedPort(name=old.name, positive=old.positive, negative=old.negative,
+                                voltage_path=old.voltage_path, current_surface=old.current_surface),))
     result = mw.Simulation.fdtd(scene, frequencies=(2.5e9, 3.e9),
-        excitations=mw.PortExcitation("feed", source_time=mw.GaussianPulse(frequency=2.75e9, fwidth=1.e9)),
-        run_time=mw.TimeConfig(time_steps=256), spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False).run()
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.GaussianPulse(frequency=2.75e9, fwidth=1.e9)),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=256), spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        )).run()
     port = result.port("feed")
     assert bool(torch.all(torch.isfinite(port.voltage)))
     assert bool(torch.all(port.accepted_power > 0.))
@@ -144,12 +146,14 @@ def test_dispersive_port_graph_and_disk_resume_preserve_history(kind, tmp_path):
     def simulation(graph):
         scene = _scene(kind, .2, False, False)
         old = scene.ports[0]
-        scene.ports = (mw.LumpedPort(name=old.name, positive=old.positive, negative=old.negative,
-                                    voltage_path=old.voltage_path, current_surface=old.current_surface),)
-        return mw.Simulation.fdtd(scene, frequency=3.e9,
-            excitations=mw.PortExcitation("feed", source_time=mw.CW(3.e9)),
-            run_time=mw.TimeConfig(time_steps=96), spectral_sampler=mw.SpectralSampler(window="none"),
-            cuda_graph=graph, full_field_dft=False)
+        scene = scene.updated(ports=(mw.LumpedPort(name=old.name, positive=old.positive, negative=old.negative,
+                                    voltage_path=old.voltage_path, current_surface=old.current_surface),))
+        return mw.Simulation.fdtd(scene, frequencies=3.e9,
+            excitations=mw.rf.PortExcitation("feed", source_time=mw.CW(3.e9)),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=96), spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                cuda_graph=graph, full_field_dft=False,
+            ))
     eager = simulation(False).run()
     graph = simulation(True).run()
     assert graph.stats()["cuda_graph_active"]
@@ -158,7 +162,7 @@ def test_dispersive_port_graph_and_disk_resume_preserve_history(kind, tmp_path):
     checkpoint = prepared.run_until(37)
     path = tmp_path / f"{kind}.pt"
     checkpoint.save(path)
-    resumed = simulation(True).prepare().run(resume_from=mw.FDTDResumeCheckpoint.load(path))
+    resumed = simulation(True).prepare().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path))
     torch.testing.assert_close(resumed.port("feed").voltage, graph.port("feed").voltage, rtol=2.e-5, atol=1.e-8)
     torch.testing.assert_close(resumed.port("feed").current, graph.port("feed").current, rtol=2.e-5, atol=1.e-9)
 
@@ -172,7 +176,7 @@ def test_uncoupled_conductive_ade_material_adjoint_matches_finite_difference(kin
             self.logit = torch.nn.Parameter(torch.zeros((1, 1, 1), device="cuda"))
 
         def to_scene(self):
-            return mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=((-0.24, .24),) * 3),
+            return mw.Scene(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=((-0.24, .24),) * 3),
                 grid=mw.GridSpec.uniform(.12), boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.),
                 structures=(mw.Structure(geometry=mw.Box(position=(0., 0., 0.), size=(.24,) * 3),
                                          material=_material(kind, .1)),),
@@ -181,12 +185,12 @@ def test_uncoupled_conductive_ade_material_adjoint_matches_finite_difference(kin
                     eps_bounds=(1., 6.)),),
                 sources=(mw.PointDipole(position=(0., 0., -.06), polarization="Ez", width=.04,
                     source_time=mw.GaussianPulse(frequency=1.e9, fwidth=.25e9, amplitude=50.)),),
-                monitors=(mw.PointMonitor("probe", (0., 0., .06), fields=("Ez",)),), device="cuda")
+                monitors=(mw.PointMonitor("probe", (0., 0., .06), fields=("Ez",)),))
     model = Design()
     def objective():
-        data = mw.Simulation.fdtd(model, frequency=1.e9, run_time=mw.TimeConfig(time_steps=36),
-                                 spectral_sampler=mw.SpectralSampler(window="none"),
-                                 full_field_dft=False).run().monitor("probe")["data"]
+        data = mw.Simulation.fdtd(model, frequencies=1.e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=36),
+                                 spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                                 full_field_dft=False)).run().monitor("probe").sel(component="Ez").values
         return data.abs().square().sum()
     loss = objective()
     loss.backward()

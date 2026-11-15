@@ -8,6 +8,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.compiler.materials import _axis_sample_offsets, _edge_axis_offsets
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 @pytest.mark.parametrize('axis', 'xyz')
@@ -17,7 +18,7 @@ def test_thin_layer_integral_converges_to_physical_thickness(axis, helper):
     nodes = np.array([-.0024, 0., thickness, .00085])
     primal = np.diff(nodes)
     dual = np.r_[primal[0], (primal[:-1]+primal[1:])/2, primal[-1]]
-    scene = SimpleNamespace(grid=SimpleNamespace(is_custom=True, is_auto=False), device='cpu')
+    scene = SimpleNamespace(scene=SimpleNamespace(grid=SimpleNamespace(is_custom=True, is_auto=False)), device='cpu')
     setattr(scene, axis, torch.tensor(nodes, dtype=torch.float32))
     setattr(scene, 'd'+axis+'_primal64', primal)
     setattr(scene, 'd'+axis+'_dual64', dual)
@@ -46,10 +47,10 @@ def test_compiled_tangential_conductivity_preserves_graded_layer_integral(axis):
     samples = [1]*3
     samples[normal] = 256
     scene = prepare_scene(mw.Scene(domain=mw.Domain(bounds=[(float(a[0]), float(a[-1])) for a in axes]),
-        grid=mw.GridSpec.custom(*axes), device='cpu', subpixel_samples=mw.SubpixelSpec(samples=tuple(samples), averaging="arithmetic"),
+        grid=mw.GridSpec.custom(*axes), subpixel=mw.SubpixelSpec(samples=tuple(samples), averaging="arithmetic"),
         structures=[mw.Structure(mw.Box(position=torch.tensor(position, dtype=torch.float64),
-                                       size=torch.tensor(size, dtype=torch.float64)), mw.Material(eps_r=3., sigma_e=sigma))]))
-    model = scene.compile_materials()
+                                       size=torch.tensor(size, dtype=torch.float64)), mw.Material(eps_r=3., sigma_e=sigma))]), device="cpu")
+    model = compile_materials(scene)
     component = 'E'+'xyz'[(normal+1)%3]
     values = model['edge_components']['sigma_e'][component]
     selection = [1]*3

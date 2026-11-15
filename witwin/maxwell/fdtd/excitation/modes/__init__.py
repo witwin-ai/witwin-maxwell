@@ -11,7 +11,7 @@ Four mode families share this package:
 * ``common``: shared constants and mode-plane helpers.
 
 The canonical import path stays ``witwin.maxwell.fdtd.excitation.modes``: this
-``__init__`` re-exports every name the former single module defined. The
+``__init__`` re-exports the submodule names that callers import from it. The
 top-level dispatchers (``solve_mode_source_profile``, the vector-mode
 assembler, and the sparse-eigensolver autograd wrapper) are defined directly in
 this module so that attributes overridden on the canonical namespace (dense
@@ -40,20 +40,10 @@ from .common import (
     _require_lossless_vector_planes,
     _IMPLICIT_EIGEN_CG_MAX_ITER,
     _IMPLICIT_EIGEN_CG_TOL,
-    _LOBPCG_MAX_ITER,
-    _LOBPCG_REQUEST_PADDING,
-    _LOBPCG_TOL,
     _MODE_PLANE_SPACING_SPREAD_BOUND,
     _PEC_OCCUPANCY_THRESHOLD,
-    _PEC_VECTOR_MATRIX_LIMIT,
-    _RIGHT_HANDED_TANGENTIAL_AXES,
-    _SPURIOUS_NEAR_K0_BETA_LIMIT,
-    _SPURIOUS_UNIFORMITY_LIMIT,
     _UNIFORM_SPACING_RTOL,
     _VECTOR_CHECKERBOARD_FRACTION_LIMIT,
-    _VECTOR_DEGENERATE_RTOL,
-    _VECTOR_DUPLICATE_BETA_RTOL,
-    _VECTOR_DUPLICATE_OVERLAP_LIMIT,
     _VECTOR_EIGEN_REQUEST_PADDING,
     _VECTOR_EIGS_MAX_ITER,
     _VECTOR_EIGS_TOL,
@@ -61,7 +51,6 @@ from .common import (
     _average_node_tensor_to_component,
     _bend_conformal_factor,
     _bilinear_sample,
-    _boundary_connected_conductor,
     _cross,
     _discrete_mode_profile_power,
     _field_component_axis_coords,
@@ -79,7 +68,6 @@ from .common import (
     _normalize_mode_profiles_to_unit_power,
     _normalize_profile_torch,
     _real_plane_numpy,
-    _regular_grid_sample,
     _resolve_tangential_bounds,
     _validate_mode_source_position,
     _vector_mode_supported,
@@ -91,7 +79,6 @@ from .eigensolvers import (
     _build_scalar_operator_torch_sparse,
     _conjugate_gradient_solve,
     _lobpcg_initial_guess,
-    _lobpcg_request_count,
     _orient_unit_eigenvector,
     _project_orthogonal,
     _real_profile_from_complex_eigenvector,
@@ -110,13 +97,10 @@ from .tem import (
     _terminal_conductor_labels,
 )
 from .vector import (
-    _build_staggered_first_differences_sparse,
     _build_vector_operator_sparse,
     _build_vector_operator_torch,
     _IsolatedVectorEigenpair,
     _is_uniform_isotropic_vector_plane,
-    _normalize_vector_mode_profiles_numpy,
-    _pec_first_difference,
     _pec_vector_operator_torch,
     _relative_vector_residual,
     _select_and_normalize_vector_mode_numpy,
@@ -126,16 +110,6 @@ from .vector import (
     _solve_vector_mode_eigenpair_dense,
     _solve_vector_mode_eigenpair_sparse,
     _split_vector_mode_components,
-    _vector_mode_checkerboard_fraction_numpy,
-    _vector_mode_divergence_residuals_numpy,
-    _vector_mode_eigenpair_residual_numpy,
-    _vector_mode_envelope_variation_numpy,
-    _vector_mode_polarization_fraction_numpy,
-    _vector_mode_power_inner_product_numpy,
-    _vector_mode_power_sign_numpy,
-    _vector_mode_request_count,
-    _vector_mode_transverse_uniformity_numpy,
-    _vector_mode_wall_peak_fraction_numpy,
     _vector_preferred_component_name,
 )
 from .yee import (
@@ -146,16 +120,12 @@ from .yee import (
     _solve_yee_transverse_pec_mode,
     _solve_yee_transverse_vector_mode,
     _split_yee_transverse_eigenvector,
-    _yee_half_to_node_first_difference,
-    _yee_half_to_node_neumann,
-    _yee_interior_to_node_dirichlet,
     _yee_pec_connectivity_check,
-    _yee_reconstruct_node_profiles,
     _yee_stagger_eps_from_nodes,
     _yee_stagger_pec_from_nodes,
     _yee_transverse_discrete_transverse_wavenumber,
-    _yee_transverse_grids,
 )
+from ....errors import UnsupportedFeatureError
 
 
 def _solve_mode_eigenpair_complex(operator, *, mode_index: int):
@@ -356,7 +326,8 @@ def _assemble_vector_mode_data(
             nodes = getattr(solver.scene, normal_axis + "_nodes64")
             low, high = nodes[plane_index]-nodes[plane_index-1], nodes[plane_index+1]-nodes[plane_index]
             if not math.isclose(low, high, rel_tol=1e-7, abs_tol=0.):
-                raise NotImplementedError("Lossy TEM native propagation requires locally uniform axial spacing at the mode plane.")
+                raise UnsupportedFeatureError("Lossy TEM native propagation requires locally uniform axial spacing at the mode plane.",
+                                              feature="guard:f667ef58", method="fdtd")
             normal_spacing = float(low)
         try:
             beta_value, component_arrays, pec_node_count = _solve_pec_tem_mode_torch(
@@ -375,7 +346,8 @@ def _assemble_vector_mode_data(
             solver_kind = "tem_electrostatic_torch"
         except NotImplementedError:
             if _max_component_imag(eps_by_axis) > 0 or _max_component_imag(mu_by_axis) > 0:
-                raise NotImplementedError("Spatially varying lossy quasi-TEM modes require a complex material potential solve.")
+                raise UnsupportedFeatureError("Spatially varying lossy quasi-TEM modes require a complex material potential solve.",
+                                              feature="guard:fa8fdab2", method="fdtd")
             # Inhomogeneous cross-section (substrate + air microstrip / coupled pair):
             # the uniform-fill electrostatic normalization does not apply, so the legacy
             # closed-form TEM solve fails closed. Route to the quasi-static variable-eps
@@ -652,14 +624,16 @@ def _assemble_terminal_line_mode(source, terminal_mode, pec_occupancy, *, tensor
         raise ValueError("A TerminalWavePort mode must use the quasi-TEM family.")
     if any(component.is_complex() and bool(torch.any(torch.imag(component) != 0))
            for component in (*tensor_eps_planes, *tensor_mu_planes)):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "TerminalWavePort quasi-TEM modes require a lossless cross-section; lossy or "
-            "complex media need a complex multi-conductor potential solve."
+            "complex media need a complex multi-conductor potential solve.",
+            feature="port.TerminalWavePort", method="fdtd"
         )
     if not all(bool(np.allclose(_real_plane_numpy(component), 1.0)) for component in tensor_mu_planes):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "TerminalWavePort quasi-TEM modes require a nonmagnetic cross-section; the "
-            "vacuum-capacitance inductance model does not include magnetic media."
+            "vacuum-capacitance inductance model does not include magnetic media.",
+            feature="port.TerminalWavePort", method="fdtd"
         )
     if pec_occupancy is None:
         raise ValueError("A TerminalWavePort aperture contains no conductor.")
@@ -701,16 +675,18 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
             data=solve_mode_source_profile(context,source)
             return apply_good_conductor_perturbation(context,source,data)
         if copper_intersects_mode(solver.scene,source):
-            raise NotImplementedError("A modal aperture intersecting CopperFoil requires explicit WaveModeSpec(conductor_model='good_conductor') within its applicability contract, or a finite-Et modal solve.")
+            raise UnsupportedFeatureError("A modal aperture intersecting CopperFoil requires explicit WaveModeSpec(conductor_model='good_conductor') within its applicability contract, or a finite-Et modal solve.",
+                                          feature="material.copper_foil", method="fdtd")
     if source.get("injection", {}).get("kind") != "soft":
         raise ValueError("ModeSource currently supports soft injection only.")
     source_time = source["source_time"]
-    if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
-        raise NotImplementedError(
+    if solver.scene.scene.boundary.uses_kind("periodic") or solver.scene.scene.boundary.uses_kind("bloch"):
+        raise UnsupportedFeatureError(
             "ModeSource mode solving is undefined under a periodic/Bloch transverse boundary: "
             "the aperture wraps with the Bloch phase, so the guided profile is an eigenfunction "
             "of a complex-Hermitian Bloch-phase transverse operator, whereas this solver builds "
-            "the real, zero-boundary transverse operator. Use none/pml/pec/pmc on the mode plane."
+            "the real, zero-boundary transverse operator. Use none/pml/pec/pmc on the mode plane.",
+            feature="source.ModeSource", method="fdtd"
         )
 
     normal_axis, tangential_axes = _mode_source_axes(source)
@@ -743,9 +719,10 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         if pec_occupancy is not None and bool(
             torch.any(pec_occupancy[1:-1, 1:-1] >= _PEC_OCCUPANCY_THRESHOLD)
         ):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Differentiable ModeSource rebuilding with an internal PEC conductor "
-                "requires a PEC mode-shape eigen-adjoint."
+                "requires a PEC mode-shape eigen-adjoint.",
+                feature="source.ModeSource", method="fdtd"
             )
 
     if (
@@ -801,13 +778,16 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         )
         if has_interior_pec and (eps_node_imag > 1.0e-7 or mu_node_imag > 1.0e-7):
             if any(value.requires_grad for value in (*eps_node_by_axis.values(), *mu_node_by_axis.values())):
-                raise NotImplementedError("Differentiable lossy TEM material profiles require a complex mode-shape adjoint.")
+                raise UnsupportedFeatureError("Differentiable lossy TEM material profiles require a complex mode-shape adjoint.",
+                                              feature="guard:6c5ae0c3", method="fdtd")
             if source.get("wave_family") != "tem":
-                raise NotImplementedError(
-                    "Lossy PEC-aware guided modes require a device-resident complex vector eigensolve.")
+                raise UnsupportedFeatureError(
+                    "Lossy PEC-aware guided modes require a device-resident complex vector eigensolve.",
+                    feature="guard:fc7f1af7", method="fdtd")
             if any(compiled_material_model.get(prefix + kind + "_poles", ())
                    for prefix in ("", "mu_") for kind in ("debye", "drude", "lorentz")):
-                raise NotImplementedError("Lossy TEM currently requires static conductivity; native pole projection is not yet implemented.")
+                raise UnsupportedFeatureError("Lossy TEM currently requires static conductivity; native pole projection is not yet implemented.",
+                                              feature="guard:69cc9701", method="fdtd")
             dt = getattr(solver, "dt", None)
             if dt is None:
                 dt = solver.resolve_mode_time_step(frequency)
@@ -826,9 +806,10 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
             component.requires_grad
             for component in (*eps_node_by_axis.values(), *mu_node_by_axis.values())
         ):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Differentiable material parameters with an internal PEC conductor require "
-                "a PEC mode-shape eigen-adjoint."
+                "a PEC mode-shape eigen-adjoint.",
+                feature="guard:9a8653c0", method="fdtd"
             )
         # A lossy (complex) permittivity makes the full-vector operator non-Hermitian and
         # its forward path solves only the real part, which would silently drop the loss.
@@ -905,17 +886,19 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
     if torch.min(eps_real).item() <= 0.0 or torch.min(mu_real).item() <= 0.0:
         raise ValueError("ModeSource requires positive epsilon and mu on the source plane.")
     if not torch.allclose(mu_real, torch.ones_like(mu_real), atol=1e-6, rtol=0.0):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "ModeSource scalar eigenmode solve is undefined for a magnetic (mu_r != 1) plane: "
             "the scalar Helmholtz reduction folds mu into a single index and scales the magnetic "
             "profile by n_eff/eta0, both of which assume a non-magnetic medium. A magnetic plane "
-            "must be solved with the full-vector operator, which carries mu per component."
+            "must be solved with the full-vector operator, which carries mu per component.",
+            feature="source.ModeSource", method="fdtd"
         )
     if eps_is_lossy and eps_real.requires_grad:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Differentiable ModeSource gradients through a lossy (complex) permittivity require a "
             "non-Hermitian eigen-adjoint; the differentiable path solves the Hermitian "
-            "real-permittivity problem."
+            "real-permittivity problem.",
+            feature="source.ModeSource", method="fdtd"
         )
 
     axis_u, axis_v = tangential_axes
@@ -1138,26 +1121,6 @@ def sample_mode_source_component(mode_data, positions: torch.Tensor, field_name:
     return _bilinear_sample(profile, coords_u, coords_v, sample_positions)
 
 
-def sample_mode_source_profile(mode_data, positions: torch.Tensor) -> torch.Tensor:
-    field_name = mode_data.get("profile_component")
-    if field_name is None:
-        axis_u, axis_v = mode_data["tangential_axes"]
-        sample_positions = torch.stack(
-            (
-                positions[..., _AXIS_TO_INDEX[axis_u]],
-                positions[..., _AXIS_TO_INDEX[axis_v]],
-            ),
-            dim=-1,
-        )
-        return _bilinear_sample(
-            mode_data["profile"],
-            mode_data["coords_u"],
-            mode_data["coords_v"],
-            sample_positions,
-        )
-    return sample_mode_source_component(mode_data, positions, field_name)
-
-
 def _gauge_vector_profiles(profiles, preferred_field_name, *, state=None):
     preferred = profiles[preferred_field_name].reshape(-1)
     peak_index = int(preferred.abs().argmax())
@@ -1189,12 +1152,13 @@ def _solve_vector_mode_torch(eps_planes, mu_planes, *, source, k0, du, dv,
     size = (nu + 1) * nv + nu * (nv + 1) if yee else 4 * nu * nv
     if size > _VECTOR_GRAD_MATRIX_LIMIT:
         forward_kind = "vector_dense" if nu * nv <= _FULL_VECTOR_DENSE_LIMIT else "vector_sparse"
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             f"ModeSource/ModePort {source['name']!r} plane material is trainable "
             "(material on the source plane requires grad): "
             f"forward mode solver {forward_kind!r} differs from replay 'scalar_real'. "
             "A matching mode-shape eigen-adjoint is required. "
-            f"Dense vector cap n <= {_VECTOR_GRAD_MATRIX_LIMIT}; actual n={size}.")
+            f"Dense vector cap n <= {_VECTOR_GRAD_MATRIX_LIMIT}; actual n={size}.",
+            feature="source.ModeSource", method="fdtd")
     if yee:
         operator, meta, eps_stag = _build_yee_transverse_operator_torch(
             eps_planes, k0=k0, du=du, dv=dv, source_name=source['name'])
@@ -1231,10 +1195,11 @@ def _solve_vector_mode_torch(eps_planes, mu_planes, *, source, k0, du, dv,
                   torch.linalg.matrix_norm(operator.detach(), ord=float('inf')) /
                   values[selected].detach().abs())
     if relative_gap <= delta:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             f"ModeSource/ModePort {source['name']!r} degenerate vector mode: "
             f"relative gap={relative_gap:.6g} <= delta={delta:.6g}; "
-            "the eigenvector derivative is not defined.")
+            "the eigenvector derivative is not defined.",
+            feature="source.ModeSource", method="fdtd")
     value, vector = _IsolatedVectorEigenpair.apply(operator, values[selected], vectors[:, selected], source['name'])
     beta = value.sqrt() if yee else value
     if yee:

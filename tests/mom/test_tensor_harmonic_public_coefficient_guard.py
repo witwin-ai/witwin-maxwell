@@ -12,15 +12,18 @@ def test_public_restore_rejects_extra_internal_tensor_coefficients(tmp_path,monk
     from dataclasses import replace
     from witwin.maxwell.mom.hmatrix import HMatrixConfig
     from witwin.maxwell.mom.linalg import StoppingRule
-    from witwin.maxwell.mom.harmonic_state import preparation_signature
+    from witwin.maxwell.mom.harmonic_recovery import preparation_signature
     import witwin.maxwell.mom.tensor_harmonic_bundle as bundle
     scene,config,point=setup()
-    scene.add_monitor(mw.PointMonitor('nonlinear_cell',tuple(point[0].tolist()),fields=('Ex','Ey','Ez','Hx','Hy','Hz')))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PointMonitor('nonlinear_cell',tuple(point[0].tolist()),fields=('Ex','Ey','Ez','Hx','Hy','Hz')),
+    ))
     config=replace(config,operator_backend='h2',riesz_storage='local_rwg_v1',hierarchical=HMatrixConfig(leaf_size=64),
         stopping=StoppingRule(method='block_gmres',preconditioner='row_column_norm',rtol=1e-11,atol=1e-20,stagnation_window=48))
     source=os.environ.get('GSP_MIXED_H2_RESULT')
     if not source:
-        source=tmp_path/'base.pt';mw.Simulation.mom(scene,frequency=3e8,config=config).run().save(source)
+        source=tmp_path/'base.pt';mw.Simulation.mom(scene,frequencies=3e8,config=config).run().save(source)
     # Real internal restore, then emulate an additional supported internal
     # constitutive coefficient. This isolates the public Scene contract gate;
     # it is not a corrupted-byte validation or a new numerical producer test.
@@ -39,13 +42,16 @@ def test_public_restore_rejects_extra_internal_tensor_coefficients(tmp_path,monk
 
 
 def test_public_restore_rejects_tensor_current_for_scalar_scene(tmp_path,monkeypatch):
-    from witwin.maxwell.mom.harmonic_state import preparation_signature
+    from witwin.maxwell.mom.harmonic_recovery import preparation_signature
     import witwin.maxwell.mom.tensor_harmonic_bundle as bundle
     scene,config,point=setup(current=True)
-    scene.add_monitor(mw.PointMonitor('nonlinear_cell',tuple(point[0].tolist()),fields=('Ex','Ey','Ez','Hx','Hy','Hz')))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PointMonitor('nonlinear_cell',tuple(point[0].tolist()),fields=('Ex','Ey','Ez','Hx','Hy','Hz')),
+    ))
     source=os.environ.get('GSP_MIXED_CURRENT_RESULT')
     if not source:
-        source=tmp_path/'current.pt';mw.Simulation.mom(scene,frequency=3e8,config=config).run().save(source)
+        source=tmp_path/'current.pt';mw.Simulation.mom(scene,frequencies=3e8,config=config).run().save(source)
     restore=bundle.restore_mixed_tensor_harmonic_bundle
     reached=[]
     def tensor_conductivity(*args,**kwargs):

@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import replace
 import numpy as np
+import importlib.util
 import pytest
 import torch
 import witwin.maxwell as mw
@@ -22,7 +23,10 @@ def test_public_hierarchy_schema19_native_and_bench_exact_replay(tmp_path,monkey
     from witwin.maxwell.mom.periodic_dyadic import QuasiperiodicDyadicRegularKernel
     from witwin.maxwell.mom.hmatrix import HierarchicalOperator
     from witwin.maxwell.mom.h2_operator import HierarchicalH2Operator
-    from maxwell_bench.lifted_state import write_lifted_states,read_lifted_states
+    if importlib.util.find_spec('maxwell_bench') is None:
+        pytest.skip('maxwell_bench.lifted_state is not importable: it is in the sibling witwin/maxwell-bench repo (not this one); install that repo at a MoM-layout revision (branch mom/provider-layout or later) to run the bench check')
+    import maxwell_bench.lifted_state as bench
+    write_lifted_states,read_lifted_states=bench.write_lifted_states,bench.read_lifted_states
     scene,config=problem(dimension)
     config=replace(config,operator_backend=backend,riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='gmres',fallback='none'))
@@ -42,10 +46,10 @@ def test_public_hierarchy_schema19_native_and_bench_exact_replay(tmp_path,monkey
     def forbidden(*args,**kwargs):raise AssertionError('Public hierarchy must not assemble a global dense matrix')
     monkeypatch.setattr(selected,'periodic_dyadic_system_block',block)
     monkeypatch.setattr(assembly,'assemble_periodic_dyadic_system',forbidden)
-    result=mw.Simulation.mom(scene,frequency=3e8,config=config).run()
+    result=mw.Simulation.mom(scene,frequencies=3e8,config=config).run()
     assert set(calls)=={(0,0),(0,1),(1,0),(1,1)}
     assert result.stats()['converged']
-    data=result.surface_currents
+    data=mw.mom.surface_currents(result)
     assert torch.count_nonzero(data.scattered_coefficients)==0
     payload=data.snapshot()
     assert payload['schema_version']==19 and payload['operator_backend']==backend
@@ -60,8 +64,8 @@ def test_public_hierarchy_schema19_native_and_bench_exact_replay(tmp_path,monkey
     monkeypatch.setattr(HierarchicalH2Operator,'__init__',forbidden)
     monkeypatch.setattr(torch.linalg,'solve',forbidden)
     restored=mw.Result.load(native,scene=scene)
-    assert restored.surface_currents.config==config
-    assert torch.equal(restored.surface_currents.scattered_coefficients,data.scattered_coefficients)
+    assert mw.mom.surface_currents(restored).config==config
+    assert torch.equal(mw.mom.surface_currents(restored).scattered_coefficients,data.scattered_coefficients)
     for actual,expected in zip(restored.query_fields(points,region_id=0,field_kind='incident'),fields):
         assert torch.equal(actual,expected)
     manifest,arrays=read_lifted_states(root,expected_manifest_sha256=digest,device='cuda')
@@ -73,7 +77,7 @@ def test_public_hierarchy_schema19_native_and_bench_exact_replay(tmp_path,monkey
         elif mutation=='backend':changed['operator_backend']='dense'
         elif mutation=='metric':changed['operator_metadata']['residual_metric_policy']['impedance_squared_ohm2']*=2
         else:changed['hierarchical_config']['parameters']['tolerance']*=2
-        with pytest.raises(ValueError):SurfaceData.restore(changed,scene,3e8)
+        with pytest.raises(ValueError):SurfaceData.restore(changed,scene,3e8,'cuda')
     saved=json.loads((root/'manifest.json').read_bytes())
     saved['native_operator']['payload']['residual_metric_policy']['impedance_squared_ohm2']*=2
     def sha(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()

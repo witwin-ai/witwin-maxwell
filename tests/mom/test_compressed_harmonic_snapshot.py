@@ -28,7 +28,7 @@ def test_actual_admitted_physical_preparation_and_saved_surface(monkeypatch,tmp_
         dense,bindings=build((2.,3.));fresh,fresh_bindings=build((2.,3.))
         sources=(mw.PlaneWave(source_time=mw.CW(3e8,amplitude=1.2,phase=.2)),
             mw.PlaneWave(direction=(1,0,0),polarization=(0,1,0),source_time=mw.CW(3e8,amplitude=.8,phase=-.3)))
-        config=mw.MoMConfig(operator_backend='h2',integration=dense.integration,
+        config=mw.mom.MoMConfig(operator_backend='h2',integration=dense.integration,
             hierarchical=HMatrixConfig(leaf_size=64),riesz_storage='local_rwg_v1',
             stopping=StoppingRule(method='block_gmres',preconditioner='row_column_norm'))
         op=HierarchicalH2SystemOperator(dense.system,dense.exterior,sources,config)

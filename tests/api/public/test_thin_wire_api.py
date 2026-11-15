@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-from types import ModuleType
 from types import MappingProxyType
 
 import pytest
@@ -16,10 +14,10 @@ def _wire(**overrides):
         "name": "feed",
         "points": ((0.0, 0.0, -0.25), (0.0, 0.0, 0.0), (0.0, 0.0, 0.25)),
         "radius": 5.0e-4,
-        "conductor": mw.WireConductor.pec(),
+        "conductor": mw.rf.WireConductor.pec(),
     }
     parameters.update(overrides)
-    return mw.ThinWire(**parameters)
+    return mw.rf.ThinWire(**parameters)
 
 
 def _wire_data(*, monitor_name="state", metadata=None):
@@ -34,7 +32,7 @@ def _wire_data(*, monitor_name="state", metadata=None):
         dtype=torch.complex128,
         requires_grad=True,
     )
-    return mw.WireData(
+    return mw.rf.WireData(
         monitor_name=monitor_name,
         wire_name="feed",
         frequencies=frequencies,
@@ -46,40 +44,40 @@ def _wire_data(*, monitor_name="state", metadata=None):
 
 
 def test_thin_wire_objects_are_top_level_public_api():
-    assert mw.ThinWire is not None
-    assert mw.WireConductor is not None
-    assert mw.WireEnd is not None
-    assert mw.WireMonitor is not None
-    assert mw.WireData is not None
+    assert mw.rf.ThinWire is not None
+    assert mw.rf.WireConductor is not None
+    assert mw.rf.WireEnd is not None
+    assert mw.rf.WireMonitor is not None
+    assert mw.rf.WireData is not None
 
 
 def test_conductor_and_endpoint_contracts_are_explicit():
-    assert mw.WireConductor.pec().kind == "pec"
-    finite = mw.WireConductor.finite(5.8e7)
+    assert mw.rf.WireConductor.pec().kind == "pec"
+    finite = mw.rf.WireConductor.finite(5.8e7)
     assert finite.kind == "finite"
     assert finite.conductivity == 5.8e7
     with pytest.raises(ValueError, match="requires a conductivity"):
-        mw.WireConductor("finite")
+        mw.rf.WireConductor("finite")
     with pytest.raises(ValueError, match="'pec' or 'finite'"):
-        mw.WireConductor("nichrome")
+        mw.rf.WireConductor("nichrome")
 
-    assert mw.WireEnd.open() == mw.WireEnd("open")
-    grounded = mw.WireEnd.grounded(structure="ground")
+    assert mw.rf.WireEnd.open() == mw.rf.WireEnd("open")
+    grounded = mw.rf.WireEnd.grounded(structure="ground")
     assert grounded.kind == "grounded"
     assert grounded.structure == "ground"
     with pytest.raises(ValueError, match="must not be empty"):
-        mw.WireEnd.grounded(structure=" ")
+        mw.rf.WireEnd.grounded(structure=" ")
     with pytest.raises(ValueError, match="cannot reference"):
-        mw.WireEnd("open", structure="ground")
-    junction = mw.WireEnd.node("junction")
+        mw.rf.WireEnd("open", structure="ground")
+    junction = mw.rf.WireEnd.node("junction")
     assert junction.kind == "node"
     assert junction.node_name == "junction"
     with pytest.raises(ValueError, match="must not be empty"):
-        mw.WireEnd.node(" ")
+        mw.rf.WireEnd.node(" ")
     with pytest.raises(ValueError, match="reserved"):
-        mw.WireEnd.node("__closed__:ghost")
+        mw.rf.WireEnd.node("__closed__:ghost")
     with pytest.raises(ValueError, match="cannot reference a structure"):
-        mw.WireEnd("node", structure="ground", node_name="junction")
+        mw.rf.WireEnd("node", structure="ground", node_name="junction")
 
 
 def test_thin_wire_preserves_trainable_tensors_and_validates_geometry():
@@ -96,7 +94,7 @@ def test_thin_wire_preserves_trainable_tensors_and_validates_geometry():
     assert wire.points is points
     assert wire.radius is radius
     assert wire.segment_count == 2
-    assert wire.endpoints == (mw.WireEnd.open(), mw.WireEnd.open())
+    assert wire.endpoints == (mw.rf.WireEnd.open(), mw.rf.WireEnd.open())
     assert wire.snap == "continuous"
 
     # Trainable points with a non-continuous snap are rejected fail-closed so the
@@ -117,7 +115,7 @@ def test_thin_wire_preserves_trainable_tensors_and_validates_geometry():
     with pytest.raises(ValueError, match="nearest.*strict"):
         _wire(snap="project")
     with pytest.raises(ValueError, match="exactly two"):
-        _wire(endpoints=(mw.WireEnd.open(),))
+        _wire(endpoints=(mw.rf.WireEnd.open(),))
 
     loop = _wire(
         points=((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 0))
@@ -127,71 +125,44 @@ def test_thin_wire_preserves_trainable_tensors_and_validates_geometry():
     with pytest.raises(ValueError, match="must not specify endpoints"):
         _wire(
             points=((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 0, 0)),
-            endpoints=(mw.WireEnd.open(), mw.WireEnd.open()),
+            endpoints=(mw.rf.WireEnd.open(), mw.rf.WireEnd.open()),
         )
 
 
 def test_scene_owns_wires_separately_and_propagates_through_clone_and_prepare():
     wire = _wire()
-    scene = mw.Scene(thin_wires=(wire,), device="cpu")
+    scene = mw.Scene(thin_wires=(wire,))
 
     assert scene.thin_wires == (wire,)
-    assert scene.structures == []
+    assert scene.structures == ()
     with pytest.raises(AttributeError):
         scene.thin_wires = ()
     with pytest.raises(ValueError, match="already present"):
-        scene.add_thin_wire(wire)
+        scene = scene.updated(thin_wires=(*scene.thin_wires, wire))
     with pytest.raises(TypeError, match="ThinWire"):
-        mw.Scene(device="cpu").add_thin_wire(object())
+        mw.Scene(thin_wires=(object(),))
 
-    assert scene.clone().thin_wires == (wire,)
-    prepared = prepare_scene(scene)
-    assert prepared.thin_wires == (wire,)
+    assert scene.thin_wires == (wire,)
+    prepared = prepare_scene(scene, device="cpu")
+    assert prepared.scene.thin_wires == (wire,)
     assert prepared._public_scene is scene
 
 
 def test_non_fdtd_simulation_rejects_thin_wire_scene_at_construction():
-    scene = mw.Scene(thin_wires=(_wire(),), device="cpu")
-    with pytest.raises(ValueError, match="FDTD-only"):
-        mw.Simulation.fdfd(scene, frequency=1.0e9)
+    scene = mw.Scene(thin_wires=(_wire(),))
+    with pytest.raises(mw.UnsupportedFeatureError, match="FDTD-only"):
+        mw.Simulation.fdfd(scene, frequencies=1.0e9, config=mw.FDFDConfig(device="cpu"))
 
 
 def test_trainable_wire_radius_is_discovered_by_fdtd_simulation():
     radius = torch.tensor(5.0e-4, dtype=torch.float64, requires_grad=True)
-    scene = mw.Scene(thin_wires=(_wire(radius=radius),), device="cpu")
-    simulation = mw.Simulation.fdtd(scene, frequency=1.0e9)
+    scene = mw.Scene(thin_wires=(_wire(radius=radius),))
+    simulation = mw.Simulation.fdtd(scene, frequencies=1.0e9, config=mw.FDTDConfig(device="cpu"))
     assert simulation.has_trainable_parameters is True
 
 
-def test_scene_thin_wire_compile_seams_forward_to_compiler(monkeypatch):
-    calls = []
-    compiler = ModuleType("witwin.maxwell.compiler.thin_wire")
-
-    def compile_thin_wires(scene, *, device):
-        calls.append(("wires", scene, device))
-        return "compiled-wires"
-
-    def compile_wire_monitors(scene, network):
-        calls.append(("monitors", scene, network))
-        return "compiled-monitors"
-
-    compiler.compile_thin_wires = compile_thin_wires
-    compiler.compile_wire_monitors = compile_wire_monitors
-    monkeypatch.setitem(sys.modules, compiler.__name__, compiler)
-
-    scene = mw.Scene(thin_wires=(_wire(),), device="cpu")
-    prepared = prepare_scene(scene)
-    assert prepared.compile_thin_wires() == "compiled-wires"
-    assert prepared.compile_wire_monitors(device="cpu") == "compiled-monitors"
-    assert calls == [
-        ("wires", prepared, "cpu"),
-        ("wires", prepared, "cpu"),
-        ("monitors", prepared, "compiled-wires"),
-    ]
-
-
 def test_wire_monitor_validates_frequency_and_quantity_contracts():
-    monitor = mw.WireMonitor(
+    monitor = mw.rf.WireMonitor(
         name="state",
         wire="feed",
         frequencies=(1.0e9, 2.0e9),
@@ -202,19 +173,19 @@ def test_wire_monitor_validates_frequency_and_quantity_contracts():
     assert monitor.kind == "wire"
 
     with pytest.raises(ValueError, match="strictly positive"):
-        mw.WireMonitor("state", "feed", frequencies=(0.0,))
+        mw.rf.WireMonitor("state", "feed", frequencies=(0.0,))
     with pytest.raises(ValueError, match="Unsupported"):
-        mw.WireMonitor("state", "feed", frequencies=(1.0,), quantities=("voltage",))
+        mw.rf.WireMonitor("state", "feed", frequencies=(1.0,), quantities=("voltage",))
     with pytest.raises(ValueError, match="unique"):
-        mw.WireMonitor(
+        mw.rf.WireMonitor(
             "state", "feed", frequencies=(1.0,), quantities=("current", "current")
         )
 
 
 def test_wire_data_is_frequency_first_device_resident_and_typed_in_result():
     data = _wire_data()
-    monitor = mw.WireMonitor("state", "feed", frequencies=(1.0e9, 2.0e9))
-    scene = mw.Scene(thin_wires=(_wire(),), monitors=(monitor,), device="cpu")
+    monitor = mw.rf.WireMonitor("state", "feed", frequencies=(1.0e9, 2.0e9))
+    scene = mw.Scene(thin_wires=(_wire(),), monitors=(monitor,))
     result = mw.Result(
         method="fdtd",
         scene=scene,
@@ -246,7 +217,7 @@ def test_wire_data_is_frequency_first_device_resident_and_typed_in_result():
 def test_wire_data_allows_only_requested_quantities():
     frequencies = torch.tensor([1.0e9], dtype=torch.float64)
     current = torch.ones((1, 2), dtype=torch.complex128)
-    data = mw.WireData(
+    data = mw.rf.WireData(
         monitor_name="current_only",
         wire_name="feed",
         frequencies=frequencies,
@@ -262,8 +233,8 @@ def test_wire_data_allows_only_requested_quantities():
 
 def test_result_snapshot_restores_detached_wire_data(tmp_path):
     data = _wire_data(metadata={"validity": {"a_over_delta": torch.tensor(0.01)}})
-    monitor = mw.WireMonitor("state", "feed", frequencies=(1.0e9, 2.0e9))
-    scene = mw.Scene(thin_wires=(_wire(),), monitors=(monitor,), device="cpu")
+    monitor = mw.rf.WireMonitor("state", "feed", frequencies=(1.0e9, 2.0e9))
+    scene = mw.Scene(thin_wires=(_wire(),), monitors=(monitor,))
     result = mw.Result(
         method="fdtd",
         scene=scene,
@@ -276,7 +247,7 @@ def test_result_snapshot_restores_detached_wire_data(tmp_path):
     restored = mw.Result.load(path, scene=scene)
     restored_data = restored.monitor("state")
 
-    assert isinstance(restored_data, mw.WireData)
+    assert isinstance(restored_data, mw.rf.WireData)
     assert restored_data.monitor_name == "state"
     assert restored_data.wire_name == "feed"
     assert restored_data.current.device.type == "cpu"
@@ -295,7 +266,7 @@ def test_result_snapshot_recurses_through_nested_mapping_metadata(tmp_path):
         {"validity": MappingProxyType({"a_over_delta": torch.tensor(0.01)})}
     )
     data = _wire_data(metadata=nested)
-    scene = mw.Scene(device="cpu")
+    scene = mw.Scene()
     result = mw.Result(
         method="fdtd",
         scene=scene,
@@ -314,7 +285,7 @@ def test_result_snapshot_recurses_through_nested_mapping_metadata(tmp_path):
 
 def test_result_snapshot_rejects_unsafe_wire_metadata(tmp_path):
     data = _wire_data(metadata={"unsafe": object()})
-    scene = mw.Scene(device="cpu")
+    scene = mw.Scene()
     result = mw.Result(
         method="fdtd",
         scene=scene,

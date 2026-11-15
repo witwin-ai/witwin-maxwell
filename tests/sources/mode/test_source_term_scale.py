@@ -43,7 +43,7 @@ def test_interpolated_current_retains_finite_small_si_density(length):
     from witwin.maxwell.scene import prepare_scene
 
     scene = prepare_scene(mw.Scene(domain=mw.Domain(bounds=((-length,length),)*3),
-                                   grid=mw.GridSpec.uniform(.5*length), boundary=mw.BoundarySpec.none(), device="cpu"))
+                                   grid=mw.GridSpec.uniform(.5*length), boundary=mw.BoundarySpec.none()), device="cpu")
     solver = SimpleNamespace(scene=scene, device=torch.device("cpu"), Ex=torch.empty(1, dtype=torch.float64),
                               dt=length/299792458, _COMPONENT_HALF_OFFSET_AXES={"Ex":(True,False,False)})
     axes = tuple(torch.as_tensor(axis) for axis in (scene.x_half64, scene.y_nodes64, scene.z_nodes64))
@@ -145,17 +145,17 @@ def test_current_profiles_skip_only_exact_zero(length, dtype, ratio):
 
     scene = prepare_scene(mw.Scene(
         domain=mw.Domain(bounds=((-length, length),) * 3), grid=mw.GridSpec.uniform(.5 * length),
-        boundary=mw.BoundarySpec.none(), device="cpu",
-    ))
+        boundary=mw.BoundarySpec.none(),
+    ), device="cpu")
     shape = (5, 5, 5)
     peak = 1.
     arrays = {"Jx": torch.full(shape, peak, dtype=torch.float64).numpy(),
               "Jy": torch.full(shape, peak * ratio, dtype=torch.float64).numpy(),
               "Mz": torch.full(shape, peak * 1e-10, dtype=torch.float64).numpy()}
-    dataset = mw.CurrentDataset(([-length, -.5 * length, 0., .5 * length, length],) * 3, arrays)
+    dataset = mw.sources.CurrentDataset(([-length, -.5 * length, 0., .5 * length, length],) * 3, arrays)
     for zero in (False, True):
         if zero:
-            dataset = mw.CurrentDataset(dataset.coords, {key: array * 0 for key, array in arrays.items()})
+            dataset = mw.sources.CurrentDataset(dataset.coords, {key: array * 0 for key, array in arrays.items()})
         solver = SimpleNamespace(
             scene=scene, device=torch.device("cpu"), Ex=torch.empty(1, dtype=dtype), dt=length / 299792458,
             _COMPONENT_HALF_OFFSET_AXES={"Ex": (True, False, False), "Ey": (False, True, False), "Hz": (True, True, False)},
@@ -219,8 +219,8 @@ def test_field_sheet_profiles_skip_only_exact_zero(length, monkeypatch):
 
     scene = prepare_scene(mw.Scene(
         domain=mw.Domain(bounds=((-length, length),) * 3), grid=mw.GridSpec.uniform(.5 * length),
-        boundary=mw.BoundarySpec.none(), device="cpu",
-    ))
+        boundary=mw.BoundarySpec.none(),
+    ), device="cpu")
     solver = SimpleNamespace(scene=scene, device=torch.device("cpu"), Ex=torch.empty(1, dtype=torch.float64),
                              c=C_0, dt=length / (100 * C_0), coefficient=torch.ones((5, 5, 5), dtype=torch.float64),
                              _electric_source_terms=[], _magnetic_source_terms=[])
@@ -229,7 +229,7 @@ def test_field_sheet_profiles_skip_only_exact_zero(length, monkeypatch):
     for residual in (0., math.cos(math.pi / 2), 1e-6):
         profiles = {name: torch.full((1, 5, 5), value * 1e-10 * length, dtype=torch.float64).numpy()
                     for name, value in {"Ey": 1., "Ez": residual, "Hz": 1e-10, "Hy": residual * 1e-10}.items()}
-        dataset = mw.FieldDataset(([0.], [-length, -.5 * length, 0., .5 * length, length],
+        dataset = mw.sources.FieldDataset(([0.], [-length, -.5 * length, 0., .5 * length, length],
                                    [-length, -.5 * length, 0., .5 * length, length]), profiles)
         solver._electric_source_terms.clear()
         solver._magnetic_source_terms.clear()

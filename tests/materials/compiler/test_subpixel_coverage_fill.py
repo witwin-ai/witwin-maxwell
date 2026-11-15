@@ -14,6 +14,7 @@ import witwin.maxwell as mw
 from witwin.maxwell.compiler.materials import compile_material_model
 from witwin.maxwell.compiler.subpixel import _inverse_diagonal_blend
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 DZ = 0.001
 EPS = 2.25
@@ -21,15 +22,16 @@ EPS = 2.25
 
 def _edges(top, spec):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 0.004), (0.0, 0.004), (0.0, 0.010))),
-        grid=mw.GridSpec.uniform(DZ),
-        boundary=mw.BoundarySpec.faces(default="periodic", z="pec"),
-        device="cpu",
-        subpixel_samples=spec,
-    )
-    scene.add_structure(mw.Structure(geometry=mw.Box(position=(0.0, 0.0, top - 0.01), size=(1.0, 1.0, 0.02)),
-                                     material=mw.Material(eps_r=EPS)))
-    prepared = prepare_scene(scene)
+                domain=mw.Domain(bounds=((0.0, 0.004), (0.0, 0.004), (0.0, 0.010))),
+                grid=mw.GridSpec.uniform(DZ),
+                boundary=mw.BoundarySpec.faces(default="periodic", z="pec"),
+                subpixel=spec,
+                structures=(
+            mw.Structure(geometry=mw.Box(position=(0.0, 0.0, top - 0.01), size=(1.0, 1.0, 0.02)),
+                         material=mw.Material(eps_r=EPS)),
+            ),
+            )
+    prepared = prepare_scene(scene, device="cpu")
     edges = compile_material_model(prepared, subpixel=spec)["edge_components"]
     return {name: edges["eps"][name][1, 1, :].double() for name in ("Ex", "Ez")}
 
@@ -52,23 +54,24 @@ def test_off_grid_face_gets_exact_fill_and_series_mean(samples, phase):
 
 def test_uniform_slab_uses_resolved_yee_averaging_windows():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 0.05), (0.0, 0.05), (-0.64, 0.64))),
-        grid=mw.GridSpec.uniform(0.025),
-        boundary=mw.BoundarySpec.pec(),
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
-    )
-    scene.add_structure(mw.Structure(
-        geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2.56, 2.56, 0.12)),
-        material=mw.Material(eps_r=3.0),
-    ))
-    prepared = prepare_scene(scene)
+                domain=mw.Domain(bounds=((0.0, 0.05), (0.0, 0.05), (-0.64, 0.64))),
+                grid=mw.GridSpec.uniform(0.025),
+                boundary=mw.BoundarySpec.pec(),
+                subpixel=mw.SubpixelSpec(samples=3, averaging="polarized"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2.56, 2.56, 0.12)),
+                material=mw.Material(eps_r=3.0),
+            ),
+            ),
+            )
+    prepared = prepare_scene(scene, device="cpu")
     edges = compile_material_model(prepared, subpixel=scene.subpixel)["edge_components"]["eps"]
     spacing = 1.28 / 52
     for component in ("Ex", "Ey", "Ez"):
         centers = torch.as_tensor(
             prepared.z_half64 if component == "Ez" else prepared.z_nodes64,
-            dtype=torch.float64, device=scene.device,
+            dtype=torch.float64, device=prepared.device,
         )
         overlap = (torch.minimum(centers + spacing / 2, centers.new_tensor(0.06))
                    - torch.maximum(centers - spacing / 2, centers.new_tensor(-0.06)))
@@ -105,27 +108,29 @@ def test_polarized_blend_is_the_inverse_tensor_diagonal():
 def test_coverage_fill_is_differentiable_in_geometry():
     size = torch.tensor(0.0063, requires_grad=True)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 0.004), (0.0, 0.004), (0.0, 0.010))),
-        grid=mw.GridSpec.uniform(DZ),
-        boundary=mw.BoundarySpec.faces(default="periodic", z="pec"),
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=4, averaging="polarized"),
-    )
-    scene.add_structure(mw.Structure(geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.0, 1.0, size)),
-                                     material=mw.Material(eps_r=EPS)))
-    edges = compile_material_model(prepare_scene(scene), subpixel=scene.subpixel)["edge_components"]
+                domain=mw.Domain(bounds=((0.0, 0.004), (0.0, 0.004), (0.0, 0.010))),
+                grid=mw.GridSpec.uniform(DZ),
+                boundary=mw.BoundarySpec.faces(default="periodic", z="pec"),
+                subpixel=mw.SubpixelSpec(samples=4, averaging="polarized"),
+                structures=(
+            mw.Structure(geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.0, 1.0, size)),
+                         material=mw.Material(eps_r=EPS)),
+            ),
+            )
+    edges = compile_material_model(prepare_scene(scene, device="cpu"), subpixel=scene.subpixel)["edge_components"]
     (gradient,) = torch.autograd.grad(edges["eps"]["Ez"].sum(), size)
     assert math.isfinite(float(gradient)) and float(gradient) > 0.0
 
 
 def test_oblique_interface_compiles_symmetric_kottke_tensor():
-    scene = mw.Scene(domain=mw.Domain(bounds=((-0.3, 0.3),) * 3),
-        grid=mw.GridSpec.uniform(0.1), device='cpu',
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging='polarized_tensor'))
     # A half-filled window at the origin, normal to (1, 1, 0).
-    scene.add_structure(mw.Structure(mw.Box(position=(1/math.sqrt(2), 1/math.sqrt(2), 0.),
-        size=(2., 2., 2.), rotation=(0., 0., math.pi/4)), mw.Material(eps_r=4.)))
-    model = prepare_scene(scene).compile_materials()
+    scene = mw.Scene(domain=mw.Domain(bounds=((-0.3, 0.3),) * 3),
+                grid=mw.GridSpec.uniform(0.1), subpixel=mw.SubpixelSpec(samples=3, averaging='polarized_tensor'),
+                     structures=(
+                         mw.Structure(mw.Box(position=(1/math.sqrt(2), 1/math.sqrt(2), 0.),
+                             size=(2., 2., 2.), rotation=(0., 0., math.pi/4)), mw.Material(eps_r=4.)),
+                     ))
+    model = compile_materials(prepare_scene(scene, device='cpu'))
     i = (3, 3, 3)
     diagonal = model['eps_components']
     off = model['eps_offdiag_components']
@@ -141,15 +146,19 @@ def test_oblique_interface_compiles_symmetric_kottke_tensor():
 @pytest.mark.parametrize("offdiagonal", [0.0, 0.2])
 def test_anisotropic_constituent_excludes_only_its_occupied_windows(offdiagonal):
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.6, 0.6),) * 3),
-        grid=mw.GridSpec.uniform(0.1), device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized_tensor"))
-    scene.add_structure(mw.Structure(mw.Sphere(position=(-0.3, 0., 0.), radius=0.16),
-        mw.Material(eps_r=4.)))
-    baseline = prepare_scene(scene).compile_materials()
-    scene.add_structure(mw.Structure(mw.Sphere(position=(0.3, 0., 0.), radius=0.16),
-        mw.Material(epsilon_tensor=mw.Tensor3x3(
-            ((2., offdiagonal, 0.), (offdiagonal, 3., 0.), (0., 0., 5.))))))
-    mixed = prepare_scene(scene).compile_materials()
+                grid=mw.GridSpec.uniform(0.1), subpixel=mw.SubpixelSpec(samples=3, averaging="polarized_tensor"),
+                     structures=(
+                         mw.Structure(mw.Sphere(position=(-0.3, 0., 0.), radius=0.16),
+                             mw.Material(eps_r=4.)),
+                     ))
+    baseline = compile_materials(prepare_scene(scene, device="cpu"))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(mw.Sphere(position=(0.3, 0., 0.), radius=0.16),
+            mw.Material(epsilon_tensor=mw.media.Tensor3x3(
+            ((2., offdiagonal, 0.), (offdiagonal, 3., 0.), (0., 0., 5.))))),
+    ))
+    mixed = compile_materials(prepare_scene(scene, device="cpu"))
     # A distant tensor body must not disable the scalar interface's coupling.
     scalar_interface = (4, 7, 6)
     assert baseline["eps_offdiag_components"]["xy"][scalar_interface].abs() > 0.01
@@ -170,13 +179,14 @@ def test_tensor_mode_preserves_conductivity_and_component_wise_edges(eps):
     from witwin.maxwell.compiler.materials import _PCBConductivityReplay
 
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.3, 0.3),) * 3),
-        grid=mw.GridSpec.uniform(0.1), device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"))
-    scene.add_structure(mw.Structure(mw.Sphere(position=(0.017, -0.023, 0.031), radius=0.19),
-        mw.Material(eps_r=eps, sigma_e=0.2, sigma_m=0.03)))
-    diagonal = prepare_scene(scene).compile_materials()
-    scene = scene.clone(subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized_tensor"))
-    tensor = prepare_scene(scene).compile_materials()
+                grid=mw.GridSpec.uniform(0.1), subpixel=mw.SubpixelSpec(samples=3, averaging="polarized"),
+                     structures=(
+                         mw.Structure(mw.Sphere(position=(0.017, -0.023, 0.031), radius=0.19),
+                             mw.Material(eps_r=eps, sigma_e=0.2, sigma_m=0.03)),
+                     ))
+    diagonal = compile_materials(prepare_scene(scene, device="cpu"))
+    scene = scene.updated(subpixel=mw.SubpixelSpec(samples=3, averaging="polarized_tensor"))
+    tensor = compile_materials(prepare_scene(scene, device="cpu"))
     assert "subpixel_full_tensor" not in diagonal
     assert tensor["subpixel_full_tensor"]
     for key in ("sigma_e_components", "sigma_m_components"):
@@ -187,4 +197,4 @@ def test_tensor_mode_preserves_conductivity_and_component_wise_edges(eps):
         for component, value in components.items():
             assert torch.equal(value, tensor["edge_components"][key][component])
     with pytest.raises(NotImplementedError, match="polarized_tensor"):
-        _PCBConductivityReplay(prepare_scene(scene))
+        _PCBConductivityReplay(prepare_scene(scene, device="cpu"))

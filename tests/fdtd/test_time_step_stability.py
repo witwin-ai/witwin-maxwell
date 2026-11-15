@@ -10,11 +10,15 @@ import witwin.maxwell as mw
 
 def _simulation(material, *, dt=None, max_electric_field=None, boundary=None):
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
-        grid=mw.GridSpec.uniform(0.1), boundary=boundary or mw.BoundarySpec.periodic(), device="cuda")
-    scene.add_structure(mw.Structure(geometry=mw.Box(position=(0., 0., 0.), size=(1.,) * 3), material=material))
-    scene.add_source(mw.PointDipole(position=(0., 0., 0.), polarization="Ez", source_time=mw.CW(frequency=0.7e9)))
-    return mw.Simulation.fdtd(scene, frequency=0.7e9,
-        run_time=mw.TimeConfig(time_steps=200, dt=dt, max_electric_field=max_electric_field), cuda_graph=False)
+                grid=mw.GridSpec.uniform(0.1), boundary=boundary or mw.BoundarySpec.periodic(),
+                     structures=(
+                         mw.Structure(geometry=mw.Box(position=(0., 0., 0.), size=(1.,) * 3), material=material),
+                     ),
+                     sources=(
+                         mw.PointDipole(position=(0., 0., 0.), polarization="Ez", source_time=mw.CW(frequency=0.7e9)),
+                     ))
+    return mw.Simulation.fdtd(scene, frequencies=0.7e9,
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=200, dt=dt, max_electric_field=max_electric_field), cuda_graph=False))
 
 
 @pytest.mark.parametrize("dt", [0., -1., float("inf"), float("nan")])
@@ -112,14 +116,17 @@ def test_strong_lorentz_uses_coupled_frequency_and_final_dt(magnetic, strength):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_density_bounds_keep_time_step_fixed_across_perturbations():
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
-        grid=mw.GridSpec.uniform(0.1), boundary=mw.BoundarySpec.pec(), device="cuda")
+        grid=mw.GridSpec.uniform(0.1), boundary=mw.BoundarySpec.pec())
     values = []
     for density in (0.1, 0.9):
-        variant = scene.clone()
-        variant.add_material_region(mw.MaterialRegion(name="design",
-            geometry=mw.Box(position=(0., 0., 0.), size=(0.4,) * 3),
-            density=torch.full((2, 2, 2), density, device="cuda"), eps_bounds=(0.25, 4.)))
-        values.append(mw.Simulation.fdtd(variant, frequency=0.7e9).prepare().solver.dt)
+        variant = scene
+        variant = variant.updated(material_regions=(
+            *variant.material_regions,
+            mw.MaterialRegion(name="design",
+                geometry=mw.Box(position=(0., 0., 0.), size=(0.4,) * 3),
+                density=torch.full((2, 2, 2), density, device="cuda"), eps_bounds=(0.25, 4.)),
+        ))
+        values.append(mw.Simulation.fdtd(variant, frequencies=0.7e9).prepare().solver.dt)
     assert values[0] == values[1]
 
 
@@ -155,10 +162,10 @@ def test_strong_debye_feedback_is_stable():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_full_tensor_lower_eigenvalue_and_modulation_minimum():
     matrix = ((0.3, 0.2, 0.), (0.2, 0.3, 0.), (0., 0., 1.))
-    anisotropic = _simulation(mw.Material(epsilon_tensor=mw.Tensor3x3(matrix))).prepare().solver
+    anisotropic = _simulation(mw.Material(epsilon_tensor=mw.media.Tensor3x3(matrix))).prepare().solver
     assert anisotropic._time_step_metadata["epsilon_lower_bound"] == pytest.approx(0.1, rel=1e-5)
     modulated = _simulation(mw.Material(eps_r=0.4,
-        modulation=mw.ModulationSpec(frequency=0.1e9, amplitude=0.25))).prepare().solver
+        modulation=mw.media.ModulationSpec(frequency=0.1e9, amplitude=0.25))).prepare().solver
     assert modulated._time_step_metadata["epsilon_lower_bound"] == pytest.approx(0.3, rel=1e-5)
 
 
@@ -180,7 +187,7 @@ def test_negative_nonlinear_increment_envelope_is_checked():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_trainable_simulation_freezes_step_and_rejects_unsafe_update():
     perturbation = torch.zeros((2, 2, 2), device="cuda", requires_grad=True)
-    simulation = _simulation(mw.PerturbationMedium(mw.Material(eps_r=0.04),
+    simulation = _simulation(mw.media.PerturbationMedium(mw.Material(eps_r=0.04),
         perturbation=perturbation, eps_sensitivity=1.), boundary=mw.BoundarySpec.pec())
     initial = simulation.prepare().solver.dt
     with torch.no_grad():

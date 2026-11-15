@@ -6,6 +6,8 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.compiler.materials import _material_definition, _same_material_definition
+from witwin.maxwell.scene import place_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 def test_declared_design_identity_changes_preserve_fixed_material_guards():
@@ -33,22 +35,21 @@ def test_batch_member_materials_equal_single_scene_on_cpu(boundary, subpixel):
     for index in range(3):
         scene = mw.Scene(
             domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
-            grid=mw.GridSpec.uniform(0.025), boundary=boundary, device="cpu",
-            **({} if subpixel is None else {"subpixel_samples": subpixel}),
+            grid=mw.GridSpec.uniform(0.025), boundary=boundary, **({} if subpixel is None else {"subpixel": subpixel}),
             structures=[mw.Structure(name="design", geometry=mw.Box(
                 position=(0.05, 0., 0.), size=(0.07, 0.08, 0.09), device="cpu"),
                 material=mw.Material(eps_r=2.0 + 0.25 * index))],
             sources=[mw.PointDipole(name="drive", position=(-0.05, 0., 0.),
                 polarization="Ez", source_time=mw.CW(frequency=1e9, amplitude=1.0 + index))],
         )
-        simulations.append(mw.Simulation.fdtd(scene, frequency=1e9))
-    batch = mw.Simulation.batch(simulations, variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=3))
+        simulations.append(mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(device="cpu")))
+    batch = mw.Simulation.batch(simulations, variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=3))
     for index, simulation in enumerate(simulations):
-        member = prepare_scene(batch.scene(index).clone(device="cpu"))
-        assert member.subpixel == (subpixel or mw.SubpixelSpec(samples=4, averaging="kottke_edge"))
-        actual, actual_spec = tree_flatten(member.compile_materials())
-        expected, expected_spec = tree_flatten(prepare_scene(simulation.scene).compile_materials())
+        member = prepare_scene(place_scene(batch.scene(index), "cpu"), device="cpu")
+        assert member.scene.subpixel == (subpixel or mw.SubpixelSpec(samples=4, averaging="kottke_edge"))
+        actual, actual_spec = tree_flatten(compile_materials(member))
+        expected, expected_spec = tree_flatten(compile_materials(prepare_scene(simulation.scene, device="cpu")))
         assert actual_spec == expected_spec
         for a, b in zip(actual, expected, strict=True):
             if torch.is_tensor(a):

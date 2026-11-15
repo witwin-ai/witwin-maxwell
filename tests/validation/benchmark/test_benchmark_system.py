@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -26,9 +28,16 @@ from benchmark.metrics import (
 from benchmark.models import ScenarioMetrics
 from benchmark.scenes import SCENARIOS, build_scene
 from benchmark.scenes._common import DX
-from benchmark.tidy3d_scene import benchmark_physical_bounds, prepare_tidy3d_benchmark_scene
+from benchmark.tidy3d_scene import (
+    benchmark_physical_bounds,
+    benchmark_reference_bounds,
+    benchmark_reference_scene,
+    prepare_tidy3d_benchmark_scene,
+)
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.adapters.tidy3d import scene_to_tidy3d
+from witwin.maxwell.compiler import compile_materials
 
 
 def test_benchmark_scenes_build():
@@ -58,6 +67,24 @@ def test_benchmark_scenes_build():
         }, name
 
 
+@pytest.mark.parametrize("name", ["symmetry_center", "symmetry_pec_center", "symmetry_pmc_center"])
+def test_symmetry_rows_are_the_kept_part_of_the_standard_scene(name):
+    from benchmark.scenes._common import base_scene
+
+    scene = build_scene(name)
+    standard = base_scene()
+    assert scene.has_symmetry
+    for (lower, upper), (standard_lower, standard_upper), entry in zip(
+            scene.domain.bounds, standard.domain.bounds, scene.symmetry):
+        assert (lower, upper) == ((0.0, standard_upper) if entry is not None else (standard_lower, standard_upper))
+    # The reference export (and its cache key) describes the standard scene, node for node.
+    assert benchmark_reference_bounds(scene) == standard.domain.bounds
+    twin = prepare_scene(benchmark_reference_scene(scene), device="cpu")
+    reference = prepare_scene(standard, device="cpu")
+    for axis in "xyz":
+        np.testing.assert_array_equal(getattr(twin, f"{axis}_nodes64"), getattr(reference, f"{axis}_nodes64"))
+
+
 def test_group7_scenarios_use_supported_source_boundary_and_monitor_contracts():
     lossy = build_scene("lossy_metal_slab")
     metal = lossy.structures[0].geometry
@@ -65,7 +92,7 @@ def test_group7_scenarios_use_supported_source_boundary_and_monitor_contracts():
     metal_upper = metal.position + metal.size / 2
     assert metal_lower[0] < lossy.domain.bounds[0][0]
     assert metal_upper[0] > lossy.domain.bounds[0][1]
-    prepared_lossy = prepare_scene(lossy)
+    prepared_lossy = prepare_scene(lossy, device="cpu")
     assert np.min(np.abs(prepared_lossy.z_nodes64 - float(metal_lower[2]))) < 1.0e-7
 
     periodic = build_scene("periodic_grating")
@@ -85,20 +112,20 @@ def test_group7_scenarios_use_supported_source_boundary_and_monitor_contracts():
         assert any(monitor.name == "resonance_probe" for monitor in cavity.monitors)
         assert SCENARIOS[name].scalar_observable == "cavity_resonance"
     pmc = build_scene("pmc_cavity")
-    assert isinstance(pmc.sources[0], mw.CustomCurrentSource)
+    assert isinstance(pmc.sources[0], mw.sources.CustomCurrentSource)
     assert set(pmc.sources[0].current_dataset.components) == {"Mz"}
     assert SCENARIOS["pmc_cavity"].display_component == "Hz"
 
     diffraction = build_scene("grating_diffraction")
-    assert any(isinstance(monitor, mw.DiffractionMonitor) for monitor in diffraction.monitors)
+    assert any(isinstance(monitor, mw.monitors.DiffractionMonitor) for monitor in diffraction.monitors)
     for name in ("sphere_rcs", "antenna_directivity"):
         scene = build_scene(name)
-        assert any(isinstance(monitor, mw.ClosedSurfaceMonitor) for monitor in scene.monitors)
+        assert any(isinstance(monitor, mw.monitors.ClosedSurfaceMonitor) for monitor in scene.monitors)
 
 
 def test_plane_slab_continues_through_transverse_external_pml():
     scene = build_scene("nonuniform_custom_grid")
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     geometry = scene.structures[0].geometry
     lower = geometry.position - geometry.size / 2
     upper = geometry.position + geometry.size / 2
@@ -108,7 +135,7 @@ def test_plane_slab_continues_through_transverse_external_pml():
     assert float(lower[1]) <= float(prepared.y_nodes64[0])
     assert float(upper[1]) >= float(prepared.y_nodes64[-1])
 
-    model = prepared.compile_materials()
+    model = compile_materials(prepared)
     z_index = int(np.argmin(np.abs(prepared.z_nodes64)))
     eps_slice = model["eps_components"]["x"][:, :, z_index]
     assert torch.allclose(eps_slice, torch.full_like(eps_slice, 3.0), atol=1.0e-4)
@@ -145,6 +172,18 @@ def test_source_normalized_tfsf_cache_uses_standard_spatial_unit_conversion():
     np.testing.assert_allclose(scaled["field"]["x"], (-0.64, 0.64))
 
 
+def _declared_spectrum(source_time, frequencies):
+    """Unit-amplitude spectrum of a declared waveform by direct quadrature of evaluate_source_time."""
+    from scipy.integrate import quad_vec
+    from witwin.maxwell.sources import evaluate_source_time
+
+    unit = dataclasses.replace(source_time, amplitude=1.0)
+    duration = source_time.settling_time
+    freqs = np.asarray(frequencies, dtype=np.float64)
+    return quad_vec(lambda tau: evaluate_source_time(unit, tau * duration) * duration
+                    * np.exp(2j * np.pi * freqs * tau * duration), 0.0, 1.0, epsabs=1e-14, epsrel=1e-11)[0]
+
+
 def test_gaussian_export_bridge_and_absolute_source_plane_comparison():
     td = pytest.importorskip("tidy3d")
     from witwin.maxwell.adapters.tidy3d import _convert_source_time
@@ -159,7 +198,12 @@ def test_gaussian_export_bridge_and_absolute_source_plane_comparison():
         source_time = scene.resolved_sources()[0].source_time
         exported = _convert_source_time(source_time, td, amplitude_scale=17.0)
         factor = benchmark_runner._source_normalization_bridge(source_time, exported, scenario.frequencies)
-        np.testing.assert_allclose(factor, np.exp(-1j * exported.phase), atol=1e-10)
+        # The declared physical phase stays in normalized results (the denominator is the phase-zero
+        # waveform), so a phase-shifted carrier (the zero-DC dipoles, phase pi/2) keeps the ratio of its
+        # spectrum to the phase-zero spectrum; for phase zero the factor is the export convention alone.
+        physical = _declared_spectrum(source_time, scenario.frequencies) / _declared_spectrum(
+            dataclasses.replace(source_time, phase=0.0), scenario.frequencies)
+        np.testing.assert_allclose(factor, np.exp(-1j * exported.phase) * physical, rtol=1e-6, atol=1e-10)
 
         frequencies = scenario.frequencies
         monitors = {
@@ -285,7 +329,7 @@ def test_s_parameter_benchmarks_compare_the_output_transverse_mode(name):
 
 @pytest.mark.parametrize("name", ("ring_resonator_s21", "waveguide_s_matrix"))
 def test_s_parameter_benchmarks_refine_grid_below_guided_cutoff(name):
-    prepared = prepare_scene(build_scene(name))
+    prepared = prepare_scene(build_scene(name), device="cpu")
 
     assert prepared.dx == pytest.approx(DX / 2)
     assert prepared.dy == pytest.approx(DX / 2)
@@ -397,7 +441,7 @@ def test_isotropic_ellipsoid_cache_uses_analytic_sphere_export(monkeypatch):
     def unexpected_mesh(self):
         raise AssertionError("The analytic sphere export must not tessellate.")
 
-    monkeypatch.setattr(mw.Ellipsoid, "to_mesh", unexpected_mesh)
+    monkeypatch.setattr(mw.geometry.Ellipsoid, "to_mesh", unexpected_mesh)
     monkeypatch.setattr(benchmark_runner, "_MESH_EXPORT_CONTRACT_VERSION", 100)
     assert benchmark_runner._benchmark_cache_key(scene, (2.0e9,), 8.0) == original
 
@@ -536,22 +580,22 @@ def test_power_plane_cache_key_records_only_changed_coordinates(cache_key_payloa
     from witwin.maxwell.fdtd.observers import _flux_yee_plane_position
 
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.64, 0.64),) * 3),
-                     grid=mw.GridSpec.uniform(0.025), device="cpu")
-    prepared = prepare_scene(scene, lazy_meshgrid=True)
+                     grid=mw.GridSpec.uniform(0.025))
+    prepared = prepare_scene(scene, lazy_meshgrid=True, device="cpu")
     requested = float(prepared.z_nodes64[40]) if on_grid else 0.3
     kwargs = dict(name="probe", position=(0, 0, requested), size=(0.8, 0.8, 0))
     if kind == "flux":
         monitor = mw.FluxMonitor(name="probe", axis="z", position=requested)
     elif kind == "flux_time":
-        monitor = mw.FluxTimeMonitor(name="probe", axis="z", position=requested)
+        monitor = mw.monitors.FluxTimeMonitor(name="probe", axis="z", position=requested)
     elif kind == "mode":
         monitor = mw.ModeMonitor(**kwargs, polarization="Ex")
     elif kind == "diffraction":
-        monitor = mw.DiffractionMonitor(**kwargs)
+        monitor = mw.monitors.DiffractionMonitor(**kwargs)
     else:
         closure = {"x": (-0.4, 0.4), "y": (-0.4, 0.4)} if kind == "closed_field" else None
         monitor = mw.FinitePlaneMonitor(**kwargs, closure_planes=closure)
-    scene.add_monitor(monitor)
+    scene = scene.updated(monitors=(*scene.monitors, monitor))
     payload = cache_key_payload(scene)
     assert "monitor_plane_export_contract_version" not in payload
     if on_grid or kind == "field":
@@ -574,8 +618,8 @@ def test_on_grid_benchmark_keeps_master_cache_key_bitwise():
 def test_normal_tfsf_with_on_grid_monitor_keeps_master_cache_key_bitwise():
     scenario = SCENARIOS["tfsf_vacuum"]
     scene = build_scene(scenario.name)
-    prepared = prepare_scene(scene, lazy_meshgrid=True)
-    scene = scene.clone(monitors=[mw.FluxMonitor(
+    prepared = prepare_scene(scene, lazy_meshgrid=True, device="cpu")
+    scene = scene.updated(monitors=[mw.FluxMonitor(
         name="on_grid", axis="z", position=float(prepared.z_nodes64[40]),
     )])
     assert benchmark_runner._benchmark_cache_key(
@@ -652,11 +696,11 @@ def test_incident_scene_signature_ignores_names_but_tracks_launch_physics():
     )
 
     changed_source = slab.sources[0]
-    slab.sources[0] = mw.PlaneWave(
+    slab = slab.updated(sources=(mw.PlaneWave(
         direction=changed_source.direction,
         polarization=changed_source.polarization,
         source_time=mw.GaussianPulse(frequency=2.0e9, fwidth=0.4e9),
-    )
+    ), *slab.sources[1:]))
     assert benchmark_runner._incident_scene_signature(vacuum, (2.0e9,)) != (
         benchmark_runner._incident_scene_signature(slab, (2.0e9,))
     )
@@ -666,13 +710,13 @@ def test_incident_scene_signature_ignores_unit_transverse_plane_wave_orientation
     vacuum = build_scene("planewave_vacuum")
     rotated = build_scene("planewave_vacuum")
     source = rotated.sources[0]
-    rotated.sources[0] = mw.PlaneWave(
+    rotated = rotated.updated(sources=(mw.PlaneWave(
         direction=source.direction,
         polarization=(0.8, 0.6, 0.0),
         source_time=source.source_time,
         injection=source.injection,
         injection_axis=source.injection_axis,
-    )
+    ), *rotated.sources[1:]))
     assert benchmark_runner._incident_scene_signature(vacuum, (2.0e9,)) == (
         benchmark_runner._incident_scene_signature(rotated, (2.0e9,))
     )
@@ -682,7 +726,7 @@ def test_incident_scene_signature_ignores_plane_wave_amplitude_and_phase():
     unit = build_scene("planewave_periodic_vacuum")
     driven = build_scene("planewave_periodic_vacuum")
     source = driven.sources[0]
-    driven.sources[0] = mw.PlaneWave(
+    driven = driven.updated(sources=(mw.PlaneWave(
         direction=source.direction,
         polarization=source.polarization,
         source_time=mw.GaussianPulse(
@@ -693,7 +737,7 @@ def test_incident_scene_signature_ignores_plane_wave_amplitude_and_phase():
         ),
         injection=source.injection,
         injection_axis=source.injection_axis,
-    )
+    ), *driven.sources[1:]))
 
     assert benchmark_runner._incident_scene_signature(unit, (2.0e9,)) == (
         benchmark_runner._incident_scene_signature(driven, (2.0e9,))
@@ -705,13 +749,13 @@ def test_incident_scene_signature_preserves_boundary_and_direction_requirements(
     pml = build_scene("planewave_vacuum")
     angled = build_scene("planewave_periodic_vacuum")
     source = angled.sources[0]
-    angled.sources[0] = mw.PlaneWave(
+    angled = angled.updated(sources=(mw.PlaneWave(
         direction=(0.6, 0.0, 0.8),
         polarization=(0.0, 1.0, 0.0),
         source_time=source.source_time,
         injection=source.injection,
         injection_axis="z",
-    )
+    ), *angled.sources[1:]))
 
     periodic_signature = benchmark_runner._incident_scene_signature(periodic, (2.0e9,))
     assert periodic_signature != benchmark_runner._incident_scene_signature(pml, (2.0e9,))
@@ -721,7 +765,7 @@ def test_incident_scene_signature_preserves_boundary_and_direction_requirements(
 def test_cached_incident_power_scales_unit_reference_by_amplitude_squared(monkeypatch):
     scene = build_scene("planewave_periodic_vacuum")
     source = scene.sources[0]
-    scene.sources[0] = mw.PlaneWave(
+    scene = scene.updated(sources=(mw.PlaneWave(
         direction=source.direction,
         polarization=source.polarization,
         source_time=mw.GaussianPulse(
@@ -732,7 +776,7 @@ def test_cached_incident_power_scales_unit_reference_by_amplitude_squared(monkey
         ),
         injection=source.injection,
         injection_axis=source.injection_axis,
-    )
+    ), *scene.sources[1:]))
     loaded = []
 
     def fake_load(name, *, expected_cache_key):
@@ -832,7 +876,7 @@ def test_full_tensor_benchmark_launches_a_transverse_eigenpolarization():
 
 def test_directional_field_comparison_excludes_the_soft_source_stencil():
     scene = build_scene("planewave_vacuum")
-    source_position = benchmark_runner.soft_plane_wave_coordinate(scene, "z", 1.0)
+    source_position = benchmark_runner.soft_plane_wave_coordinate(scene, "z", 1.0, device="cpu")
     spacing = 0.025
     x = np.array((-0.1, 0.1))
     z = source_position + spacing * np.array((-1.5, -0.5, 0.5, 1.5, 2.5))
@@ -859,10 +903,10 @@ def test_volume_current_comparison_excludes_source_box_and_one_cell(current_comp
         source = mw.UniformCurrentSource(size=(0.2, 0.2, 0.2), center=center)
     else:
         dataset_coords = tuple((value - 0.1, value + 0.1) for value in center)
-        source = mw.CustomCurrentSource(
-            mw.CurrentDataset(dataset_coords, {current_component: np.ones((2, 2, 2))})
+        source = mw.sources.CustomCurrentSource(
+            mw.sources.CurrentDataset(dataset_coords, {current_component: np.ones((2, 2, 2))})
         )
-    scene = mw.Scene(device="cpu").add_source(source)
+    scene = mw.Scene(sources=(source,))
     offsets = np.array((-0.25, -0.15, 0.0, 0.15, 0.25))
     coords = (center[0] + offsets, center[2] + offsets)
     reference = np.arange(25).reshape(5, 5).astype(complex) + 1j
@@ -882,7 +926,7 @@ def test_volume_current_comparison_excludes_source_box_and_one_cell(current_comp
         scene, "y", coords, actual, reference, monitor_position=0.6
     )
     assert outside_actual.size == actual.size
-    dipole_scene = mw.Scene(device="cpu").add_source(mw.PointDipole(position=center))
+    dipole_scene = mw.Scene(sources=(mw.PointDipole(position=center),))
     assert benchmark_runner._volume_current_exterior_mask(
         dipole_scene, "y", coords, center[1]
     ) is None
@@ -934,7 +978,7 @@ def test_spectral_comparison_preserves_carrier_and_sideband_absolute_phase():
 
 
 def test_absolute_phase_is_preserved_without_a_directional_source():
-    scene = mw.Scene(device="cpu")
+    scene = mw.Scene()
     reference = np.ones((2, 2), dtype=np.complex128)
     actual = reference * np.exp(0.4j)
 
@@ -976,9 +1020,7 @@ def test_resonance_diagnostic_uses_nearest_resonant_field_slice():
 
 
 def test_point_source_field_comparison_excludes_the_singular_source_disk():
-    scene = mw.Scene(device="cpu").add_source(
-        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez")
-    )
+    scene = mw.Scene(sources=(mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez"),))
     coords = np.linspace(-0.2, 0.2, 9)
     reference = np.ones((coords.size, coords.size), dtype=np.complex128)
     actual = reference * np.exp(0.3j)
@@ -998,9 +1040,7 @@ def test_point_source_field_comparison_excludes_the_singular_source_disk():
 
 
 def test_point_source_field_comparison_excludes_reference_weak_field_noise():
-    scene = mw.Scene(device="cpu").add_source(
-        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez")
-    )
+    scene = mw.Scene(sources=(mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez"),))
     coords = np.linspace(-0.2, 0.2, 9)
     reference = np.full((coords.size, coords.size), 1.0e-6, dtype=np.complex128)
     reference[1:3, 1:3] = 1.0
@@ -1240,7 +1280,7 @@ def test_time_monitor_vacuum_peaks_at_physical_propagation_delay():
         normalize_source=False,
     )
     source = scene.resolved_sources()[0]
-    source_z = benchmark_runner.soft_plane_wave_coordinate(scene, "z", 1.0)
+    source_z = benchmark_runner.soft_plane_wave_coordinate(scene, "z", 1.0, device="cpu")
 
     field = monitors["field_time"]
     field_times = np.asarray(field["t"], dtype=np.float64)
@@ -1410,40 +1450,42 @@ def test_ring_scalar_observable_reports_one_resonance_frequency():
     assert resonance_rows[0]["phase_error"] is None
 
 
-def test_cavity_scalar_observable_uses_sub_bin_quadratic_peak():
+def _record_kernel(frequencies, f0, record_time):
+    """DFT of an undamped mode over a rectangular record [0, T] (the kernel-fit model)."""
+    detune = np.asarray(frequencies) - f0
+    return record_time * np.sinc(detune * record_time) * np.exp(-1j * np.pi * detune * record_time)
+
+
+def test_cavity_scalar_observable_fits_the_record_kernel_between_comb_points():
+    # Comb spacing 5 coarser than 1/T = 4: a peak interpolation is biased, the kernel fit is not
+    # (exact model; the residual 1e-7 is the fit's f0 grid and parabola resolution, far below the
+    # 1.0e-3 scalar limits).
     frequencies = tuple(np.linspace(100.0, 120.0, 5))
-    expected_peak = 113.0
-    spectrum = np.exp(-((np.asarray(frequencies) - expected_peak) / 7.0) ** 2)
-    monitors = {
-        "resonance_probe": {
-            "fields": {"Ez": spectrum},
-        }
-    }
+    record_time = 0.25
+    monitors = {"resonance_probe": {"fields": {"Ez": _record_kernel(frequencies, 113.0, record_time)}}}
 
     observables = benchmark_runner._scalar_observables(
-        "cavity_resonance",
-        monitors,
-        frequencies,
+        "cavity_resonance", monitors, frequencies, record_time=record_time
     )
 
-    assert observables["resonance_frequency"][0] == pytest.approx(expected_peak)
+    assert observables["resonance_frequency"][0] == pytest.approx(113.0, rel=1.0e-6)
     assert np.max(observables["normalized_probe_spectrum"]) == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="record_time"):
+        benchmark_runner._scalar_observables("cavity_resonance", monitors, frequencies)
 
 
 def test_cavity_scalar_observable_accepts_magnetic_dual_probe():
-    frequencies = (1.0e8, 1.5e8, 2.0e8)
-    monitors = {
-        "resonance_probe": {
-            "fields": {"Hz": np.asarray([1.0, 4.0, 2.0], dtype=np.complex128)}
-        }
-    }
+    frequencies = tuple(np.linspace(1.0e8, 2.0e8, 9))
+    record_time = 1.0 / 1.0e7
+    spectrum = _record_kernel(frequencies, 1.52e8, record_time)
+    monitors = {"resonance_probe": {"fields": {"Hz": spectrum}}}
 
     observables = benchmark_runner._scalar_observables(
-        "cavity_resonance", monitors, frequencies
+        "cavity_resonance", monitors, frequencies, record_time=record_time
     )
 
-    assert observables["normalized_probe_spectrum"] == pytest.approx((0.25, 1.0, 0.5))
-    assert 1.0e8 < observables["resonance_frequency"][0] < 2.0e8
+    assert observables["normalized_probe_spectrum"] == pytest.approx(np.abs(spectrum) / np.max(np.abs(spectrum)))
+    assert observables["resonance_frequency"][0] == pytest.approx(1.52e8, rel=1.0e-6)
 
 
 def test_real_scalar_comparison_plot_is_generated(tmp_path, monkeypatch):
@@ -1608,13 +1650,13 @@ def test_diffraction_scalar_plot_explains_weak_order_relative_error(
 
 
 def test_tidy3d_closed_surface_faces_feed_common_far_field_postprocess(monkeypatch):
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "huygens",
         position=(0.0, 0.0, 0.0),
         size=(0.2, 0.2, 0.2),
         frequencies=(1.0e9,),
     )
-    scene = mw.Scene(device="cpu").add_monitor(surface)
+    scene = mw.Scene(monitors=(surface,))
     coords = np.linspace(-0.1, 0.1, 3)
     monitors = {}
     for face in surface.faces:
@@ -1659,15 +1701,15 @@ def test_benchmark_cache_rejects_mismatched_cache_key(tmp_path, monkeypatch):
 
 
 def test_extract_maxwell_monitors_prefers_native_component_payload():
-    scene = mw.Scene(device="cpu").add_monitor(
+    scene = mw.Scene(monitors=(
         mw.PlaneMonitor(
             name="field_xy",
             axis="z",
             position=0.0,
             fields=("Ez",),
             frequencies=(1.5e9,),
-        )
-    )
+        ),
+    ))
 
     native = np.full((4, 4), 2.0, dtype=np.complex128)
     aligned = np.full((3, 3), 0.5, dtype=np.complex128)
@@ -1690,7 +1732,7 @@ def test_extract_maxwell_monitors_prefers_native_component_payload():
     }
 
     class DummyResult:
-        def monitor(self, name):
+        def raw_monitor(self, name):
             assert name == "field_xy"
             return payload
 
@@ -1703,15 +1745,15 @@ def test_extract_maxwell_monitors_prefers_native_component_payload():
 
 
 def test_extract_maxwell_monitors_also_preserves_collocated_vector_payload():
-    scene = mw.Scene(device="cpu").add_monitor(
+    scene = mw.Scene(monitors=(
         mw.FinitePlaneMonitor(
             name="field",
             position=(0.0, 0.0, 0.0),
             size=(0.0, 0.4, 0.4),
             fields=("Ex", "Ey", "Ez"),
             frequencies=(1.5e9,),
-        )
-    )
+        ),
+    ))
     coords = np.linspace(-0.2, 0.2, 3)
     payload = {
         "y": coords,
@@ -1729,7 +1771,7 @@ def test_extract_maxwell_monitors_also_preserves_collocated_vector_payload():
     }
 
     class DummyResult:
-        def monitor(self, name):
+        def raw_monitor(self, name):
             assert name == "field"
             return payload
 
@@ -1744,7 +1786,6 @@ def test_aligned_vector_field_comparison_uses_collocated_components():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
     )
     coords = np.linspace(-0.25, 0.25, 3)
     reference = {
@@ -1782,17 +1823,17 @@ def test_extract_fdfd_monitors_preserves_component_yee_coordinates():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    ).add_monitor(
-        mw.PlaneMonitor(
-            "field",
-            axis="y",
-            position=0.0,
-            fields=("Ex", "Ey", "Ez"),
-            frequencies=(1.0e9,),
-        )
+        monitors=(
+            mw.PlaneMonitor(
+                "field",
+                axis="y",
+                position=0.0,
+                fields=("Ex", "Ey", "Ez"),
+                frequencies=(1.0e9,),
+            ),
+        ),
     )
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     fields = {
         "EX": torch.ones((prepared.x_half.numel(), prepared.y.numel(), prepared.z.numel())),
         "EY": torch.ones((prepared.x.numel(), prepared.y_half.numel(), prepared.z.numel())),
@@ -1801,11 +1842,13 @@ def test_extract_fdfd_monitors_preserves_component_yee_coordinates():
 
     class DummyResult:
         method = "fdfd"
-        frequency = 1.0e9
+        frequencies = (1.0e9,)
         prepared_scene = prepared
 
-        def tensor(self, name):
-            return fields[name]
+        def field(self, name, *, freq_index=None):
+            # One frequency selected: the phasor array itself (Result.field returns FieldData).
+            assert freq_index == 0
+            return SimpleNamespace(values=fields[name])
 
     result = DummyResult()
     result.fields = fields
@@ -1818,9 +1861,7 @@ def test_extract_fdfd_monitors_preserves_component_yee_coordinates():
 
 
 def test_extract_maxwell_point_monitor_unwraps_component_data():
-    scene = mw.Scene(device="cpu").add_monitor(
-        mw.PointMonitor("probe", position=(0.0, 0.0, 0.0), fields=("Ez",))
-    )
+    scene = mw.Scene(monitors=(mw.PointMonitor("probe", position=(0.0, 0.0, 0.0), fields=("Ez",)),))
     payload = {
         "frequencies": (1.0, 2.0),
         "components": {
@@ -1829,7 +1870,7 @@ def test_extract_maxwell_point_monitor_unwraps_component_data():
     }
 
     class DummyResult:
-        def monitor(self, name):
+        def raw_monitor(self, name):
             assert name == "probe"
             return payload
 
@@ -1841,15 +1882,15 @@ def test_extract_maxwell_point_monitor_unwraps_component_data():
 
 def test_extract_maxwell_mode_monitor_preserves_complex_frequency_series():
     frequencies = (1.8e9, 2.0e9)
-    scene = mw.Scene(device="cpu").add_monitor(
+    scene = mw.Scene(monitors=(
         mw.ModeMonitor(
             "mode_out",
             position=(0.2, 0.0, 0.0),
             size=(0.0, 0.4, 0.5),
             polarization="Ez",
             frequencies=frequencies,
-        )
-    )
+        ),
+    ))
 
     class DummyResult:
         def raw_monitor(self, name):
@@ -1858,11 +1899,10 @@ def test_extract_maxwell_mode_monitor_preserves_complex_frequency_series():
 
         def monitor(self, name, *, freq_index):
             assert name == "mode_out"
-            return {
-                "amplitude_forward": torch.tensor(1.0 + 0.1j * freq_index),
-                "amplitude_backward": torch.tensor(0.01j * (freq_index + 1)),
-                "effective_index": 1.7 + 0.05 * freq_index,
-            }
+            amplitudes = torch.tensor([[1.0 + 0.1j * freq_index, 0.01j * (freq_index + 1)]])
+            return mw.ModeAmplitudeData(values=amplitudes, dims=("mode", "propagation"),
+                                        coords={"propagation": ("+", "-")},
+                                        attrs={"effective_index": 1.7 + 0.05 * freq_index})
 
     extracted = benchmark_runner._extract_maxwell_monitors(DummyResult(), scene)
 
@@ -1879,15 +1919,15 @@ def test_extract_maxwell_mode_monitor_preserves_complex_frequency_series():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA tensor payloads")
 def test_extract_maxwell_monitors_converts_cuda_tensor_payloads_to_numpy():
-    scene = mw.Scene(device="cpu").add_monitor(
+    scene = mw.Scene(monitors=(
         mw.PlaneMonitor(
             name="field_xy",
             axis="z",
             position=0.0,
             fields=("Ez",),
             frequencies=(1.5e9,),
-        )
-    )
+        ),
+    ))
 
     field = torch.full((4, 4), 2.0 + 0.5j, dtype=torch.complex64, device="cuda")
     coords = torch.linspace(-0.15, 0.15, 4, device="cuda")
@@ -1906,7 +1946,7 @@ def test_extract_maxwell_monitors_converts_cuda_tensor_payloads_to_numpy():
     }
 
     class DummyResult:
-        def monitor(self, name):
+        def raw_monitor(self, name):
             assert name == "field_xy"
             return payload
 
@@ -1928,14 +1968,14 @@ def test_extract_maxwell_monitors_trims_flux_to_physical_interior():
         domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.2),
         boundary=mw.BoundarySpec.pml(num_layers=1),
-        device="cpu",
-    ).add_monitor(
-        mw.FluxMonitor(
-            name="flux_z",
-            axis="z",
-            position=0.0,
-            frequencies=(1.0,),
-        )
+        monitors=(
+            mw.FluxMonitor(
+                name="flux_z",
+                axis="z",
+                position=0.0,
+                frequencies=(1.0,),
+            ),
+        ),
     )
 
     coords = np.linspace(-0.4, 0.4, 5)
@@ -1962,7 +2002,7 @@ def test_extract_maxwell_monitors_trims_flux_to_physical_interior():
     }
 
     class DummyResult:
-        def monitor(self, name):
+        def raw_monitor(self, name):
             assert name == "flux_z"
             return payload
 
@@ -1978,14 +2018,14 @@ def test_extract_maxwell_flux_monitors_accepts_cuda_tensor_payloads():
         domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.2),
         boundary=mw.BoundarySpec.pml(num_layers=1),
-        device="cpu",
-    ).add_monitor(
-        mw.FluxMonitor(
-            name="flux_z",
-            axis="z",
-            position=0.0,
-            frequencies=(1.0,),
-        )
+        monitors=(
+            mw.FluxMonitor(
+                name="flux_z",
+                axis="z",
+                position=0.0,
+                frequencies=(1.0,),
+            ),
+        ),
     )
 
     coords = torch.linspace(-0.4, 0.4, 5, device="cuda")
@@ -2012,7 +2052,7 @@ def test_extract_maxwell_flux_monitors_accepts_cuda_tensor_payloads():
     }
 
     class DummyResult:
-        def monitor(self, name):
+        def raw_monitor(self, name):
             assert name == "flux_z"
             return payload
 
@@ -2154,17 +2194,17 @@ def test_geometry_export_masks_detect_a_shifted_cone(monkeypatch):
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.4, 0.4), (-0.4, 0.4))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.pml(num_layers=2),
-        device="cpu",
-    ).add_structure(
-        mw.Structure(
-            geometry=mw.Cone(
-                position=(0.0, 0.0, -0.1),
-                radius=0.12,
-                height=0.2,
-                axis="z",
+        structures=(
+            mw.Structure(
+                geometry=mw.geometry.Cone(
+                    position=(0.0, 0.0, -0.1),
+                    radius=0.12,
+                    height=0.2,
+                    axis="z",
+                ),
+                material=mw.Material(eps_r=2.0),
             ),
-            material=mw.Material(eps_r=2.0),
-        )
+        ),
     )
     maxwell_mask, exported_mask = benchmark_plotting._geometry_export_masks(scene)
     baseline_mismatch = np.count_nonzero(maxwell_mask ^ exported_mask)
@@ -2188,19 +2228,19 @@ def test_prepare_tidy3d_benchmark_scene_preserves_material_regions():
         domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
         grid=mw.GridSpec.uniform(0.25),
         boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cpu",
-    ).add_material_region(
-        mw.MaterialRegion(
-            name="region",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
-            density=torch.ones((2, 2, 2), dtype=torch.float32),
-            eps_bounds=(1.0, 4.0),
-        )
+        material_regions=(
+            mw.MaterialRegion(
+                name="region",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+                density=torch.ones((2, 2, 2), dtype=torch.float32),
+                eps_bounds=(1.0, 4.0),
+            ),
+        ),
     )
 
     trimmed = prepare_tidy3d_benchmark_scene(scene)
 
-    assert trimmed is not scene
+    assert trimmed is scene  # immutable: nothing to copy
     assert trimmed.domain.bounds == scene.domain.bounds
     assert len(trimmed.material_regions) == 1
     assert trimmed.material_regions[0] == scene.material_regions[0]
@@ -2234,13 +2274,11 @@ def test_benchmark_scene_material_slices_match_exactly(geometry, label):
         domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
         grid=mw.GridSpec.uniform(0.01),
         boundary=mw.BoundarySpec.pml(num_layers=25),
-        device="cpu",
-    ).add_structure(
-        mw.Structure(geometry=geometry, material=mw.Material(eps_r=4.0), name=label)
+        structures=(mw.Structure(geometry=geometry, material=mw.Material(eps_r=4.0), name=label),),
     )
     trimmed = prepare_tidy3d_benchmark_scene(scene)
-    prepared_scene = prepare_scene(scene)
-    prepared_trimmed = prepare_scene(trimmed)
+    prepared_scene = prepare_scene(scene, device="cpu")
+    prepared_trimmed = prepare_scene(trimmed, device="cpu")
 
     scene_slice, scene_coords = benchmark_plotting.get_plane_slice_with_coords(
         prepared_scene,
@@ -2264,7 +2302,6 @@ def test_align_plane_monitor_fields_crops_to_physical_interior():
         domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.2),
         boundary=mw.BoundarySpec.pml(num_layers=1),
-        device="cpu",
     )
 
     coords = np.linspace(-0.4, 0.4, 5)
@@ -2290,7 +2327,7 @@ def test_align_plane_monitor_fields_crops_to_physical_interior():
 def test_tidy3d_plane_wave_source_is_exported_inside_physical_interior():
     scene = build_scene("planewave_vacuum")
     td_scene = prepare_tidy3d_benchmark_scene(scene)
-    td_sim = td_scene.to_tidy3d(frequencies=(2.0e9,), run_time=1e-9)
+    td_sim = scene_to_tidy3d(td_scene, frequencies=(2.0e9,), run_time=1e-9)
     source = td_sim.sources[0]
     physical_bounds = benchmark_physical_bounds(scene)
 

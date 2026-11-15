@@ -99,7 +99,7 @@ def export_rows(output):
         dx, dl, padding = overrides.get("dx", case.dx), overrides.get("longitudinal_dl", case.longitudinal_dl), overrides.get("padding", case.padding)
         scene = printed_line_scene("cpw", dx=dx, longitudinal_dl=dl, axial_half_length=case.axial_half_length,
                                    port_separation=case.separation, transverse_padding=padding,
-                                   transverse_refinement_radius=.02, device="cpu")
+                                   transverse_refinement_radius=.02)
         record["grids"][label] = dict(overrides=overrides, y_nodes=list(map(float, scene.grid.y_coords)),
                                       z_nodes=list(map(float, scene.grid.z_coords)))
     record["scope"] = ("Geometry only: sample coordinates/weights of the fixed 2.5 mm public V/I functional "

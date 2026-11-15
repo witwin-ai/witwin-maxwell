@@ -26,7 +26,7 @@ def _plane(length):
 def test_scattering_ratios_accept_small_positive_si_power(length):
     power = 1e-24 / 400 * length**2
     payloads = {name: dict(frequencies=(C_0/length,), flux=[flux]) for name, flux in (("in", .9*power), ("out", .8*power))}
-    result = SimpleNamespace(frequencies=(C_0/length,), monitor=payloads.__getitem__)
+    result = SimpleNamespace(frequencies=(C_0/length,), raw_monitor=payloads.__getitem__)
     data = compute_s_parameters(result, "in", transmitted_monitor="out", incident_power=power)
     assert data["S11_mag"].item() == pytest.approx(.1**.5)
     assert data["S21_mag"].item() == pytest.approx(.8**.5)

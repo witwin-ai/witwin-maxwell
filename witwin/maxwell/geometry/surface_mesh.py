@@ -6,7 +6,11 @@ import math
 import torch
 from witwin.core import GeometryBase
 
+from ..errors import UnsupportedFeatureError
+from .._stability import experimental
 
+
+@experimental("pcb")
 class SurfaceMesh(GeometryBase):
     """A true zero-volume surface with SI float64 vertices and fixed topology.
 
@@ -23,7 +27,8 @@ class SurfaceMesh(GeometryBase):
                  physical_thickness=0., sheet_model=None, device=None):
         for value in (vertices, position, rotation, physical_thickness):
             if isinstance(value, torch.Tensor) and value.requires_grad:
-                raise NotImplementedError("SurfaceMesh requires fixed geometry and topology.")
+                raise UnsupportedFeatureError("SurfaceMesh requires fixed geometry and topology.",
+                                              feature="geometry.surface_mesh", method=None)
         super().__init__(device=device)
         self.vertices = torch.as_tensor(vertices, dtype=torch.float64, device=device)
         topology = torch.as_tensor(triangles, device=self.vertices.device)
@@ -110,7 +115,8 @@ class SurfaceMesh(GeometryBase):
 
     def signed_distance(self, xx, yy, zz):
         del xx, yy, zz
-        raise NotImplementedError("SurfaceMesh is zero volume and requires native PEC cut-trace compilation; it cannot be sampled as material occupancy.")
+        raise UnsupportedFeatureError("SurfaceMesh is zero volume and requires native PEC cut-trace compilation; it cannot be sampled as material occupancy.",
+                                      feature="geometry.surface_mesh", method=None)
 
     def classify_query_points(self, points):
         """Exact triangle contact and closed-surface winding for physical queries.
@@ -151,6 +157,8 @@ class SurfaceMesh(GeometryBase):
     def planar_pec(self, scene):
         """Exact grid-aligned reduction, otherwise leave the native cut surface."""
         from .planar_pec import PlanarPEC
+        from ..scene import prepare_scene
+        scene = prepare_scene(scene)
         vertices, _ = self.to_mesh()
         vertices = vertices.to(scene.device)
         ranges = vertices.amax(0)-vertices.amin(0)
@@ -160,9 +168,6 @@ class SurfaceMesh(GeometryBase):
             return None
         axis = int(axes[0])
         coordinate = vertices[:, axis].mean()
-        if not hasattr(scene, "xyz"[axis]+"_nodes64"):
-            from ..scene import prepare_scene
-            scene = prepare_scene(scene)
         nodes = torch.as_tensor(getattr(scene, "xyz"[axis]+"_nodes64"), device=vertices.device, dtype=torch.float64)
         spacing = (nodes[1:]-nodes[:-1]).min()
         if not bool(torch.min((nodes-coordinate).abs()) <= 8*torch.finfo(torch.float64).eps*spacing):
@@ -190,7 +195,8 @@ class SurfaceMesh(GeometryBase):
     def bent_rectangle(cls, *, width, length, radius, segments=16, device=None, **kwargs):
         """Bend an arc-length-preserving rectangle about its longitudinal y axis."""
         if any(isinstance(value, torch.Tensor) and value.requires_grad for value in (width, length, radius)):
-            raise NotImplementedError("SurfaceMesh requires fixed geometry and topology.")
+            raise UnsupportedFeatureError("SurfaceMesh requires fixed geometry and topology.",
+                                          feature="geometry.surface_mesh", method=None)
         width, length, radius = float(width), float(length), float(radius)
         if not all(math.isfinite(float(value)) and float(value) > 0 for value in (width, length, radius)):
             raise ValueError("Bent surface width, length and radius must be finite and positive.")

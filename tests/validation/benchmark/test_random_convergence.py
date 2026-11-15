@@ -28,7 +28,7 @@ def test_f1_resolution_and_polarized_scene():
     sample, _ = rc.build_sample(plan, device="cpu")
     assert sample.scene.subpixel.averaging == "polarized"
     assert sample.scene.subpixel.samples == (3, 3, 3)
-    assert sample.fdtd_kwargs["reference_frequency"] == rc.F0
+    assert sample.fdtd_kwargs["config"].reference_frequency == rc.F0
 
 
 def test_f1_zero_dc_source():
@@ -45,7 +45,7 @@ def test_f1_zero_dc_source():
     assert plan["spec"] == dict(spec, f1_averaging="polarized")
     expected = builders.dielectric(
         spec["scene_id"], n=spec["n"], wavelengths=spec["wavelengths"], bodies=spec["bodies"],
-        kind=spec["kind"], eps=spec["eps"], lossy=spec["lossy"], device="cpu",
+        kind=spec["kind"], eps=spec["eps"], lossy=spec["lossy"],
     ).scene.sources[0]
     sample, _ = rc.build_sample(plan, device="cpu")
     assert len(sample.scene.sources) == 1
@@ -82,7 +82,7 @@ def test_dielectric_catalog_sources_are_zero_dc_without_the_dc_warning():
     builders = [b for b in scene_builders() if b.family == "F1"]
     assert len(builders) == 10
     for builder in builders:
-        scene = builder.build(device="cpu").scene
+        scene = builder.build().scene
         (source,) = scene.sources
         assert source.source_time == mw.GaussianPulse(rc.F0, .8 * rc.F0, phase=math.pi / 2)
         # Uniform cube: the 3D vacuum CFL step sets the sampling clock of the diagnostic.
@@ -109,7 +109,7 @@ def test_conductor_catalog_sources_are_zero_dc():
     values = np.array([pulse.evaluate(t) for t in times])
     assert abs(np.trapezoid(values, times)) / np.trapezoid(abs(values), times) <= 1e-8
     for builder in builders:
-        (source,) = builder.build(device="cpu").scene.sources
+        (source,) = builder.build().scene.sources
         assert source.source_time == expected, builder.name
 
 
@@ -194,7 +194,7 @@ def test_f4_radius_ladder_stays_inside_the_thin_wire_band():
 
     assert rc.THIN_WIRE_MAX_RADIUS_TO_SPACING == thin_wire._MAX_RADIUS_TO_SPACING
     # The base builder radius, measured on the n=40 grid the F4 ladder starts from.
-    sample = datagen.wire("f4_probe", n=40, kind="dipole", count=11, finite=False, device="cpu")
+    sample = datagen.wire("f4_probe", n=40, kind="dipole", count=11, finite=False)
     span = 1.6 * rc.C0 / rc.F0
     assert all(abs(w.radius / (span / 40) - rc.F4_BASE_RADIUS_TO_SPACING) < 1e-12
                for w in sample.scene.thin_wires)
@@ -225,10 +225,9 @@ def test_f4_wire_ports_use_the_gap_binding_across_the_feed(kind):
 
     n = 40
     dx = 1.6 * rc.C0 / rc.F0 / n
-    scene = prepare_scene(datagen.wire("f4_probe", n=n, kind=kind, count=11, finite=False,
-                                       device="cpu").scene)
-    (wire,) = scene.thin_wires
-    (record,) = _resolve_port_bindings(scene, scene.thin_wires)
+    scene = prepare_scene(datagen.wire("f4_probe", n=n, kind=kind, count=11, finite=False).scene, device="cpu")
+    (wire,) = scene.scene.thin_wires
+    (record,) = _resolve_port_bindings(scene, scene.scene.thin_wires)
     assert record["kind"] == "gap" and record["orientation"] == 1
     assert record["positive_point"] == record["negative_point"] + 1
     points = np.asarray(wire.points, dtype=np.float64)
@@ -250,6 +249,6 @@ def test_f4_catalog_ports_use_the_gap_binding():
     builders = [b for b in scene_builders() if b.family == "F4"]
     assert len(builders) == 10
     for builder in builders:
-        scene = prepare_scene(builder.build(device="cpu").scene)
-        (record,) = _resolve_port_bindings(scene, scene.thin_wires)
+        scene = prepare_scene(builder.build().scene, device="cpu")
+        (record,) = _resolve_port_bindings(scene, scene.scene.thin_wires)
         assert record["kind"] == "gap", builder.name

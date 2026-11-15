@@ -18,6 +18,26 @@ from witwin.maxwell.mom.linalg import StoppingRule
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
 
 
+# The fixture holds the FMM payloads from before 9dafc627f. That commit made
+# compact shared storage the FMMConfig default and made every payload record
+# its storage policies and near-coefficient budgets (restore requires them).
+# Each historical case is rebuilt with the old storage defaults selected
+# explicitly; its pinned payload must match field for field, plus the
+# storage fields that are now always recorded.
+LEGACY_STORAGE=dict(table_storage='dense',shift_storage='dense',near_storage='full_matrix')
+EXPLICIT_STORAGE_FIELDS=('table_storage','shift_storage','near_storage',
+    'near_coefficient_workspace_budget_bytes','near_coefficient_cache_budget_bytes')
+
+
+def original_payload_cases():
+    old=json.loads((Path(__file__).parent/'fixtures/bounded_compact_original_payloads.json').read_text())
+    for case in old['cases']:
+        current=mw.mom.FMMConfig(**{**LEGACY_STORAGE,**case['options']})
+        expected=copy.deepcopy(case['payload'])
+        expected['parameters'].update({name:getattr(current,name) for name in EXPLICIT_STORAGE_FIELDS})
+        yield case,current,expected
+
+
 def relative(actual,expected):
     return float(((actual-expected).norm()/expected.norm()).detach())
 
@@ -28,15 +48,15 @@ def physical(tmp_path_factory):
     scene=mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.01,position=(x,0.,0.)),
         mw.Material(eps_r=2.+i,mu_r=1.2+.1*i)) for i,x in enumerate((-.2,.2))],
         sources=[mw.PlaneWave()])
-    fmm=mw.FMMConfig(order=6,kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5),
+    fmm=mw.mom.FMMConfig(order=6,kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5),
         kernel_bound_rule='direct_first_wave_min_v1',table_storage='compact_shared_displacement_v1',
         shift_storage='separable_v1',near_storage='scalar_reciprocal_dk_v1',far_action_batch=32,
         leaf_size=8,separation_ratio=.25,leaf_factor_kernel='primary',leaf_factor_max_edges=16)
-    config=mw.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3),
+    config=mw.mom.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3),
         operator_backend='fmm',fmm=fmm,riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='gmres',preconditioner='rwg_diagonal',fallback='none',
                              rtol=1e-12,atol=0.,maxiter=240,restart=120))
-    prepared=mw.Simulation.mom(scene,frequency=9e7,config=config).prepare()
+    prepared=mw.Simulation.mom(scene,frequencies=9e7,config=config).prepare()
     op=prepared.solver.handle.actions
     assert op.exterior.far and op.far_action_batch==32
     # One complete original weak reference is shared by every new physical
@@ -137,7 +157,7 @@ def test_public_new_policy_solve_exact_restore_and_complete_original_residual(ph
     scene,prepared,op,reference,out=physical
     result=prepared.run()
     assert result.stats()['converged'] and result.stats()['error_budget']['checked']
-    current=result.surface_currents.scattered_coefficients
+    current=mw.mom.surface_currents(result).scattered_coefficients
     original_residual=current@reference.mT-prepared.solver.rhs
     error=float(original_residual.norm()/prepared.solver.rhs.norm())
     assert error<=1e-10
@@ -152,37 +172,37 @@ def test_public_new_policy_solve_exact_restore_and_complete_original_residual(ph
         for cls in (MultipoleOperator,MultipoleSystemActions,SystemOperator):patch.setattr(cls,'__init__',forbidden)
         patch.setattr(torch.linalg,'solve',forbidden)
         restored=mw.Result.load(artifact,scene=scene)
-        assert restored.surface_currents.config.fmm.far_action_batch==32
-        torch.testing.assert_close(restored.surface_currents.scattered_coefficients,current,rtol=0,atol=0)
+        assert mw.mom.surface_currents(restored).config.fmm.far_action_batch==32
+        torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,current,rtol=0,atol=0)
         for field,value in [('far_action_batch',1),('far_action_batch',16),('table_storage','compact')]:
-            bad=copy.deepcopy(result.surface_currents.snapshot());bad['fmm_config']['parameters'][field]=value
-            with pytest.raises(ValueError):SurfaceData.restore(bad,scene,9e7)
+            bad=copy.deepcopy(mw.mom.surface_currents(result).snapshot());bad['fmm_config']['parameters'][field]=value
+            with pytest.raises(ValueError):SurfaceData.restore(bad,scene,9e7,'cuda')
     (out/'public.json').write_text(json.dumps(dict(artifact=str(artifact),artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
-        fmm_config=result.surface_currents.config.fmm.payload(),complete_original_residual=residual,
+        fmm_config=mw.mom.surface_currents(result).config.fmm.payload(),complete_original_residual=residual,
         production_qualification=False),indent=2)+'\n')
 
 
 def test_new_config_requires_exact_batch_version_and_rejects_unsupported_cases():
-    old=json.loads((Path(__file__).parent/'fixtures/bounded_compact_original_payloads.json').read_text())
-    for case in old['cases']:
-        current=mw.FMMConfig(**case['options'])
-        assert current.payload()==case['payload']
-        assert mw.FMMConfig.restore(case['payload'])==current
+    for case,current,expected in original_payload_cases():
+        assert current.payload()==expected
+        assert mw.mom.FMMConfig.restore(json.loads(json.dumps(expected)))==current
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(case['payload'])
         assert 'far_action_batch' not in current.construction()
-    config=mw.FMMConfig(table_storage='compact_shared_displacement_v1',far_action_batch=32)
+    config=mw.mom.FMMConfig(table_storage='compact_shared_displacement_v1',far_action_batch=32)
     payload=config.payload();assert payload['version']=='cartesian_fmm_batched_compact_config_v1'
-    assert mw.FMMConfig.restore(json.loads(json.dumps(payload)))==config
+    assert mw.mom.FMMConfig.restore(json.loads(json.dumps(payload)))==config
     for value in (0,1,33,True,2.,None):
         bad=copy.deepcopy(payload);bad['parameters']['far_action_batch']=value
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     bad=copy.deepcopy(payload);bad['version']='cartesian_fmm_shared_compact_config_v1'
-    with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
-    for kwargs in (dict(far_action_batch=32),dict(table_storage='fft_v1',far_action_batch=32),
+    with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
+    # The batch is rejected on the pre-9dafc627f default (dense) table storage.
+    for kwargs in (dict(LEGACY_STORAGE,far_action_batch=32),dict(table_storage='fft_v1',far_action_batch=32),
         dict(table_storage='compact',far_action_batch=32,order=13),dict(table_storage='compact',far_action_batch=True)):
-        with pytest.raises(ValueError):mw.FMMConfig(**kwargs)
+        with pytest.raises(ValueError):mw.mom.FMMConfig(**kwargs)
     with pytest.raises(NotImplementedError,match='free space'):
-        mw.MoMConfig(operator_backend='fmm',fmm=config,riesz_storage='local_rwg_v1',
-            periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)),stopping=StoppingRule(preconditioner='none'))
+        mw.mom.MoMConfig(operator_backend='fmm',fmm=config,riesz_storage='local_rwg_v1',
+            periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)),stopping=StoppingRule(preconditioner='none'))
     assert compact_batch_workspace_bytes(12,32,4,16)<=128*1024**2
 
 

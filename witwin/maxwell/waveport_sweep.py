@@ -15,6 +15,7 @@ from .fdtd.excitation.modes import (
     solve_mode_source_profile,
 )
 from .lumped import PortSweep
+from .material_cache import refuse_column_material_cache
 from .monitors import ModeMonitor
 from .network import NetworkData, PortData
 from .ports import WavePort
@@ -26,8 +27,11 @@ from .postprocess.waveports import (
     track_modes,
 )
 from .result import Result
-from .scene import prepare_scene
+from .scene import prepare_scene, scene_declarations
 from .sources import CW, ModeSource
+from .errors import UnsupportedFeatureError
+from .compiler.materials import compile_materials
+from .compiler.waveports import compile_waveports
 
 
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
@@ -71,14 +75,14 @@ class WavePortRunManifest:
         }
 
 
-def _mode_context(scene, *, requested_dt=None, base_frequency=None, max_electric_field=None):
-    prepared = prepare_scene(scene)
+def _mode_context(scene, *, requested_dt=None, base_frequency=None, max_electric_field=None, device=None):
+    prepared = prepare_scene(scene, device=device)
     context = SimpleNamespace(
         scene=prepared,
         Ex=torch.empty((1,), device=prepared.device, dtype=torch.float32),
         c=C_0,
-        boundary_kind=prepared.boundary.kind,
-        _compiled_material_model=prepared.compile_materials(),
+        boundary_kind=prepared.scene.boundary.kind,
+        _compiled_material_model=compile_materials(prepared),
         _mode_source_rebuild_from_fields=False,
     )
     resolved_steps = {}
@@ -230,8 +234,9 @@ def _uniform_relative_medium(context, compiled):
     mu = model["mu_r"][selector][mask]
     for name, value in (("eps_r", eps), ("mu_r", mu)):
         if value.is_complex() and bool(torch.any(torch.imag(value) != 0.0)):
-            raise NotImplementedError(
-                f"WavePort {compiled.port_name!r} {name} must be real for TE/TM impedance."
+            raise UnsupportedFeatureError(
+                f"WavePort {compiled.port_name!r} {name} must be real for TE/TM impedance.",
+                feature="port.WavePort", method="fdtd"
             )
         real = torch.real(value)
         if not torch.allclose(real, real[0].expand_as(real), rtol=1.0e-4, atol=1.0e-6):
@@ -372,9 +377,10 @@ def _material_cross_section_probe(model, compiled) -> torch.Tensor | None:
 def _validate_fixed_trainable_cross_sections(scene, context, compiled_by_name, selected_names):
     inputs = scene_trainable_material_tensors(scene)
     if not inputs:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Differentiable WavePort runs require trainable inputs that contribute to "
-            "the prepared material tensors."
+            "the prepared material tensors.",
+            feature="port.WavePort", method="fdtd"
         )
     probes = tuple(
         probe
@@ -397,11 +403,12 @@ def _validate_fixed_trainable_cross_sections(scene, context, compiled_by_name, s
         dependency is not None and bool(torch.any(dependency.detach() != 0))
         for dependency in dependencies
     ):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Differentiable WavePort runs require fixed port cross-sections and launch "
             "planes; a trainable material or geometry input affects a selected WavePort "
             "aperture or its adjacent source plane. Move the design region away from the "
-            "port launch."
+            "port launch.",
+            feature="port.WavePort", method="fdtd"
         )
 
 
@@ -418,7 +425,8 @@ def _detach_material_model(value):
 
 
 def resolve_waveport_run_manifest(scene, sweep: PortSweep, frequencies, *, requested_dt=None,
-                                  base_frequency=None, max_electric_field=None) -> WavePortRunManifest:
+                                  base_frequency=None, max_electric_field=None, device=None) -> WavePortRunManifest:
+    declared = scene_declarations(scene)
     if not isinstance(sweep, PortSweep):
         raise TypeError("sweep must be a PortSweep.")
     if sweep.source_time is not None:
@@ -426,7 +434,8 @@ def resolve_waveport_run_manifest(scene, sweep: PortSweep, frequencies, *, reque
             "WavePort PortSweep uses a calibrated per-frequency CW basis; source_time must be None."
         )
     if sweep.amplitude.requires_grad:
-        raise NotImplementedError("WavePort PortSweep does not yet support trainable amplitude.")
+        raise UnsupportedFeatureError("WavePort PortSweep does not yet support trainable amplitude.",
+                                      feature="port.WavePort", method="fdtd")
     frequency_values = tuple(float(value) for value in frequencies)
     if not frequency_values:
         raise ValueError("WavePort PortSweep requires at least one frequency.")
@@ -436,21 +445,22 @@ def resolve_waveport_run_manifest(scene, sweep: PortSweep, frequencies, *, reque
         right <= left for left, right in zip(frequency_values, frequency_values[1:])
     ):
         raise ValueError("WavePort PortSweep frequencies must be strictly increasing.")
-    wave_ports = tuple(port for port in scene.ports if isinstance(port, WavePort))
+    wave_ports = tuple(port for port in declared.ports if isinstance(port, WavePort))
     if not wave_ports:
         raise ValueError("WavePort PortSweep requires at least one WavePort.")
     non_wave_rf_ports = tuple(
         port
-        for port in scene.ports
+        for port in declared.ports
         if hasattr(port, "reference_impedance") and hasattr(port, "termination")
     )
     unterminated_non_wave_ports = tuple(
         port.name for port in non_wave_rf_ports if port.termination is None
     )
     if unterminated_non_wave_ports:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "A WavePort run can retain lumped/terminal ports only as explicit passive "
-            f"terminations; unterminated entries are {unterminated_non_wave_ports}."
+            f"terminations; unterminated entries are {unterminated_non_wave_ports}.",
+            feature="port.WavePort", method="fdtd"
         )
     ports_by_name = {port.name: port for port in wave_ports}
     selected_names = tuple(ports_by_name) if sweep.ports is None else sweep.ports
@@ -459,17 +469,17 @@ def resolve_waveport_run_manifest(scene, sweep: PortSweep, frequencies, *, reque
         raise ValueError(f"PortSweep references missing WavePort entries: {missing}.")
     if any(
         getattr(port, "source_time", None) is not None
-        for port in scene.ports
+        for port in declared.ports
         if not isinstance(port, WavePort)
-    ) or scene.sources:
+    ) or declared.sources:
         raise ValueError("WavePort PortSweep requires a Scene without independent field sources.")
 
-    context = _mode_context(scene, requested_dt=requested_dt, base_frequency=base_frequency,
+    context = _mode_context(scene, requested_dt=requested_dt, base_frequency=base_frequency, device=device,
                             max_electric_field=max_electric_field)
-    compiled_by_name = {entry.port_name: entry for entry in scene.compile_waveports()}
-    if scene_trainable_material_tensors(scene):
+    compiled_by_name = {entry.port_name: entry for entry in compile_waveports(prepare_scene(scene, device=device))}
+    if scene_trainable_material_tensors(declared):
         _validate_fixed_trainable_cross_sections(
-            scene,
+            declared,
             context,
             compiled_by_name,
             selected_names,
@@ -518,10 +528,11 @@ def resolve_waveport_run_manifest(scene, sweep: PortSweep, frequencies, *, reque
     )
 
 
-def _source_plane(scene, prepared_port: PreparedWavePort) -> tuple[float, float, float]:
+def _source_plane(scene, prepared_port: PreparedWavePort, *, device) -> tuple[float, float, float]:
     port = prepared_port.port
     axis_index = "xyz".index(port.normal_axis)
-    grid_scene = scene if hasattr(scene, port.normal_axis) else prepare_scene(scene)
+    # A declarative scene is prepared on the run's device, where its geometry lives.
+    grid_scene = scene if hasattr(scene, port.normal_axis) else prepare_scene(scene, device=device)
     nodes = getattr(grid_scene, port.normal_axis)
     plane_index = prepared_port.compiled.electric_plane_index
     source_index = plane_index - port.direction_sign
@@ -554,7 +565,8 @@ def _user_monitor_payloads(result, scene) -> dict:
     payload was requested by the user on the original scene and must survive into
     the assembled Result instead of being silently dropped.
     """
-    user_names = {monitor.name for monitor in scene.monitors}
+    declared = scene_declarations(scene)
+    user_names = {monitor.name for monitor in declared.monitors}
     return {
         name: payload
         for name, payload in result._monitors.items()
@@ -570,7 +582,9 @@ def _column_scene(
     active_mode_index: int,
     frequency_index: int,
     amplitude: complex,
+    device,
 ):
+    declared = scene_declarations(scene)
     frequency = manifest.frequencies[frequency_index]
     sources = []
     monitors = []
@@ -592,7 +606,7 @@ def _column_scene(
             monitors.append(monitor)
         if port_index != active_port_index:
             continue
-        source_position = _source_plane(scene, prepared_port)
+        source_position = _source_plane(scene, prepared_port, device=device)
         coefficients = prepared_port.tracking.orientation[
             frequency_index,
             active_mode_index,
@@ -618,11 +632,11 @@ def _column_scene(
             object.__setattr__(source, "_wave_family", compiled_mode.family)
             object.__setattr__(source,"_conductor_model",compiled_mode.conductor_model)
             sources.append(source)
-    passive_ports = tuple(port for port in scene.ports if not isinstance(port, WavePort))
-    return scene.clone(
+    passive_ports = tuple(port for port in declared.ports if not isinstance(port, WavePort))
+    return declared.updated(
         ports=passive_ports,
         sources=sources,
-        monitors=[*scene.monitors, *monitors],
+        monitors=(*declared.monitors, *monitors),
     )
 
 
@@ -636,10 +650,7 @@ def _extract_tracked_waves(result, manifest: WavePortRunManifest, frequency_inde
         complex_tem = any(data.get("beta_complex") is not None
                           for data in prepared_port.mode_data[frequency_index])
         for raw_index in range(len(prepared_port.compiled.modes)):
-            modal = result.monitor(
-                _monitor_name(prepared_port.port.name, raw_index),
-                resolve_modal=True,
-            )
+            modal = result._mode_overlap(_monitor_name(prepared_port.port.name, raw_index))
             scale = 1.0 if complex_tem else torch.sqrt(torch.abs(modal["mode_power"]))
             raw_a.append(modal["amplitude_forward"] * scale)
             raw_b.append(modal["amplitude_backward"] * scale)
@@ -680,6 +691,7 @@ def _execute_columns(
     *,
     amplitude: complex,
 ):
+    refuse_column_material_cache(simulation.config, runner="A WavePort sweep or excitation")
     incident_columns = []
     reflected_columns = []
     column_stats = []
@@ -702,6 +714,7 @@ def _execute_columns(
                 active_mode_index=active_mode_index,
                 frequency_index=frequency_index,
                 amplitude=amplitude,
+                device=simulation.config.device,
             )
             sub_simulation = type(simulation)(
                 scene=run_scene,
@@ -872,7 +885,7 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
         }
     return Result(
         method="fdtd",
-        scene=scene,
+        scene=scene_declarations(scene),
         prepared_scene=last_result.prepared_scene,
         frequency=manifest.frequencies[0],
         frequencies=manifest.frequencies,
@@ -956,7 +969,7 @@ def run_waveport_excitation(simulation, scene, excitation, manifest: WavePortRun
     # identical to a plain FDTD run of the injected mode source.
     return Result(
         method="fdtd",
-        scene=scene,
+        scene=scene_declarations(scene),
         prepared_scene=last_result.prepared_scene,
         frequency=manifest.frequencies[0],
         frequencies=manifest.frequencies,

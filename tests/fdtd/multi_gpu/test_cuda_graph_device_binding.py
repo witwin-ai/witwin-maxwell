@@ -31,36 +31,44 @@ from witwin.maxwell.fdtd.cuda.runtime.graph import (
     suspend_capture,
 )
 
+
+def _snapshot(result):
+    """Last-step real fields by Yee component (Result.time_snapshot, as plain tensors)."""
+    return {name: data.values for name, data in result.time_snapshot.items()}
+
+
 _FREQUENCY = 1.0e9
 
 
-def _vacuum_scene(device):
+def _vacuum_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.25, 0.25), (-0.25, 0.25))),
-        grid=mw.GridSpec.uniform(0.05),
-        boundary=mw.BoundarySpec.none(),
-        device=str(device),
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
-            name="src",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ex", "Ey", "Ez")))
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.25, 0.25), (-0.25, 0.25))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.none(),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
+                name="src",
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ex", "Ey", "Ez")),),
+            )
     return scene
 
 
 def _run(device, *, cuda_graph: bool, time_steps: int = 40):
     return mw.Simulation.fdtd(
-        _vacuum_scene(device),
-        frequency=_FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        cuda_graph=cuda_graph,
+        _vacuum_scene(),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            cuda_graph=cuda_graph,
+            device=device,
+        ),
     ).run()
 
 
@@ -79,19 +87,19 @@ def test_graph_stepping_on_non_default_device_matches_eager(
     torch.cuda.set_device(cuda_p2p_devices[0])
     assert torch.cuda.current_device() != device.index
 
-    eager = _run(device, cuda_graph=False)
-    graphed = _run(device, cuda_graph=True)
+    eager = _snapshot(_run(device, cuda_graph=False))
+    graphed = _snapshot(_run(device, cuda_graph=True))
 
-    assert set(eager.fields) == set(graphed.fields)
-    for name, reference in eager.fields.items():
-        assert str(graphed.fields[name].device) == str(device)
-        assert torch.equal(graphed.fields[name], reference), (
+    assert set(eager) == set(graphed)
+    for name, reference in eager.items():
+        assert str(graphed[name].device) == str(device)
+        assert torch.equal(graphed[name], reference), (
             f"{name} diverges between graph and eager stepping on {device}"
         )
     # A no-op replay leaves the field at its warmup amplitude, so the peak is a
     # blunt second witness that the graph actually carried the whole run.
-    assert float(torch.abs(graphed.fields["EZ"]).max()) == pytest.approx(
-        float(torch.abs(eager.fields["EZ"]).max()), rel=0.0, abs=0.0
+    assert float(torch.abs(graphed["EZ"]).max()) == pytest.approx(
+        float(torch.abs(eager["EZ"]).max()), rel=0.0, abs=0.0
     )
 
 

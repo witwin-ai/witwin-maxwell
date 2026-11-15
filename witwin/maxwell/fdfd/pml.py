@@ -15,7 +15,7 @@ distance rather than by index):
 
 where ``d`` is the physical layer thickness of that face and ``m``, ``R``,
 ``kappa_max`` and ``alpha_max`` are the FDTD defaults
-(``DEFAULT_CPML_CONFIG``: cubic grading, R = 1e-6, kappa = 1, alpha = 0).
+(``DEFAULT_CPML_GRADING``: cubic grading, R = 1e-6, kappa = 1, alpha = 0).
 ``scale`` is the FDTD reading of ``BoundarySpec.strength``: a value in
 (0, 100] multiplies ``sigma_max``; 0 and any value above 100 (including the
 ``BoundarySpec.pml`` default 1e6) leave the nominal ``sigma_max`` unchanged.
@@ -39,7 +39,7 @@ import math
 
 import numpy as np
 
-from ..fdtd.boundary.cpml import DEFAULT_CPML_CONFIG, _legacy_strength_scale
+from ..fdtd.boundary.cpml import DEFAULT_CPML_GRADING, _legacy_strength_scale
 
 
 def _face_depth(positions, nodes, layers, *, low):
@@ -52,7 +52,7 @@ def _face_depth(positions, nodes, layers, *, low):
 
 
 def stretch_profile_1d(positions, nodes, low_layers, high_layers, *, omega, eps0, eta0, strength,
-                       config=DEFAULT_CPML_CONFIG):
+                       grading=DEFAULT_CPML_GRADING):
     """Complex stretch factors s at ``positions`` (float64 host coordinates).
 
     ``nodes`` are the axis' primal nodes including the appended PML cells;
@@ -61,10 +61,10 @@ def stretch_profile_1d(positions, nodes, low_layers, high_layers, *, omega, eps0
     """
     positions = np.asarray(positions, dtype=np.float64)
     nodes = np.asarray(nodes, dtype=np.float64)
-    order = float(config["grading_order"])
-    kappa_max = float(config["kappa_max"])
-    alpha_max = float(config["alpha_max"])
-    numerator = -(order + 1.0) * math.log(float(config["reflection"])) / (2.0 * float(eta0))
+    order = float(grading.grading_order)
+    kappa_max = float(grading.kappa_max)
+    alpha_max = float(grading.alpha_max)
+    numerator = -(order + 1.0) * math.log(float(grading.reflection)) / (2.0 * float(eta0))
     numerator *= _legacy_strength_scale(strength)
 
     depth = np.zeros_like(positions)

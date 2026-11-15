@@ -20,9 +20,9 @@ def measure(subdivision, integration=INTEGRATION):
     start = time.perf_counter()
     torch.cuda.reset_peak_memory_stats()
     scene = physical_scene_without_stencils(make_scene('ellipsoid', .01))
-    config = mw.MoMConfig(subdivisions=subdivision, integration=integration,
-                          query_config=mw.FieldQueryConfig(max_order=128))
-    result = mw.Simulation.mom(scene, frequency=FREQUENCY, config=config).run()
+    config = mw.mom.MoMConfig(subdivisions=subdivision, integration=integration,
+                          query_config=mw.mom.FieldQueryConfig(max_order=128))
+    result = mw.Simulation.mom(scene, frequencies=FREQUENCY, config=config).run()
     control, normals, areas, angles = control_sphere(order=6, radius=.2)
     exterior = torch.cat((torch.tensor(POINTS[:-1],device='cuda',dtype=torch.float64),control))
     interior = torch.tensor(POINTS[-1:],device='cuda',dtype=torch.float64)
@@ -32,7 +32,7 @@ def measure(subdivision, integration=INTEGRATION):
             values['exterior_'+kind+'_'+name] = field
     for name,field in zip(('E','H'),result.query_fields(interior,region_id='interior',field_kind='total')):
         values['interior_total_'+name] = field
-    far,_ = result.far_field(normals)
+    far = mw.mom.far_field(result, normals)[0].values[0]
     values['far_E'] = far
     e,h = values['exterior_scattered_E'][3:],values['exterior_scattered_H'][3:]
     et,ht = values['exterior_total_E'][3:],values['exterior_total_H'][3:]

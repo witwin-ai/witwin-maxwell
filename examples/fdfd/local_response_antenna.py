@@ -15,20 +15,22 @@ import witwin.maxwell as mw
 def build(passes=1):
     lateral = [-.2,-.15,-.12,-.08,-.06,-.04,-.02,0.,.02,.04,.06,.08,.12,.15,.2]
     vertical = [-.2,-.15,-.12,-.08,-.04,-.02,0.,.02,.04,.08,.12,.15,.2]
+    source = mw.fdfd.LumpedCurrentSource(start=(-.02,0.,0.),end=(.02,0.,0.),current=1.)
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.2,.2),)*3),
                      grid=mw.GridSpec.custom(lateral,lateral,vertical),
-                     boundary=mw.BoundarySpec.pml(num_layers=3,strength=4),device='cuda')
-    scene.add_structure(mw.Structure(name='substrate',geometry=mw.Box(position=(0.,0.,-.01),size=(.16,.16,.02)),material=mw.Material(eps_r=3.5)))
-    scene.add_structure(mw.Structure(name='ground',geometry=mw.Box(position=(0.,0.,-.02),size=(.16,.16,0.)),material=mw.Material(pec=True)))
-    source = mw.LumpedCurrentSource(start=(-.02,0.,0.),end=(.02,0.,0.),current=1.)
-    scene.add_source(source)
-    observations = (mw.FieldProjection.voltage('feed',source.start,source.end),
-                    mw.FarFieldProjection('far_x',bounds=((-0.12,.12),)*3,direction=(0.,0.,1.),polarization=(1.,0.,0.)),
-                    mw.FarFieldProjection('far_y',bounds=((-0.12,.12),)*3,direction=(0.,0.,1.),polarization=(0.,1.,0.)))
-    config = mw.LocalResponseConfig(mw.LocalDesignRegion(bounds=((-0.06,.06),(-0.06,.06),(0.,0.)),components=('Ex','Ey')),
+                     boundary=mw.BoundarySpec.pml(num_layers=3,strength=4),
+                     structures=(
+                         mw.Structure(name='substrate',geometry=mw.Box(position=(0.,0.,-.01),size=(.16,.16,.02)),material=mw.Material(eps_r=3.5)),
+                         mw.Structure(name='ground',geometry=mw.Box(position=(0.,0.,-.02),size=(.16,.16,0.)),material=mw.Material(pec=True)),
+                     ),
+                     sources=(source,))
+    observations = (mw.fdfd.FieldProjection.voltage('feed',source.start,source.end),
+                    mw.fdfd.FarFieldProjection('far_x',bounds=((-0.12,.12),)*3,direction=(0.,0.,1.),polarization=(1.,0.,0.)),
+                    mw.fdfd.FarFieldProjection('far_y',bounds=((-0.12,.12),)*3,direction=(0.,0.,1.),polarization=(0.,1.,0.)))
+    config = mw.fdfd.LocalResponseConfig(mw.fdfd.LocalDesignRegion(bounds=((-0.06,.06),(-0.06,.06),(0.,0.)),components=('Ex','Ey')),
                                    observations,rhs_batch_size=16,max_response_bytes=2**30,tolerance=1e-7)
     simulation = mw.Simulation.fdfd(scene,frequencies=(.9e9,1.e9,1.1e9),
-                    solver=mw.GMRES(solver_type='direct',precision='double'),local_response=config)
+                    config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type='direct',precision='double'),local_response=config))
     return simulation
 
 

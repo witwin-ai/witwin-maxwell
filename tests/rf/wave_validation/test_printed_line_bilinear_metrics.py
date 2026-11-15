@@ -14,7 +14,7 @@ class Observation:
     frequencies=(1e9,)
     def __init__(self,faces):self.faces=faces
     def stats(self):return dict(normalize_source=False)
-    def monitor(self,name,*,frequency):assert frequency==1e9;return dict(faces=self.faces)
+    def raw_monitor(self,name,*,frequency):assert frequency==1e9;return dict(faces=self.faces)
 
 def observed(E=1.,H=1.,*,copper=False,reactive=False):
     nodes=torch.tensor([-.01,0,.01],dtype=torch.float64);half=torch.tensor([-.005,.005],dtype=torch.float64);faces={}

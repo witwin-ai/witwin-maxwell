@@ -1,4 +1,4 @@
-"""CPU-only GC state and exact observer layout/readout contracts."""
+"""GC state and exact observer layout/readout contracts."""
 
 from contextlib import nullcontext
 import gc
@@ -11,16 +11,17 @@ from witwin.maxwell._gc import paused_cyclic_gc
 from witwin.maxwell.compiler import monitors as compiler
 from witwin.maxwell.fdtd import observers
 from tests.monitors.observers.test_point_observer_batch_resolve import (
-    COMPONENTS, assert_exact, fill_groups, grid_scene, make_solver,
+    COMPONENTS, assert_exact, fill_groups, grid_scene, make_solver, requires_cuda,
 )
 
 
 @pytest.fixture(autouse=True)
-def cpu_and_gc_state(monkeypatch):
+def cpu_and_gc_state(monkeypatch, request):
     def fail(*args, **kwargs):
-        raise AssertionError("Observer GC tests must never initialize CUDA")
+        raise AssertionError("Host-only observer GC tests must never initialize CUDA")
 
-    monkeypatch.setattr(torch.cuda, "_lazy_init", fail)
+    if not request.node.get_closest_marker("cuda"):
+        monkeypatch.setattr(torch.cuda, "_lazy_init", fail)
     enabled = gc.isenabled()
     try:
         yield
@@ -63,13 +64,16 @@ def test_nested_pause_restores_outer_state(monkeypatch, enabled):
 
 def point_scene():
     scene = grid_scene()
-    for index in range(8):
-        scene.add_monitor(mw.PointMonitor(
-            f"point_{index}", ((index - 4) / 32, .021, -.013), fields=COMPONENTS,
-        ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.PointMonitor(
+              f"point_{index}", ((index - 4) / 32, .021, -.013), fields=COMPONENTS,
+          ) for index in range(8)),
+    ))
     return scene
 
 
+@requires_cuda
 @pytest.mark.parametrize("stage", ["compile", "prepare", "readout"])
 @pytest.mark.parametrize("enabled", [True, False])
 @pytest.mark.parametrize("raises", [False, True])
@@ -104,6 +108,7 @@ def test_bulk_helpers_pause_and_restore(monkeypatch, stage, enabled, raises):
     assert gc.isenabled() is enabled
 
 
+@requires_cuda
 def test_records_groups_and_results_equal_without_pause(monkeypatch):
     scene = point_scene()
     actual, expected = make_solver(scene), make_solver(scene)

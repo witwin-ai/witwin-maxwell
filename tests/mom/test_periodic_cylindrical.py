@@ -21,7 +21,7 @@ def test_cylindrical_asymptotics_hankel_fields_power_and_evanescent_orders(negat
         from witwin.maxwell.mom.physics import compile_medium
         pole=mw.DrudePole(plasma_frequency=math.sqrt(2)*handle.exterior.frequency,gamma=0.)
         exterior=compile_medium(mw.Material(drude_poles=(pole,),mu_drude_poles=(pole,)),handle.exterior.frequency)
-        handle=SystemDecodeHandle(handle.system,exterior,[mw.PlaneWave()],mw.MoMConfig(integration=handle.integration),{})
+        handle=SystemDecodeHandle(handle.system,exterior,[mw.PlaneWave()],mw.mom.MoMConfig(integration=handle.integration),{})
         assert handle.exterior.k.real<0
     sample=handle.system.bodies[0].mesh.vertices
     lattice=LatticeSpec(sample.new_tensor([[.9,0.,0.]]),sample.new_zeros(3))

@@ -14,13 +14,12 @@ from tests.support.layered_network_references import (
 
 
 pytestmark = pytest.mark.cuda
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")
 C0 = 299792458.0
 
 
-def gap_port(name, positive, negative, axis, size):
+def gap_port(name, positive, negative, axis):
     return mw.LumpedPort(name, positive=positive, negative=negative, voltage_path=mw.AxisPath(axis),
-                         current_surface=mw.Box(position=tuple((p + n) / 2 for p, n in zip(positive, negative)),
-                                                size=(size, size, size)),
                          reference_impedance=50.0)
 
 
@@ -31,10 +30,11 @@ def square_loop(side, width, gap, z):
             (-edge, edge, inner, edge, z), (-edge, -inner, -edge, edge, z), (inner, edge, -edge, edge, z)]
 
 
+@requires_cuda
 def test_square_loop_inductance_and_radiation():
     side, width, frequency, z = 1e-3, 20e-6, 1e9, .5e-3
     stack = LayerStack((Layer("air", 1e-3, 1.0),), HalfSpace(), HalfSpace())
-    port = gap_port("loop", (width / 2, -side / 2, z), (-width / 2, -side / 2, z), "x", width)
+    port = gap_port("loop", (width / 2, -side / 2, z), (-width / 2, -side / 2, z), "x")
     network = solve_layered_network(stack, square_loop(side, width, width, z), [port], (frequency,),
                                     bridge_width=width, max_edge=20e-6, edge_cell=5e-6)
     impedance = network.to_z()[0, 0, 0].item()
@@ -48,7 +48,7 @@ def test_square_loop_inductance_and_radiation():
 
 def coplanar_strips(length, width, gap, bridge, z):
     strips = [(0, length, gap / 2, gap / 2 + width, z), (0, length, -gap / 2 - width, -gap / 2, z)]
-    ports = [gap_port(name, (x, gap / 2, z), (x, -gap / 2, z), "y", bridge)
+    ports = [gap_port(name, (x, gap / 2, z), (x, -gap / 2, z), "y")
              for name, x in (("p1", bridge / 2), ("p2", length - bridge / 2))]
     return strips, ports
 
@@ -59,6 +59,7 @@ def abcd(z):
                         torch.stack((torch.ones_like(z11), z22), -1)), -2) / z21[..., None, None]
 
 
+@requires_cuda
 def test_coplanar_strips_on_dielectric_half_space():
     width = gap = 10e-6
     eps_r, frequency, z, bridge = 11.9, 10e9, 100e-6, 4e-6
@@ -97,6 +98,7 @@ def rfic_network():
     return run(), run
 
 
+@requires_cuda
 def test_rfic_reciprocity_and_passivity(rfic_network):
     network, _ = rfic_network
     y = network.to_y()
@@ -106,6 +108,7 @@ def test_rfic_reciprocity_and_passivity(rfic_network):
     assert torch.linalg.eigvalsh((y + y.conj().transpose(-1, -2)) / 2).min() > 0
 
 
+@requires_cuda
 def test_rfic_network_is_deterministic(rfic_network):
     network, run = rfic_network
     again = run()
@@ -117,12 +120,12 @@ def test_port_validation():
     stack = LayerStack((Layer("air", 1e-3, 1.0),), HalfSpace(), HalfSpace())
     strips, _ = coplanar_strips(100e-6, 10e-6, 10e-6, 4e-6, 0.)
     with pytest.raises(ValueError, match="axis-aligned"):
-        gap_port("plane", (2e-6, 5e-6, 0.), (2e-6, -5e-6, 1e-6), "y", 4e-6)
-    cases = ((gap_port("off", (2e-6, 30e-6, 0.), (2e-6, -5e-6, 0.), "y", 4e-6), "on metal"),
-             (gap_port("short", (2e-6, 12e-6, 0.), (2e-6, 6e-6, 0.), "y", 4e-6), "bridge a gap"))
+        gap_port("plane", (2e-6, 5e-6, 0.), (2e-6, -5e-6, 1e-6), "y")
+    cases = ((gap_port("off", (2e-6, 30e-6, 0.), (2e-6, -5e-6, 0.), "y"), "on metal"),
+             (gap_port("short", (2e-6, 12e-6, 0.), (2e-6, 6e-6, 0.), "y"), "bridge a gap"))
     for port, message in cases:
         with pytest.raises(ValueError, match=message):
             solve_layered_network(stack, strips, [port], (1e9,), bridge_width=4e-6, max_edge=5e-6)
-    port = gap_port("vertical", (2e-6, 5e-6, 0.), (2e-6, 5e-6, 1e-6), "z", 4e-6)
+    port = gap_port("vertical", (2e-6, 5e-6, 0.), (2e-6, 5e-6, 1e-6), "z")
     with pytest.raises(ValueError, match="horizontal"):
         solve_layered_network(stack, strips, [port], (1e9,), bridge_width=4e-6, max_edge=5e-6)

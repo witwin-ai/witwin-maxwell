@@ -98,7 +98,6 @@ def test_result_round_trip_restores_network_data(tmp_path):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
     )
     path = tmp_path / "result.pt"
 

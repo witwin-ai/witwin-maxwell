@@ -32,19 +32,19 @@ def _port(name="feed", *, x=0.0, reference_impedance=50.0):
 
 
 def _series_circuit(*, resistance, inductance, capacitance, source_amplitude):
-    circuit = mw.Circuit("gradient_network")
+    circuit = mw.circuits.Circuit("gradient_network")
     input_node = circuit.node("input")
     middle = circuit.node("middle")
     output = circuit.node("output")
-    circuit.add(mw.Resistor("R1", input_node, middle, resistance))
-    circuit.add(mw.Inductor("L1", middle, output, inductance))
-    circuit.add(mw.Capacitor("C1", output, circuit.ground, capacitance))
+    circuit.add(mw.rf.Resistor("R1", input_node, middle, resistance))
+    circuit.add(mw.rf.Inductor("L1", middle, output, inductance))
+    circuit.add(mw.rf.Capacitor("C1", output, circuit.ground, capacitance))
     circuit.add(
-        mw.CurrentSource(
+        mw.circuits.CurrentSource(
             "I1",
             circuit.ground,
             input_node,
-            waveform=mw.SineWaveform(0.0, source_amplitude, 3.0e9),
+            waveform=mw.circuits.SineWaveform(0.0, source_amplitude, 3.0e9),
         )
     )
     circuit.bind_port("feed", positive=input_node, negative=circuit.ground)
@@ -53,16 +53,16 @@ def _series_circuit(*, resistance, inductance, capacitance, source_amplitude):
 
 def _one_port_scene(circuit, *, material_density=None, reference_impedance=50.0):
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+        subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.02, 0.02),) * 3),
         grid=mw.GridSpec.uniform(0.005),
         boundary=mw.BoundarySpec.none(),
         ports=(_port(reference_impedance=reference_impedance),),
         circuits=(circuit,),
-        device="cuda",
     )
     if material_density is not None:
-        scene.add_material_region(
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
             mw.MaterialRegion(
                 name="bound_port_design",
                 geometry=mw.Box(
@@ -71,17 +71,19 @@ def _one_port_scene(circuit, *, material_density=None, reference_impedance=50.0)
                 ),
                 density=material_density,
                 eps_bounds=(1.0, 4.0),
-            )
-        )
+            ),
+        ))
     return scene
 
 
 def _port_voltage_objective(scene_or_module, *, steps=16):
     result = mw.Simulation.fdtd(
         scene_or_module,
-        frequency=3.0e9,
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        frequencies=3.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     return result.port("feed").voltage.abs().square().sum(), result
 
@@ -117,7 +119,7 @@ def test_circuit_parameter_adjoint_matches_central_difference(
         max_relative_error=0.01,
     )
     assert result.port("feed").voltage.grad_fn is not None
-    assert result.circuit("gradient_network").node_voltages.device.type == "cuda"
+    assert mw.circuits.circuit(result, "gradient_network").node_voltages.device.type == "cuda"
 
 
 def test_float64_circuit_leaf_survives_float32_prepared_cache():
@@ -142,7 +144,7 @@ def test_float64_circuit_leaf_survives_float32_prepared_cache():
         (2.5, 1.25, 0.625),
         max_relative_error=0.01,
     )
-    assert result.solver_stats["circuit_cuda_graph_active"] is False
+    assert result.stats()["circuit_cuda_graph_active"] is False
 
 
 class _BoundPortMaterialScene(mw.SceneModule):
@@ -219,26 +221,25 @@ class _SharedCircuitGeometryScene(mw.SceneModule):
             capacitance=1.0e-12,
             source_amplitude=0.01,
         )
-        scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.02, 0.02),) * 3),
-            grid=mw.GridSpec.uniform(0.005),
-            boundary=mw.BoundarySpec.none(),
-            ports=(_port(),),
-            circuits=(circuit,),
-            device="cuda",
-            subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
-        )
         extent = 0.012 + 0.004 * torch.sigmoid(self.design)
-        scene.add_structure(
-            mw.Structure(
-                name="shared_design_box",
-                geometry=mw.Box(
-                    position=(0.0, 0.0, 0.0),
-                    size=torch.stack((extent, extent, extent)),
+        scene = mw.Scene(
+                    domain=mw.Domain(bounds=((-0.02, 0.02),) * 3),
+                    grid=mw.GridSpec.uniform(0.005),
+                    boundary=mw.BoundarySpec.none(),
+                    ports=(_port(),),
+                    circuits=(circuit,),
+                    subpixel=mw.SubpixelSpec(samples=3, averaging="polarized"),
+                    structures=(
+                mw.Structure(
+                    name="shared_design_box",
+                    geometry=mw.Box(
+                        position=(0.0, 0.0, 0.0),
+                        size=torch.stack((extent, extent, extent)),
+                    ),
+                    material=mw.Material(eps_r=2.5),
                 ),
-                material=mw.Material(eps_r=2.5),
-            )
-        )
+                ),
+                )
         return scene
 
 
@@ -254,13 +255,13 @@ def test_shared_scene_module_circuit_and_geometry_graph_matches_central_differen
 
 
 def _two_port_scene(load_resistance):
-    circuit = mw.Circuit("two_port_load")
+    circuit = mw.circuits.Circuit("two_port_load")
     load_node = circuit.node("load")
     middle = circuit.node("middle")
     output = circuit.node("output")
-    circuit.add(mw.Resistor("R1", load_node, middle, load_resistance))
-    circuit.add(mw.Inductor("L1", middle, output, 0.4e-9))
-    circuit.add(mw.Capacitor("C1", output, circuit.ground, 0.8e-12))
+    circuit.add(mw.rf.Resistor("R1", load_node, middle, load_resistance))
+    circuit.add(mw.rf.Inductor("L1", middle, output, 0.4e-9))
+    circuit.add(mw.rf.Capacitor("C1", output, circuit.ground, 0.8e-12))
     circuit.bind_port("load", positive=load_node, negative=circuit.ground)
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.025, 0.025),) * 3),
@@ -268,7 +269,6 @@ def _two_port_scene(load_resistance):
         boundary=mw.BoundarySpec.pml(num_layers=3),
         ports=(_port("feed", x=-0.01), _port("load", x=0.01)),
         circuits=(circuit,),
-        device="cuda",
     )
 
 
@@ -279,13 +279,15 @@ def test_two_port_insertion_loss_adjoint_matches_central_difference():
     def objective():
         result = mw.Simulation.fdtd(
             scene,
-            frequency=3.0e9,
-            excitations=mw.PortExcitation(
+            frequencies=3.0e9,
+            excitations=mw.rf.PortExcitation(
                 "feed",
                 source_time=mw.GaussianPulse(frequency=3.0e9, fwidth=1.5e9),
             ),
-            run_time=mw.TimeConfig(time_steps=48),
-            spectral_sampler=mw.SpectralSampler(window="none"),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=48),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            ),
         ).run()
         transmission = result.port("load").b / result.port("feed").a
         insertion_loss_db = -20.0 * torch.log10(torch.abs(transmission).clamp_min(1.0e-12))
@@ -313,7 +315,7 @@ def test_circuit_data_objective_adjoint_matches_central_difference():
 
     def objective():
         result = _port_voltage_objective(scene, steps=16)[1]
-        data = result.circuit("gradient_network")
+        data = mw.circuits.circuit(result, "gradient_network")
         response = data.node_voltage("output")[1:] + 25.0 * data.branch_current("R1")[1:]
         return response.square().sum(), result
 
@@ -323,7 +325,7 @@ def test_circuit_data_objective_adjoint_matches_central_difference():
         (2.5, 1.25, 0.625),
         max_relative_error=0.01,
     )
-    data = result.circuit("gradient_network")
+    data = mw.circuits.circuit(result, "gradient_network")
     assert data.node_voltages.grad_fn is not None
     assert data.branch_currents.grad_fn is not None
 
@@ -341,7 +343,7 @@ def test_all_circuit_data_power_balance_and_tensor_diagnostics_are_differentiabl
 
     def objective():
         result = _port_voltage_objective(scene, steps=16)[1]
-        data = result.circuit("gradient_network")
+        data = mw.circuits.circuit(result, "gradient_network")
         tensor_diagnostics = {
             name: value
             for name, value in data.diagnostics.items()
@@ -396,7 +398,7 @@ def test_current_source_branch_objective_retains_waveform_gradient():
 
     def objective():
         result = _port_voltage_objective(scene, steps=16)[1]
-        current = result.circuit("gradient_network").branch_current("I1")[1:]
+        current = mw.circuits.circuit(result, "gradient_network").branch_current("I1")[1:]
         return current.square().sum(), result
 
     result = _assert_three_step_central_difference(
@@ -405,7 +407,7 @@ def test_current_source_branch_objective_retains_waveform_gradient():
         (1.0e-3, 5.0e-4, 2.5e-4),
         max_relative_error=0.01,
     )
-    assert result.circuit("gradient_network").branch_currents.grad_fn is not None
+    assert mw.circuits.circuit(result, "gradient_network").branch_currents.grad_fn is not None
 
 
 def test_spice_parameter_expression_uses_one_ancestry_safe_gradient_frontier():
@@ -421,7 +423,7 @@ def test_spice_parameter_expression_uses_one_ancestry_safe_gradient_frontier():
         # SPICE expressions follow ordinary eager PyTorch semantics. Reparse so
         # every optimization/finite-difference evaluation materializes a fresh
         # ``2 * base`` graph at the current leaf value.
-        circuit = mw.parse_spice(
+        circuit = mw.circuits.parse_spice(
             netlist,
             name="expression_network",
             parameters={"base": base_resistance},
@@ -453,7 +455,7 @@ def test_circuit_data_t0_seed_is_an_explicit_error():
             source_amplitude=0.01,
         )
     )
-    data = _port_voltage_objective(scene, steps=4)[1].circuit("gradient_network")
+    data = mw.circuits.circuit(_port_voltage_objective(scene, steps=4)[1], "gradient_network")
 
     with pytest.raises(RuntimeError, match="t=0"):
         data.node_voltages[0].sum().backward()
@@ -474,11 +476,11 @@ def test_empty_physical_branch_row_is_seed_safe():
 @pytest.mark.parametrize("unsupported", ("dc_source", "initial_condition"))
 def test_zero_state_adjoint_limitations_are_explicit(unsupported):
     parameter = torch.tensor(0.0, device="cuda", requires_grad=True)
-    circuit = mw.Circuit("zero_state_limit")
+    circuit = mw.circuits.Circuit("zero_state_limit")
     node = circuit.node("node")
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 25.0))
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 25.0))
     if unsupported == "dc_source":
-        circuit.add(mw.CurrentSource("I1", circuit.ground, node, current=parameter))
+        circuit.add(mw.circuits.CurrentSource("I1", circuit.ground, node, current=parameter))
     else:
         circuit.set_initial_condition(node, parameter)
     circuit.bind_port("feed", positive=node, negative=circuit.ground)
@@ -487,14 +489,14 @@ def test_zero_state_adjoint_limitations_are_explicit(unsupported):
         _port_voltage_objective(_one_port_scene(circuit), steps=4)
 
 
-@pytest.mark.parametrize("source_type", (mw.CurrentSource, mw.VoltageSource))
+@pytest.mark.parametrize("source_type", (mw.circuits.CurrentSource, mw.circuits.VoltageSource))
 def test_waveform_source_trainable_dc_value_is_an_explicit_error(source_type):
     dc_value = torch.tensor(0.0, device="cuda", requires_grad=True)
-    circuit = mw.Circuit("waveform_dc_limit")
+    circuit = mw.circuits.Circuit("waveform_dc_limit")
     node = circuit.node("node")
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 25.0))
-    waveform = mw.SineWaveform(0.0, 0.01, 3.0e9)
-    if source_type is mw.CurrentSource:
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 25.0))
+    waveform = mw.circuits.SineWaveform(0.0, 0.01, 3.0e9)
+    if source_type is mw.circuits.CurrentSource:
         source = source_type(
             "I1",
             circuit.ground,
@@ -525,17 +527,17 @@ class _DerivedCircuitGuardScene(mw.SceneModule):
 
     def to_scene(self):
         derived_zero = self.parameter * 0.0
-        circuit = mw.Circuit("derived_guard")
+        circuit = mw.circuits.Circuit("derived_guard")
         node = circuit.node("node")
-        circuit.add(mw.Resistor("R1", node, circuit.ground, 25.0))
+        circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 25.0))
         if self.unsupported == "dc_source":
             circuit.add(
-                mw.CurrentSource(
+                mw.circuits.CurrentSource(
                     "I1",
                     circuit.ground,
                     node,
                     current=derived_zero,
-                    waveform=mw.SineWaveform(0.0, 0.01, 3.0e9),
+                    waveform=mw.circuits.SineWaveform(0.0, 0.01, 3.0e9),
                 )
             )
         else:
@@ -593,22 +595,22 @@ def test_rc_cutoff_gradient_matches_central_difference():
     )
 
     def objective():
-        circuit = mw.Circuit(
+        circuit = mw.circuits.Circuit(
             "rc_cutoff_gradient",
-            config=mw.MNAConfig(initialization="zero"),
+            config=mw.circuits.MNAConfig(initialization="zero"),
         )
         source = circuit.node("source")
         output = circuit.node("output")
         circuit.add(
-            mw.VoltageSource(
+            mw.circuits.VoltageSource(
                 "V1",
                 source,
                 circuit.ground,
-                waveform=mw.SineWaveform(0.0, 1.0, cutoff_frequency),
+                waveform=mw.circuits.SineWaveform(0.0, 1.0, cutoff_frequency),
             )
         )
-        circuit.add(mw.Resistor("R1", source, output, resistance))
-        circuit.add(mw.Capacitor("C1", output, circuit.ground, capacitance))
+        circuit.add(mw.rf.Resistor("R1", source, output, resistance))
+        circuit.add(mw.rf.Capacitor("C1", output, circuit.ground, capacitance))
         data = _standalone_transient(circuit, dt=2.0e-3, steps=320)
         return data.node_voltage("output")[1:].square().mean(), data
 
@@ -633,24 +635,24 @@ def test_rlc_near_resonance_gradient_matches_central_difference():
     )
 
     def objective():
-        circuit = mw.Circuit(
+        circuit = mw.circuits.Circuit(
             "rlc_resonance_gradient",
-            config=mw.MNAConfig(initialization="zero"),
+            config=mw.circuits.MNAConfig(initialization="zero"),
         )
         source = circuit.node("source")
         middle = circuit.node("middle")
         output = circuit.node("output")
         circuit.add(
-            mw.VoltageSource(
+            mw.circuits.VoltageSource(
                 "V1",
                 source,
                 circuit.ground,
-                waveform=mw.SineWaveform(0.0, 1.0, 0.9 * resonance_frequency),
+                waveform=mw.circuits.SineWaveform(0.0, 1.0, 0.9 * resonance_frequency),
             )
         )
-        circuit.add(mw.Resistor("R1", source, middle, 0.5))
-        circuit.add(mw.Inductor("L1", middle, output, inductance))
-        circuit.add(mw.Capacitor("C1", output, circuit.ground, capacitance))
+        circuit.add(mw.rf.Resistor("R1", source, middle, 0.5))
+        circuit.add(mw.rf.Inductor("L1", middle, output, inductance))
+        circuit.add(mw.rf.Capacitor("C1", output, circuit.ground, capacitance))
         data = _standalone_transient(circuit, dt=2.0e-3, steps=480)
         response = data.node_voltage("output")[1:]
         return response.square().mean(), data

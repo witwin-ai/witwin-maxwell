@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import argparse
 from collections.abc import Mapping
 import copy
@@ -10,6 +11,7 @@ import inspect
 import json
 import math
 import os
+import pathlib
 import time
 from typing import Any
 
@@ -31,6 +33,7 @@ from benchmark.metrics import (
     plane_coord_keys,
     significant_field_mask,
     vector_field_comparison,
+    windowed_resonance_frequency,
 )
 from benchmark.gpu_memory import GpuMemorySampler, release_gpu_caches
 from benchmark.models import ScenarioMetrics
@@ -46,18 +49,26 @@ from benchmark.plotting import (
 )
 from benchmark.report import write_results_markdown
 from benchmark.scenes import SCENARIOS, build_scene
-from benchmark.tidy3d_scene import benchmark_physical_bounds, prepare_tidy3d_benchmark_scene
+from benchmark.tidy3d_scene import (
+    benchmark_physical_bounds,
+    benchmark_reference_bounds,
+    benchmark_reference_domain,
+    benchmark_reference_scene,
+    prepare_tidy3d_benchmark_scene,
+)
 from witwin.maxwell.adapters.tidy3d import (
     _M_TO_UM,
     _cw_steady_state_run_time,
     _convert_source_time,
     _direction_to_angles,
     _scene_time_step,
+    scene_to_tidy3d,
 )
 from witwin.maxwell.fdtd.excitation.spatial import resolve_injection_axis, soft_plane_wave_coordinate
 from witwin.maxwell.fdtd.observers import _compute_plane_flux
 from witwin.maxwell.monitors import required_flux_fields
-from witwin.maxwell.simulation import TimeConfig, Simulation
+from witwin.maxwell.simulation import TimeConfig, Simulation, FDFDConfig, FDTDConfig
+from witwin.maxwell.scene import place_scene
 
 
 _PLANE_COORD_NAMES = {
@@ -66,6 +77,9 @@ _PLANE_COORD_NAMES = {
     "z": ("x", "y"),
 }
 MAX_TIDY3D_COST_PER_SCENARIO = 2.0
+# Smallest amount a reference job is billed, whatever its estimate (a 0.0000 estimate was
+# billed 0.025 in the 2026-11-12 regeneration); priced caps apply to max(estimate, floor).
+REFERENCE_BILLING_FLOOR = 0.025
 # Set WITWIN_BENCHMARK_NO_CLOUD=1 to make a missing or stale reference cache a hard error
 # instead of a billable Tidy3D cloud submission. Use it whenever the benchmark is driven
 # from an automated loop that is only meant to re-score against existing references.
@@ -196,7 +210,7 @@ def _incident_source_payload(source):
 
 def _directional_source_uses_export_contract(source) -> bool:
     """Whether a source depends on the explicit direction/polarization mapping."""
-    if not isinstance(source, (mw.PlaneWave, mw.GaussianBeam, mw.AstigmaticGaussianBeam)):
+    if not isinstance(source, (mw.PlaneWave, mw.GaussianBeam, mw.sources.AstigmaticGaussianBeam)):
         return False
     injection_axis = resolve_injection_axis(source.direction, source.injection_axis)
     axis_idx = "xyz".index(injection_axis)
@@ -228,7 +242,7 @@ def _incident_scene_signature(scene: mw.Scene, frequencies: tuple[float, ...]) -
         "version": 1,
         "courant": _maxwell_courant(scene, frequencies),
         "frequencies": [float(frequency) for frequency in frequencies],
-        "domain": _stable_serialize(tidy_scene.domain),
+        "domain": _stable_serialize(benchmark_reference_domain(tidy_scene)),
         "grid": _stable_serialize(tidy_scene.grid),
         "boundary": _stable_serialize(tidy_scene.boundary),
         "symmetry": _stable_serialize(tidy_scene.symmetry),
@@ -337,14 +351,15 @@ def _benchmark_cache_key(
     boundary = _stable_serialize(tidy_scene.boundary)
     if tidy_scene.boundary.mode_abc is None:
         del boundary["mode_abc"]
-    if tidy_scene.boundary.mur_abc == mw.MurABC():
+    if tidy_scene.boundary.mur_abc == mw.fdtd.MurABC():
         del boundary["mur_abc"]
     payload = {
         "version": 5,
         "courant": _maxwell_courant(scene, frequencies),
         "frequencies": [float(frequency) for frequency in frequencies],
         "run_time_factor": float(run_time_factor),
-        "domain": _stable_serialize(tidy_scene.domain),
+        # A face-symmetric scene is keyed by the mirrored domain its reference describes.
+        "domain": _stable_serialize(benchmark_reference_domain(tidy_scene)),
         "grid": _stable_serialize(tidy_scene.grid),
         "boundary": boundary,
         "symmetry": _stable_serialize(tidy_scene.symmetry),
@@ -356,7 +371,7 @@ def _benchmark_cache_key(
     }
     if not normalize_source:
         payload["source_normalization"] = False
-    requested_run_time = run_time_factor * max(hi - lo for lo, hi in tidy_scene.domain.bounds) / _C0
+    requested_run_time = run_time_factor * max(hi - lo for lo, hi in benchmark_reference_bounds(tidy_scene)) / _C0
     exported_run_time = _cw_steady_state_run_time(tidy_scene, requested_run_time)
     if exported_run_time != requested_run_time:
         payload["cw_export_run_time"] = exported_run_time
@@ -409,7 +424,7 @@ def _benchmark_cache_key(
         )
     source_times = tuple(getattr(source, "source_time", None) for source in tidy_scene.sources)
     has_raw_time_output = any(
-        isinstance(monitor, (mw.FieldTimeMonitor, mw.FluxTimeMonitor))
+        isinstance(monitor, (mw.monitors.FieldTimeMonitor, mw.monitors.FluxTimeMonitor))
         for monitor in tidy_scene.resolved_monitors()
     )
     if any(isinstance(source_time, mw.CW) for source_time in source_times) or (
@@ -453,17 +468,17 @@ def _benchmark_cache_key(
         if not (
             getattr(monitor, "compute_flux", False)
             or getattr(monitor, "closure_planes", None) is not None
-            or isinstance(monitor, mw.FluxTimeMonitor)
+            or isinstance(monitor, mw.monitors.FluxTimeMonitor)
         ):
             continue
         from witwin.maxwell.scene import prepare_scene
         from witwin.maxwell.fdtd.observers import _flux_yee_plane_position
 
         if prepared_scene is None:
-            prepared_scene = prepare_scene(tidy_scene.clone(device="cpu"), lazy_meshgrid=True)
+            prepared_scene = prepare_scene(place_scene(tidy_scene, "cpu"), lazy_meshgrid=True, device="cpu")
         requested = (
             monitor.position
-            if isinstance(monitor, (mw.PlaneMonitor, mw.FluxTimeMonitor))
+            if isinstance(monitor, (mw.PlaneMonitor, mw.monitors.FluxTimeMonitor))
             else monitor.plane_position
         )
         exported = _flux_yee_plane_position(prepared_scene, monitor.axis, requested) * _M_TO_UM
@@ -671,7 +686,7 @@ def _volume_current_exterior_mask(scene, monitor_axis, coords, monitor_position)
     """Exclude current-source boxes dilated by one aligned plane-grid cell."""
     sources = [
         source for source in scene.sources
-        if isinstance(source, (mw.UniformCurrentSource, mw.CustomCurrentSource))
+        if isinstance(source, (mw.UniformCurrentSource, mw.sources.CustomCurrentSource))
     ]
     if not sources or coords is None or monitor_position is None:
         return None
@@ -777,16 +792,16 @@ def _comparison_fields(
     directional_types = (
         mw.PlaneWave,
         mw.GaussianBeam,
-        mw.AstigmaticGaussianBeam,
+        mw.sources.AstigmaticGaussianBeam,
         mw.ModeSource,
-        mw.CustomFieldSource,
+        mw.sources.CustomFieldSource,
     )
     directional_sources = [source for source in scene.sources if isinstance(source, directional_types)]
     if len(directional_sources) != 1:
         return maxwell_field, tidy3d_field
 
     source = directional_sources[0]
-    if isinstance(source, (mw.PlaneWave, mw.GaussianBeam, mw.AstigmaticGaussianBeam)):
+    if isinstance(source, (mw.PlaneWave, mw.GaussianBeam, mw.sources.AstigmaticGaussianBeam)):
         if isinstance(getattr(source, "injection", None), mw.TFSF):
             # Retain significant incident and scattered-field samples.
             support = significant_field_mask(tidy3d_field)
@@ -795,7 +810,7 @@ def _comparison_fields(
             return maxwell_field, tidy3d_field
         injection_axis = resolve_injection_axis(source.direction, source.injection_axis)
         direction_component = float(source.direction["xyz".index(injection_axis)])
-        source_position = soft_plane_wave_coordinate(scene, injection_axis, direction_component)
+        source_position = soft_plane_wave_coordinate(scene, injection_axis, direction_component, device="cpu")
     elif isinstance(source, mw.ModeSource):
         injection_axis = source.normal_axis
         direction_component = 1.0 if source.direction == "+" else -1.0
@@ -939,6 +954,9 @@ def _benchmark_flux_from_payload(payload: dict[str, Any], scene: mw.Scene):
         "frequency": payload.get("frequency"),
         "frequencies": payload.get("frequencies", ()),
     }
+    if payload.get("symmetry_image_planes"):
+        # Domain-spanning flux under Scene.symmetry is the mirrored-domain power.
+        flux_payload["symmetry_image_planes"] = payload["symmetry_image_planes"]
     for component in required_flux_fields(axis):
         if component not in payload:
             return payload.get("flux")
@@ -1080,7 +1098,7 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
             "EZ": (prepared_scene.x, prepared_scene.y, prepared_scene.z_half),
         }
         component_arrays = {
-            name: _to_numpy(result.tensor(name))
+            name: _to_numpy(result.field(name, freq_index=0).values)
             for name in ("EX", "EY", "EZ")
             if name in result.fields
         }
@@ -1091,7 +1109,7 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
             coord_names = _PLANE_COORD_NAMES[monitor.axis]
             monitor_data = {
                 "kind": "field", "axis": monitor.axis, "position": float(monitor.position),
-                "frequencies": (float(result.frequency),), "fields": {}, "field_coords": {},
+                "frequencies": (float(result.frequencies[0]),), "fields": {}, "field_coords": {},
             }
             for component in monitor.fields:
                 key = component.upper()
@@ -1117,7 +1135,7 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
         return out
     for monitor in scene.resolved_monitors():
         if isinstance(monitor, FieldTimeMonitor):
-            payload = result.monitor(monitor.name)
+            payload = result.raw_monitor(monitor.name)
             out[monitor.name] = {
                 "kind": "field_time",
                 "t": _to_numpy(payload["t"], dtype=np.float64),
@@ -1128,7 +1146,7 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
             }
             continue
         if isinstance(monitor, FluxTimeMonitor):
-            payload = result.monitor(monitor.name)
+            payload = result.raw_monitor(monitor.name)
             out[monitor.name] = {
                 "kind": "flux_time",
                 "t": _to_numpy(payload["t"], dtype=np.float64),
@@ -1141,7 +1159,7 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
                 float(value)
                 for value in raw_payload.get(
                     "frequencies",
-                    monitor.frequencies or (getattr(result, "frequency", None),),
+                    monitor.frequencies or result.frequencies[:1],
                 )
                 if value is not None
             )
@@ -1151,10 +1169,15 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
                 "effective_index": [],
             }
             for freq_index in range(len(monitor_frequencies)):
-                modal = result.monitor(monitor.name, freq_index=freq_index)
+                modal = result.monitor(monitor.name, freq_index=freq_index).isel(mode=0)
+                values = {
+                    "amplitude_forward": modal.sel(propagation="+").values,
+                    "amplitude_backward": modal.sel(propagation="-").values,
+                    "effective_index": modal.attrs["effective_index"],
+                }
                 for scalar_name in scalar_values:
                     scalar_values[scalar_name].append(
-                        _to_numpy(modal[scalar_name]).reshape(()).item()
+                        _to_numpy(values[scalar_name]).reshape(()).item()
                     )
             out[monitor.name] = {
                 "kind": "mode",
@@ -1175,13 +1198,19 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
                 float(value)
                 for value in raw_payload.get(
                     "frequencies",
-                    monitor.frequencies or (getattr(result, "frequency", None),),
+                    monitor.frequencies or result.frequencies[:1],
                 )
                 if value is not None
             )
+            # Power per Floquet order (FluxData over "order"), with the order attrs selected alongside.
             per_frequency_orders = [
-                result.monitor(monitor.name, freq_index=freq_index)["orders"]
-                for freq_index in range(len(monitor_frequencies))
+                [
+                    {"m": m, "n": n, "power": power, "efficiency": efficiency}
+                    for m, n, power, efficiency in zip(data.attrs["m"], data.attrs["n"], data.values,
+                                                       data.attrs["efficiency"])
+                ]
+                for data in (result.monitor(monitor.name, freq_index=freq_index)
+                             for freq_index in range(len(monitor_frequencies)))
             ]
             order_pairs = sorted(
                 {
@@ -1217,7 +1246,7 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
             }
             continue
         if isinstance(monitor, PermittivityMonitor):
-            payload = result.monitor(monitor.name)
+            payload = result.raw_monitor(monitor.name)
             scalars = {}
             for axis in "xyz":
                 values = np.real(_to_numpy(payload[f"eps_{axis}"]))
@@ -1230,7 +1259,7 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
                 "scalars": scalars,
             }
             continue
-        payload = result.monitor(monitor.name)
+        payload = result.raw_monitor(monitor.name)
         monitor_data: dict[str, Any] = {}
         if isinstance(monitor, FluxMonitor) or (
             isinstance(monitor, PlaneMonitor) and monitor.compute_flux
@@ -1309,7 +1338,9 @@ def _maxwell_courant(scene: mw.Scene, frequencies: tuple[float, ...]) -> float:
     c0 = 299_792_458.0
     from witwin.maxwell.scene import prepare_scene
 
-    prepared_scene = prepare_scene(scene.clone(device="cpu"))
+    # The reference resolves its time step on the grid it describes (the mirrored twin of a
+    # face-symmetric scene), so its Courant number is taken there.
+    prepared_scene = prepare_scene(place_scene(benchmark_reference_scene(scene), "cpu"), device="cpu")
     min_dx = float(prepared_scene.dx_primal64.min())
     min_dy = float(prepared_scene.dy_primal64.min())
     min_dz = float(prepared_scene.dz_primal64.min())
@@ -1335,13 +1366,14 @@ def _maxwell_courant(scene: mw.Scene, frequencies: tuple[float, ...]) -> float:
 
 def _compute_num_steps(scene: mw.Scene, run_time_factor: float, *, dt: float) -> int:
     c0 = 299_792_458.0
-    domain_size = max(bounds[1] - bounds[0] for bounds in scene.domain.bounds)
+    # The window of a face-symmetric scene is that of the mirrored domain it stands for.
+    domain_size = max(bounds[1] - bounds[0] for bounds in benchmark_reference_bounds(scene))
     run_time_s = run_time_factor * domain_size / c0
     return int(np.ceil(run_time_s / float(dt)))
 
 
 def _clone_scene(scene: mw.Scene, *, device: str) -> mw.Scene:
-    return scene.clone(device=device)
+    return place_scene(scene, device)
 
 
 def _resolve_source_normalization(scene: mw.Scene, requested: bool | None) -> bool:
@@ -1378,19 +1410,19 @@ def _run_maxwell(
                 raise ValueError("FDFD benchmark scenarios require exactly one frequency.")
             # Keep plane descriptors for extraction from the solved volume fields below.
             result = Simulation.fdfd(
-                scene.clone(monitors=[]), frequency=frequencies[0],
-                solver=mw.GMRES(solver_type="direct", precision="double"),
+                scene.updated(monitors=[]), frequencies=frequencies[0],
+                config=FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type="direct", precision="double")),
             ).run()
         elif solver == "fdtd":
             simulation = Simulation.fdtd(
-                scene, frequencies=frequencies, run_time=TimeConfig(time_steps=1),
-                spectral_sampler=mw.SpectralSampler(normalize_source=normalize_source),
-                absorber=absorber,
+                scene, frequencies=frequencies, config=FDTDConfig(run_time=TimeConfig(time_steps=1),
+                spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=normalize_source),
+                absorber=absorber),
             )
             prepared = simulation.prepare()
-            simulation.config.run_time = TimeConfig(
+            simulation.config = replace(simulation.config, run_time=TimeConfig(
                 time_steps=_compute_num_steps(scene, run_time_factor, dt=prepared.solver.dt)
-            )
+            ))
             result = prepared.run()
         else:
             raise ValueError(f"Unknown benchmark solver {solver!r}.")
@@ -1414,6 +1446,7 @@ def _run_maxwell(
         "steps_per_second": stats.get("steps_per_second"),
         "dft_samples": int(sum(dft_sample_counts)) if dft_sample_counts else None,
         "peak_gpu_memory_mb": peak_gpu_memory_bytes / 2**20,
+        "dt": float(prepared.solver.dt) if solver == "fdtd" else None,
     }
     return result, monitors, elapsed, performance
 
@@ -1638,7 +1671,7 @@ def _attach_maxwell_surface_scalars(
     )
 
     for monitor in scene.monitors:
-        if not isinstance(monitor, mw.ClosedSurfaceMonitor):
+        if not isinstance(monitor, mw.monitors.ClosedSurfaceMonitor):
             continue
         currents = equivalent_surface_currents_from_monitor(result, monitor.name)
         monitors[monitor.name] = {
@@ -1657,7 +1690,7 @@ def _attach_tidy3d_surface_scalars(
     )
 
     for surface in scene.monitors:
-        if not isinstance(surface, mw.ClosedSurfaceMonitor):
+        if not isinstance(surface, mw.monitors.ClosedSurfaceMonitor):
             continue
         face_currents = []
         for face in surface.faces:
@@ -1692,6 +1725,110 @@ def _attach_tidy3d_surface_scalars(
                 EquivalentCurrentsSurface(tuple(face_currents))
             ),
         }
+
+
+def _reference_job(name, scene, frequencies, run_time_factor, *, normalize_source):
+    """Export the reference simulation of one scenario and wrap it in an (unsubmitted) job."""
+    import tidy3d.web as web
+
+    domain_size = max(bounds[1] - bounds[0] for bounds in benchmark_reference_bounds(scene))
+    td_scene = prepare_tidy3d_benchmark_scene(scene)
+    td_sim = scene_to_tidy3d(td_scene,
+        frequencies=frequencies,
+        run_time=run_time_factor * domain_size / _C0,
+        cw_steady_state=True,
+        courant=_maxwell_courant(scene, frequencies),
+        normalize_index=0 if normalize_source else None,
+    )
+    return web.Job(simulation=td_sim, task_name=f"maxwell_benchmark_{name}", verbose=False), td_sim, td_scene
+
+
+def _run_reference_job(name, job, td_sim, td_scene, frequencies, cache_key):
+    print(f"  Tidy3D: generating reference for {name} with cloud run")
+    td_data = job.run()
+    monitors = _extract_tidy3d_monitors(td_data, td_sim, td_scene)
+    save_tidy3d_result(name, frequencies=frequencies, monitors=monitors, cache_key=cache_key)
+    print(f"  Tidy3D: saved cache for {name}")
+    return monitors
+
+
+def generate_priced_references(
+    names: list[str],
+    *,
+    max_cost_per_row: float,
+    max_total_cost: float,
+    row_caps: dict[str, float],
+    ledger_path,
+    replace_valid: bool = False,
+    price_only: bool = False,
+) -> None:
+    """Price every stale reference first; run none unless every estimate is within budget.
+
+    Each selected scenario must be an external-reference row whose cache is stale or missing
+    (a valid cache is an error: the row list must name exactly the references to replace),
+    unless ``replace_valid`` (``--refresh-references``) asks to replace valid caches too.
+    Every job is exported and priced before any runs. If one estimate exceeds its cap
+    (``row_caps`` or ``max_cost_per_row``) or the sum exceeds ``max_total_cost``, nothing
+    runs. Caps and the total apply to ``max(estimate, REFERENCE_BILLING_FLOOR)``: a small job is
+    billed at the floor even when its estimate is lower. The ledger records each estimate, the
+    budgeted amount and, after each run, the billed cost. ``price_only`` stops after the ledger.
+    """
+    import tidy3d.web as web
+
+    if os.environ.get(NO_CLOUD_ENV_VAR) == "1":
+        raise SystemExit(f"{NO_CLOUD_ENV_VAR}=1 forbids reference generation.")
+    ensure_directories()
+    ledger = {"max_cost_per_row": max_cost_per_row, "max_total_cost": max_total_cost,
+              "row_caps": row_caps, "rows": {}}
+    jobs = {}
+    for name in names:
+        scenario = SCENARIOS[name]
+        if scenario.reference_solver != "tidy3d":
+            raise SystemExit(f"{name} has no external reference.")
+        scene = build_scene(name)
+        normalize_source = _resolve_source_normalization(scene, scenario.normalize_source)
+        cache_key = _benchmark_cache_key(
+            scene, scenario.frequencies, scenario.run_time_factor, normalize_source=normalize_source
+        )
+        try:
+            load_tidy3d_result(name, expected_cache_key=cache_key)
+        except (FileNotFoundError, ValueError):
+            pass
+        else:
+            if not replace_valid:
+                raise SystemExit(f"{name} already has a valid reference cache; refusing to replace it "
+                                 "(pass --refresh-references to replace it).")
+        job, td_sim, td_scene = _reference_job(
+            name, scene, scenario.frequencies, scenario.run_time_factor, normalize_source=normalize_source
+        )
+        estimate = float(job.estimate_cost(verbose=False))
+        budgeted = max(estimate, REFERENCE_BILLING_FLOOR)
+        cap = row_caps.get(name, max_cost_per_row)
+        jobs[name] = (job, td_sim, td_scene, scenario.frequencies, cache_key)
+        ledger["rows"][name] = {"task_id": job.task_id, "estimate": estimate, "budgeted": budgeted, "cap": cap}
+        print(f"  {name}: estimate {estimate:.4f}, budgeted {budgeted:.4f} (cap {cap:.4f})")
+    total = sum(row["budgeted"] for row in ledger["rows"].values())
+    over = [name for name, row in ledger["rows"].items() if row["budgeted"] > row["cap"]]
+    ledger["estimated_total"] = total
+    ledger["approved_to_run"] = not over and total <= max_total_cost
+    ledger["price_only"] = price_only
+    pathlib.Path(ledger_path).write_text(json.dumps(ledger, indent=1))
+    if not ledger["approved_to_run"]:
+        raise SystemExit(
+            f"Refusing to run any reference: rows over their cap {over}, estimated total {total:.4f} "
+            f"(budget {max_total_cost:.4f}). Nothing was submitted for execution."
+        )
+    if price_only:
+        print(f"  price only: {len(jobs)} rows, budgeted total {total:.4f} (budget {max_total_cost:.4f}); "
+              "nothing was submitted for execution.")
+        return
+    for name, (job, td_sim, td_scene, frequencies, cache_key) in jobs.items():
+        _run_reference_job(name, job, td_sim, td_scene, frequencies, cache_key)
+        ledger["rows"][name]["billed"] = web.real_cost(job.task_id, verbose=False)
+        pathlib.Path(ledger_path).write_text(json.dumps(ledger, indent=1))
+    billed = [row.get("billed") for row in ledger["rows"].values()]
+    ledger["billed_total"] = None if None in billed else float(sum(billed))
+    pathlib.Path(ledger_path).write_text(json.dumps(ledger, indent=1))
 
 
 def _load_or_run_tidy3d(
@@ -1739,21 +1876,10 @@ def _load_or_run_tidy3d(
             f"{name}` (this costs FlexCredits)."
         )
 
-    import tidy3d.web as web
-
-    c0 = 299_792_458.0
-    domain_size = max(bounds[1] - bounds[0] for bounds in scene.domain.bounds)
-    run_time = run_time_factor * domain_size / c0
-    td_scene = prepare_tidy3d_benchmark_scene(scene)
-    td_sim = td_scene.to_tidy3d(
-        frequencies=frequencies,
-        run_time=run_time,
-        cw_steady_state=True,
-        courant=_maxwell_courant(scene, frequencies),
-        normalize_index=0 if normalize_source else None,
+    job, td_sim, td_scene = _reference_job(
+        name, scene, frequencies, run_time_factor, normalize_source=normalize_source
     )
     print(f"  Tidy3D: estimating reference cost for {name}")
-    job = web.Job(simulation=td_sim, task_name=f"maxwell_benchmark_{name}", verbose=False)
     estimated_cost = float(job.estimate_cost(verbose=False))
     print(f"  Tidy3D: estimated cost {estimated_cost:.4f} FlexCredits")
     if estimated_cost > MAX_TIDY3D_COST_PER_SCENARIO:
@@ -1761,11 +1887,7 @@ def _load_or_run_tidy3d(
             f"Tidy3D estimate for {name} is {estimated_cost:.4f} FlexCredits, above the "
             f"per-scenario budget {MAX_TIDY3D_COST_PER_SCENARIO:.4f}; reference was not run."
         )
-    print(f"  Tidy3D: generating reference for {name} with cloud run")
-    td_data = job.run()
-    monitors = _extract_tidy3d_monitors(td_data, td_sim, td_scene)
-    save_tidy3d_result(name, frequencies=frequencies, monitors=monitors, cache_key=cache_key)
-    print(f"  Tidy3D: saved cache for {name}")
+    monitors = _run_reference_job(name, job, td_sim, td_scene, frequencies, cache_key)
     monitors = _rescale_tidy3d_fields(
         monitors,
         scene=td_scene,
@@ -1987,6 +2109,8 @@ def _scalar_observables(
     observable_kind: str,
     monitors: dict[str, dict[str, Any]],
     frequencies: tuple[float, ...],
+    *,
+    record_time: float | None = None,
 ) -> dict[str, np.ndarray]:
     if observable_kind == "mode_effective_index":
         return {"n_eff": _mode_scalar(monitors, "mode_out", "effective_index")}
@@ -2085,6 +2209,8 @@ def _scalar_observables(
             "resonance_frequency": resonance_frequency,
         }
     if observable_kind == "cavity_resonance":
+        if record_time is None:
+            raise ValueError("cavity_resonance needs the DFT record_time of the run (kernel-fit resonance).")
         probe_fields = monitors["resonance_probe"]["fields"]
         component = "Ez" if "Ez" in probe_fields else "Hz"
         spectrum = _field_spectrum_rms(
@@ -2094,11 +2220,12 @@ def _scalar_observables(
             frequencies,
         )
         normalized_spectrum = spectrum / max(float(np.max(spectrum)), 1.0e-30)
+        resonance, _ = windowed_resonance_frequency(
+            frequencies, np.squeeze(np.asarray(probe_fields[component])), record_time=record_time
+        )
         return {
             "normalized_probe_spectrum": normalized_spectrum,
-            "resonance_frequency": np.asarray(
-                [_quadratic_peak_frequency(frequencies, spectrum)]
-            )
+            "resonance_frequency": np.asarray([resonance]),
         }
     if observable_kind == "diffraction_orders":
         return _diffraction_efficiencies(monitors, frequencies)
@@ -2381,6 +2508,58 @@ def _time_trace_plot_payload(
     return traces
 
 
+def _box_resonance_frequency(scene: mw.Scene, dt: float) -> float:
+    """Lowest discrete Yee eigenfrequency of a uniformly gridded closed PEC or PMC box.
+
+    Each wall sits on the grid, so the box modes keep ``k_i = pi / L_i`` exactly and the
+    Yee dispersion relation ``sin(pi f dt)^2 / (c dt)^2 = sum_i sin(k_i dx_i / 2)^2 / dx_i^2``
+    holds over the two longest axes (the lowest TE/TM mode).
+    """
+    from witwin.maxwell.scene import prepare_scene
+
+    prepared = prepare_scene(scene, device="cpu")
+    spacings = (float(prepared.dx_primal64.min()), float(prepared.dy_primal64.min()),
+                float(prepared.dz_primal64.min()))
+    lengths = [hi - lo for lo, hi in scene.domain.bounds]
+    axes = sorted(range(3), key=lambda axis: lengths[axis])[1:]
+    total = sum((np.sin(np.pi * spacings[axis] / (2.0 * lengths[axis])) / spacings[axis]) ** 2 for axis in axes)
+    return float(np.arcsin(_C0 * dt * np.sqrt(total)) / (np.pi * dt))
+
+
+def _cavity_resonance_checks(
+    scene: mw.Scene,
+    frequencies: tuple[float, ...],
+    monitors: dict[str, dict[str, Any]],
+    doubled_monitors: dict[str, dict[str, Any]] | None,
+    *,
+    dt: float,
+    record_time: float,
+) -> list[dict[str, object]]:
+    """Resonance against the discrete analytic eigenfrequency, and its runtime stability."""
+    def resonance(values, window):
+        return float(_scalar_observables("cavity_resonance", values, frequencies, record_time=window)[
+            "resonance_frequency"][0])
+
+    center = 0.5 * (frequencies[0] + frequencies[-1])
+    pairs = [("resonance_frequency_discrete_analytic", resonance(monitors, record_time),
+              _box_resonance_frequency(scene, dt))]
+    if doubled_monitors is not None:
+        pairs.append(("resonance_frequency_runtime", resonance(doubled_monitors, 2.0 * record_time),
+                      pairs[0][1]))
+    return [
+        {
+            "frequency": center,
+            "observable": observable,
+            "maxwell": complex(actual),
+            "tidy3d": complex(reference),
+            "complex_error": abs(actual - reference) / max(abs(actual), abs(reference)),
+            "magnitude_error": abs(actual - reference) / max(abs(actual), abs(reference)),
+            "phase_error": None,
+        }
+        for observable, actual, reference in pairs
+    ]
+
+
 def _compare_scalar_observables(
     observable_kind: str | None,
     maxwell_monitors: dict[str, dict[str, Any]],
@@ -2388,6 +2567,7 @@ def _compare_scalar_observables(
     frequencies: tuple[float, ...],
     *,
     scene: mw.Scene | None = None,
+    record_time: float | None = None,
 ) -> list[dict[str, object]]:
     if observable_kind is None:
         return []
@@ -2398,8 +2578,8 @@ def _compare_scalar_observables(
             frequencies,
             scene=scene,
         )
-    maxwell = _scalar_observables(observable_kind, maxwell_monitors, frequencies)
-    tidy3d = _scalar_observables(observable_kind, tidy3d_monitors, frequencies)
+    maxwell = _scalar_observables(observable_kind, maxwell_monitors, frequencies, record_time=record_time)
+    tidy3d = _scalar_observables(observable_kind, tidy3d_monitors, frequencies, record_time=record_time)
     if maxwell.keys() != tidy3d.keys():
         raise ValueError("Maxwell and Tidy3D scalar observable sets differ.")
 
@@ -2585,19 +2765,18 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
         shape_l2_error = max(item["field_shape_l2"] for item in per_frequency)
         linf_error = max(item["field_linf"] for item in per_frequency)
         corr = min(item["field_corr"] for item in per_frequency)
-        flux_error = (
-            _pick_flux_error(
-                maxwell_monitors,
-                tidy3d_monitors,
-                incident_power=_cached_plane_wave_incident_power(
-                    scene,
-                    scenario.frequencies,
-                    normalize_source=normalize_source,
-                ),
-            )
+        incident_power = (
+            _cached_plane_wave_incident_power(scene, scenario.frequencies, normalize_source=normalize_source)
             if scenario.compare_flux
             else None
         )
+        flux_error = (
+            _pick_flux_error(maxwell_monitors, tidy3d_monitors, incident_power=incident_power)
+            if scenario.compare_flux
+            else None
+        )
+        if scenario.flux_change_scale == "incident" and incident_power is None:
+            raise ValueError(f"{name}: flux_change_scale='incident' needs a known incident power.")
         field_runtime_change = None
         field_converged = None
         flux_runtime_change = None
@@ -2625,14 +2804,30 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                 flux_runtime_change, flux_converged = flux_runtime_convergence(
                     np.concatenate([np.asarray(maxwell_monitors[name]["flux"]).ravel() for name in flux_names]),
                     np.concatenate([np.asarray(doubled_monitors[name]["flux"]).ravel() for name in flux_names]),
+                    incident_power=incident_power if scenario.flux_change_scale == "incident" else None,
                 )
+        record_time = scenario.run_time_factor * max(hi - lo for lo, hi in benchmark_reference_bounds(scene)) / _C0
         scalar_metrics = _compare_scalar_observables(
             scenario.scalar_observable,
             maxwell_monitors,
             tidy3d_monitors,
             scenario.frequencies,
             scene=scene,
+            record_time=record_time,
         )
+        if scenario.scalar_observable == "cavity_resonance":
+            scalar_metrics.extend(_cavity_resonance_checks(
+                scene,
+                scenario.frequencies,
+                maxwell_monitors,
+                doubled_monitors if field_runtime_change is not None else None,
+                dt=performance["dt"],
+                record_time=record_time,
+            ))
+        if not scenario.score_fields:
+            # The display field of an undamped cavity never settles; the row is scored on
+            # its resonance frequency instead (see the cavity checks above).
+            field_converged = None
         plot_frequency_index = _diagnostic_frequency_index(
             scenario.frequencies,
             per_frequency,
@@ -2739,6 +2934,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             maxwell_peak_gpu_memory_mb=performance["peak_gpu_memory_mb"],
             per_frequency=per_frequency,
             scalar_metrics=scalar_metrics,
+            fields_scored=scenario.score_fields,
         )
         results.append(result)
         write_results_markdown([result])
@@ -2824,6 +3020,19 @@ def main() -> None:
         help="Force selected Tidy3D references to rerun and overwrite their caches.",
     )
     parser.add_argument(
+        "--max-total-cost", type=float,
+        help="With --references-only: price every selected stale reference first and run none "
+             "unless all estimates fit (see --max-cost-per-row, --row-cost-cap, --cost-ledger).",
+    )
+    parser.add_argument("--max-cost-per-row", type=float, help="Per-row estimate cap for --max-total-cost.")
+    parser.add_argument(
+        "--row-cost-cap", action="append", default=[], metavar="NAME=CREDITS",
+        help="Per-row cap override for --max-total-cost (repeatable).",
+    )
+    parser.add_argument("--cost-ledger", help="JSON ledger of estimates and billed costs for --max-total-cost.")
+    parser.add_argument("--price-only", action="store_true",
+                        help="With --max-total-cost: price every row, write the ledger and submit nothing.")
+    parser.add_argument(
         "--campaign-only", action="store_true",
         help="Select only the S1-S6 cases from the validation campaign.",
     )
@@ -2858,7 +3067,21 @@ def main() -> None:
         raise SystemExit(f"Unknown benchmark scenarios: {unknown}. Available: {list(SCENARIOS)}")
     if args.refresh_references and not args.references_only:
         raise SystemExit("--refresh-references requires --references-only.")
-    if args.references_only:
+    if args.max_total_cost is not None:
+        if not (args.references_only and args.scenarios and args.max_cost_per_row and args.cost_ledger):
+            raise SystemExit("--max-total-cost needs --references-only, explicit scenarios, "
+                             "--max-cost-per-row and --cost-ledger.")
+        row_caps = {name: float(value) for name, value in (item.split("=", 1) for item in args.row_cost_cap)}
+        unknown_caps = set(row_caps) - set(selected)
+        if unknown_caps:
+            raise SystemExit(f"--row-cost-cap names unselected scenarios: {sorted(unknown_caps)}")
+        generate_priced_references(selected, max_cost_per_row=args.max_cost_per_row,
+                                   max_total_cost=args.max_total_cost, row_caps=row_caps,
+                                   ledger_path=args.cost_ledger, replace_valid=args.refresh_references,
+                                   price_only=args.price_only)
+    elif args.price_only:
+        raise SystemExit("--price-only needs --max-total-cost.")
+    elif args.references_only:
         generate_tidy3d_references(selected, force_refresh=args.refresh_references)
     else:
         run_benchmarks(selected)

@@ -7,6 +7,7 @@ import torch
 from .boundary import expand_cpml_memory_tensor
 from .boundary.mur import iter_mur_state_tensors
 from .lumped import LUMPED_STATE_NAMES
+from ..errors import UnsupportedFeatureError
 
 _FIELD_STATE_NAMES = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 _COMPLEX_FIELD_STATE_NAMES = ("Ex_imag", "Ey_imag", "Ez_imag", "Hx_imag", "Hy_imag", "Hz_imag")
@@ -374,10 +375,6 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     )
 
 
-def checkpoint_state_names(solver) -> tuple[str, ...]:
-    return checkpoint_schema(solver).state_names
-
-
 @dataclass(frozen=True)
 class FDTDCheckpointState:
     step: int
@@ -414,7 +411,8 @@ def iter_thin_sheet_state_tensors(solver):
 def _reject_thin_sheet_checkpoint(solver):
     sheets = getattr(solver, "_thin_sheets", ())
     if sheets and not any(sheet.feeds for sheet in sheets):
-        raise NotImplementedError("Conformal thin-sheet checkpoint/resume is admitted only with a sheet gap feed.")
+        raise UnsupportedFeatureError("Conformal thin-sheet checkpoint/resume is admitted only with a sheet gap feed.",
+                                      feature="geometry.surface_mesh", method="fdtd")
 
 
 def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
@@ -481,11 +479,12 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
     wire_runtime = getattr(solver, "_wire_runtime", None)
     if wire_runtime is not None:
         if getattr(wire_runtime, "lossy_model", None) is not None:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Checkpoint/resume of a finite-conductor thin wire is not yet "
                 "implemented: the auxiliary ADE loss state is not part of the "
                 "checkpoint schema (added with the lossy reverse pass, B3). Run a "
-                "PEC wire to checkpoint a thin-wire simulation."
+                "PEC wire to checkpoint a thin-wire simulation.",
+                feature="thin_wire", method="fdtd"
             )
         tensors["wire_current"] = wire_runtime.current.detach().clone()
         tensors["wire_charge"] = wire_runtime.charge.detach().clone()

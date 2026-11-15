@@ -27,7 +27,7 @@ Ipwl coupled 0 PWL(0 0 1n 1m 2n 0)
 
 
 def test_supported_corpus_parses_with_fixed_suffix_semantics_and_order():
-    circuit = mw.parse_spice(SUPPORTED_NETLIST, name="supported")
+    circuit = mw.circuits.parse_spice(SUPPORTED_NETLIST, name="supported")
 
     assert tuple(node.name for node in circuit.nodes) == (
         "0",
@@ -61,9 +61,9 @@ def test_supported_corpus_parses_with_fixed_suffix_semantics_and_order():
 
 
 def test_canonical_serialization_round_trip_is_stable():
-    first = mw.parse_spice(SUPPORTED_NETLIST, name="supported")
+    first = mw.circuits.parse_spice(SUPPORTED_NETLIST, name="supported")
     serialized = first.to_spice()
-    second = mw.parse_spice(serialized, name="supported")
+    second = mw.circuits.parse_spice(serialized, name="supported")
 
     assert second.to_spice() == serialized
     assert tuple(node.name for node in second.nodes) == tuple(node.name for node in first.nodes)
@@ -73,7 +73,7 @@ def test_canonical_serialization_round_trip_is_stable():
 
 def test_parameter_override_preserves_tensor_identity_and_gradient():
     resistance = torch.tensor(75.0, dtype=torch.float64, requires_grad=True)
-    circuit = mw.parse_spice(
+    circuit = mw.circuits.parse_spice(
         ".param rval=50\nR1 in 0 {rval}\n.end",
         parameters={"rval": resistance},
     )
@@ -83,7 +83,7 @@ def test_parameter_override_preserves_tensor_identity_and_gradient():
 
 
 def test_subcircuits_flatten_with_hierarchical_names_and_local_nodes():
-    circuit = mw.parse_spice(
+    circuit = mw.circuits.parse_spice(
         """
         .subckt pair p n params: rv=10
         R1 p internal {rv}
@@ -109,7 +109,7 @@ def test_subcircuits_flatten_with_hierarchical_names_and_local_nodes():
     torch.testing.assert_close(circuit.devices[0].resistance, torch.tensor(20.0))
     torch.testing.assert_close(circuit.devices[2].resistance, torch.tensor(30.0))
     flattened = circuit.to_spice()
-    assert mw.parse_spice(flattened, name="flattened").to_spice() == flattened
+    assert mw.circuits.parse_spice(flattened, name="flattened").to_spice() == flattened
 
 
 def test_file_include_is_sandboxed_and_resolves_inside_root(tmp_path: Path):
@@ -119,7 +119,7 @@ def test_file_include_is_sandboxed_and_resolves_inside_root(tmp_path: Path):
     main = root / "main.cir"
     main.write_text("V1 out 0 1\n.include load.inc\n.end\n", encoding="utf-8")
 
-    circuit = mw.Circuit.from_spice(main, name="included", include_root=root)
+    circuit = mw.circuits.Circuit.from_spice(main, name="included", include_root=root)
 
     assert tuple(device.name for device in circuit.devices) == ("V1", "Rload")
 
@@ -132,7 +132,7 @@ def test_file_include_rejects_parent_escape(tmp_path: Path):
     main.write_text(".include ../outside.inc\n.end\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="escapes.*sandbox"):
-        mw.Circuit.from_spice(main, include_root=root)
+        mw.circuits.Circuit.from_spice(main, include_root=root)
 
 
 def test_nested_include_cycle_is_a_hard_error(tmp_path: Path):
@@ -142,7 +142,7 @@ def test_nested_include_cycle_is_a_hard_error(tmp_path: Path):
     second.write_text(".include first.cir\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="include cycle"):
-        mw.Circuit.from_spice(first, include_root=tmp_path)
+        mw.circuits.Circuit.from_spice(first, include_root=tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -157,13 +157,13 @@ def test_nested_include_cycle_is_a_hard_error(tmp_path: Path):
 )
 def test_unsupported_directives_are_hard_errors(statement):
     with pytest.raises(ValueError, match="Unsupported SPICE directive"):
-        mw.parse_spice(f"{statement}\n.end")
+        mw.circuits.parse_spice(f"{statement}\n.end")
 
 
 @pytest.mark.parametrize("statement", ("D1 a 0 model", "Q1 a b 0 model", "M1 d g s b model", "S1 a 0 c 0 model"))
 def test_unsupported_devices_are_hard_errors(statement):
     with pytest.raises(ValueError, match="Unsupported SPICE device"):
-        mw.parse_spice(f"{statement}\n.end")
+        mw.circuits.parse_spice(f"{statement}\n.end")
 
 
 @pytest.mark.parametrize(
@@ -180,40 +180,40 @@ def test_malicious_expressions_cannot_execute(expression, tmp_path: Path):
     marker = tmp_path / "owned"
     payload = expression.replace("unsafe", str(marker))
     with pytest.raises(ValueError):
-        mw.parse_spice(f".param x={{{payload}}}\nR1 in 0 {{x}}\n.end")
+        mw.circuits.parse_spice(f".param x={{{payload}}}\nR1 in 0 {{x}}\n.end")
     assert not marker.exists()
 
 
 def test_plain_text_include_requires_a_file_sandbox():
     with pytest.raises(ValueError, match="file-backed.*include root"):
-        mw.parse_spice(".include load.inc\n.end")
+        mw.circuits.parse_spice(".include load.inc\n.end")
 
 
 def test_statements_after_end_and_duplicate_casefolded_names_are_rejected():
     with pytest.raises(ValueError, match="after .end"):
-        mw.parse_spice("R1 in 0 1\n.end\nR2 in 0 2")
+        mw.circuits.parse_spice("R1 in 0 1\n.end\nR2 in 0 2")
     with pytest.raises(ValueError, match="already present"):
-        mw.parse_spice("R1 in 0 1\nr1 in 0 2\n.end")
+        mw.circuits.parse_spice("R1 in 0 1\nr1 in 0 2\n.end")
 
 
 def test_unsupported_directive_in_unused_subcircuit_and_ends_prefix_are_rejected():
     with pytest.raises(ValueError, match="Unsupported directive.*model"):
-        mw.parse_spice(".subckt s a b\n.model bad sw\n.ends s\n.end")
+        mw.circuits.parse_spice(".subckt s a b\n.model bad sw\n.ends s\n.end")
     with pytest.raises(ValueError, match="Unsupported directive.*endsbogus"):
-        mw.parse_spice(".subckt s a b\nR1 a b 1\n.endsbogus\n.end")
+        mw.circuits.parse_spice(".subckt s a b\nR1 a b 1\n.endsbogus\n.end")
     with pytest.raises(ValueError, match="Unsupported SPICE device.*D1"):
-        mw.parse_spice(".subckt s a b\nD1 a b model\n.ends s\n.end")
+        mw.circuits.parse_spice(".subckt s a b\nD1 a b model\n.ends s\n.end")
     with pytest.raises(ValueError, match="Unsupported syntax"):
-        mw.parse_spice(
+        mw.circuits.parse_spice(
             ".subckt s a b\n.param x={__import__('os')}\nR1 a b {x}\n.ends s\n.end"
         )
 
 
 def test_subcircuit_after_end_is_rejected_and_prior_parameter_is_visible():
     with pytest.raises(ValueError):
-        mw.parse_spice(".end\n.subckt s a b\nR1 a b 1\n.ends s")
+        mw.circuits.parse_spice(".end\n.subckt s a b\nR1 a b 1\n.ends s")
 
-    circuit = mw.parse_spice(
+    circuit = mw.circuits.parse_spice(
         ".param base=2\n.subckt s a b params: rv={base}\nR1 a b {rv}\n.ends s\nX1 in 0 s\n.end"
     )
     torch.testing.assert_close(circuit.devices[0].resistance, torch.tensor(2.0))
@@ -221,9 +221,9 @@ def test_subcircuit_after_end_is_rejected_and_prior_parameter_is_visible():
 
 def test_invalid_parameter_override_and_hierarchy_collision_are_rejected():
     with pytest.raises(ValueError, match="override name"):
-        mw.parse_spice("R1 in 0 1\n.end", parameters={"bad;name": 2.0})
+        mw.circuits.parse_spice("R1 in 0 1\n.end", parameters={"bad;name": 2.0})
     with pytest.raises(ValueError, match="collides with an explicit node"):
-        mw.parse_spice(
+        mw.circuits.parse_spice(
             "Rtop X1:internal 0 1\n"
             ".subckt s a b\nR1 a internal 1\nR2 internal b 1\n.ends s\n"
             "X1 in 0 s\n.end"
@@ -231,8 +231,8 @@ def test_invalid_parameter_override_and_hierarchy_collision_are_rejected():
 
 
 def test_serializer_refuses_a_device_name_with_the_wrong_designator():
-    circuit = mw.Circuit("invalid")
+    circuit = mw.circuits.Circuit("invalid")
     node = circuit.node("node")
-    circuit.add(mw.Resistor("load", node, circuit.ground, 50.0))
+    circuit.add(mw.rf.Resistor("load", node, circuit.ground, 50.0))
     with pytest.raises(ValueError, match="designator.*'R'"):
         circuit.to_spice()

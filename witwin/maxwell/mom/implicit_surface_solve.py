@@ -4,9 +4,10 @@ from .operator_protocol import IterativeState
 from .hmatrix import HierarchicalOperator
 from .h2_operator import HierarchicalH2Operator
 from .linalg import StoppingRule,solve_reference
+from ..errors import ConvergenceError
 
 
-class SurfaceInverseConvergenceError(RuntimeError):
+class SurfaceInverseConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         super().__init__('Fixed surface inverse failed its true residual tolerance')
         self.receipt=receipt
@@ -73,6 +74,7 @@ class FixedSurfaceInverse:
             raise ValueError('Refinement steps must be a nonnegative integer')
         operator.refresh()
         self.refinement_steps=refinement_steps
+        rule=rule.resolved()
         self.operator,self.rule=operator,rule
         self.shape,self.device,self.dtype=operator.shape,operator.device,operator.dtype
         if len(self.shape)!=2 or self.shape[0]!=self.shape[1] or self.device.type!='cuda':

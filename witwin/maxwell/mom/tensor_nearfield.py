@@ -6,6 +6,7 @@ from .dyadic_green import DyadicGreenKernel
 from .operator import IntegrationConfig, PreparedRWGGeometry
 from .nearfield import ScalarSystemBlocks, scalar_regional_block
 from .anisotropic_operator import tensor_regional_block
+from ..errors import UnsupportedFeatureError
 
 
 class GeneralizedSystemBlocks:
@@ -42,7 +43,8 @@ class GeneralizedSystemBlocks:
                 if (medium.epsilon_r.device != system.device or medium.epsilon_r.real.dtype != system.dtype):
                     raise ValueError('Generalized tensor media must match geometry device and precision')
                 if medium.epsilon_r.requires_grad or medium.mu_r.requires_grad:
-                    raise NotImplementedError('Generalized blocks require fixed material samples')
+                    raise UnsupportedFeatureError('Generalized blocks require fixed material samples',
+                                                  feature="guard:6312716d", method="mom")
         kernels = {} if interior_kernels is None else dict(interior_kernels)
         tensor_ids = {body.region_id for body in system.bodies if isinstance(body.interior, TensorMedium)}
         if any(type(key) is not int or key not in tensor_ids for key in kernels):

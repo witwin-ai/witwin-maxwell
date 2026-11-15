@@ -1,4 +1,10 @@
-"""Exact material, coefficient and table gates and synchronized prepare timings."""
+"""Exact material, coefficient and table gates and synchronized prepare timings.
+
+The torch arm of every setup comparison is the tests-side torch-setup oracle
+(``tests/support/torch_setup_oracle.py``); the accelerated arm is the default
+preparation. The G1 run baseline is the frozen existing-path capture
+(``tests/support/frozen_oracles.py``, keys ``setup-gates/g1/<scene>``).
+"""
 
 from __future__ import annotations
 
@@ -19,11 +25,12 @@ import numpy as np
 import torch
 import witwin.maxwell as mw
 
-from .gates import OUTPUT as GATE_OUTPUT, make_simulation, rule2_rows, tensors, tier_summary
+from .gates import OUTPUT as GATE_OUTPUT, api_dialect, make_simulation, rule2_rows, tensors, tier_summary
 from .scenes import CORE_SCENES, CoreCase, _grid_scene, _sphere, build_core_case
 from witwin.maxwell.compiler import materials
 from witwin.maxwell.compiler.accel import dispatch
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.scene import place_scene
 
 
 OUTPUT = GATE_OUTPUT / "setup"
@@ -230,16 +237,16 @@ def scene_for(name, *, device="cuda"):
         from benchmark.datagen.scenes import scene_builders
 
         builder = next(builder for builder in scene_builders() if builder.name == name)
-        return builder.build(device=device).scene
+        return builder.build().scene
     if name in S01_SCENES:
         return s01_scene(name, device=device)
     if name in CORE_SCENES:
-        return build_core_case(name).scene.clone(device=device)
+        return place_scene(build_core_case(name).scene, device)
     from benchmark.scenes import SCENARIOS, build_scene
     if name in SCENARIOS:
-        return build_scene(name).clone(device=device)
+        return place_scene(build_scene(name), device)
     if name.startswith("vacuum"):
-        return _grid_scene((int(name[6:]),) * 3).clone(device=device)
+        return place_scene(_grid_scene((int(name[6:]),) * 3), device)
     shape = ((7, 7, 7) if name == "mesh_5k" else (11, 11, 11)) if name in O3C_SCENES else (
         (17, 15, 19) if name == "odd" else (19, 19, 19))
     nodes = [np.linspace(-0.5, 0.5, size) for size in shape]
@@ -249,7 +256,6 @@ def scene_for(name, *, device="cuda"):
         domain=mw.Domain(bounds=tuple((float(axis[0]), float(axis[-1])) for axis in nodes)),
         grid=mw.GridSpec.custom(*nodes),
         boundary=mw.BoundarySpec.periodic() if name in ("periodic", "periodic_boolean") else mw.BoundarySpec.pec(),
-        device=device,
     )
     sphere = mw.Sphere(position=(-0.46, 0, 0) if name in ("periodic", "periodic_boolean") else (0, 0, 0),
                        radius=0.23, device=device)
@@ -258,32 +264,50 @@ def scene_for(name, *, device="cuda"):
     if name in O3C_SCENES:
         geometry = mesh_geometry(large=name == "mesh_5k", device=device)
         if name == "mesh_boolean":
-            geometry = mw.Difference(mw.Union(geometry, box, device=device),
+            geometry = mw.geometry.Difference(mw.geometry.Union(geometry, box, device=device),
                                      mw.Box(size=.15, device=device), smoothness=.017, device=device)
-        scene.add_structure(mw.Structure(geometry=geometry, material=mw.Material(eps_r=3.7)))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=geometry, material=mw.Material(eps_r=3.7)),
+        ))
     elif name == "empty_band":
-        scene.add_structure(mw.Structure(
-            geometry=mw.Box(size=4., device=device), material=mw.Material(eps_r=3.7)))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(
+                geometry=mw.Box(size=4., device=device), material=mw.Material(eps_r=3.7)),
+        ))
     elif name in ("boolean", "periodic_boolean"):
-        geometry = mw.Union(sphere, box, smoothness=.017, device=device) if name == 'periodic_boolean' else mw.Intersection(
-            mw.Union(sphere, box, device=device), mw.Box(size=0.48, device=device),
+        geometry = mw.geometry.Union(sphere, box, smoothness=.017, device=device) if name == 'periodic_boolean' else mw.geometry.Intersection(
+            mw.geometry.Union(sphere, box, device=device), mw.Box(size=0.48, device=device),
             smoothness=0.017, device=device,
         )
-        scene.add_structure(mw.Structure(geometry=geometry, material=mw.Material(eps_r=3.7)))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=geometry, material=mw.Material(eps_r=3.7)),
+        ))
     elif name == "rotated_box":
-        scene.add_structure(mw.Structure(geometry=box, material=mw.Material(eps_r=3.7)))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=box, material=mw.Material(eps_r=3.7)),
+        ))
     else:
-        scene.add_structure(mw.Structure(
-            geometry=sphere, material=mw.Material(eps_r=3.7, sigma_e=.013 if name == "conductive_kottke" else 0.),
-            priority=2 if name == "overlap" else 0,
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(
+                geometry=sphere, material=mw.Material(eps_r=3.7, sigma_e=.013 if name == "conductive_kottke" else 0.),
+                priority=2 if name == "overlap" else 0,
+            ),
         ))
         if name in ("sphere_box", "overlap", "interface_pair", "conductive_kottke"):
-            scene.add_structure(mw.Structure(
-                geometry=box, material=mw.Material(eps_r=2.1), priority=1,
-            ))
-            scene.add_structure(mw.Structure(
-                geometry=mw.Box(size=0.15, device=device),
-                material=mw.Material(eps_r=5.3), priority=1,
+            scene = scene.updated(structures=(
+                *scene.structures,
+                mw.Structure(
+                    geometry=box, material=mw.Material(eps_r=2.1), priority=1,
+                ),
+                mw.Structure(
+                    geometry=mw.Box(size=0.15, device=device),
+                    material=mw.Material(eps_r=5.3), priority=1,
+                ),
             ))
     return scene
 
@@ -304,20 +328,20 @@ def float64_scene(name, *, device="cpu"):
     elif kind.startswith("cylinder_"):
         geometry = mw.Cylinder(radius=tensor(.211), height=tensor(.473), axis=kind[-1], **transform)
     elif kind == "pyramid":
-        geometry = mw.Pyramid(base_size=tensor(.37), height=tensor(.47), **transform)
+        geometry = mw.geometry.Pyramid(base_size=tensor(.37), height=tensor(.47), **transform)
     elif kind == "polyslab":
         geometry = mw.PolySlab(vertices=((- .2, -.17), (.23, -.13), (.19, .21), (-.16, .24)),
                                bounds=(-.21, .23), sidewall_angle=.13, **transform)
     else:
-        cls = {"union": mw.Union, "intersection": mw.Intersection, "difference": mw.Difference,
-               "smooth_union": mw.Union, "mixed_tree": mw.Difference}[kind]
+        cls = {"union": mw.geometry.Union, "intersection": mw.geometry.Intersection, "difference": mw.geometry.Difference,
+               "smooth_union": mw.geometry.Union, "mixed_tree": mw.geometry.Difference}[kind]
         if kind == "mixed_tree":
-            sphere = mw.Union(sphere, mw.Box(size=.19, device=device), device=device)
+            sphere = mw.geometry.Union(sphere, mw.Box(size=.19, device=device), device=device)
         geometry = cls(box, sphere, smoothness=tensor(.017) if kind == "smooth_union" else 0.,
                        position=tensor((.013, -.011, .007)), rotation=tensor((.03, -.02, .01)))
     scene = mw.Scene(domain=mw.Domain(bounds=((- .5, .5),) * 3),
-                     grid=mw.GridSpec.uniform(.125), boundary=mw.BoundarySpec.pec(), device=device)
-    scene.add_structure(mw.Structure(geometry, mw.Material(eps_r=3.7, mu_r=1.3, sigma_e=.013)))
+                     grid=mw.GridSpec.uniform(.125), boundary=mw.BoundarySpec.pec(),
+                     structures=(mw.Structure(geometry, mw.Material(eps_r=3.7, mu_r=1.3, sigma_e=.013)),))
     return scene
 
 
@@ -330,8 +354,7 @@ def s01_scene(name, *, device="cpu", n=19):
                      grid=mw.GridSpec.custom(nodes, nodes, nodes),
                      boundary=(mw.BoundarySpec.periodic() if periodic else
                                mw.BoundarySpec.pmc() if name == "pmc" else mw.BoundarySpec.none()),
-                     subpixel_samples=mw.SubpixelSpec(pec="conformal" if name == "pec_conformal" else "staircase"),
-                     device=device)
+                     subpixel=mw.SubpixelSpec(pec="conformal" if name == "pec_conformal" else "staircase"))
     material = mw.Material(eps_r=3.7)
     position = (-.46, 0, 0) if periodic else (0, 0, 0)
     if name.startswith("cylinder_") or name == "periodic_cylinder":
@@ -339,10 +362,10 @@ def s01_scene(name, *, device="cpu", n=19):
         geometry = mw.Cylinder(position=position, radius=.21, height=.47, axis=axis,
                                rotation=(.17, .31, -.2), device=device)
         if name == "cylinder_boolean":
-            geometry = mw.Difference(geometry, mw.Box(size=.18, device=device),
+            geometry = mw.geometry.Difference(geometry, mw.Box(size=.18, device=device),
                                      smoothness=.017, device=device)
     elif name.startswith("pyramid_"):
-        geometry = mw.Pyramid(position=(-.13, -.11, -.19), base_size=.4, height=.37,
+        geometry = mw.geometry.Pyramid(position=(-.13, -.11, -.19), base_size=.4, height=.37,
                               axis=name[-1], rotation=(.17, .31, -.2), device=device)
     elif name.startswith("polyslab") or name == "periodic_polyslab":
         vertices = ((-.22, -.19), (.23, -.17), (.21, .2), (-.19, .21))
@@ -362,32 +385,50 @@ def s01_scene(name, *, device="cpu", n=19):
         elif name == "dispersive":
             material = mw.Material(eps_r=2., lorentz_poles=(mw.LorentzPole(
                 delta_eps=.7, resonance_frequency=1.5e9, gamma=.1e9),))
-    scene.add_structure(mw.Structure(geometry=geometry, material=material, name="body"))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(geometry=geometry, material=material, name="body"),
+    ))
     if name == "copper":
-        scene.add_structure(mw.Structure(name="foil", geometry=mw.Box(
-            position=(float(nodes[3*n//4]), 0., 0.), size=(0., .02, .02), device=device),
-            material=mw.CopperFoil(thickness=2.e-6, frequency_range=(.5e9, 2.e9), edge_model="none")))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(name="foil", geometry=mw.Box(
+                position=(float(nodes[3*n//4]), 0., 0.), size=(0., .02, .02), device=device),
+                material=mw.media.CopperFoil(thickness=2.e-6, frequency_range=(.5e9, 2.e9), edge_model="none")),
+        ))
     elif name == "thin_sheet":
-        scene.add_structure(mw.Structure(name="sheet", geometry=mw.Box(
-            position=(.01, 0., 0.), size=(0., .02, .02), device=device),
-            material=mw.Medium2D(sigma_s=.01)))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(name="sheet", geometry=mw.Box(
+                position=(.01, 0., 0.), size=(0., .02, .02), device=device),
+                material=mw.media.Medium2D(sigma_s=.01)),
+        ))
     elif name == "lumped_port":
         k = n//2
         half = .5*(nodes[:-1]+nodes[1:])
         center = .5*(half[k-2]+half[k+1])
         extent = half[k+1]-half[k-2]
-        scene.add_port(mw.LumpedPort("feed",
-            positive=(float(nodes[k]), float(nodes[k]), float(nodes[k+1])),
-            negative=(float(nodes[k]), float(nodes[k]), float(nodes[k-1])),
-            voltage_path=mw.AxisPath("z"), current_surface=mw.Box(
+        scene = scene.updated(ports=(
+            *scene.ports,
+            mw.LumpedPort("feed",
+                positive=(float(nodes[k]), float(nodes[k]), float(nodes[k+1])),
+                negative=(float(nodes[k]), float(nodes[k]), float(nodes[k-1])),
+                voltage_path=mw.AxisPath("z"), current_surface=mw.Box(
                 position=torch.tensor((center, center, half[k-1]), dtype=torch.float64, device=device),
-                size=torch.tensor((extent, extent, 0.), dtype=torch.float64, device=device), device=device)))
+                size=torch.tensor((extent, extent, 0.), dtype=torch.float64, device=device), device=device)),
+        ))
     elif name == "thin_wire":
-        scene.add_thin_wire(mw.ThinWire(name="wire", points=((.01, 0., -.01), (.01, 0., .01)),
-            radius=1.e-4, conductor=mw.WireConductor.pec(),
-            endpoints=(mw.WireEnd.open(), mw.WireEnd.open()), snap="continuous"))
+        scene = scene.updated(thin_wires=(
+            *scene.thin_wires,
+            mw.rf.ThinWire(name="wire", points=((.01, 0., -.01), (.01, 0., .01)),
+                radius=1.e-4, conductor=mw.rf.WireConductor.pec(),
+                endpoints=(mw.rf.WireEnd.open(), mw.rf.WireEnd.open()), snap="continuous"),
+        ))
     elif name == "closed_surface":
-        scene.add_monitor(mw.ClosedSurfaceMonitor.box("surface", size=(.025,)*3, frequencies=(1.e9,)))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.monitors.ClosedSurfaceMonitor.box("surface", size=(.025,)*3, frequencies=(1.e9,)),
+        ))
     return scene
 
 
@@ -409,7 +450,7 @@ def mesh_geometry(*, large=False, device="cpu"):
         vertices = torch.as_tensor(vertices, dtype=torch.float32, device=device)
         faces = torch.as_tensor(faces, dtype=torch.int64, device=device)
     else:
-        vertices, faces = mw.Pyramid(base_size=.4, height=.35, device=device).to_mesh()
+        vertices, faces = mw.geometry.Pyramid(base_size=.4, height=.35, device=device).to_mesh()
     return mw.Mesh(vertices, faces, recenter=False, fill_mode="solid",
                    topology_diagnostics=False, device=device)
 
@@ -581,22 +622,20 @@ def g4(names, output=OUTPUT, *, equivalence="bitwise"):
             if (name, samples, averaging) in completed:
                 continue
             scene = scene_for(name)
-            scene = scene.clone(subpixel_samples=mw.SubpixelSpec(
+            scene = scene.updated(subpixel=mw.SubpixelSpec(
                 samples=samples, averaging=averaging, pec=scene.subpixel.pec))
             start = time.perf_counter()
             print("G4 START", name, samples, averaging, flush=True)
             payloads, metadata = [], []
             for accelerated in (False, True):
-                simulation = setup_simulation(scene, accelerated=accelerated)
+                simulation = setup_simulation(scene)
                 with record_setup() as calls:
-                    prepared = simulation.prepare()
-                solver = prepared.solver
+                    solver = setup_solver(simulation, accelerated=accelerated)
                 shape = (solver.Nx, solver.Ny, solver.Nz)
                 payload = dict(model=solver._compiled_material_model, coefficients=coefficient_payload(solver))
                 metadata.append(tensor_metadata(payload))
                 payloads.append(snapshot(payload))
-                assert not hasattr(solver, "_core_runtime")
-                del payload, solver, prepared, simulation
+                del payload, solver, simulation
                 gc.collect()
                 torch.cuda.empty_cache()
             assert metadata[1] == metadata[0]
@@ -643,10 +682,19 @@ def write_setup_tensor_table(rows, output):
     output.write_text("\n".join(lines) + "\n")
 
 
-def setup_simulation(scene, *, accelerated):
-    return mw.Simulation.fdtd(scene, frequency=1.e9, accelerated_setup=accelerated, fdtd_core_path=False,
-        run_time=mw.TimeConfig(time_steps=32), full_field_dft=False,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False))
+def setup_simulation(scene):
+    return mw.Simulation.fdtd(scene, frequencies=1.e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=32), full_field_dft=False,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+        ))
+
+
+def setup_solver(simulation, *, accelerated):
+    """The default preparation's solver, or the torch-setup oracle's solver."""
+    from tests.support.torch_setup_oracle import torch_setup_solver
+
+    return simulation.prepare().solver if accelerated else torch_setup_solver(simulation)
 
 
 def coefficient_payload(solver):
@@ -679,32 +727,33 @@ def g1(names, output=OUTPUT):
     for name in names:
         if name in [row["scene"] for row in rows]:
             continue
-        payloads, setups, metadata = [], [], []
-        for arm in ("baseline", "candidate"):
-            case = build_core_case(name)
-            simulation = make_simulation(case, arm=arm, steps=64, full_field_dft=True)
-            with record_setup() as calls:
-                prepared = simulation.prepare()
-            print("G1 SETUP", name, arm, calls, flush=True)
-            if arm == "candidate":
-                candidate_setup = calls
-            setup = dict(model=prepared.solver._compiled_material_model,
-                         uniformity=prepared.solver._coefficient_uniformity)
-            metadata.append(tensor_metadata(setup, "setup"))
-            setups.append(snapshot(setup))
-            del setup
-            if arm == "candidate":
-                prepared.solver._core_runtime.chunk_size = 32
-            result = prepared.run()
-            torch.cuda.synchronize()
-            payload = tensors({name: getattr(prepared.solver, name)
-                               for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}, "fields")
-            payload.update(tensors(result.fields, "phasors"))
-            payload.update(tensors(result.monitors, "monitors"))
-            payloads.append(payload)
-            del result, prepared, simulation, case
-            gc.collect()
-            torch.cuda.empty_cache()
+        from tests.support import frozen_oracles
+
+        # Frozen existing-path baseline: torch setup snapshot, its metadata and the run payload.
+        frozen = torch.load(frozen_oracles.path(f"setup-gates/g1/{name}"), weights_only=False, map_location="cpu")
+        payloads, setups, metadata = [frozen["payload"]], [frozen["setup"]], [frozen["metadata"]]
+        case = build_core_case(name)
+        simulation = make_simulation(case, steps=64, full_field_dft=True)
+        with record_setup() as calls:
+            prepared = simulation.prepare()
+        print("G1 SETUP", name, "candidate", calls, flush=True)
+        candidate_setup = calls
+        setup = dict(model=prepared.solver._compiled_material_model,
+                     uniformity=prepared.solver._coefficient_uniformity)
+        metadata.append(tensor_metadata(setup, "setup"))
+        setups.append(snapshot(setup))
+        del setup
+        prepared.solver._core_runtime.chunk_size = 32
+        result = prepared.run()
+        torch.cuda.synchronize()
+        payload = tensors({name: getattr(prepared.solver, name)
+                           for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}, "fields")
+        payload.update(tensors(api_dialect.fields(result), "phasors"))
+        payload.update(tensors(api_dialect.monitors(result), "monitors"))
+        payloads.append(payload)
+        del result, prepared, simulation, case
+        gc.collect()
+        torch.cuda.empty_cache()
         assert metadata[1] == metadata[0], name
         assert_model_equal(setups[1], setups[0], "setup")
         assert_model_equal(payloads[1], payloads[0], name)
@@ -731,9 +780,9 @@ def timing(names=("vacuum", "sphere"), output=OUTPUT):
         for arm in ("baseline", "candidate"):
             scene = _grid_scene((256,) * 3)
             if name == "sphere":
-                _sphere(scene)
+                scene = _sphere(scene)
             case = CoreCase(name, scene)
-            simulation = make_simulation(case, arm=arm, steps=32, full_field_dft=False)
+            simulation = make_simulation(case, steps=32, full_field_dft=False)
             stages = []
             original = materials.compile_material_model
 
@@ -749,7 +798,7 @@ def timing(names=("vacuum", "sphere"), output=OUTPUT):
             torch.cuda.synchronize()
             start = time.perf_counter()
             with patch.object(scene_module, "compile_material_model", record), record_setup() as calls:
-                prepared = simulation.prepare()
+                solver = setup_solver(simulation, accelerated=arm == "candidate")
             torch.cuda.synchronize()
             assert len(stages) == 1, stages
             row = dict(
@@ -761,7 +810,7 @@ def timing(names=("vacuum", "sphere"), output=OUTPUT):
             print("TIMING", row, flush=True)
             rows.append(row)
             (output / "timings.json").write_text(json.dumps(rows, indent=2) + "\n")
-            del prepared, simulation, case, scene
+            del solver, simulation, case, scene
             gc.collect()
             torch.cuda.empty_cache()
     return rows
@@ -779,15 +828,12 @@ def coefficient_gate(names, output=OUTPUT):
                  else CoreCase(name, scene_for(name))]
         if policy is not None:
             samples, averaging = policy
-            cases = [CoreCase(name, cases[0].scene.clone(
-                subpixel_samples=mw.SubpixelSpec(samples=samples, averaging=averaging, pec=cases[0].scene.subpixel.pec)))]
+            cases = [CoreCase(name, cases[0].scene.updated(subpixel=mw.SubpixelSpec(samples=samples, averaging=averaging, pec=cases[0].scene.subpixel.pec)))]
         for arm in ('baseline', 'candidate'):
-            simulation = (setup_simulation(cases[0].scene, accelerated=arm == 'candidate')
-                          if name in S01_SCENES else
-                          make_simulation(cases[0], arm=arm, steps=32, full_field_dft=False))
+            simulation = (setup_simulation(cases[0].scene) if name in S01_SCENES else
+                          make_simulation(cases[0], steps=32, full_field_dft=False))
             with record_setup() as calls:
-                prepared = simulation.prepare()
-            solver = prepared.solver
+                solver = setup_solver(simulation, accelerated=arm == 'candidate')
             coefficients = {key: value for key, value in vars(solver).items()
                             if key.startswith(('cex_', 'cey_', 'cez_', 'chx_', 'chy_', 'chz_', 'cpml_'))
                             and torch.is_tensor(value)}
@@ -795,7 +841,7 @@ def coefficient_gate(names, output=OUTPUT):
             payloads.append(snapshot(coefficients))
             if arm == 'candidate':
                 pieces = calls.pieces
-            del solver, prepared, simulation
+            del solver, simulation
             gc.collect()
             torch.cuda.empty_cache()
         assert_model_equal(payloads[1], payloads[0], name)
@@ -818,7 +864,7 @@ def primitive_gate(output=OUTPUT):
     points = torch.cat((points, points.new_tensor([[0., -0., 0.], [.23, 0., 0.], [-.5, .5, 0.]])))
     coords = tuple(points[:, i:i+1, None] for i in range(3))
     for name in S01_SCENES[:10]:
-        geometry = prepare_scene(s01_scene(name, device="cuda")).structures[0].geometry
+        geometry = prepare_scene(s01_scene(name, device="cuda")).scene.structures[0].geometry
         payloads = []
         for accelerated in (False, True):
             token = dispatch.setup_enabled.set(accelerated)
@@ -853,18 +899,17 @@ def s01_timing(names=S01_SCENES, output=OUTPUT):
         for samples, averaging in MODES:
             for accelerated in (False, True):
                 scene = s01_scene(name, device="cuda", n=256)
-                scene = scene.clone(subpixel_samples=mw.SubpixelSpec(
+                scene = scene.updated(subpixel=mw.SubpixelSpec(
                     samples=samples, averaging=averaging, pec=scene.subpixel.pec))
-                simulation = setup_simulation(scene, accelerated=accelerated)
+                simulation = setup_simulation(scene)
                 gc.collect()
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.synchronize()
                 start = time.perf_counter()
                 with record_setup() as calls:
-                    prepared = simulation.prepare()
+                    solver = setup_solver(simulation, accelerated=accelerated)
                 torch.cuda.synchronize()
-                solver = prepared.solver
                 assert (solver.Nx, solver.Ny, solver.Nz) == (256,)*3
                 row = dict(scene=name, samples=samples, averaging=averaging, shape=(256,)*3,
                     arm="accelerated" if accelerated else "torch", prepare_seconds=time.perf_counter()-start,
@@ -873,7 +918,7 @@ def s01_timing(names=S01_SCENES, output=OUTPUT):
                 rows.append(row)
                 print("S01 TIMING", row, flush=True)
                 (output / "s01-timings.json").write_text(json.dumps(rows, indent=2) + "\n")
-                del solver, prepared, simulation, scene
+                del solver, simulation, scene
     return rows
 
 
@@ -885,13 +930,12 @@ def table_gate(names, output=OUTPUT):
     rows = []
     for name in names:
         if name == 'sphere256_edge4':
-            scene = _sphere(_grid_scene((256,) * 3)).clone(
-                subpixel_samples=mw.SubpixelSpec(samples=4, averaging='kottke_edge'))
+            scene = _sphere(_grid_scene((256,) * 3)).updated(subpixel=mw.SubpixelSpec(samples=4, averaging='kottke_edge'))
             case = CoreCase(name, scene)
         else:
             case = build_core_case(name)
         # Isolate compression from stepping and setup acceleration.
-        solver = make_simulation(case, arm='baseline', steps=32, full_field_dft=False).prepare().solver
+        solver = setup_solver(make_simulation(case, steps=32, full_field_dft=False), accelerated=False)
         for family in ('e', 'h'):
             torch.cuda.reset_peak_memory_stats()
             with patch.object(tables, 'compress', return_value=dispatch.UNCHANGED):
@@ -963,12 +1007,15 @@ def o3b_timing(names, output=OUTPUT):
         n = int(grid.removeprefix('pair'))
         samples, averaging = modes[mode]
         for arm in ('baseline', 'candidate'):
-            scene = _sphere(_grid_scene((n,) * 3)).clone(subpixel_samples=mw.SubpixelSpec(
+            scene = _sphere(_grid_scene((n,) * 3)).updated(subpixel=mw.SubpixelSpec(
                 samples=samples, averaging=averaging))
-            scene.add_structure(mw.Structure(
-                geometry=mw.Box(position=(.24, 0, 0), size=(.12, .24, .2), device='cpu'),
-                material=mw.Material(eps_r=3.)))
-            simulation = make_simulation(CoreCase(name, scene), arm=arm, steps=32, full_field_dft=False)
+            scene = scene.updated(structures=(
+                *scene.structures,
+                mw.Structure(
+                    geometry=mw.Box(position=(.24, 0, 0), size=(.12, .24, .2), device='cpu'),
+                    material=mw.Material(eps_r=3.)),
+            ))
+            simulation = make_simulation(CoreCase(name, scene), steps=32, full_field_dft=False)
             table_seconds = []
             original = core_path._compress_coefficients
 
@@ -986,7 +1033,7 @@ def o3b_timing(names, output=OUTPUT):
             torch.cuda.synchronize()
             start = time.perf_counter()
             with patch.object(core_path, '_compress_coefficients', timed_table), record_setup() as calls:
-                prepared = simulation.prepare()
+                solver = setup_solver(simulation, accelerated=arm == 'candidate')
             torch.cuda.synchronize()
             row = dict(scene=name, arm=arm, shape=(n, n, n), prepare_seconds=time.perf_counter()-start,
                        table_seconds=table_seconds, accelerated=any(calls), accelerated_pieces=calls.pieces,
@@ -994,7 +1041,7 @@ def o3b_timing(names, output=OUTPUT):
             rows.append(row)
             print('TIMING', row, flush=True)
             (output / 'o3b-timings.json').write_text(json.dumps(rows, indent=2) + '\n')
-            del prepared, simulation, scene
+            del solver, simulation, scene
             gc.collect()
             torch.cuda.empty_cache()
     return rows
@@ -1011,8 +1058,11 @@ def o3c_timing(names=("mesh128", "mesh256"), output=OUTPUT):
         n = int(name.removeprefix("mesh"))
         for arm in ("baseline", "candidate"):
             scene = _grid_scene((n,) * 3, subpixel=mw.SubpixelSpec(samples=1, averaging="arithmetic"))
-            scene.add_structure(mw.Structure(geometry=mesh_geometry(large=True), material=mw.Material(eps_r=3.7)))
-            simulation = make_simulation(CoreCase(name, scene), arm=arm, steps=32, full_field_dft=False)
+            scene = scene.updated(structures=(
+                *scene.structures,
+                mw.Structure(geometry=mesh_geometry(large=True), material=mw.Material(eps_r=3.7)),
+            ))
+            simulation = make_simulation(CoreCase(name, scene), steps=32, full_field_dft=False)
             split = {"distance": [], "winding": []}
 
             def timed(label, operation):
@@ -1038,14 +1088,14 @@ def o3c_timing(names=("mesh128", "mesh256"), output=OUTPUT):
                 stack.enter_context(patch.object(accelerator, "unsigned_distance_static_bvh",
                     timed("distance", accelerator.unsigned_distance_static_bvh)))
                 with record_setup() as calls:
-                    prepared = simulation.prepare()
+                    solver = setup_solver(simulation, accelerated=arm == "candidate")
             torch.cuda.synchronize()
             row = dict(scene=name, arm=arm, shape=(n, n, n), triangles=5000,
                        samples=1, averaging="arithmetic", prepare_seconds=time.perf_counter()-start,
                        prepare_distance_seconds=split["distance"], prepare_winding_seconds=split["winding"],
                        accelerated=any(calls), accelerated_pieces=calls.pieces,
                        peak_allocated=torch.cuda.max_memory_allocated(), peak_reserved=torch.cuda.max_memory_reserved())
-            del prepared, simulation, scene
+            del solver, simulation, scene
             gc.collect()
             torch.cuda.empty_cache()
             # Isolate full-grid distance from exact winding; GPU-authored data
@@ -1086,13 +1136,12 @@ def cpu_dry_run(output=OUTPUT):
     for name in (*EXTRAS, *CORE_SCENES):
         for samples, averaging in MODES:
             scene = scene_for(name, device="cpu")
-            scene = scene.clone(subpixel_samples=mw.SubpixelSpec(
+            scene = scene.updated(subpixel=mw.SubpixelSpec(
                 samples=samples, averaging=averaging, pec=scene.subpixel.pec))
-            simulation = setup_simulation(scene, accelerated=True)
-            assert simulation.config.accelerated_setup and not simulation.config.fdtd_core_path
+            setup_simulation(scene)
             prepared_scene = prepare_scene(scene)
             assert torch.device(prepared_scene.device).type == "cpu"
-            assert not dispatch.eligible(prepared_scene, 1., 1., prepared_scene.subpixel)
+            assert not dispatch.eligible(prepared_scene, 1., 1., prepared_scene.scene.subpixel)
             rows.append(dict(scene=name, samples=samples, averaging=averaging, accelerated=False))
     for name in O3C_SCENES:
         scene = scene_for(name, device="cpu")

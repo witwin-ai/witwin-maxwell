@@ -11,15 +11,21 @@ from tests.fdtd.test_custom_current_volume_support import _COMPONENTS, _prepare,
 from witwin.maxwell.fdtd.adjoint.core import _apply_source_term_list, _resolved_source_term_lists
 from witwin.maxwell.fdtd.distributed.sources import _crop_term_to_owned_x
 from witwin.maxwell.fdtd.excitation.temporal import apply_compiled_source_terms, apply_generic_source_terms
+from witwin.maxwell.scene import place_scene
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='FDTD requires CUDA')
 
 
 @pytest.fixture
 def solver():
     scene = _scene(mw.GridSpec.uniform(.08))
     axes = ([-.079, .083], [-.061, .093], [-.33, -.17])
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(axes, {
-        key: np.full((2, 2, 2), (-1.)**i * (i + 1)) for i, key in enumerate(_COMPONENTS)
-    }), source_time=mw.CW(frequency=2e9, phase=.37)))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(axes, {
+            key: np.full((2, 2, 2), (-1.)**i * (i + 1)) for i, key in enumerate(_COMPONENTS)
+        }), source_time=mw.CW(frequency=2e9, phase=.37)),
+    ))
     return _prepare(scene)
 
 
@@ -112,7 +118,8 @@ def test_intersection_guards_read_only_nonzero_finite_support(solver, reader):
             linear = (point[:, 0] * solver.Ex.shape[1] + point[:, 1]) * solver.Ex.shape[2] + point[:, 2]
             check = lambda: _source_support_overlap(solver, {'Ex': {'indices': point, 'linear_indices': linear}})
         elif reader == 'copper_foil':
-            solver._copper_foils = [dict(electric_name='Ex', imaginary=False, indices=point, edge_geometry=None)]
+            solver._copper_foils = [dict(electric_name='Ex', imaginary=False, indices=point.to(solver.Ex.device),
+                                         edge_geometry=None)]
             check = lambda: validate_copper_port_coupling(solver)
         else:
             complex_ = SimpleNamespace(e_component=[0], e_index=point, e_split=[False],
@@ -134,7 +141,7 @@ def test_magnetic_terms_keep_native_batch_unsupported_guard(solver):
 
 def test_custom_currents_keep_public_native_batch_admission_guard(solver):
     from witwin.maxwell.execution.batch_runtime import PreparedBatch
-    simulation = mw.Simulation.fdtd(solver.scene._public_scene, frequency=2e9, backend='cpu_reference')
+    simulation = mw.Simulation.fdtd(solver.scene._public_scene, frequencies=2e9)
     batch = SimpleNamespace(simulations=(simulation,), outputs=SimpleNamespace(result_device='cuda'))
     with pytest.raises(NotImplementedError, match='supports PointDipole sources'):
         PreparedBatch._validate_inputs(SimpleNamespace(batch=batch), None)
@@ -164,47 +171,30 @@ def test_ideal_point_shard_correction_does_not_rescale_custom_currents(solver):
 def test_periodic_finite_box_owns_duplicated_nodes_once(field):
     from witwin.maxwell.fdtd.excitation.injection import inject_source_terms
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.64, 0.64),) * 3), grid=mw.GridSpec.uniform(.08),
-                     boundary=mw.BoundarySpec.periodic(), device='cuda')
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(([-.64, .64],) * 3,
-        {'J' + field[-1]: np.ones((2, 2, 2))}), source_time=mw.CW(frequency=2e9)))
-    runtime = mw.Simulation.fdtd(scene, frequency=2e9, cuda_graph=False).prepare().solver
+                     boundary=mw.BoundarySpec.periodic(),
+                     sources=(
+                         mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(([-.64, .64],) * 3,
+                             {'J' + field[-1]: np.ones((2, 2, 2))}), source_time=mw.CW(frequency=2e9)),
+                     ))
+    runtime = mw.Simulation.fdtd(scene, frequencies=2e9, config=mw.FDTDConfig(cuda_graph=False)).prepare().solver
     inject_source_terms(runtime, time_value=0.)
     density = -getattr(runtime, field) * getattr(runtime, 'eps_' + field) / runtime.dt
     torch.testing.assert_close(density, torch.ones_like(density), rtol=2e-7, atol=0.)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason='native current propagation requires CUDA')
-@pytest.mark.parametrize('component', list(_COMPONENTS))
-def test_native_current_preparation_and_fields_match_cpu_reference(component):
-    scene = _scene(mw.GridSpec.uniform(.08))
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(
-        ([-.079, .083], [-.061, .093], [-.33, -.17]), {component: np.ones((2, 2, 2))}),
-        # A pulse records spectral samples from the first step, so a short run returns output.
-        source_time=mw.GaussianPulse(frequency=2e9, fwidth=.5e9)))
-    solvers = []
-    for device, backend in (('cpu', 'cpu_reference'), ('cuda', 'native')):
-        prepared = mw.Simulation.fdtd(scene.clone(device=device), frequency=2e9, backend=backend,
-            full_field_dft=True, cuda_graph=False, run_time=mw.TimeConfig(time_steps=32)).prepare()
-        prepared.run()
-        solvers.append(prepared.solver)
-    cpu, native = solvers
-    for a, b in zip(_terms(cpu), _terms(native)):
-        assert a['field_name'] == b['field_name'] and a['offsets'] == b['offsets']
-        torch.testing.assert_close(a['patch'], b['patch'].cpu(), rtol=2e-7, atol=0.)
-    for field in _COMPONENTS.values():
-        torch.testing.assert_close(getattr(native, field).cpu(), getattr(cpu, field), rtol=2e-5, atol=2e-6)
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='current graph execution requires CUDA')
 def test_finite_volume_electric_current_graph_matches_eager():
-    scene = _scene(mw.GridSpec.uniform(.08)).clone(device='cuda')
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(
-        ([-.079, .083], [-.061, .093], [-.33, -.17]), {'Jx': np.ones((2, 2, 2))}),
-        source_time=mw.GaussianPulse(frequency=2e9, fwidth=.5e9)))
+    scene = place_scene(_scene(mw.GridSpec.uniform(.08)), 'cuda')
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(
+            ([-.079, .083], [-.061, .093], [-.33, -.17]), {'Jx': np.ones((2, 2, 2))}),
+            source_time=mw.GaussianPulse(frequency=2e9, fwidth=.5e9)),
+    ))
     fields = []
     for graph in (False, True):
-        prepared = mw.Simulation.fdtd(scene, frequency=2e9, full_field_dft=True, cuda_graph=graph,
-            run_time=mw.TimeConfig(time_steps=32)).prepare()
+        prepared = mw.Simulation.fdtd(scene, frequencies=2e9, config=mw.FDTDConfig(full_field_dft=True, cuda_graph=graph,
+            run_time=mw.TimeConfig(time_steps=32))).prepare()
         prepared.run()
         fields.append({field: getattr(prepared.solver, field).clone() for field in _COMPONENTS.values()})
     for field in _COMPONENTS.values():
@@ -215,12 +205,15 @@ def test_finite_volume_electric_current_graph_matches_eager():
 def test_batched_source_engine_consumes_prepared_volume_patches():
     from witwin.maxwell.fdtd.cuda.backend import get_compiled_extension
     from witwin.maxwell.fdtd.excitation.temporal import BatchSourceEngine
-    scene = _scene(mw.GridSpec.uniform(.08)).clone(device='cuda')
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(
-        ([-.079, .083], [-.061, .093], [-.33, -.17]),
-        {'J' + axis: np.full((2, 2, 2), i + 1.) for i, axis in enumerate('xyz')}),
-        source_time=mw.CW(frequency=2e9, phase=.37)))
-    solver = mw.Simulation.fdtd(scene, frequency=2e9, cuda_graph=False).prepare().solver
+    scene = place_scene(_scene(mw.GridSpec.uniform(.08)), 'cuda')
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(
+            ([-.079, .083], [-.061, .093], [-.33, -.17]),
+            {'J' + axis: np.full((2, 2, 2), i + 1.) for i, axis in enumerate('xyz')}),
+            source_time=mw.CW(frequency=2e9, phase=.37)),
+    ))
+    solver = mw.Simulation.fdtd(scene, frequencies=2e9, config=mw.FDTDConfig(cuda_graph=False)).prepare().solver
     buffers = {field: getattr(solver, field).unsqueeze(0) for field in ('Ex', 'Ey', 'Ez')}
     slot = SimpleNamespace(capacity=1, solvers=(solver,), buffers=buffers, device=solver.device,
                            native=get_compiled_extension(), active=torch.ones(1, dtype=torch.int32, device=solver.device))
@@ -242,18 +235,23 @@ def test_volume_current_joint_material_gradients_match_finite_differences(compon
 
     class CurrentDesign(ConductiveDesign):
         def to_scene(self):
-            scene = super().to_scene().clone(ports=())
-            scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(([-.006, .006],) * 3,
-                {component: np.full((2, 2, 2), 50.)}), source_time=mw.CW(frequency=3e9)))
-            scene.add_monitor(mw.PointMonitor('probe', (.005, .005, .01), fields=('Ex', 'Ey', 'Ez')))
+            scene = super().to_scene().updated(ports=())
+            scene = scene.updated(sources=(
+                *scene.sources,
+                mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(([-.006, .006],) * 3,
+                    {component: np.full((2, 2, 2), 50.)}), source_time=mw.CW(frequency=3e9)),
+            ), monitors=(
+                *scene.monitors,
+                mw.PointMonitor('probe', (.005, .005, .01), fields=('Ex', 'Ey', 'Ez')),
+            ))
             return scene
 
     model = CurrentDesign()
 
     def objective():
-        result = mw.Simulation.fdtd(model, frequency=3e9, cuda_graph=False,
-            run_time=mw.TimeConfig(time_steps=48), spectral_sampler=mw.SpectralSampler(window='none')).run()
-        fields = result.monitor('probe')['components']
+        result = mw.Simulation.fdtd(model, frequencies=3e9, config=mw.FDTDConfig(cuda_graph=False,
+            run_time=mw.TimeConfig(time_steps=48), spectral_sampler=mw.fdtd.SpectralSampler(window='none'))).run()
+        fields = result.raw_monitor('probe')['components']
         return sum(fields[field].abs().square().sum() for field in ('Ex', 'Ey', 'Ez'))
 
     objective().backward()

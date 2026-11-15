@@ -217,11 +217,11 @@ def test_insufficient_host_memory_and_busy_callbacks_never_mutate_matrix(monkeyp
 @cuda
 def test_public_scene_simulation_result_uses_explicit_storage():
     scene=mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1),mw.Material(eps_r=2.25,sigma_e=.002))],sources=[mw.PlaneWave()])
-    simulation=mw.Simulation.mom(scene,frequency=3e8,config=mw.MoMConfig(subdivisions=0,riesz_storage='compact_rwg_v1',
+    simulation=mw.Simulation.mom(scene,frequencies=3e8,config=mw.mom.MoMConfig(subdivisions=0,riesz_storage='compact_rwg_v1',
         integration=IntegrationConfig(order=3,singular_order=3),stopping=rule()))
     result=simulation.run()
-    assert result.solver_stats['converged'] and result.solver_stats['direct_storage']['matrix_restored_exact']
-    assert result.surface_currents.handle._lu is None
+    assert result.stats()['converged'] and result.stats()['direct_storage']['matrix_restored_exact']
+    assert mw.mom.surface_currents(result).handle._lu is None
 
 
 @cuda

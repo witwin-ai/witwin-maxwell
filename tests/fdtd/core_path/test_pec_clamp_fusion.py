@@ -8,6 +8,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd.runtime import core_path, core_tables, stepping
+from witwin.maxwell.scene import place_scene
 
 
 FIELDS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
@@ -15,7 +16,7 @@ FIELDS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 
 def _solver(sides=((True, True),) * 3, **overrides):
     solver = SimpleNamespace(
-        scene=SimpleNamespace(boundary=mw.BoundarySpec.pec()), has_pec_faces=True,
+        scene=SimpleNamespace(scene=SimpleNamespace(boundary=mw.BoundarySpec.pec())), has_pec_faces=True,
         tfsf_enabled=False, complex_fields_enabled=False, electric_dispersive_enabled=False,
         _source_terms=[], _electric_source_terms=[], observers_enabled=False,
         _advance_magnetic_dispersive_state=lambda: None,
@@ -104,7 +105,7 @@ def test_missing_term_tables_and_periodic_images_keep_clamp():
     solver = _solver(_source_terms=None)
     assert core_path.pec_clamp_plan(solver, _sources()) == (True, False)
     solver._source_terms = [_term()]
-    solver.scene.boundary = mw.BoundarySpec.faces(default="pec", y="periodic")
+    solver.scene.scene.boundary = mw.BoundarySpec.faces(default="pec", y="periodic")
     assert core_path.pec_clamp_plan(solver, _sources()) == (True, False)
 
 
@@ -198,7 +199,7 @@ def test_graph_builder_issues_expected_native_clamp_launches(monkeypatch, face, 
     assert len(launches) == 32 * expected
 
 
-def _simulation(case, *, core=True, steps=65, device="cuda"):
+def _simulation(case, *, steps=65, device="cuda"):
     # Binary-exact nodes keep the adjacent dipole's interpolation support off
     # the wall, including the float32 coordinate conversion during compilation.
     nodes = tuple(np.linspace(-.5, .5, size) for size in (9, 17, 17))
@@ -207,38 +208,45 @@ def _simulation(case, *, core=True, steps=65, device="cuda"):
         boundary = mw.BoundarySpec.faces(x_low="pec", y_high="pec", z_low="pec")
     elif case == "cpml":
         # PEC faces next to 4-layer CPML on every axis: an open PML topology, so absorber="auto"
-        # resolves to cpml with the passivity guard inactive and the core path stays eligible
-        # (closed-transverse CPML is guard-sampled and core-refused since the guard merge).
+        # resolves to cpml with the passivity guard inactive.
         boundary = mw.BoundarySpec.faces(default="pml", x_low="pec", y_low="pec", num_layers=4)
     elif case == "mur":
         boundary = mw.BoundarySpec.faces(default="pec", z="mur")
     y = nodes[1][1] if case == "adjacent" else (nodes[1][0] if case == "on_face" else 0.)
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
-                     grid=mw.GridSpec.custom(*nodes), boundary=boundary, device="cpu")
+                     grid=mw.GridSpec.custom(*nodes), boundary=boundary)
     if case == "dispersive":
-        scene.add_structure(mw.Structure(
-            geometry=mw.Box(position=(0., 0., 0.), size=(1.2, 1.2, 1.2), device="cpu"),
-            material=mw.Material.debye(eps_inf=2., delta_eps=1., tau=8e-11), name="dispersive_host"))
-    scene.add_source(mw.PointDipole(position=(0., y, 0.), polarization="Ez", profile="ideal", width=.01,
-                                   source_time=mw.CW(frequency=1e9, phase=.3)))
-    scene.add_monitor(mw.PointMonitor("point", position=(.1, .1, .1), fields=FIELDS))
-    scene.add_monitor(mw.PlaneMonitor("plane", axis="y", position=0., fields=FIELDS, frequencies=(1e9,)))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(
+                geometry=mw.Box(position=(0., 0., 0.), size=(1.2, 1.2, 1.2), device="cpu"),
+                material=mw.Material.debye(eps_inf=2., delta_eps=1., tau=8e-11), name="dispersive_host"),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(0., y, 0.), polarization="Ez", profile="ideal", width=.01,
+                      source_time=mw.CW(frequency=1e9, phase=.3)),
+    ), monitors=(
+        *scene.monitors,
+        mw.PointMonitor("point", position=(.1, .1, .1), fields=FIELDS),
+        mw.PlaneMonitor("plane", axis="y", position=0., fields=FIELDS, frequencies=(1e9,)),
+    ))
     # A Hanning CW window opens after the >=15-period transient (hundreds of
     # steps here); window="none" samples from step 0 so a short run records DFT
     # and monitor spectra while keeping the CW injection route.
-    return mw.Simulation.fdtd(scene.clone(device=device), frequency=1e9,
-        run_time=mw.TimeConfig(time_steps=steps), full_field_dft=True, fdtd_core_path=core,
-        spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=True, shutoff=0.)
+    return mw.Simulation.fdtd(place_scene(scene, device), frequencies=1e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps), full_field_dft=True,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=True, shutoff=0.,
+        ))
 
 
 @pytest.mark.parametrize("case", ["box", "one_side", "cpml", "adjacent", "on_face", "dispersive", "mur"])
 def test_gate_scenes_build_on_host(monkeypatch, case):
     monkeypatch.setattr(torch.cuda, "_lazy_init", lambda: pytest.fail("CPU scene construction initialized CUDA"))
     simulation = _simulation(case, device="cpu")
-    assert simulation.config.fdtd_core_path
     assert len(simulation.scene.monitors) == 2
-    if case == "mur":
-        assert "MUR boundaries" in core_path.core_path_blockers(SimpleNamespace(scene=simulation.scene))
+    assert not hasattr(core_path, "core_path_decision")
 
 
 @pytest.mark.parametrize("case", ["box", "adjacent", "on_face"])
@@ -246,8 +254,8 @@ def test_real_dipole_patch_metadata_selects_expected_route(case):
     from witwin.maxwell.fdtd.excitation.injection import _prepare_point_dipole_source
     from witwin.maxwell.scene import PreparedScene
 
-    scene = PreparedScene(_simulation(case, device="cpu").scene, lazy_meshgrid=True)
-    source = scene.sources[0]
+    scene = PreparedScene(_simulation(case, device="cpu").scene, lazy_meshgrid=True, device="cpu")
+    source = scene.scene.sources[0]
     shape = tuple(len(nodes) for nodes in (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64))
     solver = _solver(scene=scene, Nx=shape[0], Ny=shape[1], Nz=shape[2], dt=1e-11, device="cpu",
                      Ez=torch.zeros(shape[0], shape[1], shape[2] - 1),
@@ -264,10 +272,10 @@ def test_real_dipole_patch_metadata_selects_expected_route(case):
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="T0 comparison requires CUDA.")
-@pytest.mark.parametrize("case", ["box", "one_side", "cpml", "adjacent", "on_face", "dispersive"])
+@pytest.mark.parametrize("case", ["box", "one_side", "cpml", "adjacent", "on_face", "dispersive", "mur"])
 @pytest.mark.parametrize("chunk", [1, 16, 32])
 def test_fields_and_monitors_equal_historical_clamps_three_runs(monkeypatch, case, chunk):
-    from benchmark.core_path.gates import tensors
+    from benchmark.core_path.gates import api_dialect, tensors
 
     plan = core_path.pec_clamp_plan
 
@@ -291,7 +299,7 @@ def test_fields_and_monitors_equal_historical_clamps_three_runs(monkeypatch, cas
         assert solver._core_runtime.pec_clamp_plan == (
             (True, True) if oracle else (case == "on_face", case == "dispersive"))
         values = {name: getattr(solver, name).cpu().clone() for name in FIELDS}
-        values.update({name: value.cpu().clone() for name, value in tensors(result.monitors, "monitor").items()})
+        values.update({name: value.cpu().clone() for name, value in tensors(api_dialect.monitors(result), "monitor").items()})
         values.update({name: value.cpu().clone()
                        for name, value in tensors(solver._dft_batched_fields, "dft").items()})
         assert any(name.startswith("monitor/") for name in values)
@@ -303,24 +311,3 @@ def test_fields_and_monitors_equal_historical_clamps_three_runs(monkeypatch, cas
         assert actual.keys() == reference.keys()
         for name in reference:
             assert torch.equal(actual[name], reference[name]), (case, chunk, name)
-
-
-@pytest.mark.cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Mur regression requires CUDA.")
-def test_pec_mur_keeps_existing_admission_and_noncore_execution():
-    from benchmark.core_path.gates import tensors
-
-    # Mur is already excluded by core_path_blockers; do not broaden admission
-    # just to exercise an optimization in a path that cannot execute it.
-    with pytest.raises(ValueError, match="MUR boundaries"):
-        _simulation("mur").prepare()
-    reference = None
-    for _ in range(3):
-        result = _simulation("mur", core=False).run()
-        fields = {name: getattr(result.solver, name).cpu().clone() for name in FIELDS}
-        fields.update(tensors(result.monitors, "monitor"))
-        if reference is not None:
-            assert fields.keys() == reference.keys()
-            for name in fields:
-                assert torch.equal(fields[name], reference[name]), name
-        reference = fields

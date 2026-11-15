@@ -1,0 +1,705 @@
+{
+  "fixture": "F-F",
+  "description": "Two-turn symmetric octagonal differential inductor (apothems 70/58 um, w 8, s 4, top-plane diagonal and underpass crossover, 4x4 um vias), PEC sheets in lossless oxide, one floating port (tests/support/rfic_a4_fixtures.octagonal_inductor); polygon (triangle) mesher.",
+  "reference": {
+    "values": {
+      "L_H": 8.871751356314552e-10,
+      "u_rel": 0.0017733329240779358,
+      "finest_substrip_count": 16,
+      "zero_thickness": {
+        "8": {
+          "value": 8.906089991379717e-10,
+          "order": 0.9541493484220086,
+          "uncertainty": 2.1031087952992966e-12
+        },
+        "12": {
+          "value": 8.888839357233718e-10,
+          "order": 0.9381312758603457,
+          "uncertainty": 2.328135363061923e-12
+        },
+        "16": {
+          "value": 8.881402317477197e-10,
+          "order": 0.9221743300383328,
+          "uncertainty": 2.5185583055061467e-12
+        }
+      },
+      "pair_error": {
+        "8": 0.015689845508534583,
+        "12": 0.007776484859151278,
+        "16": 0.004409671187087794,
+        "24": 0.0027800711544310186,
+        "32": 0.0007445133496515322,
+        "48": 0.0005844493913838011
+      },
+      "sensitivity_ratio": 0.24642389480343888,
+      "correction_rel": 0.0010866483487246778,
+      "station_step_effect_rel": 0.00010223518396945686,
+      "pair_exact_L_per_length_H_per_m": 6.611546995295212e-07
+    },
+    "provenance": {
+      "generator": "scripts/dev/rfic/octagon_reference_r7.py",
+      "generator_sha256": "9ad5d65de98bcee79fe73b03bdb86edc2fde186a5c9ffaacf0c76fc5b4b7773d",
+      "version": "FastHenry 3.0wr (tools/fasthenry-build, -m direct -t 1e-10), generator at witwin-maxwell 33b33110747ab1cc46f42d6b0be3e059d71bbc10",
+      "inputs": {
+        "frequency_Hz": 100000000.0,
+        "units": "mm with um numbers, f/1000"
+      },
+      "runs": [
+        {
+          "name": "n12",
+          "n": 12,
+          "step": 4.0,
+          "h": 0.1,
+          "ratio": 1.3,
+          "segments": 5416,
+          "input_sha256": "69a602750d7fa87150f075fe5643d80501eeba9a75b7cb447c0623992e8bf30a",
+          "L_H": 8.853152864429771e-10
+        },
+        {
+          "name": "n12-h0.05",
+          "n": 12,
+          "step": 4.0,
+          "h": 0.05,
+          "ratio": 1.3,
+          "segments": 5416,
+          "input_sha256": "f3ab22dcf4681bd10234acc838ac885a4876467fa1db5c0990798e3aaa31eb74",
+          "L_H": 8.870214274329223e-10
+        },
+        {
+          "name": "n12-h0.2",
+          "n": 12,
+          "step": 4.0,
+          "h": 0.2,
+          "ratio": 1.3,
+          "segments": 5416,
+          "input_sha256": "ea6a66061a476c843ee61657d593d5be12d225941ccf657b50dd57a30608e6d1",
+          "L_H": 8.820462439118695e-10
+        },
+        {
+          "name": "n16",
+          "n": 16,
+          "step": 4.0,
+          "h": 0.1,
+          "ratio": 1.3,
+          "segments": 7300,
+          "input_sha256": "9dbd9ff8556b2931b00c2bbfc57ef9eecc845d75c27e68e58f7c088f184d3530",
+          "L_H": 8.843221595980837e-10
+        },
+        {
+          "name": "n16-h0.05",
+          "n": 16,
+          "step": 4.0,
+          "h": 0.05,
+          "ratio": 1.3,
+          "segments": 7300,
+          "input_sha256": "899203529bd39f37aa08407d4074ebc682f94f02b80183f1e4932f9818ef26f9",
+          "L_H": 8.861253851033148e-10
+        },
+        {
+          "name": "n16-h0.2",
+          "n": 16,
+          "step": 4.0,
+          "h": 0.2,
+          "ratio": 1.3,
+          "segments": 7300,
+          "input_sha256": "bbfb5ded1b502962a67c3bb640cfbf5a36857c78ba61361be1cbb09bc79f006e",
+          "L_H": 8.809051029699007e-10
+        },
+        {
+          "name": "n20",
+          "n": 20,
+          "step": 4.0,
+          "h": 0.1,
+          "ratio": 1.3,
+          "segments": 9184,
+          "input_sha256": "5fa9fbdf1bdb7d2cec7a16a2f7d812df4cc5e32b85f22f387e3b9abb715b7d28",
+          "L_H": 8.837492018029529e-10
+        },
+        {
+          "name": "n8",
+          "n": 8,
+          "step": 4.0,
+          "h": 0.1,
+          "ratio": 1.3,
+          "segments": 3532,
+          "input_sha256": "321f3b7d96fbb0e04825ac6bfcac9d86347754c21915f43c3ef47013084d2a8c",
+          "L_H": 8.873492866156915e-10
+        },
+        {
+          "name": "n8-h0.05",
+          "n": 8,
+          "step": 4.0,
+          "h": 0.05,
+          "ratio": 1.3,
+          "segments": 3532,
+          "input_sha256": "49d2871f59cde08f37604143bee5ae35e77333135bd9e27ec725ac284d9385f6",
+          "L_H": 8.889265121017323e-10
+        },
+        {
+          "name": "n8-h0.2",
+          "n": 8,
+          "step": 4.0,
+          "h": 0.2,
+          "ratio": 1.3,
+          "segments": 3532,
+          "input_sha256": "2df9901e0a130938eaf54399cd94b1da0c3665f29ea660a904b3f0b1605f7220",
+          "L_H": 8.842935117083271e-10
+        },
+        {
+          "name": "n8-s2",
+          "n": 8,
+          "step": 2.0,
+          "h": 0.1,
+          "ratio": 1.3,
+          "segments": 6712,
+          "input_sha256": "a73b59fb9bf91a879cd391c6c6b391251c9b09209621f2bc6f38d1c0f4abab13",
+          "L_H": 8.872585682981292e-10
+        }
+      ],
+      "pair_runs": [
+        {
+          "name": "n12-h0.05-X400",
+          "n": 12,
+          "h": 0.05,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 24,
+          "input_sha256": "4bfa0729ad99f6189566cc7315d3b7cc651c0407f1415f1c1d469c807ff4a0a2",
+          "L_H": 2.6173348701348376e-10
+        },
+        {
+          "name": "n12-h0.05-X800",
+          "n": 12,
+          "h": 0.05,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 24,
+          "input_sha256": "78829e346416048cff47bd1b19133ed94b931edbb1141ec5840ee056b339577c",
+          "L_H": 5.263588193429472e-10
+        },
+        {
+          "name": "n12-h0.1-X400",
+          "n": 12,
+          "h": 0.1,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 24,
+          "input_sha256": "eff7f9334f51b05c0ab1c7a5daf7126b2644e510413178c792d8f4bad8209983",
+          "L_H": 2.600114305292294e-10
+        },
+        {
+          "name": "n12-h0.1-X800",
+          "n": 12,
+          "h": 0.1,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 24,
+          "input_sha256": "4cce8faf6447bcb63e1f275e8de62e536e5116c210a7fe5916a00d391b6a8ddd",
+          "L_H": 5.229035655284222e-10
+        },
+        {
+          "name": "n12-h0.2-X400",
+          "n": 12,
+          "h": 0.2,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 24,
+          "input_sha256": "c0d2750b0f6b12a700c889e7eb57ff5696321b415b0b7ebc979fbe2ac2bb7e5b",
+          "L_H": 2.567169232072272e-10
+        },
+        {
+          "name": "n12-h0.2-X800",
+          "n": 12,
+          "h": 0.2,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 24,
+          "input_sha256": "dae91e6bbb0c978753c3aa712c0d38726e0de861d014eaf8af1b78c32455ab72",
+          "L_H": 5.162890860935231e-10
+        },
+        {
+          "name": "n16-h0.05-X400",
+          "n": 16,
+          "h": 0.05,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 32,
+          "input_sha256": "f1748914306b301983b5a97eeff023134cad9062467c57547f8582f0f144807b",
+          "L_H": 2.6067510664192264e-10
+        },
+        {
+          "name": "n16-h0.05-X800",
+          "n": 16,
+          "h": 0.05,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 32,
+          "input_sha256": "c4d291a9699884c689d02d922b11ee7c85fd28c4d71fcde88fd051a8bbe6db0f",
+          "L_H": 5.242277346549468e-10
+        },
+        {
+          "name": "n16-h0.1-X400",
+          "n": 16,
+          "h": 0.1,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 32,
+          "input_sha256": "6399a705ef0572aeb577f9ddbe24b3b596f6ce399da8ed242df19084072b6ed0",
+          "L_H": 2.5883527549978036e-10
+        },
+        {
+          "name": "n16-h0.1-X800",
+          "n": 16,
+          "h": 0.1,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 32,
+          "input_sha256": "9d98a3d6f7e728250ba4efa858617dd57f7fc7c06c315f821b29c678f0f54016",
+          "L_H": 5.205353399752148e-10
+        },
+        {
+          "name": "n16-h0.2-X400",
+          "n": 16,
+          "h": 0.2,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 32,
+          "input_sha256": "7d291dd600b80f6e3a2315ae58db012d25b1a9012d4e400b2dcc46fafc6ef158",
+          "L_H": 2.5535773999322244e-10
+        },
+        {
+          "name": "n16-h0.2-X800",
+          "n": 16,
+          "h": 0.2,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 32,
+          "input_sha256": "a4b20392b84b9e1fb39347ff514310f2ef3eab531e0018df73d08a4f2c0066d2",
+          "L_H": 5.135516210723424e-10
+        },
+        {
+          "name": "n24-h0.05-X400",
+          "n": 24,
+          "h": 0.05,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 48,
+          "input_sha256": "1f2ac3614952225f86ced53f8f447a40d2736c183eafcd994dc67629f7bd14b4",
+          "L_H": 2.5973131782938773e-10
+        },
+        {
+          "name": "n24-h0.05-X800",
+          "n": 24,
+          "h": 0.05,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 48,
+          "input_sha256": "4b7e9befab2b6d3abc35e5337f9bbd5f74f9150bf4a5f1c118ec63f5b32e91c0",
+          "L_H": 5.223640302713406e-10
+        },
+        {
+          "name": "n24-h0.1-X400",
+          "n": 24,
+          "h": 0.1,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 48,
+          "input_sha256": "0ea1dedbad8cd0c69daff20304ffe563e4da98e14bf847ce7f09a46401f2ccf5",
+          "L_H": 2.577402894913081e-10
+        },
+        {
+          "name": "n24-h0.1-X800",
+          "n": 24,
+          "h": 0.1,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 48,
+          "input_sha256": "cb2a3c57d4d57e82c42b22b24171c371a3aafb06f0a7bba29752243eef097531",
+          "L_H": 5.183246778156684e-10
+        },
+        {
+          "name": "n24-h0.2-X400",
+          "n": 24,
+          "h": 0.2,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 48,
+          "input_sha256": "ec89cc7ac8a1394e471c970f115fa9aca45fadbc0e6c5cefe0df35d2a965a5d8",
+          "L_H": 2.540797258001945e-10
+        },
+        {
+          "name": "n24-h0.2-X800",
+          "n": 24,
+          "h": 0.2,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 48,
+          "input_sha256": "9e6e149f0e2114ebb2be6b41657ba6b7089dcc9d203d16943c030463945b1bae",
+          "L_H": 5.109796771919774e-10
+        },
+        {
+          "name": "n32-h0.05-X400",
+          "n": 32,
+          "h": 0.05,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 64,
+          "input_sha256": "326e7112bcf409e4628ed02ea6b62a3945b2fe7dd21d4117ef4f496a7b099331",
+          "L_H": 2.59352529064829e-10
+        },
+        {
+          "name": "n32-h0.05-X800",
+          "n": 32,
+          "h": 0.05,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 64,
+          "input_sha256": "420f50e1e9a4529c1ba84aaeb7f0f32cfd8455672ed4b5af0cf260bae281f491",
+          "L_H": 5.214472977991314e-10
+        },
+        {
+          "name": "n32-h0.1-X400",
+          "n": 32,
+          "h": 0.1,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 64,
+          "input_sha256": "4bab255b351ee216580f9d217eb77705ff1ff8be6f08f1369e04ddb5d2c758d9",
+          "L_H": 2.573042049472363e-10
+        },
+        {
+          "name": "n32-h0.1-X800",
+          "n": 32,
+          "h": 0.1,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 64,
+          "input_sha256": "2491cb13ebcd0268aa68b86aed7508b3a3a195f05c60461fa1aaccadc79e37a5",
+          "L_H": 5.173617904099625e-10
+        },
+        {
+          "name": "n32-h0.2-X400",
+          "n": 32,
+          "h": 0.2,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 64,
+          "input_sha256": "8690dcdebde63ed1c95da8fd62cf3dc749b6a7d345d0fa9a2374379ec33cd745",
+          "L_H": 2.536006694214879e-10
+        },
+        {
+          "name": "n32-h0.2-X800",
+          "n": 32,
+          "h": 0.2,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 64,
+          "input_sha256": "e535cb5da1446f1c034509d3096ed1d482e804486f350ed5e7c43aa4e5bb4a69",
+          "L_H": 5.100024658413931e-10
+        },
+        {
+          "name": "n48-h0.05-X400",
+          "n": 48,
+          "h": 0.05,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 96,
+          "input_sha256": "7bb081dfba5bba4087a34f4c944163f80c8a568fd00e93e8c4f49e5722fe1d13",
+          "L_H": 2.5913926144108584e-10
+        },
+        {
+          "name": "n48-h0.05-X800",
+          "n": 48,
+          "h": 0.05,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 96,
+          "input_sha256": "cf746390c974487cc89e4ea83e31e8953f4142258accd28380545f6d11f84efb",
+          "L_H": 5.21138537209533e-10
+        },
+        {
+          "name": "n48-h0.1-X400",
+          "n": 48,
+          "h": 0.1,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 96,
+          "input_sha256": "de8b33d44629844253cc00cdcdf7c19d9070b6dd5a274cf519c520281b30a217",
+          "L_H": 2.57075021829184e-10
+        },
+        {
+          "name": "n48-h0.1-X800",
+          "n": 48,
+          "h": 0.1,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 96,
+          "input_sha256": "f47f21955769dab8ff84ecb5ab8a26f9fb760a350ba5c5b43ff0c044ab36baf7",
+          "L_H": 5.169909593925583e-10
+        },
+        {
+          "name": "n48-h0.2-X400",
+          "n": 48,
+          "h": 0.2,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 96,
+          "input_sha256": "193a5f5782001d30984feee43858d44d617c8889a5008430ec1cd258b0c4e44b",
+          "L_H": 2.5336193700685006e-10
+        },
+        {
+          "name": "n48-h0.2-X800",
+          "n": 48,
+          "h": 0.2,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 96,
+          "input_sha256": "cb0acbca76fe2d89cf5d49ab1ae023fb8c68c00c623ba945e195e714842c2553",
+          "L_H": 5.095361418581339e-10
+        },
+        {
+          "name": "n8-h0.05-X400",
+          "n": 8,
+          "h": 0.05,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 16,
+          "input_sha256": "cbb0b5a3dda5f5406b005f9a7b9eba158b991c67e71657a3c1db1280550fcac5",
+          "L_H": 2.639998534031123e-10
+        },
+        {
+          "name": "n8-h0.05-X800",
+          "n": 8,
+          "h": 0.05,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 16,
+          "input_sha256": "4236bb9269a167b3e068b85c597169d7c9e9979e34acafb96a7d71830a1e95f2",
+          "L_H": 5.309265662096847e-10
+        },
+        {
+          "name": "n8-h0.1-X400",
+          "n": 8,
+          "h": 0.1,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 16,
+          "input_sha256": "00a9803bdd6e897f03ddd308f755e84fa93aff4654e4455b2ad0f11c54ecb101",
+          "L_H": 2.6243695186194994e-10
+        },
+        {
+          "name": "n8-h0.1-X800",
+          "n": 8,
+          "h": 0.1,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 16,
+          "input_sha256": "311abf647d3cf5da3eeee26c3575e1db9df47ce0d504fde099d78f73f345fdd9",
+          "L_H": 5.277880307319125e-10
+        },
+        {
+          "name": "n8-h0.2-X400",
+          "n": 8,
+          "h": 0.2,
+          "length": 400.0,
+          "ratio": 1.3,
+          "segments": 16,
+          "input_sha256": "be53ac3042167e411fafb93ca02ae331dda7bd6342c028073414be92055d24f2",
+          "L_H": 2.5940982484434206e-10
+        },
+        {
+          "name": "n8-h0.2-X800",
+          "n": 8,
+          "h": 0.2,
+          "length": 800.0,
+          "ratio": 1.3,
+          "segments": 16,
+          "input_sha256": "4e4bf0bbd080af884a8d40ec902dc8c8f0cd1b692743bb0d18a8208be7eabcdb",
+          "L_H": 5.217114950046639e-10
+        }
+      ],
+      "outputs": "<evidence-root>/rfic-mom-20261106/r7-2/fh",
+      "pair_exact": {
+        "generator": "scripts/dev/rfic/quasistatic_sda_r7.py",
+        "generator_sha256": "28e29c034f2722a4b0a5d16bb4cb6d281332a86d2d4b724ea5b45ae7fa2bce54",
+        "version": "witwin-maxwell 33b33110747ab1cc46f42d6b0be3e059d71bbc10 (numpy/scipy, CPU fp64)",
+        "inputs": {
+          "orders": 32,
+          "command": "python scripts/dev/rfic/quasistatic_sda_r7.py references"
+        },
+        "outputs": "<evidence-root>/rfic-mom-20261106/r7-2/sda/references.json",
+        "outputs_sha256": "024d21a0b3b5629759abab7e3848c29a6388a0af123991cc4366fd057eb67d2b",
+        "self_checks": "CPW vs exact finite-ground conformal map 6e-12; microstrip grounded vs image pair 3e-12; Hammerstad-Jensen -0.07% eps_eff (stated 0.2%)"
+      }
+    }
+  },
+  "sequences": {
+    "inductor": [
+      "ff-e2um-m4um",
+      "ff-e1.41421um-m2.82843um",
+      "ff-e1um-m2um"
+    ]
+  },
+  "fast_record": "ff-e2um-m4um",
+  "mom": {
+    "ff-e2um-m4um": {
+      "fixture": "F-F",
+      "edge_m": 2e-06,
+      "max_edge_m": 4e-06,
+      "frequency_Hz": [
+        100000000.0,
+        1000000000.0
+      ],
+      "unknowns": 4369,
+      "mesher": null,
+      "L_H": [
+        8.976762392911273e-10,
+        8.979057768791002e-10
+      ],
+      "R_ohm": [
+        -9.091849202913935e-13,
+        1.1900023268673811e-08
+      ],
+      "max_singular_S": 1.0000000000000362,
+      "y_real": [
+        -2.8579392421046796e-12,
+        3.7387520887538387e-10
+      ],
+      "y_imag": [
+        1.7729659773280408,
+        0.17725127423177828
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "ff",
+        "edge": 2e-06,
+        "max": 4e-06
+      }
+    },
+    "ff-e1.41421um-m2.82843um": {
+      "fixture": "F-F",
+      "edge_m": 1.4142135623730952e-06,
+      "max_edge_m": 2.8284271247461903e-06,
+      "frequency_Hz": [
+        100000000.0,
+        1000000000.0
+      ],
+      "unknowns": 6390,
+      "mesher": null,
+      "L_H": [
+        8.971264269579574e-10,
+        8.97359588429629e-10
+      ],
+      "R_ohm": [
+        -8.90460116330475e-13,
+        1.1900118459603206e-08
+      ],
+      "max_singular_S": 1.0000000000000357,
+      "y_real": [
+        -2.8025107131200514e-12,
+        3.7433336429242137e-10
+      ],
+      "y_imag": [
+        1.7740525561326934,
+        0.17735916030096144
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "ff",
+        "edge": 1.4142135623730952e-06,
+        "max": 2.8284271247461903e-06
+      }
+    },
+    "ff-e1um-m2um": {
+      "fixture": "F-F",
+      "edge_m": 1e-06,
+      "max_edge_m": 2e-06,
+      "frequency_Hz": [
+        100000000.0,
+        1000000000.0
+      ],
+      "unknowns": 12247,
+      "mesher": null,
+      "L_H": [
+        8.928861365485954e-10,
+        8.931206103233961e-10
+      ],
+      "R_ohm": [
+        -6.09722146817333e-13,
+        1.1903773914634543e-08
+      ],
+      "max_singular_S": 1.0000000000000244,
+      "y_real": [
+        -1.9372265327926095e-12,
+        3.7801122903786696e-10
+      ],
+      "y_imag": [
+        1.782477480354891,
+        0.1782009520911916
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "ff",
+        "edge": 1e-06,
+        "max": 2e-06
+      }
+    }
+  },
+  "checks": {
+    "ff-e0.707107um-m1.41421um": {
+      "fixture": "F-F",
+      "edge_m": 7.071067811865476e-07,
+      "max_edge_m": 1.4142135623730952e-06,
+      "frequency_Hz": [
+        100000000.0,
+        1000000000.0
+      ],
+      "unknowns": 22312,
+      "mesher": null,
+      "L_H": [
+        8.921210285827548e-10,
+        8.923585346005216e-10
+      ],
+      "R_ohm": [
+        -5.219647971506217e-13,
+        1.1917701563630323e-08
+      ],
+      "max_singular_S": 1.0000000000000207,
+      "y_real": [
+        -1.6499383402183584e-12,
+        3.791003064272076e-10
+      ],
+      "y_imag": [
+        1.784006182936106,
+        0.17835313601067707
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "ff",
+        "edge": 7.071067811865476e-07,
+        "max": 1.4142135623730952e-06
+      }
+    }
+  },
+  "known_offsets": {},
+  "acquisition_device": "NVIDIA RTX A6000",
+  "numerical_lock": {
+    "rule": "D-P1 (user decision 2026-11-09): committed numeric evidence is locked by value with the tiers of numerical_equivalence_standard.md (T0 bitwise, T1 within the fp64 run-level bound, T2 only with a per-field user approval); source hashes are not gates. Harness: scripts/dev/rfic/evidence_lock.py.",
+    "renewals": [
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round67/a4/ff/reacquisition",
+        "acquisition_commit": "b6b88dd2b75302676b9caccb52ec62d3b094a67e",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round67/a4/ff/reacquisition/tier_table.json",
+        "tier_table_sha256": "9c37599673415f6f6f3a77a4e01f1aa31b38cff20f0086552574caa4efd53a4f",
+        "summary": {
+          "T0": 45,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      }
+    ]
+  }
+}

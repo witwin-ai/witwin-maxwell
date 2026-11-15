@@ -2,36 +2,36 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
+from witwin.maxwell.scene import _prepared_declarations
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 FREQ = 1.0e9
 
 
-def _build_scene(material=None):
+def _build_scene(material=None, frequency=FREQ):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1e6),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="cube",
-            geometry=mw.Box(position=(0.0, 0.05, 0.0), size=(0.1, 0.1, 0.1)),
-            material=material or mw.Material(eps_r=4.0),
-        )
-    )
-    scene.add_source(_dipole("src"))
+                domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1e6),
+                structures=(
+            mw.Structure(
+                name="cube",
+                geometry=mw.Box(position=(0.0, 0.05, 0.0), size=(0.1, 0.1, 0.1)),
+                material=material or mw.Material(eps_r=4.0),
+            ),
+            ),
+                sources=(_dipole("src", frequency=frequency),),
+            )
     return scene
 
 
-def _dipole(name, position=(0.0, 0.0, 0.0), polarization=(0.0, 0.0, 1.0)):
+def _dipole(name, position=(0.0, 0.0, 0.0), polarization=(0.0, 0.0, 1.0), frequency=FREQ):
     return mw.PointDipole(
         position=position,
         polarization=polarization,
         width=0.05,
-        source_time=mw.CW(frequency=FREQ, amplitude=100.0),
+        source_time=mw.CW(frequency=frequency, amplitude=100.0),
         name=name,
     )
 
@@ -39,8 +39,8 @@ def _dipole(name, position=(0.0, 0.0, 0.0), polarization=(0.0, 0.0, 1.0)):
 def _solver(scene, frequency=FREQ):
     return mw.Simulation.fdfd(
         scene,
-        frequency=frequency,
-        solver=mw.GMRES(max_iter=100, tol=1e-6, restart=25),
+        frequencies=frequency,
+        config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(max_iter=100, tol=1e-6, restart=25)),
     ).prepare().solver
 
 
@@ -51,13 +51,13 @@ def test_solve_reuses_matrix_across_sources():
     matrix_first = solver.A_matrix
     assert matrix_first is not None
 
-    solver.scene.sources = [_dipole("src2", position=(0.05, 0.0, 0.0), polarization=(1.0, 0.0, 0.0))]
+    solver.scene.scene = _prepared_declarations(solver.scene.scene, sources=[_dipole("src2", position=(0.05, 0.0, 0.0), polarization=(1.0, 0.0, 0.0))])
     solver.solve(max_iter=100, tol=1e-6, restart=25)
     assert solver.A_matrix is matrix_first
 
     # The cached-matrix solve matches a fresh solver on the same scene.
     fresh = _solver(_build_scene())
-    fresh.scene.sources = [_dipole("src2", position=(0.05, 0.0, 0.0), polarization=(1.0, 0.0, 0.0))]
+    fresh.scene.scene = _prepared_declarations(fresh.scene.scene, sources=[_dipole("src2", position=(0.05, 0.0, 0.0), polarization=(1.0, 0.0, 0.0))])
     fresh.solve(max_iter=100, tol=1e-6, restart=25)
     for cached, reference in zip(solver.E_field, fresh.E_field):
         assert torch.allclose(cached, reference, rtol=1e-5, atol=1e-6)
@@ -71,6 +71,7 @@ def test_set_frequency_rebuilds_matrix_and_reuses_nondispersive_materials():
     eps_first = solver.material_eps_components
 
     solver.set_frequency(1.5e9)
+    solver.scene.scene = _prepared_declarations(solver.scene.scene, sources=[_dipole("src", frequency=1.5e9)])
     assert solver.A_matrix is None
     assert solver.material_eps_components is eps_first  # non-dispersive: reused
 
@@ -78,7 +79,7 @@ def test_set_frequency_rebuilds_matrix_and_reuses_nondispersive_materials():
     assert solver.A_matrix is not None
     assert solver.A_matrix is not matrix_first
 
-    fresh = _solver(_build_scene(), frequency=1.5e9)
+    fresh = _solver(_build_scene(frequency=1.5e9), frequency=1.5e9)
     fresh.solve(max_iter=50, tol=1e-6, restart=25)
     for swept, reference in zip(solver.E_field, fresh.E_field):
         assert torch.allclose(swept, reference, rtol=1e-5, atol=1e-6)
@@ -96,6 +97,7 @@ def test_set_frequency_recompiles_dispersive_materials():
     assert eps_first is not None
 
     solver.set_frequency(1.5e9)
+    solver.scene.scene = _prepared_declarations(solver.scene.scene, sources=[_dipole("src", frequency=1.5e9)])
     assert solver.material_eps_components is None
 
     solver.solve(max_iter=50, tol=1e-6, restart=25)

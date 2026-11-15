@@ -15,7 +15,7 @@ def _simulation(
     steps=32,
     frequency=3.0e9,
     boundary=None,
-    cpml_config=None,
+    cpml=mw.fdtd.CPMLConfig(),
     include_switch=False,
     cuda_graph=False,
 ):
@@ -30,14 +30,14 @@ def _simulation(
         ),
         reference_impedance=50.0,
     )
-    circuit = mw.Circuit("pulse_interconnect")
+    circuit = mw.circuits.Circuit("pulse_interconnect")
     input_node = circuit.node("input")
     output_node = circuit.node("output")
-    circuit.add(mw.Resistor("R1", input_node, output_node, 35.0))
-    circuit.add(mw.Capacitor("C1", output_node, circuit.ground, 1.2e-12))
+    circuit.add(mw.rf.Resistor("R1", input_node, output_node, 35.0))
+    circuit.add(mw.rf.Capacitor("C1", output_node, circuit.ground, 1.2e-12))
     if include_switch:
         circuit.add(
-            mw.TimedSwitch(
+            mw.circuits.TimedSwitch(
                 "S1",
                 input_node,
                 circuit.ground,
@@ -48,11 +48,11 @@ def _simulation(
             )
         )
     circuit.add(
-        mw.CurrentSource(
+        mw.circuits.CurrentSource(
             "I1",
             circuit.ground,
             input_node,
-            waveform=mw.PiecewiseLinearWaveform(
+            waveform=mw.circuits.PiecewiseLinearWaveform(
                 (0.0, 4.0e-11, 8.0e-11, 1.4e-10, 2.0e-10),
                 (0.0, 0.0, 0.02, -0.01, 0.0),
             ),
@@ -65,25 +65,27 @@ def _simulation(
         boundary=mw.BoundarySpec.none() if boundary is None else boundary,
         ports=(port,),
         circuits=(circuit,),
-        device="cuda",
     )
     return mw.Simulation.fdtd(
         scene,
-        frequency=frequency,
+        frequencies=frequency,
         # Pin the physical checkpoint schedule so the selected step indices
         # continue to straddle the PWL and switch breakpoints.
-        run_time=mw.TimeConfig(time_steps=steps, dt=8e-12),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        cpml_config={} if cpml_config is None else cpml_config,
-        cuda_graph=cuda_graph,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps, dt=8e-12),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            cpml=cpml,
+            cuda_graph=cuda_graph,
+        ),
     )
 
 
 def _assert_result_close(actual, expected):
-    for name in ("Ex", "Ey", "Ez"):
+    # Single-frequency runs without the volume DFT: compare the last-step fields.
+    for name in ("EX", "EY", "EZ"):
         torch.testing.assert_close(
-            actual.field(name),
-            expected.field(name),
+            actual.time_snapshot[name].values,
+            expected.time_snapshot[name].values,
             rtol=1.0e-6,
             atol=2.0e-8,
         )
@@ -101,8 +103,8 @@ def _assert_result_close(actual, expected):
         rtol=1.0e-6,
         atol=1.0e-9,
     )
-    actual_circuit = actual.circuit("pulse_interconnect")
-    expected_circuit = expected.circuit("pulse_interconnect")
+    actual_circuit = mw.circuits.circuit(actual, "pulse_interconnect")
+    expected_circuit = mw.circuits.circuit(expected, "pulse_interconnect")
     for actual_tensor, expected_tensor in (
         (actual_circuit.times, expected_circuit.times),
         (actual_circuit.node_voltages, expected_circuit.node_voltages),
@@ -134,7 +136,7 @@ def test_checkpoint_resume_matches_uninterrupted_result_after_pwl_breakpoint(tmp
     path = tmp_path / "pulse-interconnect.pt"
     checkpoint.save(path)
 
-    restored = mw.FDTDResumeCheckpoint.load(path, map_location="cpu")
+    restored = mw.fdtd.FDTDResumeCheckpoint.load(path, map_location="cpu")
     actual = _simulation().prepare().run(resume_from=restored)
 
     assert restored.step == 13
@@ -171,7 +173,7 @@ def test_resume_rejects_changed_frequency_configuration_before_mutation():
 def test_cpml_slab_checkpoint_resume_restores_compressed_memory_exactly():
     kwargs = {
         "boundary": mw.BoundarySpec.pml(num_layers=3),
-        "cpml_config": {"memory_mode": "slab"},
+        "cpml": mw.fdtd.CPMLConfig(memory_mode="slab"),
     }
     expected = _simulation(**kwargs).run()
     prepared = _simulation(**kwargs).prepare()
@@ -190,7 +192,7 @@ def test_resume_crosses_a_timed_switch_breakpoint_without_schedule_drift():
     actual = _simulation(include_switch=True).prepare().run(resume_from=checkpoint)
 
     _assert_result_close(actual, expected)
-    assert actual.circuit("pulse_interconnect").diagnostics[
+    assert mw.circuits.circuit(actual, "pulse_interconnect").diagnostics[
         "factorization_count"
     ] > 1
 

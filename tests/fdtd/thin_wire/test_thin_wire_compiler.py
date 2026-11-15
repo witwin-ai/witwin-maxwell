@@ -22,7 +22,7 @@ class _Kind:
     kind: str
 
 
-class _Wire(mw.ThinWire):
+class _Wire(mw.rf.ThinWire):
     def __init__(
         self,
         name,
@@ -36,7 +36,7 @@ class _Wire(mw.ThinWire):
             name=name,
             points=points,
             radius=radius,
-            conductor=mw.WireConductor.pec() if conductor is None else conductor,
+            conductor=mw.rf.WireConductor.pec() if conductor is None else conductor,
             endpoints=endpoints,
             snap=snap,
         )
@@ -64,9 +64,8 @@ def _prepared(*, wires=(), nodes=None, boundary=None, structures=(), monitors=()
         thin_wires=tuple(wires),
         monitors=monitors,
         ports=ports,
-        device="cpu",
     )
-    return prepare_scene(scene)
+    return prepare_scene(scene, device="cpu")
 
 
 def _straight(**changes):
@@ -153,7 +152,7 @@ def test_l_shape_preserves_length_orientation_and_corner_connectivity():
     wire = _Wire(
         name="elbow",
         points=((0.25, 0.25, 0.5), (0.75, 0.25, 0.5), (0.75, 0.75, 0.5)),
-        endpoints=(mw.WireEnd.grounded(structure="ground"), mw.WireEnd.open()),
+        endpoints=(mw.rf.WireEnd.grounded(structure="ground"), mw.rf.WireEnd.open()),
     )
     ground = _ground_structure(position=(0.25, 0.25, 0.5))
     network = compile_thin_wires(_prepared(wires=(wire,), structures=(ground,)))
@@ -331,9 +330,8 @@ def test_auto_grid_materializes_oblique_physical_fragments():
         domain=mw.Domain(bounds=((0.0, 1.0),) * 3),
         grid=mw.GridSpec.auto(min_steps_per_wavelength=6, wavelength=0.5),
         thin_wires=(wire,),
-        device="cpu",
     )
-    network = compile_thin_wires(prepare_scene(scene))
+    network = compile_thin_wires(prepare_scene(scene, device="cpu"))
     member_positions = network.node_positions.index_select(0, network.wire_node_indices)
 
     assert network.segment_count == 1
@@ -431,7 +429,7 @@ def test_finite_conductor_compile_carries_conductor_metadata():
     # material parameters in metadata (the topology itself stays PEC-identical).
     import witwin.maxwell as mw
 
-    wire = _straight(conductor=mw.WireConductor.finite(5.8e7))
+    wire = _straight(conductor=mw.rf.WireConductor.finite(5.8e7))
     network = compile_thin_wires(_prepared(wires=(wire,)))
     conductor = network.metadata["conductor"]
     assert conductor["kinds"] == ("finite",)
@@ -481,9 +479,9 @@ def test_continuous_points_match_float64_fixed_stencil_finite_difference():
         )
         port = mw.LumpedPort(
             "feed",
-            wire_binding=mw.WirePortBinding.gap(
-                negative=mw.WireNodeRef("continuous", 1),
-                positive=mw.WireNodeRef("continuous", 2),
+            wire_binding=mw.rf.WirePortBinding.gap(
+                negative=mw.rf.WireNodeRef("continuous", 1),
+                positive=mw.rf.WireNodeRef("continuous", 2),
             ),
         )
         return compile_thin_wires(_prepared(wires=(wire,), ports=(port,)))
@@ -589,8 +587,8 @@ def test_grounded_endpoints_require_a_named_contacting_pec_structure(
 ):
     wire = _straight(
         endpoints=(
-            mw.WireEnd.grounded(structure=structure_name),
-            mw.WireEnd.open(),
+            mw.rf.WireEnd.grounded(structure=structure_name),
+            mw.rf.WireEnd.open(),
         )
     )
     with pytest.raises(ValueError, match=message):
@@ -737,22 +735,22 @@ def test_pml_domain_shared_node_and_loop_contracts_are_rejected():
 
 
 def _branch_wires():
-    junction = mw.WireEnd.node("J")
+    junction = mw.rf.WireEnd.node("J")
     return (
         _Wire(
             "a",
             ((0.25, 0.5, 0.5), (0.5, 0.5, 0.5)),
-            endpoints=(mw.WireEnd.open(), junction),
+            endpoints=(mw.rf.WireEnd.open(), junction),
         ),
         _Wire(
             "b",
             ((0.5, 0.5, 0.5), (0.75, 0.5, 0.5)),
-            endpoints=(junction, mw.WireEnd.open()),
+            endpoints=(junction, mw.rf.WireEnd.open()),
         ),
         _Wire(
             "c",
             ((0.5, 0.5, 0.5), (0.5, 0.75, 0.5)),
-            endpoints=(junction, mw.WireEnd.open()),
+            endpoints=(junction, mw.rf.WireEnd.open()),
         ),
     )
 
@@ -815,17 +813,17 @@ def test_named_node_validation_rejects_unresolved_moved_and_overlapping_graphs()
     unresolved = _Wire(
         "unresolved",
         ((0.25, 0.25, 0.5), (0.5, 0.25, 0.5)),
-        endpoints=(mw.WireEnd.open(), mw.WireEnd.node("J")),
+        endpoints=(mw.rf.WireEnd.open(), mw.rf.WireEnd.node("J")),
     )
     with pytest.raises(ValueError, match="unresolved"):
         compile_thin_wires(_prepared(wires=(unresolved,)))
 
-    reserved_endpoint = mw.WireEnd.node("public")
+    reserved_endpoint = mw.rf.WireEnd.node("public")
     object.__setattr__(reserved_endpoint, "node_name", "__closed__:ghost")
     reserved_prefix = _Wire(
         "reserved",
         ((0.25, 0.25, 0.5), (0.5, 0.25, 0.5)),
-        endpoints=(mw.WireEnd.open(), reserved_endpoint),
+        endpoints=(mw.rf.WireEnd.open(), reserved_endpoint),
     )
     with pytest.raises(ValueError, match="reserved"):
         compile_thin_wires(_prepared(wires=(reserved_prefix,)))
@@ -839,14 +837,14 @@ def test_named_node_validation_rejects_unresolved_moved_and_overlapping_graphs()
             (0.25, 0.25, 0.5),
         ),
     )
-    whitespace_reserved = mw.WireEnd.node("public2")
+    whitespace_reserved = mw.rf.WireEnd.node("public2")
     object.__setattr__(
         whitespace_reserved, "node_name", "  __closed__:ghost  "
     )
     exact_collision = _Wire(
         "collision",
         ((0.25, 0.25, 0.25), (0.25, 0.25, 0.5)),
-        endpoints=(mw.WireEnd.open(), whitespace_reserved),
+        endpoints=(mw.rf.WireEnd.open(), whitespace_reserved),
     )
     with pytest.raises(ValueError, match="reserved"):
         compile_thin_wires(_prepared(wires=(colliding_loop, exact_collision)))
@@ -855,12 +853,12 @@ def test_named_node_validation_rejects_unresolved_moved_and_overlapping_graphs()
         _Wire(
             "a",
             ((0.25, 0.25, 0.5), (0.5, 0.25, 0.5)),
-            endpoints=(mw.WireEnd.open(), mw.WireEnd.node("J")),
+            endpoints=(mw.rf.WireEnd.open(), mw.rf.WireEnd.node("J")),
         ),
         _Wire(
             "b",
             ((0.5, 0.75, 0.5), (0.75, 0.75, 0.5)),
-            endpoints=(mw.WireEnd.node("J"), mw.WireEnd.open()),
+            endpoints=(mw.rf.WireEnd.node("J"), mw.rf.WireEnd.open()),
         ),
     )
     with pytest.raises(ValueError, match="multiple grid coordinates"):
@@ -870,12 +868,12 @@ def test_named_node_validation_rejects_unresolved_moved_and_overlapping_graphs()
         _Wire(
             "a",
             ((0.25, 0.5, 0.5), (0.5, 0.5, 0.5)),
-            endpoints=(mw.WireEnd.node("left"), mw.WireEnd.node("right")),
+            endpoints=(mw.rf.WireEnd.node("left"), mw.rf.WireEnd.node("right")),
         ),
         _Wire(
             "b",
             ((0.25, 0.5, 0.5), (0.5, 0.5, 0.5)),
-            endpoints=(mw.WireEnd.node("left"), mw.WireEnd.node("right")),
+            endpoints=(mw.rf.WireEnd.node("left"), mw.rf.WireEnd.node("right")),
         ),
     )
     with pytest.raises(ValueError, match="overlap on one physical fragment"):
@@ -888,22 +886,22 @@ def test_compile_fingerprint_includes_junction_name_to_node_mapping():
             _Wire(
                 "a0",
                 ((0.25, 0.25, 0.5), (0.5, 0.25, 0.5)),
-                endpoints=(mw.WireEnd.open(), mw.WireEnd.node(first_name)),
+                endpoints=(mw.rf.WireEnd.open(), mw.rf.WireEnd.node(first_name)),
             ),
             _Wire(
                 "a1",
                 ((0.5, 0.25, 0.5), (0.75, 0.25, 0.5)),
-                endpoints=(mw.WireEnd.node(first_name), mw.WireEnd.open()),
+                endpoints=(mw.rf.WireEnd.node(first_name), mw.rf.WireEnd.open()),
             ),
             _Wire(
                 "b0",
                 ((0.25, 0.75, 0.5), (0.5, 0.75, 0.5)),
-                endpoints=(mw.WireEnd.open(), mw.WireEnd.node(second_name)),
+                endpoints=(mw.rf.WireEnd.open(), mw.rf.WireEnd.node(second_name)),
             ),
             _Wire(
                 "b1",
                 ((0.5, 0.75, 0.5), (0.75, 0.75, 0.5)),
-                endpoints=(mw.WireEnd.node(second_name), mw.WireEnd.open()),
+                endpoints=(mw.rf.WireEnd.node(second_name), mw.rf.WireEnd.open()),
             ),
         )
 
@@ -946,8 +944,8 @@ def test_wire_order_and_fingerprints_are_deterministic_and_sensitive():
             a.__dict__
             | {
                 "endpoints": (
-                    mw.WireEnd.grounded(structure="ground"),
-                    mw.WireEnd.open(),
+                    mw.rf.WireEnd.grounded(structure="ground"),
+                    mw.rf.WireEnd.open(),
                 )
             }
         )
@@ -1000,7 +998,7 @@ def test_cache_invalidation_recompiles_changed_wire_inputs(monkeypatch):
     first = compile_thin_wires(prepared)
     assert compile_thin_wires(prepared) is first
     assert len(calls) == 1
-    prepared.thin_wires[0].radius.mul_(1.5)
+    prepared.scene.thin_wires[0].radius.mul_(1.5)
     changed = compile_thin_wires(prepared)
     assert changed is not first
     assert len(calls) == 2
@@ -1009,7 +1007,7 @@ def test_cache_invalidation_recompiles_changed_wire_inputs(monkeypatch):
         value = getattr(changed, field.name)
         if isinstance(value, torch.Tensor):
             assert torch.equal(value, getattr(fresh, field.name)), field.name
-    prepared.thin_wires[0].radius.requires_grad_()
+    prepared.scene.thin_wires[0].radius.requires_grad_()
     trainable = compile_thin_wires(prepared)
     assert compile_thin_wires(prepared) is not trainable
     assert trainable.metadata["cache_enabled"] is False
@@ -1058,3 +1056,50 @@ def test_requested_cuda_device_contains_every_compiled_tensor():
     assert all(tensor.is_cuda for tensor in network.tensor_fields())
     network.inductance.sum().backward()
     assert radius.grad is not None
+
+
+_EIGHTHS = np.linspace(0.0, 1.0, 9)
+
+
+@pytest.mark.parametrize("snap", ["strict", "continuous"])
+def test_node_binding_row_is_the_terminal_chord_of_the_matching_gap_binding(snap):
+    # Two arms whose facing ends are the terminals of a node binding describe the same
+    # feed as one wire whose middle segment is removed by a gap binding: both port rows
+    # must be the conservative line integral over that straight interval.
+    arms = (
+        _Wire("negative_arm", ((0.5, 0.5, 0.125), (0.5, 0.5, 0.375)), snap=snap),
+        _Wire("positive_arm", ((0.5, 0.5, 0.625), (0.5, 0.5, 0.875)), snap=snap),
+    )
+    nodes = mw.LumpedPort("feed", wire_binding=mw.rf.WirePortBinding.nodes(
+        negative=mw.rf.WireNodeRef("negative_arm", 1), positive=mw.rf.WireNodeRef("positive_arm", 0)))
+    wire = _Wire("wire", ((0.5, 0.5, 0.125), (0.5, 0.5, 0.375), (0.5, 0.5, 0.625), (0.5, 0.5, 0.875)), snap=snap)
+    gap = mw.LumpedPort("feed", wire_binding=mw.rf.WirePortBinding.gap(
+        negative=mw.rf.WireNodeRef("wire", 1), positive=mw.rf.WireNodeRef("wire", 2)))
+    node_network = compile_thin_wires(_prepared(wires=arms, ports=(nodes,), nodes=_EIGHTHS))
+    gap_network = compile_thin_wires(_prepared(wires=(wire,), ports=(gap,), nodes=_EIGHTHS))
+
+    for name in ("port_gap_offsets", "port_gap_edge_components", "port_gap_edge_offsets", "port_gap_weights"):
+        assert torch.equal(getattr(node_network, name), getattr(gap_network, name)), name
+    assert node_network.port_gap_weights.sum().item() == pytest.approx(0.25, rel=1e-12)
+
+
+def test_node_binding_across_a_physical_segment_samples_that_segment():
+    # A port across a wire segment reads the segment's own sampled EMF row (V = L dI/dt).
+    wire = _Wire("wire", ((0.5, 0.5, 0.125), (0.5, 0.5, 0.5), (0.5, 0.5, 0.875)))
+    port = mw.LumpedPort("feed", wire_binding=mw.rf.WirePortBinding.nodes(
+        negative=mw.rf.WireNodeRef("wire", 0), positive=mw.rf.WireNodeRef("wire", 1)))
+    network = compile_thin_wires(_prepared(wires=(wire,), ports=(port,), nodes=_EIGHTHS))
+
+    def row(components, offsets, weights):
+        merged = {}
+        for key, weight in zip(zip(components.tolist(), offsets.tolist()), weights.tolist()):
+            merged[key] = merged.get(key, 0.0) + weight
+        return merged
+
+    begin, end = network.segment_offsets[:2].tolist()
+    segment = row(network.edge_components[begin:end], network.edge_offsets[begin:end], network.weights[begin:end])
+    port_row = row(network.port_gap_edge_components, network.port_gap_edge_offsets, network.port_gap_weights)
+    assert port_row.keys() == segment.keys()
+    for key, weight in segment.items():
+        assert port_row[key] == pytest.approx(weight, rel=1e-12)
+    assert sum(port_row.values()) == pytest.approx(0.375, rel=1e-12)

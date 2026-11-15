@@ -1,0 +1,272 @@
+{
+ "schema": "witwin.scene/1",
+ "unit": {
+  "length": "m",
+  "frequency": "Hz"
+ },
+ "background": {
+  "material": null
+ },
+ "materials": {
+  "m0": {
+   "type": "Material",
+   "eps_r": 4,
+   "mu_r": 1.0,
+   "sigma_e": 0.0,
+   "name": null,
+   "sigma_m": 0.0,
+   "debye_poles": [],
+   "drude_poles": [],
+   "lorentz_poles": [],
+   "mu_debye_poles": [],
+   "mu_drude_poles": [],
+   "mu_lorentz_poles": [],
+   "epsilon_tensor": null,
+   "mu_tensor": null,
+   "sigma_e_tensor": null,
+   "orientation": null,
+   "kerr_chi3": null,
+   "nonlinearity": [],
+   "modulation": null,
+   "pec": false,
+   "pmc": false,
+   "breakdown": null,
+   "mass_density": null,
+   "kind": "medium"
+  },
+  "m1": {
+   "type": "Material",
+   "eps_r": 6,
+   "mu_r": 1.0,
+   "sigma_e": 0.01,
+   "name": null,
+   "sigma_m": 0.0,
+   "debye_poles": [],
+   "drude_poles": [],
+   "lorentz_poles": [],
+   "mu_debye_poles": [],
+   "mu_drude_poles": [],
+   "mu_lorentz_poles": [],
+   "epsilon_tensor": null,
+   "mu_tensor": null,
+   "sigma_e_tensor": null,
+   "orientation": null,
+   "kerr_chi3": null,
+   "nonlinearity": [],
+   "modulation": null,
+   "pec": false,
+   "pmc": false,
+   "breakdown": null,
+   "mass_density": null,
+   "kind": "medium"
+  }
+ },
+ "domain": {
+  "type": "Domain",
+  "bounds": [
+   [
+    -0.449688687,
+    0.449688687
+   ],
+   [
+    -0.449688687,
+    0.449688687
+   ],
+   [
+    -0.449688687,
+    0.449688687
+   ]
+  ]
+ },
+ "grid": {
+  "type": "GridSpec",
+  "dx": 0.018737028625,
+  "dy": 0.018737028625,
+  "dz": 0.018737028625,
+  "x_coords": null,
+  "y_coords": null,
+  "z_coords": null,
+  "min_steps_per_wavelength": null,
+  "wavelength": null,
+  "max_ratio": null,
+  "override_structures": [],
+  "layer_refinement": null,
+  "kind": "uniform"
+ },
+ "boundary": {
+  "type": "BoundarySpec",
+  "kind": "pml",
+  "num_layers": 8,
+  "strength": 1000000.0,
+  "bloch_wavevector": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "x": null,
+  "y": null,
+  "z": null,
+  "x_low": "pml",
+  "x_high": "pml",
+  "y_low": "pml",
+  "y_high": "pml",
+  "z_low": "pml",
+  "z_high": "pml",
+  "mur_abc": {
+   "type": "MurABC",
+   "order": 1,
+   "permittivity": null
+  },
+  "mode_abc": null
+ },
+ "structures": [
+  {
+   "type": "Structure",
+   "geometry": {
+    "type": "sphere",
+    "position": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      0.0899377390742302,
+      0.029979245737195015,
+      0.029979245737195015
+     ]
+    },
+    "radius": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": 0.11991698294878006
+    },
+    "rotation": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   },
+   "material": "m0",
+   "name": null,
+   "priority": 0,
+   "enabled": true,
+   "tags": [],
+   "metadata": {},
+   "structure_id": 0,
+   "material_id": 0,
+   "assignment_id": 0,
+   "surface_id": 0,
+   "primitive_ids": null,
+   "phase_screen": null,
+   "uv": null,
+   "face_uv": null
+  },
+  {
+   "type": "Structure",
+   "geometry": {
+    "type": "box",
+    "position": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      -0.14989623427391052,
+      0.14989623427391052,
+      0.05995849147439003
+     ]
+    },
+    "size": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      0.13190868496894836,
+      0.1798754781484604,
+      0.10792528837919235
+     ]
+    },
+    "rotation": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      0.9556233882904053,
+      0.13488920032978058,
+      -0.13271814584732056,
+      0.22577565908432007
+     ]
+    }
+   },
+   "material": "m1",
+   "name": null,
+   "priority": 0,
+   "enabled": true,
+   "tags": [],
+   "metadata": {},
+   "structure_id": 1,
+   "material_id": 1,
+   "assignment_id": 1,
+   "surface_id": 1,
+   "primitive_ids": null,
+   "phase_screen": null,
+   "uv": null,
+   "face_uv": null
+  }
+ ],
+ "thin_wires": [],
+ "sources": [
+  {
+   "type": "PointDipole",
+   "position": [
+    -0.2248443435,
+    -0.18737028625,
+    -0.1405277146875
+   ],
+   "polarization": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "width": 0.02,
+   "profile": "ideal",
+   "source_time": {
+    "type": "CW",
+    "frequency": 1000000000.0,
+    "amplitude": 1.7,
+    "phase": 0.37,
+    "kind": "cw"
+   },
+   "name": null
+  }
+ ],
+ "ports": [],
+ "lumped_elements": [],
+ "monitors": [
+  {
+   "type": "PermittivityMonitor",
+   "name": "eps",
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "size": [
+    0.599584916,
+    0.599584916,
+    0.599584916
+   ],
+   "frequencies": null
+  }
+ ],
+ "subpixel": {
+  "type": "SubpixelSpec",
+  "samples": [
+   4,
+   4,
+   4
+  ],
+  "averaging": "polarized",
+  "pec": "staircase"
+ },
+ "metadata": {}
+}

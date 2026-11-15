@@ -33,7 +33,7 @@ _PAIRS = (
 
 @pytest.mark.parametrize(("key", "variant", "tolerance"), _PAIRS)
 def test_library_matches_reference_variant(key, variant, tolerance):
-    entry = mw.MATERIAL_LIBRARY[key]
+    entry = mw.media.library.MATERIAL_LIBRARY[key]
     reference = td_library[key][variant]
     low = max(entry.frequency_range[0], reference.frequency_range[0])
     high = min(entry.frequency_range[1], reference.frequency_range[1])

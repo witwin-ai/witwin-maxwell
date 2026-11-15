@@ -27,34 +27,45 @@ class _DeterminismScene(ScalarPermittivityPointScene):
         scene = super().to_scene()
         if self.kind == "tfsf":
             scene = mw.Scene(
-                subpixel_samples=scene.subpixel,
-                domain=mw.Domain(bounds=((-1.2, 1.2),) * 3),
-                grid=mw.GridSpec.uniform(0.12),
-                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-                structures=scene.structures,
-                monitors=scene.monitors,
-                device="cuda",
-            )
-            scene.add_source(_DensityTFSFScene._build_source(
-                SimpleNamespace(source_kind="plane_wave")))
+                        subpixel=scene.subpixel,
+                        domain=mw.Domain(bounds=((-1.2, 1.2),) * 3),
+                        grid=mw.GridSpec.uniform(0.12),
+                        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                        structures=scene.structures,
+                        monitors=scene.monitors,
+                        sources=(
+                    _DensityTFSFScene._build_source(
+                        SimpleNamespace(source_kind="plane_wave")),
+                    ),
+                    )
         elif self.kind == "flux":
-            scene.add_monitor(mw.FluxMonitor("flux", axis="z", position=0.24))
+            scene = scene.updated(monitors=(*scene.monitors, mw.FluxMonitor("flux", axis="z", position=0.24)))
         else:
             # Distinct physical coordinates snap to the same Ez cell as probe.
-            scene.add_monitor(mw.PointMonitor(
-                "coincident", (0.001, 0.001, 0.181), fields=("Ez",)))
+            scene = scene.updated(monitors=(
+                *scene.monitors,
+                mw.PointMonitor(
+                    "coincident", (0.001, 0.001, 0.181), fields=("Ez",)),
+            ))
         if self.material_kind != "scalar":
-            geometry = scene.structures.pop().geometry
-            scene.subpixel = mw.SubpixelSpec(samples=1, averaging="arithmetic")
+            geometry = scene.structures[-1].geometry
+            scene = scene.updated(structures=scene.structures[:-1])
+            scene = scene.updated(subpixel=mw.SubpixelSpec(samples=1, averaging="arithmetic"))
             if self.material_kind == "density":
-                scene.add_material_region(mw.MaterialRegion(
-                    name="design", geometry=geometry, density=self.values,
-                    eps_bounds=(1.0, 6.0)))
+                scene = scene.updated(material_regions=(
+                    *scene.material_regions,
+                    mw.MaterialRegion(
+                        name="design", geometry=geometry, density=self.values,
+                        eps_bounds=(1.0, 6.0)),
+                ))
             else:
-                scene.add_structure(mw.Structure(geometry=geometry,
-                    material=mw.PerturbationMedium(
+                scene = scene.updated(structures=(
+                    *scene.structures,
+                    mw.Structure(geometry=geometry,
+                        material=mw.media.PerturbationMedium(
                         mw.Material(eps_r=3.0), perturbation=self.values,
-                        eps_sensitivity=0.2)))
+                        eps_sensitivity=0.2)),
+                ))
         return scene
 
 
@@ -66,12 +77,12 @@ def test_adjoint_gradients_are_bitwise_repeatable(kind, material_kind):
         model = _DeterminismScene(kind, material_kind)
         result = _build_simulation(model, time_steps=32).run()
         if kind == "flux":
-            loss = result.monitor("flux")["flux"].sum()
+            loss = result.monitor("flux", freq_index=0).values.sum()
         else:
-            data = result.monitor("probe")["data"]
+            data = result.monitor("probe", freq_index=0).sel(component="Ez").values
             loss = data.abs().square().sum()
             if kind == "coincident_point":
-                other = result.monitor("coincident")["data"]
+                other = result.monitor("coincident", freq_index=0).sel(component="Ez").values
                 assert torch.equal(data, other), "monitors must snap to the same Yee cell"
                 loss = loss + 0.375 * other.abs().square().sum()
         loss.backward()

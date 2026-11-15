@@ -96,7 +96,7 @@ def worker(args):
         import scipy.sparse.linalg as sla
 
         from tests.materials.thin_sheet.test_thin_sheet_feeds import _runtime_scene
-        scene = prepare_scene(_runtime_scene("pec", tilted=True))
+        scene = prepare_scene(_runtime_scene("pec", tilted=True), device="cpu")
     elif args.scene == "copper_curved_cpml":
         from tests.materials.thin_sheet.test_thin_sheet_feed_antennas import WIDTH, cylindrical_strip
 
@@ -104,16 +104,15 @@ def worker(args):
         # held on PEC, with CPML on the other four faces.
         scene = prepare_scene(mw.Scene(
             domain=mw.Domain(bounds=((-0.12, 0.12), (-WIDTH / 2, WIDTH / 2), (-0.08, 0.06))),
-            grid=mw.GridSpec.uniform(0.005), device="cpu",
-            boundary=mw.BoundarySpec.faces(default="pml", num_layers=4, y=("pmc", "pec")),
-            structures=[mw.Structure(geometry=cylindrical_strip(), material=mw.CopperFoil(
-                thickness=35e-6, frequency_range=(0.5e9, 2e9)))]))
+            grid=mw.GridSpec.uniform(0.005), boundary=mw.BoundarySpec.faces(default="pml", num_layers=4, y=("pmc", "pec")),
+            structures=[mw.Structure(geometry=cylindrical_strip(), material=mw.media.CopperFoil(
+                thickness=35e-6, frequency_range=(0.5e9, 2e9)))]), device="cpu")
     elif args.scene in NONPLANAR_SCENES:
         from tests.materials.thin_sheet.test_thin_sheet_faceted import _structure
         from tests.materials.thin_sheet.test_thin_sheet_runtime import _cavity
 
         material, kind = args.scene.split("_")
-        scene = prepare_scene(_cavity(_structure(kind, material), device="cpu"))
+        scene = prepare_scene(_cavity(_structure(kind, material)), device="cpu")
     else:
         from thin_sheet_overhead import SCENARIOS, _scene
         original = mw.Scene
@@ -122,13 +121,13 @@ def worker(args):
             return original(**(keywords | {"device": "cpu"}))
 
         with patch.object(mw, "Scene", cpu_scene):
-            scene = prepare_scene(_scene(SCENARIOS[args.scene], True))
+            scene = prepare_scene(_scene(SCENARIOS[args.scene], True), device="cpu")
     stages["scene"] = time.perf_counter() - start
     profile = cProfile.Profile()
     with patch.object(compiler, "_compile_chords", timed("chords", compiler._compile_chords)), \
          patch.object(compiler, "_compile_sheet_feeds", timed("feeds", compiler._compile_sheet_feeds)):
         profile.enable()
-        compiled = timed("compile", compiler.compile_thin_sheet)(scene, scene.structures[0])
+        compiled = timed("compile", compiler.compile_thin_sheet)(scene, scene.scene.structures[0])
         profile.disable()
     if args.scene in NONPLANAR_SCENES:
         assert not compiled.surface.planar

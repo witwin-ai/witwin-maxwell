@@ -8,8 +8,7 @@ analytic antenna references.
 
 * ``half_wave_dipole`` -- center-fed thin-wire half-wave dipole; wave-level PASS
   (sin^2 pattern, ~2.15 dBi directivity, radiation-resistance class, radiated vs
-  accepted power closure). The input reactance carries a documented delta-gap
-  feed offset.
+  accepted power closure).
 * ``patch`` -- probe-fed rectangular microstrip patch on a finite grounded
   dielectric slab, with matched-broadside and power-closure gates near 3.2 GHz.
 * ``printed_patch`` -- fixed physical PEC sheet patch, square galvanic probe and

@@ -11,6 +11,8 @@ from witwin.maxwell.fdtd import resume
 from witwin.maxwell.fdtd.distributed import resume as distributed_resume
 
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+
 MESSAGE = "checkpoint predates the additive-J n+1/2 source timing; re-run from the start"
 
 
@@ -22,27 +24,26 @@ def _source(kind):
         return mw.UniformCurrentSource(size=(.02,) * 3, source_time=waveform)
     if kind in ("electric", "magnetic", "mixed"):
         keys = {"electric": ("Jz",), "magnetic": ("Mz",), "mixed": ("Jz", "Mz")}[kind]
-        return mw.CustomCurrentSource(mw.CurrentDataset(
+        return mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(
             ((-.02, .02),) * 3, {key: np.ones((2, 2, 2)) for key in keys}), source_time=waveform)
     if kind == "plane_wave":
         return mw.PlaneWave(source_time=waveform)
     return None
 
 
-def _scene(kind="none", device="cpu"):
+def _scene(kind="none"):
     source = _source(kind)
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.05, 0.05),) * 3), grid=mw.GridSpec.uniform(0.01),
-        boundary=mw.BoundarySpec.pec(), device=device,
-        sources=[] if source is None else [source],
+        boundary=mw.BoundarySpec.pec(), sources=[] if source is None else [source],
     )
 
 
-def _execution(kind="none", device="cpu", graph=False):
+def _execution(kind="none", graph=False):
     return mw.Simulation.fdtd(
-        _scene(kind, device), frequency=1e9, run_time=mw.TimeConfig(time_steps=8),
-        backend="cpu_reference" if device == "cpu" else "native", cuda_graph=graph, full_field_dft=True,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
+        _scene(kind), frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8),
+        cuda_graph=graph, full_field_dft=True,
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False)),
     ).prepare()
 
 
@@ -59,8 +60,14 @@ def test_only_additive_electric_sources_carry_timing_metadata(kind, additive_j):
 
 def _distributed_metadata(solver):
     # Only signature/preflight metadata is exercised here, without shard execution.
+    # The pinned logical fingerprints were computed on the prepared scene's collections,
+    # which were lists (thin_wires a tuple) before 0.7.0 phase 7b.
+    declared = solver.scene.scene
+    logical_scene = SimpleNamespace(
+        sources=list(declared.sources), ports=list(declared.ports), networks=list(declared.networks),
+        thin_wires=tuple(declared.thin_wires), monitors=list(declared.monitors), circuits=list(declared.circuits))
     return SimpleNamespace(
-        shard_layouts=(), logical_scene=solver.scene,
+        shard_layouts=(), logical_scene=logical_scene,
         shards=(SimpleNamespace(rank=0, solver=solver),), _nccl=False, dt=solver.dt,
         _time_plan=solver._time_plan,
     )
@@ -68,7 +75,7 @@ def _distributed_metadata(solver):
 
 def test_non_j_fingerprint_matches_f52aa33f():
     solver = _execution().solver
-    # Computed with f52aa33f's fingerprint function on this prepared CPU scene.
+    # Computed with f52aa33f's fingerprint function on this prepared CUDA scene.
     assert resume._configuration_fingerprint(solver) == (
         "9893bfe97ee88e81f7f7f0b148f688c0ef0d8c797ddb4e17871471b7f55f9471")
     assert "additive_j_injection" not in resume._solver_signature(solver)
@@ -94,7 +101,7 @@ def test_old_additive_j_checkpoint_is_refused_before_fingerprint_comparison(tmp_
     payload["signature"]["logical_fingerprint" if distributed else "configuration_fingerprint"] = "old fingerprint"
     path = tmp_path / "old.pt"
     torch.save(payload, path)
-    restored = mw.FDTDResumeCheckpoint.load(path)
+    restored = mw.fdtd.FDTDResumeCheckpoint.load(path)
     before = execution.solver.Ez.clone()
     with pytest.raises(NotImplementedError, match=MESSAGE.replace("+", r"\+")):
         resume.preflight_resume_checkpoint(solver, restored, total_steps=8)
@@ -106,36 +113,30 @@ def test_non_j_disk_checkpoint_keeps_old_signature_and_resumes(tmp_path):
     assert "additive_j_injection" not in checkpoint.signature
     checkpoint.save(tmp_path / "non-j.pt")
     target = _execution()
-    target.run(resume_from=mw.FDTDResumeCheckpoint.load(tmp_path / "non-j.pt"))
+    target.run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(tmp_path / "non-j.pt"))
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("kind", ["point", "uniform", "electric"])
 @pytest.mark.parametrize("graph", [False, True])
-def test_new_additive_j_disk_checkpoint_round_trips(tmp_path, device, kind, graph):
-    if device == "cpu" and (kind != "point" or graph):
-        pytest.skip("CPU reference profile supports eager point-current execution")
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("requires CUDA")
-    expected = _execution(kind, device, graph).run()
-    checkpoint = _execution(kind, device, graph).run_until(3)
+def test_new_additive_j_disk_checkpoint_round_trips(tmp_path, kind, graph):
+    expected = _execution(kind, graph).run()
+    checkpoint = _execution(kind, graph).run_until(3)
     assert checkpoint.signature["additive_j_injection"] == "n+1/2"
     checkpoint.save(tmp_path / "new.pt")
-    restored = mw.FDTDResumeCheckpoint.load(tmp_path / "new.pt")
-    actual = _execution(kind, device, graph).run(resume_from=restored)
+    restored = mw.fdtd.FDTDResumeCheckpoint.load(tmp_path / "new.pt")
+    actual = _execution(kind, graph).run(resume_from=restored)
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         assert torch.equal(getattr(actual.solver, name), getattr(expected.solver, name)), name
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("kind", ["point", "uniform", "electric"])
 def test_native_resume_refuses_old_additive_j_checkpoint(tmp_path, kind):
-    checkpoint = _execution(kind, "cuda").run_until(3)
+    checkpoint = _execution(kind).run_until(3)
     payload = checkpoint._snapshot()
     payload["signature"].pop("additive_j_injection")
     torch.save(payload, tmp_path / "old.pt")
-    target = _execution(kind, "cuda")
+    target = _execution(kind)
     before = target.solver.Ez.clone()
     with pytest.raises(NotImplementedError, match=MESSAGE.replace("+", r"\+")):
-        target.run(resume_from=mw.FDTDResumeCheckpoint.load(tmp_path / "old.pt"))
+        target.run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(tmp_path / "old.pt"))
     assert torch.equal(target.solver.Ez, before)

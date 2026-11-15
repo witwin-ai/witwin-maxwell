@@ -5,15 +5,15 @@ import pytest
 import torch
 import witwin.maxwell as mw
 
-from tests.fdtd.cuda.test_batch_runtime import simulation
+from tests.fdtd.cuda.test_batch_runtime import simulation, with_scene
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Batch execution requires CUDA")
 
 
 def batch(sims, *, size=2, outputs=None, **kwargs):
     if "parameters" not in kwargs:
-        kwargs.setdefault("variation", mw.BatchVariation(sources=("drive",)))
-    return mw.Simulation.batch(sims, execution=mw.BatchExecution(devices=("cuda:0",), batch_size=size),
+        kwargs.setdefault("variation", mw.execution.BatchVariation(sources=("drive",)))
+    return mw.Simulation.batch(sims, execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=size),
                                outputs=outputs, **kwargs)
 
 
@@ -26,7 +26,7 @@ def test_public_batch_complete_results_tail_and_repeated_run(size, count):
     sims = [simulation(i) for i in range(count)]
     with batch(sims, size=size).prepare() as prepared:
         result = prepared.run()
-        assert isinstance(result, mw.BatchResult)
+        assert isinstance(result, mw.execution.BatchResult)
         assert not result.failed
         saved = result.stack(probe).clone()
         ptrs = {name: value.data_ptr() for name, value in prepared._slot.buffers.items()}
@@ -34,7 +34,7 @@ def test_public_batch_complete_results_tail_and_repeated_run(size, count):
         assert not again.failed
         assert {name: value.data_ptr() for name, value in prepared._slot.buffers.items()} == ptrs
         torch.testing.assert_close(again.stack(probe), saved, rtol=0, atol=0)
-        assert all(r.solver is None and r.raw_output is None and r._prepared_scene is None for r in result)
+        assert all(r.solver is None and r._raw_output is None and r._prepared_scene is None for r in result)
     torch.testing.assert_close(result.stack(probe), saved, rtol=0, atol=0)
     for index, sim in enumerate(sims):
         torch.testing.assert_close(probe(result[index]), probe(sim.run()), rtol=1e-4, atol=1e-6)
@@ -45,8 +45,8 @@ def test_public_batch_complete_results_tail_and_repeated_run(size, count):
 
 def test_template_source_updates_aba_reset_and_independent_results():
     sim = simulation()
-    a = mw.BatchParameters(source_scales={"drive": torch.tensor([1., 2., 3.], device="cuda:0")})
-    b = mw.BatchParameters(source_scales={"drive": torch.tensor([4., 0., -2.], device="cuda:0")})
+    a = mw.execution.BatchParameters(source_scales={"drive": torch.tensor([1., 2., 3.], device="cuda:0")})
+    b = mw.execution.BatchParameters(source_scales={"drive": torch.tensor([4., 0., -2.], device="cuda:0")})
     submission = batch(sim, parameters=a)
     with submission.prepare() as prepared:
         first = prepared.run()
@@ -75,16 +75,19 @@ def test_monitor_only_31_frequencies_has_no_full_field_dft():
 
 def test_density_template_updates_match_independent_scenes():
     sim = simulation()
-    sim.scene.add_material_region(mw.MaterialRegion(name="rho",
-        geometry=mw.Box(size=(0.05, 0.05, 0.05), device="cuda:0"),
-        density=torch.zeros(2, 2, 2, device="cuda:0"), eps_bounds=(1., 5.)))
-    parameters = mw.BatchParameters(region_densities={"rho": torch.rand(3, 2, 2, 2, device="cuda:0")})
+    sim = with_scene(sim, material_regions=(
+        *sim.scene.material_regions,
+        mw.MaterialRegion(name="rho",
+            geometry=mw.Box(size=(0.05, 0.05, 0.05), device="cuda:0"),
+            density=torch.zeros(2, 2, 2, device="cuda:0"), eps_bounds=(1., 5.)),
+    ))
+    parameters = mw.execution.BatchParameters(region_densities={"rho": torch.rand(3, 2, 2, 2, device="cuda:0")})
     submission = batch(sim, parameters=parameters)
     result = submission.run()
     assert not result.failed
     for i in range(3):
         reference = mw.Simulation.fdtd(submission.scene(i), frequencies=sim.frequencies,
-            run_time=sim.config.run_time, spectral_sampler=sim.config.spectral_sampler, cuda_graph=False).run()
+            config=mw.FDTDConfig(run_time=sim.config.run_time, spectral_sampler=sim.config.spectral_sampler, cuda_graph=False)).run()
         torch.testing.assert_close(probe(result[i]), probe(reference), rtol=1e-4, atol=1e-6)
 
 
@@ -119,16 +122,16 @@ def test_iteration_close_cancel_nonreentrancy_and_output_ownership():
 
 def test_result_persistence_cpu_export_and_explicit_field_selection(tmp_path):
     sims = [simulation(i) for i in range(2)]
-    output = mw.BatchOutput(fields=("Ez",), result_device="cpu")
+    output = mw.execution.BatchOutput(fields=("Ez",), result_device="cpu")
     result = batch(sims, outputs=output).run()
     assert not result.failed
     assert set(result[0].field("E")) == {"EZ"}
-    assert result[0].tensor("Ez").device.type == "cpu"
+    assert result[0].field("Ez").isel(f=0).values.device.type == "cpu"
     assert probe(result[0]).device.type == "cpu"
     result.save(tmp_path)
-    loaded = mw.BatchResult.load(tmp_path, scenes=[s.scene for s in sims])
+    loaded = mw.execution.BatchResult.load(tmp_path, scenes=[s.scene for s in sims])
     torch.testing.assert_close(loaded.stack(probe), result.stack(probe), rtol=0, atol=0)
-    torch.testing.assert_close(loaded[0].tensor("Ez"), result[0].tensor("Ez"), rtol=0, atol=0)
+    torch.testing.assert_close(loaded[0].field("Ez").isel(f=0).values, result[0].field("Ez").isel(f=0).values, rtol=0, atol=0)
     assert loaded.variant_ids == result.variant_ids
     with pytest.raises(FileExistsError, match="empty"):
         result.save(tmp_path)
@@ -136,9 +139,9 @@ def test_result_persistence_cpu_export_and_explicit_field_selection(tmp_path):
 
 def test_input_order_across_compatible_groups():
     sims = [simulation(), simulation(frequencies=(2e9,)), simulation(2)]
-    submission = mw.Simulation.batch(sims, execution=mw.BatchExecution(
+    submission = mw.Simulation.batch(sims, execution=mw.execution.BatchExecution(
         devices=("cuda:0",), batch_size=2, grouping="compatible"),
-        variation=mw.BatchVariation(sources=("drive",)))
+        variation=mw.execution.BatchVariation(sources=("drive",)))
     with submission.iter_results(order="input") as iterator:
         assert [item.index for item in iterator] == [0, 1, 2]
     with submission.iter_results(order="completion") as iterator:
@@ -147,13 +150,13 @@ def test_input_order_across_compatible_groups():
 
 def test_runtime_failure_records_and_cancelled_tail(monkeypatch):
     with batch([simulation(i) for i in range(5)]).prepare() as prepared:
-        def fail():
+        def fail(lanes=None):
             raise RuntimeError("injected field launch failure")
         monkeypatch.setattr(prepared._slot, "advance", fail)
         results = prepared.run()
         assert [r.status for r in results.records] == ["failed", "failed", "cancelled", "cancelled", "cancelled"]
         assert len(results.failures) == 5
-        with pytest.raises(mw.DistributedFailure, match="injected"):
+        with pytest.raises(mw.execution.DistributedFailure, match="injected"):
             results[0]
 
 
@@ -182,10 +185,13 @@ def test_result_lifetime_does_not_depend_on_cyclic_gc():
 
 def test_trainable_scene_added_after_simulation_construction_is_detected():
     sim = simulation()
-    sim.scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
-    sim.scene.add_material_region(mw.MaterialRegion(name="rho",
-        geometry=mw.Box(size=(0.05, 0.05, 0.05), device="cuda:0"),
-        density=torch.zeros(2, 2, 2, device="cuda:0", requires_grad=True), eps_bounds=(1., 5.)))
+    sim = with_scene(sim, subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
+    sim = with_scene(sim, material_regions=(
+        *sim.scene.material_regions,
+        mw.MaterialRegion(name="rho",
+            geometry=mw.Box(size=(0.05, 0.05, 0.05), device="cuda:0"),
+            density=torch.zeros(2, 2, 2, device="cuda:0", requires_grad=True), eps_bounds=(1., 5.)),
+    ))
     results = batch([sim]).run()
     results.results()
     assert results[0].raw_monitor("probe")["components"]["Ez"].requires_grad

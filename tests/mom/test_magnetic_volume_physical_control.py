@@ -15,9 +15,24 @@ from witwin.maxwell.mom.static_magnetic_volume import MagneticVolumeContrastResp
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
 
 
-@pytest.mark.parametrize('volume_refinement',[0,1])
-@torch.no_grad()
+@pytest.mark.parametrize('volume_refinement',[0,pytest.param(1,marks=pytest.mark.mom_milestone)])
 def test_tensor_sphere_multi_point_and_interface_evidence(volume_refinement):
+    sphere_evidence(((1,0),(2,0),(3,0)) if volume_refinement==0 else ((2,1),))
+
+
+def test_tensor_sphere_multi_point_and_interface_evidence_regression():
+    # Regression twin of [1]: the same refine(1) volume path, multi-point oracle and
+    # interface traces on the level-0 icosahedron (160 cells) instead of icosphere
+    # level 2 (2560 cells). As in [1], one row is recorded and finiteness is asserted.
+    # The icosahedron inradius is 0.795 radius, so its interior samples are the 0.2 and
+    # 0.6 radius shells of the same directions; the 0.85 shell would lie outside.
+    # Level 1 with refine(1) (640 cells) took 22 min on a shared slot and its exterior
+    # rms does not decrease against level 1 unrefined, so no convergence pair is cheap.
+    sphere_evidence(((0,1),),inside_shells=(.2,.6))
+
+
+@torch.no_grad()
+def sphere_evidence(cases,inside_shells=(.2,.6,.85)):
     sample=torch.empty((),device='cuda',dtype=torch.float64)
     mu=coefficient(sample);ext=MU_0*torch.eye(3,device='cuda',dtype=sample.dtype)
     drive=sample.new_tensor([.3,-.2,.7]);radius=.1
@@ -26,12 +41,12 @@ def test_tensor_sphere_multi_point_and_interface_evidence(volume_refinement):
     index=torch.arange(17,device='cuda',dtype=sample.dtype)
     z=1-2*(index+.37)/17;angle=(index+.21)*2.399963229728653
     directions=torch.stack(((1-z*z).sqrt()*angle.cos(),(1-z*z).sqrt()*angle.sin(),z),-1)
-    inside=(sample.new_tensor([.2,.6,.85])[:,None,None]*radius*directions[None]).reshape(-1,3)
+    inside=(sample.new_tensor(inside_shells)[:,None,None]*radius*directions[None]).reshape(-1,3)
     outside=(sample.new_tensor([1.2,2.,3.])[:,None,None]*radius*directions[None]).reshape(-1,3)
     distance=outside.norm(dim=-1,keepdim=True)
     exterior_reference=drive+radius**3/3*(3*outside*(outside*magnetization).sum(-1,keepdim=True)/distance**5-magnetization/distance**3)
     rows=[]
-    for level in ((1,2,3) if volume_refinement==0 else (2,)):
+    for level,volume_refinement in cases:
         start=time.monotonic();surface=sphere_mesh(radius=radius,subdivisions=level)
         vertices=torch.cat((surface.vertices,sample.new_zeros(1,3)))
         cells=torch.cat((torch.full((len(surface.faces),1),len(surface.vertices),device='cuda',dtype=torch.int64),surface.faces),-1)

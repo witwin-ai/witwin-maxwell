@@ -98,3 +98,19 @@ def test_flux_convergence_classification_and_report(tmp_path, monkeypatch):
         "| high_eps_box | 1.00000000e+00 | 1.0000e-01 (unconverged) | "
         "1.0000e-02 (unconverged) | 2.0000e-01 (unconverged) | 0.9900 (unconverged) |"
     ) in content
+
+
+def test_flux_change_can_be_scaled_by_incident_power():
+    # A null scattered-flux channel: 5e-13 W changing by 7e-15 W is 1.4% of itself but
+    # 1.4e-11 of a 0.5 mW incident power.
+    power, doubled = np.array([5.0e-13, 0.3]), np.array([5.07e-13, 0.3])
+    assert flux_runtime_convergence(power, doubled)[1] is False
+    change, converged = flux_runtime_convergence(power, doubled, incident_power=5.0e-4)
+    assert change == pytest.approx(1.4e-11) and converged is True
+
+
+def test_only_null_flux_rows_scale_the_change_by_incident_power():
+    from benchmark.scenes import SCENARIOS
+
+    scaled = {name for name, scenario in SCENARIOS.items() if scenario.flux_change_scale == "incident"}
+    assert scaled == {"pec_box", "pml_slab_through", "tfsf_vacuum"}

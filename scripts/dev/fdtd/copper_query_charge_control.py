@@ -25,11 +25,10 @@ def run_oblique_charge_control(record_property, *, fixed_wavevector=True, compar
         raise ValueError("Order acceptance requires three unchanged refinement levels.")
     for spacing in spacings:
         scene=mw.Scene(domain=mw.Domain(bounds=((- .12,.12),(-.005,.005),(-.005,.005))),
-            grid=mw.GridSpec.uniform(spacing),device='cuda',
-            boundary=mw.BoundarySpec.faces(default='none',x='pml',y='bloch',z='bloch',
+            grid=mw.GridSpec.uniform(spacing),boundary=mw.BoundarySpec.faces(default='none',x='pml',y='bloch',z='bloch',
                 num_layers=12,bloch_wavevector=(0.,ky,0.) if fixed_wavevector else 'auto'),
             structures=(mw.Structure(mw.Box(position=torch.zeros(3,dtype=torch.float64),
-                size=torch.tensor((0.,.04,.04),dtype=torch.float64)),mw.CopperFoil(
+                size=torch.tensor((0.,.04,.04),dtype=torch.float64)),mw.media.CopperFoil(
                     thickness=2e-6,conductivity=1e6,frequency_range=(.5e9,2e9)),name='foil'),),
             sources=(mw.PlaneWave(direction=(math.cos(angle),math.sin(angle),0.),
                 polarization=(-math.sin(angle),math.cos(angle),0.),
@@ -37,9 +36,9 @@ def run_oblique_charge_control(record_property, *, fixed_wavevector=True, compar
                 source_time=mw.CW(frequency,phase=.27)),))
         points=torch.tensor(((0.,0.,0.),),dtype=torch.float64,device='cuda')
         scene=retain_h_stencils(scene,points,extra_components=('Ex',) if compare_point_clock else ())
-        result=mw.Simulation.fdtd(scene,frequency=frequency,full_field_dft=True,cuda_graph=True,
+        result=mw.Simulation.fdtd(scene,frequencies=frequency,config=mw.FDTDConfig(full_field_dft=True,cuda_graph=True,
             run_time=mw.TimeConfig.auto(transient_cycles=transient_cycles,steady_cycles=steady_cycles),
-            spectral_sampler=mw.SpectralSampler(window='hanning')).run()
+            spectral_sampler=mw.fdtd.SpectralSampler(window='hanning'))).run()
         negative=result.query_fields(points,region_id='exterior',field_kind='total',trace_side='negative')
         positive=result.query_fields(points,region_id='exterior',field_kind='total',trace_side='positive')
         charge=8.8541878128e-12*(positive[0][0,0]-negative[0][0,0])

@@ -9,33 +9,33 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_components, compile_materials
 
 
 def _scene(geometry, material, *, averaging="arithmetic", spacing=0.1):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
-        grid=mw.GridSpec.uniform(spacing),
-        device="cpu",
-        # Polarized averaging needs more than one sub-sample per cell.
-        subpixel_samples=mw.SubpixelSpec(averaging=averaging, samples=2 if averaging == "polarized" else 1),
-    )
-    scene.add_structure(mw.Structure(name="csg", geometry=geometry, material=material))
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
+                grid=mw.GridSpec.uniform(spacing),
+                # Polarized averaging needs more than one sub-sample per cell.
+                subpixel=mw.SubpixelSpec(averaging=averaging, samples=2 if averaging == "polarized" else 1),
+                structures=(mw.Structure(name="csg", geometry=geometry, material=material),),
+            )
     return scene
 
 
 def _components(geometry, material=None, **kwargs):
     material = mw.Material(eps_r=4.0) if material is None else material
-    eps, _ = prepare_scene(_scene(geometry, material, **kwargs)).compile_material_components()
+    eps, _ = compile_material_components(prepare_scene(_scene(geometry, material, **kwargs), device="cpu"))
     return eps
 
 
 @pytest.mark.parametrize("averaging", ["arithmetic", "polarized"])
 def test_difference_of_boxes_compiles_exactly_like_hollow_box(averaging):
     rotation = (0.2, 0.0, 0.3)
-    difference = mw.Difference(
+    difference = mw.geometry.Difference(
         mw.Box(size=(1.2, 1.0, 0.8)), mw.Box(size=(0.8, 0.6, 0.4)), position=(0.1, 0.0, -0.05), rotation=rotation
     )
-    hollow = mw.HollowBox(
+    hollow = mw.geometry.HollowBox(
         position=(0.1, 0.0, -0.05), outer_size=(1.2, 1.0, 0.8), inner_size=(0.8, 0.6, 0.4), rotation=rotation
     )
     eps_csg = _components(difference, averaging=averaging)
@@ -46,8 +46,8 @@ def test_difference_of_boxes_compiles_exactly_like_hollow_box(averaging):
 
 def test_difference_material_fill_matches_analytic_volume():
     spacing = 0.05
-    geometry = mw.Difference(mw.Box(size=(1.2, 1.2, 1.2)), mw.Sphere(radius=0.4))
-    model = prepare_scene(_scene(geometry, mw.Material(eps_r=4.0), spacing=spacing)).compile_materials()
+    geometry = mw.geometry.Difference(mw.Box(size=(1.2, 1.2, 1.2)), mw.Sphere(radius=0.4))
+    model = compile_materials(prepare_scene(_scene(geometry, mw.Material(eps_r=4.0), spacing=spacing), device="cpu"))
     eps = model["eps_r"]
     centre = tuple(index // 2 for index in eps.shape)
     assert float(eps[centre]) == pytest.approx(1.0, abs=1.0e-4)
@@ -61,19 +61,19 @@ def test_difference_material_fill_matches_analytic_volume():
 def test_compiled_permittivity_is_differentiable_in_child_parameters():
     radius = torch.tensor(0.4, requires_grad=True)
     shift = torch.zeros(3, requires_grad=True)
-    geometry = mw.Difference(mw.Box(position=shift, size=(1.2, 1.2, 1.2)), mw.Sphere(radius=radius))
+    geometry = mw.geometry.Difference(mw.Box(position=shift, size=(1.2, 1.2, 1.2)), mw.Sphere(radius=radius))
     scene = _scene(geometry, mw.Material(eps_r=4.0), averaging="polarized")
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     # The prepared scene sees the nested parameters, so trainable compiles bypass the cache.
     assert prepared._has_trainable_geometry()
-    eps, _ = prepared.compile_material_components()
+    eps, _ = compile_material_components(prepared)
     loss = sum(component.sum() for component in eps.values())
     loss.backward()
     assert radius.grad is not None and float(radius.grad) < 0.0
     assert shift.grad is not None and torch.isfinite(shift.grad).all()
 
     def fixed_loss(value):
-        fixed = mw.Difference(mw.Box(size=(1.2, 1.2, 1.2)), mw.Sphere(radius=value))
+        fixed = mw.geometry.Difference(mw.Box(size=(1.2, 1.2, 1.2)), mw.Sphere(radius=value))
         with torch.no_grad():
             components = _components(fixed, averaging="polarized")
         return float(sum(component.sum() for component in components.values()))
@@ -84,10 +84,10 @@ def test_compiled_permittivity_is_differentiable_in_child_parameters():
 
 
 def test_pec_difference_matches_hollow_box_occupancy():
-    difference = mw.Difference(mw.Box(size=(1.2, 1.2, 1.2)), mw.Box(size=(0.8, 0.8, 0.8)))
-    hollow = mw.HollowBox(outer_size=(1.2, 1.2, 1.2), inner_size=(0.8, 0.8, 0.8))
-    csg = prepare_scene(_scene(difference, mw.Material.pec())).compile_materials()
-    ref = prepare_scene(_scene(hollow, mw.Material.pec())).compile_materials()
+    difference = mw.geometry.Difference(mw.Box(size=(1.2, 1.2, 1.2)), mw.Box(size=(0.8, 0.8, 0.8)))
+    hollow = mw.geometry.HollowBox(outer_size=(1.2, 1.2, 1.2), inner_size=(0.8, 0.8, 0.8))
+    csg = compile_materials(prepare_scene(_scene(difference, mw.Material.pec()), device="cpu"))
+    ref = compile_materials(prepare_scene(_scene(hollow, mw.Material.pec()), device="cpu"))
     assert csg["pec_mode"] == ref["pec_mode"]
     torch.testing.assert_close(csg["pec_occupancy"], ref["pec_occupancy"], rtol=0.0, atol=1.0e-6)
 
@@ -95,13 +95,13 @@ def test_pec_difference_matches_hollow_box_occupancy():
 def test_smooth_union_and_scene_placement():
     left = mw.Sphere(position=(-0.3, 0.0, 0.0), radius=0.3)
     right = mw.Sphere(position=(0.3, 0.0, 0.0), radius=0.3)
-    sharp = _components(mw.Union(left, right))["x"]
-    smooth = _components(mw.Union(left, right, smoothness=0.3))["x"]
+    sharp = _components(mw.geometry.Union(left, right))["x"]
+    smooth = _components(mw.geometry.Union(left, right, smoothness=0.3))["x"]
     # Blending only adds material near the seam.
     assert bool(torch.all(smooth >= sharp - 1.0e-5))
     assert float((smooth - sharp).sum()) > 0.0
 
-    scene = _scene(mw.Union(left, right), mw.Material(eps_r=4.0))
+    scene = _scene(mw.geometry.Union(left, right), mw.Material(eps_r=4.0))
     placed = scene.structures[0].geometry
     tensors = {id(value) for value in vars(placed).values() if isinstance(value, torch.Tensor)}
     assert all(id(child.radius) in tensors for child in placed.geometries)
@@ -110,20 +110,19 @@ def test_smooth_union_and_scene_placement():
 def test_periodic_scene_wraps_boolean_geometry_like_primitive():
     def compile_with(geometry):
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-            grid=mw.GridSpec.uniform(0.05),
-            boundary=mw.BoundarySpec.periodic(),
-            device="cpu",
-            subpixel_samples=mw.SubpixelSpec(samples=1),
-        )
-        scene.add_structure(mw.Structure(geometry=geometry, material=mw.Material(eps_r=3.0)))
-        eps, _ = prepare_scene(scene).compile_material_components()
+                    domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                    grid=mw.GridSpec.uniform(0.05),
+                    boundary=mw.BoundarySpec.periodic(),
+                    subpixel=mw.SubpixelSpec(samples=1),
+                    structures=(mw.Structure(geometry=geometry, material=mw.Material(eps_r=3.0)),),
+                )
+        eps, _ = compile_material_components(prepare_scene(scene, device="cpu"))
         return eps
 
     # A rod crossing the periodic x faces with a spherical void.
     rod = mw.Box(position=(0.45, 0.0, 0.0), size=(0.4, 0.3, 0.3))
     void = mw.Sphere(position=(0.3, 0.0, 0.0), radius=0.08)
-    eps_csg = compile_with(mw.Difference(rod, void))
+    eps_csg = compile_with(mw.geometry.Difference(rod, void))
     rod_only = compile_with(rod)
     # The periodic image of the rod reaches the low x face exactly as the primitive's does,
     # and the void only ever removes material.

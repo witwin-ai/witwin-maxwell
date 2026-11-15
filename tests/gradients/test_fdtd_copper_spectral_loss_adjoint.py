@@ -1,4 +1,5 @@
 """Independent normal-forward scans of both foil traces and direct loss factors."""
+from dataclasses import replace
 import math
 
 import pytest
@@ -25,8 +26,8 @@ class SpectralLossDesign(mw.SceneModule):
             "lorentz": dict(lorentz_poles=(mw.LorentzPole(delta_eps=1., resonance_frequency=4e9, gamma=.8e9),)),
         }
         return mw.Scene(domain=mw.Domain(bounds=((- .03,.03),)*3), grid=mw.GridSpec.uniform(.005),
-            boundary=mw.BoundarySpec.pec(), device="cuda", structures=(
-                mw.Structure(mw.Box(size=(0., .02, .02)), mw.CopperFoil(
+            boundary=mw.BoundarySpec.pec(), structures=(
+                mw.Structure(mw.Box(size=(0., .02, .02)), mw.media.CopperFoil(
                     thickness=self.log_thickness.exp(), conductivity=self.log_copper_sigma.exp(),
                     frequency_range=(2e9,4e9), mode_count=16), name="foil"),
                 mw.Structure(mw.Box(position=(.015,0.,0.), size=(.03,.06,.06)),
@@ -34,26 +35,26 @@ class SpectralLossDesign(mw.SceneModule):
                                 **poles[self.pole]), name="substrate")),
             sources=(mw.UniformCurrentSource(name="drive", center=(-.015,0.,-.0025), size=(.005,)*3, polarization="Ez",
                 source_time=mw.CW(3e9, phase=.37, amplitude=1e-5)),),
-            monitors=(mw.PowerLossMonitor("bulk", position=(0.,0.,0.), size=(.04,)*3,
+            monitors=(mw.monitors.PowerLossMonitor("bulk", position=(0.,0.,0.), size=(.04,)*3,
                 channels=("conduction", "electric_dispersion")),))
 
     def simulation(self, *, graph=False, stride=7):
-        simulation = mw.Simulation.fdtd(self, frequencies=(2.5e9,3e9), cuda_graph=graph,
+        simulation = mw.Simulation.fdtd(self, frequencies=(2.5e9,3e9), config=mw.FDTDConfig(cuda_graph=graph,
             full_field_dft=True, run_time=mw.TimeConfig(time_steps=72 if self.window=="none" else 512,
                 dt=None if self.window=="none" else 5e-12, transient_cycles=0, steady_cycles=1),
-            spectral_sampler=mw.SpectralSampler(window=self.window, normalize_source=self.normalized))
-        simulation.config.adjoint_checkpoint_stride = stride
+            spectral_sampler=mw.fdtd.SpectralSampler(window=self.window, normalize_source=self.normalized)))
+        simulation.config = replace(simulation.config, adjoint_checkpoint_stride=stride)
         return simulation
 
 
 def objective(model, kind, **kwargs):
     result = model.simulation(**kwargs).run()
     if kind == "surface":
-        value = result.conductor_losses["foil"]["surface_power"].sum()
+        value = mw.rf.conductor_losses(result)["foil"]["surface_power"].sum()
     elif kind == "combined":
-        value = result.power_loss("bulk").total.sum()+result.conductor_losses["foil"]["surface_power"].sum()
+        value = result.monitor("bulk").total.sum()+mw.rf.conductor_losses(result)["foil"]["surface_power"].sum()
     else:
-        value = result.power_loss("bulk").channel_power[kind].sum()
+        value = result.monitor("bulk").channel_power[kind].sum()
     return value, result
 
 
@@ -61,16 +62,18 @@ def test_multifrequency_pulse_absolute_copper_loss_gradient(record_property):
     class PulsedLossDesign(SpectralLossDesign):
         def to_scene(self):
             scene = super().to_scene()
-            return scene.clone(sources=(mw.UniformCurrentSource(name="drive",
+            return scene.updated(sources=(mw.UniformCurrentSource(name="drive",
                 center=(-.015, 0., -.0025), size=(.005,)*3, polarization="Ez",
                 source_time=mw.GaussianPulse(3e9, fwidth=1.5e9, amplitude=1e-5)),))
 
         def simulation(self):
             simulation = mw.Simulation.fdtd(self, frequencies=(2.5e9, 3e9),
-                cuda_graph=True, full_field_dft=True,
-                run_time=mw.TimeConfig(time_steps=256), shutoff=0.,
-                spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False))
-            simulation.config.adjoint_checkpoint_stride = 7
+                config=mw.FDTDConfig(
+                    cuda_graph=True, full_field_dft=True,
+                    run_time=mw.TimeConfig(time_steps=256), shutoff=0.,
+                    spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+                ))
+            simulation.config = replace(simulation.config, adjoint_checkpoint_stride=7)
             return simulation
 
     model = PulsedLossDesign()
@@ -81,7 +84,7 @@ def test_multifrequency_pulse_absolute_copper_loss_gradient(record_property):
     assert result.stats()["reference_frequency"] == "per-frequency"
     assert result.stats()["normalize_source"] is False
     assert result.stats()["cuda_graph_active"]
-    assert bool(torch.all(result.conductor_losses["foil"]["surface_power"] > 0))
+    assert bool(torch.all(mw.rf.conductor_losses(result)["foil"]["surface_power"] > 0))
     value.backward()
     adjoint = parameter.grad.detach().clone()
     assert adjoint.isfinite() and adjoint.abs() > 0
@@ -115,7 +118,7 @@ def test_two_sided_spectral_loss_gradients_match_independent_forward_scan(kind, 
     model = SpectralLossDesign(pole=pole)
     value, result = objective(model, kind)
     assert value.requires_grad
-    traces = result.conductor_losses["foil"]["bulk_electric_traces"]
+    traces = mw.rf.conductor_losses(result)["foil"]["bulk_electric_traces"]
     assert traces and all(trace["electric_fields"].requires_grad for trace in traces)
     assert any(float((trace["electric_fields"][:,0]-trace["electric_fields"][:,1]).detach().abs().max())>0 for trace in traces)
     value.backward()
@@ -180,7 +183,7 @@ def test_bloch_complex_partner_spectral_surface_work_gradient(record_property):
     model = BlochFoilDesign(phase=True, graph=True, stride=7)
     def evaluate():
         result = model.simulation().run()
-        return result.conductor_losses["foil"]["surface_power"].sum(),result
+        return mw.rf.conductor_losses(result)["foil"]["surface_power"].sum(),result
     value,result = evaluate()
     assert result.solver.complex_fields_enabled and result.stats()["cuda_graph_active"]
     value.backward()
@@ -207,16 +210,16 @@ def test_bloch_complex_partner_spectral_surface_work_gradient(record_property):
 def test_native_rf_batch_retains_side_loss_graph_after_reuse_and_close():
     class RFDesign(SpectralLossDesign):
         def to_scene(self):
-            return super().to_scene().clone(sources=(), ports=(mw.LumpedPort("feed",
+            return super().to_scene().updated(sources=(), ports=(mw.LumpedPort("feed",
                 positive=(-.01,0.,.005), negative=(-.01,0.,-.005), voltage_path=mw.AxisPath("z"),
                 current_surface=mw.Box(position=(-.01,0.,-.0025),size=(.015,.015,0.))),))
 
         def simulation(self, *, graph=False, stride=7):
-            simulation = mw.Simulation.fdtd(self, frequencies=(2.5e9,3e9), cuda_graph=graph,
+            simulation = mw.Simulation.fdtd(self, frequencies=(2.5e9,3e9), config=mw.FDTDConfig(cuda_graph=graph,
                 full_field_dft=True, run_time=mw.TimeConfig(time_steps=72,transient_cycles=0,steady_cycles=1),
-                spectral_sampler=mw.SpectralSampler(window="none",normalize_source=False),
-                excitations=mw.PortExcitation("feed",source_time=mw.CW(3e9,phase=.37)))
-            simulation.config.adjoint_checkpoint_stride = stride
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none",normalize_source=False)),
+                excitations=mw.rf.PortExcitation("feed",source_time=mw.CW(3e9,phase=.37)))
+            simulation.config = replace(simulation.config, adjoint_checkpoint_stride=stride)
             return simulation
 
     models = [RFDesign(pole="debye"), RFDesign(pole="debye")]
@@ -224,14 +227,14 @@ def test_native_rf_batch_retains_side_loss_graph_after_reuse_and_close():
         models[1].log_bulk_sigma.add_(.2)
     simulations = [model.simulation() for model in models]
     parameters = tuple(parameter for model in models for parameter in model.parameters())
-    batch = mw.Simulation.batch(simulations, outputs=mw.BatchOutput(fields=("Ex","Ey","Ez")),
-        execution=mw.BatchExecution(devices=("cuda:0",),batch_size=2,graph="required",graph_steps=7))
+    batch = mw.Simulation.batch(simulations, outputs=mw.execution.BatchOutput(fields=("Ex","Ey","Ez")),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",),batch_size=2,graph="required",graph_steps=7))
     with batch.prepare() as prepared:
         first = prepared.run().results()
         second = prepared.run().results()
 
     def evaluate(results):
-        return sum(result.power_loss("bulk").total.sum()+result.conductor_losses["foil"]["surface_power"].sum()
+        return sum(result.monitor("bulk").total.sum()+mw.rf.conductor_losses(result)["foil"]["surface_power"].sum()
                    for result in results)
 
     expected_value = evaluate([simulation.run() for simulation in simulations])

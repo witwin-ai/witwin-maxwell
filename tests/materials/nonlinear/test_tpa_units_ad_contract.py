@@ -16,6 +16,7 @@ from witwin.maxwell.fdtd.runtime.materials import build_nonlinear_channels, buil
 from witwin.maxwell.fdtd.material_pullback import component_node_gradients_from_yee_permittivity
 from witwin.maxwell.fdtd.adjoint.core import _general_nonlinear_electric_coefficients
 from witwin.maxwell.fdtd.runtime.stepping import update_electric_fields_bloch,update_electric_fields_bloch_xy_standard_z
+from witwin.maxwell.compiler import compile_materials
 
 BETA=4e-5
 
@@ -23,10 +24,9 @@ BETA=4e-5
 
 def compiled(beta=BETA):
     scene=mw.Scene(domain=mw.Domain(bounds=((-1.,1.),(-.3,.3),(-.3,.3))),grid=mw.GridSpec.uniform(.02),
-        boundary=mw.BoundarySpec.pml(num_layers=8,strength=1.),device='cpu',
-        structures=[mw.Structure(mw.Box(position=(-.2,0.,0.),size=(.3,.8,.8)),
-            mw.Material(eps_r=2.25,nonlinearity=None if beta==0 else mw.TwoPhotonAbsorption(beta=beta)))])
-    prepared=prepare_scene(scene);model=prepared.compile_materials()
+        boundary=mw.BoundarySpec.pml(num_layers=8,strength=1.),structures=[mw.Structure(mw.Box(position=(-.2,0.,0.),size=(.3,.8,.8)),
+            mw.Material(eps_r=2.25,nonlinearity=None if beta==0 else mw.media.TwoPhotonAbsorption(beta=beta)))])
+    prepared=prepare_scene(scene, device='cpu');model=compile_materials(prepared)
     edge=model['edge_components']['eps']
     runtime=SimpleNamespace(eps_Ex=edge['Ex']*EPSILON_0,eps_Ey=edge['Ey']*EPSILON_0,eps_Ez=edge['Ez']*EPSILON_0)
     build_nonlinear_channels(runtime,model)
@@ -130,8 +130,7 @@ def test_complex_nonlinear_evolution_rejects_before_any_field_or_kernel_access(f
 
 
 def test_actual_Bloch_material_admission_rejects_nonlinear_on_CPU_before_native_loading():
-    scene=mw.Scene(domain=mw.Domain(bounds=((-1.,1.),)*3),grid=mw.GridSpec.uniform(.25),device='cpu',
-        boundary=mw.BoundarySpec.bloch(wavevector=(.2,0.,0.)),
-        structures=[mw.Structure(mw.Box(size=(.5,.5,.5)),mw.Material(eps_r=2.25,nonlinearity=mw.TwoPhotonAbsorption(beta=BETA)))])
+    scene=mw.Scene(domain=mw.Domain(bounds=((-1.,1.),)*3),grid=mw.GridSpec.uniform(.25),boundary=mw.BoundarySpec.bloch(wavevector=(.2,0.,0.)),
+        structures=[mw.Structure(mw.Box(size=(.5,.5,.5)),mw.Material(eps_r=2.25,nonlinearity=mw.media.TwoPhotonAbsorption(beta=BETA)))])
     with pytest.raises(NotImplementedError,match='nonlinear media require the real-valued update kernels'):
-        build_materials(SimpleNamespace(_compiled_sources=()),prepare_scene(scene))
+        build_materials(SimpleNamespace(_compiled_sources=()),prepare_scene(scene, device='cpu'))

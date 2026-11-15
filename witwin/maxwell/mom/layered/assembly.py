@@ -66,6 +66,10 @@ def _adaptive_rule(device, network_accuracy=False):
         for rule, threshold in zip(rules, thresholds)])
 
 
+# _adaptive_rule rows: eight 64-point padded rules, each with one metadata row.
+NETWORK_RULE_POINTS = 8 * 65
+
+
 def _outer_rule(device):
     # Contact/self retains the reference rule; smooth analytic outer integrals
     # use the measured lower orders. Selection is per static image.
@@ -102,7 +106,7 @@ def triangle_cross_integrals(triangles, observers, beta):
 
 def assemble_layered(layout, table, *, frequency_index=0, near_ratio=2.0,
                      far_order=None, near_order=None, far_dtype=torch.float64, source_tile=64,
-                     separate=False, _tiles=False, _network_accuracy=False):
+                     separate=False, _tiles=False, _network_accuracy=False, _system=None):
     """Return complex128 Z[N,N], using a bounded [batch,faces,source_tile,10] buffer.
 
     For exp(-i*w*t), Z=-i*w*mu0*vector+i/(w*eps0)*div^T*scalar*div.
@@ -114,12 +118,28 @@ def assemble_layered(layout, table, *, frequency_index=0, near_ratio=2.0,
     """
     if far_dtype not in (torch.float32, torch.float64):
         raise ValueError("far_dtype must be torch.float32 or torch.float64")
+    if not (0 <= frequency_index < len(table.frequencies) or separate and frequency_index == -1) or source_tile < 1 or near_ratio <= 0:
+        raise ValueError("Require an admitted frequency, source_tile>=1 and near_ratio>0")
+    green, geometry = assembly_operands(layout, table)
+    far = _adaptive_rule(layout.mesh.device, _network_accuracy) if far_order is None else _rule(far_order, layout.mesh.device)
+    near = _outer_rule(layout.mesh.device) if near_order is None else _rule(near_order, layout.mesh.device)
+    if _system is not None:
+        return torch.ops.witwin_maxwell_mom_layered.assemble_system(
+            green, geometry, far, near, source_tile, near_ratio, far_dtype == torch.float64,
+            table.exact_mode, table.ground, *_system)
+    operation = (torch.ops.witwin_maxwell_mom_layered.assemble_tiles if _tiles else
+                 torch.ops.witwin_maxwell_mom_layered.assemble_parts if separate else
+                 torch.ops.witwin_maxwell_mom_layered.assemble)
+    return operation(green, geometry, far, near, frequency_index, source_tile, near_ratio,
+                     far_dtype == torch.float64, table.exact_mode, table.ground)
+
+
+def assembly_operands(layout, table):
+    """Validated (green, geometry) tensor lists of the native assembly entry points."""
     mesh, basis = layout.mesh, layout.basis
     triangles = mesh.triangles.contiguous()
     if triangles.dtype != torch.float64:
         raise ValueError("Layered assembly requires fp64 geometry")
-    if not (0 <= frequency_index < len(table.frequencies) or separate and frequency_index == -1) or source_tile < 1 or near_ratio <= 0:
-        raise ValueError("Require an admitted frequency, source_tile>=1 and near_ratio>0")
     extent = mesh.vertices.amax(0) - mesh.vertices.amin(0)
     if bool(torch.linalg.vector_norm(extent[:2]) > table.rho_max):
         raise ValueError("Layout exceeds Green table rho_max")
@@ -140,35 +160,27 @@ def assemble_layered(layout, table, *, frequency_index=0, near_ratio=2.0,
              if layout.support_slots is None else layout.support_slots)
     geometry = [triangles, layout.triangle_planes, areas2, mesh.centroids.contiguous(), edge2,
                 slopes, supports, slots, basis.face_edges.contiguous()]
+    from .mesh import JunctionRWGBasis
+    if isinstance(basis, JunctionRWGBasis):
+        geometry.append((basis.edge_lengths[:, None] * basis.edge_lengths.new_tensor([1., -1.])
+                         / areas2[supports]).contiguous())
     green = [table.remainder, table.derivatives, table.rho, table.planes, table.image_offsets,
              table.image_distances, table.image_coefficients, table.media, table.sigma, table.frequencies]
     if walls:
         v = table.vertical
         green += v.assembly_tensors()
     build_extension()
-    operation = (torch.ops.witwin_maxwell_mom_layered.assemble_tiles if _tiles else
-                 torch.ops.witwin_maxwell_mom_layered.assemble_parts if separate else
-                 torch.ops.witwin_maxwell_mom_layered.assemble)
-    return operation(
-        green, geometry, _adaptive_rule(mesh.device, _network_accuracy) if far_order is None else _rule(far_order, mesh.device),
-        _outer_rule(mesh.device) if near_order is None else _rule(near_order, mesh.device),
-        frequency_index, source_tile, near_ratio, far_dtype == torch.float64,
-        table.exact_mode, table.ground)
+    return green, geometry
 
 
-def assemble_potentials(layout, table, *, frequency_start=0, frequency_stop=None, **options):
-    """Return V[N,N], P[F,F]; frequency_index=-1 batches all frequencies.
-
-    P0_t=1/area_t on face t (unit integral), so D is signed edge length.
-    Z=-i*w*mu0*V+i/(w*eps0)*D.T@P@D. This flux convention avoids
-    area-dependent amplification of roundoff in numerical D*Lambda checks.
-    The original summed-Z gather is unchanged (T0).
-    """
+def _frequency_view(table, frequency_start, frequency_stop):
     # Frequency slices are views: no all-sweep dense potential allocation.
     table = replace(table, frequencies=table.frequencies[frequency_start:frequency_stop],
                     remainder=table.remainder[frequency_start:frequency_stop],
                     derivatives=table.derivatives[frequency_start:frequency_stop],
-                    image_coefficients=table.image_coefficients[frequency_start:frequency_stop])
+                    image_coefficients=table.image_coefficients[frequency_start:frequency_stop],
+                    # Dispersive [F, regions] permittivity rows follow the frequency slice.
+                    media=table.media[frequency_start:frequency_stop] if table.media.dim() == 2 else table.media)
     if table.vertical is not None:
         v = table.vertical
         table = replace(table, vertical=replace(
@@ -181,4 +193,28 @@ def assemble_potentials(layout, table, *, frequency_start=0, frequency_stop=None
         # tensors() must use this chunk's frequency array, not the parent sweep.
         from weakref import proxy
         table.vertical.parent = proxy(table)
-    return assemble_layered(layout, table, separate=True, **options)
+    return table
+
+
+def assemble_potentials(layout, table, *, frequency_start=0, frequency_stop=None, **options):
+    """Return V[N,N], P[F,F]; frequency_index=-1 batches all frequencies.
+
+    P0_t=1/area_t on face t (unit integral), so D is signed edge length.
+    Z=-i*w*mu0*V+i/(w*eps0)*D.T@P@D. This flux convention avoids
+    area-dependent amplification of roundoff in numerical D*Lambda checks.
+    The original summed-Z gather is unchanged (T0).
+    """
+    return assemble_layered(layout, _frequency_view(table, frequency_start, frequency_stop),
+                            separate=True, **options)
+
+
+def assemble_system(layout, table, system, workspace, order, *, frequency_start=0, frequency_stop=None,
+                    **options):
+    """Gather one chunk's V and P into caller storage with the identical tile sums.
+
+    V[m,n] lands at system[:, order[m], order[n]] (loop/tree basis positions);
+    P is packed lower-triangular complex128 in the complex64 workspace rows.
+    """
+    table = _frequency_view(table, frequency_start, frequency_stop)
+    return assemble_layered(layout, table, frequency_index=-1, separate=True,
+                            _system=(system, workspace, order), **options)

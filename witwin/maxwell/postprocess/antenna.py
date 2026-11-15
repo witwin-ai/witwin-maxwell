@@ -8,6 +8,7 @@ import torch
 from ..antenna import AntennaData, Ludwig3, _power_normalized_antenna_metrics
 from ..constants import C_0, EPSILON_0, ETA_0, MU_0
 from ..network import PortData
+from ..errors import UnsupportedFeatureError
 
 
 # Public alias for the central vacuum wave impedance constant.
@@ -602,8 +603,9 @@ def _far_fields_from_result(
             or abs(impedance.imag) > 1e-10 * abs(impedance.real)
             or abs(wavenumber.imag) > 1e-10 * abs(wavenumber.real)
         ):
-            raise NotImplementedError(
-                "Antenna gain currently requires a homogeneous lossless exterior."
+            raise UnsupportedFeatureError(
+                "Antenna gain currently requires a homogeneous lossless exterior.",
+                feature="guard:825129b7", method=None
             )
         radii.append(_select_frequency_parameter(radius, index, frequency_count))
         impedances.append(impedance.real)

@@ -38,22 +38,21 @@ def _pec_scene(grid, bounds, wall_low_x, *, pec_mode="conformal"):
     bit-exact regression comparison).
     """
     scene = mw.Scene(
-        domain=mw.Domain(bounds=bounds),
-        grid=grid,
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="wall",
-            geometry=mw.Box(
-                position=(wall_low_x + 5.0, 0.0, 0.0),
-                size=(10.0, 8.0, 8.0),
+                domain=mw.Domain(bounds=bounds),
+                grid=grid,
+                subpixel=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
+                structures=(
+            mw.Structure(
+                name="wall",
+                geometry=mw.Box(
+                    position=(wall_low_x + 5.0, 0.0, 0.0),
+                    size=(10.0, 8.0, 8.0),
+                ),
+                material=mw.Material.pec(),
             ),
-            material=mw.Material.pec(),
-        )
-    )
-    return prepare_scene(scene)
+            ),
+            )
+    return prepare_scene(scene, device="cpu")
 
 
 def _ex_edge_fill(occupancy, i0, jy, jz):
@@ -96,20 +95,18 @@ def test_pec_beta_scalar_on_uniform_tensor_on_custom():
         mw.Scene(
             domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
             grid=mw.GridSpec.uniform(0.1),
-            device="cpu",
-        )
+        ), device="cpu"
     )
     beta = _pec_geometry_beta(uniform)
     assert not torch.is_tensor(beta)
-    assert beta == pytest.approx(0.5 * min(uniform.grid.min_spacing))
+    assert beta == pytest.approx(0.5 * min(uniform.scene.grid.min_spacing))
 
     graded = np.array([-0.5, -0.30, -0.15, -0.05, 0.0, 0.08, 0.20, 0.35, 0.5], dtype=np.float64)
     scene = prepare_scene(
         mw.Scene(
             domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
             grid=mw.GridSpec.custom(graded, graded, graded),
-            device="cpu",
-        )
+        ), device="cpu"
     )
     beta = _pec_geometry_beta(scene)
     assert torch.is_tensor(beta)
@@ -126,8 +123,7 @@ def test_pec_beta_scalar_on_uniform_tensor_on_custom():
         mw.Scene(
             domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
             grid=mw.GridSpec.custom(*(np.linspace(0.0, 1.0, 11),) * 3),
-            device="cpu",
-        )
+        ), device="cpu"
     )
     beta_uc = _pec_geometry_beta(uniform_custom)
     assert torch.is_tensor(beta_uc)
@@ -156,10 +152,10 @@ def test_conformal_pec_tracks_subcell_wall_in_coarse_region():
     grid = mw.GridSpec.custom(xg, yg, zg)
 
     ref = prepare_scene(
-        mw.Scene(domain=mw.Domain(bounds=bounds), grid=grid, device="cpu")
+        mw.Scene(domain=mw.Domain(bounds=bounds), grid=grid), device="cpu"
     )
     # Global-min beta would be 0.5*0.005 = 0.0025; the wall cell is 0.04 wide.
-    global_beta = 0.5 * min(ref.grid.min_spacing)
+    global_beta = 0.5 * min(ref.scene.grid.min_spacing)
     assert global_beta == pytest.approx(0.0025, abs=1e-4)
 
     # The Ex edge whose low node sits at x = 0.20 spans the coarse cell [0.20, 0.24].
@@ -193,20 +189,19 @@ def test_conformal_pec_tracks_subcell_wall_in_coarse_region():
 
 def test_auto_grid_pec_compiles_with_per_node_beta():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.3),
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="pec",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2)),
-            material=mw.Material.pec(),
-        )
-    )
-    prepared = prepare_scene(scene)
-    assert prepared.grid.is_custom  # auto resolved to a nonuniform grid
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.3),
+                subpixel=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
+                structures=(
+            mw.Structure(
+                name="pec",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2)),
+                material=mw.Material.pec(),
+            ),
+            ),
+            )
+    prepared = prepare_scene(scene, device="cpu")
+    assert prepared.scene.grid.is_custom  # auto resolved to a nonuniform grid
     beta = _pec_geometry_beta(prepared)
     assert torch.is_tensor(beta)
     occ = _pec_occupancy(prepared)
@@ -228,16 +223,16 @@ def test_conformal_pec_nonuniform_geometry_gradient_flows():
     )
     position = torch.tensor([0.22, 0.0, 0.0], requires_grad=True)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=bounds), grid=mw.GridSpec.custom(xg, yg, zg), device="cpu"
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="wall",
-            geometry=mw.Box(position=position, size=(0.3, 4.0, 4.0)),
-            material=mw.Material.pec(),
-        )
-    )
-    occ = _pec_occupancy(prepare_scene(scene))
+                domain=mw.Domain(bounds=bounds), grid=mw.GridSpec.custom(xg, yg, zg),
+                structures=(
+            mw.Structure(
+                name="wall",
+                geometry=mw.Box(position=position, size=(0.3, 4.0, 4.0)),
+                material=mw.Material.pec(),
+            ),
+            )
+            )
+    occ = _pec_occupancy(prepare_scene(scene, device="cpu"))
     occ.sum().backward()
     assert position.grad is not None
     assert torch.isfinite(position.grad).all()

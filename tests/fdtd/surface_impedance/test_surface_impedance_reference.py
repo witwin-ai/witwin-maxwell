@@ -1,6 +1,6 @@
 """Phase 0 acceptance budget freeze and torch reference oracle for the surface boundary.
 
-This is the consumer test that binds ``witwin/maxwell/fdtd/surface_impedance_reference.py``
+This is the consumer test that binds ``tests/oracles/surface_impedance_reference.py``
 to the surface-impedance contract: it pins every frozen budget threshold, checks the
 generic torch oracle reproduces the incumbent narrowband ``|Gamma|`` gate, exercises the
 analytic Fresnel/Leontovich oblique reflection, and proves the discrete surface power
@@ -18,8 +18,8 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.fdtd import surface_impedance_reference as ref
-from witwin.maxwell.fdtd.surface_impedance_reference import (
+from tests.oracles import surface_impedance_reference as ref
+from tests.oracles.surface_impedance_reference import (
     SURFACE_ACCEPTANCE_BUDGET as BUDGET,
     SurfaceAcceptanceBudget,
     SurfaceEdgeContribution,
@@ -90,7 +90,7 @@ def test_good_conductor_surface_impedance_matches_public_media():
     4e-7*pi, so the constants agree only to ~5e-10; the pinned quantity is the sign and
     functional form (Z_s = (1 - i) * sqrt(omega*mu/(2*sigma))), not the last digit.
     """
-    metal = mw.LossyMetalMedium(conductivity=_SIGMA)
+    metal = mw.media.LossyMetalMedium(conductivity=_SIGMA)
     for frequency in (1.0e9, 2.0e9, 3.0e9):
         z_ref = complex(good_conductor_surface_impedance(_SIGMA, [frequency])[0])
         z_media = metal.surface_impedance(2.0 * math.pi * frequency)

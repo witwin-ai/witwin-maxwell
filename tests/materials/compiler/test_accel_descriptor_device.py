@@ -7,6 +7,7 @@ import witwin.maxwell as mw
 from witwin.maxwell.compiler.accel.build import build_extension
 from witwin.maxwell.compiler.accel.primitives import _CoverageGeometry, _DistanceGeometry
 from witwin.maxwell.scene import prepare_scene
+from tests.support.torch_setup_oracle import torch_setup_solver
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Setup requires CUDA.")
@@ -14,18 +15,19 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Setup req
 
 def _scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
-        grid=mw.GridSpec.uniform(0.125), boundary=mw.BoundarySpec.pec(), device="cuda",
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
-    )
-    scene.add_structure(mw.Structure(
-        geometry=mw.Sphere(position=(-0.125, 0., 0.), radius=0.23),
-        material=mw.Material(eps_r=3.7, sigma_e=0.013),
-    ))
-    scene.add_structure(mw.Structure(
-        geometry=mw.Box(position=(0.125, 0., 0.), size=(0.25, 0.5, 0.5)),
-        material=mw.Material.pec(),
-    ))
+                domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
+                grid=mw.GridSpec.uniform(0.125), boundary=mw.BoundarySpec.pec(), subpixel=mw.SubpixelSpec(samples=3, averaging="polarized"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Sphere(position=(-0.125, 0., 0.), radius=0.23),
+                material=mw.Material(eps_r=3.7, sigma_e=0.013),
+            ),
+            mw.Structure(
+                geometry=mw.Box(position=(0.125, 0., 0.), size=(0.25, 0.5, 0.5)),
+                material=mw.Material.pec(),
+            ),
+            ),
+            )
     return scene
 
 
@@ -50,13 +52,11 @@ def test_cpu_geometry_descriptor_follows_query_device():
 
 def test_accelerated_pec_occupancy_repeats_with_cpu_geometry():
     scene = _scene()
-    expected = mw.Simulation.fdtd(
-        scene, frequency=1.e9, fdtd_core_path=False, accelerated_setup=False).prepare().solver
+    expected = torch_setup_solver(mw.Simulation.fdtd(scene, frequencies=1.e9))
     expected = expected._compiled_material_model["pec_occupancy"].clone()
     assert bool((expected == 0.5).any())
     for _ in range(20):
-        prepared = mw.Simulation.fdtd(
-            scene, frequency=1.e9, accelerated_setup=True, fdtd_core_path=False).prepare()
+        prepared = mw.Simulation.fdtd(scene, frequencies=1.e9).prepare()
         # Reuse small host allocations immediately after the asynchronous setup.
         scratch = [torch.empty(384, device="cpu", dtype=torch.float32) for _ in range(64)]
         for tensor in scratch:

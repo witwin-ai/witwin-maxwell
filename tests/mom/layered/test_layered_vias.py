@@ -16,11 +16,12 @@ from tests.support.layered_via_references import rectangular_loop_inductance
 from tests.support.coupled_line_references import hammerstad_jensen_microstrip
 
 pytestmark = pytest.mark.cuda
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")
 C0, EPS0 = 299792458., 8.8541878128e-12
 
 
 def vacuum():
-    return mw.LayerStack((mw.Layer("air", 1e-3),), mw.HalfSpace(), mw.HalfSpace())
+    return mw.mom.LayerStack((mw.mom.Layer("air", 1e-3),), mw.mom.HalfSpace(), mw.mom.HalfSpace())
 
 
 def bent_sheet():
@@ -32,6 +33,7 @@ def bent_sheet():
     return layout, table
 
 
+@requires_cuda
 def test_bent_homogeneous_single_layer(record_property):
     layout, table = bent_sheet()
     z = assemble_layered(layout, table)
@@ -69,13 +71,14 @@ def vertical_loop(frequencies=(1e6,1e8,1e9), *, lossy=False):
                   (length/2+gap/2,length+width,-width/2,width/2,za)]
     vias = [(-via/2,via/2,-via/2,via/2,za,zb),
             (length-via/2,length+via/2,-via/2,via/2,za,zb)]
-    port = gap_port("loop",(length/2+gap/2,0,za),(length/2-gap/2,0,za),"x",width)
+    port = gap_port("loop",(length/2+gap/2,0,za),(length/2-gap/2,0,za),"x")
     prepared = prepare_layered_network(vacuum(),rectangles,[port],frequencies,
                                        bridge_width=width,max_edge=20e-6,edge_cell=2e-6,vias=vias,
                                        via_materials=[(5.8e7,0.,None)]*2 if lossy else None)
     return prepared, rectangles, vias, port, (length,height,width,via)
 
 
+@requires_cuda
 def test_vertical_loop_inductance_kcl_and_flatness(record_property):
     prepared, _, vias, _, dimensions = vertical_loop()
     network, currents = solve_prepared_network(prepared)
@@ -123,15 +126,16 @@ def test_vertical_loop_inductance_kcl_and_flatness(record_property):
     record_property("peak_allocated_bytes",torch.cuda.max_memory_allocated())
 
 
+@requires_cuda
 def test_vertical_port_to_ground(record_property):
     # f*h/c < 8.5e-5: transverse fields are quasi-static. Two identical
     # bridge error boxes cancel in the two-line trace extraction.
     h, frequency, width = 254e-6, 100e6, 254e-6
-    stack = mw.LayerStack((mw.Layer("substrate",h,9.8),),"pec",mw.HalfSpace())
+    stack = mw.mom.LayerStack((mw.mom.Layer("substrate",h,9.8),),"pec",mw.mom.HalfSpace())
     matrices = []
     for length in (2e-3,4e-3):
         rectangles = [(0.,length,-width/2,width/2,h)]
-        ports = [gap_port(name,(x,0,h),(x,0,0.),"z",width)
+        ports = [gap_port(name,(x,0,h),(x,0,0.),"z")
                  for name,x in (("p1",0.),("p2",length))]
         prepared = prepare_layered_network(stack,rectangles,ports,(frequency,),
                                            bridge_width=width,max_edge=h/2,edge_cell=width/32)
@@ -171,18 +175,19 @@ def test_via_placement_rejections():
 
 
 def underpass(lossy=False):
-    stack = mw.LayerStack((mw.Layer("silicon",300e-6,11.9,10.),
-                           mw.Layer("oxide",4e-6,4.1)),mw.HalfSpace(11.9,10.),mw.HalfSpace())
+    stack = mw.mom.LayerStack((mw.mom.Layer("silicon",300e-6,11.9,10.),
+                           mw.mom.Layer("oxide",4e-6,4.1)),mw.mom.HalfSpace(11.9,10.),mw.mom.HalfSpace())
     za,zb = 300.5e-6,302.5e-6
     sheets = [(-20e-6,10e-6,-5e-6,5e-6,zb),(90e-6,120e-6,-5e-6,5e-6,zb),
               (-5e-6,105e-6,-5e-6,5e-6,za),(-20e-6,120e-6,-20e-6,-10e-6,zb)]
     vias = [(-2e-6,2e-6,-2e-6,2e-6,za,zb),(98e-6,102e-6,-2e-6,2e-6,za,zb)]
-    ports = [gap_port(name,(x,-5e-6,zb),(x,-10e-6,zb),"y",4e-6)
+    ports = [gap_port(name,(x,-5e-6,zb),(x,-10e-6,zb),"y")
              for name,x in (("p1",-15e-6),("p2",115e-6))]
     return prepare_layered_network(stack,sheets,ports,(10e9,),bridge_width=4e-6,max_edge=10e-6,
                                     vias=vias,via_materials=[(5.8e7,0.,None)]*2 if lossy else None)
 
 
+@requires_cuda
 def test_rfic_underpass_reciprocity_passivity_loss_and_repeat(record_property):
     prepared = underpass()
     network,_ = solve_prepared_network(prepared)
@@ -220,19 +225,19 @@ def public_via_scene(material=None):
     via = (12*u,20*u,-4*u,4*u,za,zb)
     geometry = mw.Box(position=torch.tensor((16*u,0.,96*u),dtype=torch.float64),
                       size=torch.tensor((8*u,8*u,64*u),dtype=torch.float64))
-    structures = [mw.Structure(mw.PlanarPEC([(x0,y0),(x1,y0),(x1,y1),(x0,y1)],
+    structures = [mw.Structure(mw.geometry.PlanarPEC([(x0,y0),(x1,y0),(x1,y1),(x0,y1)],
                   normal_axis="z",coordinate=z),mw.Material.pec()) for x0,x1,y0,y1,z in sheets]
     structures.append(mw.Structure(geometry,mw.Material.pec() if material is None else material))
-    scene = mw.Scene(background=vacuum(),structures=structures)
-    port = gap_port("p",(40*u,0.,za),(32*u,0.,za),"x",8*u)
-    scene.add_port(port)
+    port = gap_port("p",(40*u,0.,za),(32*u,0.,za),"x")
+    scene = mw.Scene(background=vacuum(),structures=structures, ports=(port,))
     return scene,sheets,via,port
 
 
+@requires_cuda
 def test_public_box_via_equals_internal_and_rejects_material(record_property):
     scene,sheets,via,port = public_via_scene()
     u=2.**-20
-    config = mw.MoMConfig(layered=mw.LayeredSurfaceConfig(bridge_width_m=8*u,max_edge_length_m=16*u))
+    config = mw.mom.MoMConfig(layered=mw.mom.LayeredSurfaceConfig(bridge_width_m=8*u,max_edge_length_m=16*u))
     result = mw.Simulation.mom(scene,frequencies=(1e9,),config=config).run()
     internal = prepare_layered_network(vacuum(),sheets,[port],(1e9,),bridge_width=8*u,
                                        max_edge=16*u,vias=[via])
@@ -241,40 +246,46 @@ def test_public_box_via_equals_internal_and_rejects_material(record_property):
     record_property("public_unknowns",internal.layout.basis.n_edges)
     invalid,_,_,_ = public_via_scene(mw.Material(eps_r=2.))
     with pytest.raises(ValueError,match="via requires"):
-        mw.Simulation.mom(invalid,frequency=1e9,config=config).prepare()
+        mw.Simulation.mom(invalid,frequencies=1e9,config=config).prepare()
     misplaced,_,_,_ = public_via_scene()
     misplaced.structures[-1].geometry.size[2] /= 2
     with pytest.raises(ValueError,match="endpoints"):
-        mw.Simulation.mom(misplaced,frequency=1e9,config=config).prepare()
+        mw.Simulation.mom(misplaced,frequencies=1e9,config=config).prepare()
 
 
+@requires_cuda
 def test_public_float32_box_via_snaps_to_planes():
     # A float32 micrometre Box misses the planes by ~1e-11 m; compilation snaps
     # bounds within its rounding scale to the declared sheet coordinates.
     za,zb = 300.5e-6,302.5e-6
-    stack = mw.LayerStack((mw.Layer("silicon",300e-6,11.9,10.),mw.Layer("oxide",4e-6,4.1)),
-                          mw.HalfSpace(11.9,10.),mw.HalfSpace())
-    scene = mw.Scene(background=stack)
-    scene.add_port(gap_port("p",(0.,0.,za),(0.,0.,zb),"z",4e-6))
-    for z in (za,zb):
-        scene.add_structure(mw.Structure(mw.PlanarPEC([(0.,-5e-6),(30e-6,-5e-6),(30e-6,5e-6),(0.,5e-6)],
-                                                      normal_axis="z",coordinate=z),mw.Material.pec()))
-    scene.add_structure(mw.Structure(mw.Box(position=(15e-6,0.,(za+zb)/2),size=(4e-6,4e-6,zb-za)),
-                                     mw.Material.pec()))
+    stack = mw.mom.LayerStack((mw.mom.Layer("silicon",300e-6,11.9,10.),mw.mom.Layer("oxide",4e-6,4.1)),
+                          mw.mom.HalfSpace(11.9,10.),mw.mom.HalfSpace())
+    scene = mw.Scene(background=stack, ports=(gap_port("p",(0.,0.,za),(0.,0.,zb),"z"),))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(mw.geometry.PlanarPEC([(0.,-5e-6),(30e-6,-5e-6),(30e-6,5e-6),(0.,5e-6)],
+                                    normal_axis="z",coordinate=z),mw.Material.pec()) for z in (za,zb)),
+    ))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(mw.Box(position=(15e-6,0.,(za+zb)/2),size=(4e-6,4e-6,zb-za)),
+                     mw.Material.pec()),
+    ))
     assert scene.structures[-1].geometry.position.dtype == torch.float32
     from witwin.maxwell.mom.layered.runtime import compile_layered_scene
     *_,vias,_ = compile_layered_scene(scene)
     assert (vias[0][4],vias[0][5]) == (za,zb)
 
 
+@requires_cuda
 def test_wall_quadrature_precision_calibration(record_property):
     u=2.**-20
     table=LayeredGreenTable.build(vacuum(),(4*u,8*u),(10e9,),10*u,device="cuda",
                                   via_spans=((4*u,8*u),),extract_distance=1e-3)
     tube=mesh_conductors([(-3*u,3*u,-3*u,3*u,z) for z in (4*u,8*u)],
                          table.planes,2*u,vias=[(-u,u,-u,u,4*u,8*u)])
-    stack=mw.LayerStack((mw.Layer("silicon",300*u,11.9,10.),mw.Layer("oxide",4*u,4.1)),
-                         mw.HalfSpace(11.9,10.),mw.HalfSpace())
+    stack=mw.mom.LayerStack((mw.mom.Layer("silicon",300*u,11.9,10.),mw.mom.Layer("oxide",4*u,4.1)),
+                         mw.mom.HalfSpace(11.9,10.),mw.mom.HalfSpace())
     za,zb=300.5*u,302.5*u
     layered=LayeredGreenTable.build(stack,(za,zb),(10e9,),10*u,device="cuda",
                                     via_spans=((za,zb),),extract_distance=4*u)
@@ -307,11 +318,12 @@ def test_wall_quadrature_precision_calibration(record_property):
                     assert error < 1e-6
 
 
+@requires_cuda
 def test_ground_half_rwg_three_complete_runs(record_property):
     u=2.**-20
-    stack=mw.LayerStack((mw.Layer("air",128*u),),"pec",mw.HalfSpace())
+    stack=mw.mom.LayerStack((mw.mom.Layer("air",128*u),),"pec",mw.mom.HalfSpace())
     sheets=[(0.,64*u,-4*u,4*u,64*u)]
-    ports=[gap_port(name,(x,0.,64*u),(x,0.,0.),"z",8*u)
+    ports=[gap_port(name,(x,0.,64*u),(x,0.,0.),"z")
            for name,x in (("p1",0.),("p2",64*u))]
     first=None
     for _ in range(3):
@@ -330,6 +342,7 @@ def test_ground_half_rwg_three_complete_runs(record_property):
     record_property("unknowns",prepared.layout.basis.n_edges)
 
 
+@requires_cuda
 def test_closed_form_static_cross_integrals(record_property):
     from tests.support.layered_via_references import static_cross_triangle
     from witwin.maxwell.mom.layered.assembly import triangle_cross_integrals

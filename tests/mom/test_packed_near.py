@@ -54,8 +54,9 @@ def test_packed_rectangular_blocks_forward_adjoint_gradient_and_storage():
 def test_packed_budget_rejects_before_value_allocation(monkeypatch):
     raw = records()
     def forbidden(*args, **kwargs):
-        raise AssertionError('The failing budget must precede stacking allocation')
-    monkeypatch.setattr(torch, 'stack', forbidden)
+        raise AssertionError('The failing budget must precede block value allocation')
+    # Layout validation stacks index maps transiently; the retained value blocks are allocated with torch.empty.
+    monkeypatch.setattr(torch, 'empty', forbidden)
     with pytest.raises(MemoryError, match='before allocation'):
         PackedNearBlocks(raw, 7, retained_budget_bytes=1)
 

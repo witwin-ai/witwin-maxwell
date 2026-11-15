@@ -11,6 +11,7 @@ from witwin.maxwell.fdtd.distributed import DistributedFDTD
 from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd_parallel import FDTDParallelConfig
 from witwin.maxwell.scene import prepare_scene
+from tests.support.core_solver import bind_core
 
 
 _FREQUENCY = 1.0e9
@@ -46,42 +47,42 @@ def _vacuum_scene(*, nonuniform_x: bool, source_on_interface: bool) -> mw.Scene:
     interface_node = (len(x) - 1 + 1) // 2
     source_x = float(x[interface_node] if source_on_interface else x[2])
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (float(x[0]), float(x[-1])),
                 (float(y[0]), float(y[-1])),
                 (float(z[0]), float(z[-1])),
             )
-        ),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(source_x, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.CW(
-                frequency=_FREQUENCY,
-                amplitude=1.0,
             ),
-            name="interface_source" if source_on_interface else "source",
-        )
-    )
-    scene.add_monitor(
-        mw.PointMonitor(
-            "probe",
-            (source_x, 0.0, 0.0),
-            fields=("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"),
-        )
-    )
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.none(),
+                sources=(
+            mw.PointDipole(
+                position=(source_x, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(
+                    frequency=_FREQUENCY,
+                    amplitude=1.0,
+                ),
+                name="interface_source" if source_on_interface else "source",
+            ),
+            ),
+                monitors=(
+            mw.PointMonitor(
+                "probe",
+                (source_x, 0.0, 0.0),
+                fields=("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"),
+            ),
+            ),
+            )
     return scene
 
 
 def _run_single(scene: mw.Scene):
     solver = FDTD(prepare_scene(scene), frequency=_FREQUENCY, absorber_type="cpml")
     solver.init_field()
+    bind_core(solver)
     output = solver.solve(
         time_steps=_TIME_STEPS,
         dft_frequency=_FREQUENCY,
@@ -222,7 +223,8 @@ def test_gather_false_returns_monitors_without_global_fields_and_reports_stats(
     assert stats["gather_fields"] is False
     assert stats["result_device"] == "cuda:0"
     assert stats["overlap_requested"] is True
-    assert stats["overlap_active"] is True
+    # Shards run the whole-shard fused core Yee launch: the halo copy is not overlapped.
+    assert stats["overlap_active"] is False
     assert stats["halo_bytes_per_step"] > 0
     assert stats["halo_bytes_total"] == stats["halo_bytes_per_step"] * _TIME_STEPS
     assert set(stats["peak_memory_bytes"]) == {"cuda:0", "cuda:1"}
@@ -281,18 +283,19 @@ def _feature_scene(case: str) -> mw.Scene:
         ),
         grid=mw.GridSpec.custom(x, y, z),
         boundary=boundary,
-        device="cuda:0",
     )
     if case == "xyz_cpml_dielectric":
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 name="interface_dielectric",
                 geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.4, 0.4)),
                 material=mw.Material(eps_r=3.0),
-            )
-        )
+            ),
+        ))
     elif case == "conductive_electric_dispersion":
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 name="lossy_lorentz_interface",
                 geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.4, 0.4)),
@@ -307,11 +310,12 @@ def _feature_scene(case: str) -> mw.Scene:
                         ),
                     ),
                 ),
-            )
-        )
+            ),
+        ))
 
     if case == "uniform_current_interface":
-        scene.add_source(
+        scene = scene.updated(sources=(
+            *scene.sources,
             mw.UniformCurrentSource(
                 size=(0.5, 0.3, 0.3),
                 center=(0.0, 0.0, 0.0),
@@ -321,10 +325,11 @@ def _feature_scene(case: str) -> mw.Scene:
                     amplitude=1.0,
                 ),
                 name="cross_interface_current",
-            )
-        )
+            ),
+        ))
     else:
-        scene.add_source(
+        scene = scene.updated(sources=(
+            *scene.sources,
             mw.PointDipole(
                 position=(-0.3, 0.0, 0.0),
                 polarization="Ez",
@@ -334,11 +339,9 @@ def _feature_scene(case: str) -> mw.Scene:
                     amplitude=1.0,
                 ),
                 name="source",
-            )
-        )
-    scene.add_monitor(
-        mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=_FIELD_NAMES)
-    )
+            ),
+        ))
+    scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=_FIELD_NAMES)))
     return scene
 
 
@@ -385,6 +388,6 @@ def test_two_gpu_feature_matrix_matches_one_gpu(
     if case == "xyz_cpml_dielectric":
         assert all(shard.solver.uses_cpml for shard in distributed_solver.shards)
         for shard in distributed_solver.shards:
-            assert shard.solver.scene.boundary.uses_kind("pml")
+            assert shard.solver.scene.scene.boundary.uses_kind("pml")
     if case == "uniform_current_interface":
         assert all(shard.solver._source_terms for shard in distributed_solver.shards)

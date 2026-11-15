@@ -34,10 +34,9 @@ def measure(zoff, mode, beta_h, cells, width_cells, tilt=0., y_offset=.21):
                                sheet_model="conformal_two_sided")
     public = mw.Scene(domain=mw.Domain(bounds=((0., h), (nodes[0], nodes[-1]), (nodes[0], nodes[-1]))),
                       grid=mw.GridSpec.custom(np.array((0., h)), nodes, nodes),
-                      boundary=mw.BoundarySpec.faces(default="pec", x="pmc"), device="cuda",
-                      structures=[mw.Structure(geometry=geometry, material=pec_material())])
+                      boundary=mw.BoundarySpec.faces(default="pec", x="pmc"), structures=[mw.Structure(geometry=geometry, material=pec_material())])
     scene = prepare_scene(public)
-    c = diagnostic_compiler(mode)(scene, scene.structures[0], margin=100)
+    c = diagnostic_compiler(mode)(scene, scene.scene.structures[0], margin=100)
     labels = [(int(a), int(idx[1]), int(idx[2]), int(side))
               for a, idx, side in zip(c.e_component, c.e_index, c.e_side)]
     unique = sorted(set(labels))

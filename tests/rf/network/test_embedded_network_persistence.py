@@ -24,7 +24,6 @@ def _scene() -> mw.Scene:
         domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
-        device="cpu",
     )
 
 
@@ -68,7 +67,7 @@ def _embedded(
     fit_report: FitReport,
     *,
     metadata=None,
-) -> mw.EmbeddedNetworkData:
+) -> mw.rf.EmbeddedNetworkData:
     frequencies = torch.tensor(_FREQUENCIES, dtype=torch.float64)
     voltage = torch.tensor(
         [[1.0 + 0.1j, 0.8 - 0.2j], [0.4 + 0.3j, 0.2 + 0.5j]],
@@ -85,7 +84,7 @@ def _embedded(
         dtype=torch.float64,
         requires_grad=True,
     )
-    return mw.EmbeddedNetworkData(
+    return mw.rf.EmbeddedNetworkData(
         name=name,
         frequencies=frequencies,
         port_names=("left", "right"),
@@ -126,7 +125,7 @@ def _iter_tensors(value):
         yield from _iter_tensors(vars(value))
 
 
-def _result(*networks: mw.EmbeddedNetworkData, sharded: bool = False) -> Result:
+def _result(*networks: mw.rf.EmbeddedNetworkData, sharded: bool = False) -> Result:
     solver = None
     if sharded:
         artifact = FieldShardArtifact(
@@ -152,8 +151,8 @@ def _result(*networks: mw.EmbeddedNetworkData, sharded: bool = False) -> Result:
 
 
 def _assert_restored(
-    restored: mw.EmbeddedNetworkData,
-    reference: mw.EmbeddedNetworkData,
+    restored: mw.rf.EmbeddedNetworkData,
+    reference: mw.rf.EmbeddedNetworkData,
 ) -> None:
     assert restored.name == reference.name
     assert restored.port_names == reference.port_names
@@ -201,18 +200,18 @@ def test_result_round_trip_preserves_detached_typed_embedded_networks(tmp_path):
     assert payload["embedded_networks"]["multiport"]["fit_report"]["data_type"] == (
         "NetworkFitReport"
     )
-    assert tuple(loaded.embedded_networks) == ("plain", "multiport")
-    _assert_restored(loaded.embedded_network("plain"), plain)
-    _assert_restored(loaded.embedded_network("multiport"), multiport)
+    assert tuple(mw.rf.embedded_networks(loaded)) == ("plain", "multiport")
+    _assert_restored(mw.rf.embedded_network(loaded, "plain"), plain)
+    _assert_restored(mw.rf.embedded_network(loaded, "multiport"), multiport)
 
 
 def test_sharded_result_round_trip_preserves_embedded_network_data(tmp_path):
     embedded = _embedded("two-port", _network_fit_report())
     directory = tmp_path / "sharded"
 
-    _result(embedded, sharded=True).save_sharded(directory)
+    mw.execution.save_sharded(_result(embedded, sharded=True), directory)
     payload = torch.load(directory / "result.pt", weights_only=True)
-    loaded = Result.load_sharded(
+    loaded = mw.execution.load_sharded(
         directory,
         scene=_scene(),
         gather_fields=False,
@@ -222,7 +221,7 @@ def test_sharded_result_round_trip_preserves_embedded_network_data(tmp_path):
     assert payload["embedded_networks"]["two-port"]["voltage"].device.type == "cpu"
     assert not payload["embedded_networks"]["two-port"]["voltage"].requires_grad
     assert loaded.fields == {}
-    _assert_restored(loaded.embedded_network("two-port"), embedded)
+    _assert_restored(mw.rf.embedded_network(loaded, "two-port"), embedded)
 
 
 @pytest.mark.parametrize(
@@ -268,7 +267,7 @@ def test_result_load_accepts_version_one_snapshot_without_embedded_networks(tmp_
 
     loaded = Result.load(path, scene=_scene())
 
-    assert loaded.embedded_networks == {}
+    assert mw.rf.embedded_networks(loaded) == {}
 
 
 @pytest.mark.parametrize("sharded", (False, True))
@@ -281,6 +280,6 @@ def test_result_save_rejects_unsafe_embedded_network_metadata(tmp_path, sharded)
 
     with pytest.raises(TypeError, match=r"embedded_networks\['unsafe'\]\.metadata"):
         if sharded:
-            result.save_sharded(tmp_path / "sharded-unsafe")
+            mw.execution.save_sharded(result, tmp_path / "sharded-unsafe")
         else:
             result.save(tmp_path / "unsafe.pt")

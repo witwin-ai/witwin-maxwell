@@ -12,6 +12,7 @@ from scripts.dev.fdtd.pcb_acceptance import package_identity
 from scripts.dev.fdtd.reference_material_dump import read_native_material_dump
 from scripts.dev.fdtd.bend_pcb_external_reference import fixture
 from scripts.dev.fdtd.matched_current_reference import compile_known_current_edges
+from witwin.maxwell.compiler import compile_materials
 
 
 def reference_to_chart_edges(values,component):
@@ -26,12 +27,12 @@ def native_scene(spacing):
     structures=[]
     for name,u,size in (('ground',0.,.14),('patch',.02,.08)):
         vertices=[(a*size/2,b*size/2) for a,b in ((-1,-1),(1,-1),(1,1),(-1,1))]
-        structures.append(mw.Structure(name=name,geometry=mw.PlanarPEC(vertices,normal_axis='y',coordinate=u),material=mw.Material.pec()))
+        structures.append(mw.Structure(name=name,geometry=mw.geometry.PlanarPEC(vertices,normal_axis='y',coordinate=u),material=mw.Material.pec()))
     structures.append(mw.Structure(name='substrate',geometry=mw.Box(
         position=torch.tensor((0.,.01,0.),dtype=torch.float64),size=torch.tensor((.14,.02,.14),dtype=torch.float64)),
         material=mw.Material(eps_r=2.2,sigma_e=.001)))
     return mw.Scene(domain=mw.Domain(bounds=((-0.12,.12),(-.1,.1),(-.12,.12))),grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.pml(num_layers=round(.08/spacing)),coordinates=mw.BendCoordinates(curvature=3.),structures=structures,device='cpu')
+        boundary=mw.BoundarySpec.pml(num_layers=round(.08/spacing)),coordinates=mw.coordinates.BendCoordinates(curvature=3.),structures=structures)
 
 
 def interior_mask(scene,component):
@@ -83,8 +84,8 @@ def run(material_dump,operator_dump,output,*,spacing=.01,input_manifest=None):
     base=native_scene(spacing)
     for label,spec in (('point',None),('quarter',mw.SubpixelSpec(samples=(2,2,2),averaging='arithmetic')),
                        ('normal64',mw.SubpixelSpec(samples=(1,64,1),averaging='polarized'))):
-        scene=PreparedScene(base if spec is None else base.clone(subpixel_samples=spec))
-        model=scene.compile_materials();coefficient_report={}
+        scene=PreparedScene(base if spec is None else base.updated(subpixel=spec), device="cpu")
+        model=compile_materials(scene);coefficient_report={}
         for component,axis in enumerate('xyz'):
             name='E'+axis;mask,coordinates=interior_mask(scene,component)
             native_pec=model['pec_sheet_edges'][name].numpy().astype(bool)

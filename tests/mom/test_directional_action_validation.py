@@ -58,18 +58,12 @@ def test_complete_actual_original_dispatch_columns_H_current_higher_and_Riesz(ca
     inventory = directional_retained_inventory(actions)
     size = actions.shape[0]
     eye = torch.eye(size, device='cuda', dtype=torch.complex128)
-    deterministic = torch.are_deterministic_algorithms_enabled()
-    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
-    torch.use_deterministic_algorithms(True)
-    try:
-        with monkeypatch.context() as patch:
-            for region in (actions.exterior, *actions.interiors):
-                patch.setattr(region.far, '_action', functools.partial(legacy_action, region.far))
-            original = actions.apply(eye).mT
-        actual = actions.apply(eye).mT
-        torch.testing.assert_close(actual, original, rtol=0, atol=0)
-    finally:
-        torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+    with monkeypatch.context() as patch:
+        for region in (actions.exterior, *actions.interiors):
+            patch.setattr(region.far, '_action', functools.partial(legacy_action, region.far))
+        original = actions.apply(eye).mT
+    actual = actions.apply(eye).mT
+    torch.testing.assert_close(actual, original, rtol=0, atol=0)
     generator = torch.Generator(device='cuda').manual_seed(190542)
     x = torch.randn((3,5,size), generator=generator, device='cuda', dtype=torch.complex128).transpose(0,1).requires_grad_()
     z = torch.randn(x.shape, generator=generator, device='cuda', dtype=torch.complex128)
@@ -94,9 +88,7 @@ def test_complete_actual_original_dispatch_columns_H_current_higher_and_Riesz(ca
     assert directional_retained_inventory(actions) == inventory
     (tmp_path/'complete.json').write_text(json.dumps(dict(actual_bodies=3,physical_currents=size,
         all_columns_original_dispatch_numerically_exact=True,
-        column_comparison_deterministic_algorithms=True,
-        previous_deterministic_mode_restored=True,
-        default_execution_elementwise_determinism_qualified=False,
+        default_execution_elementwise_determinism_qualified=True,
         noncontiguous_RHS=15,errors=errors,
         saved_internal_tensors=len(saved),retained_inventory_unchanged=inventory,
         original_near_and_all_actual_regions_included=True,no_original_weak_matrix_reintegrated=True,

@@ -6,6 +6,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.compiler.ports import compile_port_geometry
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_ports
 
 
 def _pec_box(name, *, position, size=(0.5, 0.5, 0.2), rotation=None):
@@ -26,14 +27,14 @@ def _structures():
 def _port(**overrides):
     values = {
         "name": "feed",
-        "positive_terminal": mw.TerminalRef("signal"),
-        "negative_terminal": mw.TerminalRef("ground"),
+        "positive_terminal": mw.rf.TerminalRef("signal"),
+        "negative_terminal": mw.rf.TerminalRef("ground"),
         "integration_path": mw.AxisPath("z"),
         "reference_plane": 0.45,
         "reference_impedance": 50.0,
     }
     values.update(overrides)
-    return mw.TerminalPort(**values)
+    return mw.rf.TerminalPort(**values)
 
 
 def _scene(*, structures=None, port=None):
@@ -43,7 +44,6 @@ def _scene(*, structures=None, port=None):
         boundary=mw.BoundarySpec.none(),
         structures=_structures() if structures is None else structures,
         ports=(_port() if port is None else port,),
-        device="cpu",
     )
 
 
@@ -73,14 +73,14 @@ def test_terminal_port_rejects_trainable_integration_support(label, parameter):
 
 
 def test_terminal_public_contract_and_scene_resolution():
-    termination = mw.SeriesRLC(r=50.0)
+    termination = mw.rf.SeriesRLC(r=50.0)
     scene = _scene(port=_port(termination=termination))
     port = scene.ports[0]
 
-    assert isinstance(port, mw.TerminalPort)
+    assert isinstance(port, mw.rf.TerminalPort)
     assert port.kind == "terminal_port"
-    assert port.positive_terminal == mw.TerminalRef("signal")
-    assert port.negative_terminal == mw.TerminalRef("ground")
+    assert port.positive_terminal == mw.rf.TerminalRef("signal")
+    assert port.negative_terminal == mw.rf.TerminalRef("ground")
     assert port.integration_path == mw.AxisPath("z")
     assert port.voltage_path is port.integration_path
     assert port.positive == pytest.approx((0.5, 0.5, 0.7))
@@ -95,10 +95,10 @@ def test_terminal_public_contract_and_scene_resolution():
 
 
 def test_terminal_port_accepts_the_frozen_positional_contract():
-    port = mw.TerminalPort(
+    port = mw.rf.TerminalPort(
         "feed",
-        mw.TerminalRef("signal"),
-        mw.TerminalRef("ground"),
+        mw.rf.TerminalRef("signal"),
+        mw.rf.TerminalRef("ground"),
         mw.AxisPath("z"),
         0.45,
     )
@@ -110,9 +110,9 @@ def test_terminal_port_accepts_the_frozen_positional_contract():
 def test_scene_clone_and_prepare_preserve_resolved_terminal_contract():
     scene = _scene()
 
-    for resolved_scene in (scene.clone(), prepare_scene(scene)):
+    for resolved_scene in (scene, prepare_scene(scene, device="cpu").scene):
         port = resolved_scene.ports[0]
-        assert isinstance(port, mw.TerminalPort)
+        assert isinstance(port, mw.rf.TerminalPort)
         assert port.positive == pytest.approx((0.5, 0.5, 0.7))
         assert port.negative == pytest.approx((0.5, 0.5, 0.3))
         assert tuple(port.current_surface.size) == pytest.approx((0.5, 0.5, 0.0))
@@ -173,12 +173,12 @@ def test_terminal_port_uses_the_transverse_footprint_intersection():
 
 def test_terminal_port_rejects_the_same_terminal_with_port_name():
     with pytest.raises(ValueError, match="TerminalPort 'feed'.*distinct"):
-        _port(negative_terminal=mw.TerminalRef("signal"))
+        _port(negative_terminal=mw.rf.TerminalRef("signal"))
 
 
 def test_terminal_port_rejects_missing_or_nonunique_structure_names():
     with pytest.raises(ValueError, match="TerminalPort 'feed'.*does not exist"):
-        _scene(port=_port(positive_terminal=mw.TerminalRef("missing")))
+        _scene(port=_port(positive_terminal=mw.rf.TerminalRef("missing")))
 
     duplicate = _structures() + (
         _pec_box("signal", position=(0.5, 0.5, 0.9), size=(0.5, 0.5, 0.1)),
@@ -275,4 +275,4 @@ def test_terminal_port_rejects_out_of_bounds_geometry_and_reference_plane():
 def test_terminal_port_rejects_off_grid_path_or_reference_plane(structures, port, message):
     scene = _scene(structures=structures, port=port)
     with pytest.raises(ValueError, match=rf"TerminalPort 'feed'.*{message}"):
-        scene.compile_ports(device="cpu")
+        compile_ports(prepare_scene(scene, device="cpu"))

@@ -139,7 +139,9 @@ def _nonnegative_least_squares(matrix: torch.Tensor, target: torch.Tensor) -> to
         passive[int(torch.argmax(candidates))] = True
         while True:
             trial = torch.zeros_like(solution)
-            trial[passive] = torch.linalg.lstsq(matrix[:, passive], target[:, None]).solution[:, 0]
+            # SVD driver on CPU: deterministic; CUDA supports only 'gels'.
+            driver = "gelsd" if matrix.device.type == "cpu" else "gels"
+            trial[passive] = torch.linalg.lstsq(matrix[:, passive], target[:, None], driver=driver).solution[:, 0]
             if bool(torch.all(trial[passive] > 0.0)):
                 solution = trial
                 break
@@ -799,3 +801,14 @@ def fit_dispersion_nk(wavelengths, n, k=None, **options) -> DispersionFit:
     """Fit ``n + i*k`` samples at vacuum ``wavelengths`` [m]; see :func:`fit_dispersion`."""
 
     return fit_dispersion(wavelength_to_frequency(wavelengths), permittivity_from_nk(n, k), **options)
+
+
+# Public namespace ``mw.media.fit``.
+__all__ = [
+    "DispersionFit",
+    "DispersionFitReport",
+    "fit_dispersion",
+    "fit_dispersion_nk",
+    "load_dispersion_csv",
+    "permittivity_from_nk",
+]

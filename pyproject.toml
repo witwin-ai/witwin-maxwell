@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "witwin-maxwell"
-version = "0.6.0"
+version = "0.7.0"
 description = "Witwin Maxwell - Electromagnetic simulation (FDTD/FDFD)"
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
@@ -12,7 +12,7 @@ license = "LicenseRef-Witwin-Research OR LicenseRef-Witwin-Commercial"
 license-files = ["LICENSE"]
 
 dependencies = [
-    "witwin>=0.4.6,<0.5",
+    "witwin>=0.4.7,<0.5",
     "numpy>=1.24",
     "torch>=2.10",
     "scipy>=1.10",
@@ -29,6 +29,15 @@ License = "https://witwin.ai/license"
 direct = ["nvmath-python[cu12]", "nvidia-cudss-cu12"]
 # CUDA 13 hosts (matches the torch/cupy cu13 stack used by this project).
 direct-cu13 = ["nvmath-python[cu13]", "nvidia-cudss-cu13"]
+# TensorData.to_xarray() export.
+xarray = ["xarray"]
+# Test runner extras: parallel workers for the CPU suite.
+test = ["pytest>=9.1", "pytest-xdist==3.8.0"]
+# Layered MoM RFIC layouts: polygon layouts and the layered GDS import (tested with shapely 2.1, gdstk 1.0.1).
+rfic = ["shapely>=2.1", "gdstk>=1.0.1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["witwin"]

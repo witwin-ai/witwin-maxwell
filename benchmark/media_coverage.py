@@ -94,15 +94,15 @@ def _mu_lorentz() -> Material:
 
 
 def _custom_electric_uniform() -> Material:
-    return Material(lorentz_poles=(mw.CustomLorentzPole(delta_eps=torch.ones(2, 2, 2), resonance_frequency=2.0e14, gamma=1.0e13),))
+    return Material(lorentz_poles=(mw.media.CustomLorentzPole(delta_eps=torch.ones(2, 2, 2), resonance_frequency=2.0e14, gamma=1.0e13),))
 
 
 def _custom_magnetic_uniform() -> Material:
-    return Material(mu_lorentz_poles=(mw.CustomLorentzPole(delta_eps=torch.ones(2, 2, 2), resonance_frequency=2.0e14, gamma=1.0e13),))
+    return Material(mu_lorentz_poles=(mw.media.CustomLorentzPole(delta_eps=torch.ones(2, 2, 2), resonance_frequency=2.0e14, gamma=1.0e13),))
 
 
 def _custom_electric_spatial() -> Material:
-    return Material(lorentz_poles=(mw.CustomLorentzPole(delta_eps=_GRADED, resonance_frequency=2.0e14, gamma=1.0e13),))
+    return Material(lorentz_poles=(mw.media.CustomLorentzPole(delta_eps=_GRADED, resonance_frequency=2.0e14, gamma=1.0e13),))
 
 
 def _diagonal_anisotropic() -> Material:
@@ -110,12 +110,12 @@ def _diagonal_anisotropic() -> Material:
 
 
 def _full_tensor() -> Material:
-    return Material(epsilon_tensor=mw.Tensor3x3(((4.0, 0.1, 0.0), (0.1, 3.0, 0.0), (0.0, 0.0, 2.0))))
+    return Material(epsilon_tensor=mw.media.Tensor3x3(((4.0, 0.1, 0.0), (0.1, 3.0, 0.0), (0.0, 0.0, 2.0))))
 
 
 def _full_tensor_dispersive() -> Material:
     return Material(
-        epsilon_tensor=mw.Tensor3x3(((4.0, 0.1, 0.0), (0.1, 3.0, 0.0), (0.0, 0.0, 2.0))),
+        epsilon_tensor=mw.media.Tensor3x3(((4.0, 0.1, 0.0), (0.1, 3.0, 0.0), (0.0, 0.0, 2.0))),
         lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=2.0e14, gamma=1.0e13),),
     )
 
@@ -125,22 +125,22 @@ def _kerr() -> Material:
 
 
 def _chi2() -> Material:
-    return Material(eps_r=2.25, nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-12))
+    return Material(eps_r=2.25, nonlinearity=mw.media.NonlinearSusceptibility(chi2=1.0e-12))
 
 
 def _tpa() -> Material:
-    return Material(eps_r=2.25, nonlinearity=mw.TwoPhotonAbsorption(beta=1.0e-11, n0=1.5))
+    return Material(eps_r=2.25, nonlinearity=mw.media.TwoPhotonAbsorption(beta=1.0e-11, n0=1.5))
 
 
 def _modulated() -> Material:
-    return Material(eps_r=4.0, modulation=mw.ModulationSpec(frequency=1.0e12, amplitude=0.1, phase=0.0))
+    return Material(eps_r=4.0, modulation=mw.media.ModulationSpec(frequency=1.0e12, amplitude=0.1, phase=0.0))
 
 
 def _modulated_dispersive() -> Material:
     return Material(
         eps_r=4.0,
         lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=2.0e14, gamma=1.0e13),),
-        modulation=mw.ModulationSpec(frequency=1.0e12, amplitude=0.1, phase=0.0),
+        modulation=mw.media.ModulationSpec(frequency=1.0e12, amplitude=0.1, phase=0.0),
     )
 
 
@@ -157,7 +157,7 @@ def _lossy_metal() -> Material:
 
 
 def _gyromagnetic() -> Material:
-    return mw.GyromagneticFerrite(
+    return mw.media.GyromagneticFerrite(
         eps_r=14.5, saturation_magnetization=1.40e5, bias_field=(0.0, 0.0, 1.75e5),
         gilbert_damping=2.0e-3,
     )
@@ -193,7 +193,7 @@ def _pmc() -> Material:
 
 def _tensor_nonlinear() -> Material:
     unit = tuple(tuple(tuple(float(i == j == k) for k in range(3)) for j in range(3)) for i in range(3))
-    return Material(eps_r=2.25, nonlinearity=(mw.TensorNonlinearSusceptibility(chi2=unit),))
+    return Material(eps_r=2.25, nonlinearity=(mw.media.TensorNonlinearSusceptibility(chi2=unit),))
 
 
 def _perturbation_uniform() -> Material:

@@ -44,14 +44,14 @@ For module-style inverse-design workflows, define a `SceneModule`, implement `to
 | Area | Currently supported | Notes |
 | --- | --- | --- |
 | Solvers | `Simulation.fdtd(...)`; limited `Simulation.fdfd(...)` | FDTD is the primary, full-featured runtime. FDFD is a CUDA-only sparse single-frequency path with isotropic/diagonal-electric, dispersive/conductive, `none`/PML, iterative/direct-solver, and basic adjoint support; nonuniform grids, magnetic/nonlinear/full-tensor media, in-domain PEC, symmetry, and broader FDTD parity are not implemented. Both return `Result`. |
-| Sources | `PointDipole`, `PlaneWave`, `GaussianBeam`, `AstigmaticGaussianBeam`, `ModeSource`, `TFSF`, uniform/custom current and custom field sources | Soft and TFSF launch paths are available. `TFSF.slab(...)` supports any normal axis, CW or broadband waveforms, and periodic/Bloch grating layouts. `ModeSource` remains experimental. |
+| Sources | `PointDipole`, `PlaneWave`, `GaussianBeam`, `AstigmaticGaussianBeam`, `ModeSource`, `TFSF`, uniform/custom current and custom field sources | Soft and TFSF launch paths are available. `TFSF.slab(...)` supports any normal axis, CW or broadband waveforms, and periodic/Bloch grating layouts. |
 | Source time | `CW`, `GaussianPulse`, `RickerWavelet`, `CustomSourceTime` | Shared waveform vocabulary across public source APIs, including sampled or callable custom temporal signals. |
 | Boundaries | `none`, `pml`, `periodic`, `bloch`, `pec`, `pmc` | Per-axis and per-face mixed layouts are available through `BoundarySpec.faces(...)`, including x/y Bloch plus z PML for grating FDTD workflows. |
 | Materials | Isotropic and tensor electric/magnetic media; conductive, Debye, Drude, Lorentz, Sellmeier, gain, nonlinear, modulated, perturbation, custom dispersive, `Medium2D`, `Graphene`, and `LossyMetalMedium` | Compatible material effects compose in the same compiled Yee model. `MaterialRegion` is the primary differentiable design primitive; specialized combinations and adjoint limits are listed in `FEATURE_LIST.md`. |
 | Conductors | `Material.pec()`, `PlanarPEC`, conformal PEC, `LossyMetalMedium`, and two-face `CopperFoil` sheets | CopperFoil free-edge impedance (`edge_model='auto'`) is on by default; existing thick-foil scenes with free edges change Cu loss; use `edge_model='none'` for the legacy bare-rim model. See `FEATURE_LIST.md` for its validity limits. |
 | Geometry and grids | `Box`, `Sphere`, `Cylinder`, `Ellipsoid`, `Cone`, `Pyramid`, `Prism`, `Torus`, `HollowBox`, `Mesh`, `PolySlab`, custom/automatic/nonuniform grids, mesh overrides, and subpixel averaging | Shared geometry and `Structure` primitives are re-exported through `witwin.maxwell`; `Scene` owns device placement and compilation. |
 | Monitors | Point, plane, finite-plane, flux, time-domain, material/permittivity, mode, diffraction, dipole-emission, and closed-surface monitors | Frequency selection is available through `Result.at(...)`; closed surfaces feed equivalent-current and near-to-far postprocessing. |
-| Ports | `ModePort` | First-class modal port with S-parameter/modal-overlap workflows, including broadband, lossy, anisotropic, and bent-waveguide forward modes; still experimental. |
+| Ports | `ModePort` | First-class modal port with S-parameter/modal-overlap workflows, including broadband, lossy, anisotropic, and bent-waveguide forward modes. |
 | Results | `result.E`, `result.H`, `result.materials`, `Result.monitor(...)`, `Result.save(...)` | Structured field and material access stay torch-native. |
 | Postprocess | Equivalent currents, background-aware/curved-surface Stratton-Chu propagation, near-to-far transform, directivity, bistatic RCS, S-parameters, and modal overlap | Use `witwin.maxwell.postprocess`. |
 | Differentiable workflows | `SceneModule`, `MaterialRegion`, trainable material/geometry/source inputs, native-CUDA FDTD adjoint backward | Native reverse kernels cover standard/CPML/Bloch fields and supported conductive, dispersive, anisotropic, nonlinear, TFSF, and multi-source compositions. Explicit capability guards reject unsupported gradients. |
@@ -73,44 +73,45 @@ box_position = torch.stack((box_x, box_x.new_tensor(0.0), box_x.new_tensor(0.06)
 
 # Build a minimal scene: one dielectric cube and one point dipole.
 scene = mw.Scene(
-    domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-    grid=mw.GridSpec.uniform(0.12),
-    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-    device="cuda",
-    subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
-)
-scene.add_structure(
-    mw.Structure(
-        name="cube",
-        geometry=mw.Box(position=box_position, size=(0.18, 0.18, 0.18)),
-        material=mw.Material(eps_r=20.0),
-    )
-)
-scene.add_source(
-    mw.PointDipole(
-        position=(0.0, 0.0, -0.06),
-        polarization="Ez",
-        width=0.04,
-        source_time=mw.GaussianPulse(
-            frequency=1.0e9,
-            fwidth=0.25e9,
-            amplitude=50.0,
+            domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+            grid=mw.GridSpec.uniform(0.12),
+            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+            subpixel=mw.SubpixelSpec(samples=5, averaging="polarized"),
+            structures=(
+        mw.Structure(
+            name="cube",
+            geometry=mw.Box(position=box_position, size=(0.18, 0.18, 0.18)),
+            material=mw.Material(eps_r=20.0),
         ),
-    )
-)
-scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)))
+        ),
+            sources=(
+        mw.PointDipole(
+            position=(0.0, 0.0, -0.06),
+            polarization="Ez",
+            width=0.04,
+            source_time=mw.GaussianPulse(
+                frequency=1.0e9,
+                fwidth=0.25e9,
+                amplitude=50.0,
+            ),
+        ),
+        ),
+            monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)),),
+        )
 
 sim = mw.Simulation.fdtd(
     scene,
     frequencies=[1.0e9],
-    run_time=mw.TimeConfig(time_steps=32),
-    spectral_sampler=mw.SpectralSampler(window="none"),
-    full_field_dft=True,
+    config=mw.FDTDConfig(
+        run_time=mw.TimeConfig(time_steps=32),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        full_field_dft=True,
+    ),
 )
 
 # Run the simulation and backpropagate from a probe value.
 result = sim.run()
-probe = result.monitor("probe")["data"]
+probe = result.monitor("probe").sel(component="Ez").values
 loss = torch.abs(probe) ** 2
 loss.backward()
 
@@ -152,7 +153,7 @@ The release validation suite combines unit/API tests, native CUDA parity and adj
 - Full off-diagonal `Tensor3x3` electric anisotropy is supported by FDTD, including supported CPML, dispersion, conduction, and adjoint compositions; use `DiagonalTensor3` when the material is naturally diagonal because it is cheaper.
 - `LossyMetalMedium` is a narrowband, normal-incidence planar SIBC model. Curved, oblique, laterally finite, and adjoint SIBC workflows require a volumetric material model or a future generalized surface operator.
 - The public differentiable path covers supported trainable material, geometry, and source inputs. Runtime capability checks reject combinations without a physically implemented reverse channel.
-- `ModeSource`, `ModeMonitor`, and `ModePort` are available, but they are still marked experimental.
+- Every public object is stable or experimental; [`docs/reference/public-api.csv`](docs/reference/public-api.csv) lists each one with its namespace and stability, and the API Stability section of [`FEATURE_LIST.md`](FEATURE_LIST.md) lists the experimental features. Experimental classes, functions and solver entry points (`Simulation.fdfd`, `Simulation.electrostatic`, `Simulation.capacitance`, `Simulation.batch`) emit one `ExperimentalWarning` per process when your code first uses them; filter it with `warnings.filterwarnings("ignore", category=mw.ExperimentalWarning)`. `ModeSource`, `ModeMonitor`, `ModePort`, `TFSF`, `LumpedPort` and `AxisPath` are stable.
 
 ## License
 

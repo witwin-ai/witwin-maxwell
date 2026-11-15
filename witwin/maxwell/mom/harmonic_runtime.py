@@ -8,8 +8,12 @@ from .runtime import _compile_basis,_signature,_validate_surface_queries,SystemO
 from .mesh import SurfaceSystem
 from .harmonic_material import compile_harmonic_material,material_signature
 from .harmonic_preparation import prepare_harmonic_balance
-from .harmonic_state import recover_harmonic_state
+from .harmonic_recovery import recover_harmonic_state
 from .harmonic_fields import HarmonicFieldDecoder
+from .results import point_monitor_data
+from .options import option_asdict
+from ..errors import ConvergenceError
+from ..errors import UnsupportedFeatureError
 
 
 def _harmonic_operator(system,exterior,sources,config):
@@ -23,7 +27,7 @@ def _response_settings(config):
     settings=config.harmonic_balance
     source=dict(max_order=settings.source_max_order,max_inner_order=settings.source_max_inner_order)
     if config.operator_backend=='dense':
-        return dict(stopping=config.stopping,**source,tensor_face_rule=settings.tensor_face_rule,
+        return dict(stopping=config.stopping,**source,tensor_face_rule=settings.tensor_face_rule.value,
                     tensor_kernel_batch=settings.tensor_kernel_batch)
     from .surface_volume_hmatrix import SurfaceVolumeHConfig
     from .interior_volume_hmatrix import InteriorVolumeHConfig
@@ -31,7 +35,7 @@ def _response_settings(config):
     h=config.hierarchical
     shared={k:getattr(h,k) for k in ('leaf_size','max_rank','tolerance','admissibility','row_batch','retained_budget_bytes')}
     return {'compressed_settings':dict(inverse_rule=config.stopping,source_settings=source,
-        tensor_face_rule=settings.tensor_face_rule,tensor_kernel_batch=settings.tensor_kernel_batch,
+        tensor_face_rule=settings.tensor_face_rule.value,tensor_kernel_batch=settings.tensor_kernel_batch,
         source_config=SurfaceVolumeHConfig(**shared),field_config=InteriorVolumeHConfig(**shared),
         volume_config=VolumeHConfig(**shared),volume_h2_config=config.h2,
         original_relative_tolerance=(config.h2 if config.operator_backend=='h2' else h).original_sample_tolerance)}
@@ -163,7 +167,7 @@ def _validate_tensor_response_policy(part,config):
         if log.get('region_id') not in all_regions:continue
         _validate_tensor_background_policy(log,system.bodies[log['region_id']-1].interior,
             inverse.operator.provider.exterior,query)
-    expected=dict(face_rule=hb.tensor_face_rule,kernel_batch=hb.tensor_kernel_batch,
+    expected=dict(face_rule=hb.tensor_face_rule.value,kernel_batch=hb.tensor_kernel_batch,
         radial_order_policy='follow_complete_field_order',regions=selected,rhs_cache_max_bytes_per_handle=0)
     if selected and receipt.get('tensor_volume_policy')!=expected:
         raise ValueError('Compressed harmonic tensor volume policy mismatch')
@@ -207,7 +211,8 @@ class HarmonicData:
 
     def query_fields(self,points,region_id,field_kind,trace_side=None,*,harmonic,query_config=None):
         if trace_side is not None:
-            raise NotImplementedError('Coupled harmonic interface traces are not yet available')
+            raise UnsupportedFeatureError('Coupled harmonic interface traces are not yet available',
+                                          feature="guard:d1c02f70", method="mom")
         if field_kind not in ('total','incident','scattered'):
             raise ValueError('field_kind must be total, incident or scattered')
         region = self.decoder.prepared['operators'][0].system.region(region_id)
@@ -295,30 +300,27 @@ class HarmonicData:
                     dc_magnetic[magnetic_selected],_ = self.query_dc_magnetic(points[magnetic_selected],region)
                 logs[(region,0,'H')] = copy.deepcopy(self.decoder.last_query_receipt)
         output = {}
+        samples = torch.cat((electric,magnetic),dim=-1)
+        harmonics = tuple(float(f) for f in self.state.frequencies[1:])
         for monitor in monitors:
             index = indices[monitor.position]
             region = int(regions[index])
-            values = dict(zip(('Ex','Ey','Ez','Hx','Hy','Hz'),
-                              torch.cat((electric[:,index],magnetic[:,index]),dim=-1).unbind(-1)))
-            components = {name.capitalize():values[name.capitalize()] for name in monitor.fields}
+            components = tuple(name.capitalize() for name in monitor.fields)
             dc_components = {name:dc_electric[index,'xyz'.index(name[1].lower())]
                              for name in components if name.startswith('E')}
             if has_dc_h:
                 dc_components.update({name:dc_magnetic[index,'xyz'.index(name[1].lower())]
                                       for name in components if name.startswith('H')})
-            output[monitor.name] = {'kind':'point','fields':tuple(components),'components':components,**components,
-                'frequencies':tuple(float(f) for f in self.state.frequencies[1:]),
-                'position':monitor.position,'region_id':region,'field_kind':'total',
-                'coordinate_units':'m','phasor_convention':'exp(-i*n*omega*t); positive_peak',
-                'sampling':'physical_position','distance_to_surface_m':float(distances[index]),
-                'dc':{'frequency':0.,'components':dc_components,
-                      'potential_V':dc_potential[index] if any(name.startswith('E') for name in components) else None,
-                      'magnetic_available':has_dc_h},
-                'physical_qualification':False}
+            output[monitor.name] = point_monitor_data(monitor,samples[:,index],harmonics,
+                region_id=region,distance_to_surface_m=float(distances[index]),
+                dc={'frequency':0.,'components':dc_components,
+                    'potential_V':dc_potential[index] if any(name.startswith('E') for name in components) else None,
+                    'magnetic_available':has_dc_h},
+                physical_qualification=False)
         return output,{'unique_monitor_positions':len(points),'queries':logs}
 
 
-class HarmonicCutoffError(RuntimeError):
+class HarmonicCutoffError(ConvergenceError):
     def __init__(self,receipt):
         super().__init__('Harmonic cutoff budget exhausted before successive cell estimates passed')
         self.receipt = receipt
@@ -331,13 +333,16 @@ class HarmonicRuntime:
         self.config = config
         settings = config.harmonic_balance
         if settings.dc_magnetic_volumes is not None:
-            raise NotImplementedError('Explicit DC magnetic volumes require the mixed tensor current runtime')
+            raise UnsupportedFeatureError('Explicit DC magnetic volumes require the mixed tensor current runtime',
+                                          feature="guard:233874b4", method="mom")
         if config.operator_backend=='dense' and (config.stopping.method != 'direct' or config.stopping.direct_storage != 'resident'):
-            raise NotImplementedError('Harmonic response preparation currently requires resident direct linear solves')
+            raise UnsupportedFeatureError('Harmonic response preparation currently requires resident direct linear solves',
+                                          feature="guard:2e70d388", method="mom")
         if simulation.has_trainable_parameters:
-            raise NotImplementedError('Public harmonic material/geometry parameter compilation is not differentiable yet')
+            raise UnsupportedFeatureError('Public harmonic material/geometry parameter compilation is not differentiable yet',
+                                          feature="guard:3b899fa7", method="mom")
         structures = validate_scene_structure(simulation.scene,simulation.frequency)
-        _validate_surface_queries(simulation.scene)
+        _validate_surface_queries(simulation.scene,config.device)
         self.materials = tuple(compile_harmonic_material(s.material,simulation.frequency,settings.harmonics)
                                for s in structures)
         self.exterior = compile_harmonic_material(Material(),simulation.frequency,settings.harmonics)
@@ -348,19 +353,22 @@ class HarmonicRuntime:
         dual_dc = dual_materials(self.materials)
         if settings.dc_tangent_rule is not None and (not any(
                 m.tpa_scale!=0 or m.electric_dc.kind=='conductive_limit' for m in self.materials)):
-            raise NotImplementedError('DC tangent policy requires electric current or mixed current closure')
+            raise UnsupportedFeatureError('DC tangent policy requires electric current or mixed current closure',
+                                          feature="guard:3767a1db", method="mom")
         for material in self.materials:
             current_dc = material.tpa_scale != 0 or material.electric_dc.kind == 'conductive_limit'
             if current_dc:
                 if material.electric_dc.conductivity == 0 and 0. in settings.pump_scales:
-                    raise NotImplementedError('Pure TPA zero-pump continuation has an unresolved singular DC tangent')
+                    raise UnsupportedFeatureError('Pure TPA zero-pump continuation has an unresolved singular DC tangent',
+                                                  feature="guard:efe5b2c8", method="mom")
                 if material.electric_dc.kind not in ('finite_positive_dielectric','conductive_limit'):
-                    raise NotImplementedError('Current DC requires a finite dielectric or conductive electric channel')
+                    raise UnsupportedFeatureError('Current DC requires a finite dielectric or conductive electric channel',
+                                                  feature="guard:4265f3e8", method="mom")
                 if not dual_dc: material.magnetic_dc.dielectric_sample(MU_0)
             else:
                 material.electric_dc.dielectric_sample(EPSILON_0)
         enabled = [(i,s) for i,s in enumerate(simulation.scene.structures) if s.enabled]
-        bases = tuple(_compile_basis(simulation.scene,s.geometry,config) for _,s in enabled)
+        bases = tuple(_compile_basis(s.geometry,config) for _,s in enabled)
         linear_config = replace(config,harmonic_balance=None)
         operators = tuple(_harmonic_operator(SurfaceSystem.create([
             (index,s.name,basis,material.linear_samples[n])
@@ -393,7 +401,7 @@ class HarmonicRuntime:
         from .harmonic_convergence import compare_harmonic_cells
         sim = self.simulation
         count = len(data.state.frequencies)-1
-        receipt = {'initial_harmonics':count,'policy':asdict(policy),'checks':[],
+        receipt = {'initial_harmonics':count,'policy':option_asdict(policy),'checks':[],
             'cell_truncation_estimate_passed':False,'physical_qualification':False,
             'harmonic_truncation_converged':False,'failure_reason':None,
             'scope':'fixed_grid_cell_fields_with_independent_added_harmonic_budget'}
@@ -444,7 +452,7 @@ class HarmonicRuntime:
             raise ValueError('Scene or harmonic configuration changed after preparation')
         settings = self.config.harmonic_balance
         # Check geometry and response ownership before a possibly long solve.
-        from .harmonic_state import preparation_signature
+        from .harmonic_recovery import preparation_signature
         if preparation_signature(self.prepared) != self.prepared['_signature']:
             raise RuntimeError('Harmonic preparation was mutated')
         for group in self.prepared['bindings']:

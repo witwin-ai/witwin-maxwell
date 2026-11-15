@@ -15,24 +15,24 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 def test_public_separable_fmm_current_queries_and_exact_result_replay(periodic,tmp_path,monkeypatch):
     scene=mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.01,position=(x,0.,0.)),
         mw.Material(eps_r=2.+i,mu_r=1.2+.1*i)) for i,x in enumerate((-.2,.2))],sources=[mw.PlaneWave()])
-    lattice=(mw.MoMPeriodicConfig(((1.,0.,0.),),eta_per_m=2.,real_shells=2,
+    lattice=(mw.mom.MoMPeriodicConfig(((1.,0.,0.),),eta_per_m=2.,real_shells=2,
         reciprocal_shells=2,quadrature_order=32) if periodic else None)
-    base=mw.MoMConfig(subdivisions=0,periodic=lattice,integration=IntegrationConfig(order=4,singular_order=3),
+    base=mw.mom.MoMConfig(subdivisions=0,periodic=lattice,integration=IntegrationConfig(order=4,singular_order=3),
         query_config=FieldQueryConfig(adaptive=False))
-    dense=mw.Simulation.mom(scene,frequency=9e7,config=base).run()
+    dense=mw.Simulation.mom(scene,frequencies=9e7,config=base).run()
     config=replace(base,operator_backend='fmm',riesz_storage='local_rwg_v1',
-        fmm=mw.FMMConfig(order=8 if periodic else 6,table_storage='compact',near_storage='full_matrix',shift_storage='separable_v1',
+        fmm=mw.mom.FMMConfig(order=8 if periodic else 6,table_storage='compact',near_storage='full_matrix',shift_storage='separable_v1',
             leaf_size=30,separation_ratio=.25,leaf_factor_kernel='primary',leaf_factor_max_edges=16),
         stopping=StoppingRule(method='gmres',preconditioner='rwg_diagonal',fallback='none',
             rtol=1e-12,atol=0.,maxiter=240,restart=120))
-    result=mw.Simulation.mom(scene,frequency=9e7,config=config).run()
+    result=mw.Simulation.mom(scene,frequencies=9e7,config=config).run()
     assert result.stats()['converged'] and result.stats()['error_budget']['checked']
-    actions=result.surface_currents.handle.actions
+    actions=mw.mom.surface_currents(result).handle.actions
     assert actions.exterior.test.shift_storage=='separable_v1'
     assert actions.exterior.test.tree.node_count>1
     assert len(actions.exterior.regions[0].far if periodic else actions.exterior.far)>0
-    current=result.surface_currents.scattered_coefficients
-    reference=dense.surface_currents.scattered_coefficients
+    current=mw.mom.surface_currents(result).scattered_coefficients
+    reference=mw.mom.surface_currents(dense).scattered_coefficients
     errors=[float((actual-expected).norm()/expected.norm()) for actual,expected in zip(current.chunk(2),reference.chunk(2))]
     queries=[(torch.tensor([[.1,.1,.15]],device='cuda',dtype=torch.float64),'exterior'),
         (torch.tensor([[-.2,0.,0.]],device='cuda',dtype=torch.float64),1)]
@@ -60,13 +60,13 @@ def test_public_separable_fmm_current_queries_and_exact_result_replay(periodic,t
         patch.setattr(PeriodicMultipoleOperator,'__init__',forbidden)
         patch.setattr(torch.linalg,'solve',forbidden)
         restored=mw.Result.load(path,scene=scene)
-        assert restored.surface_currents.config.fmm==config.fmm
-        torch.testing.assert_close(restored.surface_currents.scattered_coefficients,current,rtol=0,atol=0)
+        assert mw.mom.surface_currents(restored).config.fmm==config.fmm
+        torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,current,rtol=0,atol=0)
         for (points,region),expected in zip(queries,fields):
             for a,b in zip(restored.query_fields(points,region_id=region,field_kind='total'),expected):
                 torch.testing.assert_close(a,b,rtol=0,atol=0)
     from witwin.maxwell.mom.runtime import SurfaceData
-    bad=copy.deepcopy(result.surface_currents.snapshot());bad['fmm_config']['parameters']['shift_storage']='dense'
-    with pytest.raises(ValueError):SurfaceData.restore(bad,scene,9e7)
+    bad=copy.deepcopy(mw.mom.surface_currents(result).snapshot());bad['fmm_config']['parameters']['shift_storage']='dense'
+    with pytest.raises(ValueError):SurfaceData.restore(bad,scene,9e7,'cuda')
     print(dict(periodic=periodic,current_family_errors=errors,exact_result_replay=True,
         physical_qualification=False,complexity_qualification=False),flush=True)

@@ -6,16 +6,20 @@ import torch
 
 from ...network import NetworkData
 from ...rational import PassivityReport, RationalFitConfig, RationalModel
+from ..._stability import experimental
 
 
+@experimental("mom_layered")
 @dataclass(frozen=True)
 class AdaptiveSweepResult:
     """Sampled Result.network stays physical; this holds its in-band surrogate.
 
     dense_network is the 2000-point evaluated model, exportable through the
     existing NetworkData.to_touchstone method. Passivity is checked on that
-    grid and with the shared pole-aware interval check. Violations are rejected;
-    no residue or direct-term perturbation changes the physical response.
+    grid and with the shared pole-aware interval check. A violating model is
+    made passive by Hamiltonian residue perturbation (macromodel.py) when that
+    changes it by at most tolerance/4 on the grid (``enforcement_change``),
+    and rejected otherwise; the sampled Result.network is never changed.
     """
 
     model: RationalModel
@@ -51,7 +55,7 @@ def _join(networks):
                        z0=first.z0[0], port_names=first.port_names, metadata=metadata)
 
 
-def adaptive_network(sweep, initial_network, initial_currents, solve):
+def adaptive_network(sweep, initial_network, initial_currents, solve, merge=None):
     """Nested fits select interval midpoints; all validation solves count.
 
     Nine uniform seeds resolve both band ends. Compare each new fit with the
@@ -61,6 +65,9 @@ def adaptive_network(sweep, initial_network, initial_currents, solve):
     error and the updated fit change to pass too. This is an estimator, not a
     uniform error proof; a budget exhaustion raises rather than returning a
     surrogate with an unqualified tolerance.
+
+    ``merge(networks, current_batches, joined)`` returns the final (network,
+    currents) when the batches carry their own meshes (streamed mm-wave calls).
     """
     networks, current_batches = [initial_network], [initial_currents]
     subset = torch.arange(0, 9, 2, device=initial_network.s.device)
@@ -78,18 +85,35 @@ def adaptive_network(sweep, initial_network, initial_currents, solve):
         residual = float((model.evaluate(network.frequencies) - network.s).abs().max())
         if validated and max(error, residual, validation_error) <= sweep.tolerance / 4:
             report = model.check_passivity(grid)
+            enforcement = 0.0
             if not report.passive:
-                raise RuntimeError(f"Adaptive rational model violates in-band passivity by {report.max_violation:g}")
+                # R6-3 hook: Hamiltonian residue-perturbation enforcement (macromodel.py), accepted
+                # only if it moves the model by <= tolerance/4 on the grid.
+                from .macromodel import enforce_rational_passivity
+                enforced = enforce_rational_passivity(model, network.frequencies, network.s)[0]
+                enforced_response = enforced.evaluate(grid)
+                enforcement = float((enforced_response - response).abs().max())
+                if enforcement > sweep.tolerance / 4:
+                    raise RuntimeError(f"Adaptive rational model violates in-band passivity by {report.max_violation:g}; "
+                                       f"enforcement would change it by {enforcement:g} > tolerance/4")
+                model, response = enforced, enforced_response
+                report = model.check_passivity(grid)
+                if not report.passive:
+                    raise RuntimeError(f"Enforced adaptive model violates in-band passivity by {report.max_violation:g}")
             dense = NetworkData(frequencies=grid, s=response, z0=network.z0[0], port_names=network.port_names)
-            frequencies = torch.cat([n.frequencies for n in networks])
-            order = torch.argsort(frequencies, stable=True)
-            currents = torch.cat(current_batches)[order]
+            if merge is None:
+                frequencies = torch.cat([n.frequencies for n in networks])
+                order = torch.argsort(frequencies, stable=True)
+                currents = torch.cat(current_batches)[order]
+            else:
+                # R6-3 hook: streamed batches carry per-frequency wall meshes (frequency_groups.py).
+                network, currents = merge(networks, current_batches, network)
             network.metadata["adaptive_sweep"] = dict(
                 solved_frequencies=len(network.frequencies), estimated_error=max(error,residual,validation_error),
                 passivity_margin=report.margin, passivity_certified=report.certified,
-                passivity_samples=report.sample_count, enforcement_change=0.0)
+                passivity_samples=report.sample_count, enforcement_change=enforcement)
             return network, currents, AdaptiveSweepResult(model,report,dense,
-                max(error,residual,validation_error),len(network.frequencies))
+                max(error,residual,validation_error),len(network.frequencies),enforcement)
         if len(network.frequencies) >= sweep.max_points:
             raise RuntimeError(f"Adaptive sweep exhausted max_points={sweep.max_points} before tolerance {sweep.tolerance:g}")
         midpoints = (network.frequencies[:-1] + network.frequencies[1:]) / 2

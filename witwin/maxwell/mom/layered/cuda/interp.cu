@@ -19,7 +19,7 @@ at::Tensor layered_grid(at::Tensor anchor,int64_t N,double near,double limit) {
 // Packing adds the analytic inverse of the second extracted asymptotic term.
 // Model: 16 B input, 16 B output, 16 B C3 (cacheable), ~20 FLOP + exp.
 __global__ void pack_kernel(const C* transformed,const double* rho,const double* planes,
-    const int64_t* pairs,const C* media,const double* sigma,const double* f,const C* tails,
+    const int64_t* pairs,const C* media,int64_t stride,const double* sigma,const double* f,const C* tails,
     C* table,int F,int P,int N,int begin,int count,bool midpoint,double a,int mode,double ground) {
   int t=blockIdx.x*blockDim.x+threadIdx.x;
   if(t>=F*count*P*2) return;
@@ -28,7 +28,7 @@ __global__ void pack_kernel(const C* transformed,const double* rho,const double*
   C v;
   if(mode) {
     double zs=planes[pairs[2*p]],zo=planes[pairs[2*p+1]];
-    C e=eps(media,sigma,1,2*pi*f[fi]);
+    C e=eps(media+fi*stride,sigma,1,2*pi*f[fi]);
     C k=root((2*pi*f[fi]/c0)*(2*pi*f[fi]/c0)*e);
     // expm1 for the finite, smooth g-g_static at a coincident source.
     double d=hypot(x,zo-zs);
@@ -57,7 +57,7 @@ void layered_pack(at::Tensor transformed,at::Tensor rho,at::Tensor planes,at::Te
   int count=frequencies.numel()*(end-begin)*pairs.size(0)*2;
   pack_kernel<<<(count+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
       transformed.data_ptr<C>(),rho.data_ptr<double>(),planes.data_ptr<double>(),pairs.data_ptr<int64_t>(),
-      media.data_ptr<C>(),sigma.data_ptr<double>(),frequencies.data_ptr<double>(),tails.data_ptr<C>(),
+      media.data_ptr<C>(),media_stride(media),sigma.data_ptr<double>(),frequencies.data_ptr<double>(),tails.data_ptr<C>(),
       table.data_ptr<C>(),frequencies.numel(),pairs.size(0),rho.numel(),begin,end-begin,midpoint,a,mode,ground);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -100,20 +100,35 @@ __global__ void magnitude_kernel(const C* mid,const double* x,const int64_t* off
   }
   magnitudes[t]=abs(value+mid[row*(N-1)+r]);
 }
-__global__ void admission_kernel(const C* y,const C* d,const C* mid,const double* x,
-                                  const double* magnitudes,double* out,int N,int rows) {
+__global__ void admission_scale_kernel(const double* magnitudes,double* scales,int N,int rows) {
   int row=blockIdx.x*blockDim.x+threadIdx.x;
   if(row>=rows) return;
-  double error=0,scale=0;
-  // Per physical midpoint: |interp-direct| / max(|G_total(mid)|,
-  // 1e-6*max_row |G_total|). The row maximum is over physical midpoints,
-  // excluding the two guard intervals and the singular self point rho=0.
+  double scale=0;
   for(int i=0;i<N-3;++i) scale=fmax(scale,magnitudes[row*(N-3)+i]);
+  scales[row]=scale;
+}
+__global__ void admission_kernel(const C* y,const C* d,const C* mid,const double* x,
+                                  const double* magnitudes,const double* scales,double* out,int N,int P,int rows) {
+  int row=blockIdx.x*blockDim.x+threadIdx.x;
+  if(row>=rows) return;
+  // Per physical midpoint: |interp-direct| / max(|G_total(mid)|,
+  // 1e-6*family max |G_total|). A row's scale is its maximum over physical
+  // midpoints, excluding the two guard intervals and the singular self point
+  // rho=0; the family is every plane pair of the row's frequency and
+  // component (the C1 rule of vertical.cu horizontal_admission). Without the
+  // family floor a row whose total kernel cancels against its PEC image to
+  // roundoff (a tangential component with one end on a PEC plane, ~1e-14 of
+  // its family) reads its own noise as the reference and refuses an accurate
+  // table. The floor changes only the verdict, never the table values.
+  int c=row%2,f=row/(2*P);
+  double family=0;
+  for(int p=0;p<P;++p) family=fmax(family,scales[(f*P+p)*2+c]);
+  double error=0;
   for(int i=0;i<N-3;++i) {
     C value=hermite((x[i]+x[i+1])*0.5,x[i],x[i+1],y[row*N+i],y[row*N+i+1],
                     d[row*N+i],d[row*N+i+1]);
     double difference=abs(value-mid[row*(N-1)+i]);
-    double denominator=fmax(magnitudes[row*(N-3)+i],1e-6*scale);
+    double denominator=fmax(magnitudes[row*(N-3)+i],1e-6*family);
     double relative=denominator==0 ? (difference==0 ? 0:INFINITY) : difference/denominator;
     error=isfinite(relative) ? fmax(error,relative) : INFINITY;
   }
@@ -133,9 +148,12 @@ at::Tensor layered_admission(at::Tensor y,at::Tensor d,at::Tensor mid,at::Tensor
   magnitude_kernel<<<(count+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
       mid.data_ptr<C>(),x.data_ptr<double>(),offsets.data_ptr<int64_t>(),distances.data_ptr<double>(),
       images.data_ptr<C>(),magnitudes.data_ptr<double>(),x.numel(),y.size(1),distances.numel(),rows);
+  auto scales=at::empty({rows},x.options());
+  admission_scale_kernel<<<(rows+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
+      magnitudes.data_ptr<double>(),scales.data_ptr<double>(),x.numel(),rows);
   admission_kernel<<<(rows+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
       y.data_ptr<C>(),d.data_ptr<C>(),mid.data_ptr<C>(),x.data_ptr<double>(),
-      magnitudes.data_ptr<double>(),errors.data_ptr<double>(),x.numel(),rows);
+      magnitudes.data_ptr<double>(),scales.data_ptr<double>(),errors.data_ptr<double>(),x.numel(),y.size(1),rows);
   admission_max<<<1,1,0,c10::cuda::getCurrentCUDAStream()>>>(errors.data_ptr<double>(),result.data_ptr<double>(),rows);
   C10_CUDA_KERNEL_LAUNCH_CHECK();return result;
 }
@@ -169,7 +187,7 @@ at::Tensor layered_evaluate(at::Tensor y,at::Tensor slopes,at::Tensor x,at::Tens
   GreenTableView view{};
   view.rho=x.data_ptr<double>();view.distances=distances.data_ptr<double>();
   view.plane_z=planes.data_ptr<double>();view.frequency_hz=f.data_ptr<double>();
-  view.sigma=sigma.data_ptr<double>();view.epsilon=media.data_ptr<C>();
+  view.sigma=sigma.data_ptr<double>();view.epsilon=media.data_ptr<C>();view.epsilon_stride=media_stride(media);
   view.values=y.data_ptr<C>();view.slopes=slopes.data_ptr<C>();view.images=images.data_ptr<C>();
   view.image_offsets=offsets.data_ptr<int64_t>();
   view.frequencies=f.numel();view.pairs=y.size(1);view.nodes=x.numel();

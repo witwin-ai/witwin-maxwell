@@ -1,5 +1,6 @@
 """Bind a physical probe-fed patch to an independently built open-source reference."""
 from __future__ import annotations
+from dataclasses import replace
 import argparse
 import hashlib
 import json
@@ -78,12 +79,12 @@ def main():
                                 edge_dl=args.edge_dl, pml_layers=args.pml_layers, air_padding=args.air_padding)
     if args.dielectric_subpixel == 'z2':
 
-        scene = scene.clone(subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 2), averaging='polarized'))
+        scene = scene.updated(subpixel=mw.SubpixelSpec(samples=(1, 1, 2), averaging='polarized'))
     elif args.dielectric_subpixel == 'quarter-cell':
-        scene = scene.clone(subpixel_samples=mw.SubpixelSpec(samples=(2, 2, 2), averaging='arithmetic'))
+        scene = scene.updated(subpixel=mw.SubpixelSpec(samples=(2, 2, 2), averaging='arithmetic'))
     if args.load_resistance != 50.:
         feed = scene.ports[0]
-        scene = scene.clone(ports=[mw.LumpedPort(feed.name, positive=feed.positive,
+        scene = scene.updated(ports=[mw.LumpedPort(feed.name, positive=feed.positive,
             negative=feed.negative, voltage_path=feed.voltage_path,
             voltage_aperture=feed.voltage_aperture, current_surface=feed.current_surface,
             reference_impedance=args.load_resistance)])
@@ -92,20 +93,22 @@ def main():
         control = mw.LumpedPort('contour_control', positive=feed.positive, negative=feed.negative,
             voltage_path=feed.voltage_path, voltage_aperture=feed.voltage_aperture,
             current_surface=feed.current_surface, reference_impedance=feed.reference_impedance)
-        scene = scene.clone(ports=[feed, control])
+        scene = scene.updated(ports=[feed, control])
     if args.record_current_balance:
-        scene = scene.clone(monitors=[*scene.monitors,
+        scene = scene.updated(monitors=[*scene.monitors,
             mw.PlaneMonitor('current_balance_E', axis='z',
                 position=(scene.ports[0].positive[2]+scene.ports[0].negative[2])/2, fields=('Ez',))])
     pulse = mw.GaussianPulse(frequency=3.2e9, fwidth=2.2e9, phase=args.pulse_phase)
     config = mw.Simulation.fdtd(scene, frequencies=frequencies,
-        excitations=mw.PortExcitation("feed", source_time=pulse),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        run_time=mw.TimeConfig(time_steps=1), full_field_dft=False)
+        excitations=mw.rf.PortExcitation("feed", source_time=pulse),
+        config=mw.FDTDConfig(
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            run_time=mw.TimeConfig(time_steps=1), full_field_dft=False,
+        ))
     prepared = config.prepare()
     solver = prepared.solver
     steps = math.ceil(args.duration / solver.dt)
-    config.config.run_time = mw.TimeConfig(time_steps=steps)
+    config.config = replace(config.config, run_time=mw.TimeConfig(time_steps=steps))
     start = time.perf_counter()
     own = None if args.material_setup_only else prepared.run()
     own_seconds = time.perf_counter() - start
@@ -133,7 +136,7 @@ def main():
     geometry_records = []
     for structure in scene.structures:
         geometry, material = structure.geometry, structure.material
-        if isinstance(geometry, mw.PlanarPEC):
+        if isinstance(geometry, mw.geometry.PlanarPEC):
             bounds = np.zeros((3, 2))
             normal = "xyz".index(geometry.normal_axis)
             bounds[normal] = geometry.coordinate

@@ -7,6 +7,7 @@ import torch
 
 from .circuits import CircuitNode
 from .sources import SourceTime, _require_length3
+from ._stability import experimental
 
 
 def _parameter_tensor(value, *, name: str, allow_zero: bool) -> torch.Tensor:
@@ -338,6 +339,7 @@ class PortExcitation:
         object.__setattr__(self, "kind", "port_excitation")
 
 
+@experimental("rf_ports")
 @dataclass(frozen=True)
 class PortSweep:
     """Request one independent single-device FDTD run per input port."""
@@ -554,6 +556,7 @@ def _coaxial_annulus(label, name, center, inner_diameter, outer_diameter, normal
     return resolved_name, resolved_center, inner, outer, axis
 
 
+@experimental("rf_ports")
 @dataclass(frozen=True)
 class CoaxialLumpedResistor:
     """Passive annular resistor between two concentric circles on a Yee node plane.

@@ -47,12 +47,12 @@ def run(output,*,spacing=.0025,direction=1,vacuum=False):
     monitors=[]
     for name,position,component in specs:
         monitors.append(mw.PointMonitor('point_'+name,position,fields=(component,)))
-        monitors.append(mw.FieldTimeMonitor('time_'+name,position=position,components=(component,)))
+        monitors.append(mw.monitors.FieldTimeMonitor('time_'+name,position=position,components=(component,)))
     scene=mw.Scene(domain=mw.Domain(bounds=((-2*spacing,2*spacing),(-radius/2,radius/2),(-2*spacing,2*spacing))),
         grid=mw.GridSpec.uniform(spacing),boundary=mw.BoundarySpec.faces(default='none',num_layers=12,
-            bloch_wavevector='auto',x='bloch',y='pml',z='bloch'),device='cuda',coordinates=mw.BendCoordinates(curvature=-1/radius),
+            bloch_wavevector='auto',x='bloch',y='pml',z='bloch'),coordinates=mw.coordinates.BendCoordinates(curvature=-1/radius),
         structures=() if vacuum else (mw.Structure(name='film',geometry=mw.Box(position=(0.,0.,0.),size=(16*spacing,0.,16*spacing)),
-            material=mw.CopperFoil(thickness=delta,conductivity=sigma,frequency_range=(frequency/2,2*frequency))),),
+            material=mw.media.CopperFoil(thickness=delta,conductivity=sigma,frequency_range=(frequency/2,2*frequency))),),
         monitors=monitors,sources=(mw.PlaneWave(name='ring_mode_drive',direction=carrier,polarization=electric,injection_axis='y',
             source_time=mw.CW(frequency,amplitude=80.)),))
     from witwin.maxwell.compiler import coordinates
@@ -61,11 +61,11 @@ def run(output,*,spacing=.0025,direction=1,vacuum=False):
         def diagnostic_time_validation(scene,**kwargs):
             # Every original material/source/metric guard remains in force;
             # only raw-time observation registration is private to this test.
-            return original(scene.clone(monitors=[monitor for monitor in scene.monitors if not isinstance(monitor,mw.FieldTimeMonitor)]),**kwargs)
+            return original(scene.updated(monitors=[monitor for monitor in scene.monitors if not isinstance(monitor,mw.monitors.FieldTimeMonitor)]),**kwargs)
         coordinates.validate_coordinate_scene=diagnostic_time_validation
         try:
-            prepared=mw.Simulation.fdtd(scene,frequency=frequency,cuda_graph=True,full_field_dft=True,
-                run_time=mw.TimeConfig(transient_cycles=24,steady_cycles=20),spectral_sampler=mw.SpectralSampler(window='hanning')).prepare()
+            prepared=mw.Simulation.fdtd(scene,frequencies=frequency,config=mw.FDTDConfig(cuda_graph=True,full_field_dft=True,
+                run_time=mw.TimeConfig(transient_cycles=24,steady_cycles=20),spectral_sampler=mw.fdtd.SpectralSampler(window='hanning'))).prepare()
             result=prepared.run()
         finally:
             coordinates.validate_coordinate_scene=original
@@ -81,12 +81,12 @@ def run(output,*,spacing=.0025,direction=1,vacuum=False):
         row=dict(native_index=list(index),position=position,complex128=encoded(value.detach().cpu().numpy()),
             native_point=encoded(point.detach().cpu().numpy()),point_relative_error=float(abs(point-value)/abs(value)))
         if component=='Ex':
-            full=result.chart_fields.tensor('E_s')[index]
+            full=mw.coordinates.chart_fields(result).tensor('E_s')[index]
             row.update(native_full=encoded(full.detach().cpu().numpy()),full_relative_error=float(abs(full-value)/abs(value)))
         spectra[name]=value
         comparison[name]=row
         raw[name]=dict(component=component,steps=torch.as_tensor(record['sample_steps']),values=buffer.detach().cpu(),native_index=index)
-    heat=0. if vacuum else float(result.conductor_losses['film']['surface_power'][0])
+    heat=0. if vacuum else float(mw.rf.conductor_losses(result)['film']['surface_power'][0])
     area=(4*spacing)**2;retard=math.cos(math.pi*frequency*solver.dt)
     flux={};ports=[]
     for side,u in (('left',-radius/6),('right',radius/6)):

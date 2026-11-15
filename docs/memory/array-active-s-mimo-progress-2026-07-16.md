@@ -25,7 +25,7 @@ completed phase: the frozen performance gate is still unmet (see below). Impleme
 work includes:
 
 - compact per-column `PortSweep` execution data with measured incident waves;
-- `Result.array_basis(...)` extraction without an FDTD rerun;
+- `mw.antenna.array_basis(result, ...)` extraction without an FDTD rerun;
 - measured-wave-normalized embedded element patterns and stable content fingerprints;
 - Hermitian closed-surface `Q_rad` and absolute `real(a^H Q_rad a)` radiated power;
 - broadside/endfire full-wave basis-versus-direct comparisons for two- and four-element

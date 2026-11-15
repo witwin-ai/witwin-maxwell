@@ -14,7 +14,7 @@ from scripts.dev.fdtd.pcb_acceptance import package_identity
 
 def build_simulation(*,spacing=.01,curvature=3.,pcb=False,transient=64,steady=32,graph=True):
     frequency=1e9
-    chart=mw.BendCoordinates(curvature=curvature)
+    chart=mw.coordinates.BendCoordinates(curvature=curvature)
     source_s=.01
     port=mw.LumpedPort('feed',positive=(source_s,.02,0.),negative=(source_s,0.,0.),voltage_path=mw.AxisPath('y'),
         current_surface=mw.Box(position=torch.tensor((source_s,spacing/2,0.),dtype=torch.float64),
@@ -26,17 +26,17 @@ def build_simulation(*,spacing=.01,curvature=3.,pcb=False,transient=64,steady=32
         for name,u,size in (('ground',0.,.14),('patch',.02,.08)):
             structures.append(mw.Structure(name=name,geometry=mw.Box(
                 position=torch.tensor((0.,u,0.),dtype=torch.float64),size=torch.tensor((size,0.,size),dtype=torch.float64)),
-                material=mw.CopperFoil(thickness=35e-6,conductivity=5.8e7,frequency_range=(.5e9,2e9))))
+                material=mw.media.CopperFoil(thickness=35e-6,conductivity=5.8e7,frequency_range=(.5e9,2e9))))
         structures.append(mw.Structure(name='substrate',geometry=mw.Box(
             position=torch.tensor((0.,.01,0.),dtype=torch.float64),size=torch.tensor((.14,.02,.14),dtype=torch.float64)),
             material=mw.Material(eps_r=2.2,sigma_e=.001)))
-        monitors.append(mw.PowerLossMonitor('dielectric',position=(0.,.01,0.),size=(.14,.02,.14)))
-    monitors.append(mw.ClosedSurfaceMonitor.box('huygens',position=(0.,.01,0.),size=(.18,.1,.18),sample_spacing=.005))
+        monitors.append(mw.monitors.PowerLossMonitor('dielectric',position=(0.,.01,0.),size=(.14,.02,.14)))
+    monitors.append(mw.monitors.ClosedSurfaceMonitor.box('huygens',position=(0.,.01,0.),size=(.18,.1,.18),sample_spacing=.005))
     scene=mw.Scene(domain=mw.Domain(bounds=((-0.12,.12),(-.1,.1),(-.12,.12))),grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.pml(num_layers=round(.08/spacing)),coordinates=chart,structures=structures,ports=(port,),monitors=monitors,device='cuda')
-    return mw.Simulation.fdtd(scene,frequency=frequency,excitations=mw.PortExcitation('feed'),full_field_dft=pcb,
+        boundary=mw.BoundarySpec.pml(num_layers=round(.08/spacing)),coordinates=chart,structures=structures,ports=(port,),monitors=monitors)
+    return mw.Simulation.fdtd(scene,frequencies=frequency,excitations=mw.rf.PortExcitation('feed'),config=mw.FDTDConfig(full_field_dft=pcb,
         cuda_graph=graph,run_time=mw.TimeConfig(transient_cycles=transient,steady_cycles=steady),
-        spectral_sampler=mw.SpectralSampler(window='hanning'))
+        spectral_sampler=mw.fdtd.SpectralSampler(window='hanning')))
 
 
 def run(output,*,load_result=None,**kwargs):
@@ -45,12 +45,12 @@ def run(output,*,load_result=None,**kwargs):
         result=simulation.run();snapshot=output.with_suffix('.pt');result.save(snapshot)
     else:
         snapshot=load_result;result=mw.Result.load(snapshot,map_location='cuda',scene=simulation.scene)
-    antenna=result.antenna(surface='huygens',driven_port='feed',theta_points=61,phi_points=121,batch_size=128)
+    antenna=mw.antenna.antenna(result, surface='huygens',driven_port='feed',theta_points=61,phi_points=121,batch_size=128)
     raw=result._native_raw_monitor('huygens')
     flux=sum(float(face['flux'].reshape(-1)[0]) for face in raw['faces'].values())
     radiated=float(antenna.p_rad[0]);accepted=float(antenna.p_accepted[0])
-    copper=sum(float(record['surface_power'][0]) for record in result.conductor_losses.values())
-    dielectric=float(result.power_loss('dielectric').total[0]) if kwargs['pcb'] else 0.
+    copper=sum(float(record['surface_power'][0]) for record in mw.rf.conductor_losses(result).values())
+    dielectric=float(result.monitor('dielectric').total[0]) if kwargs['pcb'] else 0.
     report=dict(curvature_m_inverse=kwargs['curvature'],spacing_m=kwargs['spacing'],pcb=kwargs['pcb'],
         frequency_hz=1e9,elapsed_seconds=time.perf_counter()-start,steps=result.stats().get('steps_run'),dt=result.stats().get('dt'),
         graph_active=None if result.solver is None else bool(result.solver._cuda_graph_active),snapshot=str(snapshot),

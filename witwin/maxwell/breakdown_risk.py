@@ -47,6 +47,7 @@ from typing import Any, Mapping
 import torch
 
 from .breakdown_stress import colocate_electric_magnitude
+from ._stability import experimental
 
 
 SMOOTH_BREAKDOWN_RISK_VERSION = "smooth-breakdown-risk-1"
@@ -57,6 +58,7 @@ SMOOTH_BREAKDOWN_CAPABILITY_LEVEL = "differentiable-surrogate (non-physical, non
 _REDUCTIONS = ("sum", "mean", "softmax")
 
 
+@experimental("breakdown")
 @dataclass(frozen=True)
 class SmoothBreakdownRisk:
     """Configuration of the differentiable smooth breakdown-risk surrogate.
@@ -273,6 +275,7 @@ class SmoothBreakdownRisk:
         return (weights * flat).sum()
 
 
+@experimental("breakdown")
 @dataclass(frozen=True)
 class SmoothBreakdownRiskData:
     """Typed differentiable surrogate output -- NON-PHYSICAL, NON-REGULATORY.

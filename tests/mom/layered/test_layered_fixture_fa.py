@@ -1,8 +1,9 @@
 """F-A physical gates; full-mesh convergence is recorded in the adjacent data file.
 
 GPU-0 tests use the frozen coarse mesh. Five-frequency batches keep each
-test below 120 seconds and 6 GiB. The benchmark separately measures the
-complete 25-point full mesh; batch determinism is tested on three fresh
+test below 120 seconds and 6 GiB (the memory cap is asserted here, the wall
+time on an idle card by test_layered_wall_budgets.py). The benchmark separately
+measures the complete 25-point full mesh; batch determinism is tested on three fresh
 Scene -> Simulation -> Result runs, never a reused prepared solver.
 """
 import gc
@@ -16,8 +17,9 @@ import torch
 from tests.support.rfic_fixtures import fixture_fa,SWEEP
 from tests.support.rfic_fa_references import (
     greenhouse_fa,stranded_greenhouse_fa,dc_resistance_fa,mohan_spiral,extract_fa,resonance_and_peak,partial_inductance)
+import witwin.maxwell as mw
 
-pytestmark=pytest.mark.cuda
+pytestmark = [pytest.mark.cuda, pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")]
 
 
 @pytest.fixture(autouse=True)
@@ -33,7 +35,6 @@ def gpu_budget(record_property):
     peak=torch.cuda.max_memory_allocated()
     record_property("seconds",seconds)
     record_property("peak_allocated_bytes",peak)
-    assert seconds<120
     assert peak<6*2**30
 
 
@@ -91,13 +92,13 @@ def test_sweep_reciprocity_passivity_complete_repeat(start,record_property):
         assert singular<=1+1e-9
         assert network.metadata["low_frequency_method"]=="loop_tree_scaled"
         if first is None:
-            first=(network.s.clone(),result.surface_currents.currents.clone())
+            first=(network.s.clone(),mw.mom.surface_currents(result).currents.clone())
             record_property("extraction",json.dumps(extract_fa(network)))
             record_property("reciprocity",symmetry)
             record_property("max_singular_S",singular)
         else:
             assert torch.equal(network.s,first[0])
-            assert torch.equal(result.surface_currents.currents,first[1])
+            assert torch.equal(mw.mom.surface_currents(result).currents,first[1])
         del result,network,y
         gc.collect(); torch.cuda.empty_cache()
 

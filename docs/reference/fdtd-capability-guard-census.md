@@ -556,3 +556,210 @@ predicates or review evidence. No additional raising site is introduced by the
 provider-reference registration or exported incident-spectrum time conversion.
 The timing scope and deferred raw-exact work are recorded in
 `docs/memory/bloch-fixed-k-master-reconciliation-2026-11-04.md`.
+
+## 0.7.0 construction refusals (p2e), 2026-11-08
+
+Two reviewed feature boundaries are added; no identity is changed or retired,
+so the ledger holds **586 active** and **50 retired** identities (after the p2d merge).
+
+- `simulation.py::_reject_optical_structure_assignments` refuses
+  `Structure.phase_screen` and `uv`/`face_uv` for every Maxwell solver (audit
+  G16/N7). It runs first in `_validate_method_scene_features` (construction,
+  `prepare()`, `run()`) and in `Simulation.electrostatic/capacitance`. The
+  deeper FP64-forward (`ValueError`) and mapped-admission refusals stay in place;
+  their tests now drive them directly.
+- `scene.py::MaterialRegion.__post_init__` refuses any `symmetry` other than
+  `None` (audit G17); the field was never consumed.
+
+The trainable-coefficient refusals (G10-G12) reuse the existing
+`_fixed_inputs.py::require_fixed_input` raise site and add no identity. Line
+anchors of unchanged identities are not refreshed in this change.
+
+## FDFD construction-time refusals, 2026-11-08 (0.7.0 phase 2a)
+
+`simulation.py::_reject_unsupported_fdfd_scene` adds one reviewed `feature_boundary`
+(`661ebd0f…:0`). At `Simulation.fdfd(...)` construction (and again in `prepare()`/`run()`)
+it raises one `NotImplementedError` listing every FDFD-unsupported scene feature. New
+items, all previously accepted and dropped or approximated: `LossyMetalMedium`,
+`SurfaceImpedanceMedium` and `CopperFoil` conductors (solved as vacuum), `ModulationSpec`
+(static eps), lumped elements, terminated, wire-bound and modal ports, `InternalAbsorber`,
+`SurfaceMesh` structures, `SubpixelSpec(pec="conformal")` (staircased) and CW sources whose
+frequency differs from a solve frequency. Four reviewed identities move into the same
+guard without a capability change and are retired with their tests as positive evidence
+that the refusal still fires: the three `fdfd/solver.py::_validate_supported_fdfd_materials`
+inherited-debt guards (gyromagnetic, nonlinear, full tensor) and the FDFD scene-monitor
+refusal `374da1d4…:0`. The face-kind and symmetry `ValueError`s leave `FDFD.__init__` for
+the same aggregate. Negative assertions are in
+`tests/fdfd/test_fdfd_silent_ignore_refusals.py`. On top of the p2d and p2e merges the
+manifest has **583 active** and **54 retired** identities.
+
+## 0.7.0 core-path flag removal (W7 row 3), 2026-11-09
+
+Removing the public `fdtd_core_path` option deletes `core_path.py::validate_core_path_request`,
+so its safety-refusal identity `7ded1a98…:0` ("fdtd_core_path=True is blocked by: ") is retired
+and its `SAFETY_GUARDS` entry is removed from `scripts/dev/fdtd/guard_census.py`. Nothing is
+implemented: closed-transverse CPML stays a core-path blocker, and automatic admission keeps it on
+the guarded existing path with `FDTDCoreFallbackWarning`; the retirement's positive tests assert
+that fallback. The two `configuration_guards` records for the explicit-True refusals
+(blocked scene; `initialize=False`) are removed because neither raise exists any more. The
+manifest holds **586 active** and **55 retired** identities.
+
+## W7 row 4 core admissions, 2026-11-10
+
+The core path admits PMC faces (including PMC symmetry planes), permeability, magnetic conductivity,
+Mur and mode-ABC faces, `MediumMonitor` and the projection and Gaussian-overlap monitors. These were
+`core_path_blockers` labels, not raises, so no census identity is added, changed or retired: the
+proposal from `scripts/dev/fdtd/guard_census.py` is identical on the branch and on its base. The
+separate-physics core graph's Mur/mode-ABC `assert` is removed; assertions are not tracked. The
+remaining blocker labels are asserted by `tests/fdtd/core_path` (closed-transverse CPML,
+configuration blockers) and listed in `docs/plans/fdtd-single-path-cuda.md`.
+
+## W7 row 5 closed-transverse CPML on the core path, 2026-11-11
+
+`core_path_blockers` drops `closed-transverse CPML (passivity guard)`: the core path samples the guard at
+its K-step chunk boundaries. The label was not a raise, so no identity is added or retired; the guard's
+own `FDTDPassivityError` identities are unchanged. Only the retired `7ded1a98…:0` entry is updated: its
+positive tests now assert core admission and the core-chunk trip and verdict gates
+(`tests/boundaries/cpml/test_passivity_core_chunks.py`), and its retirement reason states that the
+capability is implemented. Counts are unchanged.
+
+## W7 row 16c failure policy, 2026-11-13
+
+The last `core_path_blockers` labels ("non-CUDA execution", "unsupported source type") and the fallback machinery
+(`_FDTDCoreFallback`, the existing-path rebuilds, `FDTDCoreFallbackWarning`) are removed; a failed core load,
+activation or capture raises its own error and a failed accelerated setup retries with the torch setup. None of these
+were census identities, so no identity is added, changed or retired: the proposal from
+`scripts/dev/fdtd/guard_census.py` is identical to its base except line numbers. The retired `7ded1a98…:0` entry's
+positive test `test_default_auto.py::test_closed_transverse_absorbers_are_not_request_blockers` is replaced by
+`test_default_auto.py::test_every_scene_is_admitted`. Counts are unchanged.
+
+## W7 row 7 resume on the core path, 2026-11-11
+
+`core_path_decision` drops its `resume_from` and `initialize=False` refusals. They were decision
+labels, not raises, so no identity is added, changed or retired. The resume refusals that are raises
+(detached forward, distributed transport, breakdown observers, finite-conductor wires) are unchanged.
+
+## 0.7.0 capability registry (phase 3c), 2026-11-09
+
+The construction-time scene refusals move into `witwin/maxwell/capability/`: a key extractor
+(`keys.py`), one table per method (`tables/`) and a default-deny check (`check.py`) that raises one
+`UnsupportedFeatureError(items=...)`. Twelve reviewed identities are retired as moved, not
+implemented: `simulation.py::_reject_unsupported_fdfd_scene`, `_reject_optical_structure_assignments`,
+the four `_reject_folded_domain_monitors` refusals, the `PlanarPEC`, `LayerStack`, homogeneous-background
+(inherited debt) and in-simulation-monitor refusals of `Simulation._validate_method_scene_features`,
+`compiler/electrostatic.py::require_supported_electrostatic_scene` and
+`compiler/mom_scene.py::require_supported_mom_scene` (module deleted). Each retired entry carries
+`registry_rows` (`<method>:<key>`) naming the table rows that now hold the refusal; its positive tests
+are `tests/api/public/test_capability_registry.py::test_refused_rows_are_reported`, which observes every
+refusal row, plus the original negative tests. The single `UnsupportedFeatureError` raise site in
+`CapabilityReport.raise_if_unsupported` joins the census when p3b tracks the type. The mapped
+material-cache refusal keeps its identity. The manifest holds **561 active** and **84 retired**
+identities.
+
+Retired identities whose refusal moved into the capability registry, with the rows that hold it
+(checked against the tables by `tests/api/public/test_capability_docs.py`):
+
+<!-- capability-table: registry-rows -->
+<!-- Generated by scripts/dev/capability_tables.py; do not edit. -->
+
+| Identity prefix | Former scope | Registry rows (`method:key`) |
+| --- | --- | --- |
+| `457c10d9…` | `Simulation._validate_method_scene_features` | `fdtd:background.homogeneous`, `fdfd:background.homogeneous`, `fdtd:source.MaxwellPlaneModes`, `fdfd:source.MaxwellPlaneModes` |
+| `05f6abb1…` | `Simulation._validate_method_scene_features` | `fdfd:monitor.AngleProjectionMonitor`, `fdfd:monitor.CartesianProjectionMonitor`, `fdfd:monitor.KSpaceProjectionMonitor`, `fdfd:monitor.GaussianOverlapMonitor`, `fdfd:monitor.AstigmaticGaussianOverlapMonitor`, `fdfd:monitor.SurfaceFieldTimeMonitor`, `fdfd:monitor.AuxFieldTimeMonitor`, `mom:monitor.AngleProjectionMonitor`, `mom:monitor.CartesianProjectionMonitor`, `mom:monitor.KSpaceProjectionMonitor`, `mom:monitor.GaussianOverlapMonitor`, `mom:monitor.AstigmaticGaussianOverlapMonitor`, `mom:monitor.SurfaceFieldTimeMonitor`, `mom:monitor.AuxFieldTimeMonitor`, `mom.layered:monitor` |
+| `f6c2f43a…` | `Simulation._validate_method_scene_features` | `fdfd:geometry.planar_pec`, `mom:geometry.planar_pec` |
+| `8ae42b59…` | `Simulation._validate_method_scene_features` | `fdtd:background.layer_stack`, `fdfd:background.layer_stack`, `mom:background.layer_stack` |
+| `024542fa…` | `_reject_optical_structure_assignments` | `fdtd:structure.optical_assignment`, `fdfd:structure.optical_assignment`, `mom:structure.optical_assignment`, `mom.layered:structure.optical_assignment`, `electrostatic:structure.optical_assignment`, `capacitance:structure.optical_assignment` |
+| `92ca3cdf…` | `_reject_folded_domain_monitors` | `fdtd:symmetry.closed_surface_auto_grid` |
+| `aa185432…` | `_reject_folded_domain_monitors` | `fdtd:symmetry.closed_surface_image_plane` |
+| `a35d724b…` | `require_supported_electrostatic_scene` | `electrostatic:coordinates`, `electrostatic:symmetry`, `electrostatic:structure.optical_assignment`, `electrostatic:material.lossy_metal`, `electrostatic:material.surface_impedance`, `electrostatic:material.copper_foil`, `electrostatic:material.medium2d`, `electrostatic:material.sigma_e`, `electrostatic:material.core_surface_fields`, `electrostatic:source`, `electrostatic:monitor`, `electrostatic:port`, `electrostatic:lumped_element`, `electrostatic:internal_absorber`, `electrostatic:network`, `electrostatic:thin_wire`, `electrostatic:circuit`, `electrostatic:electrostatic_terminal.trainable_geometry`, `capacitance:coordinates`, `capacitance:symmetry`, `capacitance:structure.optical_assignment`, `capacitance:material.lossy_metal`, `capacitance:material.surface_impedance`, `capacitance:material.copper_foil`, `capacitance:material.medium2d`, `capacitance:material.sigma_e`, `capacitance:material.core_surface_fields`, `capacitance:source`, `capacitance:monitor`, `capacitance:port`, `capacitance:lumped_element`, `capacitance:internal_absorber`, `capacitance:network`, `capacitance:thin_wire`, `capacitance:circuit`, `capacitance:charge_density`, `capacitance:electrostatic_terminal.floating`, `capacitance:electrostatic_terminal.trainable_geometry` |
+| `8f8ee9d8…` | `require_supported_mom_scene` | `mom:material.pmc`, `mom:material.core_surface_fields`, `mom:material.trainable_mu_r`, `mom:internal_absorber`, `mom:source.injection_tfsf`, `mom:source.injection_axis`, `mom:source.MaxwellPlaneModes.trainable` |
+| `661ebd0f…` | `_reject_unsupported_fdfd_scene` | `fdfd:background.homogeneous`, `fdfd:background.layer_stack`, `fdfd:coordinates`, `fdfd:structure.optical_assignment`, `fdfd:symmetry`, `fdfd:subpixel.pec_conformal`, `fdfd:boundary.periodic`, `fdfd:boundary.bloch`, `fdfd:boundary.pmc`, `fdfd:boundary.mur`, `fdfd:boundary.mode_abc`, `fdfd:geometry.surface_mesh`, `fdfd:geometry.planar_pec`, `fdfd:material.lossy_metal`, `fdfd:material.surface_impedance`, `fdfd:material.copper_foil`, `fdfd:material.gyromagnetic`, `fdfd:material.nonlinear`, `fdfd:material.full_tensor`, `fdfd:material.modulation`, `fdfd:lumped_element`, `fdfd:network`, `fdfd:thin_wire`, `fdfd:internal_absorber`, `fdfd:source.MaxwellPlaneModes`, `fdfd:source.cw_frequency_mismatch`, `fdfd:monitor.PointMonitor`, `fdfd:monitor.WireMonitor`, `fdfd:monitor.PlaneMonitor`, `fdfd:monitor.FluxMonitor`, `fdfd:monitor.IncidentPowerDensityMonitor`, `fdfd:monitor.FinitePlaneMonitor`, `fdfd:monitor.ClosedSurfaceMonitor`, `fdfd:monitor.PowerLossMonitor`, `fdfd:monitor.BreakdownMonitor`, `fdfd:monitor.ComponentStressMonitor`, `fdfd:monitor.DipoleEmissionMonitor`, `fdfd:monitor.FieldTimeMonitor`, `fdfd:monitor.FluxTimeMonitor`, `fdfd:monitor.ModeMonitor`, `fdfd:monitor.DiffractionMonitor`, `fdfd:monitor.AngleProjectionMonitor`, `fdfd:monitor.CartesianProjectionMonitor`, `fdfd:monitor.KSpaceProjectionMonitor`, `fdfd:monitor.GaussianOverlapMonitor`, `fdfd:monitor.AstigmaticGaussianOverlapMonitor`, `fdfd:monitor.SurfaceFieldTimeMonitor`, `fdfd:monitor.AuxFieldTimeMonitor`, `fdfd:port.ModePort`, `fdfd:port.WavePort`, `fdfd:port.TerminalWavePort`, `fdfd:port.termination`, `fdfd:port.wire_binding` |
+| `a0a889f6…` | `_reject_folded_domain_monitors` | `fdtd:symmetry.projection_monitor` |
+| `af173e45…` | `_reject_folded_domain_monitors` | `fdtd:symmetry.diffraction_folded_axis` |
+| `3f13fab4…` | `Simulation._validate_layered_mom_gradient_fields` | `fdtd:structure.trainable_conductor_loss`, `fdfd:structure.trainable_conductor_loss`, `mom:structure.trainable_conductor_loss`, `electrostatic:structure.trainable_conductor_loss`, `capacitance:structure.trainable_conductor_loss` |
+| `7348947e…` | `_require_electrostatic_boundary` | `electrostatic:boundary.pml`, `electrostatic:boundary.periodic`, `electrostatic:boundary.bloch`, `electrostatic:boundary.pec`, `electrostatic:boundary.pmc`, `electrostatic:boundary.mur`, `electrostatic:boundary.mode_abc`, `capacitance:boundary.pml`, `capacitance:boundary.periodic`, `capacitance:boundary.bloch`, `capacitance:boundary.pec`, `capacitance:boundary.pmc`, `capacitance:boundary.mur`, `capacitance:boundary.mode_abc` |
+<!-- /capability-table: registry-rows -->
+
+## Layered MoM conductor-loss gradient admission moves into the registry, 2026-11-09
+
+The RFIC layered MoM round 1 (GR1) refusal `simulation.py::Simulation._validate_layered_mom_gradient_fields`
+(a `requires_grad` `LossyMetalMedium.conductivity`, `SurfaceRoughness` field or `PlanarPEC.physical_thickness`
+outside layered MoM) becomes the registry key `structure.trainable_conductor_loss`: refused by the fdtd, fdfd,
+mom, electrostatic and capacitance tables, supported by mom.layered. Its identity `3f13fab4...:0` is retired as
+moved with `registry_rows`; the electrostatic and capacitance runners, which never reached the old
+`Simulation.__init__` check, now refuse a trainable sheet thickness instead of reading it as a fixed value. The
+manifest holds **563 active** and **89 retired** identities.
+
+## 0.7.0 raise migration (phase 3b), 2026-11-09
+
+The census now tracks `UnsupportedFeatureError` as well as `NotImplementedError`
+(`guard_census.py::TRACKED_EXCEPTIONS`). The codemod
+`scripts/dev/codemods/070_p3b_raise_migration.py` rewrote 461 capability refusals outside
+`witwin/maxwell/mom/` from `NotImplementedError(message)` to
+`UnsupportedFeatureError(message, feature=..., method=...)`; the per-site classification is
+`scripts/dev/codemods/070_p3b_raise_sites.csv` (461 `capability`, 1 `abstract`:
+`SceneModule.to_scene`, and 4 `pinned` refusals inside `media.py::Material.evaluate_static` and
+`Material.evaluate_at_frequency`, scopes the consumer-metadata bridge pins byte for byte; they keep
+`NotImplementedError` and their identities until that bridge is re-baselined). The rewrite changes each raise expression and therefore each identity,
+but no message, scope or predicate. `scripts/dev/fdtd/raise_migration_receipt.json` maps every old
+identity to its new identity and expression; `guard_census.py` carries reviews (and the inherited
+baseline, after the MoM rename receipt) through it, so no migrated entry is reopened or retired.
+A `guard:<8 hex>` feature key is the identity prefix of the raise before migration; it stays fixed
+when the message is later reworded, and grepping this manifest for it finds the entry.
+
+Four `UnsupportedFeatureError` raises that phases 2f and 3c added outside the census enter it as
+reviewed `feature_boundary` entries with observed raising sites:
+`adjoint_inputs.py::require_material_gradient_channels`, `require_claimed_trainable_inputs`,
+`simulation.py::_reject_uncensused_trainable_tensors` and
+`capability/model.py::CapabilityReport.raise_if_unsupported`. The manifest holds **567 active**
+and **89 retired** identities; the 28 contract exclusions are unchanged. MoM raise sites keep their
+identities until the RFIC line runs the codemod with `--scope mom`.
+
+## 0.7.0 frozen solver configs (api070/p4a), 2026-11-10
+
+`material_cache` moves from `Simulation.__init__` into `FDTDConfig.material_cache`. Two reviewed
+cache refusals keep their message, scope, exception and refused set but now read the cache from the
+config, so their identities change; the old identities are retired as `boundary_replaced` with the
+new identities as `replacement_ids`: the mapped-coordinate cache refusal `347d6659…:0` →
+`18a2cf8d…:0`, and the distributed/gradient cache refusal `b5e95554…:0` → `e31c0b4a…:0` (inherited
+debt, now a `modified_boundary` with the negative test
+`tests/fdtd/core_path/test_default_auto.py::test_material_cache_refuses_gradient_execution`). No
+capability is implemented. The removed `Simulation(reference_frequency=..., material_cache=...)`
+argument checks were plain `ValueError`/`TypeError` validation outside the census. The manifest
+holds **567 active** and **91 retired** identities.
+
+## 0.7.0 typed CPML config (api070/p4b), 2026-11-10
+
+The wave-port, terminal wave-port and modal-port sweep runners (and the direct wave-port excitation,
+which shares the wave-port column runner) ran every column with `material_cache=None`, so a configured
+`FDTDConfig.material_cache` was silently ignored. One new `feature_boundary` refusal,
+`material_cache.py::refuse_column_material_cache` (`22efb9ba…:0`, feature key `guard:96a41650`), is called
+first by `waveport_sweep._execute_columns`, `terminal_waveport.run_terminal_waveport_sweep` and
+`modal_sweep.run_modal_port_sweep`, with four negative tests. A new raise has no pre-migration identity,
+so its `guard:<8 hex>` key is the identity prefix of the raise written with an empty key
+(`feature="guard:"`). The `FDTDConfig.cpml` checks are `SetupError` input validation outside the census.
+The manifest holds **568 active** and **91 retired** identities.
+
+## 0.7.0 static solver configs (api070/p4d), 2026-11-10
+
+`Simulation.electrostatic/capacitance` return a `Simulation` (PLAN section 6 Q6), so construction,
+`check()`, `prepare()` and `run()` admit the scene through the electrostatic/capacitance method tables.
+Those tables admitted every `Scene.boundary` face kind while `compile_electrostatics` refused any kind
+but `none`; the compile refusal `compiler/electrostatic.py::_require_electrostatic_boundary`
+(`7348947e…:0`, feature key `guard:8ff680a9`, inherited debt) is retired as moved with `registry_rows`:
+`boundary.<kind>` for every kind but `none` is an `INHERENT` row of both tables, observed by
+`tests/electrostatic/test_silent_ignore_refusals.py::test_full_wave_boundary_is_refused`. The predicate is
+unchanged (some face kind is not `none`), and `compile_electrostatics(scene)` keeps the refusal through its
+`check_scene` call. The new `ElectrostaticConfig`/`CapacitanceConfig` checks are `TypeError`/`ValueError`
+input validation outside the census. The manifest holds **567 active** and **92 retired** identities.
+
+## 0.7.0 namespaces: transistor placeholders removed (api070/p5b), 2026-11-10
+
+Plan Q10 (user decision 2026-11-08) removes the reserved `BJT` and `MOSFET` classes from
+`circuit_devices.py`: they only raised, and a public symbol that always raises is not an API. Their two
+raises were contract exclusions, so the `CONTRACT_GUARDS` list goes from 28 to 26 and the contract tuple
+hash in `scripts/dev/fdtd/guard_census.py` is re-pinned (the hash lock itself is unchanged). Without the
+exclusion both baseline raises count as inherited debt; they are retired with the removal as positive
+evidence (`tests/rf/nonlinear/test_nonlinear_device_contract.py::test_transistor_placeholders_are_removed`,
+`tests/api/public/test_public_api.py::test_removed_public_names_are_absent`). No active identity changes.
+The manifest holds **567 active** and **94 retired** identities with **26 contract** exclusions.

@@ -40,19 +40,21 @@ def _scene(x_kind, bloch_k, others, *, cells=1, dipoles=((0.0, 1.0),)):
         domain=mw.Domain(((-_LX / 2, _LX / 2 + (cells - 1) * _LX), (-0.3, 0.3), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(_DX),
         boundary=mw.BoundarySpec.faces(**faces),
-        device="cuda",
     )
-    for x0, amplitude in dipoles:
-        scene.add_source(
-            mw.PointDipole(
-                position=(x0, 0.03125, 0.0),
-                polarization="Ez",
-                width=_DX,
-                source_time=mw.GaussianPulse(frequency=_F, fwidth=0.5 * _F, amplitude=amplitude),
-            )
-        )
-    scene.add_monitor(mw.PointMonitor("p", (0.09375, 0.15625, 0.0625), fields=("Ez",)))
-    scene.add_monitor(mw.PointMonitor("q", (-0.125, -0.1875, -0.03125), fields=("Ez",)))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        *(mw.PointDipole(
+              position=(x0, 0.03125, 0.0),
+              polarization="Ez",
+              width=_DX,
+              source_time=mw.GaussianPulse(frequency=_F, fwidth=0.5 * _F, amplitude=amplitude),
+          ) for x0, amplitude in dipoles),
+    ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PointMonitor("p", (0.09375, 0.15625, 0.0625), fields=("Ez",)),
+        mw.PointMonitor("q", (-0.125, -0.1875, -0.03125), fields=("Ez",)),
+    ))
     return scene
 
 
@@ -60,13 +62,15 @@ def _spectra(scene):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=list(_FREQS),
-        run_time=mw.TimeConfig(time_steps=700),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        # CPML physics comparison: pin CPML (absorber="auto" picks the graded
-        # absorber for real closed-transverse PML).
-        full_field_dft=False, absorber="cpml", cpml_config={"alpha_max": 0.0}).run()
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=700),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            # CPML physics comparison: pin CPML (absorber="auto" picks the graded
+            # absorber for real closed-transverse PML).
+            full_field_dft=False, absorber="cpml", cpml=mw.fdtd.CPMLConfig(alpha_max=0.0),
+        )).run()
     values = [
-        complex(np.asarray(result.monitor(name, frequency=frequency)["Ez"].detach().cpu()).ravel()[0])
+        complex(np.asarray(result.monitor(name, frequency=frequency).sel(component="Ez").values.detach().cpu()).ravel()[0])
         for name in ("p", "q")
         for frequency in _FREQS
     ]
@@ -106,13 +110,14 @@ def test_zero_phase_single_bloch_axis_matches_periodic_run():
 def test_generalized_bloch_layout_rejects_adjoint():
     density = torch.full((1, 1, 1), 0.5, device="cuda", dtype=torch.float64, requires_grad=True)
     scene = _scene("bloch", 1.0, {})
-    scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
-    scene.add_material_region(
+    scene = scene.updated(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
+    scene = scene.updated(material_regions=(
+        *scene.material_regions,
         mw.MaterialRegion(name="design", geometry=mw.Box(position=(0, 0, 0), size=(_DX,) * 3),
-                          density=density, eps_bounds=(1.0, 4.0))
-    )
-    simulation = mw.Simulation.fdtd(scene, frequencies=[_F], run_time=mw.TimeConfig(time_steps=20),
-                                    spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False, cpml_config={"alpha_max": 0.0})
+                          density=density, eps_bounds=(1.0, 4.0)),
+    ))
+    simulation = mw.Simulation.fdtd(scene, frequencies=[_F], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=20),
+                                    spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False, cpml=mw.fdtd.CPMLConfig(alpha_max=0.0)))
     with pytest.raises(NotImplementedError, match="generalized layouts"):
         result = simulation.run()
-        result.monitor("p")["Ez"].abs().square().sum().backward()
+        result.monitor("p").sel(component="Ez").values.abs().square().sum().backward()

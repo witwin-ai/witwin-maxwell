@@ -6,6 +6,7 @@ An unqualified or nonexclusive run is never a performance acceptance result.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import argparse
 import hashlib
 import json
@@ -72,7 +73,7 @@ def normal_grid(thickness, frequency, cells_per_skin):
                            distance[1:] + thickness / 2))
 
 
-def film_scene(kind, thickness, frequency, cells_per_skin, *, device="cuda:0"):
+def film_scene(kind, thickness, frequency, cells_per_skin):
     if kind not in ("volume", "surface"):
         raise ValueError("The physical control kind must be volume or surface.")
     x = (normal_grid(thickness, frequency, cells_per_skin) if kind == "volume"
@@ -83,11 +84,11 @@ def film_scene(kind, thickness, frequency, cells_per_skin, *, device="cuda:0"):
     geometry = mw.Box(position=torch.zeros(3, dtype=torch.float64),
         size=torch.tensor([thickness if kind == "volume" else 0., .08, .08], dtype=torch.float64))
     material = (mw.Material(eps_r=1., sigma_e=SIGMA) if kind == "volume" else
-                mw.CopperFoil(thickness=thickness, conductivity=SIGMA, frequency_range=(1e9, 4e9)))
+                mw.media.CopperFoil(thickness=thickness, conductivity=SIGMA, frequency_range=(1e9, 4e9)))
     return mw.Scene(domain=mw.Domain(bounds=((float(x[0]), float(x[-1])), (-.001, .001), (-.001, .001))),
         grid=mw.GridSpec.custom(x, y, z),
         boundary=mw.BoundarySpec.faces(default="pml", num_layers=12, y="pmc", z="pec"),
-        device=device, subpixel_samples=mw.SubpixelSpec(samples=(4, 1, 1), averaging="arithmetic"),
+        subpixel=mw.SubpixelSpec(samples=(4, 1, 1), averaging="arithmetic"),
         structures=(mw.Structure(name="copper", geometry=geometry, material=material),),
         ports=(mw.LumpedPort("feed", positive=(source_x, 0., .001), negative=(source_x, 0., -.001),
             voltage_path=mw.AxisPath("z"), reference_impedance=ETA0,
@@ -106,7 +107,7 @@ def fit_waves(x, values, low, high, k):
     return amplitudes, float(residual)
 
 
-def pcb_volume_scene(family, frequency, cells_per_skin, *, device="cuda:0"):
+def pcb_volume_scene(family, frequency, cells_per_skin):
     """Restore the declared physical copper volume from the saved sheet input.
 
     Normal refinement alone is a workload forecast. Finite-strip edge heat
@@ -115,7 +116,7 @@ def pcb_volume_scene(family, frequency, cells_per_skin, *, device="cuda:0"):
     from witwin.maxwell.adapters.pcb import import_pcb_scene
     original = json.loads((FIXTURES/f"metahz-scene-pcb-{family}.json").read_text())
     definition = candidate(original, finite_copper=True)
-    scene = import_pcb_scene(definition, frequency=frequency, device=device)
+    scene = import_pcb_scene(definition, frequency=frequency)
     model = definition["conductors"][0]["constitutive_model"]
     thickness = model["thickness_m"]
     bottom = definition["conductors"][0]["bounds_m"][4]
@@ -137,7 +138,7 @@ def pcb_volume_scene(family, frequency, cells_per_skin, *, device="cuda:0"):
     z = np.unique(np.concatenate((expanded, fine)))
     structures = []
     for structure in scene.structures:
-        if isinstance(structure.material, mw.CopperFoil):
+        if isinstance(structure.material, mw.media.CopperFoil):
             position = structure.geometry.position.detach().clone()
             size = structure.geometry.size.detach().clone()
             position[2] = bottom + thickness/2
@@ -175,20 +176,17 @@ def pcb_volume_scene(family, frequency, cells_per_skin, *, device="cuda:0"):
         z = z[abs(z-plane) > 1.5*half_step]
         z = np.unique(np.concatenate((z,[plane-half_step/2,plane+half_step/2])))
     axes = [np.asarray(definition["mesh"]["axes_m"][axis]) for axis in "xy"] + [z]
-    return scene.clone(domain=mw.Domain(bounds=[(float(axis[0]),float(axis[-1])) for axis in axes]),
-        grid=mw.GridSpec.custom(*axes), structures=tuple(structures), ports=tuple(ports),
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 4), averaging="arithmetic"),
-        metadata={**scene.metadata, "physical_volume_copper_sigma": SIGMA,
+    return scene.updated(domain=mw.Domain(bounds=[(float(axis[0]),float(axis[-1])) for axis in axes]), grid=mw.GridSpec.custom(*axes), structures=tuple(structures), ports=tuple(ports), subpixel=mw.SubpixelSpec(samples=(1, 1, 4), averaging="arithmetic"), metadata={**scene.metadata, "physical_volume_copper_sigma": SIGMA,
             "physical_copper_bounds_m": [bottom,bottom+thickness],
             "qualification": "normal refinement workload only; lateral copper edge and heat convergence pending"})
 
 
 def forecast_pcb(family, frequency, cells_per_skin, duration):
     scene = pcb_volume_scene(family, frequency, cells_per_skin)
-    simulation = mw.Simulation.fdtd(scene, frequency=frequency,
-        excitations=mw.PortExcitation("feed" if scene.ports[0].name == "feed" else scene.ports[0].name,
+    simulation = mw.Simulation.fdtd(scene, frequencies=frequency,
+        excitations=mw.rf.PortExcitation("feed" if scene.ports[0].name == "feed" else scene.ports[0].name,
             source_time=mw.GaussianPulse(frequency, fwidth=frequency)),
-        run_time=mw.TimeConfig(time_steps=1), full_field_dft=False)
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1), full_field_dft=False))
     torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     prepared = simulation.prepare()
@@ -205,10 +203,12 @@ def forecast_pcb(family, frequency, cells_per_skin, duration):
 
 def run_film(kind, thickness, frequency, cells_per_skin, duration, *, execute=True):
     scene = film_scene(kind, thickness, frequency, cells_per_skin)
-    simulation = mw.Simulation.fdtd(scene, frequency=frequency,
-        excitations=mw.PortExcitation("feed", source_time=mw.CW(frequency)),
-        run_time=mw.TimeConfig(time_steps=1, transient_cycles=0), full_field_dft=True,
-        spectral_sampler=mw.SpectralSampler(window="hanning"))
+    simulation = mw.Simulation.fdtd(scene, frequencies=frequency,
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.CW(frequency)),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1, transient_cycles=0), full_field_dft=True,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+        ))
     torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     prepared = simulation.prepare()
@@ -216,7 +216,7 @@ def run_film(kind, thickness, frequency, cells_per_skin, duration, *, execute=Tr
     prepare_seconds = time.perf_counter() - start
     solver = prepared.solver
     steps = math.ceil(duration / solver.dt)
-    simulation.config.run_time = mw.TimeConfig(time_steps=steps, transient_cycles=0)
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=steps, transient_cycles=0))
     report = {"kind": kind, "thickness_m": thickness, "sigma_s_per_m": SIGMA,
         "frequency_hz": frequency, "skin_depth_m": skin_depth(frequency),
         "cells_per_skin_requested": cells_per_skin, "grid_shape": [solver.Nx, solver.Ny, solver.Nz],
@@ -236,8 +236,8 @@ def run_film(kind, thickness, frequency, cells_per_skin, duration, *, execute=Tr
     # Native batching captures the actual RF/field/DFT pipeline, including the
     # device time table. Millions of skin-resolution steps do not use a CPU loop.
     del prepared, solver
-    batch = mw.Simulation.batch([simulation], outputs=mw.BatchOutput(fields=("Ex", "Ey", "Ez")),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1, graph="required", graph_steps=256))
+    batch = mw.Simulation.batch([simulation], outputs=mw.execution.BatchOutput(fields=("Ex", "Ey", "Ez")),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=1, graph="required", graph_steps=256))
     report["processes_before"] = processes()
     start = time.perf_counter()
     with batch.prepare() as execution:
@@ -246,7 +246,7 @@ def run_film(kind, thickness, frequency, cells_per_skin, duration, *, execute=Tr
     report["prepare_and_run_seconds"] = time.perf_counter() - start
     report["processes_after"] = processes()
     report["peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
-    electric = result.tensor("Ez").detach().cpu().numpy()
+    electric = result.field("Ez").values.detach().cpu().numpy()
     if electric.ndim == 4:
         electric = electric[0]
     profile = electric[:, electric.shape[1]//2, 0]
@@ -263,7 +263,7 @@ def run_film(kind, thickness, frequency, cells_per_skin, duration, *, execute=Tr
         report["normal_sigma_integral_s"] = float(np.sum(sigma*widths))
         report["normal_sigma_integral_relative_error"] = abs(float(np.sum(sigma*widths))/(SIGMA*thickness)-1)
     else:
-        heat_density = float(result.conductor_losses["copper"]["surface_power"][0])/.002**2
+        heat_density = float(mw.rf.conductor_losses(result)["copper"]["surface_power"][0])/.002**2
     absorption = heat_density/incoming_flux
     report.update({"reflection": [float(reflection.real), float(reflection.imag)],
         "transmission": [float(transmission.real), float(transmission.imag)],

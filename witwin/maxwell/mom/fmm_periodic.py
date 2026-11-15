@@ -10,6 +10,7 @@ from .fmm_expansion import multipole_to_local, multi_indices, _points, helmholtz
 from .fmm_storage import m2l_storage_bytes
 from .fmm_compact import compact_tables, compact_moment_action
 from .scalar_moment_action import scalar_moment_action
+from ..errors import UnsupportedFeatureError
 
 
 class PeriodicImageM2L:
@@ -25,7 +26,8 @@ class PeriodicImageM2L:
                  table_budget_bytes=512*1024**2, near_index_budget_bytes=1024**2, image_tail_budget=None, kernel_error_budget=None,
                  table_storage="dense", row_batch=16):
         if table_storage in ('fft_v1','fft_ewald_v1'):
-            raise NotImplementedError('Periodic FFT M2L requires separately admitted screened coefficients')
+            raise UnsupportedFeatureError('Periodic FFT M2L requires separately admitted screened coefficients',
+                                          feature="boundary.periodic", method="mom")
         if not isinstance(lattice, LatticeSpec):
             raise TypeError('Periodic M2L requires LatticeSpec')
         lattice.assert_current()

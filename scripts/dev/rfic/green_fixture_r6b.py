@@ -55,7 +55,7 @@ def native(directory):
     import torch
     from tests.support.rfic_fixtures import fixture_fa
     from witwin.maxwell.mom.layered.green import LayeredGreenTable
-    stack = fixture_fa(device="cpu").scene.background
+    stack = fixture_fa().scene.background
     table = LayeredGreenTable.build(stack, HEIGHTS, FREQUENCIES, RHO[-1], device="cuda",
                                    via_spans=((HEIGHTS[0], HEIGHTS[-1]),))
     rho = torch.tensor(RHO, device="cuda", dtype=torch.float64)
@@ -83,7 +83,7 @@ def native(directory):
 def oracle(directory):
     from tests.support.rfic_fixtures import fixture_fa
     from tests.support.layered_green_oracle import spatial,vertical_spatial
-    stack=fixture_fa(device="cpu").scene.background
+    stack=fixture_fa().scene.background
     values=np.empty((2,3,2,len(RHO)),complex)
     vertical=np.empty((2,3,4,len(RHO)),complex)
     errors=np.empty(values.shape)

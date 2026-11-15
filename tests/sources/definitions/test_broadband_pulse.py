@@ -30,7 +30,7 @@ def _sampled_spectrum(pulse, frequencies):
 @pytest.mark.parametrize("band", _BANDS)
 @pytest.mark.parametrize("minimum_amplitude", [0.06, 0.3, 0.49])
 def test_broadband_pulse_spectrum_covers_band_at_minimum_amplitude(band, minimum_amplitude):
-    pulse = mw.BroadbandPulse(freq_range=band, minimum_amplitude=minimum_amplitude)
+    pulse = mw.sources.BroadbandPulse(freq_range=band, minimum_amplitude=minimum_amplitude)
     frequencies = np.linspace(band[0], band[1], 257)
     sampled = np.abs(_sampled_spectrum(pulse, frequencies))
     # The coverage contract holds on the independently sampled time waveform.
@@ -44,7 +44,7 @@ def test_broadband_pulse_spectrum_covers_band_at_minimum_amplitude(band, minimum
 
 @pytest.mark.parametrize("band", _BANDS)
 def test_broadband_pulse_is_zero_mean_and_starts_switched_off(band):
-    pulse = mw.BroadbandPulse(freq_range=band, phase=0.4)
+    pulse = mw.sources.BroadbandPulse(freq_range=band, phase=0.4)
     dt = 1.0 / (40.0 * pulse.characteristic_frequency)
     times = np.arange(0.0, pulse.settling_time, dt)
     samples = np.array([pulse.evaluate(float(t)) for t in times])
@@ -58,7 +58,7 @@ def test_broadband_pulse_is_zero_mean_and_starts_switched_off(band):
 
 def test_broadband_pulse_narrowband_limit_is_the_band_centred_gaussian_pulse():
     band = (190.0e12, 210.0e12)
-    pulse = mw.BroadbandPulse(freq_range=band, minimum_amplitude=0.3, amplitude=2.0, phase=0.3)
+    pulse = mw.sources.BroadbandPulse(freq_range=band, minimum_amplitude=0.3, amplitude=2.0, phase=0.3)
     expected_fwidth = 0.5 * (band[1] - band[0]) / math.sqrt(2.0 * math.log(1.0 / 0.3))
     assert pulse.frequency == pytest.approx(200.0e12)
     assert pulse.fwidth == pytest.approx(expected_fwidth, rel=1.0e-9)
@@ -73,8 +73,8 @@ def test_broadband_pulse_narrowband_limit_is_the_band_centred_gaussian_pulse():
 
 
 def test_broadband_pulse_offset_shifts_delay_in_bandwidth_units():
-    base = mw.BroadbandPulse(freq_range=(1.0e9, 3.0e9))
-    shifted = mw.BroadbandPulse(freq_range=(1.0e9, 3.0e9), offset=5.0)
+    base = mw.sources.BroadbandPulse(freq_range=(1.0e9, 3.0e9))
+    shifted = mw.sources.BroadbandPulse(freq_range=(1.0e9, 3.0e9), offset=5.0)
     assert shifted.delay - base.delay == pytest.approx(5.0 / (2.0 * math.pi * 2.0e9))
     assert shifted.fwidth == base.fwidth
     assert shifted.evaluate(base.delay + 1.0 / (2.0 * math.pi * 2.0e9) * 5.0) == pytest.approx(
@@ -83,7 +83,7 @@ def test_broadband_pulse_offset_shifts_delay_in_bandwidth_units():
 
 
 def test_broadband_pulse_compiles_and_every_evaluator_agrees():
-    pulse = mw.BroadbandPulse(freq_range=(1.0e9, 10.0e9), minimum_amplitude=0.25, amplitude=3.0, phase=0.7)
+    pulse = mw.sources.BroadbandPulse(freq_range=(1.0e9, 10.0e9), minimum_amplitude=0.25, amplitude=3.0, phase=0.7)
     compiled = compile_source_time(pulse, default_frequency=1.0e9)
     assert compiled["kind"] == "broadband_pulse"
     assert compiled["kind_code"] == SOURCE_TIME_KIND_BROADBAND_PULSE
@@ -101,8 +101,8 @@ def test_broadband_pulse_compiles_and_every_evaluator_agrees():
 
 
 def test_broadband_pulse_normalization_strips_amplitude_and_phase_consistently():
-    pulse = mw.BroadbandPulse(freq_range=(1.0e9, 10.0e9), amplitude=3.0, phase=0.7)
-    reference = mw.BroadbandPulse(freq_range=(1.0e9, 10.0e9))
+    pulse = mw.sources.BroadbandPulse(freq_range=(1.0e9, 10.0e9), amplitude=3.0, phase=0.7)
+    reference = mw.sources.BroadbandPulse(freq_range=(1.0e9, 10.0e9))
     compiled = compile_source_time(pulse, default_frequency=1.0e9)
     for t in np.linspace(0.0, pulse.settling_time, 31):
         expected = reference.evaluate(float(t))
@@ -112,23 +112,24 @@ def test_broadband_pulse_normalization_strips_amplitude_and_phase_consistently()
 
 def test_broadband_pulse_validation():
     with pytest.raises(ValueError):
-        mw.BroadbandPulse(freq_range=(2.0e9, 1.0e9))
+        mw.sources.BroadbandPulse(freq_range=(2.0e9, 1.0e9))
     with pytest.raises(ValueError):
-        mw.BroadbandPulse(freq_range=(0.0, 1.0e9))
+        mw.sources.BroadbandPulse(freq_range=(0.0, 1.0e9))
     with pytest.raises(ValueError, match="minimum_amplitude"):
-        mw.BroadbandPulse(freq_range=(1.0e9, 2.0e9), minimum_amplitude=0.5)
+        mw.sources.BroadbandPulse(freq_range=(1.0e9, 2.0e9), minimum_amplitude=0.5)
     with pytest.raises(ValueError, match="minimum_amplitude"):
-        mw.BroadbandPulse(freq_range=(1.0e9, 2.0e9), minimum_amplitude=0.05)
+        mw.sources.BroadbandPulse(freq_range=(1.0e9, 2.0e9), minimum_amplitude=0.05)
 
 
 def test_broadband_pulse_drives_surface_and_point_sources():
+    pulse = mw.sources.BroadbandPulse(freq_range=(1.0e8, 3.0e8))
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.1),
-        device="cpu",
-    )
-    pulse = mw.BroadbandPulse(freq_range=(1.0e8, 3.0e8))
-    scene.add_source(mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0), source_time=pulse))
-    scene.add_source(mw.PointDipole(position=(0.0, 0.0, 0.0), source_time=pulse))
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.1),
+                sources=(
+            mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0), source_time=pulse),
+            mw.PointDipole(position=(0.0, 0.0, 0.0), source_time=pulse),
+            ),
+            )
     compiled = compile_fdtd_sources(scene, default_frequency=2.0e8)
     assert {entry["source_time"]["kind"] for entry in compiled} == {"broadband_pulse"}

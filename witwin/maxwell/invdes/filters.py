@@ -54,6 +54,7 @@ from collections.abc import Sequence
 
 import torch
 import torch.nn.functional as F
+from .._stability import experimental
 
 _KERNELS = ("conic", "disk", "gaussian")
 _PADDING = ("edge", "reflect", "periodic", "constant", "normalized")
@@ -61,6 +62,7 @@ _TORCH_PAD_MODE = {"edge": "replicate", "reflect": "reflect", "periodic": "circu
 _GAUSSIAN_TRUNCATE = 1.5  # support radius in units of ``radius`` (= 3 sigma)
 
 
+@experimental("invdes")
 def design_spacing(size: Sequence[float], shape: Sequence[int]) -> tuple[float, ...]:
     """Return the per-axis cell spacing of a design grid spanning ``size`` metres.
 
@@ -99,6 +101,7 @@ def _normalize_padding(padding, ndim: int) -> tuple[str, ...]:
     return modes
 
 
+@experimental("invdes")
 def filter_kernel(
     radius: float,
     spacing,
@@ -167,6 +170,7 @@ def _pad_axis(x: torch.Tensor, axis: int, width: int, mode: str, value: float) -
     return F.pad(x, pads, mode=_TORCH_PAD_MODE[mode])
 
 
+@experimental("invdes")
 def apply_filter(
     x: torch.Tensor,
     kernel: torch.Tensor,
@@ -208,6 +212,7 @@ def apply_filter(
     return out / conv(mask, weight)[0, 0]
 
 
+@experimental("invdes")
 class DensityFilter(torch.nn.Module):
     """``torch.nn.Module`` density filter with a physical radius.
 
@@ -244,18 +249,21 @@ class DensityFilter(torch.nn.Module):
         return f"radius={self.radius:g}, kind={self.kind!r}, padding={self.padding!r}"
 
 
+@experimental("invdes")
 def conic_filter(x: torch.Tensor, radius: float, spacing, *, padding="edge", pad_value: float = 0.0) -> torch.Tensor:
     """Filter ``x`` with a conic (linear-hat) kernel of physical ``radius``."""
     kernel = filter_kernel(radius, spacing, kind="conic", shape=x.shape, device=x.device, dtype=x.dtype)
     return apply_filter(x, kernel, padding=padding, pad_value=pad_value)
 
 
+@experimental("invdes")
 def gaussian_filter(x: torch.Tensor, radius: float, spacing, *, padding="edge", pad_value: float = 0.0) -> torch.Tensor:
     """Filter ``x`` with a truncated Gaussian kernel (``sigma = radius / 2``)."""
     kernel = filter_kernel(radius, spacing, kind="gaussian", shape=x.shape, device=x.device, dtype=x.dtype)
     return apply_filter(x, kernel, padding=padding, pad_value=pad_value)
 
 
+@experimental("invdes")
 def disk_filter(x: torch.Tensor, radius: float, spacing, *, padding="edge", pad_value: float = 0.0) -> torch.Tensor:
     """Filter ``x`` with a uniform circular (2D) or spherical (3D) kernel."""
     kernel = filter_kernel(radius, spacing, kind="disk", shape=x.shape, device=x.device, dtype=x.dtype)

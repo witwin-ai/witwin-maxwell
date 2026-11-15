@@ -7,7 +7,7 @@ stops the two copies from drifting apart.
 
 from __future__ import annotations
 
-from witwin.maxwell.fdtd.thin_wire_reference import ACCEPTANCE_BUDGET
+from tests.oracles.thin_wire_reference import ACCEPTANCE_BUDGET
 
 
 def assert_finite_difference_agrees(errors, *, context=""):

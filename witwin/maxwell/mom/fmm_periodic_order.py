@@ -6,9 +6,11 @@ from .fmm_order import plan_multipole_order, MultipoleOrderError
 from .fmm_periodic_error import periodic_hierarchy_error_bound
 from .fmm_periodic_capacity import plan_periodic_storage
 from .fmm_storage import m2l_storage_bytes
+from ..errors import SetupError
+from ..errors import UnsupportedFeatureError
 
 
-class PeriodicOrderError(ValueError):
+class PeriodicOrderError(SetupError):
     def __init__(self, receipt):
         self.receipt = receipt
         super().__init__('No periodic FMM order satisfies the declared error and storage budgets')
@@ -21,7 +23,8 @@ def plan_periodic_order(provider, trees, lattice, *, min_order, max_order, shell
                         projection_budget_bytes=1024**3, remote_budget=None,shift_storage='dense'):
     """Select the first admitted order; never increase budgets or change shells."""
     if table_storage in ('fft_v1','fft_ewald_v1'):
-        raise NotImplementedError('Periodic FFT order planning requires separately admitted screened coefficients')
+        raise UnsupportedFeatureError('Periodic FFT order planning requires separately admitted screened coefficients',
+                                      feature="boundary.periodic", method="mom")
     if (any(type(p) is not int or p < 0 for p in (min_order, max_order))
             or max_order < min_order):
         raise ValueError('Periodic order range must be nonnegative and ordered')
@@ -89,7 +92,8 @@ def plan_periodic_parameters(provider, trees, lattice, *, min_shells, max_shells
     so a failed high-order storage attempt does not stop the shell search.
     """
     if order_options.get('table_storage') in ('fft_v1','fft_ewald_v1'):
-        raise NotImplementedError('Periodic FFT shell planning requires separately admitted screened coefficients')
+        raise UnsupportedFeatureError('Periodic FFT shell planning requires separately admitted screened coefficients',
+                                      feature="boundary.periodic", method="mom")
     if (any(type(s) is not int or s < 1 for s in (min_shells, max_shells))
             or max_shells < min_shells):
         raise ValueError('Periodic shell range must be positive and ordered')

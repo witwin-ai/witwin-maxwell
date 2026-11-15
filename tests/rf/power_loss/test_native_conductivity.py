@@ -6,6 +6,7 @@ import witwin.maxwell as mw
 from witwin.maxwell.compiler.power_loss import compile_power_loss_monitor
 from witwin.maxwell.postprocess.power_loss import compute_power_loss_data
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 @pytest.mark.parametrize('normal', range(3))
@@ -14,11 +15,11 @@ def test_native_thin_slab_loss_and_sigma_derivative(normal):
     size = [.04]*3
     size[normal] = .002
     scene = prepare_scene(mw.Scene(domain=mw.Domain(bounds=((-0.004, .004),)*3),
-        grid=mw.GridSpec.uniform(.004), device='cpu', boundary=mw.BoundarySpec.none(),
-        structures=[mw.Structure(mw.Box(size=size), mw.Material(eps_r=2., sigma_e=sigma))]))
-    monitor = mw.PowerLossMonitor('loss', position=(0.,)*3, size=(.008,)*3, frequencies=(1e9,))
+        grid=mw.GridSpec.uniform(.004), boundary=mw.BoundarySpec.none(),
+        structures=[mw.Structure(mw.Box(size=size), mw.Material(eps_r=2., sigma_e=sigma))]), device="cpu")
+    monitor = mw.monitors.PowerLossMonitor('loss', position=(0.,)*3, size=(.008,)*3, frequencies=(1e9,))
     compiled = compile_power_loss_monitor(scene, monitor)
-    material = scene.compile_materials()
+    material = compile_materials(scene)
     fields = {}
     expected = sigma*0
     for axis, component in enumerate(('Ex', 'Ey', 'Ez')):
@@ -42,10 +43,10 @@ def test_native_thin_slab_loss_and_sigma_derivative(normal):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='requires CUDA')
 def test_loss_conductivity_matches_native_field_decay():
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.012, .012),)*3),
-        grid=mw.GridSpec.uniform(.004), device='cuda', boundary=mw.BoundarySpec.none(),
+        grid=mw.GridSpec.uniform(.004), boundary=mw.BoundarySpec.none(),
         structures=[mw.Structure(mw.Box(size=(.002, .04, .04)), mw.Material(eps_r=2., sigma_e=.3))])
-    solver = mw.Simulation.fdtd(scene, frequency=1e9, full_field_dft=False).prepare().solver
-    monitor = mw.PowerLossMonitor('loss', position=(0.,)*3, size=(.016,)*3, frequencies=(1e9,))
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(full_field_dft=False)).prepare().solver
+    monitor = mw.monitors.PowerLossMonitor('loss', position=(0.,)*3, size=(.016,)*3, frequencies=(1e9,))
     compiled = compile_power_loss_monitor(solver.scene, monitor)
     for component in ('Ex', 'Ey', 'Ez'):
         decay = getattr(solver, 'c'+component.lower()+'_decay')

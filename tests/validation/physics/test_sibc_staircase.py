@@ -41,7 +41,7 @@ def _analytic_gamma(sigma, frequency):
 
 
 def _field(result, component):
-    value = result.field(component)
+    value = result.field(component).isel(f=0).values
     value = value["data"] if isinstance(value, dict) else value
     return value.detach().cpu().numpy()
 
@@ -53,12 +53,11 @@ def _run_voxel_slab(kind, frequency):
     """A flat plate normal to x, assembled from staircased voxel faces via a big cylinder."""
     dx = (_C / frequency) / 40.0
     trans = 4.0 * dx
-    material = mw.LossyMetalMedium(conductivity=_SIGMA) if kind == "sibc" else mw.Material.pec()
+    material = mw.media.LossyMetalMedium(conductivity=_SIGMA) if kind == "sibc" else mw.Material.pec()
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-trans / 2, trans / 2), (-trans / 2, trans / 2))),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.faces(default="periodic", num_layers=10, strength=1.0, x=("pml", "pml")),
-        device="cuda",
         sources=[
             mw.PointDipole(
                 position=(-0.3, 0.0, 0.0),
@@ -78,10 +77,9 @@ def _run_voxel_slab(kind, frequency):
         ],
     )
     result = mw.Simulation.fdtd(
-        scene, absorber="cpml",
-        frequencies=[frequency],
+        scene, frequencies=[frequency], config=mw.FDTDConfig(absorber="cpml",
         run_time=mw.TimeConfig.auto(steady_cycles=16, transient_cycles=24),
-        full_field_dft=True,
+        full_field_dft=True),
     ).run()
     ez = _field(result, "Ez")
     assert np.isfinite(ez).all(), "staircased slab diverged"
@@ -117,20 +115,19 @@ def test_staircased_slab_absorbs_more_than_pec():
 
 
 def _cylinder_scene(axis="z", radius=0.08, material=None):
-    material = material or mw.LossyMetalMedium(conductivity=_SIGMA)
+    material = material or mw.media.LossyMetalMedium(conductivity=_SIGMA)
     return prepare_scene(
         mw.Scene(
             domain=mw.Domain(bounds=((-0.26, 0.26), (-0.26, 0.26), (-0.26, 0.26))),
             grid=mw.GridSpec.uniform((_C / 2.0e9) / 24.0),
             boundary=mw.BoundarySpec.faces(default="pml", num_layers=8, strength=1.0),
-            device="cpu",
             structures=[
                 mw.Structure(
                     geometry=Cylinder(radius=radius, height=0.3, axis=axis, position=(0.0, 0.0, 0.0)),
                     material=material,
                 )
             ],
-        )
+        ), device="cpu"
     )
 
 
@@ -174,7 +171,6 @@ def _run_cylinder(axis, frequency=2.0e9, steps=4000):
         domain=mw.Domain(bounds=((-0.26, 0.26), (-0.26, 0.26), (-0.26, 0.26))),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.faces(default="pml", num_layers=8, strength=1.0),
-        device="cuda",
         sources=[
             mw.PointDipole(
                 position=(-0.17, 0.0, 0.0),
@@ -187,15 +183,17 @@ def _run_cylinder(axis, frequency=2.0e9, steps=4000):
         structures=[
             mw.Structure(
                 geometry=Cylinder(radius=0.08, height=0.34, axis=axis, position=(0.0, 0.0, 0.0)),
-                material=mw.LossyMetalMedium(conductivity=_SIGMA),
+                material=mw.media.LossyMetalMedium(conductivity=_SIGMA),
             )
         ],
     )
     return mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
-        run_time=mw.TimeConfig(time_steps=steps),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps),
+            full_field_dft=True,
+        ),
     ).run()
 
 
@@ -236,7 +234,6 @@ def test_staircased_orientation_equivalence_z_to_x():
             domain=mw.Domain(bounds=((-0.26, 0.26), (-0.26, 0.26), (-0.26, 0.26))),
             grid=mw.GridSpec.uniform(dx),
             boundary=mw.BoundarySpec.faces(default="pml", num_layers=8, strength=1.0),
-            device="cuda",
             sources=[
                 mw.PointDipole(
                     position=source_pos,
@@ -249,15 +246,17 @@ def test_staircased_orientation_equivalence_z_to_x():
             structures=[
                 mw.Structure(
                     geometry=Cylinder(radius=0.08, height=0.34, axis=cyl_axis, position=(0.0, 0.0, 0.0)),
-                    material=mw.LossyMetalMedium(conductivity=_SIGMA),
+                    material=mw.media.LossyMetalMedium(conductivity=_SIGMA),
                 )
             ],
         )
         return mw.Simulation.fdtd(
             scene,
             frequencies=[frequency],
-            run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=12),
-            full_field_dft=True,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=12),
+                full_field_dft=True,
+            ),
         ).run()
 
     reference = build("z", (-0.17, 0.0, 0.0), (0.0, 0.0, 1.0))

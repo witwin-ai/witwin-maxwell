@@ -44,16 +44,19 @@ def _sphere_scene(material: mw.Material) -> mw.Scene:
     through subpixel-averaged staircased cells rather than the flat, grid-aligned
     face the slab scenarios present.
     """
-    scene = base_scene().add_structure(
+    scene = base_scene()
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=SPHERE_RADIUS),
             material=material,
             name="sample",
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(direction=(0, 0, 1), polarization="Ex", source_time=PULSE)
-    )
+        ),
+    ))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PlaneWave(direction=(0, 0, 1), polarization="Ex", source_time=PULSE),
+    ))
     return _observed(scene)
 
 
@@ -69,16 +72,19 @@ def _lossy_metal_slab(conductivity: float) -> mw.Scene:
     physical_cell_count = int(math.ceil(2.0 * HALF_SPAN / DX))
     physical_step = 2.0 * HALF_SPAN / physical_cell_count
     surface = HALF_SPAN - 2.0 * physical_step
-    scene = base_scene().add_structure(
+    scene = base_scene()
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=mw.Box(position=(0.0, 0.0, surface + 0.25), size=(3.0, 3.0, 0.50)),
-            material=mw.LossyMetalMedium(conductivity=conductivity),
+            material=mw.media.LossyMetalMedium(conductivity=conductivity),
             name="lossy_metal_boundary",
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(direction=(0, 0, 1), polarization="Ex", source_time=PULSE)
-    )
+        ),
+    ))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PlaneWave(direction=(0, 0, 1), polarization="Ex", source_time=PULSE),
+    ))
     return _observed(scene, flux_positions=(-0.3, 0.45))
 
 
@@ -92,56 +98,60 @@ def _modulated_phase_scene() -> mw.Scene:
     """
     reference = base_scene()
     scene = mw.Scene(
-        domain=reference.domain,
-        grid=reference.grid,
-        boundary=PERIODIC_BOUNDARY,
-        subpixel_samples=reference.subpixel,
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2 * HALF_SPAN, 2 * HALF_SPAN, 0.1)),
-            material=mw.Material(
-                eps_r=3.0,
-                modulation=mw.ModulationSpec(
-                    frequency=MODULATION_FREQUENCY, amplitude=0.2, phase=math.pi / 3.0
+                domain=reference.domain,
+                grid=reference.grid,
+                boundary=PERIODIC_BOUNDARY,
+                subpixel=reference.subpixel,
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2 * HALF_SPAN, 2 * HALF_SPAN, 0.1)),
+                material=mw.Material(
+                    eps_r=3.0,
+                    modulation=mw.media.ModulationSpec(
+                        frequency=MODULATION_FREQUENCY, amplitude=0.2, phase=math.pi / 3.0
+                    ),
+                    name="phase_modulated_dielectric",
                 ),
-                name="phase_modulated_dielectric",
+                name="sample",
             ),
-            name="sample",
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0, 0, 1),
-            polarization="Ex",
-            source_time=mw.CW(frequency=FREQUENCIES[0], amplitude=1.0),
-        )
-    )
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=(0, 0, 1),
+                polarization="Ex",
+                source_time=mw.CW(frequency=FREQUENCIES[0], amplitude=1.0),
+            ),
+            ),
+            )
     return _observed(scene, frequencies=MODULATED_FREQUENCIES)
 
 
 def _static_medium2d_scene() -> mw.Scene:
     """Nondispersive conductive sheet, distinct from the Graphene model."""
-    scene = base_scene().add_structure(
+    scene = base_scene()
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=mw.Box(
                 position=(0.0, 0.0, 0.0),
                 size=(2 * HALF_SPAN, 2 * HALF_SPAN, 0.0),
             ),
-            material=mw.Medium2D(sigma_s=0.02, name="static_sheet"),
+            material=mw.media.Medium2D(sigma_s=0.02, name="static_sheet"),
             name="static_medium2d_sheet",
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(direction=(0, 0, 1), polarization="Ex", source_time=PULSE)
-    )
+        ),
+    ))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PlaneWave(direction=(0, 0, 1), polarization="Ex", source_time=PULSE),
+    ))
     return _observed(scene)
 
 
 def _material_region_scene() -> mw.Scene:
     """Uniform design density lowered to the same homogeneous slab in both solvers."""
-    scene = base_scene().add_material_region(
+    scene = base_scene()
+    scene = scene.updated(material_regions=(
+        *scene.material_regions,
         mw.MaterialRegion(
             name="uniform_design_region",
             geometry=mw.Box(
@@ -150,11 +160,12 @@ def _material_region_scene() -> mw.Scene:
             ),
             density=torch.full((2, 2, 2), 0.5),
             eps_bounds=(1.0, 5.0),
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(direction=(0, 0, 1), polarization="Ex", source_time=PULSE)
-    )
+        ),
+    ))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PlaneWave(direction=(0, 0, 1), polarization="Ex", source_time=PULSE),
+    ))
     return _observed(scene)
 
 

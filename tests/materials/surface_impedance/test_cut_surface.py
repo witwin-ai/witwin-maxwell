@@ -16,16 +16,21 @@ def _mesh(*, aligned=False):
                              (.008, .008, 0.), (-.008, .008, 0.)), dtype=torch.float64, device="cuda")
     if not aligned:
         vertices[:, 2] = .3*vertices[:, 0]+.001
-    return mw.SurfaceMesh(vertices, ((0, 1, 2), (0, 2, 3)))
+    return mw.geometry.SurfaceMesh(vertices, ((0, 1, 2), (0, 2, 3)))
 
 
 def _simulation(mesh=None, *, graph=False, source=()):
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.04, .04),)*3), grid=mw.GridSpec.uniform(.005),
-        boundary=mw.BoundarySpec.none(), device="cuda:0",
-        structures=(mw.Structure(geometry=_mesh() if mesh is None else mesh, material=mw.Material(pec=True)),),
+        boundary=mw.BoundarySpec.none(), structures=(mw.Structure(geometry=_mesh() if mesh is None else mesh, material=mw.Material(pec=True)),),
         sources=source)
-    return mw.Simulation.fdtd(scene, frequency=1.e9, cuda_graph=graph, full_field_dft=True,
-        spectral_sampler=mw.SpectralSampler(window="none"), run_time=mw.TimeConfig(time_steps=64, dt=5.e-12))
+    return mw.Simulation.fdtd(scene, frequencies=1.e9, config=mw.FDTDConfig(cuda_graph=graph, full_field_dft=True,
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"), run_time=mw.TimeConfig(time_steps=64, dt=5.e-12), device="cuda:0"))
+
+
+def _with_scene(simulation, **fields):
+    """The same FDTD run on ``simulation.scene.updated(**fields)``."""
+    return mw.Simulation.fdtd(simulation.scene.updated(**fields), frequencies=simulation.frequencies,
+                              excitations=simulation.excitations, config=simulation.config)
 
 
 def test_true_clipping_preserves_oblique_area_and_linear_moment():
@@ -98,7 +103,7 @@ def test_exact_planar_surface_lowers_to_existing_native_pec_edges():
 
 
 def test_bent_surface_has_positive_true_area_without_occupancy():
-    mesh = mw.SurfaceMesh.bent_rectangle(width=.02, length=.016, radius=.03, segments=12, device="cuda")
+    mesh = mw.geometry.SurfaceMesh.bent_rectangle(width=.02, length=.016, radius=.03, segments=12, device="cuda")
     solver = _simulation(mesh).prepare().solver
     expected = 2*.03*math.sin(.02/(2*.03*12))*12*.016
     assert float(solver._cut_surface["physical_area"]) == pytest.approx(expected, rel=1.e-13)
@@ -115,7 +120,7 @@ def test_overlapping_source_is_rejected_without_deleting_its_work():
 @pytest.mark.parametrize("bent", (False, True))
 def test_source_free_full_yee_modified_energy_is_conserved(bent):
     from witwin.maxwell.fdtd.runtime.stepping import update_magnetic_fields, update_electric_fields
-    mesh = mw.SurfaceMesh.bent_rectangle(width=.02, length=.016, radius=.03, segments=12,
+    mesh = mw.geometry.SurfaceMesh.bent_rectangle(width=.02, length=.016, radius=.03, segments=12,
                                          device="cuda") if bent else _mesh()
     solver = _simulation(mesh).prepare().solver
     generator = torch.Generator(device="cuda").manual_seed(33)
@@ -135,7 +140,7 @@ def test_source_free_full_yee_modified_energy_is_conserved(bent):
     energies = []
     for _ in range(512):
         previous_h = {name: getattr(solver, name).clone() for name in magnetic_weight}
-        update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
+        update_magnetic_fields(solver)
         # Exact leapfrog invariant: electric integer-time energy plus the product
         # of the two magnetic half-time states, rather than a simultaneous norm.
         energy = sum((weight*getattr(solver, name).double().square()).sum()
@@ -143,7 +148,7 @@ def test_source_free_full_yee_modified_energy_is_conserved(bent):
         energy += sum((weight*previous_h[name].double()*getattr(solver, name).double()).sum()
                       for name, weight in magnetic_weight.items())
         energies.append(energy)
-        update_electric_fields(solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+        update_electric_fields(solver)
         apply_cut_surface_constraints(solver)
     energies = torch.stack(energies)
     relative_drift = (energies-energies[0]).abs().max()/energies[0]
@@ -157,18 +162,18 @@ def test_oblique_and_bent_scene_graph_match_eager_and_resume():
     graph = _simulation(graph=True, source=(source,)).run()
     assert graph.solver._cuda_graph_active
     for name in ("Ex", "Ey", "Ez"):
-        torch.testing.assert_close(graph.tensor(name), eager.tensor(name), rtol=1.e-6, atol=1.e-8)
+        torch.testing.assert_close(graph.field(name).isel(f=0).values, eager.field(name).isel(f=0).values, rtol=1.e-6, atol=1.e-8)
     checkpoint = _simulation(source=(source,)).prepare().run_until(27)
     resumed = _simulation(graph=True, source=(source,)).prepare().run(resume_from=checkpoint)
     for name in ("Ex", "Ey", "Ez"):
-        torch.testing.assert_close(resumed.tensor(name), eager.tensor(name), rtol=1.e-6, atol=1.e-8)
+        torch.testing.assert_close(resumed.field(name).isel(f=0).values, eager.field(name).isel(f=0).values, rtol=1.e-6, atol=1.e-8)
 
 
 def test_cyclic_rotation_commutes_with_physical_projection():
     first = _simulation().prepare().solver
     mesh = _mesh()
     vertices, triangles = mesh.to_mesh()
-    rotated = mw.SurfaceMesh(vertices[:, (1, 2, 0)], triangles)
+    rotated = mw.geometry.SurfaceMesh(vertices[:, (1, 2, 0)], triangles)
     second = _simulation(rotated).prepare().solver
     generator = torch.Generator(device="cuda").manual_seed(128)
     for old, new in (("Ex", "Ez"), ("Ey", "Ex"), ("Ez", "Ey")):
@@ -196,8 +201,8 @@ def test_cut_surface_native_graph_batch_has_private_projection_buffers_and_repea
         profile="ideal", polarization="Ez", source_time=mw.CW(1.e9, amplitude=amplitude)),))
         for amplitude in (1., 2.)]
     references = [simulation.run() for simulation in simulations]
-    batch = mw.Simulation.batch(simulations, variation=mw.BatchVariation(sources=("drive",)),
-        outputs=mw.BatchOutput(fields=("Ez",)), execution=mw.BatchExecution(devices=("cuda:0",),
+    batch = mw.Simulation.batch(simulations, variation=mw.execution.BatchVariation(sources=("drive",)),
+        outputs=mw.execution.BatchOutput(fields=("Ez",)), execution=mw.execution.BatchExecution(devices=("cuda:0",),
         batch_size=2, graph="required", graph_steps=7))
     with batch.prepare() as prepared:
         first = prepared.run().results()
@@ -208,30 +213,27 @@ def test_cut_surface_native_graph_batch_has_private_projection_buffers_and_repea
         assert graphs == tuple(prepared._graphs.values())
         assert pointers == [solver._cut_surface["electric"].data_ptr() for solver in prepared._slot.solvers]
     for index, reference in enumerate(references):
-        torch.testing.assert_close(first[index].tensor("Ez"), reference.tensor("Ez"), rtol=1.e-5, atol=1.e-8)
-        torch.testing.assert_close(second[index].tensor("Ez"), first[index].tensor("Ez"), rtol=0, atol=0)
+        torch.testing.assert_close(first[index].field("Ez").isel(f=0).values, reference.field("Ez").isel(f=0).values, rtol=1.e-5, atol=1.e-8)
+        torch.testing.assert_close(second[index].field("Ez").isel(f=0).values, first[index].field("Ez").isel(f=0).values, rtol=0, atol=0)
 
 
 def test_overlapping_port_and_finite_copper_surface_fail_preparation():
-    simulation = _simulation()
-    simulation.scene.ports = (mw.LumpedPort(name="feed", positive=(0., 0., .005),
+    simulation = _with_scene(_simulation(), ports=(mw.LumpedPort(name="feed", positive=(0., 0., .005),
         negative=(0., 0., -.005), voltage_path=mw.AxisPath("z"),
-        current_surface=mw.Box(position=(0., 0., -.0025), size=(.015, .015, 0.))),)
+        current_surface=mw.Box(position=(0., 0., -.0025), size=(.015, .015, 0.))),))
     with pytest.raises(NotImplementedError, match="joint port/constraint"):
         simulation.prepare()
     # Finite copper SurfaceMesh is owned by the conformal two-sided thin-sheet
     # runtime, which prepares on CUDA but still rejects ports in the scene.
-    simulation = _simulation()
-    simulation.scene.structures = (mw.Structure(geometry=_mesh(),
-        material=mw.CopperFoil(thickness=2.e-6, frequency_range=(.5e9, 2.e9))),)
+    simulation = _with_scene(_simulation(), structures=(mw.Structure(geometry=_mesh(),
+        material=mw.media.CopperFoil(thickness=2.e-6, frequency_range=(.5e9, 2.e9))),))
     prepared = simulation.prepare()
     assert prepared.solver._thin_sheets and prepared.solver._cut_surface is None
-    simulation = _simulation()
-    simulation.scene.structures = (mw.Structure(geometry=_mesh(),
-        material=mw.CopperFoil(thickness=2.e-6, frequency_range=(.5e9, 2.e9))),)
-    simulation.scene.ports = (mw.LumpedPort(name="feed", positive=(0., 0., .005),
+    simulation = _with_scene(_simulation(), structures=(mw.Structure(geometry=_mesh(),
+        material=mw.media.CopperFoil(thickness=2.e-6, frequency_range=(.5e9, 2.e9))),),
+        ports=(mw.LumpedPort(name="feed", positive=(0., 0., .005),
         negative=(0., 0., -.005), voltage_path=mw.AxisPath("z"),
-        current_surface=mw.Box(position=(0., 0., -.0025), size=(.015, .015, 0.))),)
+        current_surface=mw.Box(position=(0., 0., -.0025), size=(.015, .015, 0.))),))
     # Sheet gap feeds are admitted (D6); any other port beside a conformal sheet is rejected.
     with pytest.raises(NotImplementedError, match="support only sheet gap feeds as ports"):
         simulation.prepare()
@@ -267,8 +269,8 @@ def test_clipped_geometry_and_zero_tangent_trace_survive_subdivision_and_normal_
     original = _mesh()
     vertices, faces = original.to_mesh()
     center = vertices.mean(0, keepdim=True)
-    refined = mw.SurfaceMesh(torch.cat((vertices, center)), ((0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 0, 4)))
-    reversed_mesh = mw.SurfaceMesh(vertices, faces.flip(1))
+    refined = mw.geometry.SurfaceMesh(torch.cat((vertices, center)), ((0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 0, 4)))
+    reversed_mesh = mw.geometry.SurfaceMesh(vertices, faces.flip(1))
     solvers = [_simulation(mesh).prepare().solver for mesh in (original, refined, reversed_mesh)]
     generator = torch.Generator(device="cuda").manual_seed(591)
     for name in ("Ex", "Ey", "Ez"):
@@ -297,7 +299,7 @@ def test_clipped_geometry_and_zero_tangent_trace_survive_subdivision_and_normal_
 def test_closed_surface_queries_use_true_contact_and_winding_without_voxelization():
     from witwin.maxwell.mom.mesh import sphere_mesh
     sphere = sphere_mesh(.02, subdivisions=1)
-    mesh = mw.SurfaceMesh(sphere.vertices, sphere.faces)
+    mesh = mw.geometry.SurfaceMesh(sphere.vertices, sphere.faces)
     points = torch.cat((sphere.vertices[:1], sphere.vertices.new_tensor(((0., 0., 0.), (.04, 0., 0.)))))
     interior, contact = mesh.classify_query_points(points)
     assert contact.tolist() == [True, False, False]
@@ -317,15 +319,15 @@ def test_cut_surface_tfsf_injection_support_is_checked_before_stepping():
 def test_cut_surface_declines_geometry_derivatives_instead_of_detaching_them():
     width = torch.tensor(.02, device="cuda", requires_grad=True)
     with pytest.raises(NotImplementedError, match="fixed geometry"):
-        mw.SurfaceMesh.bent_rectangle(width=width, length=.016, radius=.03, device="cuda")
+        mw.geometry.SurfaceMesh.bent_rectangle(width=width, length=.016, radius=.03, device="cuda")
     vertices, faces = _mesh().to_mesh()
     with pytest.raises(NotImplementedError, match="fixed geometry"):
-        mw.SurfaceMesh(vertices.requires_grad_(), faces)
+        mw.geometry.SurfaceMesh(vertices.requires_grad_(), faces)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires two visible CUDA devices")
 def test_distributed_cut_surfaces_fail_before_unowned_projection():
     scene = _simulation().scene
-    config = mw.FDTDParallelConfig(devices=("cuda:0","cuda:1"),transport="cuda_p2p",overlap=False,gather_fields=True)
+    config = mw.fdtd.FDTDParallelConfig(devices=("cuda:0","cuda:1"),transport="cuda_p2p",overlap=False,gather_fields=True)
     with pytest.raises(NotImplementedError,match="surface-current ownership"):
-        mw.Simulation.fdtd(scene,frequency=1.e9,parallel=config).prepare()
+        mw.Simulation.fdtd(scene,frequencies=1.e9,config=mw.FDTDConfig(parallel=config)).prepare()

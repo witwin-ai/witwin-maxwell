@@ -12,14 +12,14 @@ scene = mw.Scene(
     sources=[mw.PlaneWave(direction=(0, 0, 1), polarization=(1, 0, 0))],
 )
 simulation = mw.Simulation.mom(
-    scene, frequency=3e8, config=mw.MoMConfig(subdivisions=2)
+    scene, frequencies=3e8, config=mw.mom.MoMConfig(subdivisions=2)
 )
 prepared = simulation.prepare()
 handle = prepared.solver.handle
 result = prepared.run()
 points = torch.tensor([[0.2, 0.05, 0.03]], device="cuda", dtype=torch.float64)
 E, H = result.query_fields(points, region_id="exterior", field_kind="total")
-J, M = result.surface_currents.J, result.surface_currents.M
+J, M = mw.mom.surface_currents(result).J, mw.mom.surface_currents(result).M
 result.save("surface.pt")
 restored = mw.Result.load("surface.pt", scene=scene)
 ```
@@ -62,7 +62,7 @@ incident wave. Reference accuracy is never inferred from an algebraic residual.
 | Arbitrary-initial-guess correction | `mom.linalg.correct(handle, b, x0, stopping_rule)` |
 | Project native currents | `mom.mesh.project_current(source_basis, target_basis, x)` |
 | Decode physical fields | `result.query_fields(points, region_id=..., field_kind=...)` |
-| Radiation-zone amplitude | `result.far_field(unit_directions)` |
+| Radiation-zone amplitude | `mw.mom.far_field(result, unit_directions)` returns `(F_E, F_H)` as `FarFieldData` (dims `f, direction, component`; units V and A) |
 
 ### Exact compact metric storage
 

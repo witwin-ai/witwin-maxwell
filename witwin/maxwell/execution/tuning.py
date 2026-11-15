@@ -132,7 +132,7 @@ def prepare_tuned_batch(batch):
         limits = {d: max(0, int(torch.cuda.mem_get_info(d)[0]) - batch.execution.reserve_bytes) for d in devices}
     rng_devices = {torch.device(d).index for d in devices}
     for model in batch.simulations:
-        device = torch.device(model.scene.device)
+        device = torch.device(model.config.device)
         if device.type == "cuda":
             rng_devices.add(device.index if device.index is not None else torch.cuda.current_device())
         if model.scene_module is not None:

@@ -15,6 +15,8 @@ from .wire_lossy import (
     build_lossy_segment_model,
     resolve_lossy_band,
 )
+from ..errors import UnsupportedFeatureError
+from ..compiler.thin_wire import compile_thin_wires
 
 
 @dataclass(frozen=True)
@@ -173,7 +175,7 @@ def replay_wire_state(
     if runtime is None:
         raise RuntimeError("Wire replay requires an initialized wire runtime.")
     if runtime.lossy_model is not None:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Field-coupled reverse/adjoint replay of a finite-conductor thin wire is "
             "not implemented: the lossy current/ADE transpose and field-coupled "
             "conductivity sensitivity dI/dsigma remain deferred. The fixed-pole "
@@ -181,7 +183,8 @@ def replay_wire_state(
             "dissipation channel on LossySegmentModel. The analytic reference "
             "conductivity adjoint is also available through "
             "witwin.maxwell.fdtd.wire_lossy.analytic_ac_resistance; run a PEC wire for "
-            "field-coupled differentiable workflows."
+            "field-coupled differentiable workflows.",
+            feature="thin_wire", method="fdtd"
         )
     coeff = runtime.coefficients
     sampled = _field_vector(
@@ -774,31 +777,37 @@ def _wire_cfl_limit(
 
 
 def _reject_unsupported_composition(solver) -> None:
-    if solver.scene.boundary.uses_kind("bloch"):
-        raise NotImplementedError(
-            "Thin-wire FDTD does not yet support Bloch-periodic phase topology."
+    if solver.scene.scene.boundary.uses_kind("bloch"):
+        raise UnsupportedFeatureError(
+            "Thin-wire FDTD does not yet support Bloch-periodic phase topology.",
+            feature="thin_wire", method="fdtd"
         )
     if getattr(solver, "full_aniso_enabled", False):
-        raise NotImplementedError(
-            "Thin-wire FDTD does not yet support full off-diagonal anisotropic electric updates."
+        raise UnsupportedFeatureError(
+            "Thin-wire FDTD does not yet support full off-diagonal anisotropic electric updates.",
+            feature="thin_wire", method="fdtd"
         )
     if getattr(solver, "conductive_enabled", False):
-        raise NotImplementedError(
-            "Thin-wire FDTD does not yet support a conductive background electric update."
+        raise UnsupportedFeatureError(
+            "Thin-wire FDTD does not yet support a conductive background electric update.",
+            feature="thin_wire", method="fdtd"
         )
     if getattr(solver, "dispersive_enabled", False):
-        raise NotImplementedError("Thin-wire FDTD does not yet support dispersive background media.")
+        raise UnsupportedFeatureError("Thin-wire FDTD does not yet support dispersive background media.",
+                                      feature="thin_wire", method="fdtd")
     if getattr(solver, "nonlinear_enabled", False) or getattr(solver, "modulation_enabled", False):
-        raise NotImplementedError(
-            "Thin-wire FDTD does not yet support nonlinear or time-modulated background media."
+        raise UnsupportedFeatureError(
+            "Thin-wire FDTD does not yet support nonlinear or time-modulated background media.",
+            feature="thin_wire", method="fdtd"
         )
     material_model = getattr(solver, "_compiled_material_model", None)
     if getattr(solver, "surface_impedance_enabled", False) or (
         material_model is not None and material_model.get("surface_impedance")
     ):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Thin-wire FDTD cannot share conductor ownership with a surface-impedance "
-            "boundary until wire loss and SIBC power accounting are coupled."
+            "boundary until wire loss and SIBC power accounting are coupled.",
+            feature="thin_wire", method="fdtd"
         )
 
 
@@ -816,13 +825,13 @@ def _maxwell_cfl_limit(solver) -> float:
 
 
 def initialize_wire_runtime(solver) -> WireRuntime | None:
-    wires = tuple(getattr(solver.scene, "thin_wires", ()))
+    wires = tuple(getattr(solver.scene.scene, "thin_wires", ()))
     if not wires:
         solver._wire_runtime = None
         return None
 
     _reject_unsupported_composition(solver)
-    network = solver.scene.compile_thin_wires(device=solver.device)
+    network = compile_thin_wires(solver.scene, device=solver.device)
     _validate_compiled_topology(network)
     monitors = compile_wire_monitors(solver.scene, network)
     device = solver.device

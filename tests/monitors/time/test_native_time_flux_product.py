@@ -13,10 +13,10 @@ def _geometry(axis,graded=False,sign='+'):
     nodes=np.array([-.04,-.03,-.02,-.01,0.,.01,.02,.03,.04])
     if graded:nodes=np.array([-.04,-.025,-.01,0.,.006,.02,.04])
     scene=prepare_scene(mw.Scene(domain=mw.Domain(bounds=((-0.04,.04),)*3),
-        grid=mw.GridSpec.custom(nodes,nodes,nodes),boundary=mw.BoundarySpec.none(),device='cpu'))
+        grid=mw.GridSpec.custom(nodes,nodes,nodes),boundary=mw.BoundarySpec.none()), device="cpu")
     solver=SimpleNamespace(scene=scene,device='cpu',_copper_foils=[])
     for name in ('Ex','Ey','Ez','Hx','Hy','Hz'):
-        coords=component_coords(scene,name);xyz=np.meshgrid(*coords,indexing='ij')
+        coords=component_coords(scene,name, device=scene.device);xyz=np.meshgrid(*coords,indexing='ij')
         setattr(solver,name,torch.tensor(2.+3*xyz[0]-4*xyz[1]+5*xyz[2],dtype=torch.float32))
     fields={'x':('Ey','Ez','Hy','Hz'),'y':('Ex','Ez','Hx','Hz'),'z':('Ex','Ey','Hx','Hy')}[axis]
     record=dict(axis=axis,position=0.,fields=fields,normal_direction=sign)
@@ -32,7 +32,7 @@ def test_exact_area_and_all_normal_samples(axis,graded,sign):
     assert float(record['flux_weights'].sum())==pytest.approx(.08**2,rel=2e-7)
     assert record['flux_scale']==(1 if sign=='+' else -1)
     for name,meta in record['flux_components'].items():
-        normal='xyz'.index(axis);coords=component_coords(solver.scene,name)
+        normal='xyz'.index(axis);coords=component_coords(solver.scene,name, device=solver.scene.device)
         tangent=[i for i in range(3) if i!=normal]
         a,b=np.meshgrid(coords[tangent[0]],coords[tangent[1]],indexing='ij')
         xyz=[None,None,None];xyz[normal]=record['yee_plane_position'];xyz[tangent[0]]=a;xyz[tangent[1]]=b
@@ -43,7 +43,7 @@ def test_exact_area_and_all_normal_samples(axis,graded,sign):
 
 def test_mapped_time_flux_requires_explicit_qualification():
     with pytest.raises(NotImplementedError,match='mapped'):
-        prepare_time_flux(SimpleNamespace(scene=SimpleNamespace(coordinates=object())),{},1)
+        prepare_time_flux(SimpleNamespace(scene=SimpleNamespace(scene=SimpleNamespace(coordinates=object()))),{},1)
 
 
 def _oracle(ea,eb,ha,hb,ea_pos,eb_pos,weights,average):
@@ -91,7 +91,7 @@ def test_actual_public_time_flux_uses_live_fields_and_copper_right_heads(copper,
 def _passive_film():
     # At1GHz delta=159.15um; t/delta=.942 and the declared full-band
     # displacement/conduction ratio stays below the unchanged1e-5 guard.
-    return mw.CopperFoil(thickness=150e-6,conductivity=1e4,frequency_range=(.5e9,1.5e9))
+    return mw.media.CopperFoil(thickness=150e-6,conductivity=1e4,frequency_range=(.5e9,1.5e9))
 
 
 @pytest.mark.parametrize('graph',[False,True])
@@ -113,16 +113,16 @@ def _run_public_time_fixture(copper,graph,tmp_path,*,passive_film=False,controll
     if copper:
         structures=[mw.Structure(name='foil',geometry=mw.Box(position=torch.tensor([.01,0.,0.],dtype=torch.float64),
             size=torch.tensor([0.,.02,.02],dtype=torch.float64)),
-            material=(_passive_film()if passive_film else mw.CopperFoil(thickness=2e-6,frequency_range=(.5e9,2e9))))]
+            material=(_passive_film()if passive_film else mw.media.CopperFoil(thickness=2e-6,frequency_range=(.5e9,2e9))))]
     source_position=(.0025,.0025,-.005)if passive_film else(-.005,0.,-.005)
     steps=1 if controlled_state else 48
     scene=mw.Scene(domain=mw.Domain(bounds=((-0.02,.02),)*3),grid=mw.GridSpec.uniform(.005),
-        boundary=mw.BoundarySpec.pml(num_layers=3),device='cuda',structures=structures,
+        boundary=mw.BoundarySpec.pml(num_layers=3),structures=structures,
         sources=[]if controlled_state else[mw.PointDipole(position=source_position,polarization='Ey',width=.0005,
             source_time=mw.CW(1e9))],
-        monitors=[mw.FluxTimeMonitor('time',axis='z',position=0.,interval=1)])
-    simulation=mw.Simulation.fdtd(scene,frequency=1e9,run_time=mw.TimeConfig(time_steps=steps),cuda_graph=graph,
-        full_field_dft=False,spectral_sampler=mw.SpectralSampler(window='none',normalize_source=False)).prepare()
+        monitors=[mw.monitors.FluxTimeMonitor('time',axis='z',position=0.,interval=1)])
+    simulation=mw.Simulation.fdtd(scene,frequencies=1e9,config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps),cuda_graph=graph,
+        full_field_dft=False,spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=False))).prepare()
     solver=simulation.solver;captured=[];original=solver.accumulate_time_observers
     initial_state=None
     if controlled_state:
@@ -153,9 +153,9 @@ def _run_public_time_fixture(copper,graph,tmp_path,*,passive_film=False,controll
         captured.append((fields,sides));original(n)
     solver.accumulate_time_observers=observe
     result=simulation.run();assert bool(solver._cuda_graph_active)==graph
-    trace=result.monitor('time');actual=trace['flux'].detach().cpu().numpy()
+    trace=result.raw_monitor('time');actual=trace['flux'].detach().cpu().numpy()
     assert len(captured)==steps and len(actual)==steps
-    axes={name:component_coords(solver.scene,name) for name in ('Ex','Ey','Hx','Hy')}
+    axes={name:component_coords(solver.scene,name, device=solver.scene.device) for name in ('Ex','Ey','Hx','Hy')}
     nodes=solver.scene.z_nodes64;z=int(np.argmin(abs(nodes)))
     widths=[np.asarray(solver.scene.dx_primal64),np.asarray(solver.scene.dy_primal64)]
     centers=[np.asarray(solver.scene.x_half64),np.asarray(solver.scene.y_half64)]
@@ -195,7 +195,7 @@ def _run_public_time_fixture(copper,graph,tmp_path,*,passive_film=False,controll
     assert trace['field_time_offsets_steps']=={'E':0.,'H':-.5}
     file=tmp_path/'time-result.pt';result.save(file)
     restored=mw.Result.load(file,scene=scene,map_location='cpu').monitor('time')
-    torch.testing.assert_close(restored['flux'],trace['flux'].cpu(),rtol=0,atol=0)
+    torch.testing.assert_close(restored.values,trace['flux'].cpu(),rtol=0,atol=0)
     if controlled_state:assert impact>1e-5
     return receipt
 
@@ -271,11 +271,11 @@ def test_passive_film_localized_source_has_zero_split_edge_support():
     from witwin.maxwell.compiler.copper_foil import compile_copper_faces
     from witwin.maxwell.fdtd.excitation.injection import _normalized_point_dipole_profile,_sample_control_widths
     scene=prepare_scene(mw.Scene(domain=mw.Domain(bounds=((-0.02,.02),)*3),grid=mw.GridSpec.uniform(.005),
-        boundary=mw.BoundarySpec.pml(num_layers=3),device='cpu',structures=[mw.Structure(name='film',
-        geometry=mw.Box(position=torch.tensor([.01,0.,0.],dtype=torch.float64),size=torch.tensor([0.,.02,.02],dtype=torch.float64)),material=_passive_film())]))
+        boundary=mw.BoundarySpec.pml(num_layers=3),structures=[mw.Structure(name='film',
+        geometry=mw.Box(position=torch.tensor([.01,0.,0.],dtype=torch.float64),size=torch.tensor([0.,.02,.02],dtype=torch.float64)),material=_passive_film())]), device="cpu")
     faces=[f for f in compile_copper_faces(scene,device='cpu')if f.component==1]
     assert len(faces)==1
-    coords=[torch.as_tensor(a,dtype=torch.float32)for a in component_coords(scene,'Ey')]
+    coords=[torch.as_tensor(a,dtype=torch.float32)for a in component_coords(scene,'Ey', device=scene.device)]
     xyz=torch.meshgrid(*coords,indexing='ij');widths=[_sample_control_widths(a)for a in coords]
     volume=widths[0][:,None,None]*widths[1][None,:,None]*widths[2][None,None,:]
     masses=[]
@@ -290,7 +290,7 @@ def test_passive_film_localized_source_has_zero_split_edge_support():
 
 def test_passive_film_keeps_original_good_conductor_guard():
     with pytest.raises(ValueError,match='omega.*conductivity'):
-        mw.CopperFoil(thickness=150e-6,conductivity=1e4,frequency_range=(.5e9,2e9))
+        mw.media.CopperFoil(thickness=150e-6,conductivity=1e4,frequency_range=(.5e9,2e9))
 
 
 def test_nonmagnetic_background_scan_is_once_without_constant_volumes(monkeypatch):

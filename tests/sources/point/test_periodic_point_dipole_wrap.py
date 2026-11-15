@@ -27,12 +27,11 @@ CORNER = (0.98e-3, 0.01e-3, 0.0)  # inside the last x cell and the first y cell
 
 def _narrow_scene(source, *, boundary=None, pml_layers=40):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, PERIOD), (0.0, PERIOD), (-2.0e-3, 2.0e-3))),
-        grid=mw.GridSpec.uniform(STEP),
-        boundary=boundary or mw.BoundarySpec.faces(default="pml", x="periodic", y="periodic", num_layers=pml_layers),
-        device="cuda",
-    )
-    scene.add_source(source)
+                domain=mw.Domain(bounds=((0.0, PERIOD), (0.0, PERIOD), (-2.0e-3, 2.0e-3))),
+                grid=mw.GridSpec.uniform(STEP),
+                boundary=boundary or mw.BoundarySpec.faces(default="pml", x="periodic", y="periodic", num_layers=pml_layers),
+                sources=(source,),
+            )
     return scene
 
 
@@ -51,7 +50,7 @@ def _dipole(profile, polarization, position=CORNER, amplitude=1.0):
 @pytest.mark.parametrize("polarization", ("Ex", "Ez"))
 def test_narrow_period_dipole_compiles_one_patch_with_unit_moment(profile, polarization):
     scene = _narrow_scene(_dipole(profile, polarization))
-    solver = mw.Simulation.fdtd(scene, frequencies=[FREQUENCY], run_time=mw.TimeConfig(time_steps=1)).prepare().solver
+    solver = mw.Simulation.fdtd(scene, frequencies=[FREQUENCY], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare().solver
     terms = solver._source_terms
     assert len(terms) == 1
     term = terms[0]
@@ -75,15 +74,14 @@ def test_narrow_period_dipole_compiles_one_patch_with_unit_moment(profile, polar
 
 def _sheet_or_dipole_plane(source, *, steps=1600):
     scene = _narrow_scene(source, pml_layers=10)
-    scene.add_monitor(mw.PlaneMonitor("far", axis="z", position=1.8e-3, fields=("Ex",)))
+    scene = scene.updated(monitors=(*scene.monitors, mw.PlaneMonitor("far", axis="z", position=1.8e-3, fields=("Ex",))))
     result = mw.Simulation.fdtd(
-        scene, absorber="cpml",
-        frequencies=[FREQUENCY],
+        scene, frequencies=[FREQUENCY], config=mw.FDTDConfig(absorber="cpml",
         run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        full_field_dft=False),
     ).run()
-    return result.monitor("far")["data"].detach().to(torch.complex128).cpu()
+    return result.monitor("far", freq_index=0).sel(component="Ex").values.detach().to(torch.complex128).cpu()
 
 
 @pytest.mark.parametrize("profile", ("ideal", "gaussian"))
@@ -132,28 +130,30 @@ def _supercell_fields(boundary, cells, weights, *, profile, polarization, offset
         domain=mw.Domain(bounds=((0.0, cells * SUPERCELL_PERIOD), *SUPERCELL_TRANSVERSE)),
         grid=mw.GridSpec.uniform(SUPERCELL_STEP),
         boundary=boundary,
-        device="cuda",
     )
     extra = {"profile": "ideal"} if profile == "ideal" else {"width": 0.03}
     for index, weight in enumerate(weights):
         if weight == 0.0:
             continue
         x, y, z = offset
-        scene.add_source(
+        scene = scene.updated(sources=(
+            *scene.sources,
             mw.PointDipole(
                 position=(x + index * SUPERCELL_PERIOD, y, z),
                 polarization=polarization,
                 source_time=mw.GaussianPulse(1.0e9, fwidth=0.6e9, amplitude=float(weight)),
                 name=f"src{index}",
                 **extra,
-            )
-        )
-    scene.add_monitor(mw.PointMonitor("probe", (0.4, 0.125, 0.125), fields=("Ez",)))
+            ),
+        ))
+    scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.4, 0.125, 0.125), fields=("Ez",))))
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=300),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=300),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     solver = result.solver
     fields = {name: getattr(solver, name).detach().double() for name in SUPERCELL_FIELDS}
@@ -206,13 +206,12 @@ def test_shard_interface_rebuild_keeps_periodic_wrap():
     # On one shard the interface rebuild with global == local indices must
     # reproduce the compiled plane, including the folded periodic y/z factors.
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-2.0e-3, 2.0e-3), (0.0, PERIOD), (0.0, PERIOD))),
-        grid=mw.GridSpec.uniform(STEP),
-        boundary=mw.BoundarySpec.faces(default="pml", y="periodic", z="periodic", num_layers=40),
-        device="cuda",
-    )
-    scene.add_source(_dipole("ideal", "Ex", position=(0.01e-3, 0.98e-3, 0.99e-3)))
-    solver = mw.Simulation.fdtd(scene, frequencies=[FREQUENCY], run_time=mw.TimeConfig(time_steps=1)).prepare().solver
+                domain=mw.Domain(bounds=((-2.0e-3, 2.0e-3), (0.0, PERIOD), (0.0, PERIOD))),
+                grid=mw.GridSpec.uniform(STEP),
+                boundary=mw.BoundarySpec.faces(default="pml", y="periodic", z="periodic", num_layers=40),
+                sources=(_dipole("ideal", "Ex", position=(0.01e-3, 0.98e-3, 0.99e-3)),),
+            )
+    solver = mw.Simulation.fdtd(scene, frequencies=[FREQUENCY], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare().solver
     (term,) = solver._source_terms
     assert term.get("axis_factors") is not None
     source = solver._compiled_sources[0]

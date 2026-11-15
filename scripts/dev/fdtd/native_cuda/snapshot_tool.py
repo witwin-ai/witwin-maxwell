@@ -2,7 +2,7 @@
 
 Usage (from maxwell/, witwin2 env, with the extension built):
 
-    WITWIN_MAXWELL_FDTD_BACKEND=cuda WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION=1 \
+    WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION=1 \
     python scripts/dev/fdtd/native_cuda/snapshot_tool.py save
     ... make a perf change, rebuild ...
     python scripts/dev/fdtd/native_cuda/snapshot_tool.py check
@@ -25,7 +25,7 @@ import torch
 import witwin.maxwell as mw
 from benchmark.runner import _clone_scene
 from benchmark.scenes import SCENARIOS
-from witwin.maxwell.simulation import Simulation, TimeConfig
+from witwin.maxwell.simulation import Simulation, FDTDConfig, TimeConfig
 
 SNAPSHOT_DIR = Path(os.environ.get("WITWIN_MAXWELL_SNAPSHOT_DIR", ".bench_tmp/snapshots"))
 FORWARD_STEPS = 1200
@@ -47,8 +47,10 @@ def forward_outputs(name: str) -> dict[str, torch.Tensor]:
     sim = Simulation.fdtd(
         scene,
         frequencies=scenario.frequencies,
-        run_time=TimeConfig(time_steps=FORWARD_STEPS),
-        spectral_sampler=mw.SpectralSampler(normalize_source=normalize),
+        config=FDTDConfig(
+            run_time=TimeConfig(time_steps=FORWARD_STEPS),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=normalize),
+        ),
     )
     prepared = sim.prepare()
     result = prepared.run()
@@ -81,30 +83,29 @@ class _AdjointScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.03),
-            boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, 0.12), size=(0.24, 0.24, 0.24)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.18),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.03),
+                    boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.12), size=(0.24, 0.24, 0.24)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.18),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -116,12 +117,14 @@ def adjoint_outputs(adjoint_backend: str) -> dict[str, torch.Tensor]:
         sim = Simulation.fdtd(
             model,
             frequencies=[1e9],
-            run_time=TimeConfig(time_steps=ADJOINT_STEPS),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False,
+            config=FDTDConfig(
+                run_time=TimeConfig(time_steps=ADJOINT_STEPS),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False,
+            ),
         )
         result = sim.run()
-        value = result.monitor("probe")["components"]["Ez"]
+        value = result.monitor("probe").sel(component="Ez").values
         loss = (value.real**2 + value.imag**2).sum()
         loss.backward()
         return {

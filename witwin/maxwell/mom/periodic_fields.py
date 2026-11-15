@@ -10,6 +10,7 @@ from .quadrature import triangle_rule
 from .lifting_fields import decode_system,system_local_coefficients
 from .periodic_operator import validate_periodic_cell,validate_periodic_sources
 from .periodic import EwaldHelmholtzKernel
+from ..errors import ConvergenceError
 
 
 def regular_surface_fields(handle,coefficients,points,kernel,order):
@@ -45,7 +46,7 @@ def regular_surface_fields(handle,coefficients,points,kernel,order):
     return electric,magnetic
 
 
-class PeriodicFieldConvergenceError(RuntimeError):
+class PeriodicFieldConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         self.receipt=receipt
         super().__init__('Periodic field refinement failed: '+receipt['failure_reason'])

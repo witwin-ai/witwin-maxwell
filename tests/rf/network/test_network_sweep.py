@@ -36,7 +36,7 @@ def _port(
     )
 
 
-def _scene(*, device="cpu", ports=None):
+def _scene(*, ports=None):
     return mw.Scene(
         domain=mw.Domain(
             bounds=((-0.02, 0.02), (-0.02, 0.02), (-0.02, 0.02))
@@ -48,7 +48,6 @@ def _scene(*, device="cpu", ports=None):
             if ports is None
             else ports
         ),
-        device=device,
     )
 
 
@@ -112,7 +111,7 @@ def test_manifest_rejects_trainable_sweep_amplitude_before_execution():
 def test_simulation_prepare_rejects_trainable_sweep_parameters_before_solver_build():
     simulation = mw.Simulation.fdtd(
         _scene(),
-        frequency=1.0e9,
+        frequencies=1.0e9,
         excitations=PortSweep(amplitude=torch.tensor(1.0, requires_grad=True)),
     )
 
@@ -143,7 +142,7 @@ def test_manifest_rejects_trainable_declared_termination_before_standard_sweep_e
             _port(
                 "p2",
                 0.005,
-                termination=mw.SeriesRLC(r=torch.tensor(50.0, requires_grad=True)),
+                termination=mw.rf.SeriesRLC(r=torch.tensor(50.0, requires_grad=True)),
             ),
         )
     )
@@ -302,7 +301,7 @@ def test_result_snapshot_rejects_unsafe_embedded_network_metadata(tmp_path):
     frequencies, _, columns = _known_columns()
     manifest = resolve_network_run_manifest(_scene(), PortSweep(), tuple(frequencies))
     ports, network = aggregate_network_columns(manifest, columns)
-    unsafe = mw.NetworkData(
+    unsafe = mw.rf.NetworkData(
         frequencies=network.frequencies,
         s=network.s,
         z0=network.z0,
@@ -330,13 +329,15 @@ def test_two_port_single_device_sweep_returns_network_data():
     # wave-level reciprocity gate (that lives in tests/rf/wave_validation on a
     # physically asymmetric two-port).
     result = mw.Simulation.fdtd(
-        _scene(device="cuda"),
-        frequency=2.5e9,
+        _scene(),
+        frequencies=2.5e9,
         excitations=PortSweep(
             source_time=mw.GaussianPulse(frequency=2.5e9, fwidth=1.0e9)
         ),
-        run_time=mw.TimeConfig(time_steps=64),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=64),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
 
     assert result.network is not None

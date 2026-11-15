@@ -11,6 +11,8 @@ from witwin.maxwell.fdtd.ports import (
     replay_port_runtimes,
 )
 from tests.gradients.finite_difference_gate import assert_finite_difference_agrees
+from witwin.maxwell.compiler import compile_thin_wires
+from witwin.maxwell.scene import prepare_scene
 
 
 pytestmark = pytest.mark.skipif(
@@ -43,19 +45,19 @@ def _scene(
     points=_STRICT_POINTS,
     snap="strict",
 ) -> mw.Scene:
-    wire = mw.ThinWire(
+    wire = mw.rf.ThinWire(
         name="dipole",
         points=points,
         radius=radius,
-        conductor=mw.WireConductor.pec(),
-        endpoints=(mw.WireEnd.open(), mw.WireEnd.open()),
+        conductor=mw.rf.WireConductor.pec(),
+        endpoints=(mw.rf.WireEnd.open(), mw.rf.WireEnd.open()),
         snap=snap,
     )
     port = mw.LumpedPort(
         "feed",
-        wire_binding=mw.WirePortBinding.gap(
-            negative=mw.WireNodeRef("dipole", 1),
-            positive=mw.WireNodeRef("dipole", 2),
+        wire_binding=mw.rf.WirePortBinding.gap(
+            negative=mw.rf.WireNodeRef("dipole", 1),
+            positive=mw.rf.WireNodeRef("dipole", 2),
         ),
         reference_impedance=50.0,
         termination=termination,
@@ -66,7 +68,6 @@ def _scene(
         boundary=mw.BoundarySpec.none(),
         thin_wires=(wire,),
         ports=(port,),
-        device="cuda",
     )
 
 
@@ -75,7 +76,7 @@ def _float64_local_solver(*, mode: str):
         parameter = torch.tensor(
             0.8, device="cuda", dtype=torch.float64, requires_grad=True
         )
-        termination = mw.SeriesRLC(r=parameter)
+        termination = mw.rf.SeriesRLC(r=parameter)
         excitations = ()
         semantic_key = ("port", "feed", "r")
     elif mode == "excitation":
@@ -84,7 +85,7 @@ def _float64_local_solver(*, mode: str):
         )
         termination = None
         excitations = (
-            mw.PortExcitation(
+            mw.rf.PortExcitation(
                 "feed",
                 amplitude=parameter,
                 source_time=mw.CW(_FREQUENCY),
@@ -106,10 +107,12 @@ def _float64_local_solver(*, mode: str):
             points=continuous_points,
             snap="continuous",
         ),
-        frequency=_FREQUENCY,
+        frequencies=_FREQUENCY,
         excitations=excitations,
-        run_time=mw.TimeConfig(time_steps=2),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=2),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).prepare().solver
     solver.dt = 0.2
 
@@ -331,11 +334,13 @@ def test_wire_gap_port_replay_pullback_matches_dense_float64_cuda_autograd(mode)
 def _end_to_end_objective(scene, excitation):
     result = mw.Simulation.fdtd(
         scene,
-        frequency=_FREQUENCY,
+        frequencies=_FREQUENCY,
         excitations=excitation,
-        run_time=mw.TimeConfig(time_steps=24),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=24),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).run()
     data = result.port("feed")
     objective = data.voltage.abs().square().sum()
@@ -405,7 +410,7 @@ def test_wire_gap_port_end_to_end_radius_and_amplitude_adjoint_match_finite_diff
         requires_grad=True,
     )
     scene = _scene(radius=radius)
-    excitation = mw.PortExcitation(
+    excitation = mw.rf.PortExcitation(
         "feed",
         amplitude=amplitude,
         source_time=mw.CW(_FREQUENCY),
@@ -458,12 +463,12 @@ def test_continuous_oblique_gap_coordinate_adjoint_matches_fixed_stencil_finite_
     )
     points = base_points.clone().requires_grad_()
     scene = _scene(points=points, snap="continuous")
-    excitation = mw.PortExcitation(
+    excitation = mw.rf.PortExcitation(
         "feed",
         amplitude=0.8,
         source_time=mw.CW(_FREQUENCY),
     )
-    reference_network = scene.compile_thin_wires()
+    reference_network = compile_thin_wires(prepare_scene(scene))
     assert reference_network.metadata["validity"]["coordinate_gradient"] == (
         "fixed_stencil_only"
     )
@@ -490,13 +495,13 @@ def test_continuous_oblique_gap_coordinate_adjoint_matches_fixed_stencil_finite_
     for step in (8.0e-4, 4.0e-4, 2.0e-4):
         with torch.no_grad():
             points[point_index, axis] = center + step
-        plus_network = scene.compile_thin_wires()
+        plus_network = compile_thin_wires(prepare_scene(scene))
         _assert_same_wire_port_stencil(reference_network, plus_network)
         plus = float(_end_to_end_objective(scene, excitation)[0].detach())
 
         with torch.no_grad():
             points[point_index, axis] = center - step
-        minus_network = scene.compile_thin_wires()
+        minus_network = compile_thin_wires(prepare_scene(scene))
         _assert_same_wire_port_stencil(reference_network, minus_network)
         minus = float(_end_to_end_objective(scene, excitation)[0].detach())
         finite_differences.append((plus - minus) / (2.0 * step))

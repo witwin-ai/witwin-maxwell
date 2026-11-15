@@ -9,6 +9,7 @@ from .static_tensor_green import StaticTensorGreen
 from .static_tensor_interface import StaticTensorInterfaceOperator
 from .fields import classify_queries
 from .static_tensor_polarization import StaticTensorPolarization
+from ..errors import UnsupportedFeatureError
 
 
 class StaticTensorFloatingOperator:
@@ -190,7 +191,8 @@ class StaticTensorFloatingResponse:
         self.assert_current();op=self.operator;region=op.system.region(region_id)
         op.exterior._validate(points,(None,3))
         if region in op.current_regions:
-            raise NotImplementedError('Conductive interior fields require their actual volume-current closure')
+            raise UnsupportedFeatureError('Conductive interior fields require their actual volume-current closure',
+                                          feature="guard:945ea96d", method="mom")
         if len(points)==0:return points.sum(-1),points.clone()
         for body in op.system.bodies:
             inside,_=classify_queries(body.mesh,points)

@@ -9,7 +9,6 @@ def _scene(*, ports=()):
         domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
         grid=mw.GridSpec.uniform(0.25),
         ports=ports,
-        device="cpu",
     )
 
 
@@ -27,10 +26,10 @@ def _lumped_port(name="p1"):
 
 
 def test_fdtd_accepts_one_explicit_port_excitation():
-    excitation = mw.PortExcitation("p1")
+    excitation = mw.rf.PortExcitation("p1")
     simulation = mw.Simulation.fdtd(
         _scene(ports=(_lumped_port(),)),
-        frequency=1.0e9,
+        frequencies=1.0e9,
         excitations=excitation,
     )
 
@@ -41,14 +40,14 @@ def test_fdtd_rejects_duplicate_but_accepts_distinct_lumped_port_excitations():
     with pytest.raises(ValueError, match="at most once"):
         mw.Simulation.fdtd(
             _scene(ports=(_lumped_port(),)),
-            frequency=1.0e9,
-            excitations=(mw.PortExcitation("p1"), mw.PortExcitation("p1")),
+            frequencies=1.0e9,
+            excitations=(mw.rf.PortExcitation("p1"), mw.rf.PortExcitation("p1")),
         )
 
     simulation = mw.Simulation.fdtd(
         _scene(ports=(_lumped_port("p1"), _lumped_port("p2"))),
-        frequency=1.0e9,
-        excitations=(mw.PortExcitation("p1"), mw.PortExcitation("p2")),
+        frequencies=1.0e9,
+        excitations=(mw.rf.PortExcitation("p1"), mw.rf.PortExcitation("p2")),
     )
 
     assert tuple(excitation.port_name for excitation in simulation.excitations) == (
@@ -60,8 +59,8 @@ def test_fdtd_rejects_duplicate_but_accepts_distinct_lumped_port_excitations():
 def test_prepare_reports_missing_excitation_port_before_backend_initialization():
     simulation = mw.Simulation.fdtd(
         _scene(),
-        frequency=1.0e9,
-        excitations=mw.PortExcitation("missing"),
+        frequencies=1.0e9,
+        excitations=mw.rf.PortExcitation("missing"),
     )
 
     with pytest.raises(ValueError, match="missing port 'missing'"):
@@ -74,7 +73,7 @@ def test_fdfd_rejects_port_excitation():
             scene=_scene(ports=(_lumped_port(),)),
             method=mw.SimulationMethod.FDFD,
             frequencies=(1.0e9,),
-            excitations=mw.PortExcitation("p1"),
+            excitations=mw.rf.PortExcitation("p1"),
         )
 
 
@@ -89,8 +88,8 @@ def test_trainable_scene_accepts_lumped_port_for_adjoint_runtime():
 
     simulation = mw.Simulation.fdtd(
         TrainablePortScene(),
-        frequency=1.0e9,
-        excitations=mw.PortExcitation("p1"),
+        frequencies=1.0e9,
+        excitations=mw.rf.PortExcitation("p1"),
     )
 
     assert simulation.has_trainable_parameters

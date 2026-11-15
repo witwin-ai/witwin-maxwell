@@ -22,8 +22,8 @@ def test_positive_order_selection_actual_far_action_gradient_and_policy_mutation
                compile_medium(mw.Material(eps_r=2.+i,mu_r=1.2+.1*i),3e8)) for i,x in enumerate((-.5,.5))]
     system = SurfaceSystem.create(bodies)
     provider = ScalarSystemBlocks(system,exterior,IntegrationConfig(order=3,singular_order=3))
-    budget = mw.KernelErrorBudget(1e-6,1e-5)
-    config = mw.FMMConfig(order=1,max_order=8,leaf_size=30,table_storage=storage,
+    budget = mw.mom.KernelErrorBudget(1e-6,1e-5)
+    config = mw.mom.FMMConfig(order=1,max_order=8,leaf_size=30,table_storage=storage,
         shift_storage='separable_v1',kernel_error_budget=budget,kernel_bound_rule=rule)
     op = MultipoleSystemActions(provider,**config.construction())
     plan = op.order_plan
@@ -76,7 +76,7 @@ def test_positive_tail_rwg_ordered_aggregation_and_unavailable_guard(rule):
     tree=build_support_octree(lower,upper,leaf_size=1)
     # Real nonzero log-integral channels exercise ordered aggregation.
     statistics=torch.full((tree.node_count,3),-3.,device='cuda',dtype=torch.float64)
-    budget=mw.KernelErrorBudget(1e-5,1e-4)
+    budget=mw.mom.KernelErrorBudget(1e-5,1e-4)
     plan=plan_multipole_order(((tree,medium),),budget,min_order=1,max_order=12,
         rwg_statistics=(statistics,),rwg_absolute_budget=1.,balancing_impedance=abs(medium.eta),
         table_storage='compact',kernel_bound_rule=rule)

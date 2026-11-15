@@ -53,7 +53,7 @@ def _region(scene, points):
 def _owned_row(prepared, faces, component, point):
     if component not in ('Ex','Ey','Ez'):
         return None
-    axes=[torch.as_tensor(a,dtype=torch.float64)for a in component_coords(prepared,component)]
+    axes=[torch.as_tensor(a,dtype=torch.float64)for a in component_coords(prepared,component, device=prepared.device)]
     candidates=[f for f in faces if component=='E'+'xyz'[f.component]
         and point[f.axis]==float(axes[f.axis][f.normal_index])]
     if not candidates:
@@ -108,7 +108,7 @@ def build_public_vi(scene,reference_scene,reference_monitors,reference_rows,freq
     """Plan the same physical functional through shared native Yee stencils."""
     if scene.coordinates is not None or any(scene.boundary.axis_kind(a)in('bloch','periodic')for a in 'xyz'):
         raise ValueError('This bounded line adapter requires Cartesian nonperiodic geometry.')
-    prepared=prepare_scene(scene);faces=compile_copper_faces(prepared,device='cpu')
+    prepared=prepare_scene(scene,device='cpu');faces=compile_copper_faces(prepared,device='cpu')
     byname={m.name:m for m in reference_monitors}
     requested={(name,c)for pair in reference_rows for row in pair for name,c,_ in row}
     typed={};queries={};native_rows={};plane_names={};planes={}
@@ -187,7 +187,7 @@ def evaluate_public_vi(plan, *, result, frequencies=None, device='cuda'):
         evidence[name]=dict(primary=primary,constitutive_negative=negative,constitutive_positive=positive,
             kwargs=query_kwargs(term,selected),points=points,native_support=plan.native_rows[name])
     for name,(component,index)in plan.expected_points.items():
-        payload=result.monitor(name)
+        payload=result.raw_monitor(name)
         if tuple(payload['field_indices'][component])!=tuple(index):
             raise ValueError('An ordinary Point changed its actual native index.')
         axis=tuple(payload['frequencies']);indices=[axis.index(f)for f in selected]
@@ -200,7 +200,7 @@ def validate_plan_support(plan, scene):
     """CPU admission rechecks owner/region/support, never inventing spectra."""
     if len(plan.queries)!=6 or plan.contract['typed_Cu_primitive_count']!=6:
         raise ValueError('The bounded CPW/pair functional requires six selected Cu terms.')
-    prepared=prepare_scene(scene);faces=compile_copper_faces(prepared,device='cpu')
+    prepared=prepare_scene(scene,device='cpu');faces=compile_copper_faces(prepared,device='cpu')
     for name,term in plan.queries.items():
         owned=_owned_row(prepared,faces,term.component,term.points_m[0])
         if owned is None:

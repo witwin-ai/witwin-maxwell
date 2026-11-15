@@ -52,19 +52,18 @@ def _build_two_slab_scene(*, mod_a, mod_b, amplitude=80.0):
     material_a = mw.Material(eps_r=4.0, modulation=mod_a) if mod_a is not None else mw.Material(eps_r=4.0)
     material_b = mw.Material(eps_r=4.0, modulation=mod_b) if mod_b is not None else mw.Material(eps_r=4.0)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.16, 0.16), (-0.16, 0.16))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.16, 0.16), (-0.16, 0.16))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=(0.0, 0.0, 1.0),
                 source_time=mw.CW(frequency=_CARRIER, amplitude=amplitude),
                 name="pw",
             )
-        ],
-        structures=[
+            ],
+                structures=[
             mw.Structure(
                 geometry=Box(position=(-0.15, 0.0, 0.0), size=(0.16, 0.64, 0.64)),
                 material=material_a,
@@ -73,11 +72,11 @@ def _build_two_slab_scene(*, mod_a, mod_b, amplitude=80.0):
                 geometry=Box(position=(0.15, 0.0, 0.0), size=(0.16, 0.64, 0.64)),
                 material=material_b,
             ),
-        ],
-    )
-    scene.add_monitor(
-        mw.FieldTimeMonitor("probe", components=("Ez",), position=(0.42, 0.0, 0.0), interval=1)
-    )
+            ],
+                monitors=(
+            mw.monitors.FieldTimeMonitor("probe", components=("Ez",), position=(0.42, 0.0, 0.0), interval=1),
+            ),
+            )
     return scene
 
 
@@ -85,10 +84,12 @@ def _run(scene, *, time_steps):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_CARRIER],
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            full_field_dft=False,
+        ),
     ).run()
-    trace = _to_numpy(result.monitor("probe")["field"]).astype(np.float64)
+    trace = _to_numpy(result.monitor("probe").sel(component="Ez").values).astype(np.float64)
     dt = float(result.solver.dt)
     del result
     torch.cuda.empty_cache()
@@ -126,8 +127,8 @@ def _sideband_powers(trace, dt):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_two_frequency_modulation_generates_both_sideband_pairs():
     time_steps = 4096
-    spec_a = mw.ModulationSpec(frequency=_OMEGA_A, amplitude=0.25)
-    spec_b = mw.ModulationSpec(frequency=_OMEGA_B, amplitude=0.25)
+    spec_a = mw.media.ModulationSpec(frequency=_OMEGA_A, amplitude=0.25)
+    spec_b = mw.media.ModulationSpec(frequency=_OMEGA_B, amplitude=0.25)
 
     both_trace, dt = _run(_build_two_slab_scene(mod_a=spec_a, mod_b=spec_b), time_steps=time_steps)
     a_only_trace, dt_a = _run(_build_two_slab_scene(mod_a=spec_a, mod_b=None), time_steps=time_steps)
@@ -170,14 +171,16 @@ def test_two_frequency_modulation_runtime_omega_field_is_bimodal():
     # The prepared solver carries a per-edge angular-frequency field whose only
     # nonzero values are the two structure frequencies, confirming the runtime is
     # genuinely multi-frequency rather than collapsing to a single scalar.
-    spec_a = mw.ModulationSpec(frequency=_OMEGA_A, amplitude=0.25)
-    spec_b = mw.ModulationSpec(frequency=_OMEGA_B, amplitude=0.25)
+    spec_a = mw.media.ModulationSpec(frequency=_OMEGA_A, amplitude=0.25)
+    spec_b = mw.media.ModulationSpec(frequency=_OMEGA_B, amplitude=0.25)
     scene = _build_two_slab_scene(mod_a=spec_a, mod_b=spec_b)
     solver = mw.Simulation.fdtd(
         scene,
         frequencies=[_CARRIER],
-        run_time=mw.TimeConfig(time_steps=8),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=8),
+            full_field_dft=False,
+        ),
     ).prepare().solver
 
     assert solver.modulation_enabled

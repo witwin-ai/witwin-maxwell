@@ -64,7 +64,7 @@ def test_uniform_pole_perturbation_export_matches_reference_perturbation_pole_re
     delta_eps, f0, gamma = 1.0, 2.0e9, 2.0e8
     eps_sensitivity, lorentz_sensitivity = 0.4, 0.25
     base = mw.Material.lorentz(eps_inf=2.0, delta_eps=delta_eps, resonance_frequency=f0, gamma=gamma)
-    material = mw.PerturbationMedium(
+    material = mw.media.PerturbationMedium(
         base,
         perturbation=torch.full(_SHAPE, value),
         eps_sensitivity=eps_sensitivity,
@@ -104,7 +104,7 @@ def test_uniform_pole_perturbation_export_matches_reference_perturbation_pole_re
 def test_spatially_varying_pole_perturbation_export_is_rejected():
     perturbation = torch.zeros(_SHAPE)
     perturbation[0] = 1.0
-    material = mw.PerturbationMedium(
+    material = mw.media.PerturbationMedium(
         mw.Material.lorentz(eps_inf=2.0, delta_eps=1.0, resonance_frequency=2.0e9, gamma=2.0e8),
         perturbation=perturbation,
         lorentz_sensitivities=(0.25,),

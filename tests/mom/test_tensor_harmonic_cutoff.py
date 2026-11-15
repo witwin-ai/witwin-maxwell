@@ -6,7 +6,7 @@ import torch
 import witwin.maxwell as mw
 from test_tensor_harmonic_public import setup
 from witwin.maxwell.mom.harmonic_runtime import HarmonicCutoffError
-from witwin.maxwell.mom.harmonic_state import preparation_signature
+from witwin.maxwell.mom.harmonic_recovery import preparation_signature
 
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
 
@@ -22,12 +22,12 @@ def test_mixed_cutoff_prefix_reuse_persistence_and_budget(tmp_path,monkeypatch,m
             hierarchical=HMatrixConfig(leaf_size=64),stopping=StoppingRule(method='block_gmres',
                 preconditioner='row_column_norm',rtol=1e-11,atol=1e-20,stagnation_window=48))
     if not magnetic:
-        scene.structures[1]=replace(scene.structures[1],material=mw.Material(eps_r=2.))
-    policy=mw.HarmonicCutoffConfig(max_harmonics=2 if magnetic else 3,
+        scene = scene.updated(structures=(*scene.structures[:1], replace(scene.structures[1],material=mw.Material(eps_r=2.)), *scene.structures[2:]))
+    policy=mw.mom.HarmonicCutoffConfig(max_harmonics=2 if magnetic else 3,
         failure='record' if magnetic else 'raise')
     config=replace(config,harmonic_balance=replace(config.harmonic_balance,
         harmonics=1,pump_scales=(1.,),cutoff=policy))
-    prepared=mw.Simulation.mom(scene,frequency=3e8,config=config).prepare()
+    prepared=mw.Simulation.mom(scene,frequencies=3e8,config=config).prepare()
     original=prepared.solver.prepared
     import witwin.maxwell.mom.tensor_harmonic_preparation as preparation
     response_name='_prepare_compressed_harmonic' if backend=='h2' else 'prepare_cell_field_response'
@@ -59,7 +59,7 @@ def test_mixed_cutoff_prefix_reuse_persistence_and_budget(tmp_path,monkeypatch,m
     assert prepared.solver.prepared is original
     assert preparation_signature(original)==original['_signature']
     assert 'cutoff' not in original['receipt']
-    cutoff=result.solver_stats['cutoff']
+    cutoff=result.stats()['cutoff']
     assert cutoff['cell_truncation_estimate_passed'] is (not magnetic)
     assert cutoff['final_harmonics']==policy.max_harmonics
     assert cutoff['physical_qualification'] is False and cutoff['harmonic_truncation_converged'] is False
@@ -67,10 +67,10 @@ def test_mixed_cutoff_prefix_reuse_persistence_and_budget(tmp_path,monkeypatch,m
     assert result.frequencies==tuple(i*3e8 for i in range(policy.max_harmonics+1))
     if magnetic:
         assert cutoff['failure_reason']=='harmonic_budget_exhausted'
-        assert result.harmonic_state.dc_magnetic_volume is not None
-        assert bool(result.harmonic_state.cell_electric[2].norm()>0)
-    else:assert torch.count_nonzero(result.harmonic_state.cell_electric[2:])==0
-    dc=result.query_dc(point,region_id=2)
+        assert mw.mom.harmonic_state(result).dc_magnetic_volume is not None
+        assert bool(mw.mom.harmonic_state(result).cell_electric[2].norm()>0)
+    else:assert torch.count_nonzero(mw.mom.harmonic_state(result).cell_electric[2:])==0
+    dc=mw.mom.query_dc(result, point,region_id=2)
     ac=result.query_fields(point,region_id=2,field_kind='total',harmonic=policy.max_harmonics)
     path=tmp_path/'cutoff.pt';result.save(path)
     from witwin.maxwell.mom.runtime import SystemOperator
@@ -87,14 +87,14 @@ def test_mixed_cutoff_prefix_reuse_persistence_and_budget(tmp_path,monkeypatch,m
             patch.setattr(FixedSurfaceInverse,'_solve',forbidden)
             patch.setattr(GeneralizedSystemBlocks,'__call__',forbidden)
         restored=mw.Result.load(path,scene=scene)
-        assert restored.solver_stats['cutoff']==cutoff
+        assert restored.stats()['cutoff']==cutoff
         assert restored._harmonic_data.config.harmonic_balance.cutoff==policy
         assert restored.frequencies==result.frequencies
         replay_comparison=comparison(compared[0][0],restored._harmonic_data)
         assert replay_comparison['current_max_harmonic']==policy.max_harmonics
         for name in ('cell_electric','polarization','total_volume_current'):
-            torch.testing.assert_close(getattr(restored.harmonic_state,name),getattr(result.harmonic_state,name),rtol=0,atol=0)
-        for a,b in zip(restored.query_dc(point,region_id=2),dc):torch.testing.assert_close(a,b,rtol=0,atol=0)
+            torch.testing.assert_close(getattr(mw.mom.harmonic_state(restored),name),getattr(mw.mom.harmonic_state(result),name),rtol=0,atol=0)
+        for a,b in zip(mw.mom.query_dc(restored, point,region_id=2),dc):torch.testing.assert_close(a,b,rtol=0,atol=0)
         for a,b in zip(restored.query_fields(point,region_id=2,field_kind='total',harmonic=policy.max_harmonics),ac):
             torch.testing.assert_close(a,b,rtol=0,atol=0)
     # Export this already solved state for cross-repository archive validation.
@@ -119,7 +119,7 @@ def test_mixed_cutoff_prefix_reuse_persistence_and_budget(tmp_path,monkeypatch,m
     # Reuse rejects changed physical inputs before reaching the appended operator.
     from witwin.maxwell.mom.tensor_harmonic_runtime import _materials
     from witwin.maxwell.mom.harmonic_material import compile_harmonic_material
-    materials=list(_materials(scene,3e8,2,config.dtype))
+    materials=list(_materials(scene,3e8,2,config.dtype,'cuda'))
     exterior=compile_harmonic_material(mw.Material(),3e8,2)
     opts=dict(reuse_prepared=original,dc_policy=config.harmonic_balance.dc_policy() if magnetic else None,
               dc_magnetic_volumes=config.harmonic_balance.dc_magnetic_volumes)

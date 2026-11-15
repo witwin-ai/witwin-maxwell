@@ -74,7 +74,7 @@ def reverse_joint_material(solver, forward_state, adjoint_state, *, time_value,
     for entry, leaves in zip(getattr(solver, "_copper_foils", ()), copper_leaves):
         record = {key: gradient if gradient is not None else torch.zeros_like(leaf)
             for key, gradient, leaf in zip(COPPER_COEFFICIENTS, gradients[cursor:cursor + len(leaves)], leaves)}
-        record["structure_index"] = next(index for index, structure in enumerate(solver.scene.structures)
+        record["structure_index"] = next(index for index, structure in enumerate(solver.scene.scene.structures)
                                          if structure.material is entry["face"].material)
         record["response_alpha"] = entry.get("response_alpha", 1.)
         record["edge_geometry"] = entry.get("edge_geometry")

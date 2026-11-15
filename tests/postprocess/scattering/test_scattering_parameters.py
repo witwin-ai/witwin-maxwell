@@ -3,7 +3,7 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.fdtd import calculate_required_steps
+from witwin.maxwell.fdtd.solver import calculate_required_steps
 from witwin.core import Box
 from witwin.maxwell.postprocess import compute_s_parameters
 from witwin.maxwell.result import Result
@@ -23,7 +23,6 @@ def _synthetic_flux_result(*, frequencies, incident_flux, transmitted_flux=None)
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
     )
     frequencies = tuple(float(freq) for freq in frequencies)
     samples = np.full((len(frequencies),), 8, dtype=int)
@@ -69,7 +68,6 @@ def _synthetic_flux_result_with_source(*, frequencies, incident_flux, source, tr
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
         sources=[source],
     )
     samples = np.full((len(frequencies),), 8, dtype=int)
@@ -99,12 +97,12 @@ def _synthetic_flux_result_with_source(*, frequencies, incident_flux, source, tr
 
 
 def _stack_flux_results(results):
-    frequencies = tuple(float(result.frequency) for result in results)
+    frequencies = tuple(float(result.frequencies[0]) for result in results)
     monitors = {}
     for monitor_name in results[0].monitors:
-        samples = np.asarray([int(result.monitor(monitor_name)["samples"]) for result in results], dtype=int)
-        flux = np.asarray([float(result.monitor(monitor_name)["flux"]) for result in results], dtype=float)
-        first_payload = results[0].monitor(monitor_name)
+        samples = np.asarray([int(result.raw_monitor(monitor_name)["samples"]) for result in results], dtype=int)
+        flux = np.asarray([float(result.monitor(monitor_name, freq_index=0).values) for result in results], dtype=float)
+        first_payload = results[0].raw_monitor(monitor_name)
         monitors[monitor_name] = {
             "kind": first_payload["kind"],
             "fields": first_payload["fields"],
@@ -130,9 +128,11 @@ def _runtime_for_scene(scene, frequency, *, steady_cycles=8, transient_cycles=18
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).prepare()
     solver = prepared.solver
     domain_size = max(
@@ -154,11 +154,10 @@ def _runtime_for_scene(scene, frequency, *, steady_cycles=8, transient_cycles=18
 
 def _build_tfsf_multifrequency_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.96, 0.96), (-0.96, 0.96), (-0.96, 0.96))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-0.96, 0.96), (-0.96, 0.96), (-0.96, 0.96))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=(0.0, 0.0, 1.0),
@@ -166,10 +165,12 @@ def _build_tfsf_multifrequency_scene():
                 injection=mw.TFSF(bounds=_TFSF_BOUNDS),
                 name="pw",
             )
-        ],
-    )
-    scene.add_monitor(mw.FluxMonitor("port1", axis="x", position=-0.16, frequencies=_MULTI_FREQUENCIES, normal_direction="+"))
-    scene.add_monitor(mw.FluxMonitor("port2", axis="x", position=0.16, frequencies=_MULTI_FREQUENCIES, normal_direction="+"))
+            ],
+                monitors=(
+            mw.FluxMonitor("port1", axis="x", position=-0.16, frequencies=_MULTI_FREQUENCIES, normal_direction="+"),
+            mw.FluxMonitor("port2", axis="x", position=0.16, frequencies=_MULTI_FREQUENCIES, normal_direction="+"),
+            ),
+            )
     return scene
 
 
@@ -178,7 +179,6 @@ def _build_half_space_scene(frequency, *, material=None):
         domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
         grid=mw.GridSpec.uniform(0.015),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
         sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
@@ -194,15 +194,19 @@ def _build_half_space_scene(frequency, *, material=None):
         # vacuum shell inside the transverse PML and the port fluxes pick up
         # spurious edge power: S21 = 0.11 inside 14.5 skin depths of metal and
         # S21 > 1 for eps_r=4, independent of PML thickness (6/12/24 layers).
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 name="half_space",
                 geometry=Box(position=(0.6, 0.0, 0.0), size=(1.2, 1.2, 1.2)),
                 material=material,
-            )
-        )
-    scene.add_monitor(mw.FluxMonitor("port1", axis="x", position=-0.2, frequencies=[frequency], normal_direction="+"))
-    scene.add_monitor(mw.FluxMonitor("port2", axis="x", position=0.4, frequencies=[frequency], normal_direction="+"))
+            ),
+        ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.FluxMonitor("port1", axis="x", position=-0.2, frequencies=[frequency], normal_direction="+"),
+        mw.FluxMonitor("port2", axis="x", position=0.4, frequencies=[frequency], normal_direction="+"),
+    ))
     return scene
 
 
@@ -216,9 +220,11 @@ def _run_half_space_case(*, material=None):
             mw.Simulation.fdtd(
                 reference_scene,
                 frequencies=[frequency],
-                run_time=reference_runtime,
-                spectral_sampler=mw.SpectralSampler(window="hanning"),
-                full_field_dft=False,
+                config=mw.FDTDConfig(
+                    run_time=reference_runtime,
+                    spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                    full_field_dft=False,
+                ),
             ).run()
         )
         dut_scene = _build_half_space_scene(frequency, material=material)
@@ -227,9 +233,11 @@ def _run_half_space_case(*, material=None):
             mw.Simulation.fdtd(
                 dut_scene,
                 frequencies=[frequency],
-                run_time=dut_runtime,
-                spectral_sampler=mw.SpectralSampler(window="hanning"),
-                full_field_dft=False,
+                config=mw.FDTDConfig(
+                    run_time=dut_runtime,
+                    spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                    full_field_dft=False,
+                ),
             ).run()
         )
     return _stack_flux_results(reference_results), _stack_flux_results(dut_results)
@@ -324,9 +332,11 @@ def test_compute_s_parameters_free_space_multifrequency_fdtd_returns_zero_s11():
     result = mw.Simulation.fdtd(
         scene,
         frequencies=_MULTI_FREQUENCIES,
-        run_time=runtime,
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=runtime,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     s_params = compute_s_parameters(
@@ -350,11 +360,10 @@ def _build_broadband_tfsf_fine_scene():
     # aperture-area normalization is not swamped by numerical dispersion.
     aperture = ((-0.15, 0.15), (-0.15, 0.15), (-0.15, 0.15))
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.45, 0.45), (-0.45, 0.45), (-0.45, 0.45))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-0.45, 0.45), (-0.45, 0.45), (-0.45, 0.45))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=(0.0, 0.0, 1.0),
@@ -362,9 +371,11 @@ def _build_broadband_tfsf_fine_scene():
                 injection=mw.TFSF(bounds=aperture),
                 name="pw",
             )
-        ],
-    )
-    scene.add_monitor(mw.FluxMonitor("port1", axis="x", position=-0.075, frequencies=_BROADBAND_FREQUENCIES, normal_direction="+"))
+            ],
+                monitors=(
+            mw.FluxMonitor("port1", axis="x", position=-0.075, frequencies=_BROADBAND_FREQUENCIES, normal_direction="+"),
+            ),
+            )
     return scene
 
 
@@ -379,9 +390,11 @@ def test_compute_s_parameters_broadband_auto_matches_measured_incident_flux():
     result = mw.Simulation.fdtd(
         scene,
         frequencies=_BROADBAND_FREQUENCIES,
-        run_time=runtime,
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=runtime,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     def _to_numpy(value):
@@ -389,7 +402,7 @@ def test_compute_s_parameters_broadband_auto_matches_measured_incident_flux():
             return value.detach().cpu().to(dtype=torch.float64).numpy().reshape(-1)
         return np.asarray(value, dtype=float).reshape(-1)
 
-    measured_incident = _to_numpy(result.monitor("port1")["flux"])
+    measured_incident = _to_numpy(result.monitor("port1").values)
     s_params = compute_s_parameters(result, incident_monitor="port1", incident_power="auto")
     auto_incident = _to_numpy(s_params["P_incident"])
 

@@ -100,14 +100,14 @@ def test_actual_native_and_sampled_yee_planes_crop_affine_flux(axis,sign,spacing
                                     sample_spacing=spacing,normal_direction=sign)
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.025,.025),)*3),
         grid=mw.GridSpec.custom(np.linspace(-.025,.025,25),np.linspace(-.025,.025,28),np.linspace(-.025,.025,32)),
-        boundary=mw.BoundarySpec.none(),device='cuda',monitors=[monitor])
-    solver = mw.Simulation.fdtd(scene,frequency=1e9,full_field_dft=False,
-        run_time=mw.TimeConfig(time_steps=1),spectral_sampler=mw.SpectralSampler(window='none',normalize_source=False)).prepare().solver
+        boundary=mw.BoundarySpec.none(),monitors=[monitor])
+    solver = mw.Simulation.fdtd(scene,frequencies=1e9,config=mw.FDTDConfig(full_field_dft=False,
+        run_time=mw.TimeConfig(time_steps=1),spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=False))).prepare().solver
     solver._prepare_observers((1e9,),'none',1)
     for entry in solver._observer_spectral_entries:
         entry.update(start_step=0,end_step=1,phase_cos=1.,phase_sin=0.,h_offset_cos=1.,h_offset_sin=0.)
     for field in fields:
-        coordinates=component_coords(solver.scene,field)
+        coordinates=component_coords(solver.scene,field, device=solver.scene.device)
         points=torch.meshgrid(*(torch.tensor(c,device='cuda') for c in coordinates),indexing='ij')
         value=torch.zeros_like(points[0])
         if field==fields[0]:

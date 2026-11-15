@@ -20,8 +20,8 @@ def test_frequency_and_lane_axes_use_one_group_launch(monkeypatch, frequencies, 
         return original(engine)
     monkeypatch.setattr(BatchObserverEngine, "advance", measured)
     sims = [simulation(i, frequencies=frequencies, steps=24) for i in range(count)]
-    result = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=4)).run()
+    result = mw.Simulation.batch(sims, variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=4)).run()
     result.results()
     assert calls == [1] * 24
     for i, sim in enumerate(sims):

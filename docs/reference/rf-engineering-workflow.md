@@ -44,9 +44,9 @@ scene = mw.Scene(
 
 result = mw.Simulation.fdtd(
     scene,
-    frequency=10e9,
-    excitations=mw.PortExcitation("feed", source_time=mw.CW(10e9)),
-    run_time=mw.TimeConfig(time_steps=1000),
+    frequencies=10e9,
+    excitations=mw.rf.PortExcitation("feed", source_time=mw.CW(10e9)),
+    config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1000)),
 ).run()
 
 port = result.port("feed")
@@ -64,7 +64,7 @@ Use `Circuit` when a load has internal nodes, controlled sources, scheduled
 switches, transient PULSE/SIN/PWL sources, or connections across multiple EM
 ports. The circuit binds existing lumped/terminal port names and runs as a
 same-step GPU MNA/DAE solve inside FDTD; results are available through
-`result.circuit(name)`. The restricted SPICE import, persistence schemas, and
+`mw.circuits.circuit(result, name)`. The restricted SPICE import, persistence schemas, and
 forward checkpoint/resume workflow are documented in
 [SPICE/MNA circuit co-simulation](spice-mna-cosimulation.md).
 
@@ -78,7 +78,7 @@ result = mw.Simulation.fdtd(
     scene,
     frequencies=(8e9, 10e9, 12e9),
     excitations=mw.PortSweep(),
-    run_time=mw.TimeConfig(time_steps=2000),
+    config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2000)),
 ).run()
 
 network = result.network
@@ -122,22 +122,23 @@ empirical phase correction.
 Declare a closed frequency-domain Huygens surface and name the driven port:
 
 ```python
-scene.add_monitor(
+scene = scene.updated(monitors=(
+    *scene.monitors,
     mw.ClosedSurfaceMonitor.box(
         "nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(10e-3, 10e-3, 10e-3),
         frequencies=(10e9,),
-    )
-)
+    ),
+))
 
 result = mw.Simulation.fdtd(
     scene,
-    frequency=10e9,
+    frequencies=10e9,
     excitations=mw.PortExcitation("feed", source_time=mw.CW(10e9)),
-    run_time=mw.TimeConfig(time_steps=2000),
+    config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2000)),
 ).run()
-antenna = result.antenna(surface="nf2ff", driven_port="feed")
+antenna = mw.antenna.antenna(result, surface="nf2ff", driven_port="feed")
 ```
 
 `AntennaData` keeps `[frequency, theta, phi]` fields and reports radiation
@@ -155,17 +156,18 @@ one excitation column.
 `PowerLossMonitor` is the shared typed loss contract:
 
 ```python
-scene.add_monitor(
+scene = scene.updated(monitors=(
+    *scene.monitors,
     mw.PowerLossMonitor(
         "device_loss",
         position=(0.0, 0.0, 0.0),
         size=(2e-3, 2e-3, 2e-3),
         frequencies=(10e9,),
         channels=("conduction",),
-    )
-)
+    ),
+))
 
-loss = result.power_loss("device_loss")
+loss = mw.postprocess.power_loss(result, "device_loss")
 ```
 
 Static bulk electric conduction is computed from full-field FDTD spectra as

@@ -32,7 +32,7 @@ def _rotated_uniaxial_tensor(eps_xx, eps_ordinary, eps_extraordinary):
     """
     mean = 0.5 * (eps_ordinary + eps_extraordinary)
     delta = 0.5 * (eps_extraordinary - eps_ordinary)
-    return mw.Tensor3x3(((eps_xx, 0.0, 0.0), (0.0, mean, delta), (0.0, delta, mean)))
+    return mw.media.Tensor3x3(((eps_xx, 0.0, 0.0), (0.0, mean, delta), (0.0, delta, mean)))
 
 
 def _total_field_energy(solver):
@@ -44,26 +44,25 @@ def _total_field_energy(solver):
 
 def _run_energy(material, *, time_steps, spacing=0.05, layers=8):
     """Total E-field energy in the grid after ``time_steps`` steps, and finiteness."""
+    # A homogeneous crystal filling the domain overlaps every absorber face.
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.pml(num_layers=layers, strength=1.0),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.pml(num_layers=layers, strength=1.0),
+                sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=(0.0, 1.0, 0.0),
                 source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.35e9, amplitude=60.0),
                 name="pw",
             )
-        ],
-    )
-    # A homogeneous crystal filling the domain overlaps every absorber face.
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(80.0, 80.0, 80.0)), material=material)
-    )
-    scene.add_monitor(mw.FieldTimeMonitor("probe", components=("Ey",), position=(0.0, 0.0, 0.0)))
-    sim = mw.Simulation.fdtd(scene, frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=time_steps))
+            ],
+                structures=(
+            mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(80.0, 80.0, 80.0)), material=material),
+            ),
+                monitors=(mw.monitors.FieldTimeMonitor("probe", components=("Ey",), position=(0.0, 0.0, 0.0)),),
+            )
+    sim = mw.Simulation.fdtd(scene, frequencies=[1.0e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=time_steps)))
     prepared = sim.prepare()
     prepared.run()
     solver = prepared.solver
@@ -128,27 +127,26 @@ def test_aniso_cpml_kernel_reduces_to_raw_correction_outside_absorber():
     """
     frequency = 1.0e9
     material = mw.Material(
-        epsilon_tensor=mw.Tensor3x3(((2.0, 0.3, 0.2), (0.3, 2.5, 0.4), (0.2, 0.4, 3.0)))
+        epsilon_tensor=mw.media.Tensor3x3(((2.0, 0.3, 0.2), (0.3, 2.5, 0.4), (0.2, 0.4, 3.0)))
     )
+    # Interior structure clear of every PML face: off-diagonal coefficients vanish
+    # inside the absorber, so both kernels act only where the stretch is neutral.
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
-        grid=mw.GridSpec.uniform(0.04),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
+                grid=mw.GridSpec.uniform(0.04),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=(0.0, 0.0, 1.0),
                 source_time=mw.CW(frequency=frequency, amplitude=1.0),
                 name="pw",
             )
-        ],
-    )
-    # Interior structure clear of every PML face: off-diagonal coefficients vanish
-    # inside the absorber, so both kernels act only where the stretch is neutral.
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.3, 0.16, 0.16)), material=material)
-    )
+            ],
+                structures=(
+            mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.3, 0.16, 0.16)), material=material),
+            ),
+            )
     solver = mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare().solver
     assert solver.full_aniso_enabled
     assert solver.uses_cpml

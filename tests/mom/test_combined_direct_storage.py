@@ -12,14 +12,14 @@ def test_compact_real_eight_rhs_restore_repeat_fields_gradient_and_persistence(t
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=2.25, sigma_e=.01))],
                      sources=[mw.PlaneWave()])
     rule = StoppingRule(method='direct', direct_storage='sealed_host_restore_v1', rtol=1e-10)
-    config = mw.MoMConfig(subdivisions=0, riesz_storage='compact_rwg_v1', stopping=rule,
+    config = mw.mom.MoMConfig(subdivisions=0, riesz_storage='compact_rwg_v1', stopping=rule,
                          integration=IntegrationConfig(order=3, singular_order=4))
-    prepared = mw.Simulation.mom(scene, frequency=3e8, config=config).prepare()
+    prepared = mw.Simulation.mom(scene, frequencies=3e8, config=config).prepare()
     handle = prepared.solver.handle
     original = handle.matrix.clone(); gram = handle.test_riesz.blocks[0].gram.clone()
     pointer = handle.matrix.data_ptr(); factor = handle._riesz_factor
     result = prepared.run()
-    assert result.solver_stats['converged'] and result.solver_stats['direct_storage']['matrix_restored_exact']
+    assert result.stats()['converged'] and result.stats()['direct_storage']['matrix_restored_exact']
     orientations = [((0,0,1),(1,0,0)), ((0,0,1),(0,1,0)), ((0,0,-1),(1,0,0)),
                     ((0,0,-1),(0,1,0)), ((1,0,0),(0,1,0)), ((1,0,0),(0,0,1)),
                     ((0,1,0),(1,0,0)), ((0,1,0),(0,0,1))]
@@ -45,10 +45,10 @@ def test_compact_real_eight_rhs_restore_repeat_fields_gradient_and_persistence(t
     before_fields = result.query_fields(points, region_id='exterior', field_kind='total')
     path = tmp_path/'combined-sealed-compact.pt';result.save(path)
     loaded = mw.Result.load(path, scene=scene)
-    assert loaded.surface_currents.config.stopping.direct_storage=='sealed_host_restore_v1'
-    assert loaded.surface_currents.config.riesz_storage=='compact_rwg_v1'
-    assert loaded.surface_currents.handle.metadata['riesz_storage']=='block_compact_rwg_v1'
-    torch.testing.assert_close(loaded.surface_currents.scattered_coefficients, result.surface_currents.scattered_coefficients)
+    assert mw.mom.surface_currents(loaded).config.stopping.direct_storage=='sealed_host_restore_v1'
+    assert mw.mom.surface_currents(loaded).config.riesz_storage=='compact_rwg_v1'
+    assert mw.mom.surface_currents(loaded).handle.metadata['riesz_storage']=='block_compact_rwg_v1'
+    torch.testing.assert_close(mw.mom.surface_currents(loaded).scattered_coefficients, mw.mom.surface_currents(result).scattered_coefficients)
     for actual, expected in zip(loaded.query_fields(points, region_id='exterior', field_kind='total'), before_fields):
         torch.testing.assert_close(actual, expected, rtol=2e-11, atol=2e-12)
     x = (solved*1.01).detach().requires_grad_()

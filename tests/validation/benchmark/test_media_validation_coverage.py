@@ -26,6 +26,7 @@ from benchmark.media_coverage import (
 )
 from benchmark.scenes import SCENARIOS, build_scene
 from benchmark.scenes.media import MEDIA_EXPORT_SCENARIOS
+from witwin.maxwell.adapters.tidy3d import scene_to_tidy3d
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 _HAS_TIDY3D = importlib.util.find_spec("tidy3d") is not None
@@ -122,7 +123,7 @@ def test_convention_checks_match_relative_permittivity():
 def test_media_export_scenarios_export_as_full_scenes():
     for scenario in MEDIA_EXPORT_SCENARIOS:
         scene = build_scene(scenario.name)
-        td_sim = scene.to_tidy3d(frequencies=scenario.frequencies, run_time=1.0e-13)
+        td_sim = scene_to_tidy3d(scene, frequencies=scenario.frequencies, run_time=1.0e-13)
         assert td_sim.structures, scenario.name
 
 

@@ -54,13 +54,12 @@ def compact_array_column_result(result, *, prepared_scene):
         method=result.method,
         scene=result.scene,
         prepared_scene=prepared_scene,
-        frequency=result.frequency,
         frequencies=result.frequencies,
         solver=constants,
         monitors=retained_monitors,
         ports={},
         metadata=result._metadata,
-        solver_stats=result.solver_stats,
+        solver_stats=result._solver_stats,
     )
 
 

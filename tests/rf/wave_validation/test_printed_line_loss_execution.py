@@ -50,9 +50,9 @@ def test_actual_two_drive_spectra_and_shared_heat_match_direct_source_and_disk_r
         physical_vector_diagnostics.append(metric)
         for component, selection in schema.items():
             for plane in selection['planes']:
-                actual = combined.monitor(plane['name'], frequency=frequency)['components'][component]['data']
-                direct = results[2].monitor(plane['name'], frequency=frequency)['components'][component]['data']
-                basis = [result.monitor(plane['name'], frequency=frequency)['components'][component]['data'] for result in results[:2]]
+                actual = combined.raw_monitor(plane['name'], frequency=frequency)['components'][component]['data']
+                direct = results[2].raw_monitor(plane['name'], frequency=frequency)['components'][component]['data']
+                basis = [result.raw_monitor(plane['name'], frequency=frequency)['components'][component]['data'] for result in results[:2]]
                 metric = superposition_metrics(actual, direct, basis, (1., phase))
                 metric.update(component=component, frequency_hz=frequency, plane=plane['name'])
                 field_diagnostics.append(metric)
@@ -68,9 +68,9 @@ def test_actual_two_drive_spectra_and_shared_heat_match_direct_source_and_disk_r
     # Actual split-trace phasors, not only integrated powers, must superpose.
     for name, record in combined.conductor_losses.items():
         actual = {entry['component']: entry for entry in record['bulk_electric_traces']}
-        direct = {entry['component']: entry for entry in results[2].conductor_losses[name]['bulk_electric_traces']}
+        direct = {entry['component']: entry for entry in mw.rf.conductor_losses(results[2])[name]['bulk_electric_traces']}
         for component in actual:
-            basis_traces = [next(entry for entry in result.conductor_losses[name]['bulk_electric_traces'] if entry['component'] == component)
+            basis_traces = [next(entry for entry in mw.rf.conductor_losses(result)[name]['bulk_electric_traces'] if entry['component'] == component)
                 for result in results[:2]]
             for index, frequency in enumerate(case.frequencies):
                 metric = superposition_metrics(actual[component]['electric_fields'][index], direct[component]['electric_fields'][index],
@@ -93,11 +93,11 @@ def test_actual_two_drive_spectra_and_shared_heat_match_direct_source_and_disk_r
     for name in resumed:
         torch.testing.assert_close(resumed[name], uninterrupted[name], rtol=0, atol=0)
     assert reports[0]['checkpoint']['step'] == 512 and reports[0]['checkpoint']['total_steps'] == 1024
-    for name, record in results[0].conductor_losses.items():
-        torch.testing.assert_close(record['surface_power'], results[3].conductor_losses[name]['surface_power'], rtol=0, atol=0)
+    for name, record in mw.rf.conductor_losses(results[0]).items():
+        torch.testing.assert_close(record['surface_power'], mw.rf.conductor_losses(results[3])[name]['surface_power'], rtol=0, atol=0)
     for frequency in case.frequencies:
         for component, selection in schema.items():
             for plane in selection['planes']:
-                resumed_data = results[0].monitor(plane['name'], frequency=frequency)['components'][component]['data']
-                original_data = results[3].monitor(plane['name'], frequency=frequency)['components'][component]['data']
+                resumed_data = results[0].raw_monitor(plane['name'], frequency=frequency)['components'][component]['data']
+                original_data = results[3].raw_monitor(plane['name'], frequency=frequency)['components'][component]['data']
                 torch.testing.assert_close(resumed_data, original_data, rtol=0, atol=0)

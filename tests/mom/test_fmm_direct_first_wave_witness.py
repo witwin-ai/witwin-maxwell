@@ -35,16 +35,16 @@ def test_positive_difference_rejection_and_whole_geometric_tail():
     reference=real_support_truncation_bounds_many(d,r,r,0.,(0,6,12))
     for key in ('green_absolute','gradient_component_absolute'):
         torch.testing.assert_close(laplace[key],reference[key],rtol=3e-14,atol=0)
-    config=mw.FMMConfig(table_storage='dense',near_storage='full_matrix',kernel_bound_rule=RULE)
+    config=mw.mom.FMMConfig(table_storage='dense',near_storage='full_matrix',kernel_bound_rule=RULE)
     assert config.payload()['version']=='cartesian_fmm_direct_first_wave_config_v1'
-    assert mw.FMMConfig.restore(config.payload())==config
+    assert mw.mom.FMMConfig.restore(config.payload())==config
     for rule in ('direct_positive_tail_min_v1','first_wave_min_v1','bivariate_cauchy_v1'):
         changed=copy.deepcopy(config.payload());changed['parameters']['kernel_bound_rule']=rule
-        with pytest.raises(ValueError):mw.FMMConfig.restore(changed)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(changed)
     from witwin.maxwell.mom.linalg import StoppingRule
     with pytest.raises(NotImplementedError,match='free space'):
-        mw.MoMConfig(operator_backend='fmm',fmm=config,riesz_storage='local_rwg_v1',
-            stopping=StoppingRule(preconditioner='rwg_diagonal'),periodic=mw.MoMPeriodicConfig(((1.,0,0),)))
+        mw.mom.MoMConfig(operator_backend='fmm',fmm=config,riesz_storage='local_rwg_v1',
+            stopping=StoppingRule(preconditioner='rwg_diagonal'),periodic=mw.mom.MoMPeriodicConfig(((1.,0,0),)))
 
 
 def test_saved_original_worst_geometry_native_bound_and_actual_full_kernel(tmp_path):

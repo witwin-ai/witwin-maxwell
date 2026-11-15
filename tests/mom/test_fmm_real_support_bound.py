@@ -154,23 +154,23 @@ def test_policy_identity_exact_default_roundtrip_and_periodic_rejection():
     options = dict(operator_backend='fmm', riesz_storage='local_rwg_v1',
                    stopping=StoppingRule(rtol=1e-9, preconditioner='rwg_diagonal'))
     for shifts in ('dense','separable_v1'):
-        default = mw.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shifts)
+        default = mw.mom.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shifts)
         assert 'kernel_bound_rule' not in default.payload()['parameters']
-        assert mw.FMMConfig.restore(default.payload()) == default
-        selected = mw.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shifts,kernel_bound_rule=RULE)
+        assert mw.mom.FMMConfig.restore(default.payload()) == default
+        selected = mw.mom.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shifts,kernel_bound_rule=RULE)
         payload = selected.payload()
         assert payload['version'] == 'cartesian_fmm_real_support_config_v1'
-        assert mw.FMMConfig.restore(payload) == selected
+        assert mw.mom.FMMConfig.restore(payload) == selected
         assert selected.construction()['kernel_bound_rule'] == RULE
-        assert _numerical_identity(mw.MoMConfig(fmm=default,**options)) != _numerical_identity(mw.MoMConfig(fmm=selected,**options))
+        assert _numerical_identity(mw.mom.MoMConfig(fmm=default,**options)) != _numerical_identity(mw.mom.MoMConfig(fmm=selected,**options))
         for field in payload['parameters']:
             bad=copy.deepcopy(payload); del bad['parameters'][field]
-            with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+            with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
         for mutation in ('version','kernel_bound_rule'):
             bad=copy.deepcopy(payload)
             if mutation=='version':bad['version']='cartesian_fmm_separable_config_v1'
             else:bad['parameters'][mutation]='bivariate_cauchy_v1'
-            with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+            with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
         with pytest.raises(NotImplementedError,match='free space'):
-            mw.MoMConfig(fmm=selected,periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)),**options)
-    with pytest.raises(ValueError):mw.FMMConfig(kernel_bound_rule='unknown')
+            mw.mom.MoMConfig(fmm=selected,periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)),**options)
+    with pytest.raises(ValueError):mw.mom.FMMConfig(kernel_bound_rule='unknown')

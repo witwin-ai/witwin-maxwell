@@ -15,10 +15,69 @@ def field_runtime_convergence(field_1x: np.ndarray, field_2x: np.ndarray) -> tup
     return relative_change, relative_change <= FIELD_CONVERGENCE_TOLERANCE
 
 
-def flux_runtime_convergence(power_1x: np.ndarray, power_2x: np.ndarray) -> tuple[float, bool]:
-    """Classify the largest relative flux change across monitors and frequencies."""
-    relative_change = float(np.max(np.abs(power_2x - power_1x) / np.abs(power_1x)))
+def flux_runtime_convergence(
+    power_1x: np.ndarray, power_2x: np.ndarray, *, incident_power: float | None = None
+) -> tuple[float, bool]:
+    """Classify the largest flux change across monitors and frequencies.
+
+    The change is relative to each monitored power, or to ``incident_power`` for rows whose
+    monitored powers vanish by construction (the flux error uses the same scale).
+    """
+    scale = np.abs(power_1x) if incident_power is None else incident_power
+    relative_change = float(np.max(np.abs(power_2x - power_1x) / scale))
     return relative_change, relative_change <= FLUX_CONVERGENCE_TOLERANCE
+
+
+def windowed_resonance_frequency(
+    frequencies, spectrum, *, record_time: float, half_width: int = 2
+) -> tuple[float, float]:
+    """Estimate a lossless resonance from its finite-record DFT; return (f0, one-sigma).
+
+    An undamped mode observed over a rectangular record of length ``T`` has the DFT kernel
+    ``T sinc((f - f0) T) exp(+-i pi (f - f0) T)`` (centered on ``T/2``; the sign is the
+    transform convention, and the better-fitting one is used). The kernel, a constant
+    and a linear background (other modes' tails, source transient) are least-squares fitted
+    to the complex spectrum on the comb points ``[peak - half_width, peak + half_width + 1]``;
+    ``f0`` minimizes the residual (variable projection). The one-sigma uncertainty is the
+    Gauss-Newton sensitivity of ``f0`` with the linear coefficients projected out, scaled by
+    the residual variance. A peak-interpolation estimator is biased up to about a third of
+    the comb spacing whenever the comb is coarser than ``1/T``; this fit is not.
+    """
+    f = np.asarray(frequencies, dtype=np.float64)
+    y = np.asarray(spectrum, dtype=np.complex128).reshape(-1)
+    peak = int(np.argmax(np.abs(y)))
+    window = slice(max(0, peak - half_width), min(len(f), peak + half_width + 2))
+    fw, yw = f[window], y[window]
+    spacing = float(f[1] - f[0])
+
+    def kernel(f0, sign):
+        detune = fw - f0
+        return record_time * np.sinc(detune * record_time) * np.exp(sign * 1j * np.pi * detune * record_time)
+
+    def solve(f0, sign):
+        basis = np.stack([kernel(f0, sign), np.ones_like(fw), fw - f[peak]], axis=1)
+        coefficients, *_ = np.linalg.lstsq(basis, yw, rcond=None)
+        return basis, coefficients, basis @ coefficients - yw
+
+    grid = np.linspace(f[peak] - spacing, f[peak] + 2.0 * spacing, 3001)
+    scans = {sign: np.array([np.vdot(r, r).real for r in (solve(value, sign)[2] for value in grid)])
+             for sign in (1.0, -1.0)}
+    sign = min(scans, key=lambda key: scans[key].min())
+    rss = scans[sign]
+    best = int(np.argmin(rss))
+    f0 = float(grid[best])
+    if 0 < best < len(grid) - 1:
+        curvature, slope, _ = np.polyfit(grid[best - 1:best + 2] - grid[best], rss[best - 1:best + 2], 2)
+        if curvature > 0:
+            f0 = float(grid[best] - slope / (2.0 * curvature))
+    basis, coefficients, residual = solve(f0, sign)
+    step = 1.0e-4 * spacing
+    jacobian = (kernel(f0 + step, sign) - kernel(f0 - step, sign)) / (2.0 * step) * coefficients[0]
+    orthonormal, _ = np.linalg.qr(basis)
+    jacobian -= orthonormal @ (orthonormal.conj().T @ jacobian)
+    dof = max(2 * len(fw) - 2 * basis.shape[1] - 1, 1)
+    variance = np.vdot(residual, residual).real / dof
+    return f0, float(np.sqrt(variance / np.vdot(jacobian, jacobian).real))
 
 
 def significant_field_mask(reference: np.ndarray, *, relative_floor: float = 0.1) -> np.ndarray:

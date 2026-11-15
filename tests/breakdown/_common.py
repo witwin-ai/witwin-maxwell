@@ -41,71 +41,70 @@ def build_breakdown_scene(
 ):
     """A dielectric box carrying a breakdown descriptor inside a PML box."""
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
-        grid=mw.GridSpec.uniform(h),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1e6),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="dielectric",
-            geometry=mw.Box(position=box_position, size=box_size),
-            material=mw.Material(
-                eps_r=eps_r,
-                sigma_e=sigma_e,
-                breakdown=mw.DielectricBreakdown(
-                    critical_field=critical_field,
-                    minimum_duration=minimum_duration,
-                    post_breakdown_conductivity=post_sigma,
-                    ramp_time=ramp_time,
-                    default_ramp_steps=default_ramp_steps,
+                domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
+                grid=mw.GridSpec.uniform(h),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1e6),
+                structures=(
+            mw.Structure(
+                name="dielectric",
+                geometry=mw.Box(position=box_position, size=box_size),
+                material=mw.Material(
+                    eps_r=eps_r,
+                    sigma_e=sigma_e,
+                    breakdown=mw.breakdown.DielectricBreakdown(
+                        critical_field=critical_field,
+                        minimum_duration=minimum_duration,
+                        post_breakdown_conductivity=post_sigma,
+                        ramp_time=ramp_time,
+                        default_ramp_steps=default_ramp_steps,
+                    ),
                 ),
             ),
-        )
-    )
+            ),
+            )
     if with_source:
-        scene.add_source(
+        scene = scene.updated(sources=(
+            *scene.sources,
             mw.PointDipole(
                 position=source_position,
                 width=0.04,
                 polarization=(0.0, 0.0, 1.0),
                 source_time=mw.CW(frequency=1e9, amplitude=source_amplitude),
-            )
-        )
+            ),
+        ))
     return scene
 
 
 def build_plain_scene(*, eps_r: float = 3.0, sigma_e: float = 0.0, **kwargs):
     """The same geometry/source with a plain (breakdown-free) dielectric box."""
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (-kwargs.get("half", 0.3), kwargs.get("half", 0.3)),
             )
             * 3
-        ),
-        grid=mw.GridSpec.uniform(kwargs.get("h", 0.02)),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1e6),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="dielectric",
-            geometry=mw.Box(
-                position=kwargs.get("box_position", (0.0, 0.0, 0.0)),
-                size=kwargs.get("box_size", (0.12, 0.12, 0.12)),
             ),
-            material=mw.Material(eps_r=eps_r, sigma_e=sigma_e),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=kwargs.get("source_position", (-0.2, 0.0, 0.0)),
-            width=0.04,
-            polarization=(0.0, 0.0, 1.0),
-            source_time=mw.CW(frequency=1e9, amplitude=kwargs.get("source_amplitude", 1.0)),
-        )
-    )
+                grid=mw.GridSpec.uniform(kwargs.get("h", 0.02)),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1e6),
+                structures=(
+            mw.Structure(
+                name="dielectric",
+                geometry=mw.Box(
+                    position=kwargs.get("box_position", (0.0, 0.0, 0.0)),
+                    size=kwargs.get("box_size", (0.12, 0.12, 0.12)),
+                ),
+                material=mw.Material(eps_r=eps_r, sigma_e=sigma_e),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=kwargs.get("source_position", (-0.2, 0.0, 0.0)),
+                width=0.04,
+                polarization=(0.0, 0.0, 1.0),
+                source_time=mw.CW(frequency=1e9, amplitude=kwargs.get("source_amplitude", 1.0)),
+            ),
+            ),
+            )
     return scene
 
 
@@ -114,7 +113,7 @@ def prepare_solver(scene, *, time_steps: int = 10):
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=time_steps),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=time_steps)),
     ).prepare()
     return prepared.solver
 
@@ -134,7 +133,9 @@ def run_breakdown(scene, *, time_steps: int = 80):
     return mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=True,
+        ),
     ).run()

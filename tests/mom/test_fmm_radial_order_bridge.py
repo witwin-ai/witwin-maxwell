@@ -21,8 +21,13 @@ def runner():
 
 @pytest.fixture
 def bundle():
-    # An explicit evidence path is required; no missing-evidence skip or mock
-    # admission can turn this workflow into an actual resource qualification.
+    # An explicit evidence path is required; no mock admission can turn this
+    # workflow into an actual resource qualification. Without the bundle the
+    # bridge tests skip with the reason below; a skip is not a qualification.
+    if 'GSP_RADIAL_ORDER_BRIDGE' not in os.environ:
+        pytest.skip('GSP_RADIAL_ORDER_BRIDGE is not set: point it at a scalar_fmm_radial_order_bridge_v1 bundle '
+                    'for the current production source (scripts/dev/fdtd/regression_shards/build_module_inputs.py '
+                    '--radial-bridge) to run the radial-order bridge checks')
     return json.loads(Path(os.environ['GSP_RADIAL_ORDER_BRIDGE']).read_text())
 
 

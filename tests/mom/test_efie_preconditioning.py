@@ -65,15 +65,15 @@ def test_mixed_gram_is_well_conditioned_and_matches_rotation():
 def run(scene, frequency, side, cells, factory, *, rtol=1e-6, maxiter=1200):
     stopping = StoppingRule(method='gmres', rtol=rtol, maxiter=maxiter, restart=maxiter, preconditioner='none',
                             stagnation_window=maxiter)
-    config = mw.MoMConfig(open_surface=mw.OpenSurfaceConfig(max_edge_length_m=side/cells), stopping=stopping,
+    config = mw.mom.MoMConfig(open_surface=mw.mom.OpenSurfaceConfig(max_edge_length_m=side/cells), stopping=stopping,
                           right_preconditioner=factory)
-    return mw.Simulation.mom(scene, frequency=frequency, config=config).run()
+    return mw.Simulation.mom(scene, frequencies=frequency, config=config).run()
 
 
 def plate(side, frequency):
     return mw.Scene(structures=[mw.Structure(mw.Box(size=(side, side, 0)), mw.Material.pec())],
                     sources=[mw.PlaneWave(direction=(0.0, 0.6, -0.8), polarization=(1.0, 0.0, 0.0),
-                                          source_time=mw.CW(frequency=frequency))], device='cuda')
+                                          source_time=mw.CW(frequency=frequency))])
 
 
 def test_calderon_iterations_stay_flat_under_refinement_and_match_the_direct_solution():
@@ -84,15 +84,15 @@ def test_calderon_iterations_stay_flat_under_refinement_and_match_the_direct_sol
     for cells in (6, 12):
         plain = run(plate(side, frequency), frequency, side, cells, None)
         preconditioned = run(plate(side, frequency), frequency, side, cells, CalderonPreconditioner())
-        assert preconditioned.solver_stats['converged']
-        counts[cells] = (plain.solver_stats['iterations'], preconditioned.solver_stats['iterations'])
-        error = (plain.surface_currents.J-preconditioned.surface_currents.J).norm()/plain.surface_currents.J.norm()
+        assert preconditioned.stats()['converged']
+        counts[cells] = (plain.stats()['iterations'], preconditioned.stats()['iterations'])
+        error = (mw.mom.surface_currents(plain).J-mw.mom.surface_currents(preconditioned).J).norm()/mw.mom.surface_currents(plain).J.norm()
         assert float(error) < 1e-4
         runtime = preconditioned.solver
-        report = preconditioned_residual(runtime.handle, preconditioned.surface_currents.J, runtime.rhs,
+        report = preconditioned_residual(runtime.handle, mw.mom.surface_currents(preconditioned).J, runtime.rhs,
                                          runtime.right_preconditioner.apply)
         assert report['true_relative_residual'] <= 1e-6 and report['preconditioned_relative_residual'] > 0
-        assert preconditioned.solver_stats['right_preconditioner']['version'].startswith('open_efie_calderon')
+        assert preconditioned.stats()['right_preconditioner']['version'].startswith('open_efie_calderon')
     assert counts[12][1] < counts[12][0]
     assert counts[12][1] <= counts[6][1]+6  # natural open-edge rule: flat under refinement
 
@@ -106,18 +106,18 @@ def test_calderon_stays_accurate_and_flat_at_low_frequency():
         result = run(plate(side, frequency), frequency, side, cells, CalderonPreconditioner())
         runtime = result.solver
         reference, _ = solve_reference(runtime.handle, runtime.rhs, StoppingRule(method='direct'))
-        error = (result.surface_currents.J-reference).norm()/reference.norm()
-        assert result.solver_stats['converged'] and result.solver_stats['iterations'] <= 25
+        error = (mw.mom.surface_currents(result).J-reference).norm()/reference.norm()
+        assert result.stats()['converged'] and result.stats()['iterations'] <= 25
         assert float(error) < 1e-4
 
 
 def test_open_surface_preconditioners_reject_the_pmchwt_layout():
     from witwin.maxwell.mom.efie_preconditioning import CalderonPreconditioner
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=0.1), mw.Material(eps_r=2))],
-                     sources=[mw.PlaneWave(source_time=mw.CW(frequency=3e8))], device='cuda')
-    config = mw.MoMConfig(stopping=StoppingRule(method='gmres'), right_preconditioner=CalderonPreconditioner())
+                     sources=[mw.PlaneWave(source_time=mw.CW(frequency=3e8))])
+    config = mw.mom.MoMConfig(stopping=StoppingRule(method='gmres'), right_preconditioner=CalderonPreconditioner())
     with pytest.raises(ValueError, match='single-current'):
-        mw.Simulation.mom(scene, frequency=3e8, config=config).prepare()
+        mw.Simulation.mom(scene, frequencies=3e8, config=config).prepare()
 
 
 def test_calderon_rejects_multi_sheet_scenes_explicitly():
@@ -127,8 +127,8 @@ def test_calderon_rejects_multi_sheet_scenes_explicitly():
     plates = [mw.Structure(mw.Box(position=(0.0, 0.0, z), size=(side, side, 0)), mw.Material.pec())
               for z in (0.075*C_0/frequency, -0.075*C_0/frequency)]
     scene = mw.Scene(structures=plates, sources=[mw.PlaneWave(direction=(0.0, 0.0, -1.0), polarization=(1.0, 0.0, 0.0),
-                                                              source_time=mw.CW(frequency=frequency))], device='cuda')
-    config = mw.MoMConfig(open_surface=mw.OpenSurfaceConfig(max_edge_length_m=side/6),
+                                                              source_time=mw.CW(frequency=frequency))])
+    config = mw.mom.MoMConfig(open_surface=mw.mom.OpenSurfaceConfig(max_edge_length_m=side/6),
                           stopping=StoppingRule(method='gmres'), right_preconditioner=CalderonPreconditioner())
     with pytest.raises(NotImplementedError, match='exactly one sheet; this scene has 2'):
-        mw.Simulation.mom(scene, frequency=frequency, config=config).prepare()
+        mw.Simulation.mom(scene, frequencies=frequency, config=config).prepare()

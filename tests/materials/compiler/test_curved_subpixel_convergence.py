@@ -6,6 +6,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_components
 
 
 _BOUNDS = ((-0.8, 0.8),) * 3
@@ -26,20 +27,19 @@ def _primitive(kind, *, position=_POSITION, trainable=False):
 
 def _compile_components(geometry, grid, *, samples, averaging="arithmetic", eps_r=5.0):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=_BOUNDS),
-        grid=grid,
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=samples, averaging=averaging),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="curved",
-            geometry=geometry,
-            material=mw.Material(eps_r=eps_r),
-        )
-    )
-    prepared = prepare_scene(scene)
-    eps, _ = prepared.compile_material_components()
+                domain=mw.Domain(bounds=_BOUNDS),
+                grid=grid,
+                subpixel=mw.SubpixelSpec(samples=samples, averaging=averaging),
+                structures=(
+            mw.Structure(
+                name="curved",
+                geometry=geometry,
+                material=mw.Material(eps_r=eps_r),
+            ),
+            ),
+            )
+    prepared = prepare_scene(scene, device="cpu")
+    eps, _ = compile_material_components(prepared)
     return prepared, eps
 
 

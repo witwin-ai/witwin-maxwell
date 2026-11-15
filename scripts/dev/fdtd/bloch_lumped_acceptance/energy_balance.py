@@ -1,4 +1,5 @@
 """Pulsed source-off decay and carrier-CW power conservation of a loaded cell."""
+from dataclasses import replace
 import sysconfig
 import os
 
@@ -53,18 +54,20 @@ def power(reference, loaded, label, frequency, *, gate):
 def cw_simulation(args, *, termination=None, empty=False):
     problem = simulation(angle=args.angle, empty=empty, termination=termination, steps=args.cw_steps)
     source = problem.scene.sources[0]
-    problem.scene.sources[0] = mw.PlaneWave(
-        name=source.name, direction=source.direction, polarization=source.polarization,
-        injection=source.injection, source_time=mw.CW(F0))
-    # Resolve one fixed Bloch phase from the discrete carrier, removing the
-    # continuum/numerical-wavenumber mismatch as well as the broadband defect.
-    problem.scene.boundary = mw.BoundarySpec.faces(default="pml", num_layers=16,
-        x="bloch", y="bloch", z="pml", bloch_wavevector="auto")
+    scene = problem.scene.updated(
+        sources=(mw.PlaneWave(name=source.name, direction=source.direction, polarization=source.polarization,
+                              injection=source.injection, source_time=mw.CW(F0)), *problem.scene.sources[1:]),
+        # Resolve one fixed Bloch phase from the discrete carrier, removing the
+        # continuum/numerical-wavenumber mismatch as well as the broadband defect.
+        boundary=mw.BoundarySpec.faces(default="pml", num_layers=16,
+                                       x="bloch", y="bloch", z="pml", bloch_wavevector="auto"))
+    problem = mw.Simulation.fdtd(scene, frequencies=problem.frequencies, excitations=problem.excitations,
+                                 config=problem.config)
     # Keep the same requested band and band-scale alpha as the pulse.
     # A late Hann window removes switch-on transients from the carrier phasors.
-    problem.config.run_time = mw.TimeConfig(time_steps=args.cw_steps,
-                                          transient_cycles=args.cw_transient_cycles)
-    problem.config.spectral_sampler = mw.SpectralSampler(window="hanning")
+    problem.config = replace(problem.config,
+                             run_time=mw.TimeConfig(time_steps=args.cw_steps, transient_cycles=args.cw_transient_cycles),
+                             spectral_sampler=mw.SpectralSampler(window="hanning"))
     return problem
 
 
@@ -120,7 +123,7 @@ def main():
         reference, _ = run(cw_simulation(args, empty=True))
         phase = complex(reference.solver.boundary_phase_cos[1], reference.solver.boundary_phase_sin[1])
         for name in ("upstream", "downstream"):
-            components = reference.monitor(name, frequency=F0)["components"]
+            components = reference.raw_monitor(name, frequency=F0)["components"]
             for component in ("Ex", "Hy"):
                 field = torch.as_tensor(components[component]["data"])
                 defect = torch.linalg.vector_norm(field[:, -1] - phase * field[:, 0]) \

@@ -26,6 +26,7 @@ class HarmonicCurrentClosure:
             if (type(tangent_rule) is not StoppingRule or tangent_rule.method!='gmres'
                     or tangent_rule.preconditioner!='none' or tangent_rule.recycle_size or tangent_rule.fallback!='none'):
                 raise ValueError('DC closure requires unpreconditioned unrecycled GMRES without fallback')
+            tangent_rule=tangent_rule.resolved()
         if type(tangent_column_batch) is not int or tangent_column_batch<1:
             raise ValueError('DC closure tangent column batch must be a positive integer')
         if tangent_rule is None and tangent_column_batch!=8:
@@ -54,8 +55,8 @@ class HarmonicCurrentClosure:
         """Canonical active inner policy, excluding inactive default options."""
         self.assert_current()
         if self.tangent_rule is None:return {}
-        from dataclasses import asdict
-        return {'tangent_rule':asdict(self.tangent_rule),'tangent_column_batch':self.tangent_column_batch}
+        from .options import option_asdict
+        return {'tangent_rule':option_asdict(self.tangent_rule),'tangent_column_batch':self.tangent_column_batch}
 
     def validate_receipt(self,record,block):
         """Check historical inner policy and bounds without repeating solves."""
@@ -118,7 +119,7 @@ def surface_face_potentials(block,binding,potential):
 def validate_current_receipt(record,*,rule,column_batch,size,dtype):
     """Validate recorded policy using independently bound dimension and precision."""
     import math
-    from dataclasses import asdict
+    from .options import option_asdict
     if not isinstance(record,dict):raise ValueError('Invalid stored DC solver receipt')
     if rule is None:
         if any(k in record for k in ('linear_solver','tangent_rule','tangent_checks')):
@@ -126,7 +127,7 @@ def validate_current_receipt(record,*,rule,column_batch,size,dtype):
         return
     iterations=record.get('iterations');checks=record.get('tangent_checks')
     if (record.get('linear_solver')!='streamed_inverse_checked_gmres'
-            or record.get('tangent_rule')!=asdict(rule)
+            or record.get('tangent_rule')!=option_asdict(rule)
             or record.get('tangent_column_batch')!=column_batch
             or record.get('global_current_jacobian_stored') is not False
             or record.get('fast_work_qualified') is not False or record.get('physical_qualification') is not False
@@ -141,7 +142,7 @@ def validate_current_receipt(record,*,rule,column_batch,size,dtype):
                 or bound.get('complete') is not True or bound.get('admitted') is not True
                 or bound.get('inconclusive') is not False or bound.get('solve_failure') is not None
                 or bound.get('columns_checked')!=size or bound.get('column_batch')!=column_batch
-                or bound.get('tangent_rule')!=asdict(rule)
+                or bound.get('tangent_rule')!=option_asdict(rule)
                 or any(bound.get(k) is not False for k in ('underlying_action_error_certified','interval_certified','physical_qualification','fast_work_qualified'))
                 or not isinstance(solve,dict) or solve.get('converged') is not True):
             raise ValueError('Invalid stored DC tangent bound')

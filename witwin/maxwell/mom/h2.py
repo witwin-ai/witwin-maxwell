@@ -10,8 +10,11 @@ import torch
 from .h2_basis import NestedClusterBasis, NestedBasisConfig
 from .lowrank import LowRankBlock
 from .h2_capacity import plan_h2_storage, H2CapacityError
+from ..errors import ConvergenceError
+from .._stability import experimental
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class H2Config:
     max_rank: int = 64
@@ -45,7 +48,7 @@ class H2Config:
         return cls(**payload['parameters'])
 
 
-class H2ConversionFailure(RuntimeError):
+class H2ConversionFailure(ConvergenceError):
     def __init__(self, message, receipt):
         super().__init__(message)
         self.receipt = receipt

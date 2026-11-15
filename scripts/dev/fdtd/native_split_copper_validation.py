@@ -32,13 +32,12 @@ def build_native_simulation(*, device, spacing=.005, polarization='Ez', complex_
     probes += list(range(math.ceil(.04/spacing), math.floor(.12/spacing)+1))
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.2, .2), (-.01, .01), (-.01, .01))),
         grid=mw.GridSpec.custom(x, yz, yz), boundary=mw.BoundarySpec.faces(default='pml', num_layers=12,
-            y=paired, z=paired, bloch_wavevector=(0., 0., 0.)), device=device,
-        sources=(mw.PlaneWave(direction=(1., 0., 0.), polarization=direction,
+            y=paired, z=paired, bloch_wavevector=(0., 0., 0.)), sources=(mw.PlaneWave(direction=(1., 0., 0.), polarization=direction,
             source_time=mw.CW(frequency, phase=.37), injection=mw.TFSF.slab(axis='x', bounds=(-.15, .15))),),
         monitors=tuple(mw.PointMonitor(f'probe-{index:+d}', (index*spacing, 0., 0.), fields=(polarization,)) for index in probes))
-    return mw.Simulation.fdtd(scene, frequency=frequency, full_field_dft=False, cuda_graph=False,
+    return mw.Simulation.fdtd(scene, frequencies=frequency, config=mw.FDTDConfig(full_field_dft=False, cuda_graph=False,
         run_time=mw.TimeConfig(transient_cycles=ramp_cycles+settling_cycles, steady_cycles=measurement_cycles),
-        spectral_sampler=mw.SpectralSampler(window='hanning'))
+        spectral_sampler=mw.fdtd.SpectralSampler(window='hanning'), device=device))
 
 
 @contextmanager
@@ -75,7 +74,7 @@ def encode(value):
 
 def compile_preflight(*, spacing, offset, polarization, complex_fields):
     simulation = build_native_simulation(device='cpu', spacing=spacing, polarization=polarization, complex_fields=complex_fields)
-    scene = PreparedScene(simulation.scene, lazy_meshgrid=True)
+    scene = PreparedScene(simulation.scene, device=simulation.config.device, lazy_meshgrid=True)
     layout = compile_native_plane_layout(scene, cut=offset*spacing, polarization=polarization,
                                        implicit_bounds=(-spacing, 2*spacing))
     return dict(scope='Real Scene -> PreparedScene grid/source compilation only; no native CUDA preparation or field execution',
@@ -102,7 +101,7 @@ def execute_native(args):
         raise RuntimeError('Actual prepared-native execution requires a separately scheduled WITWIN_RUN_NATIVE_SPLIT_CUDA=1 window.')
     frequency, sigma = 1e9, 5.8e7
     thickness = math.sqrt(2/(2*math.pi*frequency*MU_0*sigma))
-    material = mw.CopperFoil(thickness=thickness, conductivity=sigma, frequency_range=(.5e9, 2e9))
+    material = mw.media.CopperFoil(thickness=thickness, conductivity=sigma, frequency_range=(.5e9, 2e9))
     simulation = build_native_simulation(device='cuda', spacing=args.spacing, polarization=args.polarization,
         complex_fields=not args.real_fields, ramp_cycles=args.ramp_cycles,
         settling_cycles=args.settling_cycles, measurement_cycles=args.measurement_cycles)

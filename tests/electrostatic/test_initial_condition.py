@@ -36,22 +36,20 @@ def _uniform_dc_result(*, device="cpu", bounds=BOUNDS, h=H):
         domain=mw.Domain(bounds=bounds),
         grid=mw.GridSpec.uniform(h),
         boundary=mw.BoundarySpec.none(),
-        device=device,
     )
-    boundary = mw.ElectrostaticBoundarySpec(
+    boundary = mw.electrostatic.ElectrostaticBoundarySpec(
         default="neumann", z_low=("dirichlet", 1.0), z_high=("dirichlet", 0.0)
     )
-    return mw.Simulation.electrostatic(scene, boundary=boundary).run()
+    return mw.Simulation.electrostatic(scene, config=mw.electrostatic.ElectrostaticConfig(boundary=boundary, device=device)).run()
 
 
-def _matching_fdtd_scene(*, device="cpu", boundary=None, bounds=BOUNDS, h=H):
+def _matching_fdtd_scene(*, boundary=None, bounds=BOUNDS, h=H):
     return prepare_scene(
         mw.Scene(
             domain=mw.Domain(bounds=bounds),
             grid=mw.GridSpec.uniform(h),
             boundary=boundary if boundary is not None else mw.BoundarySpec.periodic(),
-            device=device,
-        )
+        ), device="cpu"
     )
 
 
@@ -61,29 +59,29 @@ def _matching_fdtd_scene(*, device="cpu", boundary=None, bounds=BOUNDS, h=H):
 
 
 def test_from_result_rejects_non_electrostatic_result():
-    fake = mw.Scene(domain=mw.Domain(bounds=BOUNDS), grid=mw.GridSpec.uniform(H), device="cpu")
+    fake = mw.Scene(domain=mw.Domain(bounds=BOUNDS), grid=mw.GridSpec.uniform(H))
     from witwin.maxwell.result import Result
 
     bad = Result(method="fdtd", scene=fake, frequency=1e9)
     with pytest.raises(ValueError):
-        mw.ElectrostaticInitialCondition.from_result(bad)
+        mw.electrostatic.ElectrostaticInitialCondition.from_result(bad)
 
 
 def test_from_result_rejects_negative_tolerance():
     dc = _uniform_dc_result()
     with pytest.raises(ValueError):
-        mw.ElectrostaticInitialCondition.from_result(dc, tolerance=-1.0)
+        mw.electrostatic.ElectrostaticInitialCondition.from_result(dc, tolerance=-1.0)
 
 
 def test_from_result_captures_dc_provenance():
     dc = _uniform_dc_result()
-    ic = mw.ElectrostaticInitialCondition.from_result(dc)
+    ic = mw.electrostatic.ElectrostaticInitialCondition.from_result(dc)
     assert ic.tolerance == DEFAULT_GAUSS_TOLERANCE
     prov = ic.provenance
     assert prov["source"] == "electrostatic"
     assert prov["capability_level"] == "electrostatic-prebias"
-    assert prov["grid_shape"] == tuple(dc.electrostatic.potential.shape)
-    assert prov["dc_iterations"] == dc.electrostatic.iterations
+    assert prov["grid_shape"] == tuple(mw.electrostatic.electrostatic(dc).potential.shape)
+    assert prov["dc_iterations"] == mw.electrostatic.electrostatic(dc).iterations
     # Gauss residual is filled only at injection (needs FDTD eps).
     assert ic.gauss_residual is None
 
@@ -95,7 +93,7 @@ def test_from_result_captures_dc_provenance():
 
 def test_mapping_yields_exact_yee_component_shapes():
     dc = _uniform_dc_result()
-    ic = mw.ElectrostaticInitialCondition.from_result(dc)
+    ic = mw.electrostatic.ElectrostaticInitialCondition.from_result(dc)
     prepared = _matching_fdtd_scene()
     Ex, Ey, Ez = ic.map_to_yee(prepared)
     Nx, Ny, Nz = prepared.Nx, prepared.Ny, prepared.Nz
@@ -109,7 +107,7 @@ def test_mapped_field_has_zero_discrete_yee_curl():
     # curl (the H-update source) is identically zero to roundoff -- this is exactly
     # what makes the pre-bias a discrete FDTD steady state.
     dc = _uniform_dc_result()
-    ic = mw.ElectrostaticInitialCondition.from_result(dc)
+    ic = mw.electrostatic.ElectrostaticInitialCondition.from_result(dc)
     prepared = _matching_fdtd_scene()
     Ex, Ey, Ez = (t.numpy() for t in ic.map_to_yee(prepared))
     dx = np.asarray(prepared.dx_primal64)
@@ -134,7 +132,7 @@ def test_mapped_field_has_zero_discrete_yee_curl():
 
 def test_uniform_field_recovered_exactly():
     dc = _uniform_dc_result()
-    ic = mw.ElectrostaticInitialCondition.from_result(dc)
+    ic = mw.electrostatic.ElectrostaticInitialCondition.from_result(dc)
     prepared = _matching_fdtd_scene()
     _, _, Ez = ic.map_to_yee(prepared)
     # V = 1 across Lz = 0.5 -> uniform Ez = 2 V/m everywhere.
@@ -148,7 +146,7 @@ def test_uniform_field_recovered_exactly():
 
 def test_grid_mismatch_is_rejected():
     dc = _uniform_dc_result()
-    ic = mw.ElectrostaticInitialCondition.from_result(dc)
+    ic = mw.electrostatic.ElectrostaticInitialCondition.from_result(dc)
     # A different resolution -> different node grid -> fail closed.
     mismatched = _matching_fdtd_scene(h=0.1)
     with pytest.raises(ValueError, match="does not match the FDTD scene grid"):
@@ -159,7 +157,7 @@ def test_pml_boundary_grid_extension_is_rejected():
     # A PML boundary pads the FDTD grid, so its node grid no longer matches the
     # electrostatic (non-extending) grid: the identity guard must reject it.
     dc = _uniform_dc_result()
-    ic = mw.ElectrostaticInitialCondition.from_result(dc)
+    ic = mw.electrostatic.ElectrostaticInitialCondition.from_result(dc)
     pml = _matching_fdtd_scene(boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0))
     with pytest.raises(ValueError, match="does not match the FDTD scene grid"):
         ic.map_to_yee(pml)
@@ -172,19 +170,18 @@ def test_pml_boundary_grid_extension_is_rejected():
 
 def _sim_with_ic(boundary, *, parallel=None):
     dc = _uniform_dc_result()
-    ic = mw.ElectrostaticInitialCondition.from_result(dc)
+    ic = mw.electrostatic.ElectrostaticInitialCondition.from_result(dc)
     scene = mw.Scene(
         domain=mw.Domain(bounds=BOUNDS),
         grid=mw.GridSpec.uniform(H),
         boundary=boundary,
-        device="cpu",
     )
-    return mw.Simulation.fdtd(scene, frequencies=[1e9], initial_condition=ic, parallel=parallel)
+    return mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(initial_condition=ic, parallel=parallel, device="cpu"))
 
 
 def test_run_rejects_non_initial_condition_object():
-    scene = mw.Scene(domain=mw.Domain(bounds=BOUNDS), grid=mw.GridSpec.uniform(H), device="cpu")
-    sim = mw.Simulation.fdtd(scene, frequencies=[1e9], initial_condition="not-an-ic")
+    scene = mw.Scene(domain=mw.Domain(bounds=BOUNDS), grid=mw.GridSpec.uniform(H))
+    sim = mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(initial_condition="not-an-ic", device="cpu"))
     with pytest.raises(TypeError):
         sim._validate_initial_condition_support()
 
@@ -198,7 +195,7 @@ def test_run_rejects_bloch_prebias():
 def test_run_rejects_distributed_prebias():
     sim = _sim_with_ic(
         mw.BoundarySpec.periodic(),
-        parallel=mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1")),
+        parallel=mw.fdtd.FDTDParallelConfig(devices=("cuda:0", "cuda:1")),
     )
     with pytest.raises(NotImplementedError, match="[Dd]istributed|multi-GPU"):
         sim._validate_initial_condition_support()
@@ -206,25 +203,24 @@ def test_run_rejects_distributed_prebias():
 
 def test_run_rejects_trainable_prebias():
     dc = _uniform_dc_result()
-    ic = mw.ElectrostaticInitialCondition.from_result(dc)
+    ic = mw.electrostatic.ElectrostaticInitialCondition.from_result(dc)
     density = torch.rand((4, 4, 4), dtype=torch.float32, requires_grad=True)
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=BOUNDS),
-        grid=mw.GridSpec.uniform(H),
-        boundary=mw.BoundarySpec.periodic(),
-        device="cpu",
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design",
-            geometry=mw.Box(position=(0.25, 0.25, 0.25), size=(0.2, 0.2, 0.2)),
-            density=density,
-            eps_bounds=(1.0, 6.0),
-            mu_bounds=(1.0, 1.0),
-        )
-    )
-    sim = mw.Simulation.fdtd(scene, frequencies=[1e9], initial_condition=ic)
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=BOUNDS),
+                grid=mw.GridSpec.uniform(H),
+                boundary=mw.BoundarySpec.periodic(),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.25, 0.25, 0.25), size=(0.2, 0.2, 0.2)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            ),
+            ),
+            )
+    sim = mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(initial_condition=ic, device="cpu"))
     assert sim.has_trainable_parameters
     with pytest.raises(NotImplementedError, match="[Tt]rainable|adjoint"):
         sim._validate_initial_condition_support()
@@ -243,41 +239,37 @@ def _plate(zc):
 def _plate_prebias_and_solver(time_steps=300, *, device="cuda", tolerance=DEFAULT_GAUSS_TOLERANCE):
     # DC: parallel plates as fixed-potential terminals, insulating sides.
     dc_scene = mw.Scene(
-        domain=mw.Domain(bounds=BOUNDS),
-        grid=mw.GridSpec.uniform(H),
-        boundary=mw.BoundarySpec.none(),
-        device=device,
-    )
-    dc_scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal("hot", geometry=_plate(0.075), potential=1.0)
-    )
-    dc_scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal("gnd", geometry=_plate(0.425), grounded=True)
-    )
+                   domain=mw.Domain(bounds=BOUNDS),
+                   grid=mw.GridSpec.uniform(H),
+                   boundary=mw.BoundarySpec.none(),
+                   electrostatic_terminals=(
+                   mw.electrostatic.ElectrostaticTerminal("hot", geometry=_plate(0.075), potential=1.0),
+                   mw.electrostatic.ElectrostaticTerminal("gnd", geometry=_plate(0.425), grounded=True),
+               ),
+               )
     dc = mw.Simulation.electrostatic(
-        dc_scene, boundary=mw.ElectrostaticBoundarySpec(default="neumann")
+        dc_scene, config=mw.electrostatic.ElectrostaticConfig(boundary=mw.electrostatic.ElectrostaticBoundarySpec(default="neumann"), device=device)
     ).run()
-    ic = mw.ElectrostaticInitialCondition.from_result(dc, tolerance=tolerance)
+    ic = mw.electrostatic.ElectrostaticInitialCondition.from_result(dc, tolerance=tolerance)
 
     # FDTD: the plates are PEC-material structures; periodic sides keep the uniform
     # interior field from being clipped, so it is an exact discrete steady state.
     fdtd_scene = mw.Scene(
-        domain=mw.Domain(bounds=BOUNDS),
-        grid=mw.GridSpec.uniform(H),
-        boundary=mw.BoundarySpec.periodic(),
-        device=device,
-    )
-    fdtd_scene.add_structure(
-        mw.Structure(name="hot", geometry=_plate(0.075), material=mw.Material.pec())
-    )
-    fdtd_scene.add_structure(
-        mw.Structure(name="gnd", geometry=_plate(0.425), material=mw.Material.pec())
-    )
+                     domain=mw.Domain(bounds=BOUNDS),
+                     grid=mw.GridSpec.uniform(H),
+                     boundary=mw.BoundarySpec.periodic(),
+                     structures=(
+                     mw.Structure(name="hot", geometry=_plate(0.075), material=mw.Material.pec()),
+                     mw.Structure(name="gnd", geometry=_plate(0.425), material=mw.Material.pec()),
+                 ),
+                 )
     sim = mw.Simulation.fdtd(
         fdtd_scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        initial_condition=ic,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            initial_condition=ic, device=device,
+        ),
     )
     return ic, sim
 

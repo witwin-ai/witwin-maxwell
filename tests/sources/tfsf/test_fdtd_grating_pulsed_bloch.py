@@ -30,33 +30,31 @@ def _bloch_slab_boundary(*, wavevector, num_layers=4):
 
 
 def test_pulsed_bloch_grating_slab_prepares_complex_line(monkeypatch):
-    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda *args, **kwargs: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.solver._require_cuda_scene", lambda scene: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.solver._get_fdtd_module", lambda: object())
-    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.initialization.require_cuda_scene", lambda scene: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.initialization.get_fdtd_module", lambda: object())
+    from tests.support.host_preparation import stub_cuda_preparation
+    stub_cuda_preparation(monkeypatch)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.06),
-        boundary=_bloch_slab_boundary(wavevector=(math.pi, 0.5 * math.pi, 0.0)),
-        device="cpu",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.2, 0.1, 0.9746794344808963),
-            polarization=(1.0, 0.0, -0.20519567041703082),
-            source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.3e9, amplitude=20.0),
-            injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
-            name="grating_pulse",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.06),
+                boundary=_bloch_slab_boundary(wavevector=(math.pi, 0.5 * math.pi, 0.0)),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.2, 0.1, 0.9746794344808963),
+                polarization=(1.0, 0.0, -0.20519567041703082),
+                source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.3e9, amplitude=20.0),
+                injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
+                name="grating_pulse",
+            ),
+            ),
+                monitors=(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")),),
+            )
 
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=[0.85e9, 1.0e9, 1.15e9],
-        run_time=mw.TimeConfig(time_steps=256),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=256),
+            absorber="cpml", device="cpu",
+        ),
     )
     solver = simulation.prepare().solver
     assert solver._tfsf_state["provider"] == "plane_wave_fixed_k"
@@ -103,7 +101,7 @@ def _bloch_capture_solver():
         bloch_wavevector=(0.0, math.pi, 0.0),
     )
     return SimpleNamespace(
-        scene=SimpleNamespace(boundary=boundary),
+        scene=SimpleNamespace(scene=SimpleNamespace(boundary=boundary)),
         fdtd_module=fdtd_module,
         Ex=object(),
         Ex_imag=object(),

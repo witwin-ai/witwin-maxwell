@@ -11,6 +11,9 @@ from witwin.maxwell.fdtd.excitation.injection import initialize_source_terms
 from witwin.maxwell.fdtd.runtime.materials import pole_component_weight
 from witwin.maxwell.postprocess.fdtd_loss import automatic_electric_dispersion_density
 from witwin.maxwell.postprocess.modal import _mode_overlap_context
+from witwin.maxwell.compiler import compile_materials
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs CUDA for FDTD preparation')
 
 
 @pytest.fixture(autouse=True)
@@ -24,41 +27,43 @@ def _single_cpu_thread():
 class _Design(mw.SceneModule):
     def __init__(self, launch):
         super().__init__()
-        self.value = torch.nn.Parameter(torch.tensor(.4))
+        self.value = torch.nn.Parameter(torch.tensor(.4, device='cuda'))
         self.launch = launch
 
     def to_scene(self):
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.4, 0.4),) * 3),
-            grid=mw.GridSpec.uniform(.08), boundary=mw.BoundarySpec.none(), device='cpu',
-            subpixel_samples=mw.SubpixelSpec(samples=1, averaging='arithmetic'))
-        scene.add_material_region(mw.MaterialRegion(
-            'design', mw.Box(position=(0, 0, 0), size=(.48, .24, .32)),
-            self.value.sigmoid().expand(2, 2, 2), eps_bounds=(1., 12.)))
+                    domain=mw.Domain(bounds=((-0.4, 0.4),) * 3),
+                    grid=mw.GridSpec.uniform(.08), boundary=mw.BoundarySpec.none(), subpixel=mw.SubpixelSpec(samples=1, averaging='arithmetic'),
+                    material_regions=(
+                mw.MaterialRegion(
+                    'design', mw.Box(position=(0, 0, 0), size=(.48, .24, .32)),
+                    self.value.sigmoid().expand(2, 2, 2), eps_bounds=(1., 12.)),
+                ))
         kwargs = dict(position=(0, 0, 0), size=(0, .48, .48), polarization='Ez',
                       source_time=mw.GaussianPulse(frequency=1e9, fwidth=.2e9), name='launch')
         if self.launch == 'source':
-            scene.add_source(mw.ModeSource(**kwargs))
+            scene = scene.updated(sources=(*scene.sources, mw.ModeSource(**kwargs)))
         elif self.launch == 'port':
-            scene.add_port(mw.ModePort(**kwargs))
+            scene = scene.updated(ports=(*scene.ports, mw.ModePort(**kwargs)))
         else:
-            scene.add_source(mw.PointDipole(position=(0, 0, 0), source_time=mw.CW(1e9)))
-            scene.add_structure(mw.Structure(
-                mw.Box(position=(.32, 0, 0), size=(.16, .24, .32)),
-                mw.Material(eps_r=2., debye_poles=(mw.DebyePole(
-                    delta_eps=self.value.square(), tau=1e-10),))))
-        for cls, name in ((mw.PermittivityMonitor, 'eps'), (mw.MediumMonitor, 'medium')):
-            scene.add_monitor(cls(name, position=(0, 0, 0), size=(.64, .48, .48)))
+            scene = scene.updated(sources=(*scene.sources, mw.PointDipole(position=(0, 0, 0), source_time=mw.CW(1e9))), structures=(
+                *scene.structures,
+                mw.Structure(
+                    mw.Box(position=(.32, 0, 0), size=(.16, .24, .32)),
+                    mw.Material(eps_r=2., debye_poles=(mw.DebyePole(
+                    delta_eps=self.value.square(), tau=1e-10),))),
+            ))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            *(cls(name, position=(0, 0, 0), size=(.64, .48, .48)) for cls, name in ((mw.monitors.PermittivityMonitor, 'eps'), (mw.monitors.MediumMonitor, 'medium'))),
+        ))
         return scene
 
 
 def _host_bridge_result(monkeypatch, model):
     # Exercise production bridge scene selection, material/source initialization,
     # custom-forward grad mode and Result construction. Native stepping/adjoints
-    # require CUDA; only those parts and CPU admission are replaced here.
-    from witwin.maxwell.fdtd import cpu_profile
-    monkeypatch.setattr(cpu_profile, 'admit_cpu_reference_scene',
-                        lambda simulation, scene: setattr(scene, '_fdtd_cpu_reference', True))
+    # are replaced here.
     cls = bridge_module._FDTDGradientBridge
 
     def init(self, simulation):
@@ -79,8 +84,8 @@ def _host_bridge_result(monkeypatch, model):
     monkeypatch.setattr(cls, 'accept_forward', accept)
     monkeypatch.setattr(cls, 'rebuild_forward_outputs',
                         lambda self, outputs: ({'Ex': outputs[0]}, {}, {}, {}, {}))
-    simulation = mw.Simulation.fdtd(model, frequency=1e9, backend='cpu_reference',
-                                   run_time=mw.TimeConfig(time_steps=12))
+    simulation = mw.Simulation.fdtd(model, frequencies=1e9,
+                                   config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=12)))
     return bridge_module.run_fdtd_with_gradient_bridge(simulation)
 
 
@@ -89,9 +94,9 @@ def test_bridge_result_materials_are_numerical_but_launch_replay_has_gradients(m
     model = _Design(launch)
     result = _host_bridge_result(monkeypatch, model)
     assert not result.scene.material_regions[0].density.requires_grad
-    assert not result.prepared_scene.material_regions[0].density.requires_grad
+    assert not result.prepared_scene.scene.material_regions[0].density.requires_grad
     for name in ('eps', 'medium'):
-        payload = result.monitor(name)
+        payload = result.raw_monitor(name)
         assert not payload['eps'].requires_grad
         assert payload['eps'].grad_fn is None
     context = _mode_overlap_context(result)
@@ -117,13 +122,13 @@ def test_bridge_result_materials_are_numerical_but_launch_replay_has_gradients(m
 def test_pole_work_keeps_field_gradients_without_a_declaration_graph(monkeypatch):
     result = _host_bridge_result(monkeypatch, _Design('none'))
     scene = result.prepared_scene
-    entry = scene.compile_materials()['debye_poles'][0]
+    entry = compile_materials(scene)['debye_poles'][0]
     masks = {c: torch.ones_like(pole_component_weight(entry, c), dtype=torch.bool)
              for c in ('Ex', 'Ey', 'Ez')}
-    fields = {c: torch.ones((1, *mask.shape), dtype=torch.complex128, requires_grad=True)
+    fields = {c: torch.ones((1, *mask.shape), dtype=torch.complex128, device=mask.device, requires_grad=True)
               for c, mask in masks.items()}
     density = automatic_electric_dispersion_density(
-        scene, SimpleNamespace(component_masks=masks), torch.tensor([1e9]), fields, 1e-11)
+        scene, SimpleNamespace(component_masks=masks), torch.tensor([1e9], device=masks['Ex'].device), fields, 1e-11)
     assert not entry['pole'].delta_eps.requires_grad
     objective = sum(value.sum() for value in density.values())
     gradients = torch.autograd.grad(objective, tuple(fields.values()))

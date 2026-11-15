@@ -27,25 +27,25 @@ Create circuit nodes and shared linear device objects, bind one or more existing
 ```python
 import witwin.maxwell as mw
 
-circuit = mw.Circuit("matching_network")
+circuit = mw.circuits.Circuit("matching_network")
 input_node = circuit.node("input")
 middle = circuit.node("middle")
 output_node = circuit.node("output")
 
-circuit.add(mw.Inductor("L1", input_node, middle, 2.65e-9))
-circuit.add(mw.Capacitor("C1", middle, circuit.ground, 2.12e-12))
-circuit.add(mw.Inductor("L2", middle, output_node, 2.65e-9))
+circuit.add(mw.rf.Inductor("L1", input_node, middle, 2.65e-9))
+circuit.add(mw.rf.Capacitor("C1", middle, circuit.ground, 2.12e-12))
+circuit.add(mw.rf.Inductor("L2", middle, output_node, 2.65e-9))
 circuit.bind_port("feed", positive=input_node, negative=circuit.ground)
 circuit.bind_port("antenna", positive=output_node, negative=circuit.ground)
 
-scene.add_circuit(circuit)
+scene = scene.updated(circuits=(*scene.circuits, circuit))
 result = mw.Simulation.fdtd(
     scene,
-    frequency=3e9,
-    run_time=mw.TimeConfig(time_steps=1000),
+    frequencies=3e9,
+    config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1000)),
 ).run()
 
-data = result.circuit("matching_network")
+data = mw.circuits.circuit(result, "matching_network")
 print(data.node_voltage("middle"))
 print(data.branch_current("L2"))
 ```
@@ -144,8 +144,8 @@ and resume into another fresh preparation of the same simulation:
 ```python
 simulation = mw.Simulation.fdtd(
     scene,
-    frequency=3e9,
-    run_time=mw.TimeConfig(time_steps=1000),
+    frequencies=3e9,
+    config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1000)),
 )
 
 checkpoint = simulation.prepare().run_until(400)

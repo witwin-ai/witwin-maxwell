@@ -2,7 +2,10 @@
 import cmath, math
 import numpy as np
 import pytest
+import torch
 from tests.support.observer_origin_probe import run, port_table_probe, port_unit_probe
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
 
 @pytest.fixture(scope='module')
 def records():
@@ -34,9 +37,10 @@ def test_port_midpoint_origin_table():
 
 def test_exact_physical_step_tables():
     from tests.support.observer_origin_probe import mw, torch
-    scene=mw.Scene(domain=mw.Domain(bounds=((0.,.1),(0.,.1),(0.,.4))),grid=mw.GridSpec.uniform(.05),device='cpu',boundary=mw.BoundarySpec.pec())
-    scene.add_source(mw.PointDipole(position=(.025,.05,.1),polarization='Ex',source_time=mw.CW(frequency=2e9)))
-    s=mw.Simulation.fdtd(scene,frequencies=(2e9,),backend='cpu_reference',cuda_graph=False,full_field_dft=False,run_time=mw.TimeConfig(time_steps=7,dt=9.5238e-12),spectral_sampler=mw.SpectralSampler(window='none',normalize_source=False)).prepare().solver
+    scene=mw.Scene(domain=mw.Domain(bounds=((0.,.1),(0.,.1),(0.,.4))),grid=mw.GridSpec.uniform(.05),boundary=mw.BoundarySpec.pec(), sources=(
+              mw.PointDipole(position=(.025,.05,.1),polarization='Ex',source_time=mw.CW(frequency=2e9)),
+          ))
+    s=mw.Simulation.fdtd(scene,frequencies=(2e9,),config=mw.FDTDConfig(cuda_graph=False,full_field_dft=False,run_time=mw.TimeConfig(time_steps=7,dt=9.5238e-12),spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=False))).prepare().solver
     fs=(1.5e9,2e9,2.2e9)
     s.enable_dft(fs,window_type='none',end_step=7,components=('Ex',))
     assert s.build_dft_step_tables(7)
@@ -47,8 +51,8 @@ def test_exact_physical_step_tables():
     for n in range(7):
         ec[n]=c;es[n]=si
         c,si=c*dc-si*ds,si*dc+c*ds
-    assert torch.equal(s._dft_weighted_cos_table,torch.from_numpy(ec))
-    assert torch.equal(s._dft_weighted_sin_table,torch.from_numpy(es))
+    assert torch.equal(s._dft_weighted_cos_table.cpu(),torch.from_numpy(ec))
+    assert torch.equal(s._dft_weighted_sin_table.cpu(),torch.from_numpy(es))
 
 @pytest.fixture(scope='module')
 def port_units():

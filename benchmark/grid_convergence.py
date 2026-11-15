@@ -35,34 +35,33 @@ class GridSample:
 
 def build_scene(resolution: float) -> mw.Scene:
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(float(resolution)),
-        boundary=mw.BoundarySpec.pml(num_layers=8),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="sphere",
-            geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=0.14),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization="Ex",
-            source_time=mw.GaussianPulse(frequency=FREQUENCY, fwidth=0.4e9),
-        )
-    )
-    scene.add_monitor(
-        mw.PlaneMonitor(
-            "field",
-            axis="y",
-            position=0.0,
-            fields=("Ex",),
-            frequencies=(FREQUENCY,),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(float(resolution)),
+                boundary=mw.BoundarySpec.pml(num_layers=8),
+                structures=(
+            mw.Structure(
+                name="sphere",
+                geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=0.14),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization="Ex",
+                source_time=mw.GaussianPulse(frequency=FREQUENCY, fwidth=0.4e9),
+            ),
+            ),
+                monitors=(
+            mw.PlaneMonitor(
+                "field",
+                axis="y",
+                position=0.0,
+                fields=("Ex",),
+                frequencies=(FREQUENCY,),
+            ),
+            ),
+            )
     return scene
 
 

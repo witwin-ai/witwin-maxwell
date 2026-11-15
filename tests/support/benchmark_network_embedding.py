@@ -50,7 +50,7 @@ def _ports(*, domain_size: float, grid_cells: int) -> tuple[mw.LumpedPort, ...]:
     )
 
 
-def _network(device: torch.device) -> mw.NetworkBlock:
+def _network(device: torch.device) -> mw.rf.NetworkBlock:
     dtype = torch.float64
     complex_dtype = torch.complex128
     port_names = tuple(f"network_{index}" for index in range(PORT_COUNT))
@@ -63,20 +63,20 @@ def _network(device: torch.device) -> mw.NetworkBlock:
     )
     diagonal = torch.arange(PORT_COUNT, device=device)
     residues[diagonal, diagonal, :] = 2.0e7 / MODEL_ORDER
-    model = mw.RationalModel(
+    model = mw.rf.rational.RationalModel(
         poles=poles.to(dtype=complex_dtype),
         residues=residues,
         direct=direct.to(dtype=complex_dtype),
         representation="Y",
     )
     frequencies = torch.linspace(0.25e9, 6.0e9, 33, device=device, dtype=dtype)
-    data = mw.NetworkData.from_y(
+    data = mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=model.evaluate(frequencies),
         z0=50.0,
         port_names=port_names,
     )
-    return mw.NetworkBlock(
+    return mw.rf.NetworkBlock(
         name="benchmark_load",
         network=data,
         connections={
@@ -107,7 +107,6 @@ def _scene(*, dynamic: bool, grid_cells: int) -> mw.Scene:
             if dynamic
             else ()
         ),
-        device="cuda",
     )
     return scene
 
@@ -117,11 +116,13 @@ def _sample(
 ) -> tuple[float, int, int, tuple[bool, bool, bool]]:
     simulation = mw.Simulation.fdtd(
         scene,
-        frequency=FREQUENCY_HZ,
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
-        cuda_graph=True,
+        frequencies=FREQUENCY_HZ,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+            cuda_graph=True,
+        ),
     )
     solver = simulation.prepare().solver
     start = torch.cuda.Event(enable_timing=True)

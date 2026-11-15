@@ -12,34 +12,34 @@ from witwin.maxwell.mom.fmm_capacity import multipole_action_tensors, storage_by
 from witwin.maxwell.mom.fmm_system import MultipoleSystemActions
 from witwin.maxwell.mom.fmm_operator import MultipoleOperator
 from witwin.maxwell.mom.runtime import SurfaceData, SystemOperator
+from test_bounded_compact_far import original_payload_cases
 
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
 
 
 def config(**options):
-    return mw.FMMConfig(order=6, table_storage='compact_shared_displacement_v1',
+    return mw.mom.FMMConfig(order=6, table_storage='compact_shared_displacement_v1',
         shift_storage='separable_v1', near_storage='scalar_reciprocal_dk_v1',
         far_action_batch=32, leaf_size=8, separation_ratio=.25,
         expansion_center_policy='dyadic_cell_v1',
-        kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5),
+        kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5),
         kernel_bound_rule='direct_first_wave_min_v1', **options)
 
 
 def test_new_center_version_exact_fields_and_affected_default_payloads():
     # Configuration identity changed; this is the necessary default-schema
     # control. No previously passed numerical construction is repeated.
-    old=json.loads((Path(__file__).parent/'fixtures/bounded_compact_original_payloads.json').read_text())
-    for case in old['cases']:
-        current=mw.FMMConfig(**case['options'])
-        assert current.payload()==case['payload']
-        assert mw.FMMConfig.restore(case['payload'])==current
+    for case,current,expected in original_payload_cases():
+        assert current.payload()==expected
+        assert mw.mom.FMMConfig.restore(json.loads(json.dumps(expected)))==current
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(case['payload'])
         assert 'expansion_center_policy' not in current.construction()
     for batch in (1,32):
         values=config().payload()['parameters'];values['far_action_batch']=batch
-        candidate=mw.FMMConfig(**{**config().construction(),'far_action_batch':batch})
+        candidate=mw.mom.FMMConfig(**{**config().construction(),'far_action_batch':batch})
         payload=candidate.payload()
         assert payload['version']=='cartesian_fmm_dyadic_centers_config_v1'
-        assert mw.FMMConfig.restore(json.loads(json.dumps(payload)))==candidate
+        assert mw.mom.FMMConfig.restore(json.loads(json.dumps(payload)))==candidate
         assert candidate.construction()['expansion_center_policy']=='dyadic_cell_v1'
         for kind in ('missing','extra','policy','version','budget','storage'):
             bad=copy.deepcopy(payload)
@@ -49,31 +49,31 @@ def test_new_center_version_exact_fields_and_affected_default_payloads():
             elif kind=='version':bad['version']='cartesian_fmm_batched_compact_config_v1'
             elif kind=='budget':bad['parameters']['kernel_error_budget']['extra']=1
             else:bad['parameters']['table_storage']='dense'
-            with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+            with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
 
 
 @pytest.mark.parametrize('kind',['policy','dense','high_order','periodic','precision'])
 def test_public_unsupported_geometry_rejects_before_prepare(kind):
-    values=config().payload()['parameters'];values['kernel_error_budget']=mw.KernelErrorBudget(1e-6,1e-5)
+    values=config().payload()['parameters'];values['kernel_error_budget']=mw.mom.KernelErrorBudget(1e-6,1e-5)
     if kind=='policy':values['expansion_center_policy']='approximate_bins'
     elif kind=='dense':values['table_storage']='dense'
     elif kind=='high_order':values['max_order']=13
     with pytest.raises((ValueError,NotImplementedError)):
-        candidate=mw.FMMConfig(**values)
-        mw.MoMConfig(operator_backend='fmm',fmm=candidate,riesz_storage='local_rwg_v1',
+        candidate=mw.mom.FMMConfig(**values)
+        mw.mom.MoMConfig(operator_backend='fmm',fmm=candidate,riesz_storage='local_rwg_v1',
             stopping=StoppingRule(preconditioner='none'),
             dtype=torch.complex64 if kind=='precision' else torch.complex128,
-            periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)) if kind=='periodic' else None)
+            periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)) if kind=='periodic' else None)
 
 
 def test_new_public_geometry_all_columns_native_gradients_solve_and_exact_restore(tmp_path,monkeypatch):
     scene=mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.01,position=(x,0.,0.)),
         mw.Material(eps_r=2.+i,mu_r=1.2+.1*i)) for i,x in enumerate((-.2,.2))],sources=[mw.PlaneWave()])
-    cfg=mw.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3),
+    cfg=mw.mom.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3),
         operator_backend='fmm',fmm=config(max_order=12),riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='gmres',preconditioner='rwg_diagonal',fallback='none',
             rtol=1e-12,atol=0.,maxiter=240,restart=120))
-    prepared=mw.Simulation.mom(scene,frequency=9e7,config=cfg).prepare();op=prepared.solver.handle.actions
+    prepared=mw.Simulation.mom(scene,frequencies=9e7,config=cfg).prepare();op=prepared.solver.handle.actions
     assert op.exterior.far and op.order_plan['selected_order']>=6
     assert op.expansion_center_policy=='dyadic_cell_v1'
     assert op.receipt()['expansion_center_policy']=='dyadic_cell_v1'
@@ -105,7 +105,7 @@ def test_new_public_geometry_all_columns_native_gradients_solve_and_exact_restor
     assert relative(second,2*op.adjoint(op.apply(direction)))<1e-11
     owned=storage_bytes(multipole_action_tensors(op));assert owned==op.capacity_plan['planned_bytes']
     result=prepared.run();assert result.stats()['converged'] and result.stats()['error_budget']['checked']
-    current=result.surface_currents.scattered_coefficients
+    current=mw.mom.surface_currents(result).scattered_coefficients
     residual=relative(current@reference.mT,prepared.solver.rhs);assert residual<=1e-10
     artifact=tmp_path/'dyadic-centers-result.pt';result.save(artifact)
     def forbidden(*args,**kwargs):raise AssertionError('restore reconstructed or solved the FMM operator')
@@ -113,12 +113,12 @@ def test_new_public_geometry_all_columns_native_gradients_solve_and_exact_restor
         for cls in (MultipoleOperator,MultipoleSystemActions,SystemOperator):patch.setattr(cls,'__init__',forbidden)
         patch.setattr(torch.linalg,'solve',forbidden)
         restored=mw.Result.load(artifact,scene=scene)
-        assert restored.surface_currents.config.fmm==cfg.fmm
-        torch.testing.assert_close(restored.surface_currents.scattered_coefficients,current,rtol=0,atol=0)
+        assert mw.mom.surface_currents(restored).config.fmm==cfg.fmm
+        torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,current,rtol=0,atol=0)
         for key,value in [('expansion_center_policy','support_box_midpoint_v1'),('leaf_size',30),
                 ('far_action_batch',1),('table_storage','compact')]:
-            bad=copy.deepcopy(result.surface_currents.snapshot());bad['fmm_config']['parameters'][key]=value
-            with pytest.raises(ValueError):SurfaceData.restore(bad,scene,9e7)
+            bad=copy.deepcopy(mw.mom.surface_currents(result).snapshot());bad['fmm_config']['parameters'][key]=value
+            with pytest.raises(ValueError):SurfaceData.restore(bad,scene,9e7,'cuda')
     record=dict(version='public_dyadic_centers_geometry_check_v1',original_columns=op.shape[0],
         original_relative_error=original_error,native_H_relative_error=native_error,
         current_gradient_relative_error=relative(gradient,hermitian),complete_original_residual=residual,

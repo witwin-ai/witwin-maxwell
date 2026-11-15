@@ -13,10 +13,10 @@ from witwin.maxwell.scene import prepare_scene
 
 @lru_cache(None)
 def baseline(metal='pec'):
-    original=printed_dipole_scene(device='cpu',lateral_dl=.0005,substrate_cells=8,air_dl=.002,metal=metal)
+    original=printed_dipole_scene(lateral_dl=.0005,substrate_cells=8,air_dl=.002,metal=metal)
     widths=[(float(a[1]-a[0]),float(a[-1]-a[-2])) for a in
             (original.grid.x_coords,original.grid.y_coords,original.grid.z_coords)]
-    kwargs=dict(device='cpu',lateral_dl=.0005,substrate_cells=8,air_dl=.0005,pml_layers=48,
+    kwargs=dict(lateral_dl=.0005,substrate_cells=8,air_dl=.0005,pml_layers=48,
                 metal=metal,boundary_cell_widths=widths,vacuum_reference_y_nodes=original.grid.y_coords)
     scene=printed_dipole_scene(**kwargs)
     return scene,kwargs
@@ -39,7 +39,7 @@ def test_combined_refinement_retains_exterior_native_node_half_support_and_real_
     fixed,kwargs=baseline(metal)
     actual=printed_dipole_scene(**dict(kwargs,lateral_dl=step,substrate_cells=cells,coupon_y_dl=step,
         vacuum_reference_z_nodes=fixed.grid.z_coords))
-    old,new=[prepare_scene(scene,lazy_meshgrid=True) for scene in (fixed,actual)]
+    old,new=[prepare_scene(scene,lazy_meshgrid=True, device="cpu") for scene in (fixed,actual)]
     for axis,position in zip('xyz',(.032,.020,.017)):
         for part in ('nodes64','half64'):
             a,b=[np.asarray(getattr(scene,axis+'_'+part)) for scene in (old,new)]
@@ -57,7 +57,7 @@ def test_combined_refinement_retains_exterior_native_node_half_support_and_real_
     for a,b in zip(fixed.structures,actual.structures):
         for name in ('position','size','vertices'):
             if hasattr(a.geometry,name):assert torch.equal(getattr(a.geometry,name),getattr(b.geometry,name))
-    ca,cb=[compile_port_geometry(scene,scene.ports[0],device='cpu') for scene in (old,new)]
+    ca,cb=[compile_port_geometry(scene,scene.scene.ports[0],device='cpu') for scene in (old,new)]
     for scene,port in ((old,ca),(new,cb)):
         assert port.metadata['positive_target']=='positive_arm' and port.metadata['negative_target']=='negative_arm'
         # An affine E field has the exact fixed finite-width gap integral.

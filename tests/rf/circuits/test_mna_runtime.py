@@ -21,12 +21,12 @@ def _system(circuit, dt=1.0e-3):
 
 
 def test_dc_voltage_divider_matches_hand_solution_on_cuda_double():
-    circuit = mw.Circuit("divider")
+    circuit = mw.circuits.Circuit("divider")
     source = circuit.node("source")
     output = circuit.node("output")
-    circuit.add(mw.VoltageSource("V1", source, circuit.ground, 3.7))
-    circuit.add(mw.Resistor("R1", source, output, 2.3))
-    circuit.add(mw.Resistor("R2", output, circuit.ground, 4.9))
+    circuit.add(mw.circuits.VoltageSource("V1", source, circuit.ground, 3.7))
+    circuit.add(mw.rf.Resistor("R1", source, output, 2.3))
+    circuit.add(mw.rf.Resistor("R2", output, circuit.ground, 4.9))
 
     system = _system(circuit)
     matrix, rhs = system.assemble_dc()
@@ -45,27 +45,27 @@ def test_dc_voltage_divider_matches_hand_solution_on_cuda_double():
 @pytest.mark.parametrize(
     ("source_type", "expected"),
     (
-        (mw.VoltageControlledVoltageSource, 6.0),
-        (mw.VoltageControlledCurrentSource, -4.0),
-        (mw.CurrentControlledCurrentSource, 6.0),
-        (mw.CurrentControlledVoltageSource, -2.5),
+        (mw.circuits.VoltageControlledVoltageSource, 6.0),
+        (mw.circuits.VoltageControlledCurrentSource, -4.0),
+        (mw.circuits.CurrentControlledCurrentSource, 6.0),
+        (mw.circuits.CurrentControlledVoltageSource, -2.5),
     ),
 )
 def test_controlled_source_dc_stamps_match_hand_reference(source_type, expected):
-    circuit = mw.Circuit("controlled")
+    circuit = mw.circuits.Circuit("controlled")
     control = circuit.node("control")
     output = circuit.node("output")
-    circuit.add(mw.VoltageSource("V1", control, circuit.ground, 2.0 if source_type in (mw.VoltageControlledVoltageSource, mw.VoltageControlledCurrentSource) else 1.0))
-    circuit.add(mw.Resistor("Rcontrol", control, circuit.ground, 2.0))
-    if source_type is mw.VoltageControlledVoltageSource:
+    circuit.add(mw.circuits.VoltageSource("V1", control, circuit.ground, 2.0 if source_type in (mw.circuits.VoltageControlledVoltageSource, mw.circuits.VoltageControlledCurrentSource) else 1.0))
+    circuit.add(mw.rf.Resistor("Rcontrol", control, circuit.ground, 2.0))
+    if source_type is mw.circuits.VoltageControlledVoltageSource:
         circuit.add(source_type("E1", output, circuit.ground, control, circuit.ground, 3.0))
-    elif source_type is mw.VoltageControlledCurrentSource:
+    elif source_type is mw.circuits.VoltageControlledCurrentSource:
         circuit.add(source_type("G1", output, circuit.ground, control, circuit.ground, 0.5))
-    elif source_type is mw.CurrentControlledCurrentSource:
+    elif source_type is mw.circuits.CurrentControlledCurrentSource:
         circuit.add(source_type("F1", output, circuit.ground, "V1", 3.0))
     else:
         circuit.add(source_type("H1", output, circuit.ground, "V1", 5.0))
-    circuit.add(mw.Resistor("Rout", output, circuit.ground, 4.0))
+    circuit.add(mw.rf.Resistor("Rout", output, circuit.ground, 4.0))
 
     solution, _ = _system(circuit).solve_dc()
 
@@ -80,19 +80,19 @@ def test_controlled_source_dc_stamps_match_hand_reference(source_type, expected)
 def _rc_sine(integration, dt, final_time=0.4):
     tau = 0.1
     frequency = 0.7
-    circuit = mw.Circuit("rc", config=mw.MNAConfig(integration=integration))
+    circuit = mw.circuits.Circuit("rc", config=mw.circuits.MNAConfig(integration=integration))
     source = circuit.node("source")
     output = circuit.node("output")
     circuit.add(
-        mw.VoltageSource(
+        mw.circuits.VoltageSource(
             "V1",
             source,
             circuit.ground,
-            waveform=mw.SineWaveform(0.0, 1.0, frequency),
+            waveform=mw.circuits.SineWaveform(0.0, 1.0, frequency),
         )
     )
-    circuit.add(mw.Resistor("R1", source, output, 2.0))
-    circuit.add(mw.Capacitor("C1", output, circuit.ground, tau / 2.0))
+    circuit.add(mw.rf.Resistor("R1", source, output, 2.0))
+    circuit.add(mw.rf.Capacitor("C1", output, circuit.ground, tau / 2.0))
     data = _system(circuit, dt=dt).transient(round(final_time / dt))
     omega = 2.0 * math.pi * frequency
     times = data.times
@@ -146,7 +146,7 @@ def test_trapezoidal_discrete_energy_residual_converges_at_second_order():
 
 
 def _unit_step(delay, duration):
-    return mw.PulseWaveform(
+    return mw.circuits.PulseWaveform(
         initial=0.0,
         pulsed=1.0,
         delay=delay,
@@ -161,10 +161,10 @@ def _unit_step(delay, duration):
 def test_linear_step_responses_match_analytic_reference(network):
     dt = 2.0e-4 if network != "rlc" else 1.0e-4
     final_time = 0.3 if network != "rlc" else 0.15
-    circuit = mw.Circuit(network)
+    circuit = mw.circuits.Circuit(network)
     source = circuit.node("source")
     circuit.add(
-        mw.VoltageSource(
+        mw.circuits.VoltageSource(
             "V1",
             source,
             circuit.ground,
@@ -175,23 +175,23 @@ def test_linear_step_responses_match_analytic_reference(network):
         output = circuit.node("output")
         resistance = 2.0
         capacitance = 0.05
-        circuit.add(mw.Resistor("R1", source, output, resistance))
-        circuit.add(mw.Capacitor("C1", output, circuit.ground, capacitance))
+        circuit.add(mw.rf.Resistor("R1", source, output, resistance))
+        circuit.add(mw.rf.Capacitor("C1", output, circuit.ground, capacitance))
     elif network == "rl":
         output = circuit.node("output")
         resistance = 2.0
         inductance = 0.2
-        circuit.add(mw.Resistor("R1", source, output, resistance))
-        circuit.add(mw.Inductor("L1", output, circuit.ground, inductance))
+        circuit.add(mw.rf.Resistor("R1", source, output, resistance))
+        circuit.add(mw.rf.Inductor("L1", output, circuit.ground, inductance))
     else:
         intermediate = circuit.node("intermediate")
         output = circuit.node("output")
         resistance = 1.0
         inductance = 0.02
         capacitance = 0.02
-        circuit.add(mw.Resistor("R1", source, intermediate, resistance))
-        circuit.add(mw.Inductor("L1", intermediate, output, inductance))
-        circuit.add(mw.Capacitor("C1", output, circuit.ground, capacitance))
+        circuit.add(mw.rf.Resistor("R1", source, intermediate, resistance))
+        circuit.add(mw.rf.Inductor("L1", intermediate, output, inductance))
+        circuit.add(mw.rf.Capacitor("C1", output, circuit.ground, capacitance))
 
     data = _system(circuit, dt=dt).transient(round(final_time / dt))
     active = torch.arange(data.times.numel(), device="cuda") > 0
@@ -224,23 +224,23 @@ def test_transformer_transient_matches_independent_state_space_reference():
     first_resistance = 1.0
     second_resistance = 1.5
     mutual = coupling * math.sqrt(first_inductance * second_inductance)
-    circuit = mw.Circuit("transformer_reference")
+    circuit = mw.circuits.Circuit("transformer_reference")
     source = circuit.node("source")
     first = circuit.node("first")
     second = circuit.node("second")
     circuit.add(
-        mw.VoltageSource(
+        mw.circuits.VoltageSource(
             "V1",
             source,
             circuit.ground,
             waveform=_unit_step(0.0, final_time),
         )
     )
-    circuit.add(mw.Resistor("R1", source, first, first_resistance))
-    circuit.add(mw.Inductor("L1", first, circuit.ground, first_inductance))
-    circuit.add(mw.Resistor("R2", second, circuit.ground, second_resistance))
-    circuit.add(mw.Inductor("L2", second, circuit.ground, second_inductance))
-    circuit.add(mw.MutualInductor("K1", "L1", "L2", coupling))
+    circuit.add(mw.rf.Resistor("R1", source, first, first_resistance))
+    circuit.add(mw.rf.Inductor("L1", first, circuit.ground, first_inductance))
+    circuit.add(mw.rf.Resistor("R2", second, circuit.ground, second_resistance))
+    circuit.add(mw.rf.Inductor("L2", second, circuit.ground, second_inductance))
+    circuit.add(mw.circuits.MutualInductor("K1", "L1", "L2", coupling))
 
     data = _system(circuit, dt=dt).transient(round(final_time / dt))
     inductance_matrix = np.array(
@@ -284,20 +284,20 @@ def test_vccs_transient_matches_analytic_reference():
     resistance = 2.0
     capacitance = 0.05
     transconductance = 0.4
-    circuit = mw.Circuit("controlled_transient")
+    circuit = mw.circuits.Circuit("controlled_transient")
     control = circuit.node("control")
     output = circuit.node("output")
     circuit.add(
-        mw.VoltageSource(
+        mw.circuits.VoltageSource(
             "V1",
             control,
             circuit.ground,
             voltage=0.0,
-            waveform=mw.SineWaveform(0.0, 1.0, frequency),
+            waveform=mw.circuits.SineWaveform(0.0, 1.0, frequency),
         )
     )
     circuit.add(
-        mw.VoltageControlledCurrentSource(
+        mw.circuits.VoltageControlledCurrentSource(
             "G1",
             output,
             circuit.ground,
@@ -306,8 +306,8 @@ def test_vccs_transient_matches_analytic_reference():
             transconductance,
         )
     )
-    circuit.add(mw.Resistor("R1", output, circuit.ground, resistance))
-    circuit.add(mw.Capacitor("C1", output, circuit.ground, capacitance))
+    circuit.add(mw.rf.Resistor("R1", output, circuit.ground, resistance))
+    circuit.add(mw.rf.Capacitor("C1", output, circuit.ground, capacitance))
 
     data = _system(circuit, dt=dt).transient(round(final_time / dt))
     omega = 2.0 * math.pi * frequency
@@ -324,22 +324,22 @@ def test_vccs_transient_matches_analytic_reference():
 
 
 def test_zero_and_constrained_initialization_create_consistent_dae_state():
-    zero_circuit = mw.Circuit("zero_init", config=mw.MNAConfig(initialization="zero"))
+    zero_circuit = mw.circuits.Circuit("zero_init", config=mw.circuits.MNAConfig(initialization="zero"))
     source = zero_circuit.node("source")
     output = zero_circuit.node("output")
-    zero_circuit.add(mw.VoltageSource("V1", source, zero_circuit.ground, 1.0))
-    zero_circuit.add(mw.Resistor("R1", source, output, 1.0))
-    zero_circuit.add(mw.Capacitor("C1", output, zero_circuit.ground, 0.1))
+    zero_circuit.add(mw.circuits.VoltageSource("V1", source, zero_circuit.ground, 1.0))
+    zero_circuit.add(mw.rf.Resistor("R1", source, output, 1.0))
+    zero_circuit.add(mw.rf.Capacitor("C1", output, zero_circuit.ground, 0.1))
     zero_data = _system(zero_circuit).transient(2)
 
     torch.testing.assert_close(zero_data.node_voltage("source")[0], zero_data.times.new_tensor(1.0))
     torch.testing.assert_close(zero_data.node_voltage("output")[0], zero_data.times.new_tensor(0.0))
     assert zero_data.diagnostics["initial_factorization_count"] == 1
 
-    constrained = mw.Circuit("constrained_init")
+    constrained = mw.circuits.Circuit("constrained_init")
     node = constrained.node("node")
-    constrained.add(mw.Resistor("R1", node, constrained.ground, 1.0))
-    constrained.add(mw.Capacitor("C1", node, constrained.ground, 0.1))
+    constrained.add(mw.rf.Resistor("R1", node, constrained.ground, 1.0))
+    constrained.add(mw.rf.Capacitor("C1", node, constrained.ground, 0.1))
     constrained.set_initial_condition(node, 0.4)
     constrained_data = _system(constrained).transient(2)
 
@@ -351,10 +351,10 @@ def test_zero_and_constrained_initialization_create_consistent_dae_state():
 
 
 def test_dc_source_value_is_distinct_from_transient_waveform():
-    circuit = mw.Circuit("dc_source")
+    circuit = mw.circuits.Circuit("dc_source")
     node = circuit.node("node")
     circuit.add(
-        mw.VoltageSource(
+        mw.circuits.VoltageSource(
             "V1",
             node,
             circuit.ground,
@@ -362,7 +362,7 @@ def test_dc_source_value_is_distinct_from_transient_waveform():
             waveform=_unit_step(0.0, 1.0),
         )
     )
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 1.0))
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 1.0))
     system = _system(circuit)
 
     dc, _ = system.solve_dc()
@@ -374,11 +374,11 @@ def test_dc_source_value_is_distinct_from_transient_waveform():
 
 
 def test_timed_switch_t0_state_and_piecewise_factor_cache_are_consistent():
-    circuit = mw.Circuit("switch", config=mw.MNAConfig(integration="backward_euler"))
+    circuit = mw.circuits.Circuit("switch", config=mw.circuits.MNAConfig(integration="backward_euler"))
     node = circuit.node("node")
-    circuit.add(mw.VoltageSource("V1", node, circuit.ground, 1.0))
+    circuit.add(mw.circuits.VoltageSource("V1", node, circuit.ground, 1.0))
     circuit.add(
-        mw.TimedSwitch(
+        mw.circuits.TimedSwitch(
             "S1",
             node,
             circuit.ground,
@@ -396,12 +396,12 @@ def test_timed_switch_t0_state_and_piecewise_factor_cache_are_consistent():
 
 def test_reused_system_refreshes_trainable_inductance_and_autograd_graph():
     inductance = torch.tensor(0.2, device="cuda", dtype=torch.float64, requires_grad=True)
-    circuit = mw.Circuit("trainable_inductor", config=mw.MNAConfig(initialization="zero"))
+    circuit = mw.circuits.Circuit("trainable_inductor", config=mw.circuits.MNAConfig(initialization="zero"))
     source = circuit.node("source")
     output = circuit.node("output")
-    circuit.add(mw.VoltageSource("V1", source, circuit.ground, 1.0))
-    circuit.add(mw.Resistor("R1", source, output, 1.0))
-    circuit.add(mw.Inductor("L1", output, circuit.ground, inductance))
+    circuit.add(mw.circuits.VoltageSource("V1", source, circuit.ground, 1.0))
+    circuit.add(mw.rf.Resistor("R1", source, output, 1.0))
+    circuit.add(mw.rf.Inductor("L1", output, circuit.ground, inductance))
     system = _system(circuit, dt=0.001)
 
     first = system.transient(2).branch_current("L1")[-1]
@@ -420,12 +420,12 @@ def test_reused_system_refreshes_trainable_inductance_and_autograd_graph():
 
 
 def test_circuit_data_exports_physical_currents_and_migrates_all_tensors():
-    circuit = mw.Circuit("data")
+    circuit = mw.circuits.Circuit("data")
     source = circuit.node("source")
     output = circuit.node("output")
-    circuit.add(mw.VoltageSource("V1", source, circuit.ground, 1.0))
-    circuit.add(mw.Resistor("R1", source, output, 2.0))
-    circuit.add(mw.Capacitor("C1", output, circuit.ground, 0.1))
+    circuit.add(mw.circuits.VoltageSource("V1", source, circuit.ground, 1.0))
+    circuit.add(mw.rf.Resistor("R1", source, output, 2.0))
+    circuit.add(mw.rf.Capacitor("C1", output, circuit.ground, 0.1))
     data = _system(circuit).transient(2)
 
     torch.testing.assert_close(data.branch_current("R1"), data.branch_current("C1"))
@@ -434,7 +434,7 @@ def test_circuit_data_exports_physical_currents_and_migrates_all_tensors():
     assert migrated.diagnostics["dt"].device.type == "cpu"
 
     with pytest.raises(ValueError, match="must be unique"):
-        mw.CircuitData(
+        mw.circuits.CircuitData(
             circuit_name="duplicate",
             times=torch.arange(2, dtype=torch.float32),
             node_names=("0", "0"),
@@ -443,7 +443,7 @@ def test_circuit_data_exports_physical_currents_and_migrates_all_tensors():
             branch_currents=torch.zeros((2, 0)),
         )
     with pytest.raises(ValueError, match="share one dtype"):
-        mw.CircuitData(
+        mw.circuits.CircuitData(
             circuit_name="dtype",
             times=torch.arange(2, dtype=torch.float64),
             node_names=("0",),
@@ -452,7 +452,7 @@ def test_circuit_data_exports_physical_currents_and_migrates_all_tensors():
             branch_currents=torch.zeros((2, 0), dtype=torch.float64),
         )
     with pytest.raises(ValueError, match="node_names must be unique"):
-        mw.CircuitData(
+        mw.circuits.CircuitData(
             circuit_name="normalized_names",
             times=torch.arange(2, dtype=torch.float64),
             node_names=(1, "1"),
@@ -461,7 +461,7 @@ def test_circuit_data_exports_physical_currents_and_migrates_all_tensors():
             branch_currents=torch.zeros((2, 0), dtype=torch.float64),
         )
     with pytest.raises(ValueError, match="real floating dtype"):
-        mw.CircuitData(
+        mw.circuits.CircuitData(
             circuit_name="integer_times",
             times=torch.arange(2),
             node_names=("0",),
@@ -473,10 +473,10 @@ def test_circuit_data_exports_physical_currents_and_migrates_all_tensors():
 
 def test_reused_system_refreshes_mutated_constant_source():
     voltage = torch.tensor(1.0)
-    circuit = mw.Circuit("source_refresh")
+    circuit = mw.circuits.Circuit("source_refresh")
     node = circuit.node("node")
-    circuit.add(mw.VoltageSource("V1", node, circuit.ground, voltage))
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 1.0))
+    circuit.add(mw.circuits.VoltageSource("V1", node, circuit.ground, voltage))
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 1.0))
     system = _system(circuit)
 
     system.transient(1)
@@ -487,11 +487,11 @@ def test_reused_system_refreshes_mutated_constant_source():
 
 
 def test_float32_switch_cache_key_matches_compiled_schedule_dtype():
-    circuit = mw.Circuit("switch_rounding", config=mw.MNAConfig(integration="backward_euler"))
+    circuit = mw.circuits.Circuit("switch_rounding", config=mw.circuits.MNAConfig(integration="backward_euler"))
     node = circuit.node("node")
-    circuit.add(mw.VoltageSource("V1", node, circuit.ground, 1.0))
+    circuit.add(mw.circuits.VoltageSource("V1", node, circuit.ground, 1.0))
     circuit.add(
-        mw.TimedSwitch(
+        mw.circuits.TimedSwitch(
             "S1",
             node,
             circuit.ground,
@@ -514,12 +514,12 @@ def test_float32_switch_cache_key_matches_compiled_schedule_dtype():
 
 
 def test_fixed_mna_profile_has_no_per_step_host_transfer_growth():
-    circuit = mw.Circuit("profile")
+    circuit = mw.circuits.Circuit("profile")
     source = circuit.node("source")
     output = circuit.node("output")
-    circuit.add(mw.VoltageSource("V1", source, circuit.ground, 1.0))
-    circuit.add(mw.Resistor("R1", source, output, 2.0))
-    circuit.add(mw.Capacitor("C1", output, circuit.ground, 0.1))
+    circuit.add(mw.circuits.VoltageSource("V1", source, circuit.ground, 1.0))
+    circuit.add(mw.rf.Resistor("R1", source, output, 2.0))
+    circuit.add(mw.rf.Capacitor("C1", output, circuit.ground, 0.1))
     system = _system(circuit)
     system.transient(2)
 
@@ -551,16 +551,16 @@ def test_fixed_mna_profile_has_no_per_step_host_transfer_growth():
 
 
 def test_mutual_inductance_matrix_and_transient_block_match_hand_stamp():
-    circuit = mw.Circuit("transformer")
+    circuit = mw.circuits.Circuit("transformer")
     source = circuit.node("source")
     first = circuit.node("first")
     second = circuit.node("second")
-    circuit.add(mw.VoltageSource("V1", source, circuit.ground, 0.0))
-    circuit.add(mw.Resistor("R1", source, first, 3.0))
-    circuit.add(mw.Inductor("L1", first, circuit.ground, 2.0))
-    circuit.add(mw.Resistor("R2", second, circuit.ground, 3.0))
-    circuit.add(mw.Inductor("L2", second, circuit.ground, 8.0))
-    circuit.add(mw.MutualInductor("K1", "L1", "L2", -0.25))
+    circuit.add(mw.circuits.VoltageSource("V1", source, circuit.ground, 0.0))
+    circuit.add(mw.rf.Resistor("R1", source, first, 3.0))
+    circuit.add(mw.rf.Inductor("L1", first, circuit.ground, 2.0))
+    circuit.add(mw.rf.Resistor("R2", second, circuit.ground, 3.0))
+    circuit.add(mw.rf.Inductor("L2", second, circuit.ground, 8.0))
+    circuit.add(mw.circuits.MutualInductor("K1", "L1", "L2", -0.25))
     system = _system(circuit, dt=0.1)
 
     expected = torch.tensor([[2.0, -1.0], [-1.0, 8.0]], device="cuda", dtype=torch.float64)
@@ -583,10 +583,10 @@ def test_mutual_inductance_matrix_and_transient_block_match_hand_stamp():
 
 
 def test_singular_dc_and_cpu_runtime_are_explicit_errors():
-    circuit = mw.Circuit("singular")
+    circuit = mw.circuits.Circuit("singular")
     node = circuit.node("node")
-    circuit.add(mw.VoltageSource("V1", node, circuit.ground, 1.0))
-    circuit.add(mw.Inductor("L1", node, circuit.ground, 1.0))
+    circuit.add(mw.circuits.VoltageSource("V1", node, circuit.ground, 1.0))
+    circuit.add(mw.rf.Inductor("L1", node, circuit.ground, 1.0))
 
     with pytest.raises(ValueError, match="DC ideal-voltage/inductor loop.*L1"):
         _system(circuit).solve_dc()
@@ -596,12 +596,12 @@ def test_singular_dc_and_cpu_runtime_are_explicit_errors():
 
 def test_trainable_cuda_parameter_keeps_autograd_graph():
     resistance = torch.tensor(2.0, device="cuda", dtype=torch.float64, requires_grad=True)
-    circuit = mw.Circuit("gradient")
+    circuit = mw.circuits.Circuit("gradient")
     source = circuit.node("source")
     output = circuit.node("output")
-    circuit.add(mw.VoltageSource("V1", source, circuit.ground, 1.0))
-    circuit.add(mw.Resistor("R1", source, output, resistance))
-    circuit.add(mw.Resistor("R2", output, circuit.ground, 3.0))
+    circuit.add(mw.circuits.VoltageSource("V1", source, circuit.ground, 1.0))
+    circuit.add(mw.rf.Resistor("R1", source, output, resistance))
+    circuit.add(mw.rf.Resistor("R2", output, circuit.ground, 3.0))
 
     data = _system(circuit).transient(1)
     data.node_voltage("output")[-1].backward()
@@ -616,12 +616,12 @@ def test_trainable_cuda_parameter_keeps_autograd_graph():
 
 
 def test_gpu_solution_matches_independent_numpy_mna_reference():
-    circuit = mw.Circuit("reference")
+    circuit = mw.circuits.Circuit("reference")
     source = circuit.node("source")
     output = circuit.node("output")
-    circuit.add(mw.VoltageSource("V1", source, circuit.ground, torch.tensor(2.7, dtype=torch.float64)))
-    circuit.add(mw.Resistor("R1", source, output, torch.tensor(1.3, dtype=torch.float64)))
-    circuit.add(mw.Resistor("R2", output, circuit.ground, torch.tensor(4.1, dtype=torch.float64)))
+    circuit.add(mw.circuits.VoltageSource("V1", source, circuit.ground, torch.tensor(2.7, dtype=torch.float64)))
+    circuit.add(mw.rf.Resistor("R1", source, output, torch.tensor(1.3, dtype=torch.float64)))
+    circuit.add(mw.rf.Resistor("R2", output, circuit.ground, torch.tensor(4.1, dtype=torch.float64)))
     solution, _ = _system(circuit).solve_dc()
 
     matrix = np.array([[1 / 1.3, -1 / 1.3, 1], [-1 / 1.3, 1 / 1.3 + 1 / 4.1, 0], [1, 0, 0]], dtype=np.float64)

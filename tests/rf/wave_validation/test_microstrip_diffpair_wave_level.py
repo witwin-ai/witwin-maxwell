@@ -53,7 +53,7 @@ PASSIVITY_SLACK = 1.10
 
 def _port_mode_kinds(scene, frequency=1.0e9):
     prepared = prepare_scene(scene)
-    manifest = resolve_waveport_run_manifest(prepared, mw.PortSweep(), (frequency,))
+    manifest = resolve_waveport_run_manifest(prepared, mw.rf.PortSweep(), (frequency,))
     out = []
     for port in manifest.prepared_ports:
         md = port.mode_data[0][0]
@@ -65,7 +65,7 @@ def _port_mode_kinds(scene, frequency=1.0e9):
 # Routing (modal-eigensolve): inhomogeneous -> quasi-static, uniform -> legacy. #
 # --------------------------------------------------------------------------- #
 def test_microstrip_waveport_routes_to_quasistatic_line_mode():
-    kinds = _port_mode_kinds(microstrip_two_port_scene(dx=0.005, device="cuda"))
+    kinds = _port_mode_kinds(microstrip_two_port_scene(dx=0.005))
     assert len(kinds) == 2
     n_max = math.sqrt(SUBSTRATE_EPS)
     for kind, neff in kinds:
@@ -75,7 +75,7 @@ def test_microstrip_waveport_routes_to_quasistatic_line_mode():
 
 
 def test_differential_pair_waveports_route_to_quasistatic_line_mode():
-    kinds = _port_mode_kinds(differential_pair_scene(dx=0.005, device="cuda"))
+    kinds = _port_mode_kinds(differential_pair_scene(dx=0.005))
     assert len(kinds) == 4
     n_max = math.sqrt(SUBSTRATE_EPS)
     for kind, neff in kinds:
@@ -87,7 +87,7 @@ def test_uniform_fill_interior_pec_tem_keeps_the_closed_form_electrostatic_solve
     """Falsification of 'always quasi-static': a UNIFORM (air) coax still uses the
     closed-form electrostatic TEM solve; the quasi-static fallback fires only for the
     inhomogeneous cross-section that the closed-form path rejects."""
-    kinds = _port_mode_kinds(coax_thru_scene(dx=0.005, device="cuda"))
+    kinds = _port_mode_kinds(coax_thru_scene(dx=0.005))
     assert len(kinds) == 2
     for kind, neff in kinds:
         assert kind == "tem_electrostatic_torch", kind
@@ -125,12 +125,14 @@ def test_tem_signal_potentials_maps_conductor_count_to_drive():
 def test_microstrip_two_port_extraction_is_conditioned_and_passive():
     freqs = tuple(float(x) for x in np.linspace(0.6e9, 1.6e9, 6))
     result = mw.Simulation.fdtd(
-        microstrip_two_port_scene(dx=0.005, device="cuda"),
+        microstrip_two_port_scene(dx=0.005),
         frequencies=freqs,
-        excitations=mw.PortSweep(),
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=16),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortSweep(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=16),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
     s = result.network.s.cpu().numpy()
     cond = float(np.max(result.network.metadata["extraction_condition_number"].cpu().numpy()))
@@ -152,12 +154,14 @@ def test_microstrip_two_port_extraction_is_conditioned_and_passive():
 def test_differential_pair_four_port_shows_line_coupling():
     freqs = tuple(float(x) for x in np.linspace(0.6e9, 1.2e9, 4))
     result = mw.Simulation.fdtd(
-        differential_pair_scene(dx=0.005, device="cuda"),
+        differential_pair_scene(dx=0.005),
         frequencies=freqs,
-        excitations=mw.PortSweep(),
-        run_time=mw.TimeConfig.auto(steady_cycles=5, transient_cycles=12),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortSweep(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=5, transient_cycles=12),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
     s = result.network.s.cpu().numpy()
     cond = float(np.max(result.network.metadata["extraction_condition_number"].cpu().numpy()))

@@ -7,6 +7,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd.adjoint.core import accumulate_pole_coefficient_gradients
 from witwin.maxwell.fdtd.checkpoint import dispersive_state_name
+from witwin.maxwell.compiler import compile_materials
 
 
 @pytest.mark.parametrize("kind", ["debye", "drude", "lorentz"])
@@ -59,7 +60,7 @@ def test_split_trace_pole_parameter_gradients_fail_closed_for_scene_modules():
 
         def to_scene(self):
             return mw.Scene(domain=mw.Domain(bounds=((-0.2, .2),)*3), grid=mw.GridSpec.uniform(.1),
-                device="cpu", structures=[mw.Structure(geometry=mw.Sphere(radius=.1),
+                structures=[mw.Structure(geometry=mw.Sphere(radius=.1),
                     material=mw.Material.drude(eps_inf=2., plasma_frequency=2e9, gamma=self.scale*1e8))])
     model = Design()
     bridge = SimpleNamespace(_material_graph_scene=model.to_scene)
@@ -68,8 +69,8 @@ def test_split_trace_pole_parameter_gradients_fail_closed_for_scene_modules():
         with torch.no_grad(), pytest.raises(ValueError, match="split-trace conductor histories"):
             _FDTDGradientBridge._validate_supported_configuration(bridge, solver)
     static = model.to_scene()
-    static.structures = [mw.Structure(geometry=static.structures[0].geometry,
-        material=mw.Material.drude(eps_inf=2., plasma_frequency=2e9, gamma=1e8))]
+    static = static.updated(structures=[mw.Structure(geometry=static.structures[0].geometry,
+        material=mw.Material.drude(eps_inf=2., plasma_frequency=2e9, gamma=1e8))])
     _require_fixed_trace_poles(static)
 
 
@@ -88,15 +89,14 @@ def test_pole_material_pullback_matches_fd_on_fixed_sphere(kind, parameter):
         parameters = dict(values)
         parameters[parameter] *= scale
         return mw.Scene(domain=mw.Domain(bounds=((-0.2, .2),)*3), grid=mw.GridSpec.uniform(.08),
-            boundary=mw.BoundarySpec.pec(), device="cpu",
-            structures=[mw.Structure(geometry=mw.Sphere(radius=.143),
+            boundary=mw.BoundarySpec.pec(), structures=[mw.Structure(geometry=mw.Sphere(radius=.143),
                 material=mw.Material(eps_r=2., **{kind+"_poles": (pole_type(**parameters),)}))])
     scale = torch.tensor(1., requires_grad=True)
     scene = build(scale)
-    inputs = material_dependent_inputs(scene, scene_trainable_material_tensors(scene))
+    inputs = material_dependent_inputs(scene, scene_trainable_material_tensors(scene), device="cpu")
     assert len(inputs) == 1
-    prepared = prepare_scene(scene)
-    model = prepared.compile_materials()
+    prepared = prepare_scene(scene, device="cpu")
+    model = compile_materials(prepared)
     entry = model[kind+"_poles"][0]
     coefficients = pole_update_coefficients(entry["pole"], kind, EPSILON_0, dt)
     gradients = {}
@@ -109,7 +109,7 @@ def test_pole_material_pullback_matches_fd_on_fixed_sphere(kind, parameter):
         grad_pole_coefficients=gradients)
     derivative, = torch.autograd.grad(inputs[0], scale, grad_outputs=output)
     def objective(x):
-        local = prepare_scene(build(x)).compile_materials()[kind+"_poles"][0]
+        local = compile_materials(prepare_scene(build(x), device="cpu"))[kind+"_poles"][0]
         coeff = pole_update_coefficients(local["pole"], kind, EPSILON_0, dt)
         return sum((coeff[key] * (local["edge_weights"][c] if key == "drive" else 1.) * grad).sum()
                    for (c, _, _), mapping in gradients.items() for key, grad in mapping.items())
@@ -129,14 +129,15 @@ def test_binary_interface_pole_parameter_gradient_matches_fd(kind, parameter, ma
         pole = {"debye": mw.DebyePole, "drude": mw.DrudePole, "lorentz": mw.LorentzPole}[kind](**values)
         material = mw.Material(eps_r=2., **{("mu_" if magnetic else "")+kind+"_poles": (pole,)})
         scene = mw.Scene(domain=mw.Domain(bounds=((-0.3, .3),)*3), grid=mw.GridSpec.uniform(.06),
-            boundary=mw.BoundarySpec.pec(), device="cuda",
-            structures=[mw.Structure(geometry=mw.Sphere(radius=.143), material=material)],
+            boundary=mw.BoundarySpec.pec(), structures=[mw.Structure(geometry=mw.Sphere(radius=.143), material=material)],
             sources=[mw.PointDipole(position=(-.12, 0., 0.), polarization="Ez", width=.06,
                 source_time=mw.CW(frequency=1e9))])
         result = mw.Simulation.fdtd(scene, frequencies=(1e9,),
-            run_time=mw.TimeConfig(time_steps=240, dt=3e-12), full_field_dft=True, cuda_graph=False,
-            spectral_sampler=mw.SpectralSampler(normalize_source=False, window="none")).run()
-        field = result.field("Ez")
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=240, dt=3e-12), full_field_dft=True, cuda_graph=False,
+                spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=False, window="none"),
+            )).run()
+        field = result.field("Ez").isel(f=0).values
         if isinstance(field, dict):
             field = field["data"]
         return field.abs().square().sum()

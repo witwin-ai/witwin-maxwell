@@ -14,18 +14,18 @@ cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA required')
 
 
 def test_explicit_storage_configuration():
-    assert mw.MoMConfig().riesz_storage == 'dense'
-    assert mw.MoMConfig(riesz_storage='compact_rwg_v1').riesz_storage == 'compact_rwg_v1'
+    assert mw.mom.MoMConfig().riesz_storage == 'dense'
+    assert mw.mom.MoMConfig(riesz_storage='compact_rwg_v1').riesz_storage == 'compact_rwg_v1'
     for invalid in ('diagonal', 'auto', None, False, [], 1):
         with pytest.raises(ValueError, match='riesz_storage'):
-            mw.MoMConfig(riesz_storage=invalid)
+            mw.mom.MoMConfig(riesz_storage=invalid)
 
 
 @pytest.mark.parametrize('configuration,marker', [('compact_rwg_v1', 'dense'),
     ('compact_rwg_v1', None), (None, 'compact_rwg_v1'), ('dense', 'compact_rwg_v1')])
 def test_restore_rejects_conflicting_storage_provenance_before_compile(monkeypatch, configuration, marker):
     from witwin.maxwell.mom import runtime
-    config = mw.MoMConfig()
+    config = mw.mom.MoMConfig()
     payload = dict(schema_version=3, basis='RWG', coefficient_order=['all_J_scattered', 'all_M_scattered'],
         coefficient_units=['A/m', 'V/m'], coordinate_units='m', subdivisions=0,
         dtype='torch.complex128', integration=asdict(config.integration),
@@ -37,19 +37,19 @@ def test_restore_rejects_conflicting_storage_provenance_before_compile(monkeypat
     if marker is not None: payload['operator_metadata']['riesz_storage'] = marker
     monkeypatch.setattr(runtime, 'compile_surfaces', lambda *args: pytest.fail('conflicting storage reached geometry compilation'))
     with pytest.raises(ValueError, match='Riesz storage metadata|missing or unsupported fields'):
-        runtime.SurfaceData.restore(payload, None, 3e8)
+        runtime.SurfaceData.restore(payload, None, 3e8, 'cuda')
 
 
 def test_historical_dense_storage_requires_explicit_archive_migration(monkeypatch):
     from witwin.maxwell.mom import runtime
-    config = mw.MoMConfig()
+    config = mw.mom.MoMConfig()
     payload = dict(schema_version=1, basis='RWG', coefficient_order=['J', 'M'],
         coefficient_units=['A/m', 'V/m'], coordinate_units='m', subdivisions=0,
         dtype='torch.complex128', integration=asdict(config.integration),
         stopping=asdict(config.stopping), query_config=asdict(config.query_config), operator_metadata={})
     monkeypatch.setattr(runtime, 'compile_surfaces', lambda *args: pytest.fail('historical payload reached runtime compilation'))
     with pytest.raises(ValueError, match='historical data requires explicit archive migration'):
-        runtime.SurfaceData.restore(payload, None, 3e8)
+        runtime.SurfaceData.restore(payload, None, 3e8, 'cuda')
 
 
 def system(dtype=torch.complex128, n=5):
@@ -216,8 +216,8 @@ def test_adjoint_never_conjugates_the_matrix(monkeypatch):
 def test_public_compact_path_eight_rhs_fields_and_persistence(tmp_path, monkeypatch):
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=2.25, sigma_e=.01))],
         sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=4))
-    dense_prepared = mw.Simulation.mom(scene, frequency=3e8, config=config).prepare()
+    config = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=4))
+    dense_prepared = mw.Simulation.mom(scene, frequencies=3e8, config=config).prepare()
     dense_handle = dense_prepared.solver.handle
     dense_result = dense_prepared.run()
     compact_config = replace(config, riesz_storage='compact_rwg_v1')
@@ -230,7 +230,7 @@ def test_public_compact_path_eight_rhs_fields_and_persistence(tmp_path, monkeypa
     with monkeypatch.context() as patch:
         patch.setattr(torch, 'block_diag', lambda *args: pytest.fail('compact path materialized block metric'))
         patch.setattr(torch.linalg, 'cholesky_ex', factor)
-        prepared = mw.Simulation.mom(scene, frequency=3e8, config=compact_config).prepare()
+        prepared = mw.Simulation.mom(scene, frequencies=3e8, config=compact_config).prepare()
         result = prepared.run()
     compact_handle = prepared.solver.handle
     assert factors == [((30, 30), torch.float64)]
@@ -255,15 +255,15 @@ def test_public_compact_path_eight_rhs_fields_and_persistence(tmp_path, monkeypa
     path = tmp_path / 'compact.pt'
     result.save(path)
     restored = mw.Result.load(path, scene=scene)
-    assert restored.surface_currents.config.riesz_storage == 'compact_rwg_v1'
-    assert restored.surface_currents.handle.metadata['riesz_storage'] == 'block_compact_rwg_v1'
-    torch.testing.assert_close(restored.surface_currents.scattered_coefficients, result.surface_currents.scattered_coefficients)
+    assert mw.mom.surface_currents(restored).config.riesz_storage == 'compact_rwg_v1'
+    assert mw.mom.surface_currents(restored).handle.metadata['riesz_storage'] == 'block_compact_rwg_v1'
+    torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients, mw.mom.surface_currents(result).scattered_coefficients)
 
 
 @cuda
 def test_storage_selection_cannot_change_after_prepare():
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=2))], sources=[mw.PlaneWave()])
-    simulation = mw.Simulation.mom(scene, frequency=3e8, config=mw.MoMConfig(subdivisions=0,
+    simulation = mw.Simulation.mom(scene, frequencies=3e8, config=mw.mom.MoMConfig(subdivisions=0,
         integration=IntegrationConfig(order=2, singular_order=3), riesz_storage='compact_rwg_v1'))
     prepared = simulation.prepare()
     simulation.config = replace(simulation.config, riesz_storage='dense')

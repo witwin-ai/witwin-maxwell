@@ -16,23 +16,22 @@ def test_mixed_sources_reject_absolute_spectra_but_keep_ratios(tmp_path):
 
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.02, .02),) * 3), grid=mw.GridSpec.uniform(.005),
-        boundary=mw.BoundarySpec.none(), device="cuda",
-        ports=(mw.LumpedPort("feed", positive=(0., 0., .005), negative=(0., 0., -.005),
+        boundary=mw.BoundarySpec.none(), ports=(mw.LumpedPort("feed", positive=(0., 0., .005), negative=(0., 0., -.005),
             voltage_path=mw.AxisPath("z"), current_surface=mw.Box(
                 position=(0., 0., -.0025), size=(.015, .015, 0.))),),
         sources=(mw.PointDipole((.01, 0., 0.), polarization="Ez",
             source_time=mw.GaussianPulse(3e9, fwidth=1.5e9)),),
         monitors=(mw.PointMonitor("point", (.005, .005, 0.), fields=("Ez",)),
-                  mw.FieldTimeMonitor("trace", components=("Ez",)),
+                  mw.monitors.FieldTimeMonitor("trace", components=("Ez",)),
                   mw.FluxMonitor("flux", axis="x", position=.005)),
     )
-    kwargs = dict(frequency=3e9, run_time=mw.TimeConfig(time_steps=96),
+    kwargs = dict(run_time=mw.TimeConfig(time_steps=96),
         shutoff=0., full_field_dft=True, cuda_graph=False,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False))
-    result = mw.Simulation.fdtd(scene,
-        excitations=mw.PortExcitation("feed", source_time=mw.CW(3e9)), **kwargs).run()
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False))
+    result = mw.Simulation.fdtd(scene, frequencies=3e9,
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.CW(3e9)), config=mw.FDTDConfig(**kwargs)).run()
     assert result.stats()["time_plan"]["mixed_sources"]
-    assert torch.isfinite(result.monitor("trace")["components"]["Ez"]).all()
+    assert torch.isfinite(result.monitor("trace").sel(component="Ez").values).all()
     message = ("Absolute spectra of a run mixing ongoing (CW / undamped / periodic / DC) "
         "and transient sources have no horizon-independent scale; use normalize_source=True, "
         "ratios such as S/Z, or a run with only ongoing or only transient sources.")
@@ -40,12 +39,12 @@ def test_mixed_sources_reject_absolute_spectra_but_keep_ratios(tmp_path):
     assert isinstance(port, _RatioOnlyPortData)
     for name in ("z_in", "reflection_coefficient", "return_loss_db", "vswr"):
         assert torch.equal(getattr(port, name), getattr(result._ports["feed"], name))
-    for read in (lambda: result.field("Ez"), lambda: result.fields,
-                 lambda: result.monitor("point"), lambda: result.raw_monitor("flux"),
-                 lambda: result.monitors, lambda: result.raw_output,
+    for read in (lambda: result.field("Ez").values, lambda: result.fields,
+                 lambda: result.raw_monitor("point"), lambda: result.raw_monitor("flux"),
+                 lambda: result.monitors,
                  lambda: port.voltage, lambda: port.current, lambda: port.available_power,
                  lambda: port.incident_power, lambda: result.ports["feed"].a,
-                 lambda: result.embedded_networks, lambda: result.embedded_network("feed"),
+                 lambda: mw.rf.embedded_networks(result), lambda: mw.rf.embedded_network(result, "feed"),
                  lambda: result._snapshot_payload(fields={})):
         with pytest.raises(ValueError) as error:
             read()
@@ -58,8 +57,8 @@ def test_mixed_sources_reject_absolute_spectra_but_keep_ratios(tmp_path):
     with pytest.raises(ValueError) as error:
         ratios["P_incident"]
     assert str(error.value) == message
-    sweep = mw.Simulation.fdtd(scene,
-        excitations=mw.PortSweep(source_time=mw.CW(3e9)), **kwargs).run()
+    sweep = mw.Simulation.fdtd(scene, frequencies=3e9,
+        excitations=mw.rf.PortSweep(source_time=mw.CW(3e9)), config=mw.FDTDConfig(**kwargs)).run()
     assert torch.isfinite(sweep.network.s).all()
     assert torch.isfinite(sweep.network.to_z()).all()
     with pytest.raises(ValueError) as error:
@@ -86,11 +85,13 @@ def test_pec_dipole_spectrum_is_independent_of_horizon_and_shutoff(record_proper
     for cycles in (40, 200):
         for shutoff in (0., 1e-5):
             scene, frequencies, excitations = build_scene("dipole", 24, 3)
-            scene.monitors.clear()
+            scene = scene.updated(monitors=())
             result = mw.Simulation.fdtd(
                 scene, frequencies=frequencies, excitations=excitations,
-                run_time=mw.TimeConfig.auto(steady_cycles=cycles, transient_cycles=8),
-                shutoff=shutoff, full_field_dft=False,
+                config=mw.FDTDConfig(
+                    run_time=mw.TimeConfig.auto(steady_cycles=cycles, transient_cycles=8),
+                    shutoff=shutoff, full_field_dft=False,
+                ),
             ).run()
             assert result.stats()["time_steps"] == (6976 if cycles == 40 else 27376)
             powers[cycles, shutoff] = result.port("feed").incident_power
@@ -109,22 +110,21 @@ def test_source_normalization_scales_ports_fields_powers_and_port_gradients():
         for normalized in (False, True):
             amplitude = torch.tensor(.8, device="cuda", requires_grad=True)
             scene = mw.Scene(
-                domain=mw.Domain(bounds=((-0.02, .02),) * 3), grid=mw.GridSpec.uniform(.005),
-                boundary=mw.BoundarySpec.none(), device="cuda",
-                ports=(mw.LumpedPort("feed", positive=(0., 0., .005), negative=(0., 0., -.005),
+                        domain=mw.Domain(bounds=((-0.02, .02),) * 3), grid=mw.GridSpec.uniform(.005),
+                        boundary=mw.BoundarySpec.none(), ports=(mw.LumpedPort("feed", positive=(0., 0., .005), negative=(0., 0., -.005),
                     voltage_path=mw.AxisPath("z"), current_surface=mw.Box(
                         position=(0., 0., -.0025), size=(.015, .015, 0.))),),
-                monitors=(mw.PointMonitor("point", (.01, .005, 0.), fields=("Ez",)),),
-            )
-            scene.add_thin_wire(mw.ThinWire(
-                "wire", points=((.01, -.005, 0.), (.01, .005, 0.)),
-                radius=.0003, conductor=mw.WireConductor.pec(), snap="continuous",
-            ))
-            scene.add_monitor(mw.WireMonitor("wire_state", "wire", frequencies=(3e9,)))
+                        monitors=(mw.PointMonitor("point", (.01, .005, 0.), fields=("Ez",)), mw.rf.WireMonitor("wire_state", "wire", frequencies=(3e9,))),
+                        thin_wires=(
+                    mw.rf.ThinWire(
+                        "wire", points=((.01, -.005, 0.), (.01, .005, 0.)),
+                        radius=.0003, conductor=mw.rf.WireConductor.pec(), snap="continuous",
+                    ),
+                    ),
+                    )
             prepared = mw.Simulation.fdtd(
-                scene, frequency=3e9, run_time=mw.TimeConfig(time_steps=96), shutoff=0.,
-                excitations=mw.PortExcitation("feed", amplitude=amplitude, source_time=waveform),
-                spectral_sampler=mw.SpectralSampler(window="none", normalize_source=normalized),
+                scene, frequencies=3e9, excitations=mw.rf.PortExcitation("feed", amplitude=amplitude, source_time=waveform), config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=96), shutoff=0.,
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=normalized)),
             ).prepare()
             result = prepared.run()
             port = result.port("feed")
@@ -149,8 +149,8 @@ def test_source_normalization_scales_ports_fields_powers_and_port_gradients():
             torch.testing.assert_close(getattr(normalized, name), getattr(raw, name) / spectrum.abs().square(),
                                        rtol=1e-5, atol=0.)
         torch.testing.assert_close(normalized.reflection_coefficient, raw.reflection_coefficient, rtol=1e-5, atol=0.)
-        torch.testing.assert_close(torch.as_tensor(runs[1][0].monitor("point")["Ez"]),
-                                   torch.as_tensor(runs[0][0].monitor("point")["Ez"]) / spectrum,
+        torch.testing.assert_close(torch.as_tensor(runs[1][0].monitor("point", freq_index=0).sel(component="Ez").values),
+                                   torch.as_tensor(runs[0][0].monitor("point", freq_index=0).sel(component="Ez").values) / spectrum,
                                    rtol=1e-5, atol=0.)
         for name in ("current", "charge"):
             torch.testing.assert_close(getattr(runs[1][0].monitor("wire_state"), name),
@@ -164,8 +164,10 @@ def test_reference_frequency_scales_amplitudes_and_round_trips(tmp_path):
         scene, frequencies, excitations = build_scene("dipole", 24, 3)
         result = mw.Simulation.fdtd(
             scene, frequencies=frequencies, excitations=excitations,
-            reference_frequency=reference_frequency, full_field_dft=True,
-            run_time=mw.TimeConfig(time_steps=96), shutoff=0.,
+            config=mw.FDTDConfig(
+                reference_frequency=reference_frequency, full_field_dft=True,
+                run_time=mw.TimeConfig(time_steps=96), shutoff=0.,
+            ),
         ).run()
         resolved = "per-frequency" if reference_frequency is None else reference_frequency
         assert result._metadata["reference_frequency"] == resolved
@@ -181,11 +183,11 @@ def test_reference_frequency_scales_amplitudes_and_round_trips(tmp_path):
     # again can differ from scaling the raw sum by up to two subnormal ULPs.
     subnormal_ulp = torch.finfo(torch.float32).tiny * torch.finfo(torch.float32).eps
     for name in default.fields:
-        torch.testing.assert_close(explicit.fields[name],
-            factors.to(default.fields[name].real.dtype)[:, None, None, None] * default.fields[name],
+        torch.testing.assert_close(explicit.fields[name].values,
+            factors.to(default.fields[name].values.real.dtype)[:, None, None, None] * default.fields[name].values,
             rtol=1e-6, atol=2 * subnormal_ulp)
-    point = torch.as_tensor(default.monitor("point")["Ez"])
-    torch.testing.assert_close(torch.as_tensor(explicit.monitor("point")["Ez"]),
+    point = torch.as_tensor(default.monitor("point").sel(component="Ez").values)
+    torch.testing.assert_close(torch.as_tensor(explicit.monitor("point").sel(component="Ez").values),
         factors.to(point.real) * point, rtol=1e-6, atol=0.)
     torch.testing.assert_close(explicit.port("feed").incident_power,
         factors.square() * default.port("feed").incident_power, rtol=1e-6, atol=0.)
@@ -201,8 +203,7 @@ def test_mixed_source_guard_survives_a_disk_checkpoint_resume(tmp_path):
 
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.02, .02),) * 3), grid=mw.GridSpec.uniform(.005),
-        boundary=mw.BoundarySpec.none(), device="cuda",
-        ports=(mw.LumpedPort("feed", positive=(0., 0., .005), negative=(0., 0., -.005),
+        boundary=mw.BoundarySpec.none(), ports=(mw.LumpedPort("feed", positive=(0., 0., .005), negative=(0., 0., -.005),
             voltage_path=mw.AxisPath("z"), current_surface=mw.Box(
                 position=(0., 0., -.0025), size=(.015, .015, 0.))),),
         sources=(mw.PointDipole((.01, 0., 0.), polarization="Ez",
@@ -211,19 +212,19 @@ def test_mixed_source_guard_survives_a_disk_checkpoint_resume(tmp_path):
     )
 
     def simulation():
-        return mw.Simulation.fdtd(scene, excitations=mw.PortExcitation("feed", source_time=mw.CW(3e9)),
-            frequency=3e9, run_time=mw.TimeConfig(time_steps=96), shutoff=0., cuda_graph=False,
-            spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False))
+        return mw.Simulation.fdtd(scene, excitations=mw.rf.PortExcitation("feed", source_time=mw.CW(3e9)),
+            frequencies=3e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=96), shutoff=0., cuda_graph=False,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False)))
 
     path = tmp_path / "mixed.pt"
     simulation().prepare().run_until(48).save(path)
-    restored = mw.FDTDResumeCheckpoint.load(path, map_location="cpu")
+    restored = mw.fdtd.FDTDResumeCheckpoint.load(path, map_location="cpu")
     # The derived classification is recomputed by preparation, not read from the checkpoint.
     result = simulation().prepare().run(resume_from=restored)
     assert result.stats()["time_plan"]["mixed_sources"]
     port = result.port("feed")
     assert isinstance(port, _RatioOnlyPortData)
     assert torch.isfinite(port.z_in).all()
-    for read in (lambda: result.monitor("point"), lambda: port.voltage):
+    for read in (lambda: result.raw_monitor("point"), lambda: port.voltage):
         with pytest.raises(ValueError, match="no horizon-independent scale"):
             read()

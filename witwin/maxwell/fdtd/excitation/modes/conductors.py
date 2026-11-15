@@ -11,11 +11,12 @@ from ....constants import C_0, ETA_0
 from ....compiler.copper_foil import compile_copper_faces, copper_edge_admittance_scale
 from ....compiler.materials import evaluate_material_components
 from .common import _discrete_mode_profile_power, _normalize_mode_profiles_to_unit_power
+from ....errors import UnsupportedFeatureError
 
 
 def _reject_curved_modal_aperture(scene, source):
     from ....compiler.cut_surface import clip_triangles
-    for structure in scene.structures:
+    for structure in scene.scene.structures:
         if (not getattr(structure,'enabled',True)
                 or not getattr(structure.material,'is_copper_foil',False)
                 or getattr(structure.geometry,'kind',None)!='surface_mesh'):
@@ -32,15 +33,18 @@ def _reject_curved_modal_aperture(scene, source):
         highs=(center+half+tolerance).expand(len(triangles),3)
         _polygon,counts=clip_triangles(triangles,lows,highs)
         if bool((counts>0).any()):
-            raise NotImplementedError('SurfaceMesh CopperFoil modal apertures require a curved finite-Et mode solve; good_conductor supports longitudinal planar foils only.')
+            raise UnsupportedFeatureError('SurfaceMesh CopperFoil modal apertures require a curved finite-Et mode solve; good_conductor supports longitudinal planar foils only.',
+                                          feature="geometry.surface_mesh", method="fdtd")
 
 
 def prepare_good_conductor_context(solver, source):
     """Return a private modal boundary model; never alter the physical foil model."""
     if source.get('wave_family') != 'tem':
-        raise NotImplementedError("good_conductor is supported only for TEM/quasi-TEM WavePort modes.")
+        raise UnsupportedFeatureError("good_conductor is supported only for TEM/quasi-TEM WavePort modes.",
+                                      feature="port.WavePort", method="fdtd")
     if getattr(solver,'_mode_source_rebuild_from_fields',False):
-        raise NotImplementedError("Good-conductor mode-shape gradients are unsupported.")
+        raise UnsupportedFeatureError("Good-conductor mode-shape gradients are unsupported.",
+                                      feature="guard:0f53dde3", method="fdtd")
     scene=solver.scene
     _reject_curved_modal_aperture(scene,source)
     propagation='xyz'.index(source['normal_axis'])
@@ -68,7 +72,8 @@ def prepare_good_conductor_context(solver, source):
                     center,span=source['position'][axis],source['size'][axis]
                     intersects &= (values>=center-span/2)&(values<=center+span/2)
                 if bool(intersects.any()):
-                    raise NotImplementedError('A good-conductor mode requires longitudinal foils throughout its source/probe stencil.')
+                    raise UnsupportedFeatureError('A good-conductor mode requires longitudinal foils throughout its source/probe stencil.',
+                                                  feature="material.copper_foil", method="fdtd")
             continue
         if face.component!=propagation:
             continue
@@ -83,9 +88,11 @@ def prepare_good_conductor_context(solver, source):
         if not len(low) and not len(high):
             continue
         if low.shape!=high.shape or not torch.equal(low[:,transverse],high[:,transverse]):
-            raise NotImplementedError('A good-conductor mode cannot cross a foil end or axial discontinuity.')
+            raise UnsupportedFeatureError('A good-conductor mode cannot cross a foil end or axial discontinuity.',
+                                          feature="material.copper_foil", method="fdtd")
         if any(torch.is_tensor(value) and value.requires_grad for value in (face.material.thickness,face.material.conductivity)):
-            raise NotImplementedError('Good-conductor mode profiles require fixed foil material parameters.')
+            raise UnsupportedFeatureError('Good-conductor mode profiles require fixed foil material parameters.',
+                                          feature="material.copper_foil", method="fdtd")
         mask[tuple(face.indices.T)]=1
         accepted.append((face,high[:,transverse]))
     if not accepted:
@@ -123,7 +130,8 @@ def apply_good_conductor_perturbation(solver, source, data):
     plane=data['plane_index']
     spacing=float(nodes[plane+1]-nodes[plane])
     if not math.isclose(spacing,float(nodes[plane]-nodes[plane-1]),rel_tol=1e-7):
-        raise NotImplementedError('Good-conductor mode source/probe planes require locally uniform axial spacing.')
+        raise UnsupportedFeatureError('Good-conductor mode source/probe planes require locally uniform axial spacing.',
+                                      feature="guard:18b6b523", method="fdtd")
     beta0=data.get('beta_complex')
     if beta0 is None:
         k0=2*math.pi*frequency/C_0
@@ -249,7 +257,7 @@ def copper_intersects_mode(scene, source):
     """Detect physical foil crossings without assigning any ideal ownership."""
     _reject_curved_modal_aperture(scene,source)
     propagation='xyz'.index(source['normal_axis'])
-    for structure in scene.structures:
+    for structure in scene.scene.structures:
         if not getattr(structure,'enabled',True) or not getattr(structure.material,'is_copper_foil',False):
             continue
         geometry=structure.geometry

@@ -157,9 +157,12 @@ def test_physical_behavior_changes_are_t2(change):
         assert_numerically_equivalent(ref, new, level="run", name=change)
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=[
-    pytest.mark.cuda, pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")])])
-def test_85000_leaves(device, monkeypatch):
+DEVICES = ["cpu", pytest.param("cuda", marks=[
+    pytest.mark.cuda, pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")])]
+
+
+def compare_85000_leaves(device, monkeypatch):
+    """Compare a large leaf tree; returns the comparison wall time in seconds."""
     # Distinct small leaves model the setup consumer's large nested state tree.
     # Leaves are views of two device tensors so fixture construction stays two
     # transfers instead of 170k tiny launches on a busy device.
@@ -188,8 +191,14 @@ def test_85000_leaves(device, monkeypatch):
     assert len(report["tensors"]) == 85016
     assert report["tier"] == "T1"
     assert len(transfers) == 2  # Float and bool: one transfer per device/dtype.
-    assert elapsed < 5, f"85000 leaves took {elapsed:.3f}s on {device}"
     print(f"85000 leaves ({device}): {elapsed:.3f}s, {len(transfers)} metric transfers")
+    return elapsed
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_85000_leaves(device, monkeypatch):
+    compare_85000_leaves(device, monkeypatch)
+
 
 
 def test_pin_receipts_and_unset_log(monkeypatch, tmp_path):

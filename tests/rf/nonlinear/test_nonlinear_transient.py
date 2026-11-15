@@ -15,7 +15,7 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.compiler.nonlinear_devices import (
+from tests.oracles.nonlinear_devices import (
     NonlinearMNASystem,
     compile_nonlinear_devices,
     multistart_dc,
@@ -39,9 +39,9 @@ def _default_float64():
 
 
 def _diode_divider(source_voltage, resistance, saturation_current, ideality=1.0):
-    circuit = mw.Circuit("div")
+    circuit = mw.circuits.Circuit("div")
     node = circuit.node("a")
-    diode = mw.Diode(
+    diode = mw.circuits.Diode(
         "d1", node, circuit.ground, saturation_current=saturation_current, ideality=ideality
     )
     compiled = compile_nonlinear_devices([diode], {"a": 0}, dtype=torch.float64, device="cpu")
@@ -76,7 +76,7 @@ def test_diode_dc_iv_matches_analytic_shockley_below_1e_5():
     for source_voltage in torch.linspace(-2.0, 2.0, 41).tolist():
         system, vte = _diode_divider(source_voltage, resistance, saturation_current)
         solution, stats = solve_dc_operating_point(
-            system, system.injection.clone(), mw.NonlinearSolveConfig()
+            system, system.injection.clone(), mw.circuits.NonlinearSolveConfig()
         )
         assert stats.converged
         v = solution.item()
@@ -96,7 +96,7 @@ def test_gmin_continuation_converges_hard_start_and_leaves_no_residual_gmin():
     # 8 V across 5 ohm hammers the junction; a cold Newton start from 0 with no
     # continuation would take an enormous first step. gmin continuation ramps it.
     system, vte = _diode_divider(8.0, 5.0, 1e-14)
-    config = mw.NonlinearSolveConfig(gmin_start=1.0, gmin_steps=6)
+    config = mw.circuits.NonlinearSolveConfig(gmin_start=1.0, gmin_steps=6)
     solution, stats = solve_dc_operating_point(system, system.injection.clone(), config)
     assert stats.converged
     # The returned state must satisfy the true (gmin-free) residual: the last
@@ -129,7 +129,7 @@ def test_rectifier_normalized_rms_below_1_percent(builder_name, golden_key):
     system, source_injection, output_index = getattr(fx, builder_name)()
     times = fx.coarse_times()
     result = run_nonlinear_transient(
-        system, times, source_injection, mw.NonlinearSolveConfig(), integration="trapezoidal"
+        system, times, source_injection, mw.circuits.NonlinearSolveConfig(), integration="trapezoidal"
     )
     output = result.node_voltages[:, output_index]
     # Compare over the final period (the steady ripple), where the golden and the
@@ -146,7 +146,7 @@ def test_rectifier_normalized_rms_below_1_percent(builder_name, golden_key):
 def test_every_converged_transient_step_satisfies_kcl():
     system, source_injection, _ = fx.build_full_wave_system()
     times = fx.coarse_times()
-    config = mw.NonlinearSolveConfig()
+    config = mw.circuits.NonlinearSolveConfig()
     result = run_nonlinear_transient(system, times, source_injection, config, integration="trapezoidal")
     # Worst per-step KCL residual over the whole run must clear the residual gate
     # for a representative current scale (~ AMPLITUDE / SOURCE_RESISTANCE).
@@ -159,12 +159,12 @@ def test_every_converged_transient_step_satisfies_kcl():
 # Gate: multistart reports multistability on an N-shaped PWL device.
 # --------------------------------------------------------------------------- #
 def _tunnel_divider(source_voltage, resistance):
-    circuit = mw.Circuit("tunnel")
+    circuit = mw.circuits.Circuit("tunnel")
     node = circuit.node("a")
     # N-shaped I-V with a negative-differential-resistance middle segment.
     voltages = torch.tensor([0.0, 0.10, 0.40, 0.60], dtype=torch.float64)
     currents = torch.tensor([0.0, 10.0e-3, 1.0e-3, 6.0e-3], dtype=torch.float64)
-    device = mw.PiecewiseLinearIV("j1", node, circuit.ground, voltages=voltages, currents=currents)
+    device = mw.circuits.PiecewiseLinearIV("j1", node, circuit.ground, voltages=voltages, currents=currents)
     compiled = compile_nonlinear_devices([device], {"a": 0}, dtype=torch.float64, device="cpu")
     conductance = torch.tensor([[1.0 / resistance]], dtype=torch.float64)
     injection = torch.tensor([source_voltage / resistance], dtype=torch.float64)
@@ -176,7 +176,7 @@ def test_multistart_reports_multiple_operating_points():
     # points, so a single seed can only report the branch it lands in.
     system = _tunnel_divider(source_voltage=0.80, resistance=100.0)
     seeds = [torch.tensor([v]) for v in (0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)]
-    report = multistart_dc(system, system.injection.clone(), seeds, mw.NonlinearSolveConfig())
+    report = multistart_dc(system, system.injection.clone(), seeds, mw.circuits.NonlinearSolveConfig())
     assert report.num_operating_points >= 2
     # At least two distinct seeds must resolve to distinct operating points.
     resolved = {root for root in report.seed_to_root if root >= 0}
@@ -191,7 +191,7 @@ def test_monostable_bias_reports_single_operating_point():
     # multistart must report exactly one even from scattered seeds.
     system = _tunnel_divider(source_voltage=0.03, resistance=200.0)
     seeds = [torch.tensor([v]) for v in (0.0, 0.02, 0.05, 0.1, 0.2)]
-    report = multistart_dc(system, system.injection.clone(), seeds, mw.NonlinearSolveConfig())
+    report = multistart_dc(system, system.injection.clone(), seeds, mw.circuits.NonlinearSolveConfig())
     assert report.num_operating_points == 1
 
 
@@ -205,9 +205,9 @@ def test_linear_charge_companion_matches_analytic_rc_decay():
     capacitance = 1.0e-9
     resistance = 1.0e3
     v0 = 2.0
-    circuit = mw.Circuit("rc")
+    circuit = mw.circuits.Circuit("rc")
     node = circuit.node("a")
-    cap = mw.VoltageDependentCapacitor(
+    cap = mw.circuits.VoltageDependentCapacitor(
         "c1", node, circuit.ground, q_coefficients=torch.tensor([0.0, capacitance])
     )
     compiled = compile_nonlinear_devices([cap], {"a": 0}, dtype=torch.float64, device="cpu")
@@ -221,7 +221,7 @@ def test_linear_charge_companion_matches_analytic_rc_decay():
         system,
         times,
         lambda t: injection.clone(),
-        mw.NonlinearSolveConfig(),
+        mw.circuits.NonlinearSolveConfig(),
         integration="trapezoidal",
         initial_state=torch.tensor([v0]),
     )
@@ -239,12 +239,12 @@ def test_linear_charge_companion_matches_analytic_rc_decay():
 def test_pwl_knot_crossing_triggers_backward_euler_breakpoint():
     # A ramped source sweeps a PWL device's terminal voltage across its knots; the
     # transient must localize a backward-Euler step whenever a knot is crossed.
-    circuit = mw.Circuit("pwl_ramp")
+    circuit = mw.circuits.Circuit("pwl_ramp")
     node = circuit.node("a")
     voltages = torch.tensor([-1.0, 0.0, 0.2, 0.4, 1.0], dtype=torch.float64)
     currents = torch.tensor([-1.0e-3, 0.0, 0.5e-3, 3.0e-3, 9.0e-3], dtype=torch.float64)
-    device = mw.PiecewiseLinearIV("j1", node, circuit.ground, voltages=voltages, currents=currents)
-    cap = mw.VoltageDependentCapacitor(
+    device = mw.circuits.PiecewiseLinearIV("j1", node, circuit.ground, voltages=voltages, currents=currents)
+    cap = mw.circuits.VoltageDependentCapacitor(
         "c1", node, circuit.ground, q_coefficients=torch.tensor([0.0, 1.0e-9])
     )
     compiled = compile_nonlinear_devices([device, cap], {"a": 0}, dtype=torch.float64, device="cpu")
@@ -258,7 +258,7 @@ def test_pwl_knot_crossing_triggers_backward_euler_breakpoint():
     def ramp(t):
         return torch.tensor([(1.5 * (t / 1.0e-6)) / resistance], dtype=torch.float64)
 
-    config = mw.NonlinearSolveConfig()
+    config = mw.circuits.NonlinearSolveConfig()
     result = run_nonlinear_transient(system, times, ramp, config, integration="trapezoidal")
     assert len(result.breakpoint_steps) >= 1
     assert torch.isfinite(result.node_voltages).all()
@@ -291,7 +291,7 @@ def test_record_and_stop_transient_truncates_and_flags_unconverged():
     # must report converged=False, and must record the step index it stopped on --
     # not affirm converged=True over a garbage (~1e119) iterate.
     system, _ = _diode_divider(8.0, 5.0, 1e-14)
-    config = mw.NonlinearSolveConfig(max_iterations=1, failure="record_and_stop")
+    config = mw.circuits.NonlinearSolveConfig(max_iterations=1, failure="record_and_stop")
     times = torch.linspace(0.0, 1.0e-9, 5, dtype=torch.float64)
     injection = system.injection.clone()
     result = run_nonlinear_transient(
@@ -319,7 +319,7 @@ def test_record_and_stop_transient_truncates_and_flags_unconverged():
 def test_record_and_stop_unconverged_dc_start_truncates_at_step_zero():
     system, _ = _diode_divider(8.0, 5.0, 1e-14)
     # max_iterations=1 with no gmin continuation cannot converge the cold DC start.
-    config = mw.NonlinearSolveConfig(
+    config = mw.circuits.NonlinearSolveConfig(
         max_iterations=1, failure="record_and_stop", gmin_start=0.0, gmin_steps=0
     )
     times = torch.linspace(0.0, 1.0e-9, 5, dtype=torch.float64)

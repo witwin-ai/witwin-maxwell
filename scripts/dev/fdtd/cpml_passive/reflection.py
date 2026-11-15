@@ -16,9 +16,10 @@ from model import C0, EPS0, MU0, ETA
 
 def layer_profiles(h, dt, preset="real", theta=0., layers=12, interior=8):
     import torch
-    from witwin.maxwell.fdtd.boundary.cpml import _cpml_profile_1d, DEFAULT_CPML_CONFIG
+    from dataclasses import asdict
+    from witwin.maxwell.fdtd.boundary.cpml import _cpml_profile_1d, CPMLGrading, DEFAULT_CPML_GRADING
     nodes=np.arange(-interior,layers+1)*h
-    cfg=dict(DEFAULT_CPML_CONFIG)
+    cfg=asdict(DEFAULT_CPML_GRADING)
     rate,floor=None,0.
     if preset=="cfs":
         rate=2*np.pi*.3e9
@@ -33,7 +34,7 @@ def layer_profiles(h, dt, preset="real", theta=0., layers=12, interior=8):
             config["alpha_max"]*=MU0/EPS0
         out=_cpml_profile_1d((nodes[:-1]+nodes[1:])/2 if magnetic else nodes,nodes,
             layers,dt,MU0 if magnetic else EPS0,torch.tensor(MU0/EPS0 if magnetic else 1.,dtype=torch.float64),
-            ETA,config,apply_low=False,apply_high=True,shift_rate=rate,shift_floor=floor)
+            ETA,CPMLGrading(**config),apply_low=False,apply_high=True,shift_rate=rate,shift_floor=floor)
         result.append(tuple(x.numpy() for x in out))
     return nodes,result
 

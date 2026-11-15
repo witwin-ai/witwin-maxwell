@@ -14,6 +14,8 @@ from witwin.maxwell.fdtd.excitation.temporal import InjectionKind, injection_tim
 from witwin.maxwell.fdtd.runtime.spectral import source_normalization_spectrum
 from witwin.maxwell.fdtd.runtime.timeplan import compile_fdtd_time_plan
 
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
+
 
 def test_injection_time_is_bitwise_identical_to_inline_expressions():
     for kind in get_args(InjectionKind):
@@ -64,21 +66,20 @@ def _record(kind, count=64, *, normalize=False):
     values *= np.array([2., 1., 2.])[None, :, None]
     scene = mw.Scene(
         domain=mw.Domain(bounds=((0., .1), (0., .1), (0., length))),
-        grid=mw.GridSpec.uniform(dx), device="cpu",
-        boundary=mw.BoundarySpec.pec().with_faces(y_low="pmc", y_high="pmc"),
-        sources=(mw.CustomCurrentSource(
-            mw.CurrentDataset(([-.05, .15], [0., .05, .1], coords), {component: values}),
+        grid=mw.GridSpec.uniform(dx), boundary=mw.BoundarySpec.pec().with_faces(y_low="pmc", y_high="pmc"),
+        sources=(mw.sources.CustomCurrentSource(
+            mw.sources.CurrentDataset(([-.05, .15], [0., .05, .1], coords), {component: values}),
             source_time=mw.CW(frequency)),),
         monitors=(mw.PointMonitor("probe", (.025, .05, .1), fields=("Ex", "Hy")),),
     )
     prepared = mw.Simulation.fdtd(
-        scene, frequencies=(frequency,), backend="cpu_reference", cuda_graph=False,
+        scene, frequencies=(frequency,), config=mw.FDTDConfig(cuda_graph=False,
         field_dtype=torch.float32,
         run_time=mw.TimeConfig(time_steps=count, dt=dt, transient_cycles=0),
         full_field_dft=normalize,
-        spectral_sampler=mw.SpectralSampler(
+        spectral_sampler=mw.fdtd.SpectralSampler(
             window="none", normalize_source=normalize,
-            observer_dtype=torch.float32 if normalize else torch.float64),
+            observer_dtype=torch.float32 if normalize else torch.float64)),
     ).prepare()
     result = prepared.run()
     solver = prepared.solver
@@ -123,6 +124,7 @@ def records():
     return {kind: _record(kind) for kind in ("J", "M")}
 
 
+@requires_cuda
 def test_additive_j_at_half_step(records):
     for measurement in records["J"].values():
         error = abs(measurement["observed"] - measurement["expected"]) / abs(measurement["expected"])
@@ -130,17 +132,20 @@ def test_additive_j_at_half_step(records):
         assert error < 3e-6, (error, integer_error)
 
 
+@requires_cuda
 def test_m_at_integer_step(records):
     for measurement in records["M"].values():
         assert abs(measurement["observed"] - measurement["expected"]) / abs(measurement["expected"]) < 3e-6
 
 
+@requires_cuda
 def test_observer_origin_independent_of_source():
     for measurement in _record("M", 1).values():
         ratio = measurement["observed"] / (2 * measurement["native"])
         assert abs(ratio - measurement["origin"]) < 2e-14
 
 
+@requires_cuda
 @pytest.mark.parametrize("kind", ["J", "M"])
 def test_normalized_recurrence_uses_the_same_source_instant(kind):
     for measurement in _record(kind, normalize=True).values():
@@ -166,7 +171,7 @@ def test_source_spectrum_matches_injection_instant(kind, alpha, waveform):
         envelope = lambda t: np.exp(-.5 * ((t - 6 * sigma) / sigma) ** 2) * np.cos(2 * math.pi * frequency * (t - 6 * sigma))
     elif waveform == "callable":
         envelope = lambda t: np.cos(2 * math.pi * frequency * t) * np.exp(-frequency * t)
-        source_time = mw.CustomSourceTime(envelope, characteristic_frequency=frequency)
+        source_time = mw.sources.CustomSourceTime(envelope, characteristic_frequency=frequency)
     else:
         source_time = mw.CW(frequency)
         envelope = (lambda t: np.exp(-2j * math.pi * frequency * t)) if waveform == "analytic_cw" else (lambda t: np.cos(2 * math.pi * frequency * t))
@@ -174,14 +179,13 @@ def test_source_spectrum_matches_injection_instant(kind, alpha, waveform):
     sources = {
         "dipole": lambda: mw.PointDipole((0., 0., 0.), source_time=source_time),
         "uniform": lambda: mw.UniformCurrentSource((.1,) * 3, source_time=source_time),
-        "J": lambda: mw.CustomCurrentSource(mw.CurrentDataset(coords, {"Jx": np.ones((2, 2, 2))}), source_time=source_time),
-        "M": lambda: mw.CustomCurrentSource(mw.CurrentDataset(coords, {"My": np.ones((2, 2, 2))}), source_time=source_time),
-        "custom_field": lambda: mw.CustomFieldSource(mw.FieldDataset((coords[0], coords[1], [0.]), {"Ex": np.ones((2, 2, 1))}), source_time=source_time),
+        "J": lambda: mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(coords, {"Jx": np.ones((2, 2, 2))}), source_time=source_time),
+        "M": lambda: mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(coords, {"My": np.ones((2, 2, 2))}), source_time=source_time),
+        "custom_field": lambda: mw.sources.CustomFieldSource(mw.sources.FieldDataset((coords[0], coords[1], [0.]), {"Ex": np.ones((2, 2, 1))}), source_time=source_time),
         "tfsf": lambda: mw.PlaneWave(source_time=source_time, injection=mw.TFSF(bounds=((-0.05, .05),) * 3)),
         "mode": lambda: mw.ModeSource(position=(0., 0., 0.), source_time=source_time),
     }
-    scene = mw.Scene(domain=mw.Domain(bounds=((-0.1, .1),) * 3), device="cpu",
-                     sources=() if kind == "port" else (sources[kind](),))
+    scene = mw.Scene(domain=mw.Domain(bounds=((-0.1, .1),) * 3), sources=() if kind == "port" else (sources[kind](),))
     solver = SimpleNamespace(
         dt=dt, c=299792458., device="cpu", _normalize_source=True,
         complex_fields_enabled=waveform == "analytic_cw", _spectral_reference_frequency=None,
@@ -197,7 +201,7 @@ def test_source_spectrum_matches_injection_instant(kind, alpha, waveform):
             source.update(reference_incident_kind="physical_upstream_yee_entry_plane", reference_incident_projection=-.05)
     compile_fdtd_time_plan(solver, scene, mw.TimeConfig(time_steps=count), (frequency,),
         default_source_frequency=frequency, window="none", normalize_source=True,
-        excitations=(mw.PortExcitation("feed", source_time=source_time),) if kind == "port" else ())
+        excitations=(mw.rf.PortExcitation("feed", source_time=source_time),) if kind == "port" else ())
     actual = source_normalization_spectrum(solver, (frequency,), steps_run=count, window_type="none")
     n = np.arange(count)
     samples = envelope(n * dt + alpha * dt)

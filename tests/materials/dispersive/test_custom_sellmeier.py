@@ -6,6 +6,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.core import Box
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials, compile_relative_materials
 
 _FREQUENCY = 1.0e9
 _C = 299_792_458.0
@@ -22,16 +23,14 @@ _GRID_SHAPE = (7, 15, 15)
 _NODE_SAMPLING = mw.SubpixelSpec(samples=1, averaging="arithmetic")
 
 
-def _build_scene(*structures, device="cpu", subpixel_samples=None):
+def _build_scene(*structures, subpixel_samples=None):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.4, 0.4), (-0.4, 0.4))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device=device,
-        **({} if subpixel_samples is None else {"subpixel_samples": subpixel_samples}),
+        **({} if subpixel_samples is None else {"subpixel": subpixel_samples}),
     )
-    for structure in structures:
-        scene.add_structure(structure)
+    scene = scene.updated(structures=(*scene.structures, *structures))
     return scene
 
 
@@ -53,11 +52,11 @@ def _piecewise_boxes():
 
 
 def _compile(material, geometry=_SLAB_BOX):
-    return prepare_scene(_build_scene(mw.Structure(geometry=geometry, material=material))).compile_materials()
+    return compile_materials(prepare_scene(_build_scene(mw.Structure(geometry=geometry, material=material)), device="cpu"))
 
 
 def _relative_eps(*structures, frequency=_FREQUENCY, subpixel_samples=None):
-    eps, _ = prepare_scene(_build_scene(*structures, subpixel_samples=subpixel_samples)).compile_relative_materials(
+    eps, _ = compile_relative_materials(prepare_scene(_build_scene(*structures, subpixel_samples=subpixel_samples), device="cpu"),
         frequency=frequency)
     return eps
 
@@ -93,7 +92,7 @@ def test_uniform_custom_sellmeier_compiles_exactly_to_sellmeier():
         b_coefficients=(_full(1.2), 0.5), c_coefficients=(_C1, _full(_C2)), eps_inf=1.5
     )
     # A tensor B yields a custom pole; a scalar B over a uniform C stays a scalar pole.
-    assert isinstance(custom.lorentz_poles[0], mw.CustomLorentzPole)
+    assert isinstance(custom.lorentz_poles[0], mw.media.CustomLorentzPole)
     assert type(custom.lorentz_poles[1]) is mw.LorentzPole
     expected = _compile(reference)
     compiled = _compile(custom)
@@ -146,16 +145,20 @@ def test_piecewise_constant_c_splits_into_one_pole_per_level():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_uniform_custom_sellmeier_matches_sellmeier_run():
     def run(material):
-        scene = _build_scene(mw.Structure(geometry=_SLAB_BOX, material=material), device="cuda")
-        scene.add_source(mw.PlaneWave(direction=(1.0, 0.0, 0.0), polarization=(0.0, 0.0, 1.0),
-                                      source_time=mw.CW(frequency=_FREQUENCY, amplitude=80.0), name="pw"))
-        scene.add_monitor(mw.PointMonitor("probe", (0.35, 0.0, 0.0), fields=("Ez",)))
+        scene = _build_scene(mw.Structure(geometry=_SLAB_BOX, material=material))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PlaneWave(direction=(1.0, 0.0, 0.0), polarization=(0.0, 0.0, 1.0),
+                         source_time=mw.CW(frequency=_FREQUENCY, amplitude=80.0), name="pw"),
+        ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.35, 0.0, 0.0), fields=("Ez",))))
         result = mw.Simulation.fdtd(
             scene, frequencies=[_FREQUENCY],
-            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-            spectral_sampler=mw.SpectralSampler(window="hanning"), full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"), full_field_dft=False,
+            ),
         ).run()
-        return result.monitor("probe")["data"]
+        return result.monitor("probe", freq_index=0).sel(component="Ez").values
 
     reference = mw.Material.sellmeier(b_coefficients=(1.2,), c_coefficients=(_C1,), eps_inf=1.5)
     custom = mw.Material.custom_sellmeier(b_coefficients=(_full(1.2),), c_coefficients=(_C1,), eps_inf=1.5)

@@ -98,7 +98,7 @@ def compile_mass_density(scene) -> CompiledMassDensity:
 
     material_ids: dict[int, int] = {}
     tissue_names: dict[int, str] = {}
-    for structure in _bulk_structures(scene):
+    for structure in _bulk_structures(scene.scene):
         material = _structure_material(structure)
         if material is None or getattr(material, "mass_density", None) is None:
             continue

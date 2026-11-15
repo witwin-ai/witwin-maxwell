@@ -85,22 +85,29 @@ def make_scene(resolution, kpar, polarization, eps_r, source_time, *, auto=False
             x="bloch", y="bloch", z="pml", num_layers=resolution // 2,
             bloch_wavevector="auto" if auto else (kpar, 0., 0.),
         ),
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 128), averaging="polarized"),
-        device="cuda",
+        subpixel=mw.SubpixelSpec(samples=(1, 1, 128), averaging="polarized"),
     )
     if eps_r != 1:
-        scene.add_structure(mw.Structure(
-            geometry=mw.Box(position=(0., 0., SLAB_CENTER), size=(LAMBDA0, LAMBDA0, THICKNESS)),
-            material=mw.Material(eps_r=eps_r), name="slab",
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(
+                geometry=mw.Box(position=(0., 0., SLAB_CENTER), size=(LAMBDA0, LAMBDA0, THICKNESS)),
+                material=mw.Material(eps_r=eps_r), name="slab",
+            ),
         ))
-    scene.add_source(mw.PlaneWave(
-        direction=(sine, 0., cosine),
-        polarization=(0., 1., 0.) if polarization == "TE" else (cosine, 0., -sine),
-        source_time=source_time, injection=mw.TFSF.slab(axis="z", bounds=(-.65 * LAMBDA0, .65 * LAMBDA0)),
-        name="incident",
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PlaneWave(
+            direction=(sine, 0., cosine),
+            polarization=(0., 1., 0.) if polarization == "TE" else (cosine, 0., -sine),
+            source_time=source_time, injection=mw.TFSF.slab(axis="z", bounds=(-.65 * LAMBDA0, .65 * LAMBDA0)),
+            name="incident",
+        ),
     ))
-    for name, position in (("reflection", REFLECTION_Z), ("transmission", TRANSMISSION_Z)):
-        scene.add_monitor(mw.PlaneMonitor(name, axis="z", position=position, fields=("Ex", "Ey")))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.PlaneMonitor(name, axis="z", position=position, fields=("Ex", "Ey")) for name, position in (("reflection", REFLECTION_Z), ("transmission", TRANSMISSION_Z))),
+    ))
     return scene
 
 
@@ -111,15 +118,20 @@ def make_simulation(resolution, kpar, polarization, eps_r, frequencies=FREQUENCI
         source_time = (mw.CW(frequency=frequencies[0], amplitude=1.) if cw else
                        make_pulse(kpar, min(frequencies), max(frequencies)))
     scene = make_scene(resolution, kpar, polarization, eps_r, source_time, auto=cw and cw_auto)
-    scene.add_monitor(mw.PlaneMonitor("scattered", axis="z", position=-.8 * LAMBDA0, fields=("Ex", "Ey")))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PlaneMonitor("scattered", axis="z", position=-.8 * LAMBDA0, fields=("Ex", "Ey")),
+    ))
     return mw.Simulation.fdtd(
         scene, frequencies=frequencies,
-        run_time=(mw.TimeConfig(time_steps=time_steps) if time_steps is not None else
-                  mw.TimeConfig.auto(transient_cycles=cw_transient_cycles if cw else 0,
-                                     steady_cycles=100 if cw else 80)),
-        spectral_sampler=mw.SpectralSampler(window="hanning" if cw else "none"),
-        full_field_dft=full_field_dft, cuda_graph=cuda_graph,
-        absorber="cpml", shutoff=(0. if cw else 1.e-10) if shutoff is None else shutoff,
+        config=mw.FDTDConfig(
+            run_time=(mw.TimeConfig(time_steps=time_steps) if time_steps is not None else
+                      mw.TimeConfig.auto(transient_cycles=cw_transient_cycles if cw else 0,
+                                         steady_cycles=100 if cw else 80)),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning" if cw else "none"),
+            full_field_dft=full_field_dft, cuda_graph=cuda_graph,
+            absorber="cpml", shutoff=(0. if cw else 1.e-10) if shutoff is None else shutoff,
+        ),
     )
 
 

@@ -11,17 +11,17 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA requi
 
 
 def scene():
+    # source_time=None is the unit CW at every solve frequency.
     result = mw.Scene(domain=mw.Domain(bounds=((-0.12,.12),)*3),
                       grid=mw.GridSpec.custom(*([-.12,-.04,.03,.12],)*3),
-                      boundary=mw.BoundarySpec.pml(num_layers=2,strength=2),device='cuda')
-    result.add_source(mw.PointDipole(position=(-.04,0.,0.),polarization='Ez',width=.02,
-                                    source_time=mw.CW(frequency=1e9)))
+                      boundary=mw.BoundarySpec.pml(num_layers=2,strength=2),
+                      sources=(mw.PointDipole(position=(-.04,0.,0.),polarization='Ez',width=.02),))
     return result
 
 
 def solver_for(candidate):
-    return mw.Simulation.fdfd(candidate,frequency=1e9,
-           solver=mw.GMRES(solver_type='direct',precision='double')).prepare().solver
+    return mw.Simulation.fdfd(candidate,frequencies=1e9,
+           config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type='direct',precision='double'))).prepare().solver
 
 
 def test_factorized_curl_matches_fast_stencil_and_constant_mu_scaling():
@@ -62,12 +62,15 @@ def test_variable_mu_manufactured_constant_magnetic_curl():
 
 def test_diagonal_mu_magnetic_observation_and_fixed_background_local_response():
     background = scene()
-    background.add_structure(mw.Structure(name='magnet',geometry=mw.Box(size=(10.,)*3),
-        material=mw.Material(mu_tensor=mw.DiagonalTensor3(2.,4.,8.))))
+    background = background.updated(structures=(
+        *background.structures,
+        mw.Structure(name='magnet',geometry=mw.Box(size=(10.,)*3),
+            material=mw.Material(mu_tensor=mw.DiagonalTensor3(2.,4.,8.))),
+    ))
     solver = solver_for(background)
     solver._ensure_system_matrix()
     prepared = solver.scene
-    projection = mw.FieldProjection('hy',component='Hy',position=(0.,0.,0.))
+    projection = mw.fdfd.FieldProjection('hy',component='Hy',position=(0.,0.,0.))
     q = compile_projection((projection,),prepared,torch.complex128,1e9)
     field = torch.zeros(prepared.N_vector_total,device='cuda',dtype=torch.complex128)
     ez = field[prepared.N_ex+prepared.N_ey:].reshape(prepared.Nx_ez,prepared.Ny_ez,prepared.Nz_ez)
@@ -75,44 +78,56 @@ def test_diagonal_mu_magnetic_observation_and_fixed_background_local_response():
     actual = torch.sparse.mm(q,field[:,None])[0,0]
     expected = actual.new_tensor(1j/(2*math.pi*1e9*4*math.pi*1e-7*4))
     torch.testing.assert_close(actual,expected,rtol=1e-7,atol=1e-12)
-    config = mw.LocalResponseConfig(mw.LocalDesignRegion(bounds=((-0.05,.04),)*3),(projection,),tolerance=1e-8)
-    with mw.Simulation.fdfd(background,frequency=1e9,solver=mw.GMRES(solver_type='direct',precision='double'),local_response=config).prepare() as response:
-        candidate = background.clone()
-        candidate.add_structure(mw.Structure(name='edit',geometry=mw.Box(size=(.04,)*3),
-            material=mw.Material(eps_r=3.,mu_tensor=mw.DiagonalTensor3(2.,4.,8.))))
+    config = mw.fdfd.LocalResponseConfig(mw.fdfd.LocalDesignRegion(bounds=((-0.05,.04),)*3),(projection,),tolerance=1e-8)
+    with mw.Simulation.fdfd(background,frequencies=1e9,config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type='direct',precision='double'),local_response=config)).prepare() as response:
+        candidate = background
+        candidate = candidate.updated(structures=(
+            *candidate.structures,
+            mw.Structure(name='edit',geometry=mw.Box(size=(.04,)*3),
+                material=mw.Material(eps_r=3.,mu_tensor=mw.DiagonalTensor3(2.,4.,8.))),
+        ))
         result = response.run(scene=candidate,full_fields=True)
         full = solver_for(candidate);full._ensure_system_matrix()
         d = torch.from_dlpack(full._ensure_symmetrization_scale())
         expected = full.solve_physical_rhs(torch.from_dlpack(full._build_source_vector_yee())/d,tol=1e-8)
-        actual = torch.cat([result.tensor(c).flatten() for c in ('Ex','Ey','Ez')])
+        actual = torch.cat([result.field(c).isel(f=0).values.flatten() for c in ('Ex','Ey','Ez')])
         torch.testing.assert_close(actual,expected,rtol=1e-7,atol=1e-8)
-        torch.testing.assert_close(result.monitor('hy')['value'],torch.sparse.mm(q,expected[:,None])[0,0],rtol=1e-7,atol=1e-8)
+        torch.testing.assert_close(result.monitor('hy').isel(f=0).values,torch.sparse.mm(q,expected[:,None])[0,0],rtol=1e-7,atol=1e-8)
         full._release_direct_solver()
-        candidate.add_structure(mw.Structure(name='bad_mu',geometry=mw.Box(size=(.04,)*3),material=mw.Material(mu_r=5.)))
+        candidate = candidate.updated(structures=(
+            *candidate.structures,
+            mw.Structure(name='bad_mu',geometry=mw.Box(size=(.04,)*3),material=mw.Material(mu_r=5.)),
+        ))
         with pytest.raises(ValueError,match='unchanged background permeability'):
             response.run(scene=candidate)
 
 
 def test_trainable_permeability_fails_in_full_and_local_material_gradients():
     background = scene()
-    background.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
-    candidate = background.clone()
+    background = background.updated(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
+    candidate = background
     density = torch.zeros((1,1,1),device='cuda',requires_grad=True)
-    candidate.add_material_region(mw.MaterialRegion(name='magnetic_edit',geometry=mw.Box(size=(.04,)*3),
-        density=density,eps_bounds=(1.,2.),mu_bounds=(1.,2.)))
+    candidate = candidate.updated(material_regions=(
+        *candidate.material_regions,
+        mw.MaterialRegion(name='magnetic_edit',geometry=mw.Box(size=(.04,)*3),
+            density=density,eps_bounds=(1.,2.),mu_bounds=(1.,2.)),
+    ))
     with pytest.raises(NotImplementedError,match='fixed permeability'):
-        mw.Simulation.fdfd(candidate,frequency=1e9,solver=mw.GMRES(solver_type='direct')).run()
-    config = mw.LocalResponseConfig(mw.LocalDesignRegion(bounds=((-0.05,.04),)*3),
-        (mw.FieldProjection('probe',position=(.03,.03,.03)),),tolerance=1e-8)
-    with mw.Simulation.fdfd(background,frequency=1e9,solver=mw.GMRES(solver_type='direct',precision='double'),local_response=config).prepare() as response:
+        mw.Simulation.fdfd(candidate,frequencies=1e9,config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type='direct'))).run()
+    config = mw.fdfd.LocalResponseConfig(mw.fdfd.LocalDesignRegion(bounds=((-0.05,.04),)*3),
+        (mw.fdfd.FieldProjection('probe',position=(.03,.03,.03)),),tolerance=1e-8)
+    with mw.Simulation.fdfd(background,frequencies=1e9,config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type='direct',precision='double'),local_response=config)).prepare() as response:
         with pytest.raises(NotImplementedError,match='fixed permeability'):
             response.run(scene=candidate)
 
 
 def test_magnetic_conductivity_recompiles_on_frequency_change():
     background = scene()
-    background.add_structure(mw.Structure(name='magnetic_loss',geometry=mw.Box(size=(10.,)*3),
-                                         material=mw.Material(mu_r=1.5,sigma_m=.05)))
+    background = background.updated(structures=(
+        *background.structures,
+        mw.Structure(name='magnetic_loss',geometry=mw.Box(size=(10.,)*3),
+                    material=mw.Material(mu_r=1.5,sigma_m=.05)),
+    ))
     solver = solver_for(background)
     for frequency in (1e9,1.5e9):
         solver.set_frequency(frequency)
@@ -129,11 +144,14 @@ def test_passive_conductivity_and_cw_phase_use_radiating_convention():
     from witwin.maxwell.compiler.sources import compile_fdfd_sources
     from witwin.maxwell.constants import EPSILON_0
     background = scene()
-    background.sources = [mw.PointDipole(position=(0.,0.,0.),polarization='Ez',
-                          source_time=mw.CW(frequency=1e9,amplitude=2.,phase=math.pi/2))]
+    background = background.updated(sources=(mw.PointDipole(position=(0.,0.,0.),polarization='Ez',
+                          source_time=mw.CW(frequency=1e9,amplitude=2.,phase=math.pi/2)),))
     assert abs(compile_fdfd_sources(background,default_frequency=1e9)[0]['polarization'][2]+2j)<1e-12
-    background.add_structure(mw.Structure(name='loss',geometry=mw.Box(size=(10.,)*3),
-        material=mw.Material(eps_r=2.,sigma_e=.1)))
+    background = background.updated(structures=(
+        *background.structures,
+        mw.Structure(name='loss',geometry=mw.Box(size=(10.,)*3),
+            material=mw.Material(eps_r=2.,sigma_e=.1)),
+    ))
     solver = solver_for(background);solver._ensure_material_components()
     epsilon = solver.material_eps_components['x']
     expected = 2+1j*.1/(2*math.pi*1e9*EPSILON_0)

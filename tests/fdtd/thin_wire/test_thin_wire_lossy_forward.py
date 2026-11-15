@@ -21,38 +21,37 @@ _FREQUENCY = 2.0e9
 
 def _scene(*, conductor, quantities=("current", "charge", "ohmic_loss")):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
-        grid=mw.GridSpec.uniform(0.04),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda",
-    )
-    scene.add_thin_wire(
-        mw.ThinWire(
-            name="wire",
-            points=((0.0, 0.0, -0.08), (0.0, 0.0, 0.08)),
-            radius=2.0e-3,
-            conductor=conductor,
-            endpoints=(mw.WireEnd.open(), mw.WireEnd.open()),
-            snap="strict",
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            name="drive",
-            position=(0.0, 0.0, 0.02),
-            polarization="Ez",
-            width=0.04,
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=10.0),
-        )
-    )
-    scene.add_monitor(
-        mw.WireMonitor(
-            name="wire_state",
-            wire="wire",
-            frequencies=(_FREQUENCY,),
-            quantities=quantities,
-        )
-    )
+                domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
+                grid=mw.GridSpec.uniform(0.04),
+                boundary=mw.BoundarySpec.none(),
+                thin_wires=(
+            mw.rf.ThinWire(
+                name="wire",
+                points=((0.0, 0.0, -0.08), (0.0, 0.0, 0.08)),
+                radius=2.0e-3,
+                conductor=conductor,
+                endpoints=(mw.rf.WireEnd.open(), mw.rf.WireEnd.open()),
+                snap="strict",
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                name="drive",
+                position=(0.0, 0.0, 0.02),
+                polarization="Ez",
+                width=0.04,
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=10.0),
+            ),
+            ),
+                monitors=(
+            mw.rf.WireMonitor(
+                name="wire_state",
+                wire="wire",
+                frequencies=(_FREQUENCY,),
+                quantities=quantities,
+            ),
+            ),
+            )
     return scene
 
 
@@ -60,8 +59,10 @@ def _run(scene, *, time_steps=400):
     return mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
 
 
@@ -69,7 +70,7 @@ def _prepare(scene, *, time_steps=10):
     return mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=time_steps),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=time_steps)),
     ).prepare()
 
 
@@ -78,12 +79,12 @@ def test_pec_wire_bitwise_parity():
     # enters the lossy path (its wire runtime carries no lossy model), so the
     # finite-conductor feature leaves the PEC leapfrog untouched.
     prepared = _prepare(
-        _scene(conductor=mw.WireConductor.pec(), quantities=("current", "charge"))
+        _scene(conductor=mw.rf.WireConductor.pec(), quantities=("current", "charge"))
     )
     assert prepared.solver._wire_runtime.lossy_model is None
 
-    first = _run(_scene(conductor=mw.WireConductor.pec(), quantities=("current",)))
-    second = _run(_scene(conductor=mw.WireConductor.pec(), quantities=("current",)))
+    first = _run(_scene(conductor=mw.rf.WireConductor.pec(), quantities=("current",)))
+    second = _run(_scene(conductor=mw.rf.WireConductor.pec(), quantities=("current",)))
     first_current = first.monitor("wire_state").current
     second_current = second.monitor("wire_state").current
     assert torch.equal(first_current, second_current)
@@ -93,9 +94,9 @@ def test_pec_parity_falsification():
     # Falsification of (e): a finite conductor on the same geometry takes the torch
     # lossy path and changes the wire response, proving the parity above is a real
     # bypass, not a no-op.
-    pec = _run(_scene(conductor=mw.WireConductor.pec(), quantities=("current",)))
+    pec = _run(_scene(conductor=mw.rf.WireConductor.pec(), quantities=("current",)))
     lossy = _run(
-        _scene(conductor=mw.WireConductor.finite(5.8e7), quantities=("current",))
+        _scene(conductor=mw.rf.WireConductor.finite(5.8e7), quantities=("current",))
     )
     difference = (
         pec.monitor("wire_state").current - lossy.monitor("wire_state").current
@@ -110,12 +111,14 @@ def test_lossy_wire_runs_and_emits_ohmic_loss():
     # dissipation and the model it was computed from share one companion build
     # (the rational fit is nondeterministic across rebuilds, so the identity check
     # below must use this run's own model, not a fresh _prepare()).
-    scene = _scene(conductor=mw.WireConductor.finite(5.8e7))
+    scene = _scene(conductor=mw.rf.WireConductor.finite(5.8e7))
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=400),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=400),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).prepare()
     solver = prepared.solver
     model = solver._wire_runtime.lossy_model
@@ -158,7 +161,7 @@ def test_lossy_wire_runs_and_emits_ohmic_loss():
 
 def test_pec_ohmic_loss_is_zero():
     # A PEC wire reports exactly zero ohmic dissipation (no lossy model).
-    scene = _scene(conductor=mw.WireConductor.pec())
+    scene = _scene(conductor=mw.rf.WireConductor.pec())
     result = _run(scene)
     ohmic = result.monitor("wire_state").ohmic_loss
     assert ohmic is not None
@@ -170,7 +173,7 @@ def test_pec_ohmic_loss_only_monitor_returns_zeros():
     # (no 'current') is a valid public config. Before the lossy feature it returned
     # a zeros channel; it must still return zeros and must NOT raise at finalize
     # (the PEC dissipation channel is identically zero and needs no current).
-    scene = _scene(conductor=mw.WireConductor.pec(), quantities=("ohmic_loss",))
+    scene = _scene(conductor=mw.rf.WireConductor.pec(), quantities=("ohmic_loss",))
     result = _run(scene)
     ohmic = result.monitor("wire_state").ohmic_loss
     assert ohmic is not None
@@ -182,7 +185,7 @@ def test_lossy_ohmic_loss_without_current_fails_at_prepare():
     # loss. The requirement is enforced at prepare (before any stepping), not at
     # finalize, so an invalid monitor config does not waste an entire run.
     scene = _scene(
-        conductor=mw.WireConductor.finite(5.8e7), quantities=("ohmic_loss",)
+        conductor=mw.rf.WireConductor.finite(5.8e7), quantities=("ohmic_loss",)
     )
     with pytest.raises(ValueError, match="current"):
         _prepare(scene)
@@ -195,7 +198,7 @@ def test_lossy_reverse_replay_fails_closed():
     # ship (analytic_ac_resistance).
     from witwin.maxwell.fdtd.wire import replay_wire_state
 
-    prepared = _prepare(_scene(conductor=mw.WireConductor.finite(5.8e7)))
+    prepared = _prepare(_scene(conductor=mw.rf.WireConductor.finite(5.8e7)))
     solver = prepared.solver
     runtime = solver._wire_runtime
     state = {
@@ -216,7 +219,7 @@ def test_lossy_checkpoint_fails_closed():
     # in the checkpoint schema, added with B3).
     from witwin.maxwell.fdtd.checkpoint import capture_checkpoint_state
 
-    prepared = _prepare(_scene(conductor=mw.WireConductor.finite(5.8e7)))
+    prepared = _prepare(_scene(conductor=mw.rf.WireConductor.finite(5.8e7)))
     with pytest.raises(NotImplementedError, match="[Cc]heckpoint"):
         capture_checkpoint_state(prepared.solver, 0)
 
@@ -224,8 +227,8 @@ def test_lossy_checkpoint_fails_closed():
 def test_lossy_current_differs_from_pec():
     # Loss damps the wire response: the finite-conductor current is not identical
     # to the PEC current (no-loss-descriptor == old path; finite != old path).
-    pec = _run(_scene(conductor=mw.WireConductor.pec()))
-    lossy = _run(_scene(conductor=mw.WireConductor.finite(5.8e7)))
+    pec = _run(_scene(conductor=mw.rf.WireConductor.pec()))
+    lossy = _run(_scene(conductor=mw.rf.WireConductor.finite(5.8e7)))
     pec_current = pec.monitor("wire_state").current
     lossy_current = lossy.monitor("wire_state").current
     assert not torch.allclose(pec_current, lossy_current)

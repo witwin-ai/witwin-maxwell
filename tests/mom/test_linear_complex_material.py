@@ -43,7 +43,7 @@ def test_complex_gain_and_lossy_background_still_reject(epsilon,mu,background):
 
 
 def test_active_complex_absorption_host_index_is_not_silently_reinterpreted():
-    material=mw.Material(eps_r=2.+.05j,nonlinearity=mw.TwoPhotonAbsorption(beta=.001))
+    material=mw.Material(eps_r=2.+.05j,nonlinearity=mw.media.TwoPhotonAbsorption(beta=.001))
     with pytest.raises(TypeError):
         _=material.tpa_sigma_scale
     with pytest.raises(TypeError):
@@ -57,13 +57,13 @@ def test_public_complex_scalar_prepare_matches_complete_original_weak_matrix(tmp
     epsilon,mu=2.+.05j,1.3+.02j
     scene=mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.01),mw.Material(eps_r=epsilon,mu_r=mu))],
                    sources=[mw.PlaneWave()])
-    config=mw.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3),
-        operator_backend='fmm',fmm=mw.FMMConfig(order=6,far_action_batch=32,
+    config=mw.mom.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3),
+        operator_backend='fmm',fmm=mw.mom.FMMConfig(order=6,far_action_batch=32,
             table_storage='compact_shared_displacement_v1',shift_storage='separable_v1',
             near_storage='scalar_reciprocal_dk_v1',leaf_size=8,separation_ratio=.25),
         riesz_storage='local_rwg_v1',stopping=StoppingRule(preconditioner='rwg_diagonal',fallback='none'))
-    prepared=mw.Simulation.mom(scene,frequency=9e7,config=config).prepare()
-    exterior,interior=validate_scene(scene,9e7)
+    prepared=mw.Simulation.mom(scene,frequencies=9e7,config=config).prepare()
+    exterior,interior=validate_scene(scene,9e7,device='cuda')
     assert interior.epsilon_r==epsilon and interior.mu_r==mu and exterior.epsilon_r==1.
     op=prepared.solver.handle.actions
     edges=torch.arange(op.shape[0]//2,device='cuda')

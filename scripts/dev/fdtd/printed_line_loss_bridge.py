@@ -37,6 +37,7 @@ from scripts.dev.fdtd.printed_line_loss_execution import tensor_signature
 from scripts.dev.fdtd.printed_line_regional_power import regional_plane_power
 from scripts.dev.fdtd.printed_line_two_length import physical_transfer, real_basis, signed_peak_power, two_length_modes
 from witwin.maxwell.fdtd.copper_foil import copper_spectral_power
+import witwin.maxwell as mw
 
 
 CAPTURE_SCHEMA = 'printed-line-executed-Cu-realization/1'
@@ -285,7 +286,7 @@ def check_provenance(context, capture, evidence):
         raise ValueError('Realization does not reproduce the executed copper-operator signature.')
     if evidence['capture_binding_sha256'] is not None and evidence['capture_binding_sha256'] != manifest['binding_sha256']:
         raise ValueError('Execution record names a different realization capture.')
-    expected = spectral_contract(identity=evidence['identity'], grid=grid_of(prepare_scene(context['observed'])),
+    expected = spectral_contract(identity=evidence['identity'], grid=grid_of(prepare_scene(context['observed'], device='cpu')),
         operator=evidence['operator'], context=context, total_steps=evidence['clock']['total_steps'])
     if basis.execution_contract != expected:
         raise ValueError('Capture contract differs from this source/grid/material/observation declaration.')
@@ -308,7 +309,7 @@ def check_clock(context, result, capture, evidence):
     frequencies = tuple(float(f) for f in result.frequencies)
     if frequencies != tuple(case.frequencies) or basis.frequencies != frequencies or basis.dt != dt:
         raise ValueError('Result/realization frequency axis or timestep differ.')
-    records = result.conductor_losses
+    records = mw.rf.conductor_losses(result)
     sampled = 0
     for realization in basis.realizations:
         trace = next(t for t in records[realization.face]['bulk_electric_traces'] if t['component'] == realization.component)
@@ -337,7 +338,7 @@ def _execution_clock(dt, case):
 def check_coherent_loss(result, capture):
     """Replay the Result's film work through the captured realization only."""
     basis = capture['basis']
-    records = _cpu(result.conductor_losses)
+    records = _cpu(mw.rf.conductor_losses(result))
     if tensor_signature(records) != tensor_signature(basis.conductor_records):
         raise ValueError('Captured conductor records are not this Result\'s executed records.')
     frequencies = torch.tensor(basis.frequencies, dtype=torch.float64)
@@ -376,9 +377,9 @@ def check_tails(context, result, clock):
     for monitor in tail_monitors(context):
         if monitor.interval != TAIL_INTERVAL:
             raise ValueError('Tail probe interval changed.')
-        payload = result.monitor(monitor.name)
-        field = torch.as_tensor(payload['field']).detach().cpu().numpy()
-        times = torch.as_tensor(payload['t']).detach().cpu().numpy()
+        trace = result.monitor(monitor.name)
+        field = trace.isel(component=0).values.detach().cpu().numpy()
+        times = trace.coords['t'].detach().cpu().numpy()
         if (field.shape != times.shape or len(times) != expected or not np.isfinite(field).all()
             or not np.isfinite(times).all() or np.any(np.diff(times) <= 0) or times[0] < 0 or times[-1] > total * dt):
             raise ValueError('Tail trace does not cover its complete executed interval.')

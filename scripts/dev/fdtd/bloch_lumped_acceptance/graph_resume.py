@@ -30,8 +30,8 @@ def assert_equal(actual, expected, *, steps):
             assert torch.equal(getattr(getattr(a, bank), name), getattr(getattr(b, bank), name)), (bank, name)
     for monitor in ("upstream", "downstream"):
         for frequency in FREQUENCIES:
-            a = actual.monitor(monitor, frequency=frequency)
-            b = expected.monitor(monitor, frequency=frequency)
+            a = actual.raw_monitor(monitor, frequency=frequency)
+            b = expected.raw_monitor(monitor, frequency=frequency)
             for name in ("Ex", "Ey", "Hx", "Hy", "flux"):
                 assert torch.equal(torch.as_tensor(a[name]), torch.as_tensor(b[name])), (monitor, frequency, name)
 
@@ -51,7 +51,7 @@ def main():
     eager = problem(False).run()
     graph = problem(True).run()
     assert graph.solver._port_cuda_graph_active, "Imaginary apply must execute in the captured port step"
-    assert not eager.solver_stats["port_cuda_graph_active"]
+    assert not eager.stats()["port_cuda_graph_active"]
     assert any(torch.count_nonzero(getattr(graph.solver, name + "_imag")) for name in FIELDS)
     assert_equal(graph, eager, steps=args.steps)
     print("PASS complex graph/eager torch.equal fields, load states and V/I", flush=True)

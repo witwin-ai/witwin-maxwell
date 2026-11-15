@@ -1,20 +1,6 @@
 from __future__ import annotations
 
-import os
-
 import torch
-
-_VALID_FDTD_BACKENDS = {"cuda", "auto"}
-
-
-def resolve_fdtd_backend_name(requested: str | None = None) -> str:
-    backend = (requested or os.environ.get("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")).strip().lower()
-    if backend not in _VALID_FDTD_BACKENDS:
-        choices = ", ".join(sorted(_VALID_FDTD_BACKENDS))
-        raise ValueError(f"WITWIN_MAXWELL_FDTD_BACKEND must be one of: {choices}.")
-    if backend == "auto":
-        return "cuda"
-    return backend
 
 
 def get_fdtd_module():

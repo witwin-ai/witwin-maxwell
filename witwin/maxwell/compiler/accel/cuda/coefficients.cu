@@ -1,7 +1,4 @@
 #include "checks.h"
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 
 struct Coefficients {
@@ -46,25 +43,25 @@ __global__ void coefficients_kernel(Coefficients p) {
   p.decay[c][i]=decay; p.curl[c][i]=curl;
 }
 
-std::vector<at::Tensor> coefficients_setup(std::vector<at::Tensor> material,
-    std::vector<at::Tensor> sigma, std::vector<at::Tensor> profiles,
+std::vector<torch::stable::Tensor> coefficients_setup(std::vector<torch::stable::Tensor> material,
+    std::vector<torch::stable::Tensor> sigma, std::vector<torch::stable::Tensor> profiles,
     std::vector<int64_t> shape, double dt, bool electric_loss, bool magnetic_loss) {
-  check_tensors(material, material[0], at::kFloat, "coefficients", "material");
-  check_tensors(sigma, material[0], at::kFloat, "coefficients", "sigma");
-  check_tensors(profiles, material[0], at::kFloat, "coefficients", "profiles");
-  c10::cuda::CUDAGuard guard(material[0].device());
-  Coefficients p{}; std::vector<at::Tensor> out;
+  check_tensors(material, material[0], torch::headeronly::ScalarType::Float, "coefficients", "material");
+  check_tensors(sigma, material[0], torch::headeronly::ScalarType::Float, "coefficients", "sigma");
+  check_tensors(profiles, material[0], torch::headeronly::ScalarType::Float, "coefficients", "profiles");
+  torch::stable::accelerator::DeviceGuard guard(material[0].get_device_index());
+  Coefficients p{}; std::vector<torch::stable::Tensor> out;
   p.dt=dt; p.electric_loss=electric_loss; p.magnetic_loss=magnetic_loss;
   p.absorber=!profiles.empty(); int maximum=0;
-  for(int a=0;a<3;++a) {p.n[a]=shape[a]; if(p.absorber) p.profile[a]=profiles[a].data_ptr<float>();}
+  for(int a=0;a<3;++a) {p.n[a]=shape[a]; if(p.absorber) p.profile[a]=profiles[a].const_data_ptr<float>();}
   for(int c=0;c<6;++c) {
-    out.push_back(at::empty_like(material[c])); out.push_back(at::empty_like(material[c]));
-    p.material[c]=material[c].data_ptr<float>(); p.sigma[c]=sigma[c].data_ptr<float>();
-    p.decay[c]=out[2*c].data_ptr<float>(); p.curl[c]=out[2*c+1].data_ptr<float>();
+    out.push_back(torch::stable::empty_like(material[c])); out.push_back(torch::stable::empty_like(material[c]));
+    p.material[c]=material[c].const_data_ptr<float>(); p.sigma[c]=sigma[c].const_data_ptr<float>();
+    p.decay[c]=out[2*c].mutable_data_ptr<float>(); p.curl[c]=out[2*c+1].mutable_data_ptr<float>();
     p.count[c]=material[c].numel(); maximum=std::max(maximum,p.count[c]);
     for(int a=0;a<3;++a) p.size[c][a]=material[c].size(a);
   }
-  coefficients_kernel<<<dim3((maximum+255)/256,6),256,0,c10::cuda::getCurrentCUDAStream()>>>(p);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  coefficients_kernel<<<dim3((maximum+255)/256,6),256,0,current_cuda_stream()>>>(p);
+  STD_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }

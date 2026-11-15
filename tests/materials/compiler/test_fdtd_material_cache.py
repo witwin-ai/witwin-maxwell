@@ -11,7 +11,7 @@ from witwin.maxwell.scene import prepare_scene
 def test_cache_bounds_and_snapshot_aliases():
     for kwargs in ({"max_bytes": 0}, {"max_entries": True}, {"max_entries": -1}):
         with pytest.raises(ValueError):
-            mw.FDTDMaterialCache(**kwargs)
+            mw.fdtd.FDTDMaterialCache(**kwargs)
     x = torch.ones(4)
     original = {"a": x, "b": [x]}
     copied = _clone_tree(original)
@@ -30,8 +30,7 @@ def scene(eps=2., shift=0., dx=.1, pml=4, subpixel=1):
     faces = np.array([[0,2,1],[0,3,2],[0,1,3],[1,2,3]], dtype=np.int64)
     mesh = mw.Mesh(vertices, faces, recenter=False, fill_mode="solid", device="cuda")
     return mw.Scene(domain=mw.Domain(bounds=((-0.5,.5),)*3), grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pml(num_layers=pml), device="cuda",
-        subpixel_samples=subpixel, structures=[mw.Structure(mesh,mw.Material(eps_r=eps))],
+        boundary=mw.BoundarySpec.pml(num_layers=pml), subpixel=subpixel, structures=[mw.Structure(mesh,mw.Material(eps_r=eps))],
         sources=[mw.PointDipole(position=(.3,0,0),polarization="Ez",source_time=mw.CW(frequency=1e8))],
         monitors=[mw.PointMonitor("probe",position=(.1,0,0),fields=("Ez",))])
 
@@ -48,8 +47,8 @@ def test_cache_content_identity_invalidation_and_trainable_rejection():
     prepared = prepare_scene(scene())
     prepared.device = str(prepared.x.device)
     assert _scene_key(prepared, 1e8) == expected
-    original.sources.clear()
-    original.monitors.clear()
+    original = original.updated(sources=())
+    original = original.updated(monitors=())
     assert key(original) == expected
     for changed in (scene(eps=3),scene(shift=.01),scene(dx=.125),scene(pml=5),scene(subpixel=2)):
         assert key(changed) != expected
@@ -59,7 +58,7 @@ def test_cache_content_identity_invalidation_and_trainable_rejection():
     with pytest.raises(ValueError, match="trainable"):
         key(original)
     unsupported = scene()
-    unsupported.structures[0] = mw.Structure(unsupported.structures[0].geometry,mw.Material(eps_r=2.,kerr_chi3=1e-20))
+    unsupported = unsupported.updated(structures=(mw.Structure(unsupported.structures[0].geometry,mw.Material(eps_r=2.,kerr_chi3=1e-20)), *unsupported.structures[1:]))
     with pytest.raises(NotImplementedError,match="kerr"):
         key(unsupported)
     mutated = scene()
@@ -76,15 +75,17 @@ def test_cache_content_identity_invalidation_and_trainable_rejection():
 
 @cuda
 def test_cached_public_solves_match_and_materials_are_owned():
-    cache = mw.FDTDMaterialCache()
+    cache = mw.fdtd.FDTDMaterialCache()
     def simulation(cache=None):
-        return mw.Simulation.fdtd(scene(), frequency=1e8,
-                                  run_time=mw.TimeConfig(time_steps=400, transient_cycles=0, steady_cycles=1),
-                                  spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
-                                  material_cache=cache, full_field_dft=True)
-    from witwin.maxwell import scene as scene_module
-    compiler = scene_module.compile_material_model
-    with patch.object(scene_module, "compile_material_model", wraps=compiler) as compile_call:
+        return mw.Simulation.fdtd(scene(), frequencies=1e8,
+                                  config=mw.FDTDConfig(
+                                      run_time=mw.TimeConfig(time_steps=400, transient_cycles=0, steady_cycles=1),
+                                      spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+                                      material_cache=cache, full_field_dft=True,
+                                  ))
+    from witwin.maxwell.compiler import materials as materials_module
+    compiler = materials_module.compile_material_model
+    with patch.object(materials_module, "compile_material_model", wraps=compiler) as compile_call:
         uncached = simulation().prepare()
         first = simulation(cache).prepare()
         second = simulation(cache).prepare()
@@ -99,21 +100,22 @@ def test_cached_public_solves_match_and_materials_are_owned():
         actual = second.run()
         assert reference.fields.keys() == actual.fields.keys()
         for name in reference.fields:
-            assert torch.equal(reference.fields[name], actual.fields[name])
-        assert actual.solver_stats["material_cache"]["outcome"] == "hit"
+            assert torch.equal(reference.fields[name].values, actual.fields[name].values)
+        assert actual.stats()["material_cache"]["outcome"] == "hit"
+        assert actual.solver._core_runtime is not None and reference.solver._core_runtime is not None
     cache.clear()
     assert cache.stats["entries"] == 0 and cache.stats["bytes"] == 0
 
 
 @cuda
 def test_cache_lru_and_oversized_not_retained():
-    cache = mw.FDTDMaterialCache(max_entries=1)
+    cache = mw.fdtd.FDTDMaterialCache(max_entries=1)
     cache._bind(prepare_scene(scene()),frequency=1e8)
     cache._bind(prepare_scene(scene(eps=3)),frequency=1e8)
     assert cache.stats["evictions"] == 1
     cache._bind(prepare_scene(scene()),frequency=1e8)
     assert cache.stats["misses"] == 3
-    small = mw.FDTDMaterialCache(max_bytes=1)
+    small = mw.fdtd.FDTDMaterialCache(max_bytes=1)
     info = small._bind(prepare_scene(scene()),frequency=1e8)
     assert info["outcome"] == "miss_oversized_not_retained"
     assert small.stats["entries"] == 0

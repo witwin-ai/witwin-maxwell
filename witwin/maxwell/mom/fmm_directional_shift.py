@@ -4,6 +4,7 @@ import torch
 from .fmm_expansion import _points, multi_indices
 from .fmm_shift import SeparableMultipoleShift
 from .fmm_fft import _rhs_chunks
+from .ordered_reduction import ordered_index_add_
 from .direct_system import DirectSystemActions
 
 
@@ -305,8 +306,8 @@ class DirectionalChangingCarrierShift:
             if not bool(torch.isfinite(minus).all() & torch.isfinite(plus).all()
                         & ~(structural & ((base == 0) | (minus == 0) | (plus == 0))).any()):
                 raise ValueError('Changing carrier nonzero coefficient terms exceed native precision')
-            negative.index_add_(0, flat, minus)
-            positive.index_add_(0, flat, plus)
+            ordered_index_add_(negative, 0, flat, minus)
+            ordered_index_add_(positive, 0, flat, plus)
             pending.clear()
 
         for row, alpha in enumerate(targets):
@@ -427,7 +428,7 @@ class DirectionalChangingCarrierShift:
             if bool(((value[:,:,None,:] != 0) & (coefficients[None,None,:,None] != 0) & (products == 0)).any()):
                 raise ValueError('Compact nonzero phase products underflow native precision')
             result=value.new_zeros((len(value),self.source_count,4))
-            result.index_add_(1,indices.flatten(),products.flatten(1,2))
+            ordered_index_add_(result,1,indices.flatten(),products.flatten(1,2))
         else:
             gathered=value[:,indices,:]
             products=gathered*coefficients[None,None,:,None]

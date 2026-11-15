@@ -58,7 +58,7 @@ def _axis_nodes(low,high,dx):
     return np.concatenate(([low],coordinates[(coordinates > low+roundoff) & (coordinates < high-roundoff)],[high]))
 
 
-def build_scene(*, dx: float = 0.0025, device: str = "cuda") -> mw.Scene:
+def build_scene(*, dx: float = 0.0025) -> mw.Scene:
     total = dipole_length()
     gap = 2.0 * dx
     arm_length = 0.5 * (total - gap)
@@ -100,24 +100,23 @@ def build_scene(*, dx: float = 0.0025, device: str = "cuda") -> mw.Scene:
     domain_half_y = max(0.5 * BLOCK_SIZE[1], arm_width) + 16 * dx
     bounds = ((-16*dx,domain_half_x),(-domain_half_y,domain_half_y),(-domain_half_z,domain_half_z))
     scene = mw.Scene(
-        domain=mw.Domain(bounds=bounds),
-        grid=mw.GridSpec.custom(*(_axis_nodes(low,high,dx) for low,high in bounds)),
-        boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
-        ports=(feed,),
-        structures=(*arms, block),
-        device=device,
-        metadata={"qualification":"functional exposure fixture; absolute dosimetry convergence and reference validation pending",
+                domain=mw.Domain(bounds=bounds),
+                grid=mw.GridSpec.custom(*(_axis_nodes(low,high,dx) for low,high in bounds)),
+                boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
+                ports=(feed,),
+                structures=(*arms, block),
+                metadata={"qualification":"functional exposure fixture; absolute dosimetry convergence and reference validation pending",
             "tissue_values":"unchanged canonical 900 MHz catalogue values used as fixed benchmark coefficients at 3 GHz"},
-    )
-    scene.add_monitor(
-        mw.PowerLossMonitor(
-            "loss",
-            position=(cx, 0.0, 0.0),
-            size=BLOCK_SIZE,
-            frequencies=FREQUENCIES,
-            channels=("conduction",),
-        )
-    )
+                monitors=(
+            mw.monitors.PowerLossMonitor(
+                "loss",
+                position=(cx, 0.0, 0.0),
+                size=BLOCK_SIZE,
+                frequencies=FREQUENCIES,
+                channels=("conduction",),
+            ),
+            ),
+            )
     return scene
 
 

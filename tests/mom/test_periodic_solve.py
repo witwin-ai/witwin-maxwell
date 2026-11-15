@@ -24,7 +24,7 @@ def test_actual_periodic_scalar_solve_fields_and_zero_contrast(dimension,tmp_pat
     vectors=sample.new_tensor([[.7,0.,0.],[0.,.8,0.]])[:dimension]
     lattice=LatticeSpec(vectors,sample.new_zeros(3))
     kernel=EwaldHelmholtzKernel(lattice,3.5,real_shells=3,reciprocal_shells=4,quadrature_order=64)
-    config=mw.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3))
+    config=mw.mom.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3))
     decoder=SystemDecodeHandle(system,original.exterior,[mw.PlaneWave()],config,{})
     matrix,assembly=assemble_periodic_system(system,original.exterior,config.integration,kernel=kernel)
     rhs,rhs_receipt=build_periodic_rhs(decoder,kernel=kernel)

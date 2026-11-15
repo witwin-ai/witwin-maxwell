@@ -3,7 +3,8 @@
 The envelope fit ports bloch_lumped_acceptance/common.py::assert_passivity.
 This is an empirical growth detector, not a discrete passivity certificate.
 
-Step-loop hook contract (the main loop today; the core path in the single-path change):
+Step-loop hook contract (the per-step loop in stepping.py and the core path's K-step
+chunks in core_path.py):
 
 - At prepare/solve start: ``state = make_passivity_state(solver)``; None means no guard.
 - Every ``SAMPLE_INTERVAL`` completed steps: ``sample_passivity(state, step, energy)``,
@@ -13,6 +14,10 @@ Step-loop hook contract (the main loop today; the core path in the single-path c
   device-only except for one ``check_passivity(history.cpu(), state)`` per completed
   window (every WINDOW_SAMPLES * SAMPLE_INTERVAL steps), so a loop may align that
   host copy with its existing shutoff-check synchronization.
+- The core path ends a K-step chunk at every multiple of SAMPLE_INTERVAL while a guard
+  state exists (K is 1, 16 or 32, and chunk lengths never cross such a step), then
+  samples outside the graph after the replay. Samples, windows and the trip step are
+  therefore those of the per-step loop.
 - Checkpoints carry the state through ``capture_passivity``/``preflight_passivity``.
 """
 from __future__ import annotations
@@ -23,6 +28,7 @@ from copy import deepcopy
 
 import torch
 
+from ...errors import ConvergenceError
 from ..boundary.runtime import closed_transverse_pml, complex_fixed_k
 
 SAMPLE_INTERVAL = 32
@@ -37,7 +43,7 @@ ENERGY_FLOOR = 1e-10
 DEFERRED_STORAGE = (("_copper_foils", "CopperFoil"), ("_thin_sheets", "thin sheets"))
 
 
-class FDTDPassivityError(RuntimeError):
+class FDTDPassivityError(ConvergenceError):
     """The late CPML energy envelope exceeds the accepted growth bound."""
 
 
@@ -103,7 +109,7 @@ def uncounted_storage(solver) -> list[str]:
     In a passive run, energy can move between such state and the Yee fields, so
     a field-energy envelope could show growth that is not CPML instability.
     """
-    scene = solver.scene
+    scene = solver.scene.scene
     labels = [label for attr, label in (
         ("thin_wires", "thin wires"), ("networks", "embedded networks"),
     ) if getattr(scene, attr, ())]
@@ -123,7 +129,7 @@ def make_passivity_state(solver):
         return None
     fixed_k = complex_fixed_k(solver)
     if not fixed_k and (getattr(solver, "complex_fields_enabled", False)
-                        or not closed_transverse_pml(solver.scene)):
+                        or not closed_transverse_pml(solver.scene.scene)):
         return None
     uncounted = uncounted_storage(solver)
     if uncounted:
@@ -142,7 +148,7 @@ def make_passivity_state(solver):
     # available start criterion, also used for ongoing/CW sources.
     transient = math.ceil(max(
         plan.get("transient_cycles", 15) / plan.get("reference_frequency", solver.source_frequency),
-        10 * max(hi - lo for lo, hi in solver.scene.domain.bounds) / solver.c,
+        10 * max(hi - lo for lo, hi in solver.scene.scene.domain.bounds) / solver.c,
     ) / solver.dt)
     start = (max(transient, plan.get("latest_source_settling_step", 0))
              if not plan.get("shutoff_allowed", True) else
@@ -296,6 +302,17 @@ def sample_passivity(state, step, energy):
     state["window_max"].zero_()
     if state["window_count"] >= FIT_WINDOWS:
         check_passivity(history.cpu(), state)
+
+
+def sample_completed_step(solver, step):
+    """Sample after ``step`` completed steps when it is a sampling step; both loops call this."""
+    state = solver._passivity_state
+    if state is None or step % SAMPLE_INTERVAL:
+        return
+    sample_passivity(state, step, total_energy(solver))
+    if state["warning"] is not None:
+        solver.passivity_guard_status = "warned: complex fixed-k growth"
+        solver.passivity_guard_warning = state["warning"]
 
 
 def capture_passivity(solver):

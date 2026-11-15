@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 import torch
+from ._stability import experimental
 
 
 # Per-cell breakdown state codes shared between the runtime state machine and the
@@ -33,6 +34,7 @@ BREAKDOWN_STATE_NAMES = {
 }
 
 
+@experimental("breakdown")
 @dataclass(frozen=True)
 class BreakdownEvent:
     """A single deterministic breakdown trigger.
@@ -64,6 +66,7 @@ class BreakdownEvent:
         return BREAKDOWN_STATE_NAMES.get(int(self.state_after), "unknown")
 
 
+@experimental("breakdown")
 @dataclass(frozen=True)
 class BreakdownResultData:
     """Deterministic-breakdown outputs assembled from a completed FDTD run.
@@ -93,12 +96,54 @@ class BreakdownResultData:
         )
 
 
+@experimental("breakdown")
+def breakdown_data(result) -> BreakdownResultData | None:
+    """The deterministic dielectric-breakdown outputs of ``result``, or ``None`` for scenes without a
+    breakdown material. Distinct from :func:`breakdown`, the non-feedback stress record of a
+    ``BreakdownMonitor``."""
+    return result._breakdown
+
+
+@experimental("breakdown")
+def breakdown_events(result) -> tuple[BreakdownEvent, ...]:
+    """The typed breakdown event log of ``result`` ordered by ``(step, cell_index)`` (empty when inactive)."""
+    return () if result._breakdown is None else result._breakdown.events
+
+
+@experimental("breakdown")
+def breakdown_names(result) -> tuple[str, ...]:
+    """Names of the ``BreakdownMonitor`` stress records in ``result``."""
+    return result._breakdown_names()
+
+
+@experimental("breakdown")
+def breakdown(result, name: str):
+    """The typed non-feedback dielectric-stress record (``BreakdownStressData``) of monitor ``name``.
+
+    Capability level: stress-only. Peak field, exceedance duration, longest contiguous
+    exceedance, qualifying sustained-stress locations and per-cell maps (kept on device),
+    with full threshold/colocation provenance.
+    """
+    return result._breakdown_record(name)
+
+
+# Public namespace ``mw.breakdown``: dielectric breakdown and its smooth risk surrogate.
+from ._lazy import lazy_attributes  # noqa: E402
+
 __all__ = [
     "BreakdownEvent",
     "BreakdownResultData",
-    "BREAKDOWN_STATE_INTACT",
-    "BREAKDOWN_STATE_RECOVERING",
-    "BREAKDOWN_STATE_CONDUCTING",
-    "BREAKDOWN_STATE_FAILED",
-    "BREAKDOWN_STATE_NAMES",
+    "DielectricBreakdown",
+    "SmoothBreakdownRisk",
+    "SmoothBreakdownRiskData",
+    "breakdown",
+    "breakdown_data",
+    "breakdown_events",
+    "breakdown_names",
 ]
+
+__getattr__, __dir__ = lazy_attributes(__name__, names={
+    ".breakdown_risk": ("SmoothBreakdownRisk", "SmoothBreakdownRiskData"),
+    ".media": ("DielectricBreakdown",),
+})
+del lazy_attributes

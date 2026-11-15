@@ -20,9 +20,10 @@ import torch
 import witwin.maxwell as mw
 from witwin.core import Box
 from witwin.maxwell.compiler.materials import compile_surface_impedance_layout
-from witwin.maxwell.fdtd.surface_impedance_reference import good_conductor_surface_impedance
+from tests.oracles.surface_impedance_reference import good_conductor_surface_impedance
 from witwin.maxwell.media import RationalSurfaceImpedance, SurfaceImpedanceMedium
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 _BANNED_DEFERRALS = ("not implemented yet", "not supported yet", "in v1")
 _FLUSH_SLAB = dict(position=(0.3, 0.0, 0.0), size=(0.4, 0.4, 0.4))
@@ -34,7 +35,6 @@ def _scene(structures, boundary=None):
         grid=mw.GridSpec.uniform(0.05),
         boundary=boundary
         or mw.BoundarySpec.faces(default="periodic", num_layers=4, strength=1.0, x=("pml", "pml")),
-        device="cpu",
         structures=structures,
     )
 
@@ -51,9 +51,9 @@ def _good_conductor_medium(name="coating"):
 
 def test_incumbent_good_conductor_slab_still_compiles_as_order0():
     scene = prepare_scene(
-        _scene([mw.Structure(geometry=Box(**_FLUSH_SLAB), material=mw.LossyMetalMedium(conductivity=5.8e7))])
+        _scene([mw.Structure(geometry=Box(**_FLUSH_SLAB), material=mw.media.LossyMetalMedium(conductivity=5.8e7))]), device="cpu"
     )
-    layout = scene.compile_materials().get("surface_impedance")
+    layout = compile_materials(scene).get("surface_impedance")
     assert layout is not None and bool(layout)
     # Full transverse span, flush against +x: exactly one illuminated face.
     assert len(layout.faces) == 1
@@ -70,9 +70,9 @@ def test_incumbent_good_conductor_slab_still_compiles_as_order0():
 
 def test_generic_surface_impedance_medium_now_compiles():
     scene = prepare_scene(
-        _scene([mw.Structure(geometry=Box(**_FLUSH_SLAB), material=_good_conductor_medium())])
+        _scene([mw.Structure(geometry=Box(**_FLUSH_SLAB), material=_good_conductor_medium())]), device="cpu"
     )
-    layout = scene.compile_materials().get("surface_impedance")
+    layout = compile_materials(scene).get("surface_impedance")
     assert layout is not None and bool(layout)
     assert len(layout.faces) == 1
     # A generic rational surface has no narrowband conductivity (uses the ADE path).
@@ -84,7 +84,7 @@ def test_generic_surface_impedance_medium_now_compiles():
 
 def test_finite_block_exposes_six_faces_with_area_sums():
     block = Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2))
-    scene = prepare_scene(_scene([mw.Structure(geometry=block, material=mw.LossyMetalMedium(conductivity=5.8e7))]))
+    scene = prepare_scene(_scene([mw.Structure(geometry=block, material=mw.media.LossyMetalMedium(conductivity=5.8e7))]), device="cpu")
     layout = compile_surface_impedance_layout(scene)
     assert len(layout.faces) == 6
     # Every face is a 0.2 x 0.2 square; none spans the full cross-section.
@@ -100,7 +100,7 @@ def test_finite_block_exposes_six_faces_with_area_sums():
 
 def test_mid_domain_double_sided_plate_exposes_two_faces():
     plate = Box(position=(0.0, 0.0, 0.0), size=(0.2, 1.0, 1.0))  # bounded along x only
-    scene = prepare_scene(_scene([mw.Structure(geometry=plate, material=mw.LossyMetalMedium(conductivity=5.8e7))]))
+    scene = prepare_scene(_scene([mw.Structure(geometry=plate, material=mw.media.LossyMetalMedium(conductivity=5.8e7))]), device="cpu")
     layout = compile_surface_impedance_layout(scene)
     assert len(layout.faces) == 2
     sides = sorted(face.metal_side for face in layout.faces)
@@ -119,10 +119,10 @@ def test_multiple_metals_and_orientations_enumerate_all_faces():
     scene = prepare_scene(
         _scene(
             [
-                mw.Structure(geometry=x_plate, material=mw.LossyMetalMedium(conductivity=5.8e7)),
-                mw.Structure(geometry=y_plate, material=mw.LossyMetalMedium(conductivity=1.0e6)),
+                mw.Structure(geometry=x_plate, material=mw.media.LossyMetalMedium(conductivity=5.8e7)),
+                mw.Structure(geometry=y_plate, material=mw.media.LossyMetalMedium(conductivity=1.0e6)),
             ]
-        )
+        ), device="cpu"
     )
     layout = compile_surface_impedance_layout(scene)
     assert len(layout.metals) == 2
@@ -135,7 +135,7 @@ def test_multiple_metals_and_orientations_enumerate_all_faces():
 
 def test_face_owner_order_is_deterministic_and_sorted():
     block = Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2))
-    scene = prepare_scene(_scene([mw.Structure(geometry=block, material=mw.LossyMetalMedium(conductivity=5.8e7))]))
+    scene = prepare_scene(_scene([mw.Structure(geometry=block, material=mw.media.LossyMetalMedium(conductivity=5.8e7))]), device="cpu")
     first = compile_surface_impedance_layout(scene)
     second = compile_surface_impedance_layout(scene)
     ranks_first = [face.owner_rank for face in first.faces]
@@ -152,13 +152,13 @@ def test_overlapping_pec_and_surface_ownership_fails_closed():
     scene = prepare_scene(
         _scene(
             [
-                mw.Structure(geometry=Box(**_FLUSH_SLAB), material=mw.LossyMetalMedium(conductivity=5.8e7)),
+                mw.Structure(geometry=Box(**_FLUSH_SLAB), material=mw.media.LossyMetalMedium(conductivity=5.8e7)),
                 mw.Structure(geometry=Box(**_FLUSH_SLAB), material=mw.Material.pec()),
             ]
-        )
+        ), device="cpu"
     )
     with pytest.raises(NotImplementedError, match="two contradictory owners"):
-        scene.compile_materials()
+        compile_materials(scene)
 
 
 def test_non_overlapping_pec_does_not_trip_the_owner_guard():
@@ -166,27 +166,27 @@ def test_non_overlapping_pec_does_not_trip_the_owner_guard():
     scene = prepare_scene(
         _scene(
             [
-                mw.Structure(geometry=Box(**_FLUSH_SLAB), material=mw.LossyMetalMedium(conductivity=5.8e7)),
+                mw.Structure(geometry=Box(**_FLUSH_SLAB), material=mw.media.LossyMetalMedium(conductivity=5.8e7)),
                 mw.Structure(
                     geometry=Box(position=(-0.3, 0.0, 0.0), size=(0.1, 0.1, 0.1)), material=mw.Material.pec()
                 ),
             ]
-        )
+        ), device="cpu"
     )
-    assert bool(scene.compile_materials().get("surface_impedance"))
+    assert bool(compile_materials(scene).get("surface_impedance"))
 
 
 def test_two_different_surface_materials_on_one_interface_fail_closed():
     scene = prepare_scene(
         _scene(
             [
-                mw.Structure(geometry=Box(**_FLUSH_SLAB), material=mw.LossyMetalMedium(conductivity=5.8e7)),
+                mw.Structure(geometry=Box(**_FLUSH_SLAB), material=mw.media.LossyMetalMedium(conductivity=5.8e7)),
                 mw.Structure(geometry=Box(**_FLUSH_SLAB), material=_good_conductor_medium(name="other")),
             ]
-        )
+        ), device="cpu"
     )
     with pytest.raises(NotImplementedError, match="contradictory owners"):
-        scene.compile_materials()
+        compile_materials(scene)
 
 
 def test_tangential_2x2_surface_model_fails_closed_with_a_phase():
@@ -209,9 +209,9 @@ def test_tangential_2x2_surface_model_fails_closed_with_a_phase():
     )
     assert model.port_count == 2
     medium = SurfaceImpedanceMedium(impedance=model, name="anisotropic")
-    scene = prepare_scene(_scene([mw.Structure(geometry=Box(**_FLUSH_SLAB), material=medium)]))
+    scene = prepare_scene(_scene([mw.Structure(geometry=Box(**_FLUSH_SLAB), material=medium)]), device="cpu")
     with pytest.raises(NotImplementedError) as info:
-        scene.compile_materials()
+        compile_materials(scene)
     message = str(info.value)
     assert "tangential 2x2" in message
     assert "Phase" in message
@@ -223,9 +223,9 @@ def test_tangential_2x2_surface_model_fails_closed_with_a_phase():
 
 def test_rotated_surface_still_fails_closed_with_a_phase():
     rotated = Box(position=(0.3, 0.0, 0.0), size=(0.4, 0.4, 0.4), rotation=(0.9238795, 0.0, 0.0, 0.3826834))
-    scene = prepare_scene(_scene([mw.Structure(geometry=rotated, material=mw.LossyMetalMedium(conductivity=5.8e7))]))
+    scene = prepare_scene(_scene([mw.Structure(geometry=rotated, material=mw.media.LossyMetalMedium(conductivity=5.8e7))]), device="cpu")
     with pytest.raises(NotImplementedError) as info:
-        scene.compile_materials()
+        compile_materials(scene)
     message = str(info.value)
     assert "Phase" in message
     assert not any(phrase in message.lower() for phrase in _BANNED_DEFERRALS)
@@ -234,15 +234,15 @@ def test_rotated_surface_still_fails_closed_with_a_phase():
 def test_bloch_surface_still_fails_closed_with_a_phase():
     scene = prepare_scene(
         _scene(
-            [mw.Structure(geometry=Box(**_FLUSH_SLAB), material=mw.LossyMetalMedium(conductivity=5.8e7))],
+            [mw.Structure(geometry=Box(**_FLUSH_SLAB), material=mw.media.LossyMetalMedium(conductivity=5.8e7))],
             boundary=mw.BoundarySpec.faces(
                 default="periodic", num_layers=4, strength=1.0, x=("pml", "pml"),
                 y=("bloch", "bloch"), bloch_wavevector=(0.0, 10.0, 0.0),
             ),
-        )
+        ), device="cpu"
     )
     with pytest.raises(NotImplementedError) as info:
-        scene.compile_materials()
+        compile_materials(scene)
     message = str(info.value)
     assert "Phase" in message
     assert not any(phrase in message.lower() for phrase in _BANNED_DEFERRALS)

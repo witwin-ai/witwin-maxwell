@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..fdtd_parallel import _normalize_devices
 from ..scene import Scene
@@ -79,24 +78,19 @@ class MultiGPUExecution:
 
 
 def _run_simulation_on_device(simulation, device):
-    """Bind a Simulation's declarative Scene to ``device`` and run it.
+    """Run a Simulation with its config bound to ``device``.
 
-    The Scene is declarative and owns device placement, so prepare/run happen in
-    the leased device context rather than materializing a full PreparedScene on a
-    coordinator GPU. A per-run shallow copy of the Scene is pinned to the leased
-    device so the returned ``Result.scene.device`` matches the device its tensors
-    live on, while the caller's original Scene object is never mutated (device is
-    a declarative attribute resolved at prepare time, so the copy is cheap).
+    The solver config owns device placement, so prepare/run happen in the leased
+    device context rather than materializing a full PreparedScene on a coordinator
+    GPU. The caller's config is restored afterwards.
     """
 
-    original_input = simulation.scene_input
-    column_scene = copy.copy(original_input)
-    column_scene.device = str(device)
-    simulation.scene_input = column_scene
+    original_config = simulation.config
+    simulation.config = replace(original_config, device=str(device))
     try:
         return simulation.run()
     finally:
-        simulation.scene_input = original_input
+        simulation.config = original_config
 
 
 def _reject_ensemble_incompatible(simulation, index: int) -> None:
@@ -128,7 +122,7 @@ def build_ensemble_plan(simulations, execution: MultiGPUExecution) -> ExecutionP
     """Validate simulations and materialize an immutable ensemble ExecutionPlan."""
 
     if not isinstance(execution, MultiGPUExecution):
-        raise TypeError("execution must be a maxwell.MultiGPUExecution.")
+        raise TypeError("execution must be a maxwell.execution.MultiGPUExecution.")
     resolved = list(simulations)
     seen_scene_ids: dict[int, int] = {}
     tasks = []
@@ -174,7 +168,7 @@ def run_many(simulations, *, execution: MultiGPUExecution) -> ResultSequence:
     """
 
     if not isinstance(execution, MultiGPUExecution):
-        raise TypeError("execution must be a maxwell.MultiGPUExecution.")
+        raise TypeError("execution must be a maxwell.execution.MultiGPUExecution.")
     plan = build_ensemble_plan(simulations, execution)
     pool = execution.build_pool(require_cuda=True)
     return execute_plan(plan, pool)

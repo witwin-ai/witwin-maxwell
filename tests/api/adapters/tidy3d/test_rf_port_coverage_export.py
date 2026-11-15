@@ -19,22 +19,27 @@ A, B = 1.0e-3, 2.3e-3
 
 def _coax_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-3e-3, 3e-3), (-3e-3, 3e-3), (0.0, 18e-3))),
-        grid=mw.GridSpec.uniform(0.25e-3),
-        boundary=mw.BoundarySpec.pec(),
-        device="cpu",
-    )
-    scene.add_structure(mw.Structure(mw.Cylinder(position=(0, 0, 8.5e-3), radius=A, height=15e-3, axis="z"),
-                                     mw.Material.pec(), name="inner"))
-    scene.add_port(mw.CoaxialLumpedPort("feed", center=(0, 0, 1e-3), inner_diameter=2 * A, outer_diameter=2 * B,
-                                        normal_axis="z", direction="+", reference_impedance=50.0))
-    scene.add_lumped_element(mw.CoaxialLumpedResistor("load", center=(0, 0, 16e-3), inner_diameter=2 * A,
-                                                      outer_diameter=2 * B, normal_axis="z", resistance=75.0))
+                domain=mw.Domain(bounds=((-3e-3, 3e-3), (-3e-3, 3e-3), (0.0, 18e-3))),
+                grid=mw.GridSpec.uniform(0.25e-3),
+                boundary=mw.BoundarySpec.pec(),
+                structures=(
+            mw.Structure(mw.Cylinder(position=(0, 0, 8.5e-3), radius=A, height=15e-3, axis="z"),
+                         mw.Material.pec(), name="inner"),
+            ),
+                ports=(
+            mw.rf.CoaxialLumpedPort("feed", center=(0, 0, 1e-3), inner_diameter=2 * A, outer_diameter=2 * B,
+                                 normal_axis="z", direction="+", reference_impedance=50.0),
+            ),
+                lumped_elements=(
+            mw.rf.CoaxialLumpedResistor("load", center=(0, 0, 16e-3), inner_diameter=2 * A,
+                                     outer_diameter=2 * B, normal_axis="z", resistance=75.0),
+            ),
+            )
     return scene
 
 
 def test_coaxial_port_maps_to_the_reference_terminal_port():
-    port = mw.CoaxialLumpedPort("feed", center=(0, 0, 1e-3), inner_diameter=2 * A, outer_diameter=2 * B,
+    port = mw.rf.CoaxialLumpedPort("feed", center=(0, 0, 1e-3), inner_diameter=2 * A, outer_diameter=2 * B,
                                 normal_axis="z", direction="-", reference_impedance=60.0)
     reference = coaxial_lumped_port_to_tidy3d(port)
     assert isinstance(reference, td.plugins.smatrix.CoaxialLumpedPort)
@@ -59,19 +64,19 @@ def test_coaxial_scene_exports_drive_monitors_and_annular_resistors():
 
 
 def test_baseband_drives_map_to_reference_baseband_source_times():
-    gaussian = _convert_source_time(mw.BasebandGaussianPulse(40e-12, offset=6.0, amplitude=2.0), td)
+    gaussian = _convert_source_time(mw.sources.BasebandGaussianPulse(40e-12, offset=6.0, amplitude=2.0), td)
     assert isinstance(gaussian, td.BasebandGaussianPulse)
     assert (gaussian.twidth, gaussian.offset, gaussian.amplitude) == (40e-12, 6.0, 2.0)
-    rectangle = _convert_source_time(mw.BasebandRectangularPulse(10e-12, 200e-12), td)
+    rectangle = _convert_source_time(mw.sources.BasebandRectangularPulse(10e-12, 200e-12), td)
     assert isinstance(rectangle, td.BasebandRectangularPulse)
     assert (rectangle.rise_time, rectangle.twidth, rectangle.offset) == (10e-12, 200e-12, 5.0)
 
 
 def test_pec_frame_exports_as_the_driven_mode_source_frame_and_receiver_walls():
-    scene = coax_thru_scene(dx=0.01, device="cpu")
+    scene = coax_thru_scene(dx=0.01)
     for port in scene.ports:
-        for structure in mw.PECFrame(3).structures(port, scene):
-            scene.add_structure(structure)
+        for structure in mw.rf.PECFrame(3).structures(port, scene, device="cpu"):
+            scene = scene.updated(structures=(*scene.structures, structure))
     sim = scene_to_tidy3d(scene, frequencies=(1e9,))
     drive = next(source for source in sim.sources if isinstance(source, td.ModeSource))
     assert drive.name == "left::drive"
@@ -84,7 +89,7 @@ def test_pec_frame_exports_as_the_driven_mode_source_frame_and_receiver_walls():
 
 
 def test_low_frequency_smoothing_maps_to_the_reference_spec():
-    spec = mw.LowFrequencySmoothingSpec(min_sampling_time=2.0, max_sampling_time=7.0, order=2, max_deviation=0.3)
+    spec = mw.rf.LowFrequencySmoothingSpec(min_sampling_time=2.0, max_sampling_time=7.0, order=2, max_deviation=0.3)
     reference = low_frequency_smoothing_to_tidy3d(spec, ["port_mode"])
     assert isinstance(reference, td.LowFrequencySmoothingSpec)
     assert reference.monitors == ("port_mode",)

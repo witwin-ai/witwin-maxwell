@@ -177,7 +177,7 @@ def _axis_coords_for_length(scene, axis, length):
 def _tfsf_leakage_ratio(result, component, bounds):
     solver = result.solver
     scene = solver.scene
-    raw = result.raw_output[component]
+    raw = result._raw_output[component]
     field = torch.abs(raw).detach().cpu().numpy() if isinstance(raw, torch.Tensor) else np.abs(raw)
     xc = _axis_coords_for_length(scene, "x", field.shape[0])
     yc = _axis_coords_for_length(scene, "y", field.shape[1])
@@ -211,31 +211,32 @@ def test_tfsf_graded_region_within_bound_keeps_leakage_small():
     xn = np.linspace(lo, hi, 25)
     bounds = ((-0.32, 0.32), (-0.32, 0.32), (-0.32, 0.32))
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((lo, hi), (lo, hi), (lo, hi))),
-        grid=mw.GridSpec.custom(xn, xn, zn),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=mw.CW(frequency=1.0e9, amplitude=80.0),
-            injection=mw.TFSF(bounds=bounds),
-            name="tfsf_graded",
-        )
-    )
+                domain=mw.Domain(bounds=((lo, hi), (lo, hi), (lo, hi))),
+                grid=mw.GridSpec.custom(xn, xn, zn),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization=(1.0, 0.0, 0.0),
+                source_time=mw.CW(frequency=1.0e9, amplitude=80.0),
+                injection=mw.TFSF(bounds=bounds),
+                name="tfsf_graded",
+            ),
+            ),
+            )
     # The graded z region is genuinely nonuniform yet accepted.
-    prepared = mw.Simulation.fdtd(scene, frequency=1.0e9).prepare()
+    prepared = mw.Simulation.fdtd(scene, frequencies=1.0e9).prepare()
     zc = np.asarray(prepared.solver.scene.dz_primal64)
     assert float(zc.max()) - float(zc.min()) > 1e-6
 
     result = mw.Simulation.fdtd(
         scene,
-        frequency=1.0e9,
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        frequencies=1.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).run()
     leakage_ratio, inside_max, outside_max = _tfsf_leakage_ratio(result, "Ex", bounds)
     assert inside_max > 0.0
@@ -254,24 +255,23 @@ def test_tfsf_strongly_graded_region_rejected_with_predicted_error():
     graded = nodes.copy()
     graded[10] += 0.02  # region spacings become 0.03 / 0.07
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((lo, hi), (lo, hi), (lo, hi))),
-        grid=mw.GridSpec.custom(nodes, nodes, graded),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=mw.GaussianPulse(frequency=3e9, fwidth=1e9, amplitude=1.0),
-            injection=mw.TFSF(bounds=((-0.15, 0.15), (-0.15, 0.15), (-0.15, 0.15))),
-            name="pw",
-        )
-    )
+                domain=mw.Domain(bounds=((lo, hi), (lo, hi), (lo, hi))),
+                grid=mw.GridSpec.custom(nodes, nodes, graded),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization=(1.0, 0.0, 0.0),
+                source_time=mw.GaussianPulse(frequency=3e9, fwidth=1e9, amplitude=1.0),
+                injection=mw.TFSF(bounds=((-0.15, 0.15), (-0.15, 0.15), (-0.15, 0.15))),
+                name="pw",
+            ),
+            ),
+            )
     with pytest.raises(
         ValueError, match="locally uniform grid spacing along axis 'z'"
     ) as excinfo:
-        mw.Simulation.fdtd(scene, frequency=3e9).prepare()
+        mw.Simulation.fdtd(scene, frequencies=3e9).prepare()
     assert _reported_number(str(excinfo.value)) > _TFSF_DISPERSION_SPREAD_BOUND
 
 
@@ -283,21 +283,20 @@ def test_mode_source_graded_plane_within_bound_runs():
     yn = _geom_graded_nodes(lo, hi, 20, total_ratio=1.004)  # fractional spread < 1e-2
     xn = np.linspace(lo, hi, 21)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((lo, hi), (lo, hi), (lo, hi))),
-        grid=mw.GridSpec.custom(xn, yn, xn),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(-0.2, 0.0, 0.0),
-            size=(0.0, 0.4, 0.4),
-            polarization="Ez",
-            source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
-            name="mode0",
-        )
-    )
-    solver = mw.Simulation.fdtd(scene, frequency=1e9).prepare().solver
+                domain=mw.Domain(bounds=((lo, hi), (lo, hi), (lo, hi))),
+                grid=mw.GridSpec.custom(xn, yn, xn),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                sources=(
+            mw.ModeSource(
+                position=(-0.2, 0.0, 0.0),
+                size=(0.0, 0.4, 0.4),
+                polarization="Ez",
+                source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
+                name="mode0",
+            ),
+            ),
+            )
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9).prepare().solver
     # The transverse (y) plane is genuinely graded yet accepted.
     yc = np.asarray(solver.scene.dy_primal64)
     assert float(yc.max()) - float(yc.min()) > 1e-6
@@ -314,22 +313,21 @@ def test_mode_source_strongly_graded_plane_rejected_with_predicted_variation():
     graded = nodes.copy()
     graded[10] += 0.02
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((lo, hi), (lo, hi), (lo, hi))),
-        grid=mw.GridSpec.custom(nodes, graded, nodes),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(-0.2, 0.0, 0.0),
-            size=(0.0, 0.4, 0.4),
-            polarization="Ez",
-            source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
-            name="mode0",
-        )
-    )
+                domain=mw.Domain(bounds=((lo, hi), (lo, hi), (lo, hi))),
+                grid=mw.GridSpec.custom(nodes, graded, nodes),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                sources=(
+            mw.ModeSource(
+                position=(-0.2, 0.0, 0.0),
+                size=(0.0, 0.4, 0.4),
+                polarization="Ez",
+                source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
+                name="mode0",
+            ),
+            ),
+            )
     with pytest.raises(
         ValueError, match="locally uniform grid spacing along axis 'y'"
     ) as excinfo:
-        mw.Simulation.fdtd(scene, frequency=1e9).prepare()
+        mw.Simulation.fdtd(scene, frequencies=1e9).prepare()
     assert _reported_number(str(excinfo.value)) > _MODE_PLANE_SPACING_SPREAD_BOUND

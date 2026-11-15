@@ -42,64 +42,56 @@ def _box(pos, size):
 
 def _prebias():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=BOUNDS),
-        grid=mw.GridSpec.uniform(H),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(name="diel", geometry=_box(*DIEL), material=mw.Material(eps_r=3.2))
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal("signal", geometry=_box(*SIGNAL), potential=200.0)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal("ground", geometry=_box(*GROUND), grounded=True)
-    )
+                domain=mw.Domain(bounds=BOUNDS),
+                grid=mw.GridSpec.uniform(H),
+                boundary=mw.BoundarySpec.none(),
+                structures=(mw.Structure(name="diel", geometry=_box(*DIEL), material=mw.Material(eps_r=3.2)),),
+                electrostatic_terminals=(
+            mw.electrostatic.ElectrostaticTerminal("signal", geometry=_box(*SIGNAL), potential=200.0),
+            mw.electrostatic.ElectrostaticTerminal("ground", geometry=_box(*GROUND), grounded=True),
+            ),
+            )
     dc = mw.Simulation.electrostatic(
-        scene, boundary=mw.ElectrostaticBoundarySpec(default="neumann")
+        scene, config=mw.electrostatic.ElectrostaticConfig(boundary=mw.electrostatic.ElectrostaticBoundarySpec(default="neumann"))
     ).run()
-    return mw.ElectrostaticInitialCondition.from_result(dc, tolerance=1.0)
+    return mw.electrostatic.ElectrostaticInitialCondition.from_result(dc, tolerance=1.0)
 
 
 def _generator():
-    return mw.ESDVoltageSource(
-        "gun", port="feed", waveform=mw.ESDWaveform.iec_61000_4_2(8000.0)
+    return mw.esd.ESDVoltageSource(
+        "gun", port="feed", waveform=mw.esd.ESDWaveform.iec_61000_4_2(8000.0)
     )
 
 
 def _fdtd_scene(circuit, *, dielectric_material=None):
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=BOUNDS),
-        grid=mw.GridSpec.uniform(H),
-        boundary=mw.BoundarySpec.pec(),
-        circuits=(circuit,),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(name="signal", geometry=_box(*SIGNAL), material=mw.Material.pec())
-    )
-    scene.add_structure(
-        mw.Structure(name="ground", geometry=_box(*GROUND), material=mw.Material.pec())
-    )
     # This control uses a fixed dielectric response with a stress-only monitor.
     material = mw.Material(eps_r=3.2) if dielectric_material is None else dielectric_material
-    scene.add_structure(mw.Structure(name="diel", geometry=_box(*DIEL), material=material))
-    scene.add_port(
-        mw.TerminalPort(
-            "feed", mw.TerminalRef("signal"), mw.TerminalRef("ground"), mw.AxisPath("z"), 0.01
-        )
-    )
-    scene.add_monitor(
-        mw.BreakdownMonitor(
-            "stress",
-            position=(0.0, 0.0, 0.0),
-            size=(0.10, 0.10, 0.08),
-            critical_field=1.0e3,
-            minimum_duration=0.0,
-            quantities=("electric_field", "exposure"),
-        )
-    )
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=BOUNDS),
+                grid=mw.GridSpec.uniform(H),
+                boundary=mw.BoundarySpec.pec(),
+                circuits=(circuit,),
+                structures=(
+            mw.Structure(name="signal", geometry=_box(*SIGNAL), material=mw.Material.pec()),
+            mw.Structure(name="ground", geometry=_box(*GROUND), material=mw.Material.pec()),
+            mw.Structure(name="diel", geometry=_box(*DIEL), material=material),
+            ),
+                ports=(
+            mw.rf.TerminalPort(
+                "feed", mw.rf.TerminalRef("signal"), mw.rf.TerminalRef("ground"), mw.AxisPath("z"), 0.01
+            ),
+            ),
+                monitors=(
+            mw.esd.BreakdownMonitor(
+                "stress",
+                position=(0.0, 0.0, 0.0),
+                size=(0.10, 0.10, 0.08),
+                critical_field=1.0e3,
+                minimum_duration=0.0,
+                quantities=("electric_field", "exposure"),
+            ),
+            ),
+            )
     return scene
 
 
@@ -107,7 +99,7 @@ def _breakdown_material():
     return mw.Material(
         eps_r=3.2,
         sigma_e=1e-12,
-        breakdown=mw.DielectricBreakdown(
+        breakdown=mw.breakdown.DielectricBreakdown(
             critical_field=1.0e3,
             minimum_duration=0.0,
             post_breakdown_conductivity=5.0,
@@ -117,7 +109,7 @@ def _breakdown_material():
 
 def _dt() -> float:
     solver = mw.Simulation.fdtd(
-        _fdtd_scene(_generator().build_circuit(t_end=1.0e-9)), frequency=1.0e9
+        _fdtd_scene(_generator().build_circuit(t_end=1.0e-9)), frequencies=1.0e9
     ).prepare().solver
     return float(solver.dt)
 
@@ -127,14 +119,16 @@ def test_circuit_driven_prebias_esd_stress_end_to_end():
     result = mw.Simulation.fdtd(
         _fdtd_scene(circuit),
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=RUN_STEPS),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
-        initial_condition=_prebias(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=RUN_STEPS),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+            initial_condition=_prebias(),
+        ),
     ).run()
 
     # 1) Pre-bias provenance carries the DC diagnostics + Gauss residual.
-    prov = result.electrostatic_prebias
+    prov = mw.electrostatic.electrostatic_prebias(result)
     assert prov is not None
     assert prov["source"] == "electrostatic"
     assert prov["dc_iterations"] > 0
@@ -142,20 +136,20 @@ def test_circuit_driven_prebias_esd_stress_end_to_end():
 
     # 2) The circuit-driven ESD generator ran through the strong MNA coupling and
     #    its port voltage is a genuine (non-zero) two-way-coupled trace.
-    data = result.circuit(circuit.name)
+    data = mw.circuits.circuit(result, circuit.name)
     assert data.node_voltages.device.type == "cuda"
     assert torch.all(torch.isfinite(data.node_voltages))
     assert float(torch.max(torch.abs(data.node_voltage("tip")))) > 0.0
 
     # 3) The generator provenance (revision, level voltage, source network) rides
     #    through to the result (gate c on the e2e path).
-    generator = result.esd_generator(circuit.name)
+    generator = mw.esd.esd_generator(result, circuit.name)
     assert generator["injection"] == "source_impedance_network"
     assert generator["waveform"]["standard_revision"] == "ed2-contact"
     assert generator["waveform"]["level_voltage"] == pytest.approx(8000.0)
 
     # 4) The non-feedback stress record is populated on device.
-    stress = result.breakdown("stress")
+    stress = mw.breakdown.breakdown(result, "stress")
     assert stress.capability_level == "stress-only"
     assert stress.peak_field > 0.0
     assert stress.max_field_map.device.type == "cuda"
@@ -170,7 +164,9 @@ def test_circuit_port_coupling_fails_closed_in_breakdown_media():
         mw.Simulation.fdtd(
             scene,
             frequencies=[1e9],
-            run_time=mw.TimeConfig(time_steps=RUN_STEPS),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=RUN_STEPS),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False,
+            ),
         ).prepare()

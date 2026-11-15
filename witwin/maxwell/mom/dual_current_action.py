@@ -4,6 +4,7 @@ from .static_current import FaceCurrentBalance
 from .static_current_projector import StaticCurrentProjector
 from .static_volume_curl import StaticVolumeCurlAction
 from .fixed_tangent_inverse import _FixedTangentInverse
+from ..errors import ConvergenceError
 
 
 class _Product(torch.autograd.Function):
@@ -94,7 +95,7 @@ class DualStaticCurrentAction:
     def source_rhs_adjoint(self,value):return _Product.apply(value,self,'source_adjoint')
 
 
-class DualCurrentInverseConvergenceError(RuntimeError):
+class DualCurrentInverseConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         super().__init__('Dual current inverse failed its original RHS residual tolerance')
         self.receipt=receipt
@@ -108,7 +109,7 @@ class FixedDualCurrentInverse(_FixedTangentInverse):
             version='fixed_dual_current_inverse_v1',residual_metric='packed_current_Euclidean')
 
 
-class DualCurrentAdmissionError(RuntimeError):
+class DualCurrentAdmissionError(ConvergenceError):
     def __init__(self,receipt):
         super().__init__('Dual current coupled inverse bound is inconclusive')
         self.receipt=receipt

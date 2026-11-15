@@ -58,7 +58,7 @@ def _complex_vector_alignment_error(field: np.ndarray, target: np.ndarray) -> fl
 
 def _component_volume(result, component: str):
     solver = result.solver
-    field = _to_numpy(result.tensor(component))
+    field = _to_numpy(result.field(component).isel(f=0).values)
     if component == "Ex":
         x = np.linspace(
             solver.scene.domain_range[0] + 0.5 * solver.scene.dx,
@@ -158,169 +158,166 @@ def _save_line_plot(*, coords, values, output_name: str, title: str, xlabel: str
 
 def _boundary_scene(boundary: mw.BoundarySpec):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=_BOUNDARY_DOMAIN_BOUNDS),
-        grid=mw.GridSpec.uniform(0.15),
-        boundary=boundary,
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1.0e9, amplitude=25.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=_BOUNDARY_DOMAIN_BOUNDS),
+                grid=mw.GridSpec.uniform(0.15),
+                boundary=boundary,
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1.0e9, amplitude=25.0),
+                name="src",
+            ),
+            ),
+            )
     return scene
 
 
 def _mixed_periodic_pml_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.9, 0.9), (-0.6, 0.6), (-0.9, 0.9))),
-        grid=mw.GridSpec.uniform(0.15),
-        boundary=mw.BoundarySpec.faces(
+                domain=mw.Domain(bounds=((-0.9, 0.9), (-0.6, 0.6), (-0.9, 0.9))),
+                grid=mw.GridSpec.uniform(0.15),
+                boundary=mw.BoundarySpec.faces(
             default="pml",
             num_layers=4,
             strength=1.0,
             y="periodic",
-        ),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, -0.55, 0.0),
-            polarization="Ez",
-            width=0.12,
-            source_time=mw.CW(frequency=1.0e9, amplitude=25.0),
-            name="src",
-        )
-    )
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, -0.55, 0.0),
+                polarization="Ez",
+                width=0.12,
+                source_time=mw.CW(frequency=1.0e9, amplitude=25.0),
+                name="src",
+            ),
+            ),
+            )
     return scene
 
 
 def _pmc_symmetry_pair():
     half_scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.15),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        symmetry=("PMC", None, None),
-        device="cuda",
-    )
-    half_scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1.0e9, amplitude=25.0),
-            name="src",
-        )
-    )
+                     domain=mw.Domain(bounds=((0.0, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                     grid=mw.GridSpec.uniform(0.15),
+                     boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                     symmetry=("PMC", None, None),
+                     sources=(
+                     mw.PointDipole(
+                     position=(0.0, 0.0, 0.0),
+                     polarization="Ez",
+                     width=0.05,
+                     source_time=mw.CW(frequency=1.0e9, amplitude=25.0),
+                     name="src",
+                 ),
+                 ),
+                 )
 
     full_scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.45, 0.599999), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.15),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    full_scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1.0e9, amplitude=25.0),
-            name="src",
-        )
-    )
+                     domain=mw.Domain(bounds=((-0.45, 0.599999), (-0.6, 0.6), (-0.6, 0.6))),
+                     grid=mw.GridSpec.uniform(0.15),
+                     boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                     sources=(
+                     mw.PointDipole(
+                     position=(0.0, 0.0, 0.0),
+                     polarization="Ez",
+                     width=0.05,
+                     source_time=mw.CW(frequency=1.0e9, amplitude=25.0),
+                     name="src",
+                 ),
+                 ),
+                 )
     return half_scene, full_scene
 
 
 def _cpml_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1.0e9, amplitude=100.0),
-            name="src",
-        )
-    )
-    for name, position in (
+                domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1.0e9, amplitude=100.0),
+                name="src",
+            ),
+            ),
+            )
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.PointMonitor(name, position, fields=("Ez",)) for name, position in (
         ("center", (0.0, 0.0, 0.0)),
         ("inner_x", (0.24, 0.0, 0.0)),
         ("pml_mid_x", (0.40, 0.0, 0.0)),
         ("pml_outer_x", (0.56, 0.0, 0.0)),
-    ):
-        scene.add_monitor(mw.PointMonitor(name, position, fields=("Ez",)))
+    )),
+    ))
     return scene
 
 
 def _tfsf_scene(*, with_scatterer: bool):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=_TFSF_DOMAIN_BOUNDS),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(1.0, 0.0, 0.0),
-            polarization=(0.0, 0.0, 1.0),
-            source_time=mw.CW(frequency=1.0e9, amplitude=80.0),
-            injection=mw.TFSF(bounds=_TFSF_BOUNDS),
-            name="tfsf_pw",
-        )
-    )
+                domain=mw.Domain(bounds=_TFSF_DOMAIN_BOUNDS),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PlaneWave(
+                direction=(1.0, 0.0, 0.0),
+                polarization=(0.0, 0.0, 1.0),
+                source_time=mw.CW(frequency=1.0e9, amplitude=80.0),
+                injection=mw.TFSF(bounds=_TFSF_BOUNDS),
+                name="tfsf_pw",
+            ),
+            ),
+            )
     if with_scatterer:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 name="sphere",
                 geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=0.12),
                 material=mw.Material(eps_r=4.0),
-            )
-    )
+            ),
+        ))
     return scene
 
 
 def _oblique_tfsf_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=_TFSF_DOMAIN_BOUNDS),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=tuple(float(value) for value in _OBLIQUE_TFSF_DIRECTION),
-            polarization=tuple(float(value) for value in _OBLIQUE_TFSF_POLARIZATION),
-            source_time=mw.CW(frequency=1.0e9, amplitude=80.0),
-            injection=mw.TFSF(bounds=_TFSF_BOUNDS),
-            name="tfsf_pw_oblique",
-        )
-    )
+                domain=mw.Domain(bounds=_TFSF_DOMAIN_BOUNDS),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PlaneWave(
+                direction=tuple(float(value) for value in _OBLIQUE_TFSF_DIRECTION),
+                polarization=tuple(float(value) for value in _OBLIQUE_TFSF_POLARIZATION),
+                source_time=mw.CW(frequency=1.0e9, amplitude=80.0),
+                injection=mw.TFSF(bounds=_TFSF_BOUNDS),
+                name="tfsf_pw_oblique",
+            ),
+            ),
+            )
     for label, sign in (("upstream", -0.5), ("center", 0.0), ("downstream", 0.5)):
         position = tuple(float(value) for value in (sign * _OBLIQUE_TFSF_PROBE_STEP * _OBLIQUE_TFSF_DIRECTION))
-        scene.add_monitor(
+        scene = scene.updated(monitors=(
+            *scene.monitors,
             mw.PointMonitor(
                 name=f"probe_{label}",
                 position=position,
                 fields=("Ex", "Ey", "Ez"),
-            )
-        )
+            ),
+        ))
     return scene
 
 
 def _grating_tfsf_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=_GRATING_TFSF_DOMAIN_BOUNDS),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=mw.BoundarySpec.faces(
+                domain=mw.Domain(bounds=_GRATING_TFSF_DOMAIN_BOUNDS),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=mw.BoundarySpec.faces(
             default="pml",
             num_layers=4,
             strength=1.0,
@@ -328,18 +325,17 @@ def _grating_tfsf_scene():
             y="bloch",
             z="pml",
             bloch_wavevector="auto",
-        ),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.2, 0.1, 0.9746794344808963),
-            polarization=(1.0, 0.0, -0.20519567041703082),
-            source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
-            injection=mw.TFSF.slab(axis="z", bounds=_GRATING_TFSF_Z_BOUNDS),
-            name="grating_tfsf",
-        )
-    )
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.2, 0.1, 0.9746794344808963),
+                polarization=(1.0, 0.0, -0.20519567041703082),
+                source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
+                injection=mw.TFSF.slab(axis="z", bounds=_GRATING_TFSF_Z_BOUNDS),
+                name="grating_tfsf",
+            ),
+            ),
+            )
     return scene
 
 
@@ -347,20 +343,24 @@ def _run_boundary_result(scene):
     return mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+            absorber="cpml",
+        ),
     ).run()
 
 
 def _run_tfsf_result(scene, *, steady_cycles=6, transient_cycles=15):
     return mw.Simulation.fdtd(
         scene,
-        frequency=1.0e9,
-        run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        frequencies=1.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).run()
 
 
@@ -368,10 +368,12 @@ def _run_grating_tfsf_result(scene):
     return mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=64),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=True,
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=64),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=True,
+            absorber="cpml",
+        ),
     ).run()
 
 
@@ -549,7 +551,7 @@ def _cpml_summary():
     ez, x, y, z = _component_volume(result, "Ez")
     monitors = {}
     for name in ("center", "inner_x", "pml_mid_x", "pml_outer_x"):
-        monitors[name] = abs(result.monitor(name)["data"])
+        monitors[name] = abs(result.monitor(name, freq_index=0).sel(component="Ez").values)
 
     iy = int(np.argmin(np.abs(y)))
     iz = int(np.argmin(np.abs(z)))
@@ -642,7 +644,7 @@ def _tfsf_oblique_summary():
     transversality_errors = {}
     ex_fractions = {}
     for label in ("upstream", "center", "downstream"):
-        point_monitor = result.monitor(f"probe_{label}")
+        point_monitor = result.raw_monitor(f"probe_{label}")
         field_vector = _complex_point_vector(point_monitor, ("Ex", "Ey", "Ez"))
         polarization_residuals[label] = _complex_vector_alignment_error(field_vector, _OBLIQUE_TFSF_POLARIZATION)
         transversality_errors[label] = float(

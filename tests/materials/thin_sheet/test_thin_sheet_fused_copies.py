@@ -1,32 +1,25 @@
-"""Bitwise index-copy, one-step, graph and dispatch gates for fused sheet plans."""
-import os
-from unittest.mock import patch
+"""Bitwise index-copy, one-step and graph gates for fused sheet plans.
 
+The reference arm is the frozen Torch thin-sheet oracle (tests/oracles/thin_sheet_torch.py).
+"""
 import numpy as np
 import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.fdtd import thin_sheet
 from witwin.maxwell.fdtd.checkpoint import graph_state_tensors
 from witwin.maxwell.fdtd.runtime.stepping import _field_update_block, _make_field_update_runner
 
-from . import test_thin_sheet_cuda as scenes
-from .harness import backend_for
+from tests.oracles import thin_sheet_torch
 
-SELECTOR = "WITWIN_MAXWELL_THIN_SHEET_KERNEL"
+from . import test_thin_sheet_cuda as scenes
+
 FIELDS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 
 
-def _prepare(kind="copper", device="cuda", kernel=None):
-    with patch.dict(os.environ):
-        if kernel is None:
-            os.environ.pop(SELECTOR, None)
-        else:
-            os.environ[SELECTOR] = kernel
-        scene = scenes._cavity(kind, device)
-        return mw.Simulation.fdtd(scene, frequencies=[2e9], run_time=mw.TimeConfig(time_steps=1),
-                                  backend=backend_for(scene)).prepare().solver
+def _prepare(kind="copper"):
+    scene = scenes._cavity(kind, "cuda")
+    return mw.Simulation.fdtd(scene, frequencies=[2e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare().solver
 
 
 @pytest.fixture(scope="module")
@@ -76,7 +69,7 @@ def test_gather_scatter_matches_torch_bits(copy_solver, monkeypatch, dtype, name
     n = min(len(plan["extra_slots"]), len(special))
     extra[plan["extra_slots"][:n]] = special[:n]
     assert plan["extra_slots"].unique().numel() == plan["extra_slots"].numel()
-    expected = thin_sheet._gather_torch(solver, plan, extra, torch.empty(plan["size"], dtype=torch.float64,
+    expected = thin_sheet_torch.gather(solver, plan, extra, torch.empty(plan["size"], dtype=torch.float64,
                                                                       device=sheet.device))
     actual = sheet.gather(solver, plan, extra)
     _bits_equal(actual, expected)
@@ -89,7 +82,7 @@ def test_gather_scatter_matches_torch_bits(copy_solver, monkeypatch, dtype, name
     values[:n] = special[:n]
     saved_fields = {field_name: getattr(solver, field_name).clone() for field_name in plan["fused"]["names"]}
     saved_extra = extra.clone()
-    thin_sheet._scatter_torch(solver, plan, extra, values)
+    thin_sheet_torch.scatter(solver, plan, extra, values)
     expected_fields = {field_name: getattr(solver, field_name).clone() for field_name in saved_fields}
     expected_extra = extra.clone()
     for field_name, field in saved_fields.items():
@@ -121,11 +114,13 @@ def _assert_step_equal(a, b):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("kind", ["pec", "copper"])
-def test_one_field_step_matches_torch(kind):
-    fused, reference = _prepare(kind), _prepare(kind, kernel="torch")
+def test_one_field_step_matches_torch(kind, monkeypatch):
+    fused, reference = _prepare(kind), _prepare(kind)
     _seed_identical(fused, reference)
     _field_update_block(fused, 0.)
-    _field_update_block(reference, 0.)
+    with monkeypatch.context() as patch:
+        thin_sheet_torch.install(patch)
+        _field_update_block(reference, 0.)
     if kind == "pec":
         _assert_step_equal(fused, reference)
         print(dict(E1=kind, fp64_difference=0, fp32_max_ulp=0), flush=True)
@@ -148,32 +143,3 @@ def test_fused_graph_matches_eager_from_nonzero_state(kind):
         _field_update_block(eager, 0.)
         _assert_step_equal(graph, eager)
     print(dict(E3=kind, graph_eager_bit_difference=0, steps=5), flush=True)
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("kernel", [None, "fused", "torch"], ids=["default", "fused", "torch"])
-def test_copy_dispatch_has_no_reference_calls_on_fused_cuda(device, kernel, monkeypatch):
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("requires CUDA")
-    solver = _prepare(device=device, kernel=kernel)
-    calls = {name: 0 for name in ("_gather_torch", "_scatter_torch", "_gather_fused", "_scatter_fused")}
-    for name in calls:
-        original = getattr(thin_sheet, name)
-
-        def counted(*args, _name=name, _original=original):
-            calls[_name] += 1
-            return _original(*args)
-
-        monkeypatch.setattr(thin_sheet, name, counted)
-    _field_update_block(solver, 0.)
-    fused = device == "cuda" and kernel != "torch"
-    assert calls["_gather_fused"] == (4 if fused else 0)
-    assert calls["_scatter_fused"] == (3 if fused else 0)
-    assert calls["_gather_torch"] == (0 if fused else 4)
-    assert calls["_scatter_torch"] == (0 if fused else 3)
-    print(dict(dispatch=device, selector=kernel or "default", **calls), flush=True)
-
-
-def test_invalid_copy_selector_is_rejected():
-    with pytest.raises(ValueError, match="must be fused or torch"):
-        _prepare(device="cpu", kernel="invalid")

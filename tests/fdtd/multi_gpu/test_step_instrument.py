@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from witwin.maxwell.fdtd.distributed.instrumentation import StepRateInstrument
+from tests.support.step_rate_instrument import StepRateInstrument
 
 
 class _SyncCounter:

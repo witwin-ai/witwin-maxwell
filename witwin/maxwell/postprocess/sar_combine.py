@@ -53,11 +53,11 @@ def _prepared_grid_hash(result) -> str:
 
 
 def _stacked_electric_fields(result, frequencies):
-    """Stack per-frequency complex Ex/Ey/Ez the way Result.power_loss consumes them."""
+    """Stack per-frequency complex Ex/Ey/Ez the way the PowerLossMonitor reduction consumes them."""
     fields = {}
     for component in ("Ex", "Ey", "Ez"):
         fields[component] = torch.stack(
-            [result.tensor(component, frequency=frequency) for frequency in frequencies],
+            [result._native_tensor(component, frequency=frequency) for frequency in frequencies],
             dim=0,
         )
     return fields
@@ -118,7 +118,7 @@ def combine_coherent_sar(
                     )
                 summed[name] = summed[name] + weight * tensor
 
-    sar = resolved[0].sar(
+    sar = resolved[0]._sar(
         monitor,
         averaging=averaging,
         normalization=normalization,
@@ -249,7 +249,7 @@ def combine_incoherent_sar(
         if cell_sizes is None:
             raise ValueError(
                 "combine_incoherent_sar cannot recompute averaging: the operand SARResult "
-                "carries no cell-size provenance (recompute it from a fresh Result.sar)."
+                "carries no cell-size provenance (recompute it from a fresh mw.sar.sar(result, ...))."
             )
         averaged, peaks = compute_mass_averaged_sar(
             averaging,

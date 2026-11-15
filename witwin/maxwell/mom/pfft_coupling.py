@@ -230,7 +230,7 @@ class ClusteredExterior:
             self.regions.append((index, PFFTRegionOperator(region, correction, medium)))
             clusters.append((index, member_bases, centre, radius))
         self.coupling = PlaneWaveCoupling(clusters, medium, digits=config.digits,
-                                          precision=config.grid_precision, device=device)
+                                          precision=config.grid_precision.value, device=device)
 
     def channels(self, value):
         d, k = self.coupling.channels(value, self.count)

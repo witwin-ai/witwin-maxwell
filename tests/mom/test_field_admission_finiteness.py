@@ -65,9 +65,9 @@ def periodic_handle(tensor):
               else compile_medium(mw.Material(eps_r=2.), 3e8))
     basis = basis_at(0.)
     system = SurfaceSystem.create([(0, 'body', basis, medium)])
-    config = mw.MoMConfig(integration=IntegrationConfig(order=1, singular_order=1),
-        dyadic_integration=mw.DyadicIntegrationConfig() if tensor else None,
-        periodic=mw.MoMPeriodicConfig(((2., 0., 0.),)))
+    config = mw.mom.MoMConfig(integration=IntegrationConfig(order=1, singular_order=1),
+        dyadic_integration=mw.mom.DyadicIntegrationConfig() if tensor else None,
+        periodic=mw.mom.MoMPeriodicConfig(((2., 0., 0.),)))
     handle = SystemDecodeHandle(system, compile_medium(mw.Material(), 3e8), [], config, {})
     return handle, config.periodic.compile(device='cuda', dtype=torch.complex128)
 

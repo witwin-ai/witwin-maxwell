@@ -5,6 +5,7 @@ The default prepares only. Full execution is explicit because a skin-resolved
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import argparse
 import hashlib
 import json
@@ -31,17 +32,17 @@ def validation_identity():
     return {str(path.resolve()):hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
 
 
-def scene_control(family, kind, frequency, cells_per_skin, *, device="cuda:0"):
+def scene_control(family, kind, frequency, cells_per_skin):
     from witwin.maxwell.adapters.pcb import import_pcb_scene
     original = json.loads((FIXTURES/f"metahz-scene-pcb-{family}.json").read_text())
     definition = candidate(original, finite_copper=True)
-    scene = (pcb_volume_scene(family,frequency,cells_per_skin,device=device) if kind == "volume"
-             else import_pcb_scene(definition,frequency=frequency,device=device))
+    scene = (pcb_volume_scene(family,frequency,cells_per_skin) if kind == "volume"
+             else import_pcb_scene(definition,frequency=frequency))
     if kind == "volume":
         for record in definition["conductors"]:
             record["bounds_m"][5] += record["constitutive_model"]["thickness_m"]
     monitors = power_observations(definition,scene,frequency)
-    return scene.clone(monitors=monitors), definition
+    return scene.updated(monitors=monitors), definition
 
 
 def volume_material_heat(result, *, copper):
@@ -57,10 +58,10 @@ def volume_material_heat(result, *, copper):
     from witwin.maxwell.scene import prepare_scene
     structures = tuple(s for s in result.scene.structures
         if (s.name in ("positive-pad","negative-pad")) == copper)
-    scene = result.scene.clone(structures=structures,ports=(),sources=())
+    scene = result.scene.updated(structures=structures, ports=(), sources=())
     monitor = next(m for m in scene.monitors if m.name == "bulk_loss")
-    compiled = compile_power_loss_monitor(prepare_scene(scene,lazy_meshgrid=True),monitor)
-    fields = {component:torch.stack([result.tensor(component,frequency=f) for f in result.frequencies])
+    compiled = compile_power_loss_monitor(prepare_scene(scene,device=result._data_device(),lazy_meshgrid=True),monitor)
+    fields = {component:torch.stack([result.field(component,frequency=f).values for f in result.frequencies])
               for component in ("Ex","Ey","Ez")}
     return compute_power_loss_data(compiled,torch.as_tensor(result.frequencies,device=compiled.device,
         dtype=torch.float64),electric_fields=fields).conduction
@@ -73,11 +74,13 @@ def run(args):
     scene,definition = scene_control(args.family,args.kind,args.frequency,args.cells_per_skin)
     if args.edge_cells_per_skin is not None:
         scene = refine_pcb_edges(scene,args.frequency,args.edge_cells_per_skin)
-    simulation = mw.Simulation.fdtd(scene,frequency=args.frequency,
-        excitations=mw.PortExcitation(scene.ports[0].name,
+    simulation = mw.Simulation.fdtd(scene,frequencies=args.frequency,
+        excitations=mw.rf.PortExcitation(scene.ports[0].name,
             source_time=mw.GaussianPulse(args.frequency,fwidth=args.frequency)),
-        run_time=mw.TimeConfig(time_steps=1,transient_cycles=0),
-        spectral_sampler=mw.SpectralSampler(window="none"),full_field_dft=True)
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1,transient_cycles=0),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),full_field_dft=True,
+        ))
     torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     preflight = simulation.prepare()
@@ -102,9 +105,9 @@ def run(args):
     if not args.execute:
         return report
     del preflight,solver
-    simulation.config.run_time = mw.TimeConfig(time_steps=steps,transient_cycles=0)
-    batch = mw.Simulation.batch([simulation],outputs=mw.BatchOutput(fields=("Ex","Ey","Ez")),
-        execution=mw.BatchExecution(devices=("cuda:0",),batch_size=1,graph="required",graph_steps=256))
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=steps,transient_cycles=0))
+    batch = mw.Simulation.batch([simulation],outputs=mw.execution.BatchOutput(fields=("Ex","Ey","Ez")),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",),batch_size=1,graph="required",graph_steps=256))
     report["processes_before"] = processes()
     start = time.perf_counter()
     with batch.prepare() as execution:
@@ -117,15 +120,15 @@ def run(args):
     report["peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
     report["processes_after"] = processes()
     start = time.perf_counter()
-    total_bulk = result.power_loss("bulk_loss").conduction
+    total_bulk = result.monitor("bulk_loss").conduction
     copper = (volume_material_heat(result,copper=True) if args.kind == "volume" else
-              sum((row["surface_power"].to(total_bulk.device) for row in result.conductor_losses.values()),
+              sum((row["surface_power"].to(total_bulk.device) for row in mw.rf.conductor_losses(result).values()),
                   torch.zeros_like(total_bulk)))
     substrate = total_bulk-copper if args.kind == "volume" else total_bulk
     report["bulk_loss_partition"] = "actual total native bulk work minus last-declared copper contribution" if args.kind == "volume" else "bulk work plus separately retained two-trace conductor work"
     report["copper_w"],report["substrate_w"] = copper.detach().cpu().tolist(),substrate.detach().cpu().tolist()
     args.output.write_text(json.dumps(report,indent=2)+"\n")
-    antenna = result.antenna(surface="radiation",driven_port=scene.ports[0].name,
+    antenna = mw.antenna.antenna(result, surface="radiation",driven_port=scene.ports[0].name,
         theta_points=91,phi_points=73,radius=10.)
     port = result.port(scene.ports[0].name)
     report.update({"reflection":[[float(v.real),float(v.imag)] for v in port.reflection_coefficient.flatten()],

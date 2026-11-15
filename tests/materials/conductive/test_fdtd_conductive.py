@@ -32,64 +32,64 @@ def _abs_np(tensor: torch.Tensor) -> np.ndarray:
 def test_conductive_material_runs_and_is_finite():
     """A nonzero sigma_e material must run an FDTD simulation without raising."""
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(0.03),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1e6),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="lossy_cube",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.12, 0.12, 0.12)),
-            material=mw.Material(eps_r=2.0, sigma_e=0.05),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.09, 0.0, 0.0),
-            width=0.04,
-            polarization=(0.0, 0.0, 1.0),
-            source_time=mw.CW(frequency=1e9, amplitude=50.0),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(0.03),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1e6),
+                structures=(
+            mw.Structure(
+                name="lossy_cube",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.12, 0.12, 0.12)),
+                material=mw.Material(eps_r=2.0, sigma_e=0.05),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(-0.09, 0.0, 0.0),
+                width=0.04,
+                polarization=(0.0, 0.0, 1.0),
+                source_time=mw.CW(frequency=1e9, amplitude=50.0),
+            ),
+            ),
+            )
 
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=80),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=80),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=True,
+        ),
     ).run()
 
-    assert torch.isfinite(result.E.z).all()
-    assert torch.isfinite(result.E.x).all()
-    assert torch.isfinite(result.E.y).all()
+    assert torch.isfinite(result.E.z.isel(f=0).values).all()
+    assert torch.isfinite(result.E.x.isel(f=0).values).all()
+    assert torch.isfinite(result.E.y.isel(f=0).values).all()
 
 
 def _build_conductive_slab_scene(*, sigma_e: float):
     """A z-polarized point dipole in front of a full-transverse conductive slab."""
     half = _SLAB_HALF
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
-        grid=mw.GridSpec.uniform(_SLAB_RES),
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1e7),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="conductive_slab",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.12, 1.2, 1.2)),
-            material=mw.Material(eps_r=2.0, sigma_e=sigma_e),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.24, 0.0, 0.0),
-            width=0.04,
-            polarization=(0.0, 0.0, 1.0),
-            source_time=mw.CW(frequency=1e9, amplitude=100.0),
-        )
-    )
+                domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
+                grid=mw.GridSpec.uniform(_SLAB_RES),
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=1e7),
+                structures=(
+            mw.Structure(
+                name="conductive_slab",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.12, 1.2, 1.2)),
+                material=mw.Material(eps_r=2.0, sigma_e=sigma_e),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(-0.24, 0.0, 0.0),
+                width=0.04,
+                polarization=(0.0, 0.0, 1.0),
+                source_time=mw.CW(frequency=1e9, amplitude=100.0),
+            ),
+            ),
+            )
     return scene
 
 
@@ -118,13 +118,15 @@ def test_fdtd_conductive_slab_attenuates_against_lossless_control():
         result = mw.Simulation.fdtd(
             _build_conductive_slab_scene(sigma_e=sigma_e),
             frequencies=[freq],
-            run_time=mw.TimeConfig.auto(steady_cycles=20, transient_cycles=15),
-            spectral_sampler=mw.SpectralSampler(window="hanning"),
-            full_field_dft=True,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=20, transient_cycles=15),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                full_field_dft=True,
+            ),
         ).run()
         ratios.append(
             _slab_transmission_ratio(
-                _abs_np(result.E.z),
+                _abs_np(result.E.z.isel(f=0).values),
                 result.solver.scene.x_nodes64,
             )
         )
@@ -146,37 +148,36 @@ class _ConductiveDesignScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="lossy",
-                geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
-                material=mw.Material(eps_r=2.0, sigma_e=0.1),
-            )
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, -0.06), size=(0.12, 0.12, 0.12)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.12),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    structures=(
+                mw.Structure(
+                    name="lossy",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
+                    material=mw.Material(eps_r=2.0, sigma_e=0.1),
+                ),
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, -0.06), size=(0.12, 0.12, 0.12)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.12),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -186,12 +187,14 @@ def test_fdtd_adjoint_accepts_conductive_media():
     simulation = mw.Simulation.fdtd(
         model,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=24),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=24),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
     result = simulation.run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).sel(component="Ez").values
     loss = (data * data.conj()).real if data.is_complex() else data * data
     loss.backward()
     grad = model.logits.grad

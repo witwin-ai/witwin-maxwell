@@ -36,8 +36,11 @@ from .open_surface import OpenRWGBasis, compile_open_surface
 from .operator import local_geometry
 from .physics import compile_medium, source_phasor, validate_scene_structure
 from .quadrature import triangle_rule
+from .results import point_monitor_data
 from .single_layer import SINGLE_LAYER_VERSION, assemble_single_layer, global_divergence
 from .topology import EFIE_OPEN_PEC
+from ..errors import UnsupportedFeatureError
+from .._stability import experimental
 
 FORMULATION_ID = 'efie_open_pec_exp_minus_iwt_v1'
 CURRENT_KIND = 'total_electric_surface_current_A_per_m'
@@ -45,6 +48,7 @@ RHS_VERSION = 'efie_tested_incident_field_v1'
 DECODER_VERSION = 'efie_single_layer_static_subtracted_fields_v1'
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class OpenSurfaceConfig:
     """Discretization controls specific to open conducting sheets.
@@ -69,7 +73,7 @@ def efie_identity(config):
     return {'formulation': EFIE_OPEN_PEC, 'formulation_id': FORMULATION_ID, 'current_kind': CURRENT_KIND,
             'basis_id': 'open_rwg_interior_edges_v1', 'test_space_id': 'RWG',
             'single_layer_version': SINGLE_LAYER_VERSION, 'kernel_id': FREE_SPACE.kernel_id,
-            'kernel_version': FREE_SPACE.version, 'operator_backend': config.operator_backend,
+            'kernel_version': FREE_SPACE.version, 'operator_backend': config.operator_backend.value,
             **({'pfft': config.pfft.payload()} if config.operator_backend == 'pfft' else {}),
             'rhs_version': RHS_VERSION, 'decoder_version': DECODER_VERSION}
 
@@ -84,8 +88,9 @@ def validate_efie_config(config):
     # backend, so this loop also rejects all of them.
     for name, value in unsupported.items():
         if value is not None:
-            raise NotImplementedError(f'The open-surface PEC EFIE does not support MoMConfig.{name}; '
-                                      'only the dense free-space backend is implemented')
+            raise UnsupportedFeatureError(f'The open-surface PEC EFIE does not support MoMConfig.{name}; '
+                                      'only the dense free-space backend is implemented',
+                                          feature="guard:848ab151", method="mom")
     # The pFFT single layer uses the local RWG Gram metric (riesz_storage=local_rwg_v1).
     if config.operator_backend == 'dense' and config.riesz_storage != 'dense':
         raise ValueError('The open-surface PEC EFIE uses one dense RWG Gram residual metric (riesz_storage=dense)')
@@ -191,7 +196,7 @@ def compile_open_pec_scene(scene, frequency, config):
     validate_efie_config(config)
     validate_scene_structure(scene, frequency, point_dipoles=True, formulation=EFIE_OPEN_PEC)
     from .runtime import _validate_surface_queries
-    _validate_surface_queries(scene)
+    _validate_surface_queries(scene, config.device)
     exterior = compile_medium(Material(), frequency, background=True)
     dtype = torch.float64 if config.dtype == torch.complex128 else torch.float32
     resolution = None if config.open_surface is None else config.open_surface.max_edge_length_m
@@ -199,7 +204,7 @@ def compile_open_pec_scene(scene, frequency, config):
     for index, structure in enumerate(scene.structures):
         if not structure.enabled:
             continue
-        mesh = compile_open_surface(structure.geometry, device=scene.device, dtype=dtype,
+        mesh = compile_open_surface(structure.geometry, device=config.device, dtype=dtype,
                                     max_edge_length_m=resolution)
         basis = OpenRWGBasis(mesh)
         bodies.append(OpenSurfaceBody(index, structure.name, basis, edges, faces))
@@ -504,9 +509,10 @@ class OpenSurfaceData:
                                          far_field_function=self.far_field)
 
     def snapshot(self):
-        raise NotImplementedError('Open-surface EFIE results do not support snapshot persistence: no payload '
+        raise UnsupportedFeatureError('Open-surface EFIE results do not support snapshot persistence: no payload '
                                   'schema binds the sheet meshes, open RWG layout and total-current carrier, '
-                                  'so Result.save/load would not be verifiable; re-run the Simulation instead')
+                                  'so Result.save/load would not be verifiable; re-run the Simulation instead',
+                                      feature="guard:7a12d62b", method="mom")
 
 
 class OpenPECRuntime:
@@ -514,7 +520,8 @@ class OpenPECRuntime:
 
     def __init__(self, simulation):
         if simulation.has_trainable_parameters:
-            raise NotImplementedError('Open-surface EFIE geometry/material derivatives are not supported')
+            raise UnsupportedFeatureError('Open-surface EFIE geometry/material derivatives are not supported',
+                                          feature="guard:e44de633", method="mom")
         self.simulation = simulation
         config = simulation.config
         system, exterior = compile_open_pec_scene(simulation.scene, simulation.frequency, config)
@@ -557,15 +564,11 @@ class OpenPECRuntime:
             electric, magnetic = data.query_fields(points)
             index = {position: i for i, position in enumerate(positions)}
             distances = surface_distances(self.handle.system, points)
+            samples = torch.cat((electric, magnetic), -1)
             for monitor in sim.scene.monitors:
                 i = index[monitor.position]
-                values = dict(zip(('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz'), torch.cat((electric[i], magnetic[i]))))
-                components = {name.capitalize(): values[name.capitalize()] for name in monitor.fields}
-                monitors[monitor.name] = {'kind': 'point', 'fields': tuple(components), 'components': components,
-                    **components, 'position': monitor.position, 'frequency': sim.frequency,
-                    'frequencies': (sim.frequency,), 'region_id': 0, 'field_kind': 'total',
-                    'coordinate_units': 'm', 'phasor_convention': 'exp(-i omega t)',
-                    'sampling': 'physical_position', 'distance_to_surface_m': float(distances[i])}
+                monitors[monitor.name] = point_monitor_data(monitor, samples[i][None], (sim.frequency,),
+                    region_id=0, distance_to_surface_m=float(distances[i]))
         return Result(method='mom', scene=sim.scene, frequency=sim.frequency, solver=self, surface_data=data,
                       solver_stats=log, monitors=monitors,
                       metadata={**sim.metadata, **copy.deepcopy(self.handle.metadata),

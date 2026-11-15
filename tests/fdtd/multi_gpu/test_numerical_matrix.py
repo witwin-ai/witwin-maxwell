@@ -13,6 +13,7 @@ from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd_parallel import FDTDParallelConfig
 from witwin.maxwell.result import Result
 from witwin.maxwell.scene import prepare_scene
+from tests.support.core_solver import bind_core
 
 
 _FREQUENCY = 1.0e9
@@ -50,6 +51,7 @@ def _run_pair(
 ) -> _SolvePair:
     single = FDTD(prepare_scene(scene), frequency=_FREQUENCY, absorber_type="cpml")
     single.init_field()
+    bind_core(single)
     single_output = single.solve(
         time_steps=time_steps,
         dft_frequency=dft_frequency,
@@ -91,29 +93,30 @@ def _small_scene(*, source_time=None, time_monitor: bool = False) -> mw.Scene:
         ),
         grid=mw.GridSpec.custom(x, y, z),
         boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
     )
     if source_time is not None:
-        scene.add_source(
+        scene = scene.updated(sources=(
+            *scene.sources,
             mw.PointDipole(
                 position=(0.0, 0.0, 0.0),
                 polarization="Ez",
                 profile="ideal",
                 source_time=source_time,
                 name="interface_pulse",
-            )
-        )
+            ),
+        ))
     if time_monitor:
-        scene.add_monitor(
-            mw.FieldTimeMonitor(
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.monitors.FieldTimeMonitor(
                 "six_field_trace",
                 components=_FIELD_NAMES,
                 position=(0.1, 0.0, 0.0),
                 start=2,
                 stop=46,
                 interval=3,
-            )
-        )
+            ),
+        ))
     return scene
 
 
@@ -248,7 +251,7 @@ def test_two_gpu_sharded_result_save_lazy_and_gather_round_trip(
     )
 
     directory = tmp_path / "two-gpu-sharded-result"
-    manifest = result.save_sharded(directory)
+    manifest = mw.execution.save_sharded(result, directory)
 
     assert tuple(path.name for path in sorted(directory.iterdir())) == (
         "manifest.json",
@@ -279,21 +282,21 @@ def test_two_gpu_sharded_result_save_lazy_and_gather_round_trip(
         assert cursor == reference.shape[global_component.x_axis]
         assert persisted_x == reference.shape[global_component.x_axis]
 
-    lazy = Result.load_sharded(
+    lazy = mw.execution.load_sharded(
         directory,
         scene=solver.logical_scene,
         prepared_scene=solver.scene,
         gather_fields=False,
         map_location="cpu",
     )
-    assert lazy.is_sharded is True
+    assert mw.execution.is_sharded(lazy) is True
     assert lazy.fields == {}
-    assert tuple(path.name for path in lazy.shard_paths) == (
+    assert tuple(path.name for path in mw.execution.shard_paths(lazy)) == (
         "rank-0000.pt",
         "rank-0001.pt",
     )
 
-    gathered = Result.load_sharded(
+    gathered = mw.execution.load_sharded(
         directory,
         scene=solver.logical_scene,
         prepared_scene=solver.scene,
@@ -303,7 +306,7 @@ def test_two_gpu_sharded_result_save_lazy_and_gather_round_trip(
     assert tuple(gathered.fields) == ("EX", "EY", "EZ")
     for name, reference in references.items():
         torch.testing.assert_close(
-            gathered.fields[name.upper()],
+            gathered.fields[name.upper()].values,
             reference.detach().cpu(),
             rtol=0.0,
             atol=0.0,
@@ -318,7 +321,8 @@ def _magnetic_ade_scene() -> mw.Scene:
             amplitude=10.0,
         )
     )
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="interface_magnetic_lorentz",
             geometry=mw.Box(
@@ -334,8 +338,8 @@ def _magnetic_ade_scene() -> mw.Scene:
                     ),
                 ),
             ),
-        )
-    )
+        ),
+    ))
     return scene
 
 
@@ -364,24 +368,23 @@ def test_magnetic_lorentz_ade_six_fields_match_one_gpu(
 def _shutoff_scene() -> mw.Scene:
     nodes = np.linspace(-0.5, 0.5, 26, dtype=np.float64)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.custom(nodes, nodes, nodes),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda:0",
-    )
-    scene.add_source(
-        mw.UniformCurrentSource(
-            size=(0.08, 0.08, 0.08),
-            center=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            source_time=mw.GaussianPulse(
-                frequency=_FREQUENCY,
-                fwidth=0.4e9,
-                amplitude=100.0,
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.custom(nodes, nodes, nodes),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=(
+            mw.UniformCurrentSource(
+                size=(0.08, 0.08, 0.08),
+                center=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                source_time=mw.GaussianPulse(
+                    frequency=_FREQUENCY,
+                    fwidth=0.4e9,
+                    amplitude=100.0,
+                ),
+                name="ringdown_pulse",
             ),
-            name="ringdown_pulse",
-        )
-    )
+            ),
+            )
     return scene
 
 

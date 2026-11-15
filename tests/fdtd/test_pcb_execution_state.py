@@ -9,46 +9,48 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="native CU
 
 def simulation(*, graph=True, thickness=35e-6, coordinate=0, cache=None, monitors=False, window="none", steps=128):
 
-    sheet = mw.PlanarPEC.rectangle(bounds=((-0.025, .025),) * 2, normal_axis="x",
+    sheet = mw.geometry.PlanarPEC.rectangle(bounds=((-0.025, .025),) * 2, normal_axis="x",
                                    coordinate=coordinate, physical_thickness=thickness)
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.04, .04),) * 3), grid=mw.GridSpec.uniform(.01),
-        boundary=mw.BoundarySpec.pml(num_layers=4), device="cuda",
-        structures=[mw.Structure(sheet, mw.Material.pec(), name="screen")],
+        boundary=mw.BoundarySpec.pml(num_layers=4), structures=[mw.Structure(sheet, mw.Material.pec(), name="screen")],
         sources=[mw.PointDipole(position=(-.02, 0, 0), polarization="Ez",
                                 source_time=mw.CW(frequency=2.45e9))],
     )
     if monitors:
-        scene.add_monitor(mw.PointMonitor("point", (-.01, 0, 0), fields=("Ez",)))
-        scene.add_monitor(mw.PlaneMonitor("plane", axis="x", position=-.01, fields=("Ez", "Hy")))
-        scene.add_monitor(mw.FieldTimeMonitor("trace", position=(-.01, 0, 0), components=("Ez",), interval=3))
-        scene.add_monitor(mw.FluxTimeMonitor("flux", axis="x", position=-.01, interval=5))
-    return mw.Simulation.fdtd(scene, frequency=2.45e9, cuda_graph=graph,
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.PointMonitor("point", (-.01, 0, 0), fields=("Ez",)),
+            mw.PlaneMonitor("plane", axis="x", position=-.01, fields=("Ez", "Hy")),
+            mw.monitors.FieldTimeMonitor("trace", position=(-.01, 0, 0), components=("Ez",), interval=3),
+            mw.monitors.FluxTimeMonitor("flux", axis="x", position=-.01, interval=5),
+        ))
+    return mw.Simulation.fdtd(scene, frequencies=2.45e9, config=mw.FDTDConfig(cuda_graph=graph,
         run_time=mw.TimeConfig(time_steps=steps, transient_cycles=0, steady_cycles=1),
-        spectral_sampler=mw.SpectralSampler(window=window, normalize_source=False),
-        full_field_dft=True, material_cache=cache)
+        spectral_sampler=mw.fdtd.SpectralSampler(window=window, normalize_source=False),
+        full_field_dft=True, material_cache=cache))
 
 
 def compare(actual, expected):
     for name in expected.fields:
-        torch.testing.assert_close(actual.fields[name], expected.fields[name], rtol=2e-6, atol=2e-8)
+        torch.testing.assert_close(actual.fields[name].values, expected.fields[name].values, rtol=2e-6, atol=2e-8)
 
 
 def test_planar_pec_graph_and_disk_resume_preserve_actual_fields(tmp_path):
     reference = simulation(graph=False).run()
     captured = simulation().run()
-    assert captured.solver_stats["cuda_graph_active"]
+    assert captured.stats()["cuda_graph_active"]
     compare(captured, reference)
     checkpoint = simulation().prepare().run_until(64)
     assert any(float(v.abs().max()) > 0 for k, v in checkpoint.physics.tensors.items() if k in ("Ex", "Ey", "Ez"))
     checkpoint.save(tmp_path / "checkpoint.pt")
-    restored = mw.FDTDResumeCheckpoint.load(tmp_path / "checkpoint.pt")
+    restored = mw.fdtd.FDTDResumeCheckpoint.load(tmp_path / "checkpoint.pt")
     resumed = simulation().prepare().run(resume_from=restored)
     compare(resumed, reference)
     resumed.save(tmp_path / "result.pt")
     reopened = mw.Result.load(tmp_path / "result.pt", scene=resumed.scene)
     for name in resumed.fields:
-        torch.testing.assert_close(reopened.fields[name].cpu(), resumed.fields[name].cpu())
+        torch.testing.assert_close(reopened.fields[name].values.cpu(), resumed.fields[name].values.cpu())
 
 
 def test_planar_physical_identity_changes_reject_old_checkpoint():
@@ -59,7 +61,7 @@ def test_planar_physical_identity_changes_reject_old_checkpoint():
 
 
 def test_planar_material_cache_copies_masks_and_invalidates_geometry():
-    cache = mw.FDTDMaterialCache(max_entries=2)
+    cache = mw.fdtd.FDTDMaterialCache(max_entries=2)
     uncached = simulation().run()
     first = simulation(cache=cache).prepare()
     second = simulation(cache=cache).prepare()
@@ -80,7 +82,7 @@ def test_spectral_and_time_observations_survive_disk_resume(tmp_path, window, sp
     reference = simulation(monitors=True, window=window, steps=512).run()
     checkpoint = simulation(monitors=True, window=window, steps=512).prepare().run_until(split)
     checkpoint.save(tmp_path / "state.pt")
-    checkpoint = mw.FDTDResumeCheckpoint.load(tmp_path / "state.pt")
+    checkpoint = mw.fdtd.FDTDResumeCheckpoint.load(tmp_path / "state.pt")
     resumed = simulation(monitors=True, window=window, steps=512).prepare().run(resume_from=checkpoint)
     compare(resumed, reference)
 
@@ -96,7 +98,7 @@ def test_spectral_and_time_observations_survive_disk_resume(tmp_path, window, sp
         elif isinstance(b, (int, float, complex)):
             assert a == pytest.approx(b, rel=2e-6, abs=2e-8)
     for name in ("point", "plane", "trace", "flux"):
-        check(resumed.monitor(name), reference.monitor(name))
+        check(resumed.raw_monitor(name), reference.raw_monitor(name))
 
 
 def test_corrupt_observation_state_is_rejected_before_field_restore():
@@ -122,8 +124,8 @@ def test_planar_pec_native_batch_matches_independent_runs():
     configs = [simulation(coordinate=z) for z in (0, .01)]
     reference = [config.run() for config in configs]
     batch = mw.Simulation.batch([simulation(coordinate=z) for z in (0, .01)],
-        outputs=mw.BatchOutput(fields=("Ex", "Ey", "Ez")),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2,
+        outputs=mw.execution.BatchOutput(fields=("Ex", "Ey", "Ez")),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=2,
                                     graph="required", graph_steps=7))
     with batch.prepare() as prepared:
         results = prepared.run()
@@ -138,4 +140,4 @@ def test_resume_can_change_observer_execution_mode(initial_graph):
     resumed = simulation(graph=not initial_graph, monitors=True, steps=512).prepare().run(resume_from=checkpoint)
     compare(resumed, expected)
     from tests.monitors.observers.test_grouped_ordinary_spectra import check
-    check(resumed.monitor("plane"), expected.monitor("plane"))
+    check(resumed.raw_monitor("plane"), expected.raw_monitor("plane"))

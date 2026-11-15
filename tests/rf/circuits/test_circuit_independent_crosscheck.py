@@ -125,8 +125,8 @@ class _Drive:
     times: np.ndarray
     values: np.ndarray
 
-    def waveform(self) -> mw.PiecewiseLinearWaveform:
-        return mw.PiecewiseLinearWaveform(
+    def waveform(self) -> mw.circuits.PiecewiseLinearWaveform:
+        return mw.circuits.PiecewiseLinearWaveform(
             torch.tensor(self.times, dtype=torch.float64),
             torch.tensor(self.values, dtype=torch.float64),
         )
@@ -142,36 +142,37 @@ def _drive(*, t0, tau, fc, amp, tmax=3.0e-9, n=4000) -> _Drive:
     return _Drive(times, _modulated_gaussian(times, t0=t0, tau=tau, fc=fc, amp=amp))
 
 
-def _circuit(resistance: float, waveform) -> mw.Circuit:
-    circuit = mw.Circuit("loop")
+def _circuit(resistance: float, waveform) -> mw.circuits.Circuit:
+    circuit = mw.circuits.Circuit("loop")
     drive = circuit.node("drive")
     pnode = circuit.node("pnode")
-    circuit.add(mw.VoltageSource("V1", drive, circuit.ground, 0.0, waveform=waveform))
-    circuit.add(mw.Resistor("R1", drive, pnode, resistance))
+    circuit.add(mw.circuits.VoltageSource("V1", drive, circuit.ground, 0.0, waveform=waveform))
+    circuit.add(mw.rf.Resistor("R1", drive, pnode, resistance))
     circuit.bind_port("feed", positive=pnode, negative=circuit.ground)
     return circuit
 
 
-def _scene(circuit: mw.Circuit) -> mw.Scene:
+def _scene(circuit: mw.circuits.Circuit) -> mw.Scene:
     return mw.Scene(
         domain=mw.Domain(bounds=_BOUNDS),
         grid=mw.GridSpec.uniform(_DX),
         boundary=mw.BoundarySpec.pml(num_layers=10),
         ports=(_port(),),
         circuits=(circuit,),
-        device="cuda",
     )
 
 
-def _run(circuit: mw.Circuit, *, steps: int):
+def _run(circuit: mw.circuits.Circuit, *, steps: int):
     return mw.Simulation.fdtd(
         _scene(circuit),
         frequencies=tuple(float(f) for f in _BAND),
         # The frozen ODE comparison uses this spatial-CFL sampling and physical
         # horizon; dense waveform-table knots do not redefine that experiment.
-        run_time=mw.TimeConfig(time_steps=steps, dt=8e-12),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps, dt=8e-12),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).run()
 
 
@@ -187,11 +188,11 @@ def measure_admittance(result) -> np.ndarray:
     return i / v
 
 
-def fit_admittance(admittance: np.ndarray) -> mw.RationalModel:
-    config = mw.RationalFitConfig(
+def fit_admittance(admittance: np.ndarray) -> mw.rf.rational.RationalModel:
+    config = mw.rf.rational.RationalFitConfig(
         order=_FIT_ORDER, iterations=10, proportional=True, enforce_stability=True
     )
-    return mw.fit_rational(
+    return mw.rf.rational.fit_rational(
         torch.tensor(_BAND, dtype=torch.float64),
         torch.tensor(admittance, dtype=torch.complex128),
         config,
@@ -203,7 +204,7 @@ def fit_admittance(admittance: np.ndarray) -> mw.RationalModel:
 # Hand-built real modal state-space realization of Y_em(s) and the KVL ODE.
 # NO framework realization helper is used -- this is derived in the test.
 # ---------------------------------------------------------------------------
-def _realize_admittance(model: mw.RationalModel):
+def _realize_admittance(model: mw.rf.rational.RationalModel):
     """Real modal (A, B, C, D, Cp) for Y(s) = D + s*Cp + sum_k r_k/(s - p_k).
 
     Conjugate pole pairs collapse to a real 2x2 controllable-companion block;
@@ -319,7 +320,7 @@ def _coupled_port_trace(result, resistance: float) -> _PortTrace:
     source-node voltage = the applied stimulus V1(t).
     """
 
-    data = result.circuit("loop")
+    data = mw.circuits.circuit(result, "loop")
     times = data.times.detach().cpu().numpy()
     source = data.node_voltage("drive").detach().cpu().numpy()
     v_port = data.node_voltage("pnode").detach().cpu().numpy()

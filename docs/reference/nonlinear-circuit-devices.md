@@ -13,7 +13,7 @@ from the nonlinear electromagnetic *material* constitutive path.
 
 | Slice | Scope | State |
 | --- | --- | --- |
-| N0 | Device + Newton contract, standalone (pure torch): `circuit_devices.py`, `compiler/nonlinear_devices.py`, `Circuit.add` extension, graph type-set registration, transistor contract guards | landed |
+| N0 | Device + Newton contract, standalone (pure torch): `circuit_devices.py`, `tests/oracles/nonlinear_devices.py` (test-only since 0.7.0), `Circuit.add` extension, graph type-set registration, transistor contract guards | landed |
 | N1 | Standalone transient + DC continuation | landed |
 | N2 | EM same-step coupling (forward), `DeviceData` | pending |
 | N3 | Production convergence + resume + graph path | pending |
@@ -29,7 +29,7 @@ from the nonlinear electromagnetic *material* constitutive path.
   `.kind`).
 * `compile_nonlinear_devices` -> fixed-shape, per-model-signature
   `CompiledNonlinearDevice` batches with analytic conduction `i(v)` / `di/dv` and
-  stored charge `q(v)` / `dq/dv` (`witwin/maxwell/compiler/nonlinear_devices.py`).
+  stored charge `q(v)` / `dq/dv` (`tests/oracles/nonlinear_devices.py`).
 * `NonlinearMNASystem` dense node-voltage residual/Jacobian assembler and the
   `newton_solve` Newton-Raphson core with the **dual convergence gate**, stable
   `expm1` + `pnjlim` junction limiting, and backtracking line search.

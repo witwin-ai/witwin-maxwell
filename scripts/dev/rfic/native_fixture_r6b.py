@@ -19,11 +19,11 @@ def record(directory,name,simulation,repeat=1):
     result=simulation.run()
     y=result.network.to_y().detach().cpu()
     s=result.network.s.detach().clone()
-    currents=result.surface_currents.currents.detach().clone()
+    currents=mw.mom.surface_currents(result).currents.detach().clone()
     for _ in range(repeat-1):
         other=simulation.run()
         assert torch.equal(s,other.network.s)
-        assert torch.equal(currents,other.surface_currents.currents)
+        assert torch.equal(currents,mw.mom.surface_currents(other).currents)
         del other
     torch.cuda.synchronize()
     series=-1/y[:,1,0] if y.shape[-1]==2 else 1/y[:,0,0]
@@ -39,7 +39,7 @@ def record(directory,name,simulation,repeat=1):
     if name.startswith("vacuum"):
         from witwin.maxwell.mom.layered.runtime import compile_layered_scene
         _,rectangles,_,materials,_,_,_=compile_layered_scene(simulation.scene)
-        layout=result.surface_currents.layout
+        layout=mw.mom.surface_currents(result).layout
         centres=layout.mesh.centroids
         thickness=torch.zeros(len(centres),device=centres.device,dtype=torch.float64)
         for (x0,x1,y0,y1,z),(_,t,_) in zip(rectangles,materials):
@@ -47,7 +47,7 @@ def record(directory,name,simulation,repeat=1):
                    &(centres[:,1]<y1)&(centres[:,2]==z))
             thickness[owned]=t
         edges=layout.basis.face_edges
-        local=result.surface_currents.currents[:,edges.clamp_min(0),:]
+        local=mw.mom.surface_currents(result).currents[:,edges.clamp_min(0),:]
         local=local*(edges>=0)[None,:,:,None]
         blocks=(layout.basis.mass_blocks()*thickness[:,None,None]).to(torch.complex128)
         bilinear=torch.einsum("ftia,tij,ftjb->fab",local,blocks,local)
@@ -77,15 +77,14 @@ if __name__=="__main__":
         del f
     if args.group in ("all","vacuum"):
         f=fixture_fa(substrate=False,lossy=True,mesh="full")
-        scene=mw.Scene(background=f.scene.background,device="cuda")
+        scene=mw.Scene(background=f.scene.background)
         for structure in f.scene.structures:
             geometry=structure.geometry
             if getattr(geometry,"kind",None)=="planar_pec":
-                geometry=mw.PlanarPEC(geometry.vertices,holes=geometry.holes,normal_axis="z",
+                geometry=mw.geometry.PlanarPEC(geometry.vertices,holes=geometry.holes,normal_axis="z",
                     coordinate=geometry.coordinate,physical_thickness=.1e-6)
-            scene.add_structure(mw.Structure(geometry,structure.material))
-        for port in f.scene.ports:
-            scene.add_port(port)
+            scene = scene.updated(structures=(*scene.structures, mw.Structure(geometry,structure.material)))
+        scene = scene.updated(ports=(*scene.ports, *f.scene.ports))
         record(args.directory,"vacuum-thin-lossy1-full",
                mw.Simulation.mom(scene,frequencies=(.1e9,1e9),config=f.config))
         del f,scene

@@ -37,6 +37,7 @@ import math
 from typing import Any, Mapping
 
 import torch
+from ._stability import experimental
 
 
 BREAKDOWN_MODEL_VERSION = "breakdown-stress-1"
@@ -299,6 +300,7 @@ class BreakdownStressAccumulator:
         )
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class BreakdownStressData:
     """Typed non-feedback dielectric-stress result (per-cell maps stay on device).
@@ -343,6 +345,7 @@ class BreakdownStressData:
 # --------------------------------------------------------------------------- #
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class ComponentRating:
     """Declared absolute-maximum envelope for a rated component.
@@ -396,6 +399,7 @@ def _cumulative_energy(time: torch.Tensor, power: torch.Tensor) -> torch.Tensor:
     return torch.cat((zero, running), dim=0)
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class ComponentStressData:
     """Typed component port-stress record and rating exceedance summary.

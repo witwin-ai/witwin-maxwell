@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA requ
 
 def compressed_config(backend, integration):
     stopping_parameters = {'preconditioner': 'none'} if backend in ('direct_h2', 'fmm') else {}
-    return mw.MoMConfig(operator_backend=backend, integration=integration,
+    return mw.mom.MoMConfig(operator_backend=backend, integration=integration,
         riesz_storage='local_rwg_v1', stopping=StoppingRule(method='gmres', fallback='none',
                                                        **stopping_parameters))
 
@@ -35,7 +35,7 @@ def original_rhs():
     sources = (mw.PlaneWave(direction=(.6, 0., .8), polarization=(0., 1., 0.)),
         mw.PlaneWave(direction=(.6, 0., -.8), polarization=(0., 1., 0.),
                      source_time=mw.CW(frequency=3e8, amplitude=.4)))
-    handle = SystemDecodeHandle(system, exterior, sources, mw.MoMConfig(integration=integration), {})
+    handle = SystemDecodeHandle(system, exterior, sources, mw.mom.MoMConfig(integration=integration), {})
     reference = tuple(build_lifted_rhs(local)[0] for local in handle.body_handles)
     return system, exterior, sources, integration, reference
 
@@ -99,15 +99,15 @@ def test_public_shared_compact_solve_uses_bounded_rhs_and_passes_complete_origin
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.01, position=(x, 0., 0.)),
         mw.Material(eps_r=2.+i, mu_r=1.2+.1*i)) for i, x in enumerate((-.2, .2))],
         sources=[mw.PlaneWave()])
-    fmm = mw.FMMConfig(order=6, max_order=10, kernel_error_budget=mw.KernelErrorBudget(1e-6, 1e-5),
+    fmm = mw.mom.FMMConfig(order=6, max_order=10, kernel_error_budget=mw.mom.KernelErrorBudget(1e-6, 1e-5),
         kernel_bound_rule='direct_first_wave_min_v1', table_storage='compact_shared_displacement_v1',
         shift_storage='separable_v1', near_storage='scalar_reciprocal_dk_v1', leaf_size=8,
         separation_ratio=.25, leaf_factor_kernel='primary', leaf_factor_max_edges=16)
-    config = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=4, singular_order=3),
+    config = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=4, singular_order=3),
         operator_backend='fmm', fmm=fmm, riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal', fallback='none',
                              rtol=1e-12, atol=0., maxiter=240, restart=120))
-    prepared = mw.Simulation.mom(scene, frequency=9e7, config=config).prepare()
+    prepared = mw.Simulation.mom(scene, frequencies=9e7, config=config).prepare()
     result = prepared.run()
     assert result.stats()['converged'] and result.stats()['error_budget']['checked']
     solver = prepared.solver
@@ -118,7 +118,7 @@ def test_public_shared_compact_solve_uses_bounded_rhs_and_passes_complete_origin
     assert all(r['rhs_near_quadrature']['maximum_accepted_relative_difference'] <= 1e-5
                for r in solver.handle.metadata['rhs_bodies'])
     receipt = measure_original_global_residual(solver.handle.provider,
-        result.surface_currents.scattered_coefficients, solver.rhs, edge_batch=19, source_batch=17)
+        mw.mom.surface_currents(result).scattered_coefficients, solver.rhs, edge_batch=19, source_batch=17)
     assert receipt['all_original_rows_measured'] and receipt['all_rhs_passed']
     assert receipt['relative_tolerance'] == 1e-10 and receipt['absolute_tolerance'] == 0.
     assert not receipt['physical_qualification']

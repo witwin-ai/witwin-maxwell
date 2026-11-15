@@ -5,6 +5,7 @@ import torch
 import witwin.maxwell.fdtd.adjoint as fdtd_adjoint
 from witwin.maxwell.fdtd.material_pullback import node_gradient_from_yee_permittivity
 from witwin.maxwell.scene import MaterialRegion, prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 def expected_cpml_reverse_backend() -> str:
     return "native_cpml"
@@ -69,7 +70,7 @@ def _clone_scene_with_densities(scene, density_tensors, trainable_region_indices
             material_regions.append(_clone_material_region(region, next(density_iter)))
         else:
             material_regions.append(region)
-    return scene.clone(material_regions=material_regions)
+    return scene.updated(material_regions=material_regions)
 
 
 def material_pullback_autograd(
@@ -84,7 +85,7 @@ def material_pullback_autograd(
 ) -> tuple[torch.Tensor, ...]:
     if not density_tensors:
         return ()
-    prepared_scene = prepare_scene(scene)
+    prepared_scene = prepare_scene(scene, device=grad_eps_ex.device)
 
     grad_eps_r = node_gradient_from_yee_permittivity(
         prepared_scene,
@@ -104,7 +105,7 @@ def material_pullback_autograd(
             density_inputs,
             trainable_region_indices,
         )
-        model = prepare_scene(cloned_scene).compile_materials()
+        model = compile_materials(prepare_scene(cloned_scene, device=grad_eps_ex.device))
         scalar = torch.sum(model["eps_r"] * grad_eps_r.to(dtype=model["eps_r"].dtype))
         grads = torch.autograd.grad(
             scalar,

@@ -88,7 +88,7 @@ def provider_beta(provider, waveform):
 
 def result_clock(result=None, solver=None, prepared_clock=None):
     """Read scalar metadata only; never copy or evaluate field tensors."""
-    stats = (result.solver_stats or {}) if result is not None else {}
+    stats = (result.stats() or {}) if result is not None else {}
     solver = getattr(result, "solver", None) if solver is None else solver
     candidates, leaves = {}, []
 
@@ -985,11 +985,11 @@ def self_test(output, hook_dir):
     controls.append("noncontiguous, singleton-strided and conjugate byte comparisons; signed zeros stay distinct")
     for stats in ({"dt": dt}, {"columns": ({"dt": dt}, {"dt": dt})},
                   {"columns": (({"dt": dt},), ({"dt": dt},))}):
-        item = SimpleNamespace(solver=None, solver_stats=stats, frequencies=frequencies)
+        item = SimpleNamespace(solver=None, stats=lambda stats=stats: stats, frequencies=frequencies)
         assert result_clock(item)["dt"] == dt
     for stats in ({"columns": ({"dt": dt}, {"dt": 2 * dt})}, {}):
         try:
-            result_clock(SimpleNamespace(solver=None, solver_stats=stats, frequencies=frequencies))
+            result_clock(SimpleNamespace(solver=None, stats=lambda stats=stats: stats, frequencies=frequencies))
         except ValueError:
             pass
         else:
@@ -1178,12 +1178,12 @@ def self_test(output, hook_dir):
         "    return result\n")
     source = ("from types import SimpleNamespace\n"
               "class R:\n"
-              "    solver_stats = {'dt': 0.037}\n"
+              "    def stats(self):\n        return {'dt': 0.037}\n"
               "    frequencies = (0.4, 0.9)\n"
               "    solver = SimpleNamespace(dt=0.037, _normalize_source=False)\n"
               "def _record(prefix, result, payload):\n    pass\n"
               "_record('fixture', R(), {})\n"
-              "batch = SimpleNamespace(solver=None, solver_stats={'dt': 0.037}, frequencies=(0.4, 0.9))\n"
+              "batch = SimpleNamespace(solver=None, stats=lambda: {'dt': 0.037}, frequencies=(0.4, 0.9))\n"
               "prepared = SimpleNamespace(dt=0.037, _normalize_source=False, "
               "_normalization_reference_provider='terminal_drive', _normalization_reference_waveform_kind='cw', "
               "_normalization_label_offset=0.5, _normalization_time_offset=0.5)\n"

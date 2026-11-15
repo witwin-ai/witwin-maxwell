@@ -11,8 +11,8 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires 
 def test_auto_capacity_uses_multiple_lanes_inside_hard_budget(graph):
     sims = [simulation(i, steps=31) for i in range(5)]
     limit = 128 * 1024**2
-    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size="auto",
+    batch = mw.Simulation.batch(sims, variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size="auto",
                                    memory_limit_bytes=limit, graph=graph))
     with batch.prepare() as prepared:
         assert 1 < prepared.capacity <= 5
@@ -31,7 +31,7 @@ def test_auto_capacity_uses_multiple_lanes_inside_hard_budget(graph):
 
 
 def test_tiny_fixed_budget_fails_before_running():
-    batch = mw.Simulation.batch([simulation()], execution=mw.BatchExecution(
+    batch = mw.Simulation.batch([simulation()], execution=mw.execution.BatchExecution(
         devices=("cuda:0",), batch_size=1, memory_limit_bytes=1024))
     with pytest.raises(torch.cuda.OutOfMemoryError):
         batch.prepare()
@@ -39,8 +39,8 @@ def test_tiny_fixed_budget_fails_before_running():
 
 def test_auto_capacity_retries_without_duplicate_publication(monkeypatch):
     batch = mw.Simulation.batch([simulation(i, steps=8) for i in range(5)],
-        variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size="auto", graph="off"))
+        variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size="auto", graph="off"))
     with batch.prepare() as prepared:
         original = prepared._solve_cohort
         def constrained():
@@ -58,16 +58,16 @@ def test_auto_capacity_retries_without_duplicate_publication(monkeypatch):
 
 def test_budget_accounts_for_retained_full_field_results_and_graph_pool():
     batch = mw.Simulation.batch([simulation(i, steps=31, frequencies=(.9e9, 1e9, 1.1e9)) for i in range(3)],
-        variation=mw.BatchVariation(sources=("drive",)), outputs=mw.BatchOutput(fields=("Ez",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=3,
+        variation=mw.execution.BatchVariation(sources=("drive",)), outputs=mw.execution.BatchOutput(fields=("Ez",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=3,
                                    memory_limit_bytes=128 * 1024**2, graph="required"))
     with batch.prepare() as prepared:
         first = prepared.run()
         first.results()
-        saved = first[0].tensor("Ez").clone()
+        saved = first[0].field("Ez").values.clone()
         second = prepared.run()
         second.results()
         stats = prepared._budget.stats()
         assert stats["peak_charged_bytes"] <= stats["limit_bytes"]
         assert prepared.report.memory == stats
-    torch.testing.assert_close(first[0].tensor("Ez"), saved, rtol=0, atol=0)
+    torch.testing.assert_close(first[0].field("Ez").values, saved, rtol=0, atol=0)

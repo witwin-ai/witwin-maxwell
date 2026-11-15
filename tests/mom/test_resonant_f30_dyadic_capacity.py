@@ -110,7 +110,7 @@ def test_original_f30_dyadic_center_minimum_capacity_before_expansions(monkeypat
         save()
         try:
             plan = plan_multipole_order(((trees[0], exterior), (trees[1], interior)),
-                mw.KernelErrorBudget(1e-6, 1e-5), min_order=6, max_order=12,
+                mw.mom.KernelErrorBudget(1e-6, 1e-5), min_order=6, max_order=12,
                 separation_ratio=.25, table_budget_bytes=1024**3,
                 table_storage='compact_shared_displacement_v1', kernel_bound_rule='positive_tail_min_v1')
         except MultipoleOrderError as error:

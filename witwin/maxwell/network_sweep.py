@@ -9,6 +9,8 @@ import torch
 from .lumped import PortExcitation, PortSweep, SeriesRLC
 from .network import NetworkData, PortData
 from .sources import GaussianPulse
+from .errors import UnsupportedFeatureError
+from .scene import scene_declarations
 
 
 @dataclass(frozen=True)
@@ -39,9 +41,10 @@ class NetworkRunManifest:
 def _real_scalar_reference_impedance(port) -> float:
     value = torch.as_tensor(port.reference_impedance)
     if value.requires_grad:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             f"Port {port.name!r} has a trainable reference impedance, but PortSweep "
-            "does not support RF-parameter gradients."
+            "does not support RF-parameter gradients.",
+            feature="port", method="fdtd"
         )
     if value.ndim != 0:
         raise ValueError(
@@ -72,9 +75,10 @@ def resolve_network_run_manifest(scene, sweep: PortSweep, frequencies) -> Networ
     if not isinstance(sweep, PortSweep):
         raise TypeError("sweep must be a PortSweep.")
     if sweep.amplitude.requires_grad:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "PortSweep amplitude is trainable, but PortSweep does not support "
-            "RF-parameter gradients."
+            "RF-parameter gradients.",
+            feature="port", method="fdtd"
         )
     frequency_values = tuple(float(value) for value in frequencies)
     if not frequency_values:
@@ -104,9 +108,10 @@ def resolve_network_run_manifest(scene, sweep: PortSweep, frequencies) -> Networ
             isinstance(value, torch.Tensor) and value.requires_grad
             for value in (termination.r, termination.l, termination.c)
         ):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"Port {port.name!r} has a trainable termination, but PortSweep "
-                "does not support RF-parameter gradients."
+                "does not support RF-parameter gradients.",
+                feature="port", method="fdtd"
             )
         if port.termination is not None:
             raise ValueError(
@@ -128,9 +133,10 @@ def resolve_network_run_manifest(scene, sweep: PortSweep, frequencies) -> Networ
 
 
 def build_network_column_run(scene, sweep: PortSweep, manifest: NetworkRunManifest, active_name: str):
+    declared = scene_declarations(scene)
     ports_by_name = {
         port.name: port
-        for port in scene.ports
+        for port in declared.ports
         if hasattr(port, "reference_impedance") and hasattr(port, "termination")
     }
     excitation = PortExcitation(

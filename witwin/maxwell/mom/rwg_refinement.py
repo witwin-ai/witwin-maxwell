@@ -2,6 +2,8 @@
 import torch
 from .mesh import RWGBasis
 from .operator import local_geometry
+from .ordered_reduction import ordered_index_add_
+from ..errors import UnsupportedFeatureError
 
 
 class RWGRefinement:
@@ -15,7 +17,8 @@ class RWGRefinement:
         if not isinstance(coarse, RWGBasis):
             raise TypeError('RWG refinement requires an RWGBasis')
         if coarse.mesh.vertices.requires_grad:
-            raise NotImplementedError('RWG refinement requires fixed geometry')
+            raise UnsupportedFeatureError('RWG refinement requires fixed geometry',
+                                          feature="guard:4fad1c40", method="mom")
         if coarse._mesh_version != (id(coarse.mesh.vertices), coarse.mesh.vertices._version,
                                    id(coarse.mesh.faces), coarse.mesh.faces._version):
             raise ValueError('Coarse basis geometry changed')
@@ -68,5 +71,4 @@ class RWGRefinement:
     def adjoint(self, value):
         self._validate(value, self.fine.n_edges)
         weighted = (value[..., :, None]*self.weights).flatten(-2)
-        indices = self.columns.flatten().expand(weighted.shape)
-        return value.new_zeros((*value.shape[:-1], self.coarse.n_edges)).scatter_add(-1, indices, weighted)
+        return ordered_index_add_(value.new_zeros((*value.shape[:-1], self.coarse.n_edges)), -1, self.columns.flatten(), weighted)

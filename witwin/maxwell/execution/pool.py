@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 import torch
 
+from ..errors import UnsupportedFeatureError
+
 _batch_pool_context = threading.local()
 
 
@@ -21,7 +23,8 @@ class BatchMemoryPool:
 
     def __init__(self, device, limit_bytes, reserve_bytes, *, account=None):
         if torch.cuda.memory.get_allocator_backend() != "native":
-            raise NotImplementedError("Batch hard budgets require the native PyTorch caching allocator.")
+            raise UnsupportedFeatureError("Batch hard budgets require the native PyTorch caching allocator.",
+                                          feature="guard:0eb3abc4", method="fdtd")
         from ..fdtd.cuda.backend import get_compiled_extension
         library_path = get_compiled_extension().__file__
         self.device = torch.device(device)

@@ -21,7 +21,7 @@ def test_rayleigh_scattered_fields_reconstruct_periodic_decoder(side):
     body=original.system.bodies[0]
     system=SurfaceSystem.create([(body.structure_index,body.name,body.basis,body.interior)])
     sample=body.mesh.vertices
-    handle=SystemDecodeHandle(system,original.exterior,[mw.PlaneWave()],mw.MoMConfig(integration=replace(original.integration,order=6,singular_order=6)),{})
+    handle=SystemDecodeHandle(system,original.exterior,[mw.PlaneWave()],mw.mom.MoMConfig(integration=replace(original.integration,order=6,singular_order=6)),{})
     lattice=LatticeSpec(sample.new_tensor([[.7,0.,0.],[0.,.8,0.]]),sample.new_zeros(3))
     kernel=EwaldHelmholtzKernel(lattice,3.5,real_shells=3,reciprocal_shells=6)
     torch.manual_seed(8)
@@ -71,7 +71,7 @@ def test_coherent_total_rayleigh_plane_flux(side,skew):
         mw.PlaneWave(direction=(direction[0],0.,-direction[2]),polarization=polarization,source_time=mw.CW(
             frequency=original.exterior.frequency,amplitude=.3,phase=-.4))]
     handle=SystemDecodeHandle(system,original.exterior,sources,
-        mw.MoMConfig(integration=replace(original.integration,order=6,singular_order=6)),{})
+        mw.mom.MoMConfig(integration=replace(original.integration,order=6,singular_order=6)),{})
     lattice=LatticeSpec(sample.new_tensor([[.7,0.,0.],[0.,.8,0.]]),sample.new_zeros(3))
     if skew:
         lattice=LatticeSpec(sample.new_tensor([[1.5,.2,0.],[.1,1.4,0.]]),sample.new_zeros(3))
@@ -118,7 +118,7 @@ def test_rayleigh_independent_estimates_and_unresolved_evanescent_tail():
     body=original.system.bodies[0]
     system=SurfaceSystem.create([(body.structure_index,body.name,body.basis,body.interior)])
     sample=body.mesh.vertices
-    handle=SystemDecodeHandle(system,original.exterior,[mw.PlaneWave()],mw.MoMConfig(),{})
+    handle=SystemDecodeHandle(system,original.exterior,[mw.PlaneWave()],mw.mom.MoMConfig(),{})
     lattice=LatticeSpec(sample.new_tensor([[.7,0.,0.],[0.,.8,0.]]),sample.new_zeros(3))
     torch.manual_seed(8)
     currents=.01*torch.randn(2*system.total_edges,device=sample.device,dtype=torch.complex128)

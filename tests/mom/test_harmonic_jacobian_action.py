@@ -37,7 +37,7 @@ def test_native_tangent_transpose_and_product_gradients(monkeypatch):
 @pytest.mark.parametrize('kind,backend',[('current','hmatrix'),('mixed','h2'),('dual','h2')])
 def test_compressed_tangent_finite_difference_and_transpose(kind,backend):
     scene,config=runpy.run_path('tests/mom/test_compressed_hb_public.py')['setup'](kind,backend)
-    prepared=mw.Simulation.mom(scene,frequency=3e8,config=config).prepare()
+    prepared=mw.Simulation.mom(scene,frequencies=3e8,config=config).prepare()
     model=prepared.solver.model
     check_compressed_tangent(model,model.background)
     check_inverse=runpy.run_path('tests/mom/test_harmonic_tangent_inverse.py')['check_compressed_inverse']

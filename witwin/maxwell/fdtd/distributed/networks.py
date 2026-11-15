@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from ...compiler.ports import CompiledPortGeometry
+from ...compiler.ports import CompiledPortGeometry, compile_ports
 from ...fdtd_parallel import FDTDPartitionPlan, FDTDShardLayout
 from ...network import EmbeddedNetworkData
 from ...ports import TerminalPort, _resolve_terminal_port
@@ -29,6 +29,8 @@ from ..ports import (
 )
 from ._shared import local_port_geometry, move_port_data
 from .circuits import _OwnerCurrentReuseState, _owner_for_index
+from ...compiler.networks import compile_networks
+from ...compiler.ports import compile_ports
 
 
 @dataclass(frozen=True)
@@ -72,7 +74,7 @@ def compile_distributed_network_plan(
     O(coupled edges).
     """
 
-    networks = tuple(getattr(scene, "networks", ()))
+    networks = tuple(scene.scene.networks)
     if not networks:
         return None
     if len(networks) != 1:
@@ -85,7 +87,7 @@ def compile_distributed_network_plan(
         raise ValueError("A distributed network must connect at least one FDTD port.")
 
     compiled = tuple(
-        scene.compile_ports(device="cpu") if geometries is None else geometries
+        compile_ports(scene, device="cpu") if geometries is None else geometries
     )
     geometry_by_name = {geometry.port_name: geometry for geometry in compiled}
     if len(set(connection_names)) != len(connection_names):
@@ -272,16 +274,16 @@ class DistributedNetworkRuntime:
         plan = compile_distributed_network_plan(prepared_scene, partition_plan)
         if plan is None:
             return None
-        block = tuple(prepared_scene.networks)[0]
+        block = tuple(prepared_scene.scene.networks)[0]
         owner_shard = tuple(shards)[plan.owner_rank]
         owner_device = owner_shard.device
         ports_by_name = {}
-        for port in prepared_scene.ports:
+        for port in prepared_scene.scene.ports:
             resolved = (
                 _resolve_terminal_port(
                     port,
-                    prepared_scene.structures,
-                    prepared_scene.domain.bounds,
+                    prepared_scene.scene.structures,
+                    prepared_scene.scene.domain.bounds,
                 )
                 if isinstance(port, TerminalPort)
                 else port
@@ -293,7 +295,7 @@ class DistributedNetworkRuntime:
 
         # Compile the network once from the global scene; the owner shard's local
         # scene carries no networks, so the compiled block is injected below.
-        compiled_networks = prepared_scene.compile_networks(
+        compiled_networks = compile_networks(prepared_scene,
             dt=owner_shard.solver.dt,
             device=owner_device,
         )

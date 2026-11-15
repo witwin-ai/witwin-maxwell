@@ -27,8 +27,9 @@ from witwin.maxwell.compiler.gyromagnetic import (
     CompiledGyromagneticLayout,
     compile_gyromagnetic_layout,
 )
-from witwin.maxwell.fdtd import ferrite_reference as oracle
+from tests.oracles import ferrite_reference as oracle
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_gyromagnetic_materials
 
 MU_0 = 4.0e-7 * math.pi
 
@@ -41,21 +42,19 @@ def _ferrite(bias=(0.0, 0.0, 1.75e5), **kwargs):
         gilbert_damping=2.0e-3,
     )
     base.update(kwargs)
-    return mw.GyromagneticFerrite(**base)
+    return mw.media.GyromagneticFerrite(**base)
 
 
 def _scene(material, *, size=(0.4, 0.4, 0.4), position=(0.0, 0.0, 0.0), spacing=0.1, extra=None):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.none(),
-        device="cpu",
-    )
-    scene.add_structure(mw.Structure(geometry=Box(position=position, size=size), material=material))
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.none(),
+                structures=(mw.Structure(geometry=Box(position=position, size=size), material=material),),
+            )
     if extra is not None:
-        for structure in extra:
-            scene.add_structure(structure)
-    return prepare_scene(scene)
+        scene = scene.updated(structures=(*scene.structures, *extra))
+    return prepare_scene(scene, device="cpu")
 
 
 # --- local basis: orthogonality + rotation covariance ------------------------
@@ -140,13 +139,12 @@ def test_sparse_dense_index_parity():
 
 def test_empty_layout_when_no_ferrite():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.none(),
-        device="cpu",
-    )
-    scene.add_structure(mw.Structure(geometry=Box(size=(0.4, 0.4, 0.4)), material=mw.Material(eps_r=4.0)))
-    layout = compile_gyromagnetic_layout(prepare_scene(scene))
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.none(),
+                structures=(mw.Structure(geometry=Box(size=(0.4, 0.4, 0.4)), material=mw.Material(eps_r=4.0)),),
+            )
+    layout = compile_gyromagnetic_layout(prepare_scene(scene, device="cpu"))
     assert layout.num_active == 0
     assert not layout.enabled
     assert layout.permeability_tensor(1e9).shape == (0, 3, 3)
@@ -237,20 +235,22 @@ def test_cayley_contraction_when_lossy():
 def test_scene_cache_returns_same_layout():
     material = _ferrite()
     scene = _scene(material)
-    a = scene.compile_gyromagnetic_materials()
-    b = scene.compile_gyromagnetic_materials()
+    a = compile_gyromagnetic_materials(scene)
+    b = compile_gyromagnetic_materials(scene)
     assert a is b
-    scene.add_structure(mw.Structure(geometry=Box(size=(0.1, 0.1, 0.1)), material=mw.Material(eps_r=2.0)))
-    c = scene.compile_gyromagnetic_materials()
-    assert c is not a  # cache invalidated on structure change
+    # A changed scene is a new scene (scenes are immutable), with its own cache.
+    changed = _scene(material, extra=(
+        mw.Structure(geometry=Box(size=(0.1, 0.1, 0.1)), material=mw.Material(eps_r=2.0)),))
+    c = compile_gyromagnetic_materials(changed)
+    assert c is not a
 
 
 def test_with_timestep_idempotent_and_dt_binding():
     dt = 2.0e-13
     scene = _scene(_ferrite())
-    base = scene.compile_gyromagnetic_materials()
+    base = compile_gyromagnetic_materials(scene)
     assert base.dt is None and base.phi is None
-    bound = scene.compile_gyromagnetic_materials(dt=dt)
+    bound = compile_gyromagnetic_materials(scene, dt=dt)
     assert bound.dt == dt and bound.phi is not None
     assert bound.with_timestep(dt) is bound  # idempotent for equal dt
 

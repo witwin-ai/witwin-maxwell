@@ -26,13 +26,13 @@ def test_public_automatic_directional_three_body_solve_original_residual_and_exa
         cone_subdivisions=(2**20,), max_contexts=4096,
         tensor_workspace_budget_bytes=512*1024**2,
         leaf_factor_kernel='original', leaf_factor_max_edges=16)
-    config = mw.MoMConfig(subdivisions=0,
+    config = mw.mom.MoMConfig(subdivisions=0,
         integration=IntegrationConfig(order=6, singular_order=3, pair_batch=4,
             far_pair_batch=16, near_max_order=32),
         operator_backend='fmm', fmm=fmm, riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal',
             rtol=1e-12, atol=0., maxiter=240, restart=120))
-    simulation = mw.Simulation.mom(scene, frequency=3e8, config=config)
+    simulation = mw.Simulation.mom(scene, frequencies=3e8, config=config)
     prepared = simulation.prepare()
     handle = prepared.solver.handle
     actions = handle.actions
@@ -51,10 +51,10 @@ def test_public_automatic_directional_three_body_solve_original_residual_and_exa
     stats = result.stats()
     assert stats['converged'] and stats['error_budget']['checked']
     assert not stats['fallback_used'] and not stats['original_global_residual_certified']
-    coefficients = result.surface_currents.scattered_coefficients
+    coefficients = mw.mom.surface_currents(result).scattered_coefficients
     path = tmp_path/'directional-public-result.pt'
     result.save(path)
-    snapshot = result.surface_currents.snapshot()
+    snapshot = mw.mom.surface_currents(result).snapshot()
     assert snapshot['fmm_config'] == fmm.payload()
     def forbidden(*args, **kwargs):
         raise AssertionError('Restoring physical directional currents rebuilt or solved the operator')
@@ -65,15 +65,15 @@ def test_public_automatic_directional_three_body_solve_original_residual_and_exa
             patch.setattr(cls, '__init__', forbidden)
         patch.setattr(torch.linalg, 'solve', forbidden)
         restored = mw.Result.load(path, scene=scene)
-        torch.testing.assert_close(restored.surface_currents.scattered_coefficients,
+        torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,
             coefficients, rtol=0, atol=0)
-        assert restored.surface_currents.config.fmm == fmm
-        assert restored.surface_currents.snapshot()['fmm_config'] == fmm.payload()
+        assert mw.mom.surface_currents(restored).config.fmm == fmm
+        assert mw.mom.surface_currents(restored).snapshot()['fmm_config'] == fmm.payload()
         for field, value in (('max_candidates', 256), ('phase_relative_budget', 1e-11),
                              ('cone_subdivisions', [2]), ('global_ideal_rwg_error_budget', 1e-3)):
             bad = copy.deepcopy(snapshot)
             bad['fmm_config']['parameters'][field] = value
-            with pytest.raises(ValueError): SurfaceData.restore(bad, scene, 3e8)
+            with pytest.raises(ValueError): SurfaceData.restore(bad, scene, 3e8, 'cuda')
     (tmp_path/'public.json').write_text(json.dumps(dict(stats=stats,
         artifact_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         configuration=fmm.payload(), root_DAG_receipts=[r.test.plan_guard.receipt() for r in regions],

@@ -66,17 +66,18 @@ def _scene(networks=()):
         sources=(),
         ports=tuple(_lumped_port(n, x) for n, x in zip(PORT_NAMES, PORT_XS)),
         networks=networks,
-        device=DEVICE,
     )
 
 
-def _measure_bare_three_port() -> mw.NetworkData:
+def _measure_bare_three_port() -> mw.rf.NetworkData:
     result = mw.Simulation.fdtd(
         _scene(),
         frequencies=MEASURE_FREQUENCIES,
-        excitations=mw.PortSweep(source_time=SOURCE_TIME),
-        run_time=mw.TimeConfig(time_steps=TIME_STEPS),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        excitations=mw.rf.PortSweep(source_time=SOURCE_TIME),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=TIME_STEPS),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     bare = result.network
     assert bare is not None
@@ -85,9 +86,9 @@ def _measure_bare_three_port() -> mw.NetworkData:
     return bare
 
 
-def _lossy_model() -> mw.StateSpaceNetwork:
+def _lossy_model() -> mw.rf.rational.StateSpaceNetwork:
     conductance = torch.tensor([[0.03, -0.02], [-0.02, 0.03]], dtype=torch.float64, device=DEVICE)
-    return mw.StateSpaceNetwork(
+    return mw.rf.rational.StateSpaceNetwork(
         A=torch.zeros((0, 0), dtype=torch.float64, device=DEVICE),
         B=torch.zeros((0, 2), dtype=torch.float64, device=DEVICE),
         C=torch.zeros((2, 0), dtype=torch.float64, device=DEVICE),
@@ -97,12 +98,12 @@ def _lossy_model() -> mw.StateSpaceNetwork:
     )
 
 
-def _reactive_model() -> mw.StateSpaceNetwork:
+def _reactive_model() -> mw.rf.rational.StateSpaceNetwork:
     resistance = 50.0
     capacitance = 5.0e-12
     shunt = 2.0e-3
     incidence = torch.tensor((1.0, -1.0), dtype=torch.float64, device=DEVICE)
-    return mw.StateSpaceNetwork(
+    return mw.rf.rational.StateSpaceNetwork(
         A=torch.tensor(((-1.0 / (resistance * capacitance),),), dtype=torch.float64, device=DEVICE),
         B=(incidence / (resistance * capacitance)).reshape(1, 2),
         C=(-incidence / resistance).reshape(2, 1),
@@ -113,8 +114,8 @@ def _reactive_model() -> mw.StateSpaceNetwork:
     )
 
 
-def _write_touchstone(model: mw.StateSpaceNetwork, path: str) -> mw.NetworkData:
-    full = mw.NetworkData.from_y(
+def _write_touchstone(model: mw.rf.rational.StateSpaceNetwork, path: str) -> mw.rf.NetworkData:
+    full = mw.rf.NetworkData.from_y(
         frequencies=FULL_GRID,
         y=model.evaluate(FULL_GRID),
         z0=50.0,
@@ -124,12 +125,12 @@ def _write_touchstone(model: mw.StateSpaceNetwork, path: str) -> mw.NetworkData:
     return full
 
 
-def _raw_samples_at_measure(path: str) -> mw.NetworkData:
+def _raw_samples_at_measure(path: str) -> mw.rf.NetworkData:
     """Read the raw Touchstone samples and select the measurement frequencies."""
 
-    raw = mw.NetworkData.from_touchstone(path, device=DEVICE)
+    raw = mw.rf.NetworkData.from_touchstone(path, device=DEVICE)
     idx = torch.tensor(MEASURE_INDICES, device=DEVICE)
-    return mw.NetworkData(
+    return mw.rf.NetworkData(
         frequencies=raw.frequencies[idx],
         s=raw.s[idx],
         z0=raw.z0[idx],
@@ -138,19 +139,21 @@ def _raw_samples_at_measure(path: str) -> mw.NetworkData:
 
 
 def _embedded_input_reflection(path: str, order: int) -> torch.Tensor:
-    block = mw.TouchstoneNetwork(
+    block = mw.rf.TouchstoneNetwork(
         name="dut",
         path=path,
         connections={"n0": "d1", "n1": "d2"},
-        fit=mw.RationalFitConfig(order=order),
+        fit=mw.rf.rational.RationalFitConfig(order=order),
         device=DEVICE,
     )
     result = mw.Simulation.fdtd(
         _scene(networks=(block,)),
         frequencies=MEASURE_FREQUENCIES,
-        excitations=mw.PortExcitation("d0", source_time=SOURCE_TIME),
-        run_time=mw.TimeConfig(time_steps=TIME_STEPS),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        excitations=mw.rf.PortExcitation("d0", source_time=SOURCE_TIME),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=TIME_STEPS),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     port = result.port("d0")
     return (port.b / port.a).reshape(-1)

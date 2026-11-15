@@ -1,45 +1,22 @@
-"""Dispatch and CPU orchestration controls for cooperative chord kernels."""
-from collections import Counter
+"""Orchestration control for the cooperative chord kernels against the Torch sheet oracle."""
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from witwin.maxwell.fdtd import thin_sheet
 from witwin.maxwell.fdtd.cuda import backend
-from witwin.maxwell.fdtd.runtime.stepping import _field_update_block
+
+from tests.oracles import thin_sheet_torch
 
 from .test_thin_sheet_fused_copies import _prepare
 from .test_thin_sheet_feeds import _simulation
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("kernel", [None, "fused", "torch"], ids=["default", "fused", "torch"])
-def test_chord_solve_dispatch(device, kernel, monkeypatch):
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("requires CUDA")
-    solver = _prepare(device=device, kernel=kernel)
-    calls = Counter()
-    for name in ("_chord_solve_fused", "_chord_solve_torch"):
-        original = getattr(thin_sheet, name)
-
-        def counted(*args, _name=name, _original=original):
-            calls[_name] += 1
-            return _original(*args)
-
-        monkeypatch.setattr(thin_sheet, name, counted)
-    _field_update_block(solver, 0.)
-    fused = device == "cuda" and kernel != "torch"
-    assert calls["_chord_solve_fused"] == int(fused)
-    assert calls["_chord_solve_torch"] == int(not fused)
-    print(dict(dispatch=device, selector=kernel or "default", **calls), flush=True)
-
-
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("fed", [False, True])
-def test_chord_schedule_with_cpu_kernel_doubles(fed, monkeypatch):
-    """Exercise real preparation/scalars and both sweeps without loading CUDA."""
-    solver = (_simulation(device="cpu", tilted=True, steps=1).prepare().solver if fed
-              else _prepare(device="cpu", kernel="torch"))
+def test_chord_schedule_with_kernel_doubles(fed, monkeypatch):
+    """Exercise real preparation/scalars and both sweeps with Torch stand-ins for the chord kernels."""
+    solver = _simulation(tilted=True, steps=1).prepare().solver if fed else _prepare()
     sheet = solver._thin_sheets[0]
     calls = []
 
@@ -83,9 +60,9 @@ def test_chord_schedule_with_cpu_kernel_doubles(fed, monkeypatch):
     generator = torch.Generator().manual_seed(314)
     results = []
     for _ in range(2):
-        rhs = torch.randn(2 * cu["count"], dtype=torch.float64, generator=generator)
+        rhs = torch.randn(2 * cu["count"], dtype=torch.float64, generator=generator).to(sheet.device)
         saved_rhs = rhs.clone()
-        expected = thin_sheet._chord_solve_torch(sheet, rhs)
+        expected = thin_sheet_torch.chord_solve(sheet, rhs)
         # Setup must overwrite stale scratch without reading the previous direction.
         for name in ("residual", "direction", "temporary"):
             cu["fused"]["chord_solve"][name].fill_(float("nan"))

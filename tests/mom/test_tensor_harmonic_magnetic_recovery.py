@@ -11,12 +11,17 @@ from witwin.maxwell.mom.dyadic_green import DyadicIntegrationConfig
 from witwin.maxwell.mom.fields import FieldQueryConfig
 from witwin.maxwell.mom.harmonic_material import compile_harmonic_material,compile_tensor_harmonic_material
 from witwin.maxwell.mom.tensor_harmonic_preparation import prepare_mixed_tensor_harmonic_balance
-from witwin.maxwell.mom.harmonic_state import preparation_signature,recover_harmonic_state
+from witwin.maxwell.mom.harmonic_recovery import preparation_signature,recover_harmonic_state
 
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
 
 
-@pytest.mark.parametrize('compressed',[False,True],ids=['dense','compressed'])
+# [compressed] runs in the milestone tier only (8300-10600 s on an A6000): the refined eight-cell current
+# volume makes every compressed per-harmonic preparation an adaptive tensor-volume build. The regression tier
+# keeps [dense] (private recovery, solve-free magnetic queries, bundle snapshot and rejections) and
+# test_tensor_harmonic_public.py[h2-magnetic] (compressed magnetic harmonic-balance bundle on the same two
+# tetrahedra with an unrefined current volume, public save/load).
+@pytest.mark.parametrize('compressed',[False,pytest.param(True,marks=pytest.mark.mom_milestone)],ids=['dense','compressed'])
 def test_mixed_hb_magnetic_volume_recovery_and_solve_free_queries(monkeypatch,tmp_path,compressed):
     vertices=torch.tensor([[0.,0.,0.],[.07,0.,0.],[0.,.07,0.],[0.,0.,.07]],device='cuda',dtype=torch.float64)
     cells=torch.tensor([[0,1,2,3]],device='cuda')
@@ -24,12 +29,12 @@ def test_mixed_hb_magnetic_volume_recovery_and_solve_free_queries(monkeypatch,tm
     current=TetrahedralVolumeMesh(vertices+vertices.new_tensor([.2,0.,0.]),cells,region_id=2).refine(1)
     tensor=compile_tensor_harmonic_material(mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.,2.,2.),mu_r=1.3),3e8,2,device='cuda')
     scalar=compile_harmonic_material(mw.Material(eps_r=2.,sigma_e=.001,nonlinearity=(
-        mw.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.TwoPhotonAbsorption(beta=5.))),3e8,2)
+        mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.media.TwoPhotonAbsorption(beta=5.))),3e8,2)
     volumes=(linear,current)
     materials=(tensor,scalar)
     selected=(current,)
     exterior=compile_harmonic_material(mw.Material(),3e8,2)
-    config=mw.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),
+    config=mw.mom.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),
         dyadic_integration=DyadicIntegrationConfig(),riesz_storage='compact_rwg_v1')
     operator_type=SystemOperator
     options={}

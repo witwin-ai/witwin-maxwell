@@ -12,6 +12,7 @@ import witwin.maxwell as mw
 from witwin.maxwell.constants import C_0,EPSILON_0
 from witwin.maxwell.scene import prepare_scene
 from witwin.maxwell.fdtd.runtime.materials import build_nonlinear_channels
+from witwin.maxwell.compiler import compile_materials
 
 
 def cycle_heat(kappa, peak):
@@ -24,14 +25,14 @@ def reference_heat(specs, peak, host_index):
     # beta is defined by loss of intensity per length; dissipation density has
     # W/m^3 units. This oracle does not repeat the coefficient conversion.
     return sum(spec.beta*(.5*(host_index if spec.n0 is None else spec.n0)*EPSILON_0*C_0*peak**2)**2
-        for spec in specs if isinstance(spec,mw.TwoPhotonAbsorption))
+        for spec in specs if isinstance(spec,mw.media.TwoPhotonAbsorption))
 
 
 def compiled_material(material):
     scene=mw.Scene(domain=mw.Domain(bounds=((-0.2,0.2),)*3),grid=mw.GridSpec.uniform(.1),
-        boundary=mw.BoundarySpec.pec(),device='cpu',structures=[mw.Structure(
+        boundary=mw.BoundarySpec.pec(),structures=[mw.Structure(
             mw.Box(position=torch.zeros(3,dtype=torch.float64),size=torch.full((3,),.4,dtype=torch.float64)),material)])
-    prepared=prepare_scene(scene);model=prepared.compile_materials();edge=model['edge_components']['eps']
+    prepared=prepare_scene(scene, device='cpu');model=compile_materials(prepared);edge=model['edge_components']['eps']
     runtime=SimpleNamespace(**{'eps_'+name:edge[name]*EPSILON_0 for name in ('Ex','Ey','Ez')})
     build_nonlinear_channels(runtime,model)
     return prepared,model,runtime
@@ -40,17 +41,17 @@ def compiled_material(material):
 @pytest.mark.parametrize('n0',[None,1.,2.])
 @pytest.mark.parametrize('peak',[25.,100.,400.])
 def test_descriptor_cycle_heat_matches_declared_beta_intensity_law(n0,peak):
-    spec=mw.TwoPhotonAbsorption(beta=4e-5,n0=n0)
+    spec=mw.media.TwoPhotonAbsorption(beta=4e-5,n0=n0)
     material=mw.Material(eps_r=2.25,nonlinearity=spec)
     assert cycle_heat(material.tpa_sigma_scale,peak)==pytest.approx(reference_heat([spec],peak,1.5),rel=2e-14)
 
 
 @pytest.mark.parametrize('specs',[
-    (mw.TwoPhotonAbsorption(beta=4e-5),),
-    (mw.TwoPhotonAbsorption(beta=1e-5,n0=2.),),
-    (mw.TwoPhotonAbsorption(beta=1e-5),mw.TwoPhotonAbsorption(beta=3e-5)),
-    (mw.TwoPhotonAbsorption(beta=1e-5,n0=1.),mw.TwoPhotonAbsorption(beta=3e-5,n0=2.)),
-    (mw.NonlinearSusceptibility(chi2=1e-7,chi3=1e-9),mw.TwoPhotonAbsorption(beta=4e-5)),
+    (mw.media.TwoPhotonAbsorption(beta=4e-5),),
+    (mw.media.TwoPhotonAbsorption(beta=1e-5,n0=2.),),
+    (mw.media.TwoPhotonAbsorption(beta=1e-5),mw.media.TwoPhotonAbsorption(beta=3e-5)),
+    (mw.media.TwoPhotonAbsorption(beta=1e-5,n0=1.),mw.media.TwoPhotonAbsorption(beta=3e-5,n0=2.)),
+    (mw.media.NonlinearSusceptibility(chi2=1e-7,chi3=1e-9),mw.media.TwoPhotonAbsorption(beta=4e-5)),
 ])
 def test_actual_compiled_runtime_cycle_heat_preserves_explicit_index_and_additive_terms(specs):
     initialized=torch.cuda.is_initialized()
@@ -71,7 +72,7 @@ def test_actual_compiled_runtime_cycle_heat_preserves_explicit_index_and_additiv
 def test_physical_cycle_heat_beta_derivative_matches_independent_finite_difference(n0):
     beta=4e-5;step=beta*1e-4;peak=100.
     def work(value):return cycle_heat(mw.Material(eps_r=2.25,
-        nonlinearity=mw.TwoPhotonAbsorption(beta=value,n0=n0)).tpa_sigma_scale,peak)
+        nonlinearity=mw.media.TwoPhotonAbsorption(beta=value,n0=n0)).tpa_sigma_scale,peak)
     measured=(work(beta+step)-work(beta-step))/(2*step)
     index=1.5 if n0 is None else n0
     expected=(.5*index*EPSILON_0*C_0*peak**2)**2

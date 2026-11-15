@@ -2,7 +2,8 @@
 import pytest
 import torch
 import witwin.maxwell as mw
-from tests.fdtd.cuda.test_batch_runtime import simulation
+from tests.fdtd.cuda.test_batch_runtime import simulation, with_scene
+from witwin.maxwell.scene import place_scene
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
@@ -12,8 +13,8 @@ def test_automatic_capacity_leaves_work_for_each_worker(slots, devices):
     if len(devices) > torch.cuda.device_count():
         pytest.skip("Requires two CUDA devices")
     sims = [simulation(i, steps=16) for i in range(6)]
-    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=devices, slots_per_device=slots, batch_size="auto",
+    batch = mw.Simulation.batch(sims, variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=devices, slots_per_device=slots, batch_size="auto",
             scheduling="static", graph="required", memory_limit_bytes=128 * 1024**2))
     with batch.prepare() as prepared:
         assert all(child.capacity <= 3 for child in prepared._children)
@@ -31,10 +32,10 @@ def test_automatic_capacity_leaves_work_for_each_worker(slots, devices):
 @pytest.mark.parametrize("order,scheduling", [("completion", "throughput"), ("input", "static")])
 def test_two_slots_share_budget_and_preserve_results(graph, order, scheduling):
     sims = [simulation(i, steps=35) for i in range(7)]
-    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), slots_per_device=2, batch_size=2,
+    batch = mw.Simulation.batch(sims, variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), slots_per_device=2, batch_size=2,
                                    memory_limit_bytes=128 * 1024**2, graph=graph, scheduling=scheduling),
-        outputs=mw.BatchOutput(max_pending_results=1))
+        outputs=mw.execution.BatchOutput(max_pending_results=1))
     with batch.prepare() as prepared:
         assert len(prepared._children) == 2
         with prepared.iter_results(order=order) as iterator:
@@ -58,8 +59,8 @@ def test_two_slots_share_budget_and_preserve_results(graph, order, scheduling):
 
 def test_parallel_early_close_and_failure_records(monkeypatch):
     batch = mw.Simulation.batch([simulation(i, steps=16) for i in range(7)],
-        variation=mw.BatchVariation(sources=("drive",)), outputs=mw.BatchOutput(max_pending_results=1),
-        execution=mw.BatchExecution(devices=("cuda:0",), slots_per_device=2, batch_size=2))
+        variation=mw.execution.BatchVariation(sources=("drive",)), outputs=mw.execution.BatchOutput(max_pending_results=1),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), slots_per_device=2, batch_size=2))
     with batch.prepare() as prepared:
         iterator = prepared.iter_results()
         first = next(iterator)
@@ -79,10 +80,10 @@ def test_parallel_early_close_and_failure_records(monkeypatch):
 @pytest.mark.parametrize("destination", ["local", "cpu", "cuda:0"])
 def test_two_devices_match_single_device_with_explicit_output_transfer(destination):
     sims = [simulation(i, steps=16) for i in range(5)]
-    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0", "cuda:1"), batch_size=1,
+    batch = mw.Simulation.batch(sims, variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0", "cuda:1"), batch_size=1,
             scheduling="static", graph="required", memory_limit_bytes={"cuda:0": 64 * 1024**2, "cuda:1": 64 * 1024**2}),
-        outputs=mw.BatchOutput(result_device=destination, max_pending_results=1))
+        outputs=mw.execution.BatchOutput(result_device=destination, max_pending_results=1))
     with batch.prepare() as prepared:
         result = prepared.run()
         assert not result.failed, "\n".join(str(r.failure) for r in result.records if r.failure)
@@ -103,7 +104,7 @@ def test_scene_device_clone_keeps_input_and_autograd_ownership():
     source = simulation().scene
     position = source.structures[0].geometry.position
     position.requires_grad_(True)
-    moved = source.clone(device="cuda:1")
+    moved = place_scene(source, "cuda:1")
     target = moved.structures[0].geometry.position
     assert target.device == torch.device("cuda:1")
     assert position.device == torch.device("cuda:0")
@@ -115,8 +116,8 @@ def test_scene_device_clone_keeps_input_and_autograd_ownership():
 def test_parallel_source_updates_from_caller_stream():
     scales = torch.tensor([1., 2., 3., 4.], device="cuda:0")
     batch = mw.Simulation.batch(simulation(steps=31),
-        parameters=mw.BatchParameters(source_scales={"drive": scales}),
-        execution=mw.BatchExecution(devices=("cuda:0",), slots_per_device=2, batch_size=1, graph="required"))
+        parameters=mw.execution.BatchParameters(source_scales={"drive": scales}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), slots_per_device=2, batch_size=1, graph="required"))
     with batch.prepare() as prepared:
         first = prepared.run().stack(lambda r: r.raw_monitor("probe")["components"]["Ez"])
         stream = torch.cuda.Stream()
@@ -131,12 +132,13 @@ def test_parallel_source_updates_from_caller_stream():
 def test_regional_envelopes_follow_the_worker_device_and_budget():
     sims = [simulation(steps=19) for _ in range(4)]
     for index, sim in enumerate(sims):
-        sim.scene.structures = [mw.Structure(name="design",
+        sim = with_scene(sim, structures=[mw.Structure(name="design",
             geometry=mw.Sphere(radius=.02, position=(.01*index, 0., 0.), device="cuda:0"),
-            material=mw.Material(eps_r=2. + .1*index))]
+            material=mw.Material(eps_r=2. + .1*index))])
+        sims[index] = sim
     envelope = mw.Box(size=(.2, .2, .2), device="cuda:0")
-    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(structures={"design": envelope}),
-        execution=mw.BatchExecution(devices=("cuda:0", "cuda:1"), scheduling="static", batch_size=1,
+    batch = mw.Simulation.batch(sims, variation=mw.execution.BatchVariation(structures={"design": envelope}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0", "cuda:1"), scheduling="static", batch_size=1,
             memory_limit_bytes=128*1024**2, reserve_bytes=0, graph="required"))
     with batch.prepare() as prepared:
         results = prepared.run()
@@ -211,14 +213,14 @@ def test_batch_capture_allows_independent_consumer_thread_allocations(monkeypatc
     from witwin.maxwell.fdtd.runtime.batch import NativeFieldSlot
     entered, release = Event(), Event()
     original = NativeFieldSlot.advance
-    def pause_capture(self):
+    def pause_capture(self, lanes=None):
         if torch.cuda.is_current_stream_capturing() and not entered.is_set():
             entered.set()
             assert release.wait(10)
-        return original(self)
+        return original(self, lanes)
     monkeypatch.setattr(NativeFieldSlot, "advance", pause_capture)
     batch = mw.Simulation.batch([simulation(steps=19)],
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1, graph="required",
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=1, graph="required",
             memory_limit_bytes=128*1024**2, reserve_bytes=0))
     with batch.prepare() as prepared, ThreadPoolExecutor(max_workers=1) as executor:
         consumer_pool = torch.cuda.MemPool()
@@ -234,4 +236,4 @@ def test_batch_capture_allows_independent_consumer_thread_allocations(monkeypatc
             release.set()
         result = future.result(timeout=20)
         result.results()
-        assert result[0].solver_stats["batch_execution_tier"] == "native_pipeline_graph"
+        assert result[0].stats()["batch_execution_tier"] == "native_pipeline_graph"

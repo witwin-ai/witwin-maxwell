@@ -8,12 +8,12 @@ from witwin.maxwell.mom.layered.network import solve_layered_network
 from tests.mom.layered.test_layered_network import gap_port, square_loop
 
 
-pytestmark = pytest.mark.cuda
+pytestmark = [pytest.mark.cuda, pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")]
 SIDE, WIDTH, Z = 1e-3, 20e-6, .5e-3
 
 
 def vacuum():
-    return mw.LayerStack((mw.Layer("air", 1e-3, 1.0),), mw.HalfSpace(), mw.HalfSpace())
+    return mw.mom.LayerStack((mw.mom.Layer("air", 1e-3, 1.0),), mw.mom.HalfSpace(), mw.mom.HalfSpace())
 
 
 def c_shaped_loop():
@@ -21,22 +21,21 @@ def c_shaped_loop():
     edge, inner, gap = SIDE / 2 + WIDTH / 2, SIDE / 2 - WIDTH / 2, WIDTH / 2
     vertices = [(gap, -edge), (edge, -edge), (edge, edge), (-edge, edge), (-edge, -edge), (-gap, -edge),
                 (-gap, -inner), (-inner, -inner), (-inner, inner), (inner, inner), (inner, -inner), (gap, -inner)]
-    return mw.Structure(mw.PlanarPEC(vertices, normal_axis="z", coordinate=Z), mw.Material.pec())
+    return mw.Structure(mw.geometry.PlanarPEC(vertices, normal_axis="z", coordinate=Z), mw.Material.pec())
 
 
 def loop_port():
-    return gap_port("loop", (WIDTH / 2, -SIDE / 2, Z), (-WIDTH / 2, -SIDE / 2, Z), "x", WIDTH)
+    return gap_port("loop", (WIDTH / 2, -SIDE / 2, Z), (-WIDTH / 2, -SIDE / 2, Z), "x")
 
 
 def config():
     # Coarse: this test checks equality with the internal solver, not accuracy.
-    return mw.MoMConfig(layered=mw.LayeredSurfaceConfig(bridge_width_m=WIDTH, max_edge_length_m=40e-6,
+    return mw.mom.MoMConfig(layered=mw.mom.LayeredSurfaceConfig(bridge_width_m=WIDTH, max_edge_length_m=40e-6,
                                                          edge_cell_m=10e-6))
 
 
 def test_public_layered_network_matches_the_internal_solver():
-    scene = mw.Scene(background=vacuum(), structures=[c_shaped_loop()])
-    scene.add_port(loop_port())
+    scene = mw.Scene(background=vacuum(), structures=[c_shaped_loop()], ports=(loop_port(),))
     frequencies = (1e9, 2e9)
     result = mw.Simulation.mom(scene, frequencies=frequencies, config=config()).run()
     reference = solve_layered_network(vacuum(), square_loop(SIDE, WIDTH, WIDTH, Z), [loop_port()], frequencies,
@@ -44,35 +43,35 @@ def test_public_layered_network_matches_the_internal_solver():
     assert result.method == "mom" and result.frequencies == frequencies
     assert torch.equal(result.network.s, reference.s)
     assert result.network.port_names == ("loop",)
-    currents = result.surface_currents.currents
+    currents = mw.mom.surface_currents(result).currents
     assert currents.shape == (2, reference.metadata["unknowns"], 1)
     # exp(-i*omega*t): the loop is inductive, Im(Z11) < 0 at both frequencies.
     assert (result.network.to_z()[:, 0, 0].imag < 0).all()
 
 
 def test_public_layered_guards():
-    scene = mw.Scene(background=vacuum(), structures=[c_shaped_loop()])
-    scene.add_port(loop_port())
+    scene = mw.Scene(background=vacuum(), structures=[c_shaped_loop()], ports=(loop_port(),))
     with pytest.raises(ValueError, match="LayerStack background requires MoMConfig"):
         mw.Simulation.mom(scene, frequencies=(1e9,))
     with pytest.raises(ValueError, match="LayerStack background requires MoMConfig"):
-        mw.Simulation.mom(mw.Scene(), frequency=1e9, config=config())
+        mw.Simulation.mom(mw.Scene(), frequencies=1e9, config=config())
     with pytest.raises(NotImplementedError, match="LayerStack background requires Simulation.mom"):
         mw.Simulation.fdtd(scene, frequencies=(1e9,))
     with pytest.raises(ValueError, match="distinct"):
         mw.Simulation.mom(scene, frequencies=(1e9, 1e9), config=config())
     with pytest.raises(TypeError, match="LayerStack"):
-        mw.Scene(background=(mw.Layer("air", 1e-3),))
+        mw.Scene(background=(mw.mom.Layer("air", 1e-3),))
 
     slanted = mw.Scene(background=vacuum(), structures=[mw.Structure(
-        mw.PlanarPEC([(0., 0.), (1e-4, 0.), (0., 1e-4)], normal_axis="z", coordinate=Z), mw.Material.pec())])
-    slanted.add_port(loop_port())
-    with pytest.raises(NotImplementedError, match="Manhattan"):
-        mw.Simulation.mom(slanted, frequency=1e9, config=config()).prepare()
-    driven = mw.Scene(background=vacuum(), structures=[c_shaped_loop()])
-    driven.add_port(loop_port())
-    driven.add_source(mw.PointDipole(position=(0., 0., Z), polarization=(1., 0., 0.)))
+                  mw.geometry.PlanarPEC([(0., 0.), (1e-4, 0.), (0., 1e-4)], normal_axis="z", coordinate=Z), mw.Material.pec())],
+                       ports=(loop_port(),))
+    # B1: a slanted polygon takes the planar mesher path, which checks the port terminals.
+    with pytest.raises(ValueError, match="terminals must lie on metal"):
+        mw.Simulation.mom(slanted, frequencies=1e9, config=config()).prepare()
+    driven = mw.Scene(background=vacuum(), structures=[c_shaped_loop()], ports=(loop_port(),), sources=(
+                 mw.PointDipole(position=(0., 0., Z), polarization=(1., 0., 0.)),
+             ))
     with pytest.raises(NotImplementedError, match="LumpedPorts only"):
-        mw.Simulation.mom(driven, frequency=1e9, config=config()).prepare()
+        mw.Simulation.mom(driven, frequencies=1e9, config=config()).prepare()
     with pytest.raises(ValueError, match="bridge_width_m"):
-        mw.LayeredSurfaceConfig(bridge_width_m=0., max_edge_length_m=1e-6)
+        mw.mom.LayeredSurfaceConfig(bridge_width_m=0., max_edge_length_m=1e-6)

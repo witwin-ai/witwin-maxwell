@@ -12,21 +12,23 @@ The local workflow explicitly disables cuDSS hybrid host factor storage.
 import torch
 import witwin.maxwell as mw
 
-config = mw.LocalResponseConfig(
-    design=mw.LocalDesignRegion(bounds=((-0.02, 0.02),) * 3),
-    observations=(mw.FieldProjection("probe", component="Ez", position=(0.05, 0, 0)),),
+config = mw.fdfd.LocalResponseConfig(
+    design=mw.fdfd.LocalDesignRegion(bounds=((-0.02, 0.02),) * 3),
+    observations=(mw.fdfd.FieldProjection("probe", component="Ez", position=(0.05, 0, 0)),),
     rhs_batch_size=32,
     max_response_bytes=2**30,
     tolerance=1e-7,
 )
 simulation = mw.Simulation.fdfd(
-    scene, frequency=1e9,
-    solver=mw.GMRES(solver_type="direct", precision="double"),
-    local_response=config,
+    scene, frequencies=1e9,
+    config=mw.FDFDConfig(
+        solver=mw.fdfd.FDFDSolverConfig(solver_type="direct", precision="double"),
+        local_response=config,
+    ),
 )
 with simulation.prepare() as prepared:
     result = prepared.run(scene=candidate_scene)
-    value = result.monitor("probe")["value"]
+    value = result.monitor("probe").isel(f=0).values  # FieldData, dims ("f",)
     loss = value.abs().square()
     loss.backward()  # Candidate MaterialRegion/SceneModule parameters.
 ```
@@ -91,6 +93,11 @@ history of in-place candidate updates.
   polarization must be unit vectors. A local context verifies that the box
   encloses all discretized source/scatterer/design support. Non-vacuum exterior
   Green functions are not implemented by this observation compiler.
+- `Result.monitor(name)` returns each projection as typed data with an `f`
+  dimension (length 1 for one frequency): `FieldData` for a `FieldProjection`
+  (units V/m for an E point, A/m for an H point, V for a voltage path, 1 for
+  weighted indices) and `FarFieldData` (units V) for a `FarFieldProjection`.
+  `monitor(name, freq_index=i)` drops `f`; `.values` is the differentiable tensor.
 - Ordinary full FDFD accepts the same projections through `observations=...`.
   Do not also pass that argument when using `local_response`; put observations
   in LocalResponseConfig instead.
@@ -139,8 +146,9 @@ A single-frequency ordinary FDFD preparation also provides
 The aperture imposes rectangular PEC walls independently of the full-domain
 absorbing boundary. Bounds follow cyclic transverse axes: x/y for z, y/z for x,
 z/x for y. `result.monitor("modes")["beta"]` contains propagation constants;
-`result.raw_output["profiles"]` holds six staggered E/H arrays with a leading mode
-dimension, normalized to peak transverse E = 1 V/m. This CUDA first-order Maxwell
+`result.monitor("modes")["profiles"]` holds six staggered E/H arrays with a leading mode
+dimension, normalized to peak transverse E = 1 V/m (`"coordinates"`, `"axis"`, `"position"`
+and `"normalization"` describe the plane). This CUDA first-order Maxwell
 elimination supports nonuniform cells and diagonal complex epsilon. It uses a
 bounded dense eigensolve (`max_dofs=2048` by default). It does not support interior
 PEC geometry, nonvacuum permeability, modal material gradients, or automatic modal source injection.

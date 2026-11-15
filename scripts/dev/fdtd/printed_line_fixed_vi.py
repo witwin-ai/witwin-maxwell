@@ -21,7 +21,7 @@ def fixed_physical_probe_monitors(scene, reference_scene, reference_monitors, re
         raise ValueError('Fixed physical V/I planning does not cross periodic or Bloch seams.')
     if getattr(scene, 'coordinates', None) is not None:
         raise ValueError('Fixed physical V/I planning requires Cartesian coordinates.')
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device='cpu')  # host planning
     reference = {monitor.name: monitor for monitor in reference_monitors}
     geometries = [dict(axis=face.axis, normal=face.normal_index, component=face.component,
         indices=face.indices, electric_fields=None, name=face.name)
@@ -29,7 +29,7 @@ def fixed_physical_probe_monitors(scene, reference_scene, reference_monitors, re
     sheets = []
     for structure in scene.structures:
         geometry = structure.geometry
-        if isinstance(geometry, mw.PlanarPEC):
+        if isinstance(geometry, mw.geometry.PlanarPEC):
             vertices = geometry.vertices.detach().cpu().numpy()
             lower, upper = vertices.min(0), vertices.max(0)
             rectangle = {(float(a), float(b)) for a in (lower[0], upper[0]) for b in (lower[1], upper[1])}
@@ -50,7 +50,7 @@ def fixed_physical_probe_monitors(scene, reference_scene, reference_monitors, re
     planned = {}
     for component, positions in requested.items():
         positions = list(positions)
-        axes = [torch.as_tensor(axis, dtype=torch.float64) for axis in component_coords(prepared, component)]
+        axes = [torch.as_tensor(axis, dtype=torch.float64) for axis in component_coords(prepared, component, device=prepared.device)]
         points = torch.tensor(positions, dtype=torch.float64)
         stencil = interpolation_stencil(context, points, component, axes, faces=geometries)
         for number, position in enumerate(positions):

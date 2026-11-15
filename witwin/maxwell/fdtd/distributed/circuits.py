@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from ...compiler.ports import CompiledPortGeometry
+from ...compiler.ports import CompiledPortGeometry, compile_ports
 from ...fdtd_parallel import FDTDPartitionPlan, FDTDShardLayout
 from ...ports import TerminalPort, _resolve_terminal_port
 from ..circuits import (
@@ -83,7 +83,7 @@ def compile_distributed_circuit_plan(
     per remote bound port, independent of the port's number of Yee edges.
     """
 
-    circuits = tuple(getattr(scene, "circuits", ()))
+    circuits = tuple(scene.scene.circuits)
     if not circuits:
         return None
     if len(circuits) != 1:
@@ -95,7 +95,7 @@ def compile_distributed_circuit_plan(
         raise ValueError("A distributed circuit must bind at least one FDTD port.")
 
     compiled = tuple(
-        scene.compile_ports(device="cpu") if geometries is None else geometries
+        compile_ports(scene, device="cpu") if geometries is None else geometries
     )
     geometry_by_name = {geometry.port_name: geometry for geometry in compiled}
     binding_names = tuple(binding.port_name for binding in circuit.bindings)
@@ -279,17 +279,17 @@ class DistributedCircuitRuntime:
         plan = compile_distributed_circuit_plan(prepared_scene, partition_plan)
         if plan is None:
             return None
-        circuits = tuple(prepared_scene.circuits)
+        circuits = tuple(prepared_scene.scene.circuits)
         circuit = circuits[0]
         owner_shard = tuple(shards)[plan.owner_rank]
         owner_device = owner_shard.device
         ports_by_name = {}
-        for port in prepared_scene.ports:
+        for port in prepared_scene.scene.ports:
             resolved = (
                 _resolve_terminal_port(
                     port,
-                    prepared_scene.structures,
-                    prepared_scene.domain.bounds,
+                    prepared_scene.scene.structures,
+                    prepared_scene.scene.domain.bounds,
                 )
                 if isinstance(port, TerminalPort)
                 else port

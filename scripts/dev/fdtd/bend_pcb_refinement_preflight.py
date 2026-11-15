@@ -32,7 +32,7 @@ def compile_source_duality(spacing):
         size=torch.tensor((.02+spacing,0.,.02+spacing),dtype=torch.float64)),
         voltage_aperture=mw.Box(position=torch.tensor((.01,.01,0.),dtype=torch.float64),
         size=torch.tensor((.02,.02,.02),dtype=torch.float64)))
-    scene=PreparedScene(native_scene(spacing).clone(ports=(port,)))
+    scene=PreparedScene(native_scene(spacing).updated(ports=(port,)),device='cpu')
     compiled=compile_port_geometry(scene,port,device='cpu')
     native={tuple(index):float(weight)for index,weight in zip(compiled.voltage_indices.tolist(),compiled.voltage_weights.tolist())}
     expected={(edge.index[1],len(radial)-2-edge.index[0],edge.index[2]):

@@ -17,7 +17,7 @@ from tests.support.rfic_fixtures import fixture_fa
 from witwin.maxwell.mom.layered.runtime import compile_layered_scene
 
 def write_model(directory, maximum, nw, nh, thin=False, terminal_ports=False):
-    fixture = fixture_fa(device="cpu")
+    fixture = fixture_fa()
     stack, rectangles, ports, materials, _, vias, _ = compile_layered_scene(fixture.scene)
     nodes, segments = {}, []
     def node(point, label=""):
@@ -74,7 +74,7 @@ def write_model(directory, maximum, nw, nh, thin=False, terminal_ports=False):
 
 
 def write_grid(directory, maximum, nw, nh, thin=False, terminal_ports=False):
-    fixture=fixture_fa(device="cpu")
+    fixture=fixture_fa()
     _,rectangles,ports,materials,_,vias,_=compile_layered_scene(fixture.scene)
     rectangles=[tuple(round(v*1e6,8) for v in r) for r in rectangles]
     vias=[tuple(round(v*1e6,8) for v in r) for r in vias]

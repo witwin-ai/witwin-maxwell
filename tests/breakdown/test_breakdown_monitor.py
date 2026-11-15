@@ -13,26 +13,26 @@ from witwin.maxwell.breakdown_stress import ComponentRating
 
 def test_breakdown_monitor_requires_critical_field():
     with pytest.raises(ValueError):
-        mw.BreakdownMonitor("m", position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 1.0))
+        mw.esd.BreakdownMonitor("m", position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 1.0))
 
 
 def test_breakdown_monitor_validates_geometry_and_quantities():
     with pytest.raises(ValueError):
-        mw.BreakdownMonitor("m", position=(0, 0, 0), size=(0.0, 1.0, 1.0), critical_field=1e6)
+        mw.esd.BreakdownMonitor("m", position=(0, 0, 0), size=(0.0, 1.0, 1.0), critical_field=1e6)
     with pytest.raises(ValueError):
-        mw.BreakdownMonitor(
+        mw.esd.BreakdownMonitor(
             "m", position=(0, 0, 0), size=(1, 1, 1), critical_field=1e6, quantities=("bogus",)
         )
     with pytest.raises(ValueError):
         # 'damage' requires a damage_exponent.
-        mw.BreakdownMonitor(
+        mw.esd.BreakdownMonitor(
             "m", position=(0, 0, 0), size=(1, 1, 1), critical_field=1e6,
             quantities=("electric_field", "damage"),
         )
 
 
 def test_breakdown_monitor_stores_bounds_and_thresholds():
-    m = mw.BreakdownMonitor(
+    m = mw.esd.BreakdownMonitor(
         "insulator",
         position=(0.0, 0.0, 0.0),
         size=(2.0, 4.0, 6.0),
@@ -52,7 +52,7 @@ def test_breakdown_monitor_accepts_region_with_bounds():
     class _Region:
         bounds = ((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))
 
-    m = mw.BreakdownMonitor("m", _Region(), critical_field=1e6)
+    m = mw.esd.BreakdownMonitor("m", _Region(), critical_field=1e6)
     assert m.size == (2.0, 2.0, 2.0)
     assert m.position == (0.0, 0.0, 0.0)
 
@@ -62,12 +62,12 @@ def test_breakdown_monitor_rejects_region_and_explicit_box():
         bounds = ((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))
 
     with pytest.raises(ValueError):
-        mw.BreakdownMonitor("m", _Region(), position=(0, 0, 0), size=(1, 1, 1), critical_field=1e6)
+        mw.esd.BreakdownMonitor("m", _Region(), position=(0, 0, 0), size=(1, 1, 1), critical_field=1e6)
 
 
 def test_component_stress_monitor_binds_rating_and_series():
     rating = ComponentRating(voltage=100.0, energy=1e-6, model="tvs")
-    monitor = mw.ComponentStressMonitor(
+    monitor = mw.esd.ComponentStressMonitor(
         "diode",
         port="feed",
         rating=rating,
@@ -82,7 +82,7 @@ def test_component_stress_monitor_binds_rating_and_series():
 
 def test_component_stress_monitor_requires_rating_type():
     with pytest.raises(TypeError):
-        mw.ComponentStressMonitor(
+        mw.esd.ComponentStressMonitor(
             "diode", port="feed", rating="not-a-rating",
             voltage_series="v", current_series="i",
         )
@@ -90,22 +90,21 @@ def test_component_stress_monitor_requires_rating_type():
 
 def _stress_scene(port_name, *, with_port=True):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
-        grid=mw.GridSpec.uniform(0.2),
-        ports=(mw.ModePort("feed", position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 0.0)),)
-        if with_port
-        else (),
-        device="cpu",
-    )
-    scene.add_monitor(
-        mw.ComponentStressMonitor(
-            "part",
-            port=port_name,
-            rating=ComponentRating(voltage=100.0),
-            voltage_series="vprobe",
-            current_series="iprobe",
-        )
-    )
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
+                grid=mw.GridSpec.uniform(0.2),
+                ports=(mw.ModePort("feed", position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 0.0)),)
+                if with_port
+                else (),
+                monitors=(
+            mw.esd.ComponentStressMonitor(
+                "part",
+                port=port_name,
+                rating=ComponentRating(voltage=100.0),
+                voltage_series="vprobe",
+                current_series="iprobe",
+            ),
+            ),
+            )
     return scene
 
 
@@ -136,11 +135,8 @@ def test_component_stress_port_binding_rejects_when_scene_has_no_ports():
 
 def test_monitors_attach_to_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
-        grid=mw.GridSpec.uniform(0.2),
-        device="cpu",
-    )
-    scene.add_monitor(
-        mw.BreakdownMonitor("stress", position=(0, 0, 0), size=(1, 1, 1), critical_field=1e6)
-    )
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
+                grid=mw.GridSpec.uniform(0.2),
+                monitors=(mw.esd.BreakdownMonitor("stress", position=(0, 0, 0), size=(1, 1, 1), critical_field=1e6),),
+            )
     assert any(getattr(m, "name", None) == "stress" for m in scene.monitors)

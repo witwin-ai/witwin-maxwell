@@ -1,5 +1,4 @@
 """Auxiliary TFSF launch plans and exact native fusion qualification."""
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,6 +7,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd.runtime import core_path, core_tables
+from tests.support import frozen_oracles
 
 
 FIELDS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
@@ -141,11 +141,10 @@ def test_prepare_asserts_opposite_incident_field(family, wrong):
 
 @pytest.mark.host_validation
 def test_core_abi_marker():
+    from witwin.maxwell.fdtd.cuda import build as cuda_build
     from witwin.maxwell.fdtd.cuda.core.build import CORE_ABI_VERSION
-    assert CORE_ABI_VERSION == "core_abi_v11"
-    root = Path(core_path.__file__).parents[1] / "cuda" / "core"
-    assert 'name="witwin_maxwell_fdtd_core_abi_v11"' in (root / "build.py").read_text()
-    assert 'module.attr("abi") = "core_abi_v11"' in (root / "binding.cpp").read_text()
+    assert CORE_ABI_VERSION == "core_abi_v15"
+    assert cuda_build.SETUP.abi == "setup_abi_v7"
 
 
 @pytest.mark.host_validation
@@ -156,7 +155,7 @@ def test_ordinary_closure_launches_boundary_h_and_e_once(monkeypatch):
     solver, _, _, sources = _plan_inputs()
     sources.groups = {name: [SimpleNamespace(launch=lambda n=name: events.append(n))]
                       for name in ("magnetic", "electric", "ordinary")}
-    solver.scene = SimpleNamespace()
+    solver.scene = SimpleNamespace(scene=SimpleNamespace())
     solver.electric_dispersive_enabled = False
     solver.has_pec_faces = False
     for name in ("_advance_magnetic_dispersive_state", "_apply_magnetic_dispersive_corrections",
@@ -183,29 +182,27 @@ def test_ordinary_closure_launches_boundary_h_and_e_once(monkeypatch):
         "electric", "ordinary", "clamp", "_apply_dispersive_corrections", "mur", "cut", 3]
 
 
-def _simulation(direction, waveform, *, core, device="cuda"):
+def _simulation(direction, waveform):
     axis = next(i for i, value in enumerate(direction) if value)
     polarization = ("Ez", "Ex", "Ey")[axis]
     source_time = (mw.CW(frequency=1e9, amplitude=1.7, phase=.37) if waveform == "cw" else
                    mw.GaussianPulse(frequency=1e9, fwidth=3e8, amplitude=1.7, phase=.37, delay=.5e-9))
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.5, .5),) * 3), grid=mw.GridSpec.uniform(.05),
-        boundary=mw.BoundarySpec.pml(num_layers=4), device=device,
-        sources=[mw.PlaneWave(direction=direction, polarization=polarization, source_time=source_time,
+        boundary=mw.BoundarySpec.pml(num_layers=4), sources=[mw.PlaneWave(direction=direction, polarization=polarization, source_time=source_time,
                              injection=mw.TFSF(bounds=((-0.2, .2),) * 3))],
         monitors=[mw.PointMonitor("point", (0., 0., 0.), fields=FIELDS),
                   mw.PlaneMonitor("plane", axis="z", position=0., fields=FIELDS)])
-    return mw.Simulation.fdtd(scene, frequency=1e9, fdtd_core_path=core, full_field_dft=True,
-        backend="cpu_reference" if device == "cpu" else "native",
+    return mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(full_field_dft=True,
         cuda_graph=True, run_time=mw.TimeConfig(time_steps=65), shutoff=0.,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False))
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False)))
 
 
-@pytest.mark.host_validation
+@CUDA
 @pytest.mark.parametrize("direction", DIRECTIONS)
 @pytest.mark.parametrize("waveform", ["pulse", "cw"])
 @pytest.mark.parametrize("reference", [None, False, True])
 def test_axis_scenes_prepare_expected_reference_provider(direction, waveform, reference):
-    solver = _prepare(direction, waveform, reference, core=False, device="cpu").solver
+    solver = _prepare(direction, waveform, reference).solver
     state = solver._tfsf_state
     assert state["provider"] in {"plane_wave_ref_x_ez", "plane_wave_axis_aligned"}
     aux = state["auxiliary_grid"]
@@ -217,7 +214,7 @@ def test_axis_scenes_prepare_expected_reference_provider(direction, waveform, re
     assert not plan.folded
     launches = []
     extension = SimpleNamespace(CoreStepLaunch=lambda op, *a: launches.append(op) or SimpleNamespace())
-    step = torch.zeros(1, dtype=torch.int64)
+    step = torch.zeros(1, dtype=torch.int64, device=solver.device)
     tables = core_tables.compile_source_tables(solver, extension, step, 65)
     launches.clear()
     fusion = core_tables.compile_auxiliary_fusion(solver, extension, step, tables)
@@ -225,8 +222,8 @@ def test_axis_scenes_prepare_expected_reference_provider(direction, waveform, re
     assert launches == ([4, 5, 6] if expected_reference else [5, 6])
 
 
-def _prepare(direction, waveform, reference, *, core, device="cuda"):
-    execution = _simulation(direction, waveform, core=core, device=device).prepare()
+def _prepare(direction, waveform, reference):
+    execution = _simulation(direction, waveform).prepare()
     if reference is None:
         return execution
     solver = execution.solver
@@ -239,15 +236,21 @@ def _prepare(direction, waveform, reference, *, core, device="cuda"):
     aux._incident_values = torch.zeros_like(aux._incident_boundary_h)
     aux.electric.zero_()
     aux.electric[aux.source_index] = aux.source_value(-1)
-    if core:
-        runtime = solver._core_runtime
-        runtime.sources = core_tables.compile_source_tables(solver, runtime.extension, runtime.step, 65)
+    # These CUDA scenes run on the default core path.
+    runtime = solver._core_runtime
+    runtime.sources = core_tables.compile_source_tables(solver, runtime.extension, runtime.step, 65)
     return execution
 
 
+def _existing(direction, waveform, reference, minimum=None):
+    """The frozen existing-path payload; it does not depend on the core chunk size."""
+    key = f"existing/{''.join(map(str, map(int, direction)))}/{waveform}/{reference}/{minimum}"
+    return frozen_oracles.load(f"tests/fdtd/core_path/test_tfsf_aux_fusion.py::{key}")
+
+
 def _run(direction, waveform, reference, chunk, arm, minimum=None):
-    from benchmark.core_path.gates import tensors
-    execution = _prepare(direction, waveform, reference, core=arm != "existing")
+    from benchmark.core_path.gates import api_dialect, tensors
+    execution = _prepare(direction, waveform, reference)
     solver = execution.solver
     aux = solver._tfsf_state["auxiliary_grid"]
     if minimum is not None:
@@ -255,28 +258,26 @@ def _run(direction, waveform, reference, chunk, arm, minimum=None):
         indices = batch["sample_indices_per_coeff"]
         indices.clamp_(min=minimum)
         indices[0] = minimum
-    if arm != "existing":
-        solver._core_runtime.chunk_size = chunk
-        solver._core_tfsf_aux_fusion_disabled = arm == "unfused"
+    solver._core_runtime.chunk_size = chunk
+    solver._core_tfsf_aux_fusion_disabled = arm == "unfused"
     # Nonzero tails exercise every cell of the full prepared absorber arrays.
     generator = torch.Generator().manual_seed(542)
     for value in [*(getattr(solver, name) for name in FIELDS), aux.electric, aux.magnetic]:
         value.copy_(torch.randn(value.shape, generator=generator) * 2.**-20)
     result = execution.run()
-    if arm != "existing":
-        assert solver._core_step_graph_active
-        assert solver._core_step_graph_k == chunk
-        assert solver._core_tfsf_aux_fused is (arm == "fused")
-        if arm == "fused":
-            plan = solver._core_tfsf_aux_fold_plan
-            assert not solver._core_tfsf_aux_boundary_folded
-            if minimum is not None:
-                assert plan.sample_range[0] == minimum
-                assert plan.correction_clear is (minimum >= plan.boundary_limit)
-                assert not plan.line_clear
+    assert solver._core_step_graph_active
+    assert solver._core_step_graph_k == chunk
+    assert solver._core_tfsf_aux_fused is (arm == "fused")
+    if arm == "fused":
+        plan = solver._core_tfsf_aux_fold_plan
+        assert not solver._core_tfsf_aux_boundary_folded
+        if minimum is not None:
+            assert plan.sample_range[0] == minimum
+            assert plan.correction_clear is (minimum >= plan.boundary_limit)
+            assert not plan.line_clear
     payload = tensors({name: getattr(solver, name) for name in FIELDS}, "field")
-    payload.update(tensors(result.fields, "phasor"))
-    payload.update(tensors(result.monitors, "monitor"))
+    payload.update(tensors(api_dialect.fields(result), "phasor"))
+    payload.update(tensors(api_dialect.monitors(result), "monitor"))
     payload.update(tensors(solver._dft_batched_fields, "dft"))
     payload.update(tensors(dict(e=aux.electric, h=aux.magnetic, boundary_h=aux._incident_boundary_h,
                                 time_step=aux.time_step), "aux"))
@@ -299,7 +300,7 @@ def _assert_equal(actual, expected):
 @pytest.mark.parametrize("reference", [False, True])
 @pytest.mark.parametrize("chunk", [1, 16, 32])
 def test_g1_fields_aux_spectra_and_monitors_three_repeats(direction, waveform, reference, chunk):
-    existing = _run(direction, waveform, reference, chunk, "existing")
+    existing = _existing(direction, waveform, reference)
     unfused = _run(direction, waveform, reference, chunk, "unfused")
     _assert_equal(unfused, existing)
     for _ in range(3):
@@ -312,7 +313,7 @@ def test_g1_fields_aux_spectra_and_monitors_three_repeats(direction, waveform, r
 @pytest.mark.parametrize("chunk", [1, 16, 32])
 def test_g1_correction_samples_at_boundary_limit_and_just_below(minimum, chunk):
     args = ((0., 0., 1.), "pulse", True, chunk)
-    existing = _run(*args, "existing", minimum=minimum)
+    existing = _existing(*args[:3], minimum=minimum)
     _assert_equal(_run(*args, "unfused", minimum=minimum), existing)
     for _ in range(3):
         _assert_equal(_run(*args, "fused", minimum=minimum), existing)
@@ -326,7 +327,7 @@ def test_single_step_each_fused_side_matches_native_gather(interpolated, referen
     from witwin.maxwell.fdtd.excitation.tfsf_apply import (
         _apply_batched_aux_terms, _apply_batched_reference_terms,
     )
-    execution = _prepare((1., 0., 0.), "pulse", reference, core=True)
+    execution = _prepare((1., 0., 0.), "pulse", reference)
     solver = execution.solver
     runtime = solver._core_runtime
     aux = solver._tfsf_state["auxiliary_grid"]

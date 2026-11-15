@@ -12,9 +12,17 @@ from test_periodic_tensor_public import setup
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA required')
 
 
+# The refined (storage-reducing compression) cases keep one lattice dimension per backend in the
+# regression tier: [2-mixed-hmatrix-2] and [1-mixed-h2-2]. The other two refined cases repeat the same
+# compressed H/H2 paths on the other lattice dimension, which the unrefined cases already cover per
+# backend, so they run in the milestone tier only.
+_MILESTONE_REFINED = {(1, 'hmatrix'), (2, 'h2')}
+
+
 @pytest.mark.parametrize('dimension,tensor,backend,refinement',
     [(d, t, b, 0) for b in ('hmatrix', 'h2') for t in (False, True, 'mixed') for d in (1, 2)]
-    + [(d, 'mixed', b, 2) for b in ('hmatrix', 'h2') for d in (1, 2)])
+    + [pytest.param(d, 'mixed', b, 2, marks=(pytest.mark.mom_milestone,) if (d, b) in _MILESTONE_REFINED else ())
+       for b in ('hmatrix', 'h2') for d in (1, 2)])
 def test_periodic_hierarchical_public_dense_oracle_and_restore(
         dimension, tensor, backend, refinement, tmp_path, monkeypatch):
     scene, dense_config = setup(dimension, bool(tensor))
@@ -26,26 +34,26 @@ def test_periodic_hierarchical_public_dense_oracle_and_restore(
         from witwin.maxwell.mom.mesh import SurfaceMesh
         structures = []
         for body in scene.structures:
-            vertices = torch.as_tensor(body.geometry.vertices, device=scene.device, dtype=torch.float64)
+            vertices = torch.as_tensor(body.geometry.vertices, device="cuda", dtype=torch.float64)
             # This separated control has storage-reducing far rank at 1e-10.
             vertices = vertices[0]+.5*(vertices-vertices[0])
             mesh = SurfaceMesh(
                 vertices,
-                torch.as_tensor(body.geometry.faces, device=scene.device, dtype=torch.int64)).refine(refinement)
+                torch.as_tensor(body.geometry.faces, device="cuda", dtype=torch.int64)).refine(refinement)
             structures.append(mw.Structure(mw.Mesh(mesh.vertices, mesh.faces,
                 recenter=False, fill_mode='solid'), body.material, name=body.name))
         scene = mw.Scene(structures=structures, sources=scene.sources)
-    reference = mw.Simulation.mom(scene, frequency=3e8, config=dense_config).run()
+    reference = mw.Simulation.mom(scene, frequencies=3e8, config=dense_config).run()
     assert reference.stats()['converged'], reference.stats()
     if not tensor:
-        relabeled_dense = reference.surface_currents.snapshot()
+        relabeled_dense = mw.mom.surface_currents(reference).snapshot()
         relabeled_dense['schema_version'] = 17
         with pytest.raises(ValueError, match='hierarchical schema'):
-            SurfaceData.restore(relabeled_dense, scene, 3e8)
+            SurfaceData.restore(relabeled_dense, scene, 3e8, 'cuda')
     config = replace(dense_config, operator_backend=backend, riesz_storage='local_rwg_v1',
-        hierarchical=mw.HMatrixConfig(leaf_size=96 if refinement else 6,
+        hierarchical=mw.mom.HMatrixConfig(leaf_size=96 if refinement else 6,
             max_rank=192 if refinement else 32, tolerance=1e-10, pivoting='adaptive'),
-        h2=mw.H2Config(max_rank=128) if refinement and backend == 'h2' else None,
+        h2=mw.mom.H2Config(max_rank=128) if refinement and backend == 'h2' else None,
         stopping=StoppingRule(method='gmres', preconditioner='row_column_norm',
                               rtol=1e-12, atol=0, maxiter=480 if refinement else 240,
                               restart=480 if refinement else 120,
@@ -58,15 +66,15 @@ def test_periodic_hierarchical_public_dense_oracle_and_restore(
     monkeypatch.setattr(periodic, 'assemble_periodic_system', forbidden)
     monkeypatch.setattr(anisotropic, 'assemble_generalized_system', forbidden)
     monkeypatch.setattr(runtime, 'assemble_system', forbidden)
-    result = mw.Simulation.mom(scene, frequency=3e8, config=config).run()
+    result = mw.Simulation.mom(scene, frequencies=3e8, config=config).run()
     (tmp_path/'solve-diagnostics.json').write_text(json.dumps({
-        'stats': result.stats(), 'operator': result.surface_currents.handle.metadata},
+        'stats': result.stats(), 'operator': mw.mom.surface_currents(result).handle.metadata},
         indent=2, default=str))
     assert result.stats()['converged'], result.stats()
     assert result.stats()['error_budget']['checked']
-    data = result.surface_currents
+    data = mw.mom.surface_currents(result)
     torch.testing.assert_close(data.scattered_coefficients,
-        reference.surface_currents.scattered_coefficients, rtol=2e-7, atol=1e-12)
+        mw.mom.surface_currents(reference).scattered_coefficients, rtol=2e-7, atol=1e-12)
     if refinement:
         if backend == 'h2':
             assert len(data.handle.actions.couplings) > 0
@@ -107,7 +115,7 @@ def test_periodic_hierarchical_public_dense_oracle_and_restore(
     factor_path = tmp_path/'periodic-hierarchy-factors.pt'
     torch.save(factors, factor_path)
     factors = torch.load(factor_path, weights_only=False)
-    fresh_kernel = config.periodic.compile(device=scene.device, dtype=config.dtype)
+    fresh_kernel = config.periodic.compile(device="cuda", dtype=config.dtype)
     fresh_provider, _, _ = hierarchy._provider(data.handle.system, data.handle.exterior,
         scene.sources, config, fresh_kernel)
     vector = torch.randn_like(data.scattered_coefficients)
@@ -133,7 +141,7 @@ def test_periodic_hierarchical_public_dense_oracle_and_restore(
         patch.setattr(hierarchy.PeriodicHierarchicalH2SystemOperator, '__init__', forbidden)
         patch.setattr(torch.linalg, 'solve', forbidden)
         restored = mw.Result.load(path, scene=scene)
-        assert torch.equal(restored.surface_currents.scattered_coefficients, data.scattered_coefficients)
+        assert torch.equal(mw.mom.surface_currents(restored).scattered_coefficients, data.scattered_coefficients)
         for region, point in points.items():
             for actual, expected in zip(restored.query_fields(point, region_id=region,
                     field_kind='total'), saved_fields[region]):
@@ -145,7 +153,7 @@ def test_periodic_hierarchical_public_dense_oracle_and_restore(
         else:
             damaged[key]['real_shells'] += 1
         with pytest.raises(ValueError):
-            SurfaceData.restore(damaged, scene, 3e8)
+            SurfaceData.restore(damaged, scene, 3e8, 'cuda')
     data.handle.periodic_kernel = replace(data.handle.periodic_kernel)
     with pytest.raises(ValueError, match='binding changed|kernel changed'):
         data.handle.refresh()

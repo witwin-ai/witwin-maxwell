@@ -75,14 +75,14 @@ def prepare_line(config: Configuration, dtype=torch.float64, *, production=False
         injection=injection)
     scene = mw.Scene(domain=mw.Domain(bounds=((-config.half, config.half),) * 3),
         grid=mw.GridSpec.uniform(config.h), boundary=mw.BoundarySpec.pml(num_layers=config.layers),
-        device="cpu", sources=[source])
+        sources=[source])
     # Diagnostic-only precision admission bypass, as in the surviving-mode study.
     with patch("witwin.maxwell.fdtd.runtime.precision.validate_fp64_forward"):
-        solver = mw.Simulation.fdtd(scene, frequency=2e9, backend="cpu_reference", cuda_graph=False,
+        solver = mw.Simulation.fdtd(scene, frequencies=2e9, config=mw.FDTDConfig(cuda_graph=False,
             full_field_dft=False, field_dtype=dtype,
             run_time=mw.TimeConfig(time_steps=65536, dt=DT * config.h / .025, transient_cycles=0),
-            spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False)).prepare().solver
-    line = solver._tfsf_state["auxiliary_grid"]
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False))).prepare().solver
+    line = _host_line(solver._tfsf_state["auxiliary_grid"])
     if not config.cw:
         from witwin.maxwell.fdtd.excitation.tfsf_common import projection_extrema
         state = solver._tfsf_state
@@ -103,7 +103,24 @@ def prepare_line(config: Configuration, dtype=torch.float64, *, production=False
         count = max(math.ceil((master_s_max - line.s_min) / line.ds) + 1, 4)
         line = _graded_line(line, count - 20, 20, 2, 1e-8)
         line.s_max = master_s_max
-    return line, solver._tfsf_state
+    return line, _host_state(solver._tfsf_state)
+
+
+def _host_line(line):
+    """The prepared incident line rebuilt on the host: these 1-D diagnostics are host Torch arithmetic."""
+    from witwin.maxwell.fdtd.excitation.spatial import AuxiliaryGrid1D
+    return AuxiliaryGrid1D(s_min=line.s_min, s_max=line.s_max, ds=line.ds, dt=line.dt, wave_speed=line.wave_speed,
+                           impedance=line.impedance, source_time=line.source_time, device="cpu", dtype=line.dtype,
+                           absorber_cells=line.absorber_cells, extent64=(line.sampled_nodes - 1) * line.ds,
+                           source_buffer_cells=line.source_buffer_cells, incident_reference=line.incident_reference)
+
+
+def _host_state(state):
+    """The prepared TFSF state with every tensor of its face terms copied to the host line's device."""
+    def host(value):
+        return value.cpu() if torch.is_tensor(value) else value
+    return {**state, **{key: [{name: host(value) for name, value in term.items()} for term in state[key]]
+                        for key in ("electric_terms", "magnetic_terms")}}
 
 
 def snapped_cell_count(x: float) -> int:

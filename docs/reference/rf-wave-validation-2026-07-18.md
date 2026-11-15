@@ -260,7 +260,7 @@ Analytic transmission-line / waveguide solutions are the binding first-line
 reference (audit section 3). External reference-solver cross-references are the
 primary cross-check for the covered port families; adapter-driven generation is
 now **wired and authorized** (M3, round E): `python -m benchmark.rf_tidy3d_references`
-exports each target scene through `Scene.to_tidy3d`, gates it on being physically
+exports each target scene through `scene_to_tidy3d`, gates it on being physically
 runnable (>= 1 source), cost-estimates, and runs one cloud job per runnable scene,
 writing an `.h5` cache plus a `.generated.json` record with the task id and cost. It
 never fabricates a comparison: a source-less export records `pending-generation` with

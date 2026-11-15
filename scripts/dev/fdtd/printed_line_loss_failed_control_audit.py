@@ -45,13 +45,13 @@ def main():
         for frequency in case.frequencies:
             for component, selection in schema.items():
                 for plane in selection['planes']:
-                    samples = [result.monitor(plane['name'], frequency=frequency)['components'][component]['data'] for result in data]
-                    actual = combined.monitor(plane['name'], frequency=frequency)['components'][component]['data']
+                    samples = [result.raw_monitor(plane['name'], frequency=frequency)['components'][component]['data'] for result in data]
+                    actual = combined.raw_monitor(plane['name'], frequency=frequency)['components'][component]['data']
                     metric = superposition_metrics(actual, samples[2], samples[:2], (1., phase))
                     metric.update(component=component, plane=plane['name'], frequency_hz=frequency)
                     fields.append(metric)
         for name, record in combined.conductor_losses.items():
-            lookup = [{entry['component']: entry for entry in result.conductor_losses[name]['bulk_electric_traces']} for result in data]
+            lookup = [{entry['component']: entry for entry in mw.rf.conductor_losses(result)[name]['bulk_electric_traces']} for result in data]
             for trace in record['bulk_electric_traces']:
                 component = trace['component']
                 for frequency_index, frequency in enumerate(case.frequencies):

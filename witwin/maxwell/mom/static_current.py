@@ -11,6 +11,8 @@ import torch
 from .volume_mesh import TetrahedralVolumeMesh
 from .nonlinear import instantaneous_harmonic_sources
 from .fixed_tangent_inverse import _FixedTangentInverse,_streamed_inverse_bounds
+from .ordered_reduction import ordered_index_add_
+from ..errors import ConvergenceError
 
 
 @dataclass(frozen=True)
@@ -21,7 +23,7 @@ class StaticCurrentSolution:
     receipt: dict
 
 
-class StaticCurrentConvergenceError(RuntimeError):
+class StaticCurrentConvergenceError(ConvergenceError):
     def __init__(self, receipt):
         self.receipt = receipt
         super().__init__('DC current balance failed: '+receipt['failure_reason'])
@@ -42,7 +44,7 @@ class NodalCurrentBalance:
         tetrahedra = volume.vertices[volume.cells]
         gradients = torch.linalg.inv(tetrahedra[:,1:]-tetrahedra[:,:1]).transpose(-1,-2)
         self.gradients = torch.cat((-gradients.sum(1,keepdim=True),gradients),1)
-        self.nodal_volume = volume.vertices.new_zeros(len(volume.vertices)).index_add(
+        self.nodal_volume = ordered_index_add_(volume.vertices.new_zeros(len(volume.vertices)),
             0,volume.cells.flatten(),(volume.volumes[:,None].expand(-1,4)/4).flatten())
         self._identity = (id(volume),id(self.gradients),self.gradients._version,
                           id(self.nodal_volume),self.nodal_volume._version)
@@ -107,14 +109,14 @@ class NodalCurrentBalance:
         self._assert_current()
         self._real(current,(len(self.volume.cells),3),'Mean current')
         local = torch.einsum('tai,ti,t->ta',self.gradients,current,self.volume.volumes)
-        return current.new_zeros(self.n_dofs).index_add(0,self.cell_dofs.flatten(),local.flatten())
+        return ordered_index_add_(current.new_zeros(self.n_dofs),0,self.cell_dofs.flatten(),local.flatten())
 
     def _matrix(self,tangent):
         local = torch.einsum('tai,tij,tbj,t->tab',self.gradients,tangent,self.gradients,self.volume.volumes)
         cells = self.cell_dofs
         size = self.n_dofs
         indices = (cells[:,:,None]*size+cells[:,None,:]).flatten()
-        return local.new_zeros(size*size).index_add(0,indices,local.flatten()).reshape(size,size)
+        return ordered_index_add_(local.new_zeros(size*size),0,indices,local.flatten()).reshape(size,size)
 
     def tangent_action(self,tangent):
         """Freeze a cell current derivative on the vertex/face-zero gauge."""
@@ -143,6 +145,7 @@ class NodalCurrentBalance:
             if (type(tangent_rule) is not StoppingRule or tangent_rule.method!='gmres'
                     or tangent_rule.preconditioner!='none' or tangent_rule.recycle_size or tangent_rule.fallback!='none'):
                 raise ValueError('DC tangent solve requires unpreconditioned unrecycled GMRES without fallback')
+            tangent_rule=tangent_rule.resolved()
         if type(tangent_column_batch) is not int or tangent_column_batch<1:
             raise ValueError('DC tangent column batch must be a positive integer')
         dtype = torch.complex128 if self.volume.vertices.dtype == torch.float64 else torch.complex64
@@ -225,8 +228,8 @@ class NodalCurrentBalance:
             receipt['tangent_checks'][-1]['solve']=inverse.receipt['last_forward']
             return result
         if tangent_rule is not None:
-            from dataclasses import asdict
-            receipt.update(linear_solver='streamed_inverse_checked_gmres',tangent_rule=asdict(tangent_rule),
+            from .options import option_asdict
+            receipt.update(linear_solver='streamed_inverse_checked_gmres',tangent_rule=option_asdict(tangent_rule),
                 tangent_column_batch=tangent_column_batch,global_current_jacobian_stored=False,
                 fast_work_qualified=False)
         for iteration in range(max_iterations+1):
@@ -361,7 +364,7 @@ class StaticCurrentTangentAction:
         tensor=self.tangent.mT if adjoint else self.tangent
         current=torch.einsum('tij,...tj->...ti',tensor,gradient)
         local=torch.einsum('tai,...ti,t->...ta',block.gradients,current,block.volume.volumes)
-        result=value.new_zeros(*value.shape[:-1],block.n_dofs).index_add(
+        result=ordered_index_add_(value.new_zeros(*value.shape[:-1],block.n_dofs),
             -1,block.cell_dofs.flatten(),local.flatten(-2))[...,1:]
         if not bool(torch.isfinite(result).all()):raise ValueError('Nonfinite DC tangent product')
         self.assert_current()
@@ -375,13 +378,13 @@ class StaticCurrentTangentAction:
         self.assert_current()
         block=self.block
         local=torch.einsum('tai,tij,taj,t->ta',block.gradients,self.tangent,block.gradients,block.volume.volumes)
-        result=local.new_zeros(block.n_dofs).index_add(0,block.cell_dofs.flatten(),local.flatten())[1:]
+        result=ordered_index_add_(local.new_zeros(block.n_dofs),0,block.cell_dofs.flatten(),local.flatten())[1:]
         if not bool(torch.isfinite(result).all()):raise ValueError('Nonfinite DC tangent diagonal')
         self.assert_current()
         return result
 
 
-class StaticTangentConvergenceError(RuntimeError):
+class StaticTangentConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         super().__init__('DC tangent solve failed its original RHS residual tolerance')
         self.receipt=receipt

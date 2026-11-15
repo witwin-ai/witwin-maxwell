@@ -27,6 +27,7 @@ from witwin.maxwell.compiler.materials import (
 )
 from witwin.maxwell.fdtd.runtime.materials import average_node_to_component
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 DX = 0.02
@@ -40,16 +41,13 @@ _EDGE_ENDPOINT_SLICES = {
 
 def _pec_scene(geometry, pec_mode="conformal"):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=BOUNDS),
-        grid=mw.GridSpec.uniform(DX),
-        boundary=mw.BoundarySpec.pml(num_layers=8),
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(geometry=geometry, material=mw.Material.pec(), name="metal")
-    )
-    return prepare_scene(scene)
+                domain=mw.Domain(bounds=BOUNDS),
+                grid=mw.GridSpec.uniform(DX),
+                boundary=mw.BoundarySpec.pml(num_layers=8),
+                subpixel=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
+                structures=(mw.Structure(geometry=geometry, material=mw.Material.pec(), name="metal"),),
+            )
+    return prepare_scene(scene, device="cpu")
 
 
 def _staircase_edge_fill(prepared, component):
@@ -65,8 +63,7 @@ def _node_aligned_box(half_extent=0.1):
             domain=mw.Domain(bounds=BOUNDS),
             grid=mw.GridSpec.uniform(DX),
             boundary=mw.BoundarySpec.pml(num_layers=8),
-            device="cpu",
-        )
+        ), device="cpu"
     )
     nodes = np.asarray(reference.x_nodes64)
     low = float(nodes[int(np.argmin(np.abs(nodes + half_extent)))])
@@ -146,20 +143,19 @@ def test_conformal_pec_fill_resolves_a_curved_surface_better_than_staircase():
 def test_conformal_pec_edge_fill_is_differentiable_in_the_conductor_geometry():
     radius = torch.tensor(0.11, requires_grad=True)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=BOUNDS),
-        grid=mw.GridSpec.uniform(DX),
-        boundary=mw.BoundarySpec.pml(num_layers=8),
-        subpixel_samples=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=radius),
-            material=mw.Material.pec(),
-            name="metal",
-        )
-    )
-    edge_fill = _pec_edge_fill(prepare_scene(scene))
+                domain=mw.Domain(bounds=BOUNDS),
+                grid=mw.GridSpec.uniform(DX),
+                boundary=mw.BoundarySpec.pml(num_layers=8),
+                subpixel=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
+                structures=(
+            mw.Structure(
+                geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=radius),
+                material=mw.Material.pec(),
+                name="metal",
+            ),
+            ),
+            )
+    edge_fill = _pec_edge_fill(prepare_scene(scene, device="cpu"))
     total = sum(fill.sum() for fill in edge_fill.values())
     total.backward()
     assert radius.grad is not None
@@ -169,30 +165,29 @@ def test_conformal_pec_edge_fill_is_differentiable_in_the_conductor_geometry():
 
 
 def test_staircase_mode_carries_no_conformal_edge_fill():
-    model = _pec_scene(_node_aligned_box(), pec_mode="staircase").compile_materials()
+    model = compile_materials(_pec_scene(_node_aligned_box(), pec_mode="staircase"))
     assert model["pec_mode"] == "staircase"
     assert model["pec_edge_fill"] is None
-    conformal_model = _pec_scene(_node_aligned_box()).compile_materials()
+    conformal_model = compile_materials(_pec_scene(_node_aligned_box()))
     assert conformal_model["pec_mode"] == "conformal"
     assert set(conformal_model["pec_edge_fill"]) == {"Ex", "Ey", "Ez"}
 
 
 def test_non_pec_scene_has_no_edge_fill():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=BOUNDS),
-        grid=mw.GridSpec.uniform(DX),
-        boundary=mw.BoundarySpec.pml(num_layers=8),
-        subpixel_samples=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
-            material=mw.Material(eps_r=4.0),
-            name="dielectric",
-        )
-    )
-    model = prepare_scene(scene).compile_materials()
+                domain=mw.Domain(bounds=BOUNDS),
+                grid=mw.GridSpec.uniform(DX),
+                boundary=mw.BoundarySpec.pml(num_layers=8),
+                subpixel=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
+                material=mw.Material(eps_r=4.0),
+                name="dielectric",
+            ),
+            ),
+            )
+    model = compile_materials(prepare_scene(scene, device="cpu"))
     assert model["pec_occupancy"] is None
     assert model["pec_edge_fill"] is None
 
@@ -201,7 +196,7 @@ def test_non_pec_scene_has_no_edge_fill():
 def test_aligned_conductor_open_fractions_agree_across_modes(pec_mode):
     """The runtime-visible open fractions match between modes on an aligned box."""
     prepared = _pec_scene(_node_aligned_box(), pec_mode=pec_mode)
-    model = prepared.compile_materials()
+    model = compile_materials(prepared)
     reference = _pec_scene(_node_aligned_box(), pec_mode="staircase")
     for component in ("Ex", "Ey", "Ez"):
         fill = (
@@ -220,11 +215,10 @@ def test_one_cell_patch_survives_float32_boundary_cancellation(mode):
     prepared = prepare_scene(mw.Scene(
         domain=mw.Domain(bounds=((nodes[0], nodes[-1]),)*3),
         grid=mw.GridSpec.custom(nodes, nodes, nodes), boundary=mw.BoundarySpec.none(),
-        subpixel_samples=mw.SubpixelSpec(pec=mode, averaging="arithmetic", samples=1), device="cpu",
-        structures=[mw.Structure(mw.Box(position=(0, 0, .0035), size=(.028, .034, .001)), mw.Material.pec())]))
+        subpixel=mw.SubpixelSpec(pec=mode, averaging="arithmetic", samples=1), structures=[mw.Structure(mw.Box(position=(0, 0, .0035), size=(.028, .034, .001)), mw.Material.pec())]), device="cpu")
     from types import SimpleNamespace
     from witwin.maxwell.fdtd.runtime.materials import _pec_edge_open_fractions
-    opened = _pec_edge_open_fractions(SimpleNamespace(_compiled_material_model=prepared.compile_materials()))
+    opened = _pec_edge_open_fractions(SimpleNamespace(_compiled_material_model=compile_materials(prepared)))
     for z in (.003, .004):
         index = int(np.argmin(abs(prepared.z_nodes64-z)))
         assert torch.all(opened["Ex"][:, :, index] == 0)

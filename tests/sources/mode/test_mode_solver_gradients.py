@@ -10,72 +10,66 @@ from witwin.maxwell.compiler.materials import evaluate_material_permittivity
 from witwin.maxwell.compiler.sources import _compile_mode_source
 from witwin.maxwell.fdtd.excitation.modes import solve_mode_source_profile
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 def _mode_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.none(),
-        device="cpu",
-    )
-    scene.add_structure(
-        # A rectangular, z-offset core: with a symmetric core the Ez profile on
-        # the z half-grid has an even interior window whose two central |peak|
-        # entries tie within float64 noise, making the peak-normalization
-        # argmax (and hence the implicit sparse gradient) a knife-edge function
-        # of the grid-derived transverse spacing.
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.02), size=(1.28, 0.24, 0.32)),
-            material=mw.Material(eps_r=12.0),
-            name='core',
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(0.0, 0.0, 0.0),
-            # Aperture edges land exactly on grid nodes (+-0.24); a 0.56 span
-            # would place them exactly midway between nodes, where the nearest-
-            # node resolution is an ill-conditioned floating-point tie.
-            size=(0.0, 0.48, 0.48),
-            polarization="Ez",
-            source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
-            name="port0",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.02), size=(1.28, 0.24, 0.32)),
+                material=mw.Material(eps_r=12.0),
+                name='core',
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(0.0, 0.0, 0.0),
+                # Aperture edges land exactly on grid nodes (+-0.24); a 0.56 span
+                # would place them exactly midway between nodes, where the nearest-
+                # node resolution is an ill-conditioned floating-point tie.
+                size=(0.0, 0.48, 0.48),
+                polarization="Ez",
+                source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
+                name="port0",
+            ),
+            ),
+            )
     return scene
 
 
 def _multimode_scene(mode_index=1):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.none(),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.6, 0.48, 0.48)),
-            material=mw.Material(eps_r=12.0),
-            name='core',
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(0.0, 0.0, 0.0),
-            size=(0.0, 0.8, 0.8),
-            mode_index=mode_index,
-            polarization="Ez",
-            source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
-            name=f"port{mode_index}",
-        )
-    )
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.6, 0.48, 0.48)),
+                material=mw.Material(eps_r=12.0),
+                name='core',
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(0.0, 0.0, 0.0),
+                size=(0.0, 0.8, 0.8),
+                mode_index=mode_index,
+                polarization="Ez",
+                source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
+                name=f"port{mode_index}",
+            ),
+            ),
+            )
     return scene
 
 
 def _mode_context(scene, *, rebuild_from_fields: bool, requires_grad: bool, use_compiled_material_model: bool | None = None):
-    prepared_scene = prepare_scene(scene)
-    model = prepared_scene.compile_materials()
+    prepared_scene = prepare_scene(scene, device="cpu")
+    model = compile_materials(prepared_scene)
     eps_r = evaluate_material_permittivity(model, 1.0e9).to(dtype=torch.float32)
     eps_ex = (0.5 * (eps_r[:-1, :, :] + eps_r[1:, :, :]) * VACUUM_PERMITTIVITY).contiguous()
     eps_ey = (0.5 * (eps_r[:, :-1, :] + eps_r[:, 1:, :]) * VACUUM_PERMITTIVITY).contiguous()
@@ -94,7 +88,7 @@ def _mode_context(scene, *, rebuild_from_fields: bool, requires_grad: bool, use_
         Ex=torch.empty((1,), device=prepared_scene.device, dtype=torch.float32),
         c=299792458.0,
         eps0=VACUUM_PERMITTIVITY,
-        boundary_kind=prepared_scene.boundary.kind,
+        boundary_kind=prepared_scene.scene.boundary.kind,
         _compiled_material_model=model if use_compiled_material_model else None,
         _mode_source_rebuild_from_fields=rebuild_from_fields,
         eps_Ex=eps_ex,
@@ -339,18 +333,17 @@ def test_full_vector_mode_solver_matches_scalar_beta_on_rectangular_waveguide():
 
 def test_full_vector_mode_solver_supports_mu_not_unity():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.none(),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
-            material=mw.Material(eps_r=12.0, mu_r=2.0),
-            name='core',
-        )
-    )
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
+                material=mw.Material(eps_r=12.0, mu_r=2.0),
+                name='core',
+            ),
+            ),
+            )
     source = mw.ModeSource(
         position=(0.0, 0.0, 0.0),
         size=(0.0, 0.56, 0.56),

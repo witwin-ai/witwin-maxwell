@@ -22,7 +22,7 @@ def test_explicit_tensor_policy_forwarding_and_restored_component_binding():
     inverse,binding=inverse_for(True);kernel=inverse.operator.provider.interior_kernels[0]
     hb=HarmonicBalanceConfig(volumes=(binding.volume,),harmonics=1,
         tensor_face_rule='projected_duffy',tensor_kernel_batch=8192,branch_id='tensor-policy')
-    config=mw.MoMConfig(operator_backend='h2',riesz_storage='local_rwg_v1',
+    config=mw.mom.MoMConfig(operator_backend='h2',riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='block_gmres',preconditioner='row_column_norm'),harmonic_balance=hb)
     options=_response_settings(config)['compressed_settings']
     assert options['tensor_face_rule']==hb.tensor_face_rule and options['tensor_kernel_batch']==8192

@@ -2,9 +2,10 @@
 import copy
 from dataclasses import replace
 import torch
-from .harmonic_state import preparation_signature,HarmonicCoupledState
+from .harmonic_recovery import preparation_signature,HarmonicCoupledState
 from .surface_volume import VolumeFieldResponse
 from .static_coupling import StaticVolumeFieldResponse
+from ..errors import UnsupportedFeatureError
 
 
 class HarmonicFieldDecoder:
@@ -120,7 +121,8 @@ class HarmonicFieldDecoder:
         if state.dc_dual_state is not None:
             fields=self.query_dc_dual(points,region_id)
             if fields['magnetic_flux_density_T'] is None:
-                raise NotImplementedError('Conductive magnetic DC has a flux pole; use query_dc_dual for H and pole residue')
+                raise UnsupportedFeatureError('Conductive magnetic DC has a flux pole; use query_dc_dual for H and pole residue',
+                                              feature="guard:5752a416", method="mom")
             return fields['magnetic_A_per_m'],fields['magnetic_flux_density_T']
         if state.dc_magnetic_volume is not None:
             h,b,diagnostics=state.dc_magnetic_volume.fields(points,region_id)
@@ -128,7 +130,8 @@ class HarmonicFieldDecoder:
                 magnetic_response=state.dc_magnetic_volume.receipt,**diagnostics)
             return h,b
         if state.dc_magnetic_density is None:
-            raise NotImplementedError('This harmonic state has no recovered DC magnetic response')
+            raise UnsupportedFeatureError('This harmonic state has no recovered DC magnetic response',
+                                          feature="guard:3ce27cc3", method="mom")
         if self._dc_magnetic is None:
             from .static_magnetic import MagnetostaticInterfaceResponse
             closure = static['current_closure']

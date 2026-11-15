@@ -23,7 +23,6 @@ def _scene():
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
     )
 
 
@@ -116,8 +115,8 @@ def test_mixed_port_views_and_persistence_keep_only_public_ratios(tmp_path, colu
     assert view.port_name == "feed"
     assert view.frequencies is port.frequencies and view.z0 is port.z0
     assert view.metadata.keys() == port.metadata.keys() - {"terminal_voltage", "terminal_current"}
-    for read in (lambda: result.raw_output, lambda: result.embedded_networks,
-                 lambda: result.embedded_network("feed"),
+    for read in (lambda: mw.rf.embedded_networks(result),
+                 lambda: mw.rf.embedded_network(result, "feed"),
                  lambda: result._snapshot_payload(fields={}), lambda: view.save(tmp_path / "port.pt")):
         with pytest.raises(ValueError, match="Absolute spectra of a run mixing ongoing"):
             read()

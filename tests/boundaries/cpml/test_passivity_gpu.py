@@ -3,6 +3,7 @@
 These are qualification cases, not a claim of a passive CPML closure. Run with
 python -m pytest tests/boundaries/cpml/test_passivity_gpu.py -v
 """
+from dataclasses import replace
 import math
 
 import pytest
@@ -10,6 +11,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd.runtime.passivity import FIT_WINDOWS, total_energy
+from witwin.maxwell.scene import place_scene
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CPML qualification requires CUDA")
 
@@ -18,17 +20,18 @@ def _slab(*, fixed_k=False, absorber="cpml", steps=240000):
     # The real slab matches the diagnosed 1.28 m period / eps3 / 12-layer cell.
     k = .55 * 2 * math.pi * 1e9 / 299792458.
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((- .64, .64),) * 3),
-        grid=mw.GridSpec.anisotropic(1.28, .025, .025),
-        boundary=mw.BoundarySpec.faces(
+                domain=mw.Domain(bounds=((- .64, .64),) * 3),
+                grid=mw.GridSpec.anisotropic(1.28, .025, .025),
+                boundary=mw.BoundarySpec.faces(
             x="bloch" if fixed_k else "periodic", y="bloch" if fixed_k else "periodic",
             z="pml", num_layers=40 if absorber == "auto" else 12,
-            bloch_wavevector=(0., k if fixed_k else 0., 0.)), device="cuda",
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized", pec="staircase"),
-    )
-    scene.add_structure(mw.Structure(
-        geometry=mw.Box(position=(0., 0., 0.), size=(1.28, 1.28, .1)),
-        material=mw.Material(eps_r=4. if fixed_k else 3.)))
+            bloch_wavevector=(0., k if fixed_k else 0., 0.)), subpixel=mw.SubpixelSpec(samples=3, averaging="polarized", pec="staircase"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0., 0., 0.), size=(1.28, 1.28, .1)),
+                material=mw.Material(eps_r=4. if fixed_k else 3.)),
+            ),
+            )
     if fixed_k:
         # A finite-support cutoff pulse excites the slab-guided TM tail below
         # the fixed-k vacuum light line (0.55 GHz). Endpoints are exactly zero.
@@ -36,12 +39,15 @@ def _slab(*, fixed_k=False, absorber="cpml", steps=240000):
         pulse = torch.sin(2 * math.pi * .4e9 * times) * torch.sin(math.pi * times / times[-1]).square()
         pulse[0] = pulse[-1] = 0
         # The cell is one 1.28 m cell along x: use the ideal (point) dipole profile.
-        scene.add_source(mw.PointDipole(position=(0., 0., .025), polarization="Ez", profile="ideal",
-            source_time=mw.CustomSourceTime(times=tuple(times.tolist()), amplitudes=tuple(pulse.tolist()),
-                                          frequency=1e9, characteristic_frequency=2e9)))
-    scene.add_monitor(mw.PointMonitor("field", position=(0., 0., 0.), fields=("Ez",)))
-    sim = mw.Simulation.fdtd(scene, frequencies=(.3e9, 1e9), absorber=absorber,
-        run_time=mw.TimeConfig(time_steps=steps, dt=1.6666666666666667e-11), full_field_dft=False)
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PointDipole(position=(0., 0., .025), polarization="Ez", profile="ideal",
+                source_time=mw.sources.CustomSourceTime(times=tuple(times.tolist()), amplitudes=tuple(pulse.tolist()),
+                             frequency=1e9, characteristic_frequency=2e9)),
+        ))
+    scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("field", position=(0., 0., 0.), fields=("Ez",))))
+    sim = mw.Simulation.fdtd(scene, frequencies=(.3e9, 1e9), config=mw.FDTDConfig(absorber=absorber,
+        run_time=mw.TimeConfig(time_steps=steps, dt=1.6666666666666667e-11), full_field_dft=False))
     return sim
 
 
@@ -55,7 +61,7 @@ def _seed_tm(solver):
 def test_real_periodic_eps3_slab_tm_explicit_cpml_trips():
     prepared = _slab(steps=80000).prepare()
     _seed_tm(prepared.solver)
-    with pytest.raises(mw.FDTDPassivityError, match="real-field closed-transverse PML"):
+    with pytest.raises(mw.fdtd.FDTDPassivityError, match="real-field closed-transverse PML"):
         prepared.run()
 
 
@@ -70,12 +76,14 @@ def test_auto_real_periodic_slab_does_not_trip():
 
 def test_open_pml_dipole_does_not_trip():
     scene = mw.Scene(domain=mw.Domain(bounds=((- .15, .15),) * 3),
-        grid=mw.GridSpec.uniform(.03), boundary=mw.BoundarySpec.pml(num_layers=12), device="cuda")
-    scene.add_source(mw.PointDipole(position=(0., 0., 0.), polarization="Ez",
-                                  source_time=mw.GaussianPulse(frequency=1e9, fwidth=.3e9)))
-    scene.add_monitor(mw.PointMonitor("field", position=(0., .03, 0.), fields=("Ez",)))
-    prepared = mw.Simulation.fdtd(scene, frequency=1e9,
-        run_time=mw.TimeConfig(time_steps=40000), full_field_dft=False).prepare()
+                grid=mw.GridSpec.uniform(.03), boundary=mw.BoundarySpec.pml(num_layers=12),
+                     sources=(
+                         mw.PointDipole(position=(0., 0., 0.), polarization="Ez",
+                                      source_time=mw.GaussianPulse(frequency=1e9, fwidth=.3e9)),
+                     ),
+                     monitors=(mw.PointMonitor("field", position=(0., .03, 0.), fields=("Ez",)),))
+    prepared = mw.Simulation.fdtd(scene, frequencies=1e9,
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=40000), full_field_dft=False)).prepare()
     result = prepared.run()
     assert result.metadata["absorber"] == "cpml"
     assert prepared.solver._passivity_state is None
@@ -88,21 +96,27 @@ def test_bloch_lc_60_degrees_default_profile_does_not_trip():
     f0 = 3e9
     k = 2 * math.pi * f0 / 299792458. * math.sin(math.radians(60))
     scene = mw.Scene(domain=mw.Domain(bounds=((- .01, .01), (- .01, .01), (- .06, .06))),
-        grid=mw.GridSpec.uniform(.0005), device="cuda",
-        boundary=mw.BoundarySpec.faces(x="bloch", y="bloch", z="pml", num_layers=16,
+        grid=mw.GridSpec.uniform(.0005), boundary=mw.BoundarySpec.faces(x="bloch", y="bloch", z="pml", num_layers=16,
                                        bloch_wavevector=(0., k, 0.)))
-    for bounds in ((-.007, -.0005), (.0005, .007)):
-        scene.add_structure(mw.Structure(
-            geometry=mw.PlanarPEC.rectangle((bounds, (-.007, .007)), normal_axis="z", coordinate=0.),
-            material=mw.Material.pec()))
-    scene.add_port(mw.LumpedPort(name="load", negative=(-.0005, 0., 0.), positive=(.0005, 0., 0.),
-        voltage_path=mw.AxisPath("x"),
-        current_surface=mw.Box(position=(-.00025, 0., 0.), size=(0., .0015, .0015)),
-        termination=mw.SeriesRLC(l=5e-9, c=.5e-12)))
-    scene.add_source(mw.PointDipole(position=(0., 0., -.03), polarization="Ex",
-                                  source_time=mw.GaussianPulse(frequency=f0, fwidth=.9e9)))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(
+              geometry=mw.geometry.PlanarPEC.rectangle((bounds, (-.007, .007)), normal_axis="z", coordinate=0.),
+              material=mw.Material.pec()) for bounds in ((-.007, -.0005), (.0005, .007))),
+    ))
+    scene = scene.updated(ports=(
+        *scene.ports,
+        mw.LumpedPort(name="load", negative=(-.0005, 0., 0.), positive=(.0005, 0., 0.),
+            voltage_path=mw.AxisPath("x"),
+            current_surface=mw.Box(position=(-.00025, 0., 0.), size=(0., .0015, .0015)),
+            termination=mw.rf.SeriesRLC(l=5e-9, c=.5e-12)),
+    ), sources=(
+        *scene.sources,
+        mw.PointDipole(position=(0., 0., -.03), polarization="Ex",
+                     source_time=mw.GaussianPulse(frequency=f0, fwidth=.9e9)),
+    ))
     prepared = mw.Simulation.fdtd(scene, frequencies=(2.7e9, 3e9, 3.3e9),
-        run_time=mw.TimeConfig(time_steps=120000), full_field_dft=False).prepare()
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=120000), full_field_dft=False)).prepare()
     assert prepared.solver.active_absorber_type == "cpml"
     prepared.run()
     assert prepared.solver._passivity_state["window_count"] >= FIT_WINDOWS
@@ -113,7 +127,7 @@ def test_bloch_lc_60_degrees_default_profile_does_not_trip():
 def test_guard_checkpoint_resume_and_graph_match(graph, tmp_path):
     # Source-free TM seed keeps this equality gate independent of pulse tails.
     simulation = _slab(steps=16000)
-    simulation.config.cuda_graph = graph
+    simulation.config = replace(simulation.config, cuda_graph=graph)
     full = simulation.prepare()
     _seed_tm(full.solver)
     full.run()
@@ -123,7 +137,7 @@ def test_guard_checkpoint_resume_and_graph_match(graph, tmp_path):
     path = tmp_path / "cpml.pt"
     checkpoint.save(path)
     resumed = simulation.prepare()
-    resumed.run(resume_from=mw.FDTDResumeCheckpoint.load(path))
+    resumed.run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path))
     for key in ("history", "peak", "window_max"):
         assert torch.equal(full.solver._passivity_state[key], resumed.solver._passivity_state[key])
     for key in ("sample_count", "window_count"):
@@ -141,15 +155,15 @@ def _cw_modulated_slab(*, device="cuda"):
     spec = SCENARIOS["modulated_slab"]
     # Keep the benchmark grid, modulation and CW drive. Match the three point
     # traces in the archived growth.py, without full-volume spectral buffers.
-    scene = build_scene("modulated_slab").clone(device=device, monitors=[
-        mw.FieldTimeMonitor(name, components=("Ex",), position=position, interval=4)
+    scene = place_scene(build_scene("modulated_slab").updated(monitors=[
+        mw.monitors.FieldTimeMonitor(name, components=("Ex",), position=position, interval=4)
         for name, position in (("slab", (0., 0., 0.)),
                                ("down", (0., 0., .3)), ("up", (0., 0., -.3)))
-    ])
+    ]), device)
     transient_cycles = math.ceil(CW_TRANSIENT * min(spec.frequencies))
-    return mw.Simulation.fdtd(scene, frequencies=spec.frequencies, absorber="cpml",
+    return mw.Simulation.fdtd(scene, frequencies=spec.frequencies, config=mw.FDTDConfig(absorber="cpml",
         full_field_dft=False,
-        run_time=mw.TimeConfig(time_steps=1, transient_cycles=transient_cycles))
+        run_time=mw.TimeConfig(time_steps=1, transient_cycles=transient_cycles)))
 
 
 def _cw_growth_report(windows, *, dt, start_step, planned_steps, trip_step, error):
@@ -183,7 +197,7 @@ def _record_guard(monkeypatch):
         windows.update({int(row[0]): row.tolist() for row in history})
         try:
             check(history, state)
-        except mw.FDTDPassivityError as error:
+        except mw.fdtd.FDTDPassivityError as error:
             outcome.update(trip_step=int(history[-1, 0]), message=str(error))
             raise
 
@@ -212,8 +226,8 @@ def test_cw_modulated_slab_explicit_cpml_is_a_no_trip_control(monkeypatch, tmp_p
     assert solver.active_absorber_type == "cpml"
     dt = float(solver.dt)
     steps = math.ceil(CW_GROWTH_HORIZON / dt)
-    simulation.config.run_time = mw.TimeConfig(time_steps=steps,
-        transient_cycles=simulation.config.run_time.transient_cycles)
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=steps,
+        transient_cycles=simulation.config.run_time.transient_cycles))
     windows, outcome = _record_guard(monkeypatch)
     prepared.run()
     report = _cw_growth_report(windows, dt=dt, start_step=solver._passivity_state["start_step"],
@@ -229,12 +243,12 @@ def _cw_eps3_slab():
     # point dipole breaks transverse uniformity, so its start-up transient seeds the
     # transverse Floquet q=1 grazing-TM CPML mode.
     simulation = _slab(steps=1)
-    scene = simulation.scene.clone(sources=[mw.PointDipole(
+    scene = simulation.scene.updated(sources=[mw.PointDipole(
         position=(0., .3, .025), polarization="Ez", profile="ideal",
         source_time=mw.CW(frequency=1e9))])
-    return mw.Simulation.fdtd(scene, frequencies=(1e9,), absorber="cpml", full_field_dft=False,
+    return mw.Simulation.fdtd(scene, frequencies=(1e9,), config=mw.FDTDConfig(absorber="cpml", full_field_dft=False,
         run_time=mw.TimeConfig(time_steps=1, dt=simulation.config.run_time.dt,
-                               transient_cycles=math.ceil(CW_TRANSIENT * 1e9)))
+                               transient_cycles=math.ceil(CW_TRANSIENT * 1e9))))
 
 
 def test_cw_driven_eps3_slab_explicit_cpml_trips(monkeypatch, tmp_path, record_property):
@@ -246,8 +260,8 @@ def test_cw_driven_eps3_slab_explicit_cpml_trips(monkeypatch, tmp_path, record_p
     assert not solver.complex_fields_enabled and solver.active_absorber_type == "cpml"
     dt = float(solver.dt)
     steps = math.ceil(CW_GROWTH_HORIZON / dt)
-    simulation.config.run_time = mw.TimeConfig(time_steps=steps, dt=dt,
-        transient_cycles=simulation.config.run_time.transient_cycles)
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=steps, dt=dt,
+        transient_cycles=simulation.config.run_time.transient_cycles))
     # Prediction, stated before the run: the mode's energy grows at 2*8.11e6 1/s
     # (2.70e-4 per step). For a start-up seed fraction s of the CW energy, the diagnostic
     # onset (+0.1 %) is ln(1e-3/s)/(2*rate) after the source starts: 0.43-1.84 us for
@@ -257,7 +271,7 @@ def test_cw_driven_eps3_slab_explicit_cpml_trips(monkeypatch, tmp_path, record_p
     predicted_latest_trip = max(CW_TRANSIENT, math.log(1e-3 / 1e-16) / (2 * GROWTH_RATE_AMPLITUDE)) + fit
     windows, outcome = _record_guard(monkeypatch)
     try:
-        with pytest.raises(mw.FDTDPassivityError, match="real-field closed-transverse PML"):
+        with pytest.raises(mw.fdtd.FDTDPassivityError, match="real-field closed-transverse PML"):
             prepared.run()
     finally:
         state = getattr(solver, "_passivity_state", None)
@@ -309,29 +323,32 @@ def test_complex_fixed_k_cw_eps4_slab_completes_with_warning_metadata():
     xy = np.linspace(-.05 * wavelength, .05 * wavelength, resolution // 10 + 1)
     z = np.linspace(-wavelength, wavelength, 2 * resolution + 1)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((xy[0], xy[-1]), (xy[0], xy[-1]), (z[0], z[-1]))),
-        grid=mw.GridSpec.custom(xy, xy, z), device="cuda",
-        boundary=mw.BoundarySpec.faces(x="bloch", y="bloch", z="pml",
+                domain=mw.Domain(bounds=((xy[0], xy[-1]), (xy[0], xy[-1]), (z[0], z[-1]))),
+                grid=mw.GridSpec.custom(xy, xy, z), boundary=mw.BoundarySpec.faces(x="bloch", y="bloch", z="pml",
             num_layers=resolution // 2, bloch_wavevector=(kpar, 0., 0.)),
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 128), averaging="polarized"))
-    scene.add_structure(mw.Structure(
-        geometry=mw.Box(position=(0., 0., .013 * wavelength),
-                        size=(wavelength, wavelength, .37 * wavelength)),
-        material=mw.Material(eps_r=4.), name="slab"))
-    scene.add_source(mw.PlaneWave(direction=(sine, 0., cosine), polarization=(cosine, 0., -sine),
-        source_time=mw.CW(frequency=frequency),
-        injection=mw.TFSF.slab(axis="z", bounds=(-.65 * wavelength, .65 * wavelength))))
-    scene.add_monitor(mw.PointMonitor("field", position=(0., 0., 0.), fields=("Ex",)))
-    prepared = mw.Simulation.fdtd(scene, frequency=frequency, absorber="cpml", shutoff=0.,
-        full_field_dft=False, spectral_sampler=mw.SpectralSampler(window="hanning"),
-        run_time=mw.TimeConfig.auto(transient_cycles=300, steady_cycles=100)).prepare()
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 128), averaging="polarized"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0., 0., .013 * wavelength),
+            size=(wavelength, wavelength, .37 * wavelength)),
+                material=mw.Material(eps_r=4.), name="slab"),
+            ),
+                sources=(
+            mw.PlaneWave(direction=(sine, 0., cosine), polarization=(cosine, 0., -sine),
+                source_time=mw.CW(frequency=frequency),
+                injection=mw.TFSF.slab(axis="z", bounds=(-.65 * wavelength, .65 * wavelength))),
+            ),
+                monitors=(mw.PointMonitor("field", position=(0., 0., 0.), fields=("Ex",)),))
+    prepared = mw.Simulation.fdtd(scene, frequencies=frequency, config=mw.FDTDConfig(absorber="cpml", shutoff=0.,
+        full_field_dft=False, spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+        run_time=mw.TimeConfig.auto(transient_cycles=300, steady_cycles=100))).prepare()
     assert prepared.solver.complex_fields_enabled
     with pytest.warns(RuntimeWarning, match="complex fixed-k Bloch.*slope=.*stderr=.*window steps") as caught:
         result = prepared.run()
     assert len(caught) == 1
     assert result.metadata["passivity_guard"] == "warned: complex fixed-k growth"
     record = result.metadata["passivity_guard_warning"]
-    assert record == prepared.solver.passivity_guard_warning == result.solver_stats["passivity_guard_warning"]
+    assert record == prepared.solver.passivity_guard_warning == result.stats()["passivity_guard_warning"]
     assert record["slope"] + 3 * record["stderr"] > 4e-7
     assert record["window"][1] == record["step"]
     assert record["step"] < result.stats()["steps_run"]

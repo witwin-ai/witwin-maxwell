@@ -4,6 +4,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.core import Box, Sphere
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_tensors, compile_materials, compile_relative_materials
 
 _FREQUENCY = 1.0e9
 
@@ -14,43 +15,42 @@ _SLAB_BOX = Box(position=(0.0, 0.0, 0.0), size=(0.35, 0.35, 0.35))
 _GRID_SHAPE = (7, 7, 7)
 
 
-def _build_scene(material, *, geometry=_SLAB_BOX, device="cpu"):
+def _build_scene(material, *, geometry=_SLAB_BOX):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.4, 0.4), (-0.4, 0.4))),
-        grid=mw.GridSpec.uniform(0.05),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device=device,
-    )
-    scene.add_structure(mw.Structure(geometry=geometry, material=material))
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.4, 0.4), (-0.4, 0.4))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                structures=(mw.Structure(geometry=geometry, material=material),),
+            )
     return scene
 
 
 def _compiled_eps(material, *, frequency=None, geometry=_SLAB_BOX):
-    prepared = prepare_scene(_build_scene(material, geometry=geometry))
-    eps, _ = prepared.compile_relative_materials(frequency=frequency)
+    prepared = prepare_scene(_build_scene(material, geometry=geometry), device="cpu")
+    eps, _ = compile_relative_materials(prepared, frequency=frequency)
     return eps
 
 
 def test_perturbation_medium_validation():
     base = mw.Material(eps_r=2.25)
     with pytest.raises(TypeError, match="base must be a Material"):
-        mw.PerturbationMedium(2.25, perturbation=torch.zeros(2, 2, 2))
+        mw.media.PerturbationMedium(2.25, perturbation=torch.zeros(2, 2, 2))
     with pytest.raises(TypeError, match="torch.Tensor"):
-        mw.PerturbationMedium(base, perturbation=1.0)
+        mw.media.PerturbationMedium(base, perturbation=1.0)
     with pytest.raises(ValueError, match="3D"):
-        mw.PerturbationMedium(base, perturbation=torch.zeros(2, 2))
+        mw.media.PerturbationMedium(base, perturbation=torch.zeros(2, 2))
     with pytest.raises(ValueError, match="finite"):
-        mw.PerturbationMedium(base, perturbation=torch.full((2, 2, 2), float("inf")))
+        mw.media.PerturbationMedium(base, perturbation=torch.full((2, 2, 2), float("inf")))
     with pytest.raises(ValueError, match="PEC"):
-        mw.PerturbationMedium(mw.Material.pec(), perturbation=torch.zeros(2, 2, 2))
+        mw.media.PerturbationMedium(mw.Material.pec(), perturbation=torch.zeros(2, 2, 2))
     with pytest.raises(ValueError, match="non-positive permittivity"):
-        mw.PerturbationMedium(
+        mw.media.PerturbationMedium(
             base, perturbation=torch.full((2, 2, 2), -3.0), eps_sensitivity=1.0
         )
 
 
 def test_perturbation_medium_blocks_scalar_frequency_evaluation():
-    material = mw.PerturbationMedium(
+    material = mw.media.PerturbationMedium(
         mw.Material(eps_r=2.25), perturbation=torch.ones(2, 2, 2), eps_sensitivity=0.5
     )
     with pytest.raises(NotImplementedError, match="spatially varying"):
@@ -62,17 +62,17 @@ def test_perturbation_medium_blocks_scalar_frequency_evaluation():
 
 
 def test_perturbation_medium_requires_box_geometry():
-    material = mw.PerturbationMedium(
+    material = mw.media.PerturbationMedium(
         mw.Material(eps_r=2.25), perturbation=torch.ones(2, 2, 2), eps_sensitivity=0.5
     )
     scene = _build_scene(material, geometry=Sphere(position=(0.0, 0.0, 0.0), radius=0.2))
     with pytest.raises(ValueError, match="Box structure geometry only"):
-        prepare_scene(scene).compile_materials()
+        compile_materials(prepare_scene(scene, device="cpu"))
 
 
 def test_zero_perturbation_reproduces_base_material_exactly():
     base = mw.Material(eps_r=2.25)
-    perturbed = mw.PerturbationMedium(
+    perturbed = mw.media.PerturbationMedium(
         base, perturbation=torch.zeros(_GRID_SHAPE), eps_sensitivity=0.7
     )
     assert torch.equal(_compiled_eps(perturbed), _compiled_eps(base))
@@ -80,7 +80,7 @@ def test_zero_perturbation_reproduces_base_material_exactly():
 
 def test_uniform_perturbation_matches_directly_constructed_material():
     delta, sensitivity = 1.5, 0.8
-    perturbed = mw.PerturbationMedium(
+    perturbed = mw.media.PerturbationMedium(
         mw.Material(eps_r=2.25),
         perturbation=torch.full(_GRID_SHAPE, delta),
         eps_sensitivity=sensitivity,
@@ -93,7 +93,7 @@ def test_perturbation_of_dispersive_base_shifts_eps_inf():
     base = mw.Material.lorentz(
         eps_inf=2.0, delta_eps=1.0, resonance_frequency=2.0e9, gamma=2.0e8
     )
-    perturbed = mw.PerturbationMedium(
+    perturbed = mw.media.PerturbationMedium(
         base, perturbation=torch.full(_GRID_SHAPE, 0.5), eps_sensitivity=1.0
     )
     direct = mw.Material.lorentz(
@@ -109,11 +109,11 @@ def test_perturbation_of_dispersive_base_shifts_eps_inf():
 
 def test_nonuniform_perturbation_is_differentiable_at_compile_time():
     perturbation = (0.5 * torch.rand(_GRID_SHAPE)).requires_grad_(True)
-    material = mw.PerturbationMedium(
+    material = mw.media.PerturbationMedium(
         mw.Material(eps_r=2.25), perturbation=perturbation, eps_sensitivity=0.5
     )
-    prepared = prepare_scene(_build_scene(material))
-    eps, _ = prepared.compile_material_tensors()
+    prepared = prepare_scene(_build_scene(material), device="cpu")
+    eps, _ = compile_material_tensors(prepared)
     eps.sum().backward()
     assert perturbation.grad is not None
     assert torch.isfinite(perturbation.grad).all()
@@ -123,27 +123,29 @@ def test_nonuniform_perturbation_is_differentiable_at_compile_time():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_zero_perturbation_run_matches_base_material_run():
     def run(material):
-        scene = _build_scene(material, device="cuda")
-        scene.add_source(
+        scene = _build_scene(material)
+        scene = scene.updated(sources=(
+            *scene.sources,
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=(0.0, 0.0, 1.0),
                 source_time=mw.CW(frequency=_FREQUENCY, amplitude=80.0),
                 name="pw",
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.4, 0.0, 0.0), fields=("Ez",)))
+            ),
+        ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.4, 0.0, 0.0), fields=("Ez",))))
         result = mw.Simulation.fdtd(
             scene,
             frequencies=[_FREQUENCY],
-            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-            spectral_sampler=mw.SpectralSampler(window="hanning"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                full_field_dft=False,
+            ),
         ).run()
-        return result.monitor("probe")["data"]
+        return result.monitor("probe", freq_index=0).sel(component="Ez").values
 
     base = mw.Material(eps_r=2.25)
-    perturbed = mw.PerturbationMedium(
+    perturbed = mw.media.PerturbationMedium(
         base, perturbation=torch.zeros(_GRID_SHAPE), eps_sensitivity=0.7
     )
     base_probe = run(base)
@@ -160,34 +162,35 @@ def _abs2(z):
 
 def _perturbation_sim(perturbation):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
-            material=mw.PerturbationMedium(
-                mw.Material(eps_r=2.0), perturbation=perturbation, eps_sensitivity=2.0
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                material=mw.media.PerturbationMedium(
+                    mw.Material(eps_r=2.0), perturbation=perturbation, eps_sensitivity=2.0
+                ),
             ),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, -0.18),
-            polarization="Ez",
-            width=0.04,
-            source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, -0.18),
+                polarization="Ez",
+                width=0.04,
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)),),
+            )
     return mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=24),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=24),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
 
 
@@ -195,7 +198,7 @@ def _perturbation_sim(perturbation):
 def test_fdtd_perturbation_gradient_matches_finite_difference():
     def loss_of(perturbation):
         result = _perturbation_sim(perturbation).run()
-        return _abs2(result.monitor("probe")["data"]).sum()
+        return _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values).sum()
 
     torch.manual_seed(0)
     base = 0.4 * torch.rand(2, 2, 2, device="cuda")

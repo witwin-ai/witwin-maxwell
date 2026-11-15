@@ -7,11 +7,23 @@ from typing import Any, Mapping
 
 import torch
 
-# The single versioned mass-averaging profile. It is IEEE/IEC-inspired but NOT
-# certified: see docs and SARAveraging for the documented differences from
-# IEEE/IEC 62704-1. Do not rename it to imply certification.
-AVERAGING_PROFILE = "cubical-prefix-v1"
-_SUPPORTED_PROFILES = (AVERAGING_PROFILE,)
+from ._enums import StrEnum, parse_enum
+from .errors import UnsupportedFeatureError
+
+
+class AveragingProfile(StrEnum):
+    """The versioned SAR mass-averaging algorithm.
+
+    ``CUBICAL_PREFIX_V1`` is IEEE/IEC-inspired but NOT certified: see the docs and
+    ``SARAveraging`` for the documented differences from IEEE/IEC 62704-1. Do not
+    rename it to imply certification.
+    """
+
+    CUBICAL_PREFIX_V1 = "cubical-prefix-v1"
+
+
+# The profile that SAR averaging computes (the default of every request).
+AVERAGING_PROFILE = AveragingProfile.CUBICAL_PREFIX_V1
 _SUPPORTED_CONNECTIVITY = ("cube",)
 _SUPPORTED_BOUNDARY_POLICY = ("strict-interior",)
 
@@ -51,7 +63,7 @@ class SARAveraging:
     """
 
     mass: tuple[float, ...]
-    profile: str = AVERAGING_PROFILE
+    profile: AveragingProfile = AVERAGING_PROFILE
     connectivity: str = "cube"
     boundary_policy: str = "strict-interior"
     min_tissue_fraction: float = 0.1
@@ -59,30 +71,29 @@ class SARAveraging:
     def __init__(
         self,
         mass,
-        profile: str = AVERAGING_PROFILE,
+        profile: AveragingProfile = AVERAGING_PROFILE,
         connectivity: str = "cube",
         boundary_policy: str = "strict-interior",
         min_tissue_fraction: float = 0.1,
     ):
         object.__setattr__(self, "mass", _coerce_mass_tuple(mass))
-        if profile not in _SUPPORTED_PROFILES:
-            raise ValueError(
-                f"Unsupported SAR averaging profile {profile!r}; choices are {_SUPPORTED_PROFILES}."
-            )
+        profile = parse_enum(AveragingProfile, profile, name="SARAveraging.profile")
         if connectivity not in _SUPPORTED_CONNECTIVITY:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"SAR averaging connectivity {connectivity!r} is not implemented in "
-                f"{AVERAGING_PROFILE}; only {_SUPPORTED_CONNECTIVITY} (no tissue flood-fill) is supported."
+                f"{AVERAGING_PROFILE}; only {_SUPPORTED_CONNECTIVITY} (no tissue flood-fill) is supported.",
+                feature="guard:0f5f472a", method=None
             )
         if boundary_policy not in _SUPPORTED_BOUNDARY_POLICY:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"SAR averaging boundary_policy {boundary_policy!r} is not implemented; "
-                f"only {_SUPPORTED_BOUNDARY_POLICY} is supported."
+                f"only {_SUPPORTED_BOUNDARY_POLICY} is supported.",
+                feature="guard:a389a51c", method=None
             )
         fraction = float(min_tissue_fraction)
         if not (0.0 <= fraction <= 1.0):
             raise ValueError("SARAveraging.min_tissue_fraction must lie in [0, 1].")
-        object.__setattr__(self, "profile", str(profile))
+        object.__setattr__(self, "profile", profile)
         object.__setattr__(self, "connectivity", str(connectivity))
         object.__setattr__(self, "boundary_policy", str(boundary_policy))
         object.__setattr__(self, "min_tissue_fraction", fraction)
@@ -90,8 +101,8 @@ class SARAveraging:
     def payload(self) -> dict[str, Any]:
         return {
             "mass": list(self.mass),
-            "profile": self.profile,
-            "version": AVERAGING_PROFILE,
+            "profile": self.profile.value,
+            "version": AVERAGING_PROFILE.value,
             "connectivity": self.connectivity,
             "boundary_policy": self.boundary_policy,
             "min_tissue_fraction": self.min_tissue_fraction,
@@ -159,13 +170,14 @@ class PowerNormalization:
             if result is None:
                 raise ValueError(
                     "PowerNormalization.accepted_power needs the Result carrying the port; "
-                    "resolve it through Result.sar(...), not the bare reducer."
+                    "resolve it through mw.sar.sar(result, ...), not the bare reducer."
                 )
             return self._resolve_accepted_power_scale(result, frequencies)
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "PowerNormalization.input_power scaling requires a total injected source-power "
             "diagnostic, which this build does not expose; use accepted_power(port=...) or "
-            "source(amplitude=...) instead."
+            "source(amplitude=...) instead.",
+            feature="guard:f8ebe8c3", method=None
         )
 
     def _resolve_accepted_power_scale(self, result, frequencies) -> torch.Tensor:
@@ -244,7 +256,7 @@ class SARPeak:
     mass_kg: torch.Tensor
     cube_half_width: torch.Tensor
     cube_size_m: torch.Tensor
-    profile: str = AVERAGING_PROFILE
+    profile: AveragingProfile = AVERAGING_PROFILE
     unit: str = SAR_UNIT
 
     def payload(self) -> dict[str, Any]:
@@ -257,7 +269,7 @@ class SARPeak:
             "mass_kg": self.mass_kg.detach().to("cpu"),
             "cube_half_width": self.cube_half_width.detach().to("cpu"),
             "cube_size_m": self.cube_size_m.detach().to("cpu"),
-            "profile": self.profile,
+            "profile": str(self.profile),
             "unit": self.unit,
         }
 
@@ -272,7 +284,7 @@ class SARPeak:
             mass_kg=payload["mass_kg"],
             cube_half_width=payload["cube_half_width"],
             cube_size_m=payload["cube_size_m"],
-            profile=str(payload.get("profile", AVERAGING_PROFILE)),
+            profile=parse_enum(AveragingProfile, payload.get("profile", AVERAGING_PROFILE), name="SARPeak profile"),
             unit=str(payload.get("unit", SAR_UNIT)),
         )
 
@@ -347,12 +359,12 @@ class SARResult:
         """Return the regulatory mass-averaged peak SAR for a requested averaging mass.
 
         Requires that a :class:`SARAveraging` request was passed to
-        ``Result.sar(...)`` covering ``mass``. Fails closed otherwise rather than
+        ``mw.sar.sar(result, ...)`` covering ``mass``. Fails closed otherwise rather than
         silently substituting a point-SAR peak.
         """
         if not self.peaks:
             raise ValueError(
-                "No mass-averaged peak is available: call Result.sar(..., averaging="
+                "No mass-averaged peak is available: call mw.sar.sar(result, ..., averaging="
                 "SARAveraging(mass=...)) to request cubical-prefix-v1 averaging."
             )
         key = _match_mass_key(self.peaks.keys(), mass)
@@ -362,7 +374,7 @@ class SARResult:
         """Return the ``[F, nx, ny, nz]`` mass-averaged SAR field (W/kg, NaN at invalid)."""
         if not self.averaged:
             raise ValueError(
-                "No mass-averaged SAR field is available: request averaging on Result.sar(...)."
+                "No mass-averaged SAR field is available: request averaging on mw.sar.sar(result, ...)."
             )
         key = _match_mass_key(self.averaged.keys(), mass)
         return self.averaged[key]["sar"]
@@ -382,11 +394,11 @@ class SARResult:
 
         This is explicitly NON-REGULATORY: it is a smooth optimization surrogate,
         not the IEEE/IEC-style local peak. Use :meth:`peak` for the reported value.
-        Requires that :class:`SARAveraging` was requested on ``Result.sar(...)``.
+        Requires that :class:`SARAveraging` was requested on ``mw.sar.sar(result, ...)``.
         """
         if not self.averaged:
             raise ValueError(
-                "soft_peak needs mass-averaged SAR: call Result.sar(..., averaging="
+                "soft_peak needs mass-averaged SAR: call mw.sar.sar(result, ..., averaging="
                 "SARAveraging(mass=...)) first."
             )
         temp = float(temperature)
@@ -513,12 +525,54 @@ class SARResult:
         )
 
 
+_DECLARED = object()
+
+
+def sar(result, monitor: str, *, averaging=None, normalization=None, electric_fields=None,
+        volume_channels=None) -> SARResult:
+    """Point (and, with ``averaging``, mass-averaged) SAR of ``result`` from a ``PowerLossMonitor``.
+
+    Pure result-domain reduction: it never runs a solver, and fails explicitly when the
+    named ``PowerLossMonitor``, the frequency-domain fields or the tissue mass densities
+    are missing. ``normalization`` defaults to unit source amplitude.
+    """
+    return result._sar(monitor, averaging=averaging, normalization=normalization,
+                       electric_fields=electric_fields, volume_channels=volume_channels)
+
+
+def incident_power_density(result, monitor: str, *, spatial_average=_DECLARED):
+    """Incident power density of ``result`` on a declared ``IncidentPowerDensityMonitor``.
+
+    Forms the time-averaged normal Poynting component per cell, its magnitude (W/m^2),
+    the plane-integrated flux and, when the monitor or ``spatial_average`` (an area,
+    or ``None`` for no average) requests one, the ``spatial-average-v1`` moving-window
+    average. Defaults to the monitor's own ``spatial_average``.
+    """
+    if spatial_average is _DECLARED:
+        return result._incident_power_density(monitor)
+    return result._incident_power_density(monitor, spatial_average=spatial_average)
+
+
+# Public namespace ``mw.sar``: specific absorption rate and incident power density.
+from ._lazy import lazy_attributes  # noqa: E402
+
 __all__ = [
-    "SARAveraging",
+    "AveragingProfile",
+    "IncidentPowerDensity",
+    "IncidentPowerDensityMonitor",
     "PowerNormalization",
-    "SARResult",
+    "SARAveraging",
     "SARPeak",
-    "AVERAGING_PROFILE",
-    "SAR_UNIT",
-    "POWER_UNIT",
+    "SARResult",
+    "combine_coherent_sar",
+    "combine_incoherent_sar",
+    "incident_power_density",
+    "sar",
 ]
+
+__getattr__, __dir__ = lazy_attributes(__name__, names={
+    ".monitors": ("IncidentPowerDensityMonitor",),
+    ".postprocess.incident_power": ("IncidentPowerDensity",),
+    ".postprocess.sar_combine": ("combine_coherent_sar", "combine_incoherent_sar"),
+})
+del lazy_attributes

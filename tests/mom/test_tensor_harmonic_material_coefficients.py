@@ -10,7 +10,7 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 
 def test_tensor_material_opt_in_order_zero_fill_and_gradient():
     q=torch.randn(3,3,3,device='cuda',dtype=torch.float64,requires_grad=True)
-    declaration=mw.Material(eps_r=2.,nonlinearity=mw.TensorNonlinearSusceptibility(chi2=q))
+    declaration=mw.Material(eps_r=2.,nonlinearity=mw.media.TensorNonlinearSusceptibility(chi2=q))
     with pytest.raises(NotImplementedError,match='not integrated'):
         compile_tensor_harmonic_material(declaration,3e8,1,device='cuda')
     tensor=compile_tensor_harmonic_material(declaration,3e8,1,device='cuda',tensor_sources=True)
@@ -39,9 +39,9 @@ def test_scalar_background_tensor_sources_preserve_channels_and_native_gradient(
     rotation=torch.stack((torch.stack((angle.cos(),-angle.sin(),zero)),
         torch.stack((angle.sin(),angle.cos(),zero)),torch.stack((zero,zero,one))))
     declaration=mw.Material(eps_r=2.,mu_r=1.3,sigma_e=.001,nonlinearity=(
-        mw.NonlinearSusceptibility(chi2=.004,chi3=.002),
-        mw.TensorNonlinearSusceptibility(chi2=q,rotation=rotation),
-        mw.TensorNonlinearSusceptibility(chi2=q*.5)))
+        mw.media.NonlinearSusceptibility(chi2=.004,chi3=.002),
+        mw.media.TensorNonlinearSusceptibility(chi2=q,rotation=rotation),
+        mw.media.TensorNonlinearSusceptibility(chi2=q*.5)))
     with pytest.raises(NotImplementedError,match='not integrated'):
         compile_harmonic_material(declaration,3e8,2)
     sampled=compile_harmonic_material(declaration,3e8,2,tensor_sources=True,device='cuda')
@@ -69,8 +69,8 @@ def test_scalar_background_tensor_sources_preserve_channels_and_native_gradient(
 def test_scalar_background_tensor_cubic_coefficients_and_gradient():
     c=torch.arange(81,device='cuda',dtype=torch.float64).reshape(3,3,3,3).requires_grad_()
     rotation=c.new_tensor([[0.,-1.,0.],[1.,0.,0.],[0.,0.,1.]])
-    material=mw.Material(nonlinearity=(mw.TensorNonlinearSusceptibility(chi3=c,rotation=rotation),
-        mw.TensorNonlinearSusceptibility(chi3=c*.25)))
+    material=mw.Material(nonlinearity=(mw.media.TensorNonlinearSusceptibility(chi3=c,rotation=rotation),
+        mw.media.TensorNonlinearSusceptibility(chi3=c*.25)))
     sampled=compile_harmonic_material(material,3e8,2,tensor_sources=True,device='cuda')
     expected=torch.einsum('ia,jb,kc,ld,abcd->ijkl',rotation,rotation,rotation,rotation,c)+c*.25
     assert sampled.chi2_tensor is None and sampled.is_nonlinear

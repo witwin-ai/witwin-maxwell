@@ -12,13 +12,12 @@ GRADED_NODES = np.array([0.0, 0.1, 0.25, 0.45, 0.7, 1.0], dtype=np.float64)
 UNIFORM_NODES = np.linspace(0.0, 1.0, 11)
 
 
-def _custom_scene(nodes=GRADED_NODES, boundary=None, device="cpu"):
+def _custom_scene(nodes=GRADED_NODES, boundary=None):
     lo, hi = float(nodes[0]), float(nodes[-1])
     return mw.Scene(
         domain=mw.Domain(bounds=((lo, hi), (lo, hi), (lo, hi))),
         grid=mw.GridSpec.custom(nodes, nodes, nodes),
         boundary=boundary or mw.BoundarySpec.none(),
-        device=device,
     )
 
 
@@ -79,9 +78,9 @@ def test_custom_grid_properties():
 def test_scene_scalar_spacing_raises_on_custom_grid():
     scene = _custom_scene()
     with pytest.raises(ValueError, match="scalar spacing undefined"):
-        _ = scene.dx
+        _ = prepare_scene(scene, device="cpu").dx
     with pytest.raises(ValueError, match="no scalar spacing"):
-        _ = scene.grid_spacing
+        _ = scene.grid.spacing
 
 
 def test_domain_extent_mismatch_raises():
@@ -89,10 +88,9 @@ def test_domain_extent_mismatch_raises():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((0.0, 2.0), (0.0, 1.0), (0.0, 1.0))),
         grid=mw.GridSpec.custom(nodes, nodes, nodes),
-        device="cpu",
     )
     with pytest.raises(ValueError, match="span the domain exactly"):
-        prepare_scene(scene)
+        prepare_scene(scene, device="cpu")
 
 
 def test_prepared_scene_uniform_masters_fill_domain_with_tidy3d_spacing_semantics():
@@ -100,9 +98,8 @@ def test_prepared_scene_uniform_masters_fill_domain_with_tidy3d_spacing_semantic
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
         grid=mw.GridSpec.uniform(dl),
-        device="cpu",
     )
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
 
     cell_count = int(np.ceil(1.28 / dl))
     assert prepared.Nx == cell_count + 1
@@ -126,10 +123,9 @@ def test_uniform_grid_treats_requested_dl_as_maximum_step():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((0.0, 1.0),) * 3),
         grid=mw.GridSpec.uniform(0.3),
-        device="cpu",
     )
 
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
 
     assert prepared.Nx == 5
     np.testing.assert_allclose(prepared.x_nodes64, (0.0, 0.25, 0.5, 0.75, 1.0))
@@ -141,10 +137,9 @@ def test_prepared_scene_appends_uniform_pml_outside_domain():
         domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.pml(num_layers=2),
-        device="cpu",
     )
 
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
 
     assert prepared.Nx == 15
     np.testing.assert_allclose(prepared.x_nodes64[:3], (-0.7, -0.6, -0.5))
@@ -156,17 +151,17 @@ def test_prepared_scene_appends_uniform_pml_outside_domain():
 def test_prepared_scene_appends_custom_pml_with_edge_steps():
     scene = _custom_scene(boundary=mw.BoundarySpec.pml(num_layers=1))
 
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
 
     np.testing.assert_allclose(
         prepared.x_nodes64,
         np.concatenate(([-0.1], GRADED_NODES, [1.3])),
     )
-    assert prepared.domain.bounds[0] == (0.0, 1.0)
+    assert prepared.scene.domain.bounds[0] == (0.0, 1.0)
 
 
 def test_prepared_scene_custom_masters_on_graded_axis():
-    prepared = prepare_scene(_custom_scene(boundary=mw.BoundarySpec.pec()))
+    prepared = prepare_scene(_custom_scene(boundary=mw.BoundarySpec.pec()), device="cpu")
 
     nodes = GRADED_NODES
     primal = np.diff(nodes)
@@ -184,7 +179,7 @@ def test_prepared_scene_custom_masters_on_graded_axis():
 
 
 def test_prepared_scene_dual_boundary_entries_periodic():
-    prepared = prepare_scene(_custom_scene(boundary=mw.BoundarySpec.periodic()))
+    prepared = prepare_scene(_custom_scene(boundary=mw.BoundarySpec.periodic()), device="cpu")
     primal = np.diff(GRADED_NODES)
     wrap = 0.5 * (primal[0] + primal[-1])
     assert prepared.dy_dual64[0] == wrap
@@ -196,17 +191,17 @@ def test_component_coords_use_per_cell_half_steps_on_custom_grid():
     nodes = GRADED_NODES
     half = nodes[:-1] + 0.5 * np.diff(nodes)
 
-    ex_x, ex_y, ex_z = component_coords(scene, "Ex")
+    ex_x, ex_y, ex_z = component_coords(scene, "Ex", device="cpu")
     np.testing.assert_array_equal(ex_x, half)
     np.testing.assert_array_equal(ex_y, nodes)
     np.testing.assert_array_equal(ex_z, nodes)
 
-    hx_x, hx_y, hx_z = component_coords(scene, "Hx")
+    hx_x, hx_y, hx_z = component_coords(scene, "Hx", device="cpu")
     np.testing.assert_array_equal(hx_x, nodes)
     np.testing.assert_array_equal(hx_y, half)
     np.testing.assert_array_equal(hx_z, half)
 
-    cx, cy, cz = centered_cell_coords(scene)
+    cx, cy, cz = centered_cell_coords(scene, device="cpu")
     np.testing.assert_array_equal(cx, half)
     np.testing.assert_array_equal(cy, half)
     np.testing.assert_array_equal(cz, half)
@@ -214,7 +209,7 @@ def test_component_coords_use_per_cell_half_steps_on_custom_grid():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fdfd_accepts_custom_grid():
-    simulation = mw.Simulation.fdfd(_custom_scene(device="cuda"), frequency=1e9)
+    simulation = mw.Simulation.fdfd(_custom_scene(), frequencies=1e9)
     solver = simulation.prepare().solver
     solver._ensure_system_matrix()
     assert solver.A_matrix.shape[0] == solver.scene.N_vector_total
@@ -222,17 +217,18 @@ def test_fdfd_accepts_custom_grid():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
 def test_fdtd_custom_grid_with_pml_runs_with_physical_depth_profiles():
-    scene = _custom_scene(boundary=mw.BoundarySpec.pml(num_layers=2), device="cuda")
-    scene.add_source(
+    scene = _custom_scene(boundary=mw.BoundarySpec.pml(num_layers=2))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=(0.5, 0.5, 0.5),
             polarization="Ez",
             width=0.1,
             source_time=mw.CW(frequency=1e9, amplitude=1.0),
             name="src",
-        )
-    )
-    solver = mw.Simulation.fdtd(scene, frequency=1e9).prepare().solver
+        ),
+    ))
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9).prepare().solver
 
     assert solver.cpml_kappa_e_x.shape == (solver.Nx,)
     assert solver.cpml_kappa_h_x.shape == (solver.Nx - 1,)
@@ -259,21 +255,20 @@ def test_tfsf_rejects_nonuniform_injection_region():
     graded = nodes.copy()
     graded[10] += 0.02
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.custom(graded, nodes, nodes),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=mw.GaussianPulse(frequency=3e9, fwidth=1e9, amplitude=1.0),
-            injection=mw.TFSF(bounds=((-0.15, 0.15), (-0.15, 0.15), (-0.15, 0.15))),
-            name="pw",
-        )
-    )
-    simulation = mw.Simulation.fdtd(scene, frequency=3e9)
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.custom(graded, nodes, nodes),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization=(1.0, 0.0, 0.0),
+                source_time=mw.GaussianPulse(frequency=3e9, fwidth=1e9, amplitude=1.0),
+                injection=mw.TFSF(bounds=((-0.15, 0.15), (-0.15, 0.15), (-0.15, 0.15))),
+                name="pw",
+            ),
+            ),
+            )
+    simulation = mw.Simulation.fdtd(scene, frequencies=3e9)
     with pytest.raises(ValueError, match="locally uniform grid spacing along axis 'x'"):
         simulation.prepare()
 
@@ -286,21 +281,20 @@ def test_mode_source_rejects_nonuniform_mode_plane():
     graded = nodes.copy()
     graded[10] += 0.02
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.custom(nodes, graded, nodes),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(-0.2, 0.0, 0.0),
-            size=(0.0, 0.4, 0.4),
-            polarization="Ez",
-            source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
-            name="mode0",
-        )
-    )
-    simulation = mw.Simulation.fdtd(scene, frequency=1e9)
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.custom(nodes, graded, nodes),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                sources=(
+            mw.ModeSource(
+                position=(-0.2, 0.0, 0.0),
+                size=(0.0, 0.4, 0.4),
+                polarization="Ez",
+                source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
+                name="mode0",
+            ),
+            ),
+            )
+    simulation = mw.Simulation.fdtd(scene, frequencies=1e9)
     with pytest.raises(ValueError, match="locally uniform grid spacing along axis 'y'"):
         simulation.prepare()
 
@@ -312,9 +306,8 @@ def test_solver_spacing_tensors_on_uniform_grid():
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(dl),
         boundary=mw.BoundarySpec.pml(num_layers=6),
-        device="cuda",
     )
-    solver = mw.Simulation.fdtd(scene, frequency=1e9).prepare().solver
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9).prepare().solver
 
     assert solver.min_dx == pytest.approx(dl, rel=1e-12)
     for name in ("inv_dx_e", "inv_dy_e", "inv_dz_e"):

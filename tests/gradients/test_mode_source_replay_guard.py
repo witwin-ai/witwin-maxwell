@@ -16,6 +16,9 @@ from witwin.maxwell.fdtd.adjoint import core
 from witwin.maxwell.fdtd.excitation.modes import solve_mode_source_profile
 from witwin.maxwell.fdtd.excitation.modes.common import _average_node_tensor_to_component
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
+
+CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for native FDTD")
 
 
 class _Guide(mw.SceneModule):
@@ -30,37 +33,42 @@ class _Guide(mw.SceneModule):
         scene = mw.Scene(
             domain=mw.Domain(bounds=tuple((-.6*scale, .6*scale) if axis == 0 else (-.3*scale, .3*scale) for axis in range(3))),
             grid=mw.GridSpec.uniform(0.02*scale), boundary=mw.BoundarySpec.pml(num_layers=8),
-            device=self.device, subpixel_samples=mw.SubpixelSpec(samples=self.samples, averaging="arithmetic"),
+            subpixel=mw.SubpixelSpec(samples=self.samples, averaging="arithmetic"),
         )
         lo, hi = {"source": (-0.26, -0.14), "control": (0.04, 0.16)}[self.case]
-        for a, b, eps in ((-1., lo, 12.), (lo, hi, self.eps), (hi, 1., 12.)):
-            scene.add_structure(mw.Structure(
-                geometry=mw.Box(position=((a + b) / 2*scale, 0, 0), size=((b - a)*scale, 0.16*scale, 0.08*scale)),
-                material=mw.Material(eps_r=eps),
-            ))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            *(mw.Structure(
+                  geometry=mw.Box(position=((a + b) / 2*scale, 0, 0), size=((b - a)*scale, 0.16*scale, 0.08*scale)),
+                  material=mw.Material(eps_r=eps),
+              ) for a, b, eps in ((-1., lo, 12.), (lo, hi, self.eps), (hi, 1., 12.))),
+        ))
         kwargs = dict(position=(-0.2*scale, 0, 0), size=(0, 0.4*scale, 0.4*scale), direction="+", polarization="Ey",
                       source_time=mw.GaussianPulse(frequency=1e9/scale, fwidth=0.2e9/scale), name="launch")
         if self.launch == "port":
-            scene.add_port(mw.ModePort(**kwargs))
+            scene = scene.updated(ports=(*scene.ports, mw.ModePort(**kwargs)))
         else:
-            scene.add_source(mw.ModeSource(**kwargs))
-        scene.add_monitor(mw.PointMonitor("probe", (0.3*scale, 0, 0), fields=("Ey",)))
-        scene.add_monitor(mw.FluxMonitor("fwd", axis="x", position=0.3*scale, frequencies=[1e9/scale]))
+            scene = scene.updated(sources=(*scene.sources, mw.ModeSource(**kwargs)))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.PointMonitor("probe", (0.3*scale, 0, 0), fields=("Ey",)),
+            mw.FluxMonitor("fwd", axis="x", position=0.3*scale, frequencies=[1e9/scale]),
+        ))
         return scene
 
 
 def _forward_context(scene, *, spacing=.04, dtype=torch.float32):
     # Small host-only mode solves exercise the same material compiler and
     # no-grad launch as the native FDTD bridge, without allocating CUDA fields.
-    scene.grid = mw.GridSpec.uniform(spacing)
-    scene.boundary = mw.BoundarySpec.none()
-    prepared = prepare_scene(scene, material_dtype=dtype)
+    scene = scene.updated(grid=mw.GridSpec.uniform(spacing))
+    scene = scene.updated(boundary=mw.BoundarySpec.none())
+    prepared = prepare_scene(scene, material_dtype=dtype, device="cpu")
     from witwin.maxwell.fdtd.runtime.materials import compile_forward_materials
     sources = tuple(_compile_mode_source(source, default_frequency=1e9)
                     for source in scene.resolved_sources())
     with torch.no_grad():
         model = compile_forward_materials(prepared, sources)
-    context = SimpleNamespace(scene=prepared, _compiled_material_model=model, c=299792458.,
+    context = SimpleNamespace(scene=prepared, public_scene=scene, _compiled_material_model=model, c=299792458.,
                               Ex=torch.empty(1, device=prepared.device, dtype=dtype),
                               eps0=EPS_0, device=prepared.device)
     for field, axis in zip(("Ex", "Ey", "Ez"), "xyz"):
@@ -82,6 +90,7 @@ def test_plane_material_guard_is_spatial(case, launch, trainable):
     model.eps.requires_grad_(trainable)
     scene = model.to_scene()
     context = _forward_context(scene)
+    scene = context.public_scene  # the scene the forward context solved
     source = context._compiled_sources[0]
     assert source["mode_solver_kind"].startswith("vector_")
     inputs = (model.eps,) if trainable else ()
@@ -96,6 +105,7 @@ def test_matching_scalar_families_remain_admitted(forward_kind):
     model = _Guide("source")
     scene = model.to_scene()
     context = _forward_context(scene)
+    scene = context.public_scene  # the scene the forward context solved
     context._compiled_sources[0]["mode_solver_kind"] = forward_kind
     if "complex" in forward_kind:
         context.eps_Ey = context.eps_Ey.to(torch.complex64) * (1 + 0.01j)
@@ -106,6 +116,7 @@ def test_complex_forward_real_replay_rejects_trainable_plane():
     model = _Guide("source")
     scene = model.to_scene()
     context = _forward_context(scene)
+    scene = context.public_scene  # the scene the forward context solved
     context._compiled_sources[0]["mode_solver_kind"] = "scalar_complex_dense"
     with pytest.raises(NotImplementedError, match="launch.*scalar_complex_dense.*scalar_real"):
         _validate_mode_source_replay(context, scene, (model.eps,))
@@ -118,6 +129,7 @@ def test_trainable_launch_uses_torch_even_above_scipy_dense_cutoff(monkeypatch):
     model = _Guide("source")
     scene = model.to_scene()
     context = _forward_context(scene)
+    scene = context.public_scene  # the scene the forward context solved
     assert context._compiled_sources[0]["mode_solver_kind"] == "vector_dense_torch"
     _validate_mode_source_replay(context, scene, (model.eps,))
 
@@ -125,43 +137,50 @@ def test_trainable_launch_uses_torch_even_above_scipy_dense_cutoff(monkeypatch):
 def test_only_material_dependent_source_in_a_multisource_scene_switches():
     model = _Guide("source")
     scene = model.to_scene()
-    scene.sources.insert(0, mw.ModeSource(
+    scene = scene.updated(sources=(mw.ModeSource(
         position=(0.2, 0, 0), size=(0, 0.4, 0.4), polarization="Ey",
         source_time=mw.CW(1e9), name="fixed_plane",
-    ))
+    ), *scene.sources))
     context = _forward_context(scene)
+    scene = context.public_scene  # the scene the forward context solved
     _validate_mode_source_replay(context, scene, (model.eps,))
     assert context._compiled_sources[0]["mode_solver_kind"] == "vector_dense"
     assert context._compiled_sources[1]["mode_solver_kind"] == "vector_dense_torch"
 
 
-def _waveport_guide(case="control", *, device="cpu"):
+def _waveport_guide(case="control", *, device="cuda"):
     model = _Guide(case, device=device)
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.4, 0.4), (-0.25, 0.25))),
-        grid=mw.GridSpec.uniform(0.05), boundary=mw.BoundarySpec.none(), device=device,
-        subpixel_samples=mw.SubpixelSpec(samples=1, averaging="arithmetic"),
-    )
     lo, hi = {"source": (-0.26, -0.14), "control": (0.04, 0.16)}[case]
-    scene.add_structure(mw.Structure(
-        geometry=mw.Box(position=((lo + hi) / 2, 0, 0), size=(hi - lo, 0.16, 0.08)),
-        material=mw.Material(eps_r=model.eps),
-    ))
-    scene.add_port(mw.WavePort(
-        "input", position=(-0.2, 0, 0), size=(0, 0.6, 0.3), direction="+",
-        reference_plane=-0.2, modes=(mw.WaveModeSpec("te", polarization="Ez"),),
-    ))
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.4, 0.4), (-0.25, 0.25))),
+                grid=mw.GridSpec.uniform(0.05), boundary=mw.BoundarySpec.none(), subpixel=mw.SubpixelSpec(samples=1, averaging="arithmetic"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=((lo + hi) / 2, 0, 0), size=(hi - lo, 0.16, 0.08)),
+                material=mw.Material(eps_r=model.eps),
+            ),
+            ),
+                ports=(
+            mw.rf.WavePort(
+                "input", position=(-0.2, 0, 0), size=(0, 0.6, 0.3), direction="+",
+                reference_plane=-0.2, modes=(mw.rf.WaveModeSpec("te", polarization="Ez"),),
+            ),
+            ),
+            )
     return model, scene
 
 
 def _waveport_simulation(scene):
     return mw.Simulation.fdtd(
-        scene, frequencies=[1e9], excitations=mw.PortSweep(),
-        run_time=mw.TimeConfig(time_steps=240),
-        spectral_sampler=mw.SpectralSampler(window="none"), full_field_dft=False,
+        scene, frequencies=[1e9], excitations=mw.rf.PortSweep(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=240),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"), full_field_dft=False,
+        ),
     )
 
 
+@CUDA
 @pytest.mark.parametrize("launch", ["source", "port"])
 @pytest.mark.parametrize("trainable", [True, False])
 def test_waveport_sweep_rejects_independent_mode_launches(launch, trainable):
@@ -180,13 +199,14 @@ def test_waveport_sweep_rejects_independent_mode_launches(launch, trainable):
         source_time=mw.CW(1e9), name="independent_launch",
     )
     if launch == "source":
-        scene.add_source(launch_object)
+        scene = scene.updated(sources=(*scene.sources, launch_object))
     else:
-        scene.add_port(launch_object)
+        scene = scene.updated(ports=(*scene.ports, launch_object))
     with pytest.raises(ValueError, match="requires a Scene without independent field sources"):
         _waveport_simulation(scene).run()
 
 
+@CUDA
 def test_waveport_sweep_rejects_trainable_cross_section_through_simulation():
     """Pins an upstream refusal that keeps fixed launch terms away from trainable planes.
 
@@ -200,18 +220,19 @@ def test_waveport_sweep_rejects_trainable_cross_section_through_simulation():
         _waveport_simulation(scene).run()
 
 
+@CUDA
 def test_fixed_waveport_column_records_keep_forward_terms():
     from witwin.maxwell.waveport_sweep import _column_scene, resolve_waveport_run_manifest
 
     model, scene = _waveport_guide()
-    manifest = resolve_waveport_run_manifest(scene, mw.PortSweep(), (1e9,))
+    manifest = resolve_waveport_run_manifest(scene, mw.rf.PortSweep(), (1e9,))
     column = _column_scene(scene, manifest, active_port_index=0, active_mode_index=0,
-                           frequency_index=0, amplitude=1.0)
-    # Construct the real column's records on the forward-only CPU profile;
-    # the native public run and backward are covered by the CUDA test below.
+                           frequency_index=0, amplitude=1.0, device="cuda")
+    # Construct the real column's records without a run;
+    # the public run and backward are covered by the CUDA test below.
     model.eps.requires_grad_(False)
-    simulation = mw.Simulation.fdtd(column, frequency=1e9, backend="cpu_reference",
-                                    run_time=mw.TimeConfig(time_steps=2))
+    simulation = mw.Simulation.fdtd(column, frequencies=1e9,
+                                    config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2)))
     simulation._fixed_waveport_mode_sources = True
     with torch.no_grad():
         solver = simulation.prepare().solver
@@ -244,18 +265,18 @@ def test_public_fixed_waveport_column_admits_backward():
     assert torch.isfinite(model.eps.grad)
 
 
+@CUDA
 def test_mode_port_excitation_is_not_an_rf_port():
-    scene = _Guide("source", launch="port").to_scene()
+    scene = _Guide("source", device="cuda", launch="port").to_scene()
     with pytest.raises(TypeError, match="requires an RF port.*ModePort"):
         mw.Simulation.fdtd(scene, frequencies=[1e9],
-                           excitations=[mw.PortExcitation("launch", source_time=mw.CW(1e9))]).prepare()
+                           excitations=[mw.rf.PortExcitation("launch", source_time=mw.CW(1e9))]).prepare()
 
 
 def _edge_scene(case, parameter, *, material="eps"):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.4, 0.4),) * 3),
-        grid=mw.GridSpec.uniform(0.1), boundary=mw.BoundarySpec.none(), device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=1, averaging="arithmetic"),
+        grid=mw.GridSpec.uniform(0.1), boundary=mw.BoundarySpec.none(), subpixel=mw.SubpixelSpec(samples=1, averaging="arithmetic"),
     )
     lo, hi = {"one_cell_overlap": (-0.05, 0.05), "density_neighbor": (-0.2, 0.2),
               "padded_box": (0.025, 0.125), "away": (0.25, 0.35)}[case]
@@ -264,13 +285,18 @@ def _edge_scene(case, parameter, *, material="eps"):
         # The only trainable texture layer is centered at x=+0.1, exactly
         # one grid cell from the plane. Trilinear sampling at x=0 reaches it.
         density = torch.stack((torch.full((2, 2), 0.5), parameter.expand(2, 2)))
-    scene.add_material_region(mw.MaterialRegion(
-        name=case, geometry=mw.Box(position=((lo + hi) / 2, 0, 0), size=(hi - lo, 0.2, 0.2)),
-        density=density, eps_bounds=(1., 12.) if material == "eps" else (2., 2.),
-        mu_bounds=(1., 2.) if material == "mu" else (1., 1.),
+    scene = scene.updated(material_regions=(
+        *scene.material_regions,
+        mw.MaterialRegion(
+            name=case, geometry=mw.Box(position=((lo + hi) / 2, 0, 0), size=(hi - lo, 0.2, 0.2)),
+            density=density, eps_bounds=(1., 12.) if material == "eps" else (2., 2.),
+            mu_bounds=(1., 2.) if material == "mu" else (1., 1.),
+        ),
+    ), sources=(
+        *scene.sources,
+        mw.ModeSource(position=(0, 0, 0), size=(0, 0.4, 0.4), polarization="Ey",
+                      source_time=mw.CW(1e9), name=case),
     ))
-    scene.add_source(mw.ModeSource(position=(0, 0, 0), size=(0, 0.4, 0.4), polarization="Ey",
-                                   source_time=mw.CW(1e9), name=case))
     return scene
 
 
@@ -282,8 +308,8 @@ def _exact_plane_dependencies(scene, parameter):
     )
     from witwin.maxwell.fdtd.excitation.tfsf_common import nearest_index
 
-    prepared = prepare_scene(scene)
-    model = prepared.compile_materials()
+    prepared = prepare_scene(scene, device="cpu")
+    model = compile_materials(prepared)
     source = _compile_mode_source(scene.sources[0], default_frequency=1e9)
     axis, tangents = _mode_source_axes(source)
     plane = nearest_index(getattr(prepared, axis), source["position"]["xyz".index(axis)])
@@ -330,9 +356,9 @@ def test_plane_guard_matches_exact_autograd_at_sampling_edges(case, material):
 
 
 def _edge_forward_context(scene):
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     with torch.no_grad():
-        model = prepared.compile_materials()
+        model = compile_materials(prepared)
     # Pin a PEC-aware family that still mismatches scalar replay. Lossless
     # conductor-free trainable vector planes now use matching torch replay.
     # Only solver-family selection is needed here; no eigenproblem or FDTD step.
@@ -345,7 +371,6 @@ def _edge_forward_context(scene):
 
 def test_bridge_caches_verdict_and_invalidates_design_graph(monkeypatch):
     import witwin.maxwell.fdtd.adjoint.bridge as bridge_module
-    from witwin.maxwell.scene import PreparedScene
 
     parameter = torch.nn.Parameter(torch.tensor(0.5))
     scene = _edge_scene("away", parameter)
@@ -356,7 +381,7 @@ def test_bridge_caches_verdict_and_invalidates_design_graph(monkeypatch):
     bridge._material_graph_scene = lambda: bridge.simulation.scene
     counts = dict(probe=0, compile=0)
     original_probe = bridge_module._mode_source_replay_error
-    original_compile = PreparedScene.compile_materials
+    original_compile = bridge_module.compile_materials
 
     def probe(*args):
         counts["probe"] += 1
@@ -367,7 +392,7 @@ def test_bridge_caches_verdict_and_invalidates_design_graph(monkeypatch):
         return original_compile(*args, **kwargs)
 
     monkeypatch.setattr(bridge_module, "_mode_source_replay_error", probe)
-    monkeypatch.setattr(PreparedScene, "compile_materials", compile_materials)
+    monkeypatch.setattr(bridge_module, "compile_materials", compile_materials)
     bridge._validate_mode_source_replay(solver, (parameter,))
     bridge._validate_mode_source_replay(solver, (parameter,))
     assert counts == dict(probe=1, compile=1)
@@ -418,18 +443,19 @@ def _assert_deep_equal(actual, expected):
         assert actual == expected
 
 
+@CUDA
 def test_replay_initialization_preserves_nested_sources_and_resume_fingerprint():
     from benchmark.core_path.gates import tensors as benchmark_tensors
     from witwin.maxwell.fdtd.excitation import initialize_source_terms
     from witwin.maxwell.fdtd.resume import _configuration_fingerprint
 
-    model = _Guide("control")
+    model = _Guide("control", device="cuda")
     model.eps.requires_grad_(False)
     scene = model.to_scene()
-    scene.grid = mw.GridSpec.uniform(0.04)
-    scene.boundary = mw.BoundarySpec.none()
-    solver = mw.Simulation.fdtd(scene, frequency=1e9, backend="cpu_reference",
-                                run_time=mw.TimeConfig(time_steps=2)).prepare().solver
+    scene = scene.updated(grid=mw.GridSpec.uniform(0.04))
+    scene = scene.updated(boundary=mw.BoundarySpec.none())
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9,
+                                config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2))).prepare().solver
     before = _source_snapshot(solver._compiled_sources)
     benchmark_before = benchmark_tensors(solver._compiled_sources, "sources")
     fingerprint = _configuration_fingerprint(solver)
@@ -444,32 +470,33 @@ def test_replay_initialization_preserves_nested_sources_and_resume_fingerprint()
     _assert_deep_equal(benchmark_tensors(solver._compiled_sources, "sources"), benchmark_before)
 
 
+@CUDA
 @pytest.mark.parametrize("kind", sorted(core._SOURCE_REPLAY_REBUILD_KINDS - {"mode_source"}))
 def test_other_replay_initializers_preserve_nested_source_payloads(kind):
     from witwin.maxwell.fdtd.excitation import initialize_source_terms
 
-    waveform = mw.CustomSourceTime((0., 1e-8, 2e-8), (0., 1., 0.),
+    waveform = mw.sources.CustomSourceTime((0., 1e-8, 2e-8), (0., 1., 0.),
                                    characteristic_frequency=1e8, frequency=1e8)
-    waveform.table.tensors("cpu")
+    waveform.table.tensors("cuda")
     if kind == "custom_current":
-        source = mw.CustomCurrentSource(mw.CurrentDataset(
+        source = mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(
             ((-0.1, 0.1),) * 3, {"Jy": np.ones((2, 2, 2))}), source_time=waveform)
     elif kind == "custom_field":
-        source = mw.CustomFieldSource(mw.FieldDataset(
+        source = mw.sources.CustomFieldSource(mw.sources.FieldDataset(
             ((0.,), (-0.1, 0.1), (-0.1, 0.1)),
             {"Ey": np.ones((1, 2, 2)), "Hz": np.ones((1, 2, 2))}), source_time=waveform)
     else:
         constructor = {"point_dipole": mw.PointDipole, "plane_wave": mw.PlaneWave,
                        "gaussian_beam": mw.GaussianBeam, "uniform_current": mw.UniformCurrentSource,
-                       "astigmatic_gaussian_beam": mw.AstigmaticGaussianBeam}[kind]
+                       "astigmatic_gaussian_beam": mw.sources.AstigmaticGaussianBeam}[kind]
         kwargs = {"position": (0., 0., 0.)} if kind == "point_dipole" else (
             {"size": (0.2, 0.2, 0.2)} if kind == "uniform_current" else {})
         source = constructor(source_time=waveform, **kwargs)
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.4, 0.4),) * 3), grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=2), device="cpu", sources=[source])
-    solver = mw.Simulation.fdtd(scene, frequency=1e9, backend="cpu_reference",
-                                run_time=mw.TimeConfig(time_steps=2)).prepare().solver
+        boundary=mw.BoundarySpec.pml(num_layers=2), sources=[source])
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9,
+                                config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2))).prepare().solver
     before = _source_snapshot(solver._compiled_sources)
     replay = core._build_source_replay_solver(solver, solver._compiled_sources, *(
         getattr(solver, "eps_" + field).detach().requires_grad_() for field in ("Ex", "Ey", "Ez")))
@@ -480,17 +507,16 @@ def test_other_replay_initializers_preserve_nested_source_payloads(kind):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for native FDTD replay")
 def test_second_backward_reuses_plane_verdict(monkeypatch):
     import witwin.maxwell.fdtd.adjoint.bridge as bridge_module
-    from witwin.maxwell.scene import PreparedScene
 
     model = _Guide("control", device="cuda")
-    result = mw.Simulation.fdtd(model, frequencies=[1e9], run_time=mw.TimeConfig(time_steps=8),
-                                 full_field_dft=False).run()
-    loss = result.monitor("probe")["data"].real.sum()
+    result = mw.Simulation.fdtd(model, frequencies=[1e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8),
+                                 full_field_dft=False)).run()
+    loss = result.monitor("probe", freq_index=0).sel(component="Ey").values.real.sum()
     before = _source_snapshot(result.solver._compiled_sources)
     counts = dict(probe=0, compile=0)
     probing = False
     original_probe = bridge_module._mode_source_replay_error
-    original_compile = PreparedScene.compile_materials
+    original_compile = bridge_module.compile_materials
 
     def probe(*args):
         nonlocal probing
@@ -507,7 +533,7 @@ def test_second_backward_reuses_plane_verdict(monkeypatch):
         return original_compile(*args, **kwargs)
 
     monkeypatch.setattr(bridge_module, "_mode_source_replay_error", probe)
-    monkeypatch.setattr(PreparedScene, "compile_materials", compile_materials)
+    monkeypatch.setattr(bridge_module, "compile_materials", compile_materials)
     for _ in range(2):
         torch.autograd.grad(loss, model.eps, retain_graph=True)
         assert counts == dict(probe=1, compile=1)
@@ -516,9 +542,9 @@ def test_second_backward_reuses_plane_verdict(monkeypatch):
 
 def _objective(model):
     result = mw.Simulation.fdtd(model, frequencies=[1e9/model.scale],
-        run_time=mw.TimeConfig.auto(transient_cycles=40), full_field_dft=False).run()
-    data = result.monitor("probe")["data"].sum()
-    loss = model.scale**2 * (data.real.square() + data.imag.square()) + result.monitor("fwd")["flux"].real.sum()
+        config=mw.FDTDConfig(run_time=mw.TimeConfig.auto(transient_cycles=40), full_field_dft=False)).run()
+    data = result.monitor("probe", freq_index=0).sel(component="Ey").values.sum()
+    loss = model.scale**2 * (data.real.square() + data.imag.square()) + result.monitor("fwd", freq_index=0).values.real.sum()
     return loss, result
 
 

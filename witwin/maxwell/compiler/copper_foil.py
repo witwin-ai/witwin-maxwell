@@ -254,7 +254,7 @@ def compile_copper_faces(scene, *, device, include_halos=False):
     """Compile full Yee tangential-edge supports without volumetric copper cells."""
     faces = []
     layout = getattr(scene, "_fdtd_shard_layout", None)
-    for structure in scene.structures:
+    for structure in scene.scene.structures:
         material = structure.material
         if not isinstance(material, CopperFoil) or not bool(getattr(structure, "enabled", True)):
             continue
@@ -277,8 +277,8 @@ def compile_copper_faces(scene, *, device, include_halos=False):
         node_coords = _axis_values(scene, "xyz"[axis], half=False)
         normal_index = _snap_index(node_coords, float(position[axis]), label="foil plane",
                                    roundoff=_coordinate_roundoff(structure.geometry.position)[axis])
-        low_pml = scene.pml_thickness_for_face("xyz"[axis], "low")
-        high_pml = scene.pml_thickness_for_face("xyz"[axis], "high")
+        low_pml = scene.scene.pml_thickness_for_face("xyz"[axis], "low")
+        high_pml = scene.scene.pml_thickness_for_face("xyz"[axis], "high")
         if normal_index <= max(0, low_pml) or normal_index >= len(node_coords) - max(1, high_pml + 1):
             raise ValueError(f"CopperFoil {structure.name!r} needs exterior cells on both sides outside PML.")
         for component in range(3):
@@ -388,7 +388,7 @@ def _flat(points, shape):
 
 
 def _periodic(scene, axis):
-    return scene.boundary.axis_kind("xyz"[axis]) in ("periodic", "bloch")
+    return scene.scene.boundary.axis_kind("xyz"[axis]) in ("periodic", "bloch")
 
 
 def copper_free_edge_sides(scene, face, indices, all_faces, *, contact=None, per_side=False):

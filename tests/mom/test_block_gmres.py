@@ -132,8 +132,8 @@ def test_actual_lossy_pmchwt_multi_source_block_matches_cached_lu():
                      sources=[mw.PlaneWave()])
     rule = StoppingRule(method='block_gmres', preconditioner='row_column_norm', restart=50,
                         maxiter=100, stagnation_window=60)
-    prepared = mw.Simulation.mom(scene, frequency=3e8,
-        config=mw.MoMConfig(subdivisions=1, integration=IntegrationConfig(order=3, singular_order=4), stopping=rule)).prepare()
+    prepared = mw.Simulation.mom(scene, frequencies=3e8,
+        config=mw.mom.MoMConfig(subdivisions=1, integration=IntegrationConfig(order=3, singular_order=4), stopping=rule)).prepare()
     op = prepared.solver.handle
     sources = [mw.PlaneWave(direction=d, polarization=p) for d,p in (
         ((0,0,1),(1,0,0)), ((0,0,1),(0,1,0)), ((1,0,0),(0,0,1)),

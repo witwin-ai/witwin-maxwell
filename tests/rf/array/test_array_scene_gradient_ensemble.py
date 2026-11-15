@@ -23,10 +23,7 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell import (
-    aggregate_scene_gradient_vjp,
-    ensemble_scene_gradient_vjp,
-)
+from witwin.maxwell.antenna import aggregate_scene_gradient_vjp, ensemble_scene_gradient_vjp
 from witwin.maxwell.execution import MultiGPUExecution
 
 _TWO_GPU = pytest.mark.skipif(
@@ -43,7 +40,7 @@ def _basis(*, port_count, points_theta, points_phi, freqs, device="cpu"):
     for index in range(port_count):
         scattering[:, index, index] = 0.05 - 0.02j
     z0 = torch.full((port_count,), 50.0, device=device, dtype=cdtype)
-    network = mw.NetworkData(
+    network = mw.rf.NetworkData(
         frequencies=frequencies,
         s=scattering,
         z0=z0,
@@ -56,7 +53,7 @@ def _basis(*, port_count, points_theta, points_phi, freqs, device="cpu"):
     e_theta = torch.stack([base * (index + 1) for index in range(port_count)], dim=0)[None]
     e_theta = e_theta.expand(frequency_count, -1, -1, -1).clone()
     e_phi = 0.3j * e_theta
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies,
         port_names=network.port_names,
         theta=theta,
@@ -66,7 +63,7 @@ def _basis(*, port_count, points_theta, points_phi, freqs, device="cpu"):
         phase_center=torch.zeros(3, device=device, dtype=dtype),
         frame=torch.eye(3, device=device, dtype=dtype),
     )
-    return mw.ArrayBasisData(network=network, embedded_patterns=patterns, fingerprint="scene-grad-ens")
+    return mw.antenna.ArrayBasisData(network=network, embedded_patterns=patterns, fingerprint="scene-grad-ens")
 
 
 def _column_map(param, base_e_theta, base_e_phi, index):
@@ -473,36 +470,35 @@ class _SinglePortColumn(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.04, 0.04),) * 3),
-            grid=mw.GridSpec.uniform(0.005),
-            boundary=mw.BoundarySpec.pml(num_layers=4),
-            device=str(self.logits.device),
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.01, 0.005, 0.005)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(self.position, 0.0, 0.0),
-                polarization="Ez",
-                width=0.004,
-                source_time=mw.GaussianPulse(
-                    frequency=2.5e9, fwidth=1.0e9, delay=0.3e-9, amplitude=1.0
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.04, 0.04),) * 3),
+                    grid=mw.GridSpec.uniform(0.005),
+                    boundary=mw.BoundarySpec.pml(num_layers=4),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.01, 0.005, 0.005)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
                 ),
-            )
-        )
-        scene.add_monitor(
-            mw.ClosedSurfaceMonitor.box(
-                "nf", position=(0.0, 0.0, 0.0), size=(0.05, 0.05, 0.05), frequencies=(2.5e9,)
-            )
-        )
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(self.position, 0.0, 0.0),
+                    polarization="Ez",
+                    width=0.004,
+                    source_time=mw.GaussianPulse(
+                        frequency=2.5e9, fwidth=1.0e9, delay=0.3e-9, amplitude=1.0
+                    ),
+                ),
+                ),
+                    monitors=(
+                mw.monitors.ClosedSurfaceMonitor.box(
+                    "nf", position=(0.0, 0.0, 0.0), size=(0.05, 0.05, 0.05), frequencies=(2.5e9,)
+                ),
+                ),
+                )
         return scene
 
 
@@ -513,10 +509,12 @@ def _fdtd_column_forward(base_logits, port_positions, *, theta, phi, time_steps)
         module = _SinglePortColumn(base_logits, device, port_positions[index])
         result = mw.Simulation.fdtd(
             module,
-            frequency=2.5e9,
-            run_time=mw.TimeConfig(time_steps=time_steps),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False,
+            frequencies=2.5e9,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=time_steps),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False,
+            ),
         ).run()
         frequencies = torch.tensor([2.5e9], device=device, dtype=torch.float64)
         transformed = _far_fields_from_result(

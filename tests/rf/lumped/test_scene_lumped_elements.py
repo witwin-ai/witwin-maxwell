@@ -12,7 +12,6 @@ def _scene(*, lumped_elements=()):
         grid=GridSpec.uniform(0.25),
         boundary=BoundarySpec.none(),
         lumped_elements=lumped_elements,
-        device="cpu",
     )
 
 
@@ -28,18 +27,15 @@ def test_scene_add_clone_and_prepare_preserve_lumped_elements():
     )
     scene = _scene(lumped_elements=(resistor,))
 
-    assert scene.add_lumped_element(capacitor) is scene
-    assert scene.lumped_elements == [resistor, capacitor]
-    assert tuple(item.element_name for item in scene.compile_lumped_elements()) == (
+    scene = scene.updated(lumped_elements=(*scene.lumped_elements, capacitor))
+    assert scene.lumped_elements == (resistor, capacitor)
+    assert tuple(item.element_name for item in compile_lumped_elements(prepare_scene(scene, device="cpu"))) == (
         "r1",
         "c1",
     )
 
-    cloned = scene.clone()
-    prepared = prepare_scene(scene)
-    assert cloned.lumped_elements == [resistor, capacitor]
-    assert cloned.lumped_elements is not scene.lumped_elements
-    assert prepared.lumped_elements == [resistor, capacitor]
+    prepared = prepare_scene(scene, device="cpu")
+    assert prepared.scene.lumped_elements == (resistor, capacitor)
 
 
 @pytest.mark.parametrize("invalid", [object(), "resistor"])
@@ -92,9 +88,9 @@ def test_compile_lumped_elements_reuses_sparse_voltage_geometry_on_target_device
         Capacitor("cy", (0.5, 0.25, 0.5), (0.5, 0.75, 0.5), 2.0e-12),
         Inductor("lz", (0.5, 0.5, 0.75), (0.5, 0.5, 0.25), 3.0e-9),
     )
-    prepared = prepare_scene(_scene(lumped_elements=elements))
+    prepared = prepare_scene(_scene(lumped_elements=elements), device="cpu")
 
-    compiled = prepared.compile_lumped_elements(device=torch.device("cpu"))
+    compiled = compile_lumped_elements(prepared, device=torch.device("cpu"))
     direct = compile_lumped_elements(prepared, device="cpu")
 
     assert [item.element_name for item in direct] == ["rx", "cy", "lz"]
@@ -135,7 +131,7 @@ def test_compile_lumped_elements_reuses_sparse_voltage_geometry_on_target_device
 
 def test_compile_lumped_elements_reports_off_grid_terminals():
     element = Resistor("off_grid", (0.7, 0.5, 0.5), (0.25, 0.5, 0.5), 50.0)
-    prepared = prepare_scene(_scene(lumped_elements=(element,)))
+    prepared = prepare_scene(_scene(lumped_elements=(element,)), device="cpu")
 
     with pytest.raises(ValueError, match=r"x node=0.7 must lie on the Yee x node grid"):
-        prepared.compile_lumped_elements()
+        compile_lumped_elements(prepared, device="cpu")

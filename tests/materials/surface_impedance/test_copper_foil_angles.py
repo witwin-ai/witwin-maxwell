@@ -45,17 +45,15 @@ def _measure(*, normal=0, angle=0., polarization="te", foil=True):
         wavevector[remaining] = 2 * math.pi * FREQUENCY / 299792458. * direction[remaining]
     scene = mw.Scene(domain=mw.Domain(bounds=domain), grid=mw.GridSpec.uniform(.005),
         boundary=mw.BoundarySpec.faces(default="none", num_layers=12, strength=1.,
-            bloch_wavevector="auto" if angle else wavevector, **kinds), device="cuda",
-        structures=[mw.Structure(geometry=mw.Box(position=torch.zeros(3, dtype=torch.float64),
+            bloch_wavevector="auto" if angle else wavevector, **kinds), structures=[mw.Structure(geometry=mw.Box(position=torch.zeros(3, dtype=torch.float64),
             size=torch.tensor(size, dtype=torch.float64)),
-            material=mw.CopperFoil(thickness=DELTA, frequency_range=(.5e9, 2e9)), name="foil")] if foil else [],
+            material=mw.media.CopperFoil(thickness=DELTA, frequency_range=(.5e9, 2e9)), name="foil")] if foil else [],
         sources=[mw.PlaneWave(direction=direction, polarization=electric, injection_axis="xyz"[normal],
             injection=mw.TFSF.slab(axis="xyz"[normal], bounds=(-.25, .25)) if angle else "soft",
             source_time=mw.CW(frequency=FREQUENCY, amplitude=80.), name="incident")])
-    result = mw.Simulation.fdtd(scene, absorber="cpml", frequency=FREQUENCY,
-        run_time=mw.TimeConfig.auto(steady_cycles=20, transient_cycles=24),
-        spectral_sampler=mw.SpectralSampler(window="hanning"), full_field_dft=True).run()
-    field = result.tensor("E" + "xyz"[component])
+    result = mw.Simulation.fdtd(scene, frequencies=FREQUENCY, config=mw.FDTDConfig(absorber="cpml", run_time=mw.TimeConfig.auto(steady_cycles=20, transient_cycles=24),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"), full_field_dft=True)).run()
+    field = result.field("E" + "xyz"[component]).isel(f=0).values
     if field.ndim == 4:
         field = field[0]
     field = field.movedim(normal, 0)
@@ -84,7 +82,7 @@ def test_every_surface_orientation_and_reported_loss_matches_scattered_flux(norm
     assert abs(transmission - expected_t) / abs(expected_t) < .03
     incident_power = .5 * abs(incident)**2 / zi * .02**2
     flux_loss = incident_power * (1 - abs(reflection)**2 - abs(transmission)**2)
-    surface_power = result.conductor_losses["foil"]["surface_power"].item()
+    surface_power = mw.rf.conductor_losses(result)["foil"]["surface_power"].item()
     print(dict(normal=normal, surface_power=surface_power, scattered_flux_loss=flux_loss))
     assert abs(surface_power - flux_loss) / flux_loss < .03
 
@@ -108,7 +106,7 @@ def test_oblique_bloch_incidence_retains_correct_transmission_and_small_copper_a
     assert abs(transmission - expected_t) / abs(expected_t) < .03
     assert abs(actual_absorption - expected_absorption) / expected_absorption < .05
     assert result.solver.complex_fields_enabled
-    assert result.conductor_losses["foil"]["surface_power"].item() > 0
+    assert mw.rf.conductor_losses(result)["foil"]["surface_power"].item() > 0
 
 
 @pytest.mark.parametrize("polarization", ["te", "tm"])

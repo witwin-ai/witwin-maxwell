@@ -16,6 +16,7 @@ from .stratton_chu import (
     _trapz_weights_1d,
     build_plane_points,
 )
+from ..compiler.materials import compile_materials
 
 
 _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
@@ -87,16 +88,13 @@ def _mode_overlap_context(result):
         scene=scene,
         Ex=torch.empty((1,), device=device, dtype=torch.float32),
         c=C_0,
-        boundary_kind=scene.boundary.kind,
-        _compiled_material_model=scene.compile_materials(),
+        boundary_kind=scene.scene.boundary.kind,
+        _compiled_material_model=compile_materials(scene),
     )
 
 
 def _monitor_payload(result, monitor_name: str, *, frequency: float | None, freq_index: int | None):
-    if hasattr(result, "raw_monitor"):
-        monitor = result.raw_monitor(monitor_name, frequency=frequency, freq_index=freq_index)
-    else:
-        monitor = result.monitor(monitor_name, frequency=frequency, freq_index=freq_index, resolve_modal=False)
+    monitor = result.raw_monitor(monitor_name, frequency=frequency, freq_index=freq_index)
     if "axis" not in monitor:
         raise ValueError(f"Monitor {monitor_name!r} is not a plane monitor.")
     return monitor
@@ -224,7 +222,7 @@ def _compute_mode_overlap_from_payload(
     direction: str | None = None,
 ) -> dict[str, object]:
     context = _mode_overlap_context(result)
-    resolved_frequency = float(monitor.get("frequency", getattr(result, "frequency", None)))
+    resolved_frequency = float(monitor["frequency"] if "frequency" in monitor else result.frequencies[0])
     resolved_mode_source = _resolve_mode_source(
         result.scene,
         monitor,

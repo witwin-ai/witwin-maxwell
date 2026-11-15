@@ -8,7 +8,7 @@ from scripts.dev.fdtd.printed_line_external_reference import native_addresses,re
 
 def test_external_no_interpolation_probe_addresses_are_distinct_from_component_positions():
     scene=prepare_scene(mw.Scene(domain=mw.Domain(bounds=((-1.,2.),(-2.,3.),(-3.,4.))),
-        grid=mw.GridSpec.custom((-1.,0.,2.),(-2.,0.,3.),(-3.,0.,4.)),device="cpu"))
+        grid=mw.GridSpec.custom((-1.,0.,2.),(-2.,0.,3.),(-3.,0.,4.))), device="cpu")
     records=native_addresses(scene,{"electric":("Ez",(1,1,1)),"magnetic":("Hy",(1,1,1))})
     assert records["electric"]["address_m"]==[0.,0.,0.]
     assert records["electric"]["physical_component_position_m"]==[0.,0.,2.]
@@ -45,7 +45,7 @@ def test_independent_reference_graded_grid_keeps_local_cells_physical_domain_and
     uniform=reference_line_scene(SimpleNamespace(**common,transverse_refinement_radius=None))
     graded=reference_line_scene(SimpleNamespace(**common,transverse_refinement_radius=.02))
     assert uniform.domain.bounds==graded.domain.bounds
-    a,b=prepare_scene(uniform),prepare_scene(graded)
+    a,b=prepare_scene(uniform, device="cpu"),prepare_scene(graded, device="cpu")
     for axis in 'xyz':
         old,new=[np.asarray(getattr(s,axis+'_nodes64')) for s in (a,b)]
         if axis=='x':np.testing.assert_array_equal(old,new)

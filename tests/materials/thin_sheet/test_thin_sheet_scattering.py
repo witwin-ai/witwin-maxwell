@@ -28,11 +28,14 @@ import functools
 import math
 
 import pytest
+import torch
 
 import witwin.maxwell as mw
 from .test_thin_sheet_runtime import newmark_phase_error
 
 from . import harness as h
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Native thin sheets require CUDA.")
 
 G_VALUES = (0.5 / h.ETA0, 4.0 / h.ETA0)   # eta0*sigma*t = 0.5 and 4
 # Chord-free tilted-PEC reflection errors measured on 2026-10-30: 30-degree
@@ -156,7 +159,7 @@ def test_tilted_sheet_on_dielectric_interface(polarization):
 @pytest.mark.parametrize("dl", [.015, .0075])
 def test_tilted_copper_matches_pec_reflection(polarization, dl):
     """V12: 35 um, 30 degrees, lambda/20 and lambda/40, absolute R difference <= 1e-3."""
-    material = mw.CopperFoil(thickness=35e-6, frequency_range=(.3e9, 2e9))
+    material = mw.media.CopperFoil(thickness=35e-6, frequency_range=(.3e9, 2e9))
     _, reflection, info = h.measure_transmission(material, 30., polarization, dl)
     pec = _measure(0, 30., polarization, dl)["R"]
     copper = complex(reflection[1])

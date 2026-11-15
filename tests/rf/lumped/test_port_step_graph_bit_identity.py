@@ -3,7 +3,7 @@
 Single runs with lumped, terminal, coaxial and wire-gap ports replay the port
 terminations, post-source tail and port V/I DFT as one CUDA graph per step,
 driven by a precomputed drive table. This gate runs one fixed scene script in
-fresh interpreters, once on the frozen baseline ``f52aa33f`` (re-baselined at f52aa33f for the additive-J (n+1/2) injection timing; proven equal to the old baseline plus only that hunk (<evidence-root>/coverage-e-timing-proof/); copper fixtures stay on ``95a3ec3f``)
+fresh interpreters, once on the frozen baseline ``f52aa33f`` (re-baselined at f52aa33f for the additive-J (n+1/2) injection timing; proven equal to the old baseline plus only that hunk (<evidence-root>/coverage-e-timing-proof/); copper fixtures stay on ``95a3ec3f``; the node-bound wire fixture is pinned to ``4ba67532``)
 (``git archive`` or its staged tree) and once on the working tree, and compares every port
 voltage/current (phasors and per-step histories), network matrix, monitor
 payload, lumped state and final Yee field with ``torch.equal``.
@@ -21,6 +21,7 @@ import torch
 
 import witwin.maxwell as mw
 
+from tests.support import port_step_graph_bit_identity_scene as scene
 from tests.support.baseline_tree_env import probe_environment
 from tests.support.pinned_baselines import baseline_tree as _baseline_tree
 
@@ -32,6 +33,10 @@ BASE_COMMIT = "f36cdaf1"
 # Re-pinned 2026-11-04 to f36cdaf1 for the observer time origin (A) (physical Yee labels: raw E/H spectra and port V/I rotate by exp(+i omega dt), derived invariants hold to FP32 rounding, all else bitwise; user-approved T2; per-key proof docs/assessments/observer-origin-repin-cpu-2026-11-03/, <evidence-root>/coverage-observer-origin/repin-proof-final/). Previous: 95a3ec3f.
 COPPER_BASE_COMMIT = "f36cdaf1"
 COPPER_FIXTURES = ("copper_terminal", "resume_copper_terminal_150", "resume_copper_terminal_96")
+# Re-pinned 2026-11-11 to 4ba67532 for the node-bound wire port, which now measures the terminal chord's Yee
+# line integral (fix/thin-wire-port-binding; user-approved T2 in the validation coordinator session). Previous: f36cdaf1.
+WIRE_NODE_BASE_COMMIT = "4ba67532"
+WIRE_NODE_FIXTURES = ("wire_node",)
 CIRCUIT_ABSOLUTE_KEYS = (
     "monitors/probe/Ez", "monitors/probe/components/Ez", "monitors/probe/data",
     "ports/p1/voltage", "ports/p1/current", "ports/p1/available_power",
@@ -49,11 +54,6 @@ def _run(source_root: Path, output: Path, fixtures=()) -> dict:
     return torch.load(output, weights_only=False)
 
 
-def _split_flags(payload: dict) -> dict:
-    flags = {key: payload.pop(key) for key in [key for key in payload if key.rsplit("/", 1)[-1].startswith("__")]}
-    return {key: bool(value) for key, value in flags.items() if key.endswith("__port_graph")}
-
-
 def test_port_step_graph_is_bitwise_identical_to_the_frozen_source(tmp_path, copper_torch_kernel):
     base_root = _baseline_tree(BASE_COMMIT, tmp_path)
     base = _run(base_root, tmp_path / "base.pt")
@@ -66,6 +66,12 @@ def test_port_step_graph_is_bitwise_identical_to_the_frozen_source(tmp_path, cop
     copper = _run(copper_root, tmp_path / "copper_base.pt", COPPER_FIXTURES)
     assert Path(copper.pop("__module")).is_relative_to(copper_root)
     base.update(copper)
+    wire_node_parent = tmp_path / "wire_node"
+    wire_node_parent.mkdir()
+    wire_node_root = _baseline_tree(WIRE_NODE_BASE_COMMIT, wire_node_parent)
+    wire_node = _run(wire_node_root, tmp_path / "wire_node_base.pt", WIRE_NODE_FIXTURES)
+    assert Path(wire_node.pop("__module")).is_relative_to(wire_node_root)
+    base.update(wire_node)
     for payload in (base, branch):
         for fixture in ("circuit", "circuit_ongoing", "circuit_transient"):
             assert payload[f"{fixture}/__field_graph"]
@@ -74,16 +80,25 @@ def test_port_step_graph_is_bitwise_identical_to_the_frozen_source(tmp_path, cop
             assert f"circuit/{key}" not in payload
             for fixture in ("circuit_ongoing", "circuit_transient"):
                 assert f"{fixture}/{key}" in payload
-    _split_flags(base)
-    graph = _split_flags(branch)
+    # Fixtures on the working tree's core whole-step graph keep every end-state key; only their
+    # per-step histories are skipped: scene.HISTORY_SKIP_REASON (user-approved, 2026-11-09).
+    base, branch, base_flags, flags, core = scene.comparable_payloads(base, branch)
+    graph = {key: bool(value) for key, value in flags.items() if key.endswith("__port_graph")}
     assert base.keys() == branch.keys()
-    # The gate is only meaningful if the new path actually ran.
+    # The gate is only meaningful if the new path actually ran: the existing port graph,
+    # or the core whole-step graph for fixtures whose default execution moved there.
     for fixture in ("lumped1", "lumped2_one_driven", "terminal_direct", "coax", "wire_gap", "copper_terminal",
                     "resume_copper_terminal_150", "resume_lumped_100"):
-        assert any(graph[key] for key in graph if key.startswith(fixture + "/")), fixture
+        if fixture in core:
+            assert bool(flags[f"{fixture}/__core_whole_step"]), fixture
+        else:
+            assert any(graph[key] for key in graph if key.startswith(fixture + "/")), fixture
     for fixture in ("lumped1_nograph", "circuit", "circuit_ongoing", "circuit_transient",
                     "network_embedded", "dipole"):
         assert not any(graph[key] for key in graph if key.startswith(fixture + "/")), fixture
+    # Resumed runs reach the same final step on both trees.
+    for fixture in sorted(core):
+        assert torch.equal(flags[f"{fixture}/__steps_run"], base_flags[f"{fixture}/__steps_run"]), fixture
     assert any("/history/" in key for key in base)
     mismatched = [key for key in base
                   if base[key].dtype != branch[key].dtype or not torch.equal(base[key], branch[key])]

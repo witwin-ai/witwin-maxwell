@@ -1,7 +1,4 @@
 #include "checks.h"
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 #include <cfloat>
 #include <climits>
@@ -126,18 +123,18 @@ __global__ void distance_kernel(const float* points,const float* triangles,float
 }
 }
 
-at::Tensor mesh_distance(at::Tensor points,at::Tensor triangles,std::vector<at::Tensor> hierarchy) {
-  check_tensor(points, points, at::kFloat, "mesh_distance", "points");
-  check_tensor(triangles, points, at::kFloat, "mesh_distance", "triangles");
-  if (!hierarchy.empty()) check_tensor(hierarchy[0], points, at::kInt, "mesh_distance", "hierarchy[0] (topology)");
-  if (!hierarchy.empty()) check_tensor(hierarchy[1], points, at::kInt, "mesh_distance", "hierarchy[1] (ids)");
-  if (!hierarchy.empty()) check_tensor(hierarchy[2], points, at::kFloat, "mesh_distance", "hierarchy[2] (bounds)");
-  c10::cuda::CUDAGuard guard(points.device());
-  auto out=at::empty({points.size(0)},points.options());
-  if(points.size(0)) distance_kernel<<<(points.size(0)+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
-      points.data_ptr<float>(),triangles.data_ptr<float>(),out.data_ptr<float>(),points.size(0),triangles.size(0),
-      hierarchy.empty()?nullptr:hierarchy[0].data_ptr<int>(),hierarchy.empty()?nullptr:hierarchy[1].data_ptr<int>(),
-      hierarchy.empty()?nullptr:hierarchy[2].data_ptr<float>(),hierarchy.empty()?0:hierarchy[0].size(1));
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+torch::stable::Tensor mesh_distance(torch::stable::Tensor points,torch::stable::Tensor triangles,std::vector<torch::stable::Tensor> hierarchy) {
+  check_tensor(points, points, torch::headeronly::ScalarType::Float, "mesh_distance", "points");
+  check_tensor(triangles, points, torch::headeronly::ScalarType::Float, "mesh_distance", "triangles");
+  if (!hierarchy.empty()) check_tensor(hierarchy[0], points, torch::headeronly::ScalarType::Int, "mesh_distance", "hierarchy[0] (topology)");
+  if (!hierarchy.empty()) check_tensor(hierarchy[1], points, torch::headeronly::ScalarType::Int, "mesh_distance", "hierarchy[1] (ids)");
+  if (!hierarchy.empty()) check_tensor(hierarchy[2], points, torch::headeronly::ScalarType::Float, "mesh_distance", "hierarchy[2] (bounds)");
+  torch::stable::accelerator::DeviceGuard guard(points.get_device_index());
+  auto out=torch::stable::new_empty(points, {points.size(0)});
+  if(points.size(0)) distance_kernel<<<(points.size(0)+127)/128,128,0,current_cuda_stream()>>>(
+      points.const_data_ptr<float>(),triangles.const_data_ptr<float>(),out.mutable_data_ptr<float>(),points.size(0),triangles.size(0),
+      hierarchy.empty()?nullptr:hierarchy[0].const_data_ptr<int>(),hierarchy.empty()?nullptr:hierarchy[1].const_data_ptr<int>(),
+      hierarchy.empty()?nullptr:hierarchy[2].const_data_ptr<float>(),hierarchy.empty()?0:hierarchy[0].size(1));
+  STD_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }

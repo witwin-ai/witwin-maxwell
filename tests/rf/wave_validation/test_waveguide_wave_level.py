@@ -52,12 +52,14 @@ def _two_port_s(dx: float):
     fc = C0 / (2.0 * GUIDE_A)
     freqs = tuple(float(x) for x in np.linspace(1.2 * fc, 2.2 * fc, 11))
     result = mw.Simulation.fdtd(
-        rectangular_waveguide_scene(dx=dx, device="cuda"),
+        rectangular_waveguide_scene(dx=dx),
         frequencies=freqs,
-        excitations=mw.PortSweep(),
-        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=16),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortSweep(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=16),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
     s = result.network.s.cpu().numpy()
     cond = float(np.max(result.network.metadata["extraction_condition_number"].cpu().numpy()))

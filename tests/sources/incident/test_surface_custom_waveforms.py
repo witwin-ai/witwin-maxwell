@@ -30,21 +30,19 @@ _TOLERANCE = 2.0e-5
 
 def _scene(source, *, monitors):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=10),
-        device="cuda",
-    )
-    scene.add_source(source)
-    for monitor in monitors:
-        scene.add_monitor(monitor)
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=10),
+                sources=(source,),
+            )
+    scene = scene.updated(monitors=(*scene.monitors, *monitors))
     return scene
 
 
 def _traces():
     return [
-        mw.FieldTimeMonitor("on_axis", components=("Ex", "Hy"), position=(0.0, 0.0, 0.12), interval=1),
-        mw.FieldTimeMonitor("off_axis", components=("Ex", "Ez"), position=(0.08, -0.06, 0.04), interval=1),
+        mw.monitors.FieldTimeMonitor("on_axis", components=("Ex", "Hy"), position=(0.0, 0.0, 0.12), interval=1),
+        mw.monitors.FieldTimeMonitor("off_axis", components=("Ex", "Ez"), position=(0.08, -0.06, 0.04), interval=1),
     ]
 
 
@@ -59,7 +57,7 @@ def _table(pulse, dt, *, oversample=4, jitter=0.0, steps=_STEPS):
     values = np.array([pulse.evaluate(float(t)) / pulse.amplitude for t in times])
     # Same reference frequency (launch dispersion tuning, beam/mode profiles) and
     # the same time-step bound as the analytic pulse.
-    return mw.CustomSourceTime(times, values, amplitude=pulse.amplitude, interpolation="cubic",
+    return mw.sources.CustomSourceTime(times, values, amplitude=pulse.amplitude, interpolation="cubic",
                                frequency=pulse.frequency,
                                characteristic_frequency=pulse.characteristic_frequency)
 
@@ -69,13 +67,15 @@ def _run(make_source, source_time, dt):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_FREQUENCY],
-        run_time=mw.TimeConfig(time_steps=_STEPS, dt=dt),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=_STEPS, dt=dt),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).run()
     traces = {}
     for name in ("on_axis", "off_axis"):
-        payload = result.monitor(name)
+        payload = result.raw_monitor(name)
         for component, values in payload["components"].items():
             traces[(name, component)] = np.asarray(values.detach().cpu().numpy()).reshape(-1)
     return traces
@@ -156,21 +156,27 @@ def test_table_mode_source_matches_gaussian_pulse_mode_source():
 
     def run(source_time, dt):
         scene = _scene(make_source(source_time), monitors=_traces())
-        scene.add_structure(mw.Structure(geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.16, 0.12, 1.0)),
-                                         material=core))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.16, 0.12, 1.0)),
+                         material=core),
+        ))
         result = mw.Simulation.fdtd(
-            scene, frequencies=[_FREQUENCY], run_time=mw.TimeConfig(time_steps=_STEPS, dt=dt),
-            spectral_sampler=mw.SpectralSampler(window="none"), full_field_dft=False,
+            scene, frequencies=[_FREQUENCY], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=_STEPS, dt=dt),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"), full_field_dft=False),
         ).run()
         return {
             (name, component): np.asarray(values.detach().cpu().numpy()).reshape(-1)
             for name in ("on_axis", "off_axis")
-            for component, values in result.monitor(name)["components"].items()
+            for component, values in result.raw_monitor(name)["components"].items()
         }
 
     probe = _scene(make_source(_PULSE), monitors=())
-    probe.add_structure(mw.Structure(geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.16, 0.12, 1.0)),
-                                     material=core))
+    probe = probe.updated(structures=(
+        *probe.structures,
+        mw.Structure(geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.16, 0.12, 1.0)),
+                     material=core),
+    ))
     dt = float(mw.Simulation.fdtd(probe, frequencies=[_FREQUENCY]).prepare().solver.dt)
     deviation = _trace_deviation(run(_PULSE, dt), run(_table(_PULSE, dt), dt))
     print(f"mode source: {deviation:.3e}")
@@ -180,25 +186,24 @@ def test_table_mode_source_matches_gaussian_pulse_mode_source():
 def test_broadband_pulse_plane_wave_flux_is_flat_over_the_band():
     band = (0.5e9, 2.0e9)
     minimum_amplitude = 0.3
-    pulse = mw.BroadbandPulse(freq_range=band, minimum_amplitude=minimum_amplitude)
+    pulse = mw.sources.BroadbandPulse(freq_range=band, minimum_amplitude=minimum_amplitude)
     frequencies = np.linspace(band[0], band[1], 13)
 
     def run(source_time, normalize, reference_frequency=None):
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.4, 0.4))),
-            grid=mw.GridSpec.uniform(0.015),
-            boundary=mw.BoundarySpec.pml(num_layers=12),
-            device="cuda",
-        )
-        scene.add_source(_plane_wave(source_time))
-        scene.add_monitor(mw.FluxMonitor("flux", axis="z", position=0.15, frequencies=frequencies))
+                    domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.4, 0.4))),
+                    grid=mw.GridSpec.uniform(0.015),
+                    boundary=mw.BoundarySpec.pml(num_layers=12),
+                    sources=(_plane_wave(source_time),),
+                    monitors=(mw.FluxMonitor("flux", axis="z", position=0.15, frequencies=frequencies),),
+                )
         result = mw.Simulation.fdtd(
-            scene, frequencies=frequencies, reference_frequency=reference_frequency,
+            scene, frequencies=frequencies, config=mw.FDTDConfig(reference_frequency=reference_frequency,
             run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=4),
-            spectral_sampler=mw.SpectralSampler(normalize_source=normalize),
-            full_field_dft=False,
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=normalize),
+            full_field_dft=False),
         ).run()
-        return np.asarray(result.monitor("flux")["flux"].detach().cpu().numpy(), dtype=float)
+        return np.asarray(result.monitor("flux").values.detach().cpu().numpy(), dtype=float)
 
     normalized = run(pulse, True)
     # A fixed reference period keeps raw spectra proportional to the Fourier transform;

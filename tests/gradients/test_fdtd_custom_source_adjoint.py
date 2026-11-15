@@ -77,9 +77,11 @@ def _build_sim(model, *, time_steps=200):
     return mw.Simulation.fdtd(
         model,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
 
 
@@ -118,16 +120,16 @@ def _assert_dominant_under_1e_3(backward_grad, fd_grad):
 
 def _new_scene():
     return mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+        subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.12),
         boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda",
     )
 
 
 def _add_design(scene, density):
-    scene.add_material_region(
+    scene = scene.updated(material_regions=(
+        *scene.material_regions,
         mw.MaterialRegion(
             name="design",
             # Half-cell offset keeps the voxel window off the node knife edge.
@@ -135,8 +137,9 @@ def _add_design(scene, density):
             density=density,
             eps_bounds=(1.0, 6.0),
             mu_bounds=(1.0, 1.0),
-        )
-    )
+        ),
+    ))
+    return scene
 
 
 # ---------------------------------------------------------------------------
@@ -153,16 +156,16 @@ class _UniformCurrentScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = _new_scene()
-        _add_design(scene, density)
-        scene.add_source(
+        scene = _add_design(scene, density)
+        scene = scene.updated(sources=(
+            *scene.sources,
             mw.UniformCurrentSource(
                 size=(0.08, 0.08, 0.08),
                 polarization="Ez",
                 center=(0.0, 0.0, -0.18),
                 source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+            ),
+        ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",))))
         return scene
 
 
@@ -172,7 +175,7 @@ def test_uniform_current_source_gradient_matches_fd():
     model = _UniformCurrentScene().cuda()
 
     def loss_fn():
-        return _abs2(_build_sim(model).run().monitor("probe")["data"])
+        return _abs2(_build_sim(model).run().monitor("probe", freq_index=0).sel(component="Ez").values)
 
     backward_grad, fd_grad = _fd_and_adjoint(model, loss_fn)
     _assert_dominant_under_1e_3(backward_grad, fd_grad)
@@ -211,7 +214,7 @@ class _CustomCurrentScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = _new_scene()
-        _add_design(scene, density)
+        scene = _add_design(scene, density)
         coords = ((0.0,), (0.0,), (-0.18,))
         components = {"Jz": np.array([[[40.0]]])}
         if self.include_magnetic:
@@ -219,14 +222,14 @@ class _CustomCurrentScene(mw.SceneModule):
             # electric- and magnetic-current contribution: the reverse pass has to
             # replay both to reconstruct the forward field.
             components["My"] = np.array([[[40.0]]])
-        dataset = mw.CurrentDataset(coords, components)
-        scene.add_source(
-            mw.CustomCurrentSource(
+        dataset = mw.sources.CurrentDataset(coords, components)
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.sources.CustomCurrentSource(
                 dataset,
                 source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=1.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+            ),
+        ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",))))
         return scene
 
 
@@ -236,7 +239,7 @@ def test_custom_current_source_gradient_matches_fd():
     model = _CustomCurrentScene(include_magnetic=True).cuda()
 
     def loss_fn():
-        return _abs2(_build_sim(model).run().monitor("probe")["data"])
+        return _abs2(_build_sim(model).run().monitor("probe", freq_index=0).sel(component="Ez").values)
 
     backward_grad, fd_grad = _fd_and_adjoint(model, loss_fn)
     _assert_dominant_under_1e_3(backward_grad, fd_grad)
@@ -260,23 +263,23 @@ def test_custom_current_magnetic_channel_drives_field():
         def to_scene(self):
             density = torch.sigmoid(self.logits)
             scene = _new_scene()
-            _add_design(scene, density)
-            dataset = mw.CurrentDataset(
+            scene = _add_design(scene, density)
+            dataset = mw.sources.CurrentDataset(
                 ((0.0,), (0.0,), (-0.18,)),
                 {"My": np.array([[[40.0]]])},
             )
-            scene.add_source(
-                mw.CustomCurrentSource(
+            scene = scene.updated(sources=(
+                *scene.sources,
+                mw.sources.CustomCurrentSource(
                     dataset,
                     source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=1.0),
-                )
-            )
-            scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ex",)))
+                ),
+            ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ex",))))
             return scene
 
     model = _MagneticOnlyScene().cuda()
     # The gradient must reach the design through the magnetic-current-driven field.
-    loss = _abs2(_build_sim(model).run().monitor("probe")["components"]["Ex"])
+    loss = _abs2(_build_sim(model).run().monitor("probe", freq_index=0).sel(component="Ex").values)
     loss.backward()
     grad = model.logits.grad
     assert grad is not None and torch.isfinite(grad).all()
@@ -297,19 +300,19 @@ class _CustomFieldScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = _new_scene()
-        _add_design(scene, density)
+        scene = _add_design(scene, density)
         xs = np.linspace(-0.18, 0.18, 4)
         ys = np.linspace(-0.18, 0.18, 4)
         zs = np.array([-0.18])
         tangential_ex = np.full((4, 4, 1), 30.0)
-        dataset = mw.FieldDataset((xs, ys, zs), {"Ex": tangential_ex})
-        scene.add_source(
-            mw.CustomFieldSource(
+        dataset = mw.sources.FieldDataset((xs, ys, zs), {"Ex": tangential_ex})
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.sources.CustomFieldSource(
                 dataset,
                 source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=1.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ex",)))
+            ),
+        ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ex",))))
         return scene
 
 
@@ -319,7 +322,7 @@ def test_custom_field_source_gradient_matches_fd():
     model = _CustomFieldScene().cuda()
 
     def loss_fn():
-        return _abs2(_build_sim(model).run().monitor("probe")["components"]["Ex"])
+        return _abs2(_build_sim(model).run().monitor("probe", freq_index=0).sel(component="Ex").values)
 
     backward_grad, fd_grad = _fd_and_adjoint(model, loss_fn)
     _assert_dominant_under_1e_3(backward_grad, fd_grad)
@@ -348,16 +351,16 @@ class _CallableWaveformScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = _new_scene()
-        _add_design(scene, density)
-        scene.add_source(
+        scene = _add_design(scene, density)
+        scene = scene.updated(sources=(
+            *scene.sources,
             mw.UniformCurrentSource(
                 size=(0.08, 0.08, 0.08),
                 polarization="Ez",
                 center=(0.0, 0.0, -0.18),
-                source_time=mw.CustomSourceTime(_callable_gaussian, characteristic_frequency=1.0e9),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+                source_time=mw.sources.CustomSourceTime(_callable_gaussian, characteristic_frequency=1.0e9),
+            ),
+        ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",))))
         return scene
 
 
@@ -378,7 +381,7 @@ def test_callable_custom_source_time_gradient_matches_fd():
     model = _CallableWaveformScene().cuda()
 
     def loss_fn():
-        return _abs2(_build_sim(model).run().monitor("probe")["data"])
+        return _abs2(_build_sim(model).run().monitor("probe", freq_index=0).sel(component="Ez").values)
 
     backward_grad, fd_grad = _fd_and_adjoint(model, loss_fn)
     scale = fd_grad.abs().max().item()
@@ -402,7 +405,7 @@ def _surface_pulse_table(pulse, steps=200):
     h = 4.0e-12
     times = np.arange(-1.0e-8, 2.0e-8 + steps * 2.4e-10, h)
     values = np.array([pulse.evaluate(float(t)) for t in times])
-    return mw.CustomSourceTime(times, values, interpolation="cubic", frequency=pulse.frequency,
+    return mw.sources.CustomSourceTime(times, values, interpolation="cubic", frequency=pulse.frequency,
                                characteristic_frequency=pulse.characteristic_frequency)
 
 
@@ -417,15 +420,21 @@ class _SurfaceWaveformScene(mw.SceneModule):
 
     def to_scene(self):
         scene = _new_scene()
-        _add_design(scene, torch.sigmoid(self.logits))
+        scene = _add_design(scene, torch.sigmoid(self.logits))
         if self.source_kind == "plane_wave":
-            scene.add_source(mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
-                                          source_time=self.source_time))
+            scene = scene.updated(sources=(
+                *scene.sources,
+                mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
+                             source_time=self.source_time),
+            ))
         else:
             xs = np.linspace(-0.18, 0.18, 4)
-            dataset = mw.FieldDataset((xs, xs, np.array([-0.18])), {"Ex": np.full((4, 4, 1), 30.0)})
-            scene.add_source(mw.CustomFieldSource(dataset, source_time=self.source_time))
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ex",)))
+            dataset = mw.sources.FieldDataset((xs, xs, np.array([-0.18])), {"Ex": np.full((4, 4, 1), 30.0)})
+            scene = scene.updated(sources=(
+                *scene.sources,
+                mw.sources.CustomFieldSource(dataset, source_time=self.source_time),
+            ))
+        scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ex",))))
         return scene
 
 
@@ -447,7 +456,7 @@ def test_sampled_table_surface_source_gradient_matches_gaussian_pulse_gradient(s
     gradients = []
     for source_time in (pulse, _surface_pulse_table(pulse)):
         model = _SurfaceWaveformScene(source_kind, source_time).cuda()
-        loss = _abs2(_build_sim(model).run().monitor("probe")["components"]["Ex"])
+        loss = _abs2(_build_sim(model).run().monitor("probe", freq_index=0).sel(component="Ex").values)
         loss.backward()
         gradients.append(model.logits.grad.detach().clone())
     analytic, table = gradients

@@ -52,7 +52,7 @@ def _expected_coords(component):
     )
 
 
-def _graded_scene(device="cpu"):
+def _graded_scene():
     return mw.Scene(
         domain=mw.Domain(
             bounds=(
@@ -63,22 +63,21 @@ def _graded_scene(device="cpu"):
         ),
         grid=mw.GridSpec.custom(X_NODES, Y_NODES, Z_NODES),
         boundary=mw.BoundarySpec.pec(),
-        device=device,
     )
 
 
 def test_component_coords_midpoints_match_numpy_recomputation():
     scene = _graded_scene()
     for component in _COMPONENT_HALF_AXES:
-        actual = component_coords(scene, component)
+        actual = component_coords(scene, component, device="cpu")
         for axis, got, expected in zip("xyz", actual, _expected_coords(component)):
             np.testing.assert_array_equal(got, expected, err_msg=f"{component}/{axis}")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
 def test_point_observer_resolves_to_nearest_component_coordinate():
-    scene = _graded_scene(device="cuda")
-    solver = mw.Simulation.fdtd(scene, frequency=1e9).prepare().solver
+    scene = _graded_scene()
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9).prepare().solver
 
     # Off-node inside the fine region, clearly away from nearest-node ties.
     position = (0.030, 0.055, 0.024)
@@ -94,8 +93,8 @@ def test_point_observer_resolves_to_nearest_component_coordinate():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
 def test_plane_observer_resolves_graded_axis_neighbors_and_weights():
-    scene = _graded_scene(device="cuda")
-    solver = mw.Simulation.fdtd(scene, frequency=1e9).prepare().solver
+    scene = _graded_scene()
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9).prepare().solver
 
     # Ez plane samples live on the z half grid; 0.06 falls between the
     # half-points 0.03 and 0.08 (weights from the local, unequal spacing).
@@ -119,17 +118,18 @@ def test_plane_observer_resolves_graded_axis_neighbors_and_weights():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
 def test_point_dipole_patch_peaks_at_nearest_component_cell():
     position = (0.030, 0.055, 0.024)
-    scene = _graded_scene(device="cuda")
-    scene.add_source(
+    scene = _graded_scene()
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=position,
             polarization="Ez",
             width=0.05,
             source_time=mw.CW(frequency=1e9, amplitude=1.0),
             name="src",
-        )
-    )
-    solver = mw.Simulation.fdtd(scene, frequency=1e9).prepare().solver
+        ),
+    ))
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9).prepare().solver
     initialize_source_terms(solver)
 
     terms = [term for term in solver._source_terms if term["field_name"] == "Ez"]

@@ -25,7 +25,15 @@ from test_directional_sparse_system import _basis,_caps,_physical_tree,_original
 from test_directional_far_actions import _original_global_far_block
 from test_directional_dag_coupling import _mp_products
 
-pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
+# Milestone only, no regression twin. The cost is the module fixture's adaptive near-field
+# construction (touching-pair refinement, launch bound at a few percent GPU utilisation), run for
+# the exterior, both interiors and the dense original; the column oracle itself is cheap. A shorter
+# box with the original triangle shape is the smallest admissible case (the interior cap-to-cap
+# FAR coupling fails the order-8 directional admission below a 0.25-long box), and at 0.5 long it
+# only halves the cost. Every node uses that fixture, so the whole module is milestone; the
+# directional FMM paths stay in the regression tier through test_directional_automatic_dag_system,
+# test_directional_action_validation, test_directional_reciprocal_near and test_directional_fmm_public.
+pytestmark = [pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required'), pytest.mark.mom_milestone]
 
 
 def _branch_caps(tree,cap_nodes):

@@ -12,22 +12,21 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUD
 def test_open_gaussian_dipole_has_unit_moment(width):
     frequency = 1.0e9
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-4.0 * width, 4.0 * width),) * 3),
-        grid=mw.GridSpec.uniform(width / 4.0),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            profile="gaussian",
-            width=width,
-            source_time=mw.GaussianPulse(frequency=frequency, fwidth=0.5e9),
-        )
-    )
+                domain=mw.Domain(bounds=((-4.0 * width, 4.0 * width),) * 3),
+                grid=mw.GridSpec.uniform(width / 4.0),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                profile="gaussian",
+                width=width,
+                source_time=mw.GaussianPulse(frequency=frequency, fwidth=0.5e9),
+            ),
+            ),
+            )
     solver = mw.Simulation.fdtd(
-        scene, frequencies=[frequency], run_time=mw.TimeConfig(time_steps=1)
+        scene, frequencies=[frequency], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))
     ).prepare().solver
     (term,) = solver._source_terms
     patch = term["patch"].double()

@@ -13,6 +13,8 @@ from typing import Literal
 import torch
 
 from ..fdtd_parallel import _normalize_devices, _normalize_cuda_device
+from ..errors import UnsupportedFeatureError
+from .._stability import experimental
 
 
 def _integer(value, name, *, minimum=1):
@@ -47,6 +49,7 @@ def _mapping(value, name):
     return MappingProxyType(dict(value))
 
 
+@experimental("batch")
 @dataclass(frozen=True, kw_only=True)
 class BatchExecution:
     """Device and capacity policy; construction does not initialize CUDA."""
@@ -106,6 +109,7 @@ class BatchExecution:
             _integer(limit, "memory_limit_bytes")
 
 
+@experimental("batch")
 @dataclass(frozen=True, kw_only=True)
 class BatchParameters:
     """Named tensor inputs with an explicit leading variant dimension."""
@@ -146,6 +150,7 @@ class BatchParameters:
                      for name, t in sorted(getattr(self, kind).items()))
 
 
+@experimental("batch")
 @dataclass(frozen=True, kw_only=True)
 class BatchVariation:
     material_regions: tuple[str, ...] = ()
@@ -163,6 +168,7 @@ class BatchVariation:
         object.__setattr__(self, "structures", structures)
 
 
+@experimental("batch")
 @dataclass(frozen=True, kw_only=True)
 class BatchOutput:
     monitors: tuple[str, ...] | Literal["all"] = "all"
@@ -194,6 +200,7 @@ def _named(objects, name, *, path):
     return matches[0]
 
 
+@experimental("batch")
 class BatchSimulation:
     """Inspectable batch submission preserving the single-Scene object model."""
 
@@ -241,6 +248,9 @@ class BatchSimulation:
                 raise ValueError(f"simulations[{index}] cannot combine batch with spatial parallel execution.")
             if simulation.config.full_field_dft and not self.outputs.fields:
                 raise ValueError(f"simulations[{index}].full_field_dft conflicts with empty BatchOutput.fields.")
+            if simulation.config.records_magnetic_volume_dft:
+                raise ValueError(f"simulations[{index}].volume_dft_components: a batch selects its volume-DFT "
+                                 "components through BatchOutput.fields.")
             scene = simulation.scene
             if variation is not None:
                 for name in variation.material_regions:
@@ -276,7 +286,8 @@ class BatchSimulation:
         for name in parameters.source_scales:
             source = _named(scene.resolved_sources(), name, path="parameters.source_scales")
             if source not in scene.sources:
-                raise NotImplementedError("source_scales currently requires an explicit Scene source, not a port-generated source.")
+                raise UnsupportedFeatureError("source_scales currently requires an explicit Scene source, not a port-generated source.",
+                                              feature="guard:1d85b36d", method="fdtd")
             if getattr(source, "source_time", None) is None or not hasattr(source.source_time, "amplitude"):
                 raise ValueError(f"parameters.source_scales[{name!r}] requires an explicit source_time amplitude.")
 
@@ -290,22 +301,23 @@ class BatchSimulation:
             raise IndexError(index)
         if self.template is None:
             model = self.simulations[index]
-            return (model.scene_module.to_scene() if model.scene_module is not None else model.scene).clone()
+            return model.scene_module.to_scene() if model.scene_module is not None else model.scene
         scene = (self.template.scene_module.to_scene() if self.template.scene_module is not None
-                 else self.template.scene).clone()
+                 else self.template.scene)
+        regions, sources = list(scene.material_regions), list(scene.sources)
         for name, value in self.parameters.region_densities.items():
-            region = _named(scene.material_regions, name, path="material_regions")
-            slot = next(i for i, obj in enumerate(scene.material_regions) if obj is region)
-            scene.material_regions[slot] = replace(region, density=value[index])
+            region = _named(regions, name, path="material_regions")
+            slot = next(i for i, obj in enumerate(regions) if obj is region)
+            regions[slot] = replace(region, density=value[index])
         for name, value in self.parameters.source_scales.items():
-            source = _named(scene.sources, name, path="sources")
-            slot = next(i for i, obj in enumerate(scene.sources) if obj is source)
+            source = _named(sources, name, path="sources")
+            slot = next(i for i, obj in enumerate(sources) if obj is source)
             scaled = copy.copy(source)
             object.__setattr__(scaled, "source_time", replace(
                 source.source_time, amplitude=source.source_time.amplitude * float(value[index].detach()),
             ))
-            scene.sources[slot] = scaled
-        return scene
+            sources[slot] = scaled
+        return scene.updated(material_regions=regions, sources=sources)
 
     def plan(self):
         from .plan import build_batch_plan

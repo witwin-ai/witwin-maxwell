@@ -88,7 +88,7 @@ def main(argv=None):
     profiler = cProfile.Profile()
     base = torch.cuda.memory_allocated()
     with tracer.stage('prepare_total'):
-        prepared = profiler.runcall(mw.Simulation.mom(scene, frequency=args.frequency, config=config).prepare)
+        prepared = profiler.runcall(mw.Simulation.mom(scene, frequencies=args.frequency, config=config).prepare)
     tracer.restore()
     stream = io.StringIO()
     pstats.Stats(profiler, stream=stream).sort_stats('cumulative').print_stats(50)

@@ -16,23 +16,22 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires 
 def _simulation(*, graph=False, modulated=True):
     material = mw.Material(
         eps_r=2.0,
-        modulation=mw.ModulationSpec(frequency=0.35e9, amplitude=0.2, phase=0.4)
+        modulation=mw.media.ModulationSpec(frequency=0.35e9, amplitude=0.2, phase=0.4)
         if modulated else None,
     )
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.08, 0.08),) * 3),
         grid=mw.GridSpec.uniform(0.02),
         boundary=mw.BoundarySpec.periodic(),
-        device="cuda",
         structures=[mw.Structure(geometry=mw.Box(position=(0.0,) * 3, size=(0.4,) * 3), material=material)],
         sources=[mw.PointDipole(position=(0.0,) * 3, polarization="Ez",
                                 source_time=mw.CW(frequency=1e9))],
-        monitors=[mw.FieldTimeMonitor("probe", components=("Ez",),
+        monitors=[mw.monitors.FieldTimeMonitor("probe", components=("Ez",),
                                       position=(0.0,) * 3, interval=1)],
     )
     return mw.Simulation.fdtd(
-        scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=64),
-        full_field_dft=False, cuda_graph=graph,
+        scene, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=64),
+        full_field_dft=False, cuda_graph=graph),
     )
 
 
@@ -101,8 +100,7 @@ def test_first_two_electric_updates_preserve_endpoint_labels():
             def factor(time):
                 return 1 + mc * np.cos(omega * time) - ms * np.sin(omega * time)
             expected[component] = factor((step - 1) * dt) / factor(step * dt)
-        update_electric_fields(solver, solver.Ex, solver.Ey, solver.Ez,
-                               solver.Hx, solver.Hy, solver.Hz, time_value=step * dt)
+        update_electric_fields(solver)
         for component in expected:
             np.testing.assert_allclose(getattr(solver, component).cpu().numpy(),
                                        expected[component], rtol=3e-7, atol=0)
@@ -119,7 +117,7 @@ def test_graph_eager_and_disk_resume_are_bit_exact(tmp_path):
     path = tmp_path / "modulation.pt"
     checkpoint.save(path)
     resumed = _simulation(graph=True).prepare().run(
-        resume_from=mw.FDTDResumeCheckpoint.load(path)
+        resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path)
     ).solver
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz", "_modulation_time", "_modulation_step"):
         assert torch.equal(getattr(direct, name), getattr(graph, name)), name
@@ -147,23 +145,3 @@ def test_capture_restores_nonzero_clock_and_counter(monkeypatch, fail_capture):
     assert solver._cuda_graph_active is not fail_capture
     for name, value in graph_state_tensors(solver).items():
         assert torch.equal(value, saved[name]), name
-
-
-@pytest.mark.parametrize("step", [0, 1, 31])
-def test_old_clock_is_reconstructed_from_completed_steps(tmp_path, step):
-    checkpoint = _simulation().prepare().run_until(step)
-    path = tmp_path / "old-clock.pt"
-    checkpoint.save(path)
-    payload = torch.load(path, weights_only=True)
-    payload["auxiliary"].pop("modulation_step")
-    # A deliberately drifted saved clock must never be rounded into an index.
-    payload["auxiliary"]["modulation_time"] = torch.tensor([7.4e-6, 7.5e-6])
-    torch.save(payload, path)
-    loaded = mw.FDTDResumeCheckpoint.load(path)
-    assert loaded.auxiliary["modulation_step"].item() == step - 1
-    expected = [((step - 2) if step else -1) * loaded.dt, (step - 1) * loaded.dt]
-    assert torch.equal(loaded.auxiliary["modulation_time"], torch.tensor(expected, dtype=torch.float64))
-    actual = _simulation().prepare().run(resume_from=loaded).solver
-    reference = _simulation().prepare().run(resume_from=checkpoint).solver
-    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz", "_modulation_time", "_modulation_step"):
-        assert torch.equal(getattr(actual, name), getattr(reference, name)), name

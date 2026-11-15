@@ -35,26 +35,27 @@ def cell(angle, model, *, cpml=True, patch=False, alpha=None, conductivity=False
         boundary=mw.BoundarySpec.faces(x="bloch", y="bloch", z="pml" if cpml else "bloch",
             num_layers=2, bloch_wavevector=(0., 2 * math.pi * F0 / C0
                                              * math.sin(math.radians(angle)), 0.)),
-        device="cuda:0",
     )
     if patch:
-        for name, bounds in (("left", (-.002, -.001)), ("right", (.001, .002))):
-            scene.add_structure(mw.Structure(
-                geometry=mw.PlanarPEC.rectangle((bounds, (-.001, .001)),
-                                                normal_axis="z", coordinate=0.),
-                material=mw.Material.pec(), name=name))
-    scene.add_port(mw.LumpedPort(
-        "load", negative=(-.001, 0., 0.), positive=(.001, 0., 0.),
-        voltage_path=mw.AxisPath("x"),
-        current_surface=mw.Box(position=(-.0005, 0., 0.), size=(0., .003, .003)),
-        termination=model,
+        scene = scene.updated(structures=(
+            *scene.structures,
+            *(mw.Structure(
+                  geometry=mw.PlanarPEC.rectangle((bounds, (-.001, .001)),
+                              normal_axis="z", coordinate=0.),
+                  material=mw.Material.pec(), name=name) for name, bounds in (("left", (-.002, -.001)), ("right", (.001, .002)))),
+        ))
+    scene = scene.updated(ports=(
+        *scene.ports,
+        mw.LumpedPort(
+            "load", negative=(-.001, 0., 0.), positive=(.001, 0., 0.),
+            voltage_path=mw.AxisPath("x"),
+            current_surface=mw.Box(position=(-.0005, 0., 0.), size=(0., .003, .003)),
+            termination=model,
+        ),
     ))
-    cpml_config = {"memory_mode": "slab"}
-    if alpha is not None:
-        cpml_config["alpha_max"] = alpha
-    solver = mw.Simulation.fdtd(scene, frequency=F0, cuda_graph=False,
-        cpml_config=cpml_config,
-        run_time=mw.TimeConfig(time_steps=2)).prepare().solver
+    solver = mw.Simulation.fdtd(scene, frequencies=F0, config=mw.FDTDConfig(cuda_graph=False,
+        cpml=mw.CPMLConfig(memory_mode="slab", alpha_max=alpha),
+        run_time=mw.TimeConfig(time_steps=2), device="cuda:0")).prepare().solver
     if conductivity:
         # One interior Ex edge with a 50-ohm shunt, expressed entirely through
         # the ordinary static-conductivity coefficients. No lumped state exists.
@@ -108,7 +109,7 @@ def coordinates(solver):
 def spectrum(angle, label, model, steps, *, cpml=True, patch=False, alpha=None):
     solver = cell(angle, model, cpml=cpml, patch=patch, alpha=alpha,
                   conductivity=label == "conductivity")
-    alpha = solver.cpml_config["alpha_max"]
+    alpha = solver.cpml_grading.alpha_max
     entries = coordinates(solver)
     size = sum(t.numel() for _, _, t, _ in entries)
     assert size < 6000, size

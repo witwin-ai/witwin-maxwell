@@ -50,24 +50,28 @@ def _operating_frequency() -> float:
 
 def _matched_thru_s11() -> float:
     result = mw.Simulation.fdtd(
-        rectangular_waveguide_scene(dx=0.02, device="cuda"),
+        rectangular_waveguide_scene(dx=0.02),
         frequencies=(_operating_frequency(),),
-        excitations=mw.PortSweep(),
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=14),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortSweep(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=14),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
     return float(torch.abs(result.network.s[0, 0, 0]))
 
 
 def _shorted_s11() -> float:
     result = mw.Simulation.fdtd(
-        rectangular_waveguide_scene(dx=0.02, short_far_port=True, device="cuda"),
+        rectangular_waveguide_scene(dx=0.02, short_far_port=True),
         frequencies=(_operating_frequency(),),
-        excitations=mw.PortExcitation("left", mode_name="TE0"),
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=14),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortExcitation("left", mode_name="TE0"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=14),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
     port = result.port("left")
     return float(torch.abs((port.b / port.a).flatten()[0]))

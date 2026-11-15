@@ -11,6 +11,7 @@ import witwin.maxwell as mw
 from benchmark.scenes.dipole.dipole_vacuum import build_scene as build_dipole_vacuum
 from benchmark.scenes.planewave.dielectric_slab import build_scene as build_dielectric_slab
 from benchmark.scenes.planewave.planewave_vacuum import build_scene as build_planewave_vacuum
+from witwin.maxwell.scene import place_scene
 
 
 _C0 = 299_792_458.0
@@ -28,7 +29,7 @@ def _to_scalar(value) -> float:
 
 def _num_steps(scene: mw.Scene, *, run_time_factor: float = 15.0) -> int:
     domain_size = max(bounds[1] - bounds[0] for bounds in scene.domain.bounds)
-    dt_estimate = 0.5 * min(scene.dx, scene.dy, scene.dz) / (_C0 * np.sqrt(3.0))
+    dt_estimate = 0.5 * min(scene.grid.dx, scene.grid.dy, scene.grid.dz) / (_C0 * np.sqrt(3.0))
     run_time_s = run_time_factor * domain_size / _C0
     return int(np.ceil(run_time_s / dt_estimate))
 
@@ -40,17 +41,19 @@ def _run_scene_summary(
     normalize_source: bool,
     monitor_names: tuple[str, ...],
 ) -> dict[str, object]:
-    scene = scene_builder().clone(device="cuda")
+    scene = place_scene(scene_builder(), "cuda")
     result = mw.Simulation.fdtd(
         scene,
         frequencies=(frequency,),
-        run_time=mw.TimeConfig(time_steps=_num_steps(scene)),
-        spectral_sampler=mw.SpectralSampler(normalize_source=normalize_source),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=_num_steps(scene)),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=normalize_source),
+        ),
     ).run()
 
     summary: dict[str, object] = {}
     for monitor_name in monitor_names:
-        payload = result.monitor(monitor_name)
+        payload = result.raw_monitor(monitor_name)
         monitor_summary = {
             key: _to_numpy(value) if isinstance(value, (torch.Tensor, np.ndarray)) else value
             for key, value in payload.items()

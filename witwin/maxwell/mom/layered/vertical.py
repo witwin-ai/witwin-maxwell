@@ -8,6 +8,7 @@ from weakref import proxy
 import torch
 
 from .build import build_extension
+from .vertical_refine import graded_segments, graded_transform
 from .green import _GAUSS_NODES, _GAUSS_WEIGHTS, _SommerfeldBin, _image_paths, _quadrature_bins
 
 
@@ -34,6 +35,8 @@ class VerticalGreenTable:
     horizontal_remainder: torch.Tensor | None = None
     horizontal_derivatives: torch.Tensor | None = None
     horizontal_coefficients: torch.Tensor | None = None
+    grading: tuple | None = None
+    grading_record: dict | None = None
 
     def tensors(self):
         p = self.parent
@@ -42,7 +45,7 @@ class VerticalGreenTable:
                 self.image_offsets, p.media, p.sigma, p.frequencies, p.edges, self.boundaries]
 
     @classmethod
-    def build(cls, parent, stack, via_spans, *, z_nodes, extract_distance):
+    def build(cls, parent, stack, via_spans, *, z_nodes, extract_distance, grading=None, z_gate=True):
         spans = tuple(sorted(tuple(map(float, span)) for span in via_spans))
         if z_nodes < 4:
             raise ValueError("vertical z_nodes must be at least four")
@@ -63,6 +66,8 @@ class VerticalGreenTable:
         for a, b in spans:
             cuts = (a, *(z for z in edges if a < z < b), b)
             segments.extend(zip(cuts[:-1], cuts[1:]))
+        if grading is not None:
+            segments = graded_segments(segments, stack, *grading)
         centers = tuple((a + b) / 2 for a, b in segments)
         heights = tuple((a + b) / 2 - (b - a) / 2 * math.cos((2 * j + 1) * math.pi / (2 * z_nodes))
                         for a, b in segments for j in range(z_nodes))
@@ -71,7 +76,7 @@ class VerticalGreenTable:
         # Include every ray that can enter the extraction budget anywhere in a
         # segment pair. A fixed ray set keeps z interpolation continuous.
         margin = 2 * max(b - a for a, b in segments)
-        paths = _image_paths(stack, centers, segment_pairs, min(frequencies), max(frequencies),
+        paths = _image_paths(stack, centers, segment_pairs, frequencies,
                              extract_distance + margin, vertical=True)
         distances, sources, offsets, events, pair_offsets, multiplicities, directions = paths
         kept_distances, kept_sources, kept_offsets, kept_events = [], [], [0], []
@@ -120,7 +125,7 @@ class VerticalGreenTable:
         empty = torch.empty(0, dtype=torch.complex128, device=device)
         result = cls(proxy(parent), spans, tensor(segments), tensor(heights), geometry,
                      tensor(direct, torch.int64), tensor(pair_offsets, torch.int64), coefficients,
-                     empty, empty, tensor(0.), tensor(0.), tensor(0.), truncation, z_nodes)
+                     empty, empty, tensor(0.), tensor(0.), tensor(0.), truncation, z_nodes, grading=grading)
         pairs = tuple((i, j) for i in range(len(heights)) for j in range(i, len(heights)))
         sources = tensor([heights[i] for i, _ in pairs])
         observers = tensor([heights[j] for _, j in pairs])
@@ -134,17 +139,20 @@ class VerticalGreenTable:
             # All surviving direct/PEC rays are extracted as exact waves.
             values = torch.zeros((len(frequencies), len(pairs), 5, len(parent.rho)),
                                  dtype=torch.complex128, device=device)
+        elif grading is not None:
+            values = graded_transform(result, sources, observers, segment_index, components=5)
         else:
             values = result.transform(sources, observers, segment_index, components=5)
         result.remainder = values[:, :, :4].contiguous()
         result.horizontal_remainder = values[:, :, 4].contiguous()
         result.derivatives = ext.slopes(result.remainder, parent.rho)
         result.horizontal_derivatives = ext.slopes(result.horizontal_remainder, parent.rho)
-        result.admit(sources, observers)
+        result.admit(sources, observers, z_gate=z_gate)
         return result
 
-    def transform(self, sources, observers, segment_index, *, rho=None, components=4):
+    def transform(self, sources, observers, segment_index, *, rho=None, components=4, truncation=None):
         p, ext = self.parent, build_extension()
+        truncation = self.truncation if truncation is None else truncation
         radial = p.rho if rho is None else rho
         F, P, N = p.frequencies.numel(), sources.numel(), radial.numel()
         out = torch.empty((F, P, components, N), dtype=torch.complex128, device=p.rho.device)
@@ -152,14 +160,14 @@ class VerticalGreenTable:
         # The radial grid is inherited unchanged, including its near/log split.
         near = float(p.rho[2 * (coarse_nodes // 4)].item())
         bins = _quadrature_bins(coarse_nodes, near, p.rho_max, p.regularizer,
-                                self.truncation, F)
+                                truncation, F)
         if rho is not None:
             coordinates = radial.cpu().tolist()
             plans = []
             for b in range(4):
                 begin, end = b * N // 4, (b + 1) * N // 4
                 rmin, rmax = (0.0 if b == 0 else coordinates[begin]), coordinates[end - 1]
-                real_end = self.truncation if rmin == 0 else max(2 * p.regularizer, 32 / rmin)
+                real_end = truncation if rmin == 0 else max(2 * p.regularizer, 32 / rmin)
                 linear = max(1, math.ceil(real_end * rmax / (4 * math.pi)))
                 count = 32 * (32 + linear + (16 if rmin else 0))
                 plans.append(_SommerfeldBin(begin, end, rmin, rmax, linear, count, count, 0))
@@ -182,7 +190,7 @@ class VerticalGreenTable:
             for first in range(0, plan.nodes, chunk_nodes):
                 count = min(chunk_nodes, plan.nodes - first)
                 q, weights, kinds = ext.nodes(gl, gw, p.frequencies, p.media, p.sigma,
-                                              self.truncation, plan.rho_min, plan.rho_max,
+                                              truncation, plan.rho_min, plan.rho_max,
                                               plan.linear_panels, first, count)
                 spectrum = ext.vertical_spectral(p.media, p.sigma, p.edges, p.frequencies,
                                                   q, sources, observers, p.pec_bottom, p.pec_top, components == 5)
@@ -195,7 +203,7 @@ class VerticalGreenTable:
                 endpoints = ((plan.nodes - 32,) if plan.rho_min == 0 else
                              ((32 + plan.linear_panels + 8) * 32 - 32, plan.nodes - 32))
                 if any(first <= endpoint < first + count for endpoint in endpoints):
-                    ext.vertical_tail_bound(spectrum, q, self.truncation, plan.rho_min, bounds,
+                    ext.vertical_tail_bound(spectrum, q, truncation, plan.rho_min, bounds,
                                             bin_index, first, plan.linear_panels)
                 # Beyond the 32 deformed/log panels, linear and tail nodes
                 # are frequency-independent when both endpoints exceed the
@@ -248,7 +256,7 @@ class VerticalGreenTable:
             self.parent.media, self.parent.sigma, self.parent.edges, self.parent.frequencies,
             q, tensor(zs), tensor(zo), self.parent.pec_bottom, self.parent.pec_top)
 
-    def admit(self, sources, observers):
+    def admit(self, sources, observers, z_gate=True):
         """Coarse rho midpoints and independent z midpoint/endpoint transforms.
 
         Errors are normalized per component by the maximum total kernel on the
@@ -296,7 +304,8 @@ class VerticalGreenTable:
                                   for a, _, b, _ in pairs], torch.int64)
         indices = [1 + i * (p.physical_nodes - 2) // 16 for i in range(17)]
         radial = p.rho[indices].contiguous()
-        full_reference = self.transform(zs, zo, segment_indices, rho=radial, components=5)
+        full_reference = (self.transform(zs, zo, segment_indices, rho=radial, components=5) if self.grading is None else
+                          graded_transform(self, zs, zo, segment_indices, rho=radial, components=5))
         horizontal_reference = full_reference[:, :, 4].contiguous()
         reference = full_reference[:, :, :4].contiguous()
         reference = reference.permute(0, 2, 1, 3).reshape(p.frequencies.numel(), 4, -1).contiguous()
@@ -313,5 +322,9 @@ class VerticalGreenTable:
         h_error = ext.horizontal_z_error(self.assembly_tensors(), horizontal_reference,
                                           query_zs, query_zo, query_rho)
         self.z_interpolation_error = torch.maximum(self.z_interpolation_error, h_error)
+        if z_gate:
+            self.raise_z_failure()
+
+    def raise_z_failure(self):
         if self.z_interpolation_error.item() > 1e-6:
             raise RuntimeError(f"Vertical z interpolation admission failed: {self.z_interpolation_error.item():.6g} > 1e-6")

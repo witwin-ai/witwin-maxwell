@@ -36,19 +36,13 @@ from dataclasses import dataclass
 
 import torch
 
+from ._enums import ModePolarization, parse_enum
+from .errors import SetupError
+from .material_cache import refuse_column_material_cache
 from .network import NetworkData, PortData
 from .ports import ModePort
 from .sources import GaussianPulse, SourceTime
-
-
-_POLARIZATION_TOKENS = {
-    "ex": "x",
-    "ey": "y",
-    "ez": "z",
-    "x": "x",
-    "y": "y",
-    "z": "z",
-}
+from ._stability import experimental
 
 
 def _normalize_mode_entry(entry):
@@ -62,11 +56,10 @@ def _normalize_mode_entry(entry):
         return int(entry)
     if isinstance(entry, (tuple, list)) and len(entry) == 2:
         polarization, index = entry
-        axis = _POLARIZATION_TOKENS.get(str(polarization).lower())
-        if axis is None:
-            raise ValueError(
-                "ModalPortSweep mode polarization must be one of Ex/Ey/Ez or x/y/z."
-            )
+        polarization = parse_enum(ModePolarization, polarization, name="ModalPortSweep mode polarization")
+        if polarization is ModePolarization.AUTO:
+            raise SetupError("ModalPortSweep mode polarization must be Ex, Ey or Ez, not 'auto'.")
+        axis = polarization.value[-1].lower()
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
             raise ValueError("ModalPortSweep mode indices must be integers >= 0.")
         return (axis, int(index))
@@ -115,6 +108,7 @@ def _normalize_element_mapping(mapping):
     return (elements[0], elements[1], resolved)
 
 
+@experimental("rf_ports")
 @dataclass(frozen=True)
 class ModalPortSweep:
     """Request one independent FDTD run per selected ``(ModePort, mode)`` input.
@@ -467,7 +461,7 @@ def build_modal_column_scene(scene, plan: ModalSweepPlan, run_position: int):
                     frequencies=plan.frequencies,
                 )
             )
-    return scene.clone(ports=ports)
+    return scene.updated(ports=ports)
 
 
 @dataclass(frozen=True)
@@ -645,6 +639,7 @@ def assemble_modal_network(
     return ports, network
 
 
+@experimental("rf_ports")
 def run_modal_port_sweep(simulation, sweep: ModalPortSweep, *, scene=None):
     """Run every planned column of ``sweep`` and return the assembled ``Result``.
 
@@ -660,6 +655,7 @@ def run_modal_port_sweep(simulation, sweep: ModalPortSweep, *, scene=None):
         raise ValueError("ModalPortSweep requires a Simulation.fdtd(...) simulation.")
     if simulation.excitations or simulation.port_sweep is not None:
         raise ValueError("ModalPortSweep cannot be combined with RF port excitations.")
+    refuse_column_material_cache(simulation.config, runner="ModalPortSweep")
     run_scene = simulation.scene if scene is None else scene
     plan = plan_modal_port_sweep(run_scene, sweep, simulation.frequencies)
 

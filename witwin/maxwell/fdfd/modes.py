@@ -9,6 +9,7 @@ import math
 import torch
 from ..constants import ETA_0
 from ..result import Result
+from ..errors import UnsupportedFeatureError
 
 
 def _differences(nodes):
@@ -38,7 +39,8 @@ def solve_modes(prepared, *, axis='z', position=0., bounds=None, num_modes=1,
         raise ValueError('Mode count and matrix size limit must be positive integers.')
     if not math.isfinite(tolerance) or not 0<tolerance<1:
         raise ValueError('Mode tolerance must be between zero and one.')
-    if prepared.simulation.has_trainable_parameters:
+    from ..compiler.accel.dispatch import requires_grad
+    if prepared.simulation.has_trainable_parameters or requires_grad(prepared.simulation.scene):
         raise ValueError('Transverse eigenmodes currently require fixed material inputs.')
     solver = prepared.solver
     scene = solver.scene
@@ -46,14 +48,14 @@ def solve_modes(prepared, *, axis='z', position=0., bounds=None, num_modes=1,
     order = ((normal+1)%3,(normal+2)%3,normal)
     names = tuple('xyz'[i] for i in order)
     if bounds is None:
-        bounds = tuple(scene.domain.bounds[i] for i in order[:2])
+        bounds = tuple(scene.scene.domain.bounds[i] for i in order[:2])
     if len(bounds)!=2 or any(len(pair)!=2 or not all(math.isfinite(v) for v in pair) or pair[0]>=pair[1] for pair in bounds):
         raise ValueError('Mode bounds need two finite increasing intervals.')
-    if not scene.domain.bounds[normal][0] <= position <= scene.domain.bounds[normal][1]:
+    if not scene.scene.domain.bounds[normal][0] <= position <= scene.scene.domain.bounds[normal][1]:
         raise ValueError('Mode plane must lie inside the physical domain.')
     selections,coordinates = [],[]
     for name,pair,index in zip(names[:2],bounds,order[:2]):
-        if pair[0]<scene.domain.bounds[index][0] or pair[1]>scene.domain.bounds[index][1]:
+        if pair[0]<scene.scene.domain.bounds[index][0] or pair[1]>scene.scene.domain.bounds[index][1]:
             raise ValueError('Mode aperture must lie inside the physical domain.')
         nodes = torch.tensor(getattr(scene,name+'_nodes64'),device=scene.device)
         lo,hi = (int((nodes-value).abs().argmin()) for value in pair)
@@ -71,7 +73,8 @@ def solve_modes(prepared, *, axis='z', position=0., bounds=None, num_modes=1,
     solver._ensure_material_components()
     components = solver.material_eps_components
     if any(bool((mu != 1).any()) for mu in solver.material_mu_components.values()):
-        raise NotImplementedError('Transverse eigenmodes currently require vacuum permeability.')
+        raise UnsupportedFeatureError('Transverse eigenmodes currently require vacuum permeability.',
+                                      feature="guard:025f2cc4", method="fdfd")
     epsilon = [components[name].detach().permute(order)
                [selections[0],selections[1],plane].to(torch.complex128) for name in names]
     from ..compiler.materials import _pec_edge_fill
@@ -123,9 +126,9 @@ def solve_modes(prepared, *, axis='z', position=0., bounds=None, num_modes=1,
     profiles = {kind+name:value.T.reshape(num_modes,*shape).contiguous()
                 for kind,name,value,shape in zip(('E',)*3+('H',)*3,names+names,arrays,shapes)}
     return Result(method='fdfd',scene=prepared.simulation.scene,prepared_scene=scene,frequency=solver.frequency,
-                  monitors={'modes':{'beta':beta,'effective_index':beta/k0,'eigen_residual':residual}},
-                  raw_output={'profiles':profiles,'coordinates':dict(zip(names[:2],coordinates)),
-                              'axis':axis,'position':float(getattr(scene,axis)[plane]),
-                              'normalization':'peak transverse electric component = 1 V/m'},
+                  monitors={'modes':{'beta':beta,'effective_index':beta/k0,'eigen_residual':residual,
+                                     'profiles':profiles,'coordinates':dict(zip(names[:2],coordinates)),
+                                     'axis':axis,'position':float(getattr(scene,axis)[plane]),
+                                     'normalization':'peak transverse electric component = 1 V/m'}},
                   solver_stats={'converged':True,'mode_dofs':count,'device':str(scene.x.device),
                                 'final_residual':float(residual.max())})

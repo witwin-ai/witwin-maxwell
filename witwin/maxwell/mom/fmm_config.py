@@ -1,22 +1,87 @@
 """Versioned experimental Cartesian FMM construction and solve configuration."""
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 import math
 from .interpolation_error import KernelErrorBudget
-from .fmm_error import validate_kernel_bound_rule
+from .options import MoMOption, option_asdict, plain_option
+from ..errors import UnsupportedFeatureError
+from .._enums import parse_enum
+from .._stability import experimental
 
 
+@experimental("mom")
+class FMMTableStorage(MoMOption):
+    """M2L translation table storage selected by ``FMMConfig.table_storage``."""
+    DENSE = 'dense'
+    COMPACT = 'compact'
+    FFT_V1 = 'fft_v1'
+    FFT_EWALD_V1 = 'fft_ewald_v1'
+    COMPACT_SHARED_DISPLACEMENT_V1 = 'compact_shared_displacement_v1'
+    COMPACT_SHARED_SIGNED_AXIS_V1 = 'compact_shared_signed_axis_v1'
+    RADIAL_SERIES_SHARED_RADIUS_V1 = 'radial_series_shared_radius_v1'
+
+
+@experimental("mom")
+class FMMShiftStorage(MoMOption):
+    """M2M/L2L shift storage selected by ``FMMConfig.shift_storage``."""
+    DENSE = 'dense'
+    SEPARABLE_V1 = 'separable_v1'
+
+
+@experimental("mom")
+class FMMNearStorage(MoMOption):
+    """Near-interaction storage of ``FMMConfig`` and ``DirectionalFMMConfig`` (the latter refuses ``FULL_MATRIX``)."""
+    FULL_MATRIX = 'full_matrix'
+    SCALAR_DK_V1 = 'scalar_dk_v1'
+    SCALAR_RECIPROCAL_DK_V1 = 'scalar_reciprocal_dk_v1'
+    SCALAR_RECIPROCAL_STREAMED_DK_V1 = 'scalar_reciprocal_streamed_dk_v1'
+    SCALAR_RECIPROCAL_CACHED_DK_V1 = 'scalar_reciprocal_cached_dk_v1'
+
+
+@experimental("mom")
+class FMMKernelBoundRule(MoMOption):
+    """M2L truncation bound rule selected by ``FMMConfig.kernel_bound_rule``."""
+    BIVARIATE_CAUCHY_V1 = 'bivariate_cauchy_v1'
+    REAL_SUPPORT_MIN_V1 = 'real_support_min_v1'
+    POSITIVE_TAIL_MIN_V1 = 'positive_tail_min_v1'
+    FIRST_WAVE_MIN_V1 = 'first_wave_min_v1'
+    DIRECT_POSITIVE_TAIL_MIN_V1 = 'direct_positive_tail_min_v1'
+    DIRECT_FIRST_WAVE_MIN_V1 = 'direct_first_wave_min_v1'
+
+
+@experimental("mom")
+class FMMExpansionCenter(MoMOption):
+    """Expansion-center policy selected by ``FMMConfig.expansion_center_policy``."""
+    SUPPORT_BOX_MIDPOINT_V1 = 'support_box_midpoint_v1'
+    DYADIC_CELL_V1 = 'dyadic_cell_v1'
+    BINARY_LATTICE_V1 = 'binary_lattice_v1'
+
+
+@experimental("mom")
+class LeafFactorKernel(MoMOption):
+    """Leaf-block factor kernel of ``FMMConfig`` and ``DirectionalFMMConfig`` (the latter refuses ``PRIMARY``)."""
+    NONE = 'none'
+    ORIGINAL = 'original'
+    PRIMARY = 'primary'
+
+
+_FMM_OPTIONS = (('table_storage', FMMTableStorage), ('shift_storage', FMMShiftStorage),
+                ('near_storage', FMMNearStorage), ('kernel_bound_rule', FMMKernelBoundRule),
+                ('expansion_center_policy', FMMExpansionCenter), ('leaf_factor_kernel', LeafFactorKernel))
+
+
+@experimental("mom")
 @dataclass(frozen=True)
 class FMMConfig:
     order: int = 6
-    table_storage: str = 'compact_shared_displacement_v1'
-    shift_storage: str = 'separable_v1'
-    near_storage: str = 'scalar_reciprocal_dk_v1'
+    table_storage: FMMTableStorage = FMMTableStorage.COMPACT_SHARED_DISPLACEMENT_V1
+    shift_storage: FMMShiftStorage = FMMShiftStorage.SEPARABLE_V1
+    near_storage: FMMNearStorage = FMMNearStorage.SCALAR_RECIPROCAL_DK_V1
     near_coefficient_workspace_budget_bytes: int = 128*1024**2
     near_coefficient_cache_budget_bytes: int = 128*1024**2
-    kernel_bound_rule: str = 'bivariate_cauchy_v1'
+    kernel_bound_rule: FMMKernelBoundRule = FMMKernelBoundRule.BIVARIATE_CAUCHY_V1
     m2l_row_batch: int = 16
     far_action_batch: int = 1
-    expansion_center_policy: str = 'support_box_midpoint_v1'
+    expansion_center_policy: FMMExpansionCenter = FMMExpansionCenter.SUPPORT_BOX_MIDPOINT_V1
     # Bounds both block entries and RHS vectors per near-action chunk.
     near_action_batch: int = 32
     max_order: int | None = None
@@ -31,13 +96,13 @@ class FMMConfig:
     projection_budget_bytes: int = 1024**3
     solve_dual_tolerance: float = 1e-8
     original_sample_tolerance: float = 1e-8
-    leaf_factor_kernel: str = 'none'
+    leaf_factor_kernel: LeafFactorKernel = LeafFactorKernel.NONE
     leaf_factor_max_edges: int = 32
     leaf_factor_budget_bytes: int = 256*1024**2
 
     def __post_init__(self):
-        if self.expansion_center_policy not in ('support_box_midpoint_v1', 'dyadic_cell_v1', 'binary_lattice_v1'):
-            raise ValueError('Unsupported Cartesian FMM expansion center policy')
+        for name, option in _FMM_OPTIONS:
+            object.__setattr__(self, name, parse_enum(option, getattr(self, name), name=f'FMMConfig.{name}'))
         if self.expansion_center_policy in ('dyadic_cell_v1','binary_lattice_v1') and (
                 self.table_storage not in ('compact', 'compact_shared_displacement_v1', 'compact_shared_signed_axis_v1','radial_series_shared_radius_v1')
                 or self.order > 12 or self.max_order is not None and self.max_order > 12):
@@ -47,11 +112,9 @@ class FMMConfig:
         if self.far_action_batch > 1 and (self.table_storage not in ('compact','compact_shared_displacement_v1','compact_shared_signed_axis_v1','radial_series_shared_radius_v1')
                 or self.order > 12 or self.max_order is not None and self.max_order > 12):
             raise ValueError('Batched compact FAR requires compact order0..12')
-        validate_kernel_bound_rule(self.kernel_bound_rule)
-        if self.near_storage not in ('full_matrix', 'scalar_dk_v1', 'scalar_reciprocal_dk_v1', 'scalar_reciprocal_streamed_dk_v1', 'scalar_reciprocal_cached_dk_v1'):
-            raise ValueError('Unsupported FMM near storage')
         if self.near_storage in ('scalar_dk_v1', 'scalar_reciprocal_dk_v1', 'scalar_reciprocal_streamed_dk_v1', 'scalar_reciprocal_cached_dk_v1') and self.table_storage == 'fft_ewald_v1':
-            raise NotImplementedError('Scalar D/K near storage currently requires free space')
+            raise UnsupportedFeatureError('Scalar D/K near storage currently requires free space',
+                                          feature="guard:d874622b", method="mom")
         if (type(self.near_coefficient_workspace_budget_bytes) is not int
                 or self.near_coefficient_workspace_budget_bytes < 1):
             raise ValueError('Near coefficient workspace budget must be a positive integer')
@@ -64,12 +127,6 @@ class FMMConfig:
         if (self.near_storage != 'scalar_reciprocal_cached_dk_v1'
                 and self.near_coefficient_cache_budget_bytes != 128*1024**2):
             raise ValueError('Explicit near coefficient cache budget requires cached reciprocal storage')
-        if self.shift_storage not in ('dense','separable_v1'):
-            raise ValueError('FMM shift_storage must be dense or separable_v1')
-        if self.leaf_factor_kernel not in ('none', 'original', 'primary'):
-            raise ValueError('FMM leaf_factor_kernel must be none, original or primary')
-        if self.table_storage not in ('dense', 'compact', 'fft_v1', 'fft_ewald_v1', 'compact_shared_displacement_v1', 'compact_shared_signed_axis_v1','radial_series_shared_radius_v1'):
-            raise ValueError('FMM table_storage must be dense, compact, fft_v1 or fft_ewald_v1')
         if type(self.order) is not int or self.order < 0:
             raise ValueError('FMM order must be a nonnegative integer')
         if self.table_storage in ('compact_shared_signed_axis_v1','radial_series_shared_radius_v1') and (
@@ -101,7 +158,7 @@ class FMMConfig:
             raise ValueError('FMM separation_ratio must be less than one')
 
     def construction(self):
-        parameters = {name: getattr(self, name) for name in self.__dataclass_fields__
+        parameters = {name: plain_option(getattr(self, name)) for name in self.__dataclass_fields__
                 if name not in ('solve_dual_tolerance', 'original_sample_tolerance',
                                 'leaf_factor_kernel', 'leaf_factor_max_edges', 'leaf_factor_budget_bytes')}
         if self.far_action_batch == 1:
@@ -121,7 +178,7 @@ class FMMConfig:
         return DirectSolveConfig(self.solve_dual_tolerance, self.original_sample_tolerance)
 
     def payload(self):
-        parameters=asdict(self)
+        parameters=option_asdict(self)
         if self.table_storage == 'radial_series_shared_radius_v1':
             return {'version':'cartesian_fmm_radial_series_config_v1','parameters':parameters}
         if self.near_storage == 'scalar_reciprocal_cached_dk_v1':
@@ -292,6 +349,7 @@ class FMMConfig:
         return cls(**values)
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class DirectionalFMMConfig:
     """Automatic scalar DAG configuration with one global ideal error budget.
@@ -322,15 +380,19 @@ class DirectionalFMMConfig:
     tensor_workspace_budget_bytes: int = 1024**3
     solve_dual_tolerance: float = 1e-8
     original_sample_tolerance: float = 1e-8
-    leaf_factor_kernel: str = 'none'
+    leaf_factor_kernel: LeafFactorKernel = LeafFactorKernel.NONE
     leaf_factor_max_edges: int = 32
     leaf_factor_budget_bytes: int = 256*1024**2
-    near_storage: str = 'scalar_dk_v1'
+    near_storage: FMMNearStorage = FMMNearStorage.SCALAR_DK_V1
     near_coefficient_workspace_budget_bytes: int = 128*1024**2
     near_coefficient_cache_budget_bytes: int = 128*1024**2
 
     def __post_init__(self):
-        if self.near_storage not in ('scalar_dk_v1','scalar_reciprocal_dk_v1','scalar_reciprocal_streamed_dk_v1','scalar_reciprocal_cached_dk_v1'):
+        object.__setattr__(self, 'near_storage',
+                           parse_enum(FMMNearStorage, self.near_storage, name='DirectionalFMMConfig.near_storage'))
+        object.__setattr__(self, 'leaf_factor_kernel', parse_enum(
+            LeafFactorKernel, self.leaf_factor_kernel, name='DirectionalFMMConfig.leaf_factor_kernel'))
+        if self.near_storage == 'full_matrix':
             raise ValueError('Unsupported directional scalar near storage')
         if (type(self.near_coefficient_workspace_budget_bytes) is not int
                 or self.near_coefficient_workspace_budget_bytes < 1):
@@ -380,7 +442,7 @@ class DirectionalFMMConfig:
         return DirectSolveConfig(self.solve_dual_tolerance, self.original_sample_tolerance)
 
     def payload(self):
-        values = asdict(self)
+        values = option_asdict(self)
         values['cone_subdivisions'] = list(self.cone_subdivisions)
         if self.near_storage == 'scalar_reciprocal_cached_dk_v1':
             return dict(version='automatic_directional_cached_reciprocal_dag_fmm_config_v1', parameters=values)

@@ -93,7 +93,7 @@ def main():
         transverse_refinement_radius=.02, padding=.08, separation=.4, axial_half_length=.3, sigma=0.)
     scene = reference_line_scene(scene_args)
     ports, groups = physical_sources(scene, args.kind, .0025)
-    prepared = prepare_scene(scene.clone(ports=ports))
+    prepared = prepare_scene(scene.updated(ports=ports))
     compiled = [compile_port_geometry(prepared, port, device='cpu') for port in ports]
     identity = package_identity(mw, 'witwin-maxwell')
     core_root = Path(next(iter(witwin.core.__path__))).resolve()

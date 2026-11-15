@@ -11,6 +11,8 @@ from witwin.maxwell.fdtd.excitation.injection import _prepare_custom_current_sou
 from witwin.maxwell.scene import prepare_scene
 
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
+
 _COMPONENTS = dict(zip(("Jx", "Jy", "Jz", "Mx", "My", "Mz"),
                        ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")))
 
@@ -25,15 +27,14 @@ def _single_thread():
 
 def _scene(grid):
     return mw.Scene(
-        domain=mw.Domain(bounds=((-0.64, 0.64),) * 3), grid=grid, device="cpu",
-        boundary=mw.BoundarySpec.pml(num_layers=2),
+        domain=mw.Domain(bounds=((-0.64, 0.64),) * 3), grid=grid, boundary=mw.BoundarySpec.pml(num_layers=2),
     )
 
 
 def _prepare(scene):
     return mw.Simulation.fdtd(
-        scene, frequency=2e9, backend="cpu_reference", cuda_graph=False,
-        full_field_dft=False, run_time=mw.TimeConfig(time_steps=1),
+        scene, frequencies=2e9, config=mw.FDTDConfig(cuda_graph=False,
+        full_field_dft=False, run_time=mw.TimeConfig(time_steps=1)),
     ).prepare().solver
 
 
@@ -58,7 +59,7 @@ def _density(solver, field):
         region = tuple(slice(i, i + n) for i, n in zip(term["offsets"], term["patch"].shape))
         denom = getattr(solver, ("eps_" if field.startswith("E") else "mu_") + field)
         density[region] += -term["patch"] * denom[region] / solver.dt
-    return density.double().numpy()
+    return density.double().cpu().numpy()
 
 
 def _control_cells(coords):
@@ -70,7 +71,7 @@ def _control_cells(coords):
 
 def _expected(solver, field, lo, hi, *, singleton=False):
     factors, widths = [], []
-    for a, coords in enumerate(component_coords(solver.scene, field)):
+    for a, coords in enumerate(component_coords(solver.scene, field, device=solver.scene.device)):
         left, right = _control_cells(coords)
         if solver._COMPONENT_HALF_OFFSET_AXES[field][a]:
             nodes = getattr(solver.scene, 'xyz'[a] + '_nodes64')
@@ -100,9 +101,12 @@ def test_all_prepared_current_moments_and_extents(dtype, grid, center):
     lo, hi = np.array(center) - .08, np.array(center) + .08
     axes = tuple(np.linspace(l, h, 3) for l, h in zip(lo, hi))
     scene = _scene(grid)
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(axes, {
-        key: np.ones((3, 3, 3)) for key in _COMPONENTS
-    }), source_time=mw.CW(frequency=2e9)))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(axes, {
+            key: np.ones((3, 3, 3)) for key in _COMPONENTS
+        }), source_time=mw.CW(frequency=2e9)),
+    ))
     solver = _prepare(scene)
     tolerance = 1e-6 if dtype == torch.float32 else 1e-12
     for amplitude in (1., -2.5, .375, 0.):
@@ -123,9 +127,12 @@ def test_constant_custom_and_uniform_prepared_profiles_agree(field):
     scene = _scene(mw.GridSpec.uniform(1.28 / 52))
     center, size = (0.031, -0.047, -0.25), (.16, .12, .14)
     axes = tuple(np.linspace(c - s / 2, c + s / 2, 3) for c, s in zip(center, size))
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(axes, {"J" + field[-1]: np.ones((3, 3, 3))})))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(axes, {"J" + field[-1]: np.ones((3, 3, 3))})),
+    ))
     custom = _prepare(scene)
-    uniform = _prepare(scene.clone(sources=[mw.UniformCurrentSource(size=size, center=center, polarization=field)]))
+    uniform = _prepare(scene.updated(sources=[mw.UniformCurrentSource(size=size, center=center, polarization=field)]))
     # The unchanged uniform path computes geometry in the field precision.
     np.testing.assert_allclose(_density(custom, field), _density(uniform, field), rtol=1e-6, atol=2e-6)
 
@@ -137,7 +144,10 @@ def test_singleton_axes_keep_nearest_component_planes(singleton_axes):
     axes = tuple([l] if l == h else [l, h] for l, h in zip(lo, hi))
     shape = tuple(len(axis) for axis in axes)
     scene = _scene(mw.GridSpec.uniform(.08))
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(axes, {key: np.ones(shape) for key in _COMPONENTS})))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(axes, {key: np.ones(shape) for key in _COMPONENTS})),
+    ))
     solver = _prepare(scene)
     for field in _COMPONENTS.values():
         expected, _ = _expected(solver, field, lo, hi, singleton=True)
@@ -148,33 +158,42 @@ def test_partial_cells_sample_nonconstant_data_inside_span():
     axes = (np.array([-.079, .083]), np.array([-.061, .093]), np.array([-.33, -.17]))
     x, y, z = np.meshgrid(*axes, indexing="ij")
     scene = _scene(mw.GridSpec.uniform(1.28 / 52))
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(axes, {
-        key: 2 + x + 2*y + 3*z for key in _COMPONENTS
-    })))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(axes, {
+            key: 2 + x + 2*y + 3*z for key in _COMPONENTS
+        })),
+    ))
     solver = _prepare(scene)
     lo, hi = [a[0] for a in axes], [a[-1] for a in axes]
     for field in _COMPONENTS.values():
         coverage, _ = _expected(solver, field, lo, hi)
-        q = [np.clip(c, l, h) for c, l, h in zip(component_coords(solver.scene, field), lo, hi)]
+        q = [np.clip(c, l, h) for c, l, h in zip(component_coords(solver.scene, field, device=solver.scene.device), lo, hi)]
         xq, yq, zq = np.meshgrid(*q, indexing="ij")
         np.testing.assert_allclose(_density(solver, field), coverage * (2 + xq + 2*yq + 3*zq), rtol=1e-6, atol=1e-6)
 
 
 def test_entirely_uncovered_dataset_emits_no_terms():
     scene = _scene(mw.GridSpec.uniform(.1))
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(([.8, .9],) * 3, {
-        key: np.ones((2, 2, 2)) for key in _COMPONENTS
-    })))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(([.8, .9],) * 3, {
+            key: np.ones((2, 2, 2)) for key in _COMPONENTS
+        })),
+    ))
     solver = _prepare(scene)
     assert not solver._source_terms and not solver._magnetic_source_terms
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
 def test_nonuniform_terminal_cells_cover_the_physical_domain(dtype):
-    scene = _scene(mw.GridSpec.custom(_NONUNIFORM, _NONUNIFORM, _NONUNIFORM)).clone(boundary=mw.BoundarySpec.none())
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(([-.7, .7],) * 3, {
-        key: np.ones((2, 2, 2)) for key in _COMPONENTS
-    })))
+    scene = _scene(mw.GridSpec.custom(_NONUNIFORM, _NONUNIFORM, _NONUNIFORM)).updated(boundary=mw.BoundarySpec.none())
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(([-.7, .7],) * 3, {
+            key: np.ones((2, 2, 2)) for key in _COMPONENTS
+        })),
+    ))
     solver = _prepare(scene)
     _rematerialize(solver, scene, dtype)
     tolerance = 1e-6 if dtype == torch.float32 else 1e-12

@@ -10,7 +10,7 @@ The frozen physics contract is ``docs/reference/ferrite-physics-contract.md``.
 The per-cell 2x2 state-space matrices ``P``/``Q`` and the implicit-midpoint
 (Cayley) propagator ``Phi``/``Gamma`` come from the production helpers in
 ``media`` (``gyromagnetic_state_space``, ``gyromagnetic_update_matrices``); those
-are the twins of the verification oracle in ``fdtd.ferrite_reference`` and must
+are the twins of the verification oracle in ``tests/oracles/ferrite_reference.py`` and must
 agree with it bit-for-bit.
 
 Partial-fill cells are handled by an explicit staircase (fail-closed boundary 7):
@@ -260,7 +260,7 @@ def compile_gyromagnetic_layout(
     target_device = torch.device(scene.device if device is None else device)
     grid_shape = (int(scene.Nx), int(scene.Ny), int(scene.Nz))
 
-    structures = _bulk_structures(scene)
+    structures = _bulk_structures(scene.scene)
     ferrite_flags = [isinstance(getattr(s, "material", None), GyromagneticFerrite) for s in structures]
     if not any(ferrite_flags):
         return _empty_layout(grid_shape, target_device, dtype)
@@ -354,3 +354,25 @@ def _axis_code(bias_unit: torch.Tensor, *, atol: float = 1.0e-9) -> int:
         ):
             return k
     return -1
+
+
+def compile_gyromagnetic_materials(prepared, *, dt=None, device=None):
+    """Compile every gyromagnetic ferrite structure of a prepared scene into a layout SoA.
+
+    Returns a :class:`CompiledGyromagneticLayout` (active-cell indices, occupancy, per-cell bias/local basis,
+    ADE state matrices, and -- when ``dt`` is given -- the implicit-midpoint propagator). Cached per
+    ``(subpixel spec, device)``; the ``dt`` binding is applied on top of the cached dt-independent layout so
+    changing ``dt`` does not re-rasterize.
+    """
+    target_device = prepared.device if device is None else device
+    key = (prepared.scene.subpixel, str(torch.device(target_device)))
+    if prepared._has_dynamic_materials() or prepared._has_trainable_geometry():
+        layout = compile_gyromagnetic_layout(prepared, device=target_device)
+    else:
+        layout = prepared._gyromagnetic_layout_cache.get(key)
+        if layout is None:
+            layout = compile_gyromagnetic_layout(prepared, device=target_device)
+            prepared._gyromagnetic_layout_cache[key] = layout
+    if dt is not None:
+        layout = layout.with_timestep(dt)
+    return layout

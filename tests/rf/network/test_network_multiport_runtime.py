@@ -1,3 +1,4 @@
+from unittest.mock import patch
 from types import SimpleNamespace
 
 import numpy as np
@@ -153,15 +154,14 @@ def _solver(
         frequency_band=(0.0, 10.0),
     )
     solver = SimpleNamespace(
-        scene=SimpleNamespace(
-            compile_networks=lambda *, dt, device: (compiled,)
-        ),
+        scene=SimpleNamespace(),
         device=device,
         dt=0.2,
         Ex=field,
         _port_runtimes=tuple(port_runtimes),
     )
-    prepare_network_runtimes(solver)
+    with patch("witwin.maxwell.fdtd.networks.compile_networks", lambda prepared, *, dt, device: (compiled,)):
+        prepare_network_runtimes(solver)
     solver._network_runtimes[0].state.copy_(
         torch.tensor((0.13, -0.27, 0.41), device=device, dtype=dtype)
     )

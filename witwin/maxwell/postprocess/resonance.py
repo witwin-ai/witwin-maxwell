@@ -290,6 +290,20 @@ def harmonic_inversion(
     )
 
 
+def _time_traces(data) -> dict:
+    """``{component: FieldData}`` with a leading ``t`` dimension from a FieldTimeMonitor result."""
+    from ..results import FieldData
+
+    if isinstance(data, FieldData) and data.dims[:1] == ("t",) and "component" in data.attrs:
+        return {data.attrs["component"]: data}
+    if isinstance(data, FieldData) and data.dims[:2] == ("component", "t"):
+        return {label: data.sel(component=label) for label in data.coords["component"]}
+    if isinstance(data, Mapping) and data and all(
+            isinstance(trace, FieldData) and trace.dims[:1] == ("t",) for trace in data.values()):
+        return dict(data)
+    raise ValueError("find_resonances expects the FieldTimeMonitor data Result.monitor(name) returns.")
+
+
 def _uniform_spacing(t: torch.Tensor) -> float:
     if t.numel() < 2:
         raise ValueError("FieldTimeMonitor payload needs at least two time samples.")
@@ -301,7 +315,7 @@ def _uniform_spacing(t: torch.Tensor) -> float:
 
 
 def find_resonances(
-    payload: Mapping,
+    payload,
     frequency_window: tuple[float, float],
     *,
     component: str | None = None,
@@ -311,13 +325,13 @@ def find_resonances(
     start_time: float | None = None,
     **options,
 ) -> ResonanceModes:
-    """Run :func:`harmonic_inversion` on a ``FieldTimeMonitor`` payload.
+    """Run :func:`harmonic_inversion` on a ``FieldTimeMonitor`` trace.
 
     Args:
-        payload: The mapping returned by ``Result.monitor(name)`` for a
-            ``FieldTimeMonitor`` (``kind == "field_time"``), holding the
-            sample times ``t`` and per-component buffers ``components`` of
-            shape ``(num_samples, *spatial)``.
+        payload: What ``Result.monitor(name)`` returns for a
+            ``FieldTimeMonitor``: a ``FieldData`` with a ``t`` dimension
+            (point traces, components stacked) or a dict of per-component
+            ``FieldData`` of dims ``(t, *spatial)`` (plane and volume traces).
         frequency_window: ``(fmin, fmax)`` in Hz.
         component: Recorded component such as ``"Ez"``; optional when the
             monitor recorded a single component.
@@ -338,9 +352,7 @@ def find_resonances(
     sit half a step earlier on the Yee grid, which shifts only their phases.
     """
 
-    if not isinstance(payload, Mapping) or payload.get("kind") != "field_time":
-        raise ValueError("find_resonances expects a FieldTimeMonitor payload from Result.monitor(...).")
-    buffers = payload["components"]
+    buffers = _time_traces(payload)
     if component is None:
         if len(buffers) != 1:
             raise ValueError(f"component is required; recorded components are {tuple(buffers)}.")
@@ -350,8 +362,8 @@ def find_resonances(
         name = name[:1].upper() + name[1:].lower()
     if name not in buffers:
         raise KeyError(f"Component {component!r} not recorded; available: {tuple(buffers)}.")
-    field = buffers[name]
-    t = torch.as_tensor(payload["t"], dtype=torch.float64, device=field.device)
+    field = buffers[name].values
+    t = buffers[name].coords["t"].to(dtype=torch.float64, device=field.device)
 
     spatial_ndim = field.ndim - 1
     selectors = sum(option is not None for option in (sample, reduce, weights))

@@ -19,7 +19,7 @@ from witwin.maxwell.result import _crop_plane_monitor_payload
 
 
 def test_closed_surface_faces_record_adjacent_normal_planes():
-    box = mw.ClosedSurfaceMonitor.box("box", position=(.001, -.002, .0005), size=(.0203, .0161, .0147))
+    box = mw.monitors.ClosedSurfaceMonitor.box("box", position=(.001, -.002, .0005), size=(.0203, .0161, .0147))
     planes = {face.face_label: face.plane_position for face in box.faces}
     for face in box.faces:
         assert face.closure_planes == face.tangential_bounds
@@ -36,15 +36,15 @@ def test_closed_surface_faces_record_adjacent_normal_planes():
             size["xyz".index(axis)] = 0.
             faces.append(mw.FinitePlaneMonitor(f"{axis}{sign}", position=position, size=size,
                                                fields=mw.monitors.required_flux_fields(axis), normal_direction=sign))
-    surface = mw.ClosedSurfaceMonitor("user", faces)
+    surface = mw.monitors.ClosedSurfaceMonitor("user", faces)
     assert all(face.closure_planes is None for face in faces)
     for face in surface.faces:
         assert all(planes == (-b, b) for planes in face.closure_planes.values())
-    projection = mw.AngleProjectionMonitor("far", position=(0., 0., 0.), size=(.02, .02, .02),
+    projection = mw.monitors.AngleProjectionMonitor("far", position=(0., 0., 0.), size=(.02, .02, .02),
                                            theta=(0., 1.), phi=(0.,), exclude_surfaces=("z_neg",))
     assert len(projection.faces) == 5
     assert all(face.closure_planes == face.tangential_bounds for face in projection.faces)
-    planar = mw.AngleProjectionMonitor("plane", position=(0., 0., .01), size=(.02, .02, 0.), theta=(0.,), phi=(0.,))
+    planar = mw.monitors.AngleProjectionMonitor("plane", position=(0., 0., .01), size=(.02, .02, 0.), theta=(0.,), phi=(0.,))
     assert planar.faces[0].closure_planes is None
     with pytest.raises(ValueError, match="closure_planes"):
         mw.FinitePlaneMonitor("bad", size=(1., 1., 0.), closure_planes={"x": (0., 1.)})
@@ -101,17 +101,16 @@ _BOXES = (.010, .011, .0102, .0097, .0105, .0108, .0095)
 def _run(structures=(), monitors=()):
     surfaces = []
     for index, half in enumerate(_BOXES):
-        surfaces.append(mw.ClosedSurfaceMonitor.box(f"native{index}", size=(2 * half,) * 3, frequencies=(_F,)))
-        surfaces.append(mw.ClosedSurfaceMonitor.box(f"sampled{index}", size=(2 * half,) * 3, frequencies=(_F,),
+        surfaces.append(mw.monitors.ClosedSurfaceMonitor.box(f"native{index}", size=(2 * half,) * 3, frequencies=(_F,)))
+        surfaces.append(mw.monitors.ClosedSurfaceMonitor.box(f"sampled{index}", size=(2 * half,) * 3, frequencies=(_F,),
                                                     sample_spacing=_DX / 2))
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-.02, .02),) * 3), grid=mw.GridSpec.uniform(_DX),
-        boundary=mw.BoundarySpec.faces(default="pml", num_layers=8, strength=1.), device="cuda",
-        sources=[mw.PointDipole(position=(-.0155, .0012, .0007), polarization=(0., 0., 1.), width=_DX,
+        boundary=mw.BoundarySpec.faces(default="pml", num_layers=8, strength=1.), sources=[mw.PointDipole(position=(-.0155, .0012, .0007), polarization=(0., 0., 1.), width=_DX,
                                 source_time=mw.CW(frequency=_F, amplitude=40.), name="s")],
         structures=list(structures), monitors=[*surfaces, *monitors])
-    return mw.Simulation.fdtd(scene, frequencies=[_F], full_field_dft=bool(monitors),
-                              run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=15)).run()
+    return mw.Simulation.fdtd(scene, frequencies=[_F], config=mw.FDTDConfig(full_field_dft=bool(monitors),
+                              run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=15))).run()
 
 
 def _value(value):
@@ -119,7 +118,7 @@ def _value(value):
 
 
 def _fluxes(result, prefix):
-    return [_value(result.monitor(f"{prefix}{index}")["flux"]) for index in range(len(_BOXES))]
+    return [_value(result.monitor(f"{prefix}{index}", freq_index=0).values) for index in range(len(_BOXES))]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -128,7 +127,7 @@ def test_vacuum_closed_surface_is_watertight_for_off_node_boxes():
     native, sampled = _fluxes(result, "native"), _fluxes(result, "sampled")
     snapped = []
     for index, half in enumerate(_BOXES):
-        surface = result.monitor(f"native{index}")
+        surface = result.raw_monitor(f"native{index}")
         faces = surface["faces"].values()
         planes = {(face["axis"], face["normal_direction"]): face["yee_plane_position"] for face in faces}
         snapped.append(tuple(sorted(planes.items())))
@@ -154,11 +153,11 @@ def test_vacuum_closed_surface_is_watertight_for_off_node_boxes():
 def test_lossy_absorption_is_box_independent_and_matches_volume_loss():
     cylinder = mw.Structure(geometry=Cylinder(radius=.005, height=.01, axis="z", position=(0., 0., 0.)),
                             material=mw.Material(eps_r=1., sigma_e=30.))
-    loss = mw.PowerLossMonitor("loss", position=(0., 0., 0.), size=(.019,) * 3, frequencies=(_F,))
+    loss = mw.monitors.PowerLossMonitor("loss", position=(0., 0., 0.), size=(.019,) * 3, frequencies=(_F,))
     result = _run(structures=[cylinder], monitors=[loss])
     absorbed = [-value for value in _fluxes(result, "native")]
     sampled = [-value for value in _fluxes(result, "sampled")]
-    volume = _value(result.power_loss("loss").total)
+    volume = _value(result.monitor("loss").total)
     assert volume > 0
     for index in range(len(_BOXES)):
         # Divergence theorem against the native conduction loss of the enclosed body.

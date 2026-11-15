@@ -107,7 +107,7 @@ def _compile_aperture(scene, port: WavePort, *, device: torch.device):
     lower = position - 0.5 * size
     upper = position + 0.5 * size
     roundoff = np.asarray(port._position_roundoff) + .5 * np.asarray(port._size_roundoff)
-    _validate_in_domain(port, lower, upper, scene.domain.bounds, roundoff)
+    _validate_in_domain(port, lower, upper, scene.scene.domain.bounds, roundoff)
 
     normal_index = _AXES.index(port.normal_axis)
     tangential_axes = tuple(axis for axis in _AXES if axis != port.normal_axis)
@@ -279,7 +279,7 @@ def _compile_current_geometry(
 
     span = max(
         1.0,
-        float(scene.domain.bounds[normal_index][1] - scene.domain.bounds[normal_index][0]),
+        float(scene.scene.domain.bounds[normal_index][1] - scene.scene.domain.bounds[normal_index][0]),
     )
     negative = list(port.position)
     positive = list(port.position)
@@ -371,7 +371,7 @@ def compile_waveport_cross_section(
 
     if not isinstance(port, WavePort):
         raise TypeError("compile_waveport_cross_section expects a WavePort.")
-    resolved_scene = prepare_scene(scene)
+    resolved_scene = prepare_scene(scene, device=device)
     target_device = torch.device(resolved_scene.device if device is None else device)
     (
         aperture_lower,
@@ -423,7 +423,7 @@ def compile_waveports(
     """Compile WavePort declarations without invoking the mode solver."""
 
     if ports is None:
-        selected_ports = tuple(port for port in scene.ports if isinstance(port, WavePort))
+        selected_ports = tuple(port for port in scene.scene.ports if isinstance(port, WavePort))
     else:
         selected_ports = tuple(ports)
         if any(not isinstance(port, WavePort) for port in selected_ports):

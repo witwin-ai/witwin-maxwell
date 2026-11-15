@@ -220,44 +220,45 @@ def fdtd_layered_far_field():
     box_half = 0.20
     domain_half = 0.40
 
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "huygens",
         position=(0.0, 0.0, 0.0),
         size=(2.0 * box_half,) * 3,
         frequencies=(_FREQUENCY,),
     )
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-domain_half, domain_half),) * 3),
-        grid=mw.GridSpec.uniform(0.01),
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device="cuda",
-    )
     # Homogeneous dielectric background filling the whole domain (including the
     # PML) so the exterior is reflection-free to the absorber.
-    scene.add_structure(
-        mw.Structure(
-            name="dielectric_background",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(8.0 * domain_half,) * 3),
-            material=mw.Material(eps_r=eps_r),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
-            name="dipole",
-        )
-    )
-    scene.add_monitor(surface)
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-domain_half, domain_half),) * 3),
+                grid=mw.GridSpec.uniform(0.01),
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+                structures=(
+            mw.Structure(
+                name="dielectric_background",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(8.0 * domain_half,) * 3),
+                material=mw.Material(eps_r=eps_r),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
+                name="dipole",
+            ),
+            ),
+                monitors=(surface,),
+            )
 
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_FREQUENCY],
-        run_time=mw.TimeConfig.auto(steady_cycles=12, transient_cycles=30),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=12, transient_cycles=30),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     currents = equivalent_surface_currents_from_monitor(result, surface.name)

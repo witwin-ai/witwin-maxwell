@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterator
 
+from ..errors import MaxwellError
+from .._stability import experimental
+
 
 class FailureKind(str, Enum):
     """Deterministic taxonomy for a single ensemble task failure.
@@ -24,7 +27,7 @@ class FailureKind(str, Enum):
         return self.value
 
 
-class DistributedFailure(Exception):
+class DistributedFailure(MaxwellError):
     """Structured, order-preserving failure for one ensemble task.
 
     Retains the submission ``index``, the leased ``device`` (``None`` when the
@@ -144,6 +147,7 @@ __all__ = [
 ]
 
 
+@experimental("batch")
 @dataclass(frozen=True)
 class BatchItem:
     """One completed, failed, or cancelled variant, retaining its input identity."""
@@ -165,6 +169,7 @@ class BatchItem:
             raise self.failure
 
 
+@experimental("batch")
 class BatchResult(ResultSequence):
     """Ordinary Results with stable variant IDs and explicit tensor stacking."""
 

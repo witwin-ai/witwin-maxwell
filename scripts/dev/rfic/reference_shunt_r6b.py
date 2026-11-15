@@ -15,7 +15,7 @@ from witwin.maxwell.mom.layered.runtime import compile_layered_scene
 from reference_fixture_r6 import box,graded_axis,run_model
 
 def write_plate(directory,resolution,gap=5.,end_criteria=1e-11,max_time=3e-10):
-    scene,_=plate_fixture(device="cpu")
+    scene,_=plate_fixture()
     stack,rectangles,ports,materials,_,vias,via_materials=compile_layered_scene(scene)
     root=ET.Element("openEMS")
     fdtd=ET.SubElement(root,"FDTD",NumberOfTimesteps="2000000",endCriteria=str(end_criteria),

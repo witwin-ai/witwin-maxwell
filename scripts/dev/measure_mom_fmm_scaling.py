@@ -403,7 +403,7 @@ def run_case(index, *, order_selection=None, failure_state_path=None):
             order=PLAN['integration_order'], singular_order=PLAN['singular_order']))
         return MultipoleSystemActions(provider, order=PLAN['order_min'] if selected_order is None else selected_order,
             max_order=PLAN['order_max'] if selected_order is None else None, kernel_bound_rule=kernel_rule,
-            kernel_error_budget=mw.KernelErrorBudget(PLAN['green_absolute_budget'], PLAN['gradient_absolute_budget']),
+            kernel_error_budget=mw.mom.KernelErrorBudget(PLAN['green_absolute_budget'], PLAN['gradient_absolute_budget']),
             leaf_size=PLAN['leaf_size'], separation_ratio=PLAN['separation_ratio'],
             **{key: PLAN[key] for key in ('action_retained_budget_bytes', 'table_budget_bytes',
                 'near_budget_bytes', 'projection_budget_bytes', 'table_storage', 'near_storage',

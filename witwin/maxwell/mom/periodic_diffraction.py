@@ -3,6 +3,7 @@ import math
 import torch
 from .periodic_operator import validate_periodic_cell,validate_periodic_sources
 from .periodic_spectral import surface_current_fourier
+from ..errors import ConvergenceError
 
 
 def rayleigh_orders(handle,coefficients,*,lattice,orders,side,plane_offset,quadrature_order=6,
@@ -153,7 +154,7 @@ def rayleigh_power_balance(handle,coefficients,*,lattice,orders,lower_plane,uppe
         'quadrature_converged':False}
 
 
-class RayleighConvergenceError(RuntimeError):
+class RayleighConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         self.receipt=receipt
         super().__init__('Rayleigh independent quadrature/order estimates failed')

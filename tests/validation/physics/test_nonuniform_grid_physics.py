@@ -66,10 +66,10 @@ def _build_scene(*, with_slab):
         ),
         grid=mw.GridSpec.custom(xy_nodes, xy_nodes, z_nodes),
         boundary=mw.BoundarySpec.pml(num_layers=_PML_LAYERS),
-        device="cuda",
     )
     if with_slab:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=mw.Box(
                     position=(0.0, 0.0, 0.0),
@@ -77,26 +77,28 @@ def _build_scene(*, with_slab):
                 ),
                 material=mw.Material(eps_r=_SLAB_EPS),
                 name="slab",
-            )
-        )
-    scene.add_source(
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(0.0, 0.0, 1.0),
             polarization=(1.0, 0.0, 0.0),
             source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=0.5e9),
-        )
-    )
-    for index, position in enumerate(_REFLECTED_PLANES):
-        scene.add_monitor(
-            mw.FluxMonitor(
-                name=f"upstream_{index}", axis="z", position=position, frequencies=(_FREQUENCY,)
-            )
-        )
-    scene.add_monitor(
+        ),
+    ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.FluxMonitor(
+              name=f"upstream_{index}", axis="z", position=position, frequencies=(_FREQUENCY,)
+          ) for index, position in enumerate(_REFLECTED_PLANES)),
+    ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
         mw.FluxMonitor(
             name="transmitted", axis="z", position=_TRANSMITTED_PLANE, frequencies=(_FREQUENCY,)
-        )
-    )
+        ),
+    ))
     return scene
 
 
@@ -108,13 +110,15 @@ def _run_fluxes(*, with_slab):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(normalize_source=True),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True),
+        ),
     ).run()
     names = tuple(f"upstream_{index}" for index in range(len(_REFLECTED_PLANES)))
     names += ("transmitted",)
     fluxes = {
-        name: float(np.asarray(result.monitor(name)["flux"].detach().cpu()).reshape(-1)[0])
+        name: float(np.asarray(result.monitor(name, freq_index=0).values.detach().cpu()).reshape(-1)[0])
         for name in names
     }
     del result

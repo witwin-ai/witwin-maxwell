@@ -27,61 +27,87 @@ def dump(out_path):
 
 
     def base(spec=None, boundary=None):
-        kwargs = {} if spec is None else {"subpixel_samples": spec}
+        kwargs = {} if spec is None else {"subpixel": spec}
         return mw.Scene(domain=mw.Domain(bounds=((-0.06, 0.06),) * 3), grid=mw.GridSpec.uniform(D),
-                        boundary=boundary or mw.BoundarySpec.pml(num_layers=6), device="cuda", **kwargs)
+                        boundary=boundary or mw.BoundarySpec.pml(num_layers=6), **kwargs)
 
 
     def scenes():
         s = base()
-        s.add_structure(mw.Structure(geometry=mw.Sphere(position=(0.0031, -0.0017, 0.0023), radius=0.021), material=mw.Material(eps_r=4.0)))
-        s.add_structure(mw.Structure(geometry=mw.Box(position=(0, 0, -0.03), size=(0.1, 0.1, 0.0213)), material=mw.Material(eps_r=2.25, sigma_e=0.01)))
+        s = s.updated(structures=(
+            *s.structures,
+            mw.Structure(geometry=mw.Sphere(position=(0.0031, -0.0017, 0.0023), radius=0.021), material=mw.Material(eps_r=4.0)),
+            mw.Structure(geometry=mw.Box(position=(0, 0, -0.03), size=(0.1, 0.1, 0.0213)), material=mw.Material(eps_r=2.25, sigma_e=0.01)),
+        ))
         yield "dielectric", s
         s = base(mw.SubpixelSpec(samples=1, averaging="arithmetic", pec="staircase"))
-        s.add_structure(mw.Structure(geometry=mw.Sphere(position=(0.0031, -0.0017, 0.0023), radius=0.021), material=mw.Material(eps_r=4.0)))
+        s = s.updated(structures=(
+            *s.structures,
+            mw.Structure(geometry=mw.Sphere(position=(0.0031, -0.0017, 0.0023), radius=0.021), material=mw.Material(eps_r=4.0)),
+        ))
         yield "dielectric_explicit_spec", s
         s = base()
-        s.add_structure(mw.Structure(geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=0.019),
-                                     material=mw.Material.lorentz(eps_inf=2.0, delta_eps=2.0, resonance_frequency=2.0e9, gamma=2.0e8)))
-        s.add_structure(mw.Structure(geometry=mw.Box(position=(0.03, 0, 0), size=(0.02, 0.03, 0.03)),
-                                     material=mw.Material.drude(eps_inf=1.0, plasma_frequency=2.0e9, gamma=1.0e8)))
+        s = s.updated(structures=(
+            *s.structures,
+            mw.Structure(geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=0.019),
+                         material=mw.Material.lorentz(eps_inf=2.0, delta_eps=2.0, resonance_frequency=2.0e9, gamma=2.0e8)),
+            mw.Structure(geometry=mw.Box(position=(0.03, 0, 0), size=(0.02, 0.03, 0.03)),
+                         material=mw.Material.drude(eps_inf=1.0, plasma_frequency=2.0e9, gamma=1.0e8)),
+        ))
         yield "dispersive", s
         s = base()
-        s.add_structure(mw.Structure(geometry=mw.Box(position=(0.001, 0.002, -0.0013), size=(0.03, 0.025, 0.0217)),
-                                     material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.5))))
+        s = s.updated(structures=(
+            *s.structures,
+            mw.Structure(geometry=mw.Box(position=(0.001, 0.002, -0.0013), size=(0.03, 0.025, 0.0217)),
+                         material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.5))),
+        ))
         yield "anisotropic", s
         for pec in ("staircase", "conformal"):
             s = base(mw.SubpixelSpec(samples=1, averaging="arithmetic", pec=pec))
-            s.add_structure(mw.Structure(geometry=mw.Sphere(position=(0.0013, 0.0021, -0.0007), radius=0.017), material=mw.Material.pec()))
+            s = s.updated(structures=(
+                *s.structures,
+                mw.Structure(geometry=mw.Sphere(position=(0.0013, 0.0021, -0.0007), radius=0.017), material=mw.Material.pec()),
+            ))
             yield f"pec_{pec}", s
         s = base()
-        s.add_structure(mw.Structure(mw.Box(position=(0, 0, -0.0125), size=(0.2, 0.2, 0.025)), mw.Material(eps_r=2.25, sigma_e=0.01), name="substrate"))
-        s.add_structure(mw.Structure(mw.PlanarPEC.rectangle(((-0.1, 0.1), (-0.012, -0.004)), coordinate=0.0, physical_thickness=35e-6),
-                                     mw.Material.pec(), name="pec_strip"))
-        s.add_structure(mw.Structure(mw.Box(position=(0.0, 0.008, 0.0), size=(0.2, 0.008, 0.0)),
-                                     mw.CopperFoil(thickness=35e-6, frequency_range=(0.8e9, 2.0e9)), name="foil"))
+        s = s.updated(structures=(
+            *s.structures,
+            mw.Structure(mw.Box(position=(0, 0, -0.0125), size=(0.2, 0.2, 0.025)), mw.Material(eps_r=2.25, sigma_e=0.01), name="substrate"),
+            mw.Structure(mw.geometry.PlanarPEC.rectangle(((-0.1, 0.1), (-0.012, -0.004)), coordinate=0.0, physical_thickness=35e-6),
+                         mw.Material.pec(), name="pec_strip"),
+            mw.Structure(mw.Box(position=(0.0, 0.008, 0.0), size=(0.2, 0.008, 0.0)),
+                         mw.media.CopperFoil(thickness=35e-6, frequency_range=(0.8e9, 2.0e9)), name="foil"),
+        ))
         yield "copperfoil_planarpec", s
         s = base()
         g = torch.Generator().manual_seed(7)
         density = torch.rand((8, 8, 8), generator=g)
-        s.add_material_region(mw.MaterialRegion(name="design", geometry=mw.Box(position=(0.001, 0, 0), size=(0.032, 0.032, 0.032)),
-                                                density=density, eps_bounds=(1.0, 4.0)))
+        s = s.updated(material_regions=(
+            *s.material_regions,
+            mw.MaterialRegion(name="design", geometry=mw.Box(position=(0.001, 0, 0), size=(0.032, 0.032, 0.032)),
+                              density=density, eps_bounds=(1.0, 4.0)),
+        ))
         yield "material_region", s
 
 
     results = {}
     for name, scene in scenes():
-        scene.add_source(mw.PointDipole(position=(-0.031, 0.0007, 0.0213), polarization="Ez",
-                                        source_time=mw.GaussianPulse(frequency=F0, fwidth=0.7e9), name="src"))
-        scene.add_monitor(mw.FieldTimeMonitor("probe", components=("Ez", "Hx"), position=(0.021, -0.0011, 0.0031)))
-        sim = mw.Simulation.fdtd(scene, frequency=F0, run_time=mw.TimeConfig(time_steps=80), full_field_dft=False)
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PointDipole(position=(-0.031, 0.0007, 0.0213), polarization="Ez",
+                           source_time=mw.GaussianPulse(frequency=F0, fwidth=0.7e9), name="src"),
+        ), monitors=(
+            *scene.monitors,
+            mw.monitors.FieldTimeMonitor("probe", components=("Ez", "Hx"), position=(0.021, -0.0011, 0.0031)),
+        ))
+        sim = mw.Simulation.fdtd(scene, frequencies=F0, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=80), full_field_dft=False))
         result = sim.run()
         solver = result.solver
         tensors = {}
         for key, value in vars(solver).items():
             if torch.is_tensor(value):
                 tensors[key] = value.detach().cpu().clone()
-        payload = result.monitor("probe")
+        payload = result.raw_monitor("probe")
         for comp, trace in payload["components"].items():
             tensors["probe_" + comp] = torch.as_tensor(trace).detach().cpu().clone()
         results[name] = tensors

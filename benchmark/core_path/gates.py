@@ -1,5 +1,11 @@
 """Fresh-process G1/G1-prime/G2/G4 capture and separate CPU comparison.
 
+The candidate arm is the default FDTD execution of the working tree. The baseline
+arm is the frozen existing-path capture in the evidence store
+(``tests/support/frozen_oracles.py``): ``<store>/gates/<gate>`` for bitwise
+comparisons and ``<store>/gates/g1-rule2`` (full and half horizon) for Rule 2 G1.
+``--baseline`` points a comparison at another baseline directory.
+
 Examples::
 
     python -m benchmark.core_path.gates capture --dry-run
@@ -15,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
-from dataclasses import fields, is_dataclass
+from dataclasses import asdict, fields, is_dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -29,8 +35,23 @@ import numpy as np
 import torch
 import witwin.maxwell as mw
 
+# The frozen store holds 0.6 result layouts; read results through the test API dialect.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "support"))
+import api_dialect  # noqa: E402
+
 from .scenes import (GATE_SCENES, G2_SCENES, W1_SCENES, W2_SCENES, W3_SCENES, DISPERSIVE_SCENES,
-                     build_core_case)
+                     ANISO_SCENES, FERRITE_SCENES, FP64_SCENES, BLOCH_SCENES, CHART_SCENES,
+                     CACHE_SCENES, MONITOR_SCENES, BLOCH_SEPARATE_SCENES, build_core_case)
+from witwin.maxwell.scene import place_scene
+
+# Scenes whose private surface/wire/ADE state and port, loss and breakdown outputs are pinned too.
+PHYSICS_SCENES = (W1_SCENES + W2_SCENES + W3_SCENES + DISPERSIVE_SCENES + FERRITE_SCENES
+                  + FP64_SCENES + CHART_SCENES + MONITOR_SCENES + BLOCH_SEPARATE_SCENES
+                  + ("mur_lumped_port", "mu_slab", "bloch_debye_tfsf"))
+# TFSF provider of each complex-field gate scene (fixed-k line, discrete CW slab, zero-k pulse).
+BLOCH_PROVIDERS = {"bloch_oblique": "plane_wave_fixed_k", "bloch_oblique_te": "plane_wave_fixed_k",
+                   "bloch_debye_tfsf": "plane_wave_fixed_k", "bloch_cw_tfsf": "plane_wave_grating_slab_cw",
+                   "bloch_pulse_k0": "plane_wave_grating_slab_cw", "bloch_tfsf_resistor": "plane_wave_fixed_k"}
 
 
 OUTPUT = Path(os.environ.get("WITWIN_EVIDENCE_ROOT", "evidence")) / "core-cuda-gates"
@@ -50,6 +71,11 @@ def _reference_cache():
 
 REFERENCE_CACHE = _reference_cache()
 THREAD_ENV = {f"{name}_NUM_THREADS": "8" for name in ("OMP", "MKL", "OPENBLAS", "NUMEXPR")}
+# A forced whole-step capture failure raises after restoring the solver state (W7 row
+# 16c); the harness asserts that, then runs a fresh preparation of the same simulation
+# without the pre-run field fill. Its run payloads must therefore equal the uninterrupted
+# run of the identical scene.
+REBUILT_BASELINES = {"o2_capture_failure": "o2_tfsf_pulse"}
 
 
 def discrete_leaf(name, value):
@@ -116,56 +142,122 @@ def tier_summary(rows):
     return {tier: sum(row["tier"] == tier for row in rows.values()) for tier in ("T0", "T1", "T2")}
 
 
-def o1_candidate_simulation_options(arm: str) -> dict:
-    """Pin both controls so the baseline remains the existing implementation."""
-    return {"fdtd_core_path": arm == "candidate", "accelerated_setup": False}
+def frozen_baseline(gate: str, *, rule2: bool = False) -> Path:
+    """Verified frozen existing-path baseline directory for ``gate``."""
+    from tests.support import frozen_oracles
+
+    # G1-prime differs from G1 only in its comparison policy.
+    name = "g1-rule2" if rule2 and gate == "g1" else "g1" if gate == "g1-prime" else gate
+    root = frozen_oracles.store_root() / "gates" / name
+    for key, entry in frozen_oracles.manifest()["payloads"].items():
+        if key.startswith(f"gates/{name}/"):
+            frozen_oracles.path(key)
+    return root
 
 
-def make_simulation(case, *, arm: str, steps: int, full_field_dft: bool):
+def make_simulation(case, *, steps: int, full_field_dft: bool, material_cache=None):
+    # Float64 cases stay inside the FP64 forward admission: sparse float64 spectra, no full-field DFT.
+    fp64 = case.field_dtype == torch.float64
+    precision = {"field_dtype": torch.float64} if fp64 else {}
     return mw.Simulation.fdtd(
-        case.scene.clone(device="cuda"), frequencies=case.frequencies,
-        run_time=mw.TimeConfig(time_steps=max(1, case.steps if case.steps is not None else steps)), full_field_dft=full_field_dft,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
-        cpml_config={"memory_mode": case.cpml_memory, "kappa_max": case.cpml_kappa_max}, cuda_graph=True,
-        shutoff=case.shutoff, shutoff_check_interval=7 if case.shutoff else 100,
-        enable_plot=case.boundaries,
+        place_scene(case.scene, "cuda"), frequencies=case.frequencies,
         excitations=case.excitations,
-        **({"absorber": case.absorber} if case.absorber is not None else {}),
-        **o1_candidate_simulation_options(arm),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=max(1, case.steps if case.steps is not None else steps)),
+            full_field_dft=full_field_dft and not fp64, **precision,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False, **(
+                {"observer_dtype": torch.float64} if fp64 else {})),
+            cpml=mw.fdtd.CPMLConfig(memory_mode=case.cpml_memory, kappa_max=case.cpml_kappa_max), cuda_graph=True,
+            shutoff=case.shutoff, shutoff_check_interval=7 if case.shutoff else 100,
+            enable_plot=case.boundaries,
+            **({"absorber": case.absorber} if case.absorber is not None else {}),
+            material_cache=material_cache,
+        ),
     )
 
 
-def tensors(value, prefix: str) -> dict[str, torch.Tensor]:
-    """Snapshot numerical leaves, including scalar flux and compiled indices."""
+# Process-counter identity attributes of a public witwin-core material (PhysicalMaterial and its
+# subclasses) reached inside a compiled model: witwin-core assigns material_id from a process-wide
+# counter at construction, so it depends on what the process built before (a round-tripped or
+# reordered scene gets another value) and is a label, not setup data. G4 records such a material by
+# its other dataclass fields (the benchmark/core_path/fingerprint.py rule) and drops these exact
+# attributes on both arms; the capture lists the keys it left out. ``version`` is a constructor
+# field, not a counter, and stays.
+MATERIAL_COUNTER_ATTRIBUTES = ("material_id",)
+
+
+def tensors(value, prefix: str, *, material_counters: list | None = None) -> dict[str, torch.Tensor]:
+    """Snapshot numerical leaves, including scalar flux and compiled indices.
+
+    With ``material_counters`` (the G4 setup capture), a witwin-core material is recorded without its
+    MATERIAL_COUNTER_ATTRIBUTES and the left-out keys are appended to that list.
+    """
     if isinstance(value, torch.Tensor):
         return {prefix: value.detach().cpu().clone()}
     if type(value) in (float, complex):
         return {prefix: torch.tensor(value, dtype=torch.complex128 if type(value) is complex else torch.float64)}
     if isinstance(value, (np.ndarray, np.number, bool, int, float, complex)):
         return {prefix: torch.as_tensor(value).clone()}
+    counters = material_counters
     if is_dataclass(value) and not isinstance(value, type):
-        value = {field.name: getattr(value, field.name) for field in fields(value)}
+        skip = ()
+        if counters is not None:
+            from witwin.core import PhysicalMaterial
+
+            if isinstance(value, PhysicalMaterial):
+                skip = MATERIAL_COUNTER_ATTRIBUTES
+                counters.extend(f"{prefix}/{name}" for name in skip)
+        value = {field.name: getattr(value, field.name) for field in fields(value) if field.name not in skip}
     if isinstance(value, Mapping):
         return {key: tensor for name, item in value.items()
-                for key, tensor in tensors(item, f"{prefix}/{name}").items()}
+                for key, tensor in tensors(item, f"{prefix}/{name}", material_counters=counters).items()}
     if isinstance(value, (tuple, list)):
         return {key: tensor for index, item in enumerate(value)
-                for key, tensor in tensors(item, f"{prefix}/{index}").items()}
+                for key, tensor in tensors(item, f"{prefix}/{index}", material_counters=counters).items()}
     return {}
 
 
-def setup_tensors(solver) -> dict[str, torch.Tensor]:
+# Per-step scratch of the nonlinear E update: build_nonlinear (fdtd/runtime/materials.py) allocates
+# these with torch.empty_like, and every step's nonlinear coefficient kernel rewrites them before the
+# E update reads them. At setup they hold uninitialized caching-allocator memory, whose content
+# depends on allocation history, so G4 neither captures nor compares them. The exact names are
+# listed so no real setup tensor can be hidden;
+# tests/fdtd/core_path/test_nonlinear_scratch_poison.py proves they are written before being read.
+SETUP_SCRATCH_ATTRIBUTES = tuple(f"ce{axis}_{kind}_dynamic" for kind in ("curl", "decay") for axis in "xyz")
+SETUP_SCRATCH_KEYS = frozenset(f"setup/{name}" for name in SETUP_SCRATCH_ATTRIBUTES)
+
+
+def drop_setup_scratch(payload: dict) -> tuple[dict, list[str]]:
+    """``payload`` without the G4 setup scratch keys, and the sorted keys that were dropped."""
+    dropped = sorted(SETUP_SCRATCH_KEYS & payload.keys())
+    return {key: value for key, value in payload.items() if key not in SETUP_SCRATCH_KEYS}, dropped
+
+
+def setup_scratch_attributes(solver) -> list[str]:
+    """The scratch attributes this solver allocated (the nonlinear ones are None otherwise)."""
+    return [name for name in SETUP_SCRATCH_ATTRIBUTES if isinstance(getattr(solver, name, None), torch.Tensor)]
+
+
+def setup_tensors(solver, *, material_counters: list | None = None) -> dict[str, torch.Tensor]:
     payload = {
         name: value for name, value in vars(solver).items()
         if name.startswith(("eps_", "sigma_e_", "sigma_m_", "mu_", "cex_", "cey_", "cez_",
                             "chx_", "chy_", "chz_", "inv_", "cpml_", "psi_"))
-        and isinstance(value, torch.Tensor)
+        and isinstance(value, torch.Tensor) and name not in SETUP_SCRATCH_ATTRIBUTES
     }
     for name in ("_compiled_material_model", "_coefficient_uniformity", "_compiled_sources",
                  "_source_terms", "_electric_source_terms", "_magnetic_source_terms", "observers",
                  "_point_observer_groups", "_plane_observer_groups", "_observer_spectral_entries"):
         payload[name] = getattr(solver, name)
-    return tensors(payload, "setup")
+    return tensors(payload, "setup", material_counters=material_counters)
+
+
+def drop_material_counters(payload: dict, keys) -> tuple[dict, list[str]]:
+    """``payload`` without the material counter ``keys`` a G4 capture listed, and the keys it held."""
+    keys = frozenset(keys)
+    if any(key.rsplit("/", 1)[-1] not in MATERIAL_COUNTER_ATTRIBUTES for key in keys):
+        raise ValueError(f"not material counter keys: {sorted(keys)}")
+    return {key: value for key, value in payload.items() if key not in keys}, sorted(keys & payload.keys())
 
 
 def name_has_nonlinear(name: str) -> bool:
@@ -176,10 +268,11 @@ def physics_tensors(solver, result) -> dict[str, torch.Tensor]:
     """Pin the private surface/wire state and the public port and loss outputs."""
     from witwin.maxwell.fdtd.checkpoint import (
         graph_state_tensors, iter_surface_impedance_state_specs, iter_thin_sheet_state_tensors,
-        iter_breakdown_state_tensors,
+        iter_breakdown_state_tensors, iter_gyromagnetic_state_specs,
     )
 
     state = dict(iter_surface_impedance_state_specs(solver))
+    state.update(iter_gyromagnetic_state_specs(solver))
     state.update(iter_thin_sheet_state_tensors(solver))
     if solver.dispersive_enabled:
         state.update(graph_state_tensors(solver))
@@ -197,11 +290,15 @@ def physics_tensors(solver, result) -> dict[str, torch.Tensor]:
     wire = getattr(solver, "_wire_runtime", None)
     if wire is not None:
         state.update(wire_current=wire.current, wire_charge=wire.charge)
-    return tensors(state, "physics") | tensors({
-        "ports": result.ports, "conductor_losses": result.conductor_losses,
-        "circuits": result.circuits, "embedded_networks": result.embedded_networks,
-        "breakdown": result.breakdown_data,
-    }, "outputs")
+    if isinstance(result, SimpleNamespace):
+        # partial_result (half-horizon snapshots) carries the finalized outputs directly.
+        outputs = {"conductor_losses": result.conductor_losses, "circuits": result.circuits,
+                   "embedded_networks": result.embedded_networks, "breakdown": result.breakdown_data}
+    else:
+        outputs = {"conductor_losses": mw.rf.conductor_losses(result), "circuits": mw.circuits.circuits(result),
+                   "embedded_networks": mw.rf.embedded_networks(result),
+                   "breakdown": mw.breakdown.breakdown_data(result)}
+    return tensors(state, "physics") | tensors({"ports": result.ports, **outputs}, "outputs")
 
 
 def ade_tensors(solver):
@@ -217,12 +314,45 @@ def ade_tensors(solver):
     }, "physics")
 
 
+def result_tensors(result) -> dict[str, torch.Tensor]:
+    """Phasor fields and monitor payloads in the frozen-store (0.6) layout."""
+    if isinstance(result, SimpleNamespace):
+        fields = result.fields
+        monitors = {name: api_dialect.legacy_payload(payload) for name, payload in result.monitors.items()}
+    else:
+        # Without a full-field DFT (float64 cases) the stored fields are the last-step time
+        # snapshot, already pinned as fields/E*; phasors exist only with frequency-domain fields.
+        if result._fields_are_time_snapshot():
+            fields = {}
+        elif result.scene.coordinates is not None:
+            # Mapped results expose their stored covariant arrays only through the explicit chart frame.
+            chart = mw.coordinates.chart_fields(result)
+            fields = {name.upper(): chart.tensor(label) for label, name in chart._NATIVE.items()
+                      if label in chart.components}
+        else:
+            fields = api_dialect.fields(result)
+        monitors = api_dialect.monitors(result)
+    return tensors(fields, "phasors") | tensors(monitors, "monitors")
+
+
+def export_tensors(result) -> dict[str, torch.Tensor]:
+    """Export-time monitor reductions: power-loss channels, component stress and typed dipole emission."""
+    exports = {}
+    for monitor in result.scene.monitors:
+        if isinstance(monitor, mw.esd.ComponentStressMonitor):
+            exports[monitor.name] = mw.esd.component_stress(result, monitor.name)
+        elif isinstance(monitor, (mw.monitors.PowerLossMonitor, mw.monitors.DipoleEmissionMonitor)):
+            exports[monitor.name] = api_dialect.monitor(result, monitor.name)
+    return tensors(exports, "exports")
+
+
 def partial_result(solver):
     """Export stopped-state observations using the ordinary runtime finalizers."""
     from witwin.maxwell.fdtd.runtime.stepping import (
         finalize_circuit_data, finalize_embedded_networks, finalize_port_data, finalize_wire_data,
     )
     from witwin.maxwell.fdtd.copper_foil import copper_loss_report
+    from witwin.maxwell.fdtd.runtime.breakdown import finalize_breakdown_data
 
     if solver.dft_enabled:
         solver._sync_dft_legacy_state()
@@ -241,12 +371,13 @@ def partial_result(solver):
         monitors=monitors, ports=ports, conductor_losses=copper_loss_report(solver),
         circuits=finalize_circuit_data(solver) or {},
         embedded_networks=finalize_embedded_networks(solver, ports) or {},
+        breakdown_data=finalize_breakdown_data(solver) if getattr(solver, "breakdown_enabled", False) else None,
     )
 
 
 def capture_case(args) -> None:
     bounded = json.loads(args.bounded_items.read_text()) if args.bounded_items else {}
-    destination = args.output / args.arm / args.scene
+    destination = args.output / "candidate" / args.scene
     destination.mkdir(parents=True, exist_ok=True)
     if args.gate == "g2":
         capture_g2(args, destination)
@@ -255,11 +386,21 @@ def capture_case(args) -> None:
     steps = case.steps if case.steps is not None else args.steps
     snapshot_half = getattr(args, "snapshot_half", False)
     horizon = steps // 2 if snapshot_half else steps
-    simulation = make_simulation(case, arm=args.arm, steps=args.steps, full_field_dft=True)
+    cache = None
+    if case.material_cache is not None:
+        cache = mw.fdtd.FDTDMaterialCache()
+        if case.material_cache != "miss":
+            # Bind the warm-up scene first (the same scene for a hit); its solver is discarded.
+            warmup = case if case.cache_warmup is None else replace(case, scene=case.cache_warmup)
+            make_simulation(warmup, steps=args.steps, full_field_dft=True, material_cache=cache).prepare()
+    simulation = make_simulation(case, steps=args.steps, full_field_dft=True, material_cache=cache)
     from witwin.maxwell.fdtd.runtime import core_tables
     with patch.object(core_tables, "DELAYED_TABLE_BYTES", 0 if args.scene == "o2_delayed_inline" else core_tables.DELAYED_TABLE_BYTES):
         prepared = simulation.prepare()
     solver = prepared.solver
+    if cache is not None:
+        assert solver._material_cache_info["outcome"] == case.material_cache, (args.scene, solver._material_cache_info)
+        assert solver._core_runtime is not None, args.scene
     if case.name in DISPERSIVE_SCENES:
         assert solver.dispersive_enabled, case.name
         if case.name == "magnetic_lorentz_slab":
@@ -273,6 +414,41 @@ def capture_case(args) -> None:
         assert solver.modulation_enabled is ("modulation" in case.name), case.name
     if case.name in ("copper_patch", "copper_board_60k"):
         assert solver._thin_sheets and solver._thin_sheets[0].copper is not None
+    if case.name in ANISO_SCENES:
+        assert solver.full_aniso_enabled, case.name
+        assert (solver._aniso_cond_current is not None) is (case.name == "aniso_conductive_dipole"), case.name
+        assert (solver._aniso_disp_current is not None) is (case.name == "aniso_debye_periodic"), case.name
+        assert solver.uses_cpml is (case.name != "aniso_debye_periodic"), case.name
+        assert solver._full_aniso_cpml_overlap is (case.name == "full_tensor_slab"), case.name
+    if case.name in FP64_SCENES:
+        assert solver.Ex.dtype == torch.float64, case.name
+    if case.name in BLOCH_SCENES:
+        assert solver.complex_fields_enabled and solver.uses_cpml is (case.name != "bloch_pec_z"), case.name
+        assert (solver._tfsf_state or {}).get("provider") == BLOCH_PROVIDERS.get(case.name), case.name
+    if case.name in CHART_SCENES:
+        assert "coordinate_frame" in solver._compiled_material_model, case.name
+        assert solver.Ex.dtype == case.field_dtype, case.name
+        assert bool(solver._copper_foils) is ("copper" in case.name), case.name
+    if case.name in MONITOR_SCENES:
+        # Each gate scene reaches the runtime piece of its monitor type (time and wire observers: after the run).
+        if case.name == "power_loss_copper":
+            assert solver._copper_foils and solver.electric_dispersive_enabled, case.name
+        if case.name == "power_loss_chart":
+            assert "coordinate_frame" in solver._compiled_material_model, case.name
+        if case.name == "dipole_emission":
+            assert any(observer.get("monitor_type") == "dipole_emission" for observer in solver.observers), case.name
+    if case.name in BLOCH_SEPARATE_SCENES:
+        # Complex fields beside the separate-physics runtime the scene names.
+        feature = {"bloch_lumped_elements": "_lumped_element_runtimes", "bloch_loaded_ports": "_port_runtimes",
+                   "bloch_copper_foil": "_copper_foils", "bloch_copper_resistor": "_lumped_element_runtimes",
+                   "bloch_tfsf_resistor": "_lumped_element_runtimes"}[case.name]
+        assert solver.complex_fields_enabled and getattr(solver, feature), case.name
+        assert bool(solver._copper_foils) is ("copper" in case.name), case.name
+        assert (solver._tfsf_state or {}).get("provider") == BLOCH_PROVIDERS.get(case.name), case.name
+    if case.name in FERRITE_SCENES:
+        assert solver.gyromagnetic_enabled, case.name
+        general = case.name in ("ferrite_oblique_tfsf", "ferrite_mixed_bias")
+        assert solver._gyromagnetic_state["general"] is general, case.name
     if case.name in W1_SCENES:
         feature = {
             "w1_copper_patch": "_copper_foils", "w1_thin_sheet_cavity": "_thin_sheets",
@@ -286,8 +462,7 @@ def capture_case(args) -> None:
         assert getattr(solver, feature), (case.name, feature)
         if case.name == "w1_sheet_feed":
             assert any(sheet.feeds for sheet in solver._thin_sheets)
-    if args.arm == "candidate":
-        solver._core_runtime.chunk_size = args.chunk_size
+    solver._core_runtime.chunk_size = args.chunk_size
     if case.initial_fields:
         for index, name in enumerate(("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")):
             field = getattr(solver, name)
@@ -297,13 +472,18 @@ def capture_case(args) -> None:
         # Sampling indices/weights are normally resolved at solve entry. Build
         # those tables explicitly without advancing any fields for the setup gate.
         solver._prepare_observers(case.frequencies, "none", steps)
-        solver.enable_dft(case.frequencies, window_type="none", end_step=steps)
-        solver.build_dft_step_tables(steps)
-        payload = setup_tensors(solver)
-        rows = (solver._core_runtime.sources.rows if args.arm == "candidate" else source_table_reference(
-            solver, max(1, steps), budget=0 if args.scene == "o2_delayed_inline" else 64*1024*1024))
-        payload.update(tensors(rows, "tables/source"))
-        payload.update(tensors((solver._dft_weighted_cos_table, solver._dft_weighted_sin_table), "tables/dft"))
+        fp32 = case.field_dtype == torch.float32
+        if fp32:
+            solver.enable_dft(case.frequencies, window_type="none", end_step=steps)
+            solver.build_dft_step_tables(steps)
+        material_counters = []
+        payload = setup_tensors(solver, material_counters=material_counters)
+        excluded_setup_scratch = sorted(f"setup/{name}" for name in setup_scratch_attributes(solver))
+        assert not SETUP_SCRATCH_KEYS & payload.keys(), case.name
+        if solver._core_runtime.sources is not None:
+            payload.update(tensors(solver._core_runtime.sources.rows, "tables/source"))
+        if fp32:
+            payload.update(tensors((solver._dft_weighted_cos_table, solver._dft_weighted_sin_table), "tables/dft"))
     else:
         plots = []
         from witwin.maxwell.fdtd.runtime import stepping
@@ -314,8 +494,27 @@ def capture_case(args) -> None:
             step()
             raise RuntimeError("Forced core whole-step capture failure after state mutation.")
         from contextlib import nullcontext
-        failure = (patch.object(solver._core_runtime, "capture_chunk", side_effect=fail_capture)
-                   if case.capture_failure and args.arm == "candidate" else nullcontext())
+        if case.capture_failure and horizon > 0:
+            before = {name: getattr(solver, name).clone() for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
+            try:
+                with patch.object(solver._core_runtime, "capture_chunk", side_effect=fail_capture):
+                    if snapshot_half:
+                        simulation._execute_fdtd_solve(solver, stop_step=horizon)
+                    else:
+                        prepared.run()
+            except RuntimeError as error:
+                assert str(error) == "Forced core whole-step capture failure after state mutation.", case.name
+            else:
+                raise AssertionError(f"{case.name}: the forced capture failure did not raise")
+            assert all(torch.equal(getattr(solver, name), value) for name, value in before.items()), case.name
+            assert not solver._core_step_graph_active, case.name
+            prepared = simulation.prepare()
+            solver = prepared.solver
+            solver._core_runtime.chunk_size = args.chunk_size
+            solver.verbose = case.boundaries
+            solver.progress_update_interval = 11
+            solver.plot_interval = 13
+        failure = nullcontext()
         # The observer engine is dropped after the run; record whether solve entry built one.
         from witwin.maxwell.fdtd import observers as observer_module
         built_engine = []
@@ -336,16 +535,26 @@ def capture_case(args) -> None:
                 # Preserve the full-horizon tables and normalization; stop a fresh
                 # solve at half rather than changing the configured run length.
                 simulation._execute_fdtd_solve(solver, stop_step=horizon)
-                result = partial_result(solver)
+                result = partial_result(prepared.solver)
             else:
                 result = prepared.run()
-        payload = tensors({name: getattr(prepared.solver, name)
-                           for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}, "fields")
+        payload = tensors({name + suffix: getattr(prepared.solver, name + suffix)
+                           for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+                           for suffix in ("", "_imag") if hasattr(prepared.solver, name + suffix)}, "fields")
         if result is not None:
-            payload.update(tensors(result.fields, "phasors"))
-            payload.update(tensors(result.monitors, "monitors"))
-            if case.name in W1_SCENES + W2_SCENES + W3_SCENES + DISPERSIVE_SCENES:
+            payload.update(result_tensors(result))
+            if case.name in PHYSICS_SCENES:
                 payload.update(physics_tensors(solver, result))
+            if case.name in MONITOR_SCENES + BLOCH_SEPARATE_SCENES and not isinstance(result, SimpleNamespace):
+                payload.update(export_tensors(result))
+            if case.name in BLOCH_SEPARATE_SCENES:
+                # The complete physical state (both banks of every lumped branch and copper foil).
+                from witwin.maxwell.fdtd.checkpoint import graph_state_tensors
+                payload.update(tensors(graph_state_tensors(solver), "state/graph"))
+        if case.name in ("component_stress_port", "time_surface_aux_debye"):
+            assert solver.time_observers_enabled, case.name
+        if case.name == "wire_monitor":
+            assert solver._wire_runtime.monitor_state, case.name
             if case.name == "breakdown_slab" and not snapshot_half:
                 assert (solver.breakdown_runtime["trigger_step"] >= 0).any().item()
                 assert solver.breakdown_runtime["total_dissipated"].item() > 0
@@ -353,25 +562,40 @@ def capture_case(args) -> None:
                 payload.update(ade_tensors(solver))
         payload.update(tensors(solver._dft_batched_fields, "dft_accumulators"))
         payload.update(tensors({"shutoff": solver._shutoff_triggered, "shutoff_step": solver._shutoff_step,
-            "plots": plots, "dft_step": solver._dft_step if solver.dft_enabled else None,
+            # The pre-row-13 complex DFT was host driven (no device counter); its accumulators are pinned.
+            "plots": plots, "dft_step": solver._dft_step if solver.dft_enabled and not solver.complex_fields_enabled
+            else None,
             "observer_entries": solver._observer_spectral_entries,
             "port_samples": [(r.sample_index, r.accumulator._sample_count,
                               r.drive_accumulator._sample_count if r.drive_accumulator is not None else None)
                              for r in getattr(solver, "_port_runtimes", ())]}, "state"))
+        # Guarded closed-transverse CPML scenes also pin the sampled guard state.
+        guard = getattr(solver, "_passivity_state", None)
+        if guard is not None:
+            payload.update(tensors({key: guard[key] for key in (
+                "history", "peak", "window_max", "sample_count", "window_count", "start_step")}, "passivity"))
         if solver.tfsf_enabled and "auxiliary_grid" in solver._tfsf_state:
             aux = solver._tfsf_state["auxiliary_grid"]
-            payload.update(tensors({"electric": aux.electric, "magnetic": aux.magnetic, "step": aux.time_step}, "auxiliary"))
-        if args.arm == "candidate":
-            from witwin.maxwell.fdtd.runtime.core_path import core_path_step_loop_blockers
-            active = getattr(solver, "_core_step_graph_active", False)
-            if case.name in W2_SCENES + W3_SCENES + DISPERSIVE_SCENES:
-                assert active is (horizon > 0), case.name
-            assert active is (horizon > 0 and not case.capture_failure and not core_path_step_loop_blockers(solver)
-                              and not solver.time_observers_enabled
-                              and (not solver.observers_enabled or all(built_engine)
-                                   or observer_module.uses_native_point_observers(solver))), (case.name, active, built_engine)
-            if active:
-                assert int(solver._core_runtime.step.item()) == (solver._shutoff_step + 1 if solver._shutoff_triggered else horizon)
+            if hasattr(aux, "time_step"):
+                payload.update(tensors({"electric": aux.electric, "magnetic": aux.magnetic, "step": aux.time_step},
+                                       "auxiliary"))
+            else:
+                # Complex fixed-k line: its full state and the step its clock reached.
+                payload.update(tensors({name: tensor for name, tensor in aux.state_tensors().items() if name != "clock"}
+                                       | {"step": int(aux.clock.reshape(-1)[0])}, "auxiliary"))
+        from witwin.maxwell.fdtd.runtime.core_path import core_path_step_loop_blockers
+        from witwin.maxwell.fdtd.runtime.core_tables import source_tables_supported
+        active = getattr(solver, "_core_step_graph_active", False)
+        if case.name in (W2_SCENES + W3_SCENES + DISPERSIVE_SCENES + ANISO_SCENES + FERRITE_SCENES + FP64_SCENES
+                         + CHART_SCENES):
+            assert active is (horizon > 0), case.name
+        assert active is (horizon > 0 and not core_path_step_loop_blockers(solver)
+                          and source_tables_supported(solver)
+                          and not solver.time_observers_enabled
+                          and (not solver.observers_enabled or all(built_engine)
+                               or observer_module.uses_indexed_observers(solver))), (case.name, active, built_engine)
+        if active:
+            assert int(solver._core_runtime.step.item()) == (solver._shutoff_step + 1 if solver._shutoff_triggered else horizon)
         if case.shutoff and not snapshot_half:
             assert solver._shutoff_triggered and solver._shutoff_step + 1 < steps
     if case.name in DISPERSIVE_SCENES and not snapshot_half:
@@ -394,7 +618,7 @@ def capture_case(args) -> None:
             list(bytes.fromhex(_configuration_fingerprint(solver))), dtype=torch.uint8)
     torch.save(payload, destination / ("tensors_half.pt" if snapshot_half else "tensors.pt"))
     (destination / ("capture_half.json" if snapshot_half else "capture.json")).write_text(json.dumps({
-        "gate": args.gate, "arm": args.arm, "steps": steps,
+        "gate": args.gate, "arm": "candidate", "steps": steps,
         "process_id": os.getpid(),
         "core_runtime_active": hasattr(prepared.solver, "_core_runtime"),
         "whole_step_capture_active": getattr(solver, "_core_step_graph_active", False),
@@ -407,7 +631,11 @@ def capture_case(args) -> None:
             + (1 + len(solver._core_runtime.observer_groups) if hasattr(solver._core_runtime, "observer_groups") else 0)
             if getattr(solver, "_core_step_graph_active", False) and case.name not in W1_SCENES + W2_SCENES + W3_SCENES else None),
         "tensor_names": sorted(payload), "scene": case.plan(), "bounded_items": bounded,
+        **({"material_cache": solver._material_cache_info} if cache is not None else {}),
         **({"horizon_steps": horizon} if getattr(args, "half_horizon", False) else {}),
+        **({"excluded_setup_scratch": excluded_setup_scratch} if args.gate == "g4" else {}),
+        **({"excluded_material_counters": sorted(material_counters)}
+           if args.gate == "g4" and material_counters else {}),
     }, indent=2) + "\n")
 
 
@@ -459,7 +687,9 @@ def source_table_reference(solver, steps, *, budget=64*1024*1024):
               ("magnetic", solver._magnetic_source_terms, False, True),
               ("electric", solver._electric_source_terms, True, True)]
     aux = solver._tfsf_state.get("auxiliary_grid") if solver.tfsf_enabled else None
-    if aux is not None:
+    if aux is not None and solver._tfsf_state["provider"] == "plane_wave_fixed_k":
+        pass  # The fixed-k line stages its own drive rows (prepare_tables at solve entry).
+    elif aux is not None:
         rows["auxiliary/signals"] = upload([evaluate_source_time(aux.source_time, (aux.time_step+n+1)*aux.dt) for n in range(steps)])
         if aux.incident_reference is not None:
             rows["auxiliary/boundary_signals"] = upload([
@@ -468,10 +698,36 @@ def source_table_reference(solver, steps, *, budget=64*1024*1024):
     elif solver.tfsf_enabled:
         groups += [("tfsf_magnetic", solver._tfsf_state["magnetic_terms"], False, True),
                    ("tfsf_electric", solver._tfsf_state["electric_terms"], True, True)]
+    bloch = solver.scene.scene.boundary.uses_kind("bloch")
     for name, terms, half, generic in groups:
         for ordinal, term in enumerate(terms):
             source = term.get("source_time") or solver._source_time
             times = [n*solver.dt+(0.5*float(solver.dt) if half else 0.0) for n in range(steps)]
+            if bloch:
+                # Complex Bloch scatter: per-step (real, imaginary) signal rows and the wrap-image gather.
+                omega = float(solver.source_omega if term.get("omega") is None else term["omega"])
+                if term["cw_cos_patch"] is not None:
+                    values, patch = [_resolve_cw_signal(omega, source, t) for t in times], term["cw_cos_patch"]
+                elif term["delay_patch"] is not None:
+                    values, patch = None, term["patch"]  # the device envelope reads the step's time
+                else:
+                    pr, pi, patch = float(term["phase_real"]), float(term["phase_imag"]), term["patch"]
+                    values = []
+                    for t in times:
+                        signal = float(evaluate_source_time(source, t))
+                        quadrature = float(_resolve_cw_signal(omega, source, t)[1]) if source["kind"] == "cw" else 0.0
+                        values.append((signal*pr + quadrature*pi, signal*pi - quadrature*pr))
+                rows[f"{name}/{ordinal}/signals"] = upload(times) if values is None else upload(values).reshape(steps, 2)
+                component = "xyz".index(term["field_name"][-1].lower())
+                axes = [axis for axis in range(3) if axis != component]
+                flags = term.get("periodic_wrap_axes", tuple(
+                    int(solver.scene.scene.boundary.axis_kind("xyz"[axis]) in ("bloch", "periodic")) for axis in axes))
+                gather = source_patch_gather_reference(
+                    getattr(solver, term["field_name"]).shape, patch.shape, term["offsets"], device=solver.device,
+                    wrap=sum(1 << axis for axis, flag in zip(axes, flags) if flag))
+                for key, tensor in zip(("gather_rows", "gather_targets", "gather_entries"), gather):
+                    rows[f"{name}/{ordinal}/{key}"] = tensor
+                continue
             if term["cw_cos_patch"] is not None:
                 omega = solver.source_omega if term.get("omega") is None else term["omega"]
                 signals = upload([_resolve_cw_signal(omega, source, t) for t in times]).reshape(steps, 2)
@@ -501,13 +757,13 @@ def source_table_reference(solver, steps, *, budget=64*1024*1024):
                         signals[n].copy_(field.reshape(-1))
             else:
                 phase = float(term["phase_real"]) if not generic else 1.0
-                if generic and solver.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
+                if generic and solver.scene.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
                     phase = float(term["phase_real"])
                 signals = upload([evaluate_source_time(source, t)*phase for t in times])
-                if solver.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
+                if solver.scene.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
                     component = "xyz".index(term["field_name"][-1].lower())
                     wrap = sum(1 << axis for axis, name_axis in enumerate("xyz")
-                               if axis != component and solver.scene.boundary.axis_kind(name_axis) == "periodic")
+                               if axis != component and solver.scene.scene.boundary.axis_kind(name_axis) == "periodic")
                     if wrap:
                         gather = source_patch_gather_reference(
                             getattr(solver, term["field_name"]).shape, term["patch"].shape,
@@ -549,14 +805,13 @@ def capture_g2(args, destination: Path) -> None:
     capture_flags = []
 
     def fdtd(*positional, **keywords):
-        simulation = original_fdtd(*positional, **keywords, **o1_candidate_simulation_options(args.arm))
+        simulation = original_fdtd(*positional, **keywords)
         original_prepare = simulation.prepare
 
         def prepare(*positional, **keywords):
             prepared = original_prepare(*positional, **keywords)
             core_runtime_active.append(hasattr(prepared.solver, "_core_runtime"))
-            if args.arm == "candidate":
-                prepared.solver._core_runtime.chunk_size = args.chunk_size
+            prepared.solver._core_runtime.chunk_size = args.chunk_size
             original_prepared_run = prepared.run
             def prepared_run(*positional, **keywords):
                 # The benchmark probes dt with a one-step preparation, then
@@ -564,8 +819,7 @@ def capture_g2(args, destination: Path) -> None:
                 # so each solver uploads its source rows exactly once.
                 if prepared.solver._time_plan["total_steps"] != simulation.config.run_time.time_steps:
                     prepared.solver = original_prepare().solver
-                    if args.arm == "candidate":
-                        prepared.solver._core_runtime.chunk_size = args.chunk_size
+                    prepared.solver._core_runtime.chunk_size = args.chunk_size
                 result = original_prepared_run(*positional, **keywords)
                 capture_flags.append({"active": getattr(prepared.solver, "_core_step_graph_active", False),
                                       "k": getattr(prepared.solver, "_core_step_graph_k", None)})
@@ -580,7 +834,7 @@ def capture_g2(args, destination: Path) -> None:
         output = original_run(*positional, **keywords)
         result = output[0]
         index = str(len(captured))
-        captured[index] = tensors(result.fields, "phasors") | tensors(result.monitors, "monitors")
+        captured[index] = result_tensors(result)
         return output
 
     # Redirect every generated report/plot; cached references remain read-only.
@@ -593,7 +847,7 @@ def capture_g2(args, destination: Path) -> None:
         row, = runner.run_benchmarks([args.scene])
     (destination / "metrics.json").write_text(json.dumps(metric_row(row), indent=2) + "\n")
     (destination / "capture.json").write_text(json.dumps({
-        "gate": args.gate, "arm": args.arm, "core_runtime_active": core_runtime_active,
+        "gate": args.gate, "arm": "candidate", "core_runtime_active": core_runtime_active,
         "whole_step_capture": capture_flags,
         "requested_chunk_size": args.chunk_size,
     }, indent=2) + "\n")
@@ -623,38 +877,64 @@ def compare(args) -> None:
         assert json.loads(args.bounded_items.read_text()) == bounded
     seen = set()
     results = {}
+    excluded = {}
+    material_excluded = {}
     passed = True
+    baseline_root = getattr(args, "baseline", None) or frozen_baseline(args.gate, rule2=mode == "rule2")
+    roots = {"baseline": baseline_root, "candidate": args.output / "candidate"}
     for name in names:
+        rebuilt = args.gate in ("g1", "g1-prime") and name in REBUILT_BASELINES
+        # A cache scene pins the payloads of its base scene.
+        scene = REBUILT_BASELINES[name] if rebuilt else CACHE_SCENES.get(name, name)
+        if getattr(args, "baseline", None) is None:
+            from tests.support import frozen_oracles
+            baseline_directory = frozen_oracles.scene_directory(baseline_root.name, scene)
+        else:
+            baseline_directory = roots["baseline"] / scene
+        directories = {"baseline": baseline_directory,
+                       "candidate": roots["candidate"] / name}
         metadata_by_arm = {}
         for arm in ("baseline", "candidate"):
-            metadata = json.loads((args.output / arm / name / "capture.json").read_text())
-            assert metadata["gate"] == args.gate
+            metadata = json.loads((directories[arm] / "capture.json").read_text())
+            assert metadata["gate"] == (args.gate if arm == "candidate" or args.gate != "g1-prime" else "g1")
             active = metadata["core_runtime_active"]
             activations = active if args.gate == "g2" else [active]
             assert activations and all(value is (arm == "candidate") for value in activations), (name, arm, active)
             metadata_by_arm[arm] = metadata
         if args.gate == "g2":
-            baseline = args.baseline_json or args.output / "baseline.json"
-            before = json.loads(baseline.read_text())[name]
-            after = json.loads((args.output / "candidate" / name / "metrics.json").read_text())
+            before = json.loads((roots["baseline"] / name / "metrics.json").read_text())
+            after = json.loads((roots["candidate"] / name / "metrics.json").read_text())
             left, right = tensors(before["scores"], "scores"), tensors(after["scores"], "scores")
-            left.update(torch.load(args.output / "baseline" / name / "tensors.pt", weights_only=True, map_location="cpu"))
-            right.update(torch.load(args.output / "candidate" / name / "tensors.pt", weights_only=True, map_location="cpu"))
+            left.update(torch.load(roots["baseline"] / name / "tensors.pt", weights_only=True, map_location="cpu"))
+            right.update(torch.load(roots["candidate"] / name / "tensors.pt", weights_only=True, map_location="cpu"))
             assert before["status"] == after["status"], name
             # Check the complete score schema, including nonnumeric leaves.
             assert score_schema(before["scores"]) == score_schema(after["scores"]), name
         else:
-            for arm in ("baseline", "candidate"):
-                assert metadata_by_arm[arm]["bounded_items"] == bounded
+            assert metadata_by_arm["baseline"]["bounded_items"] == {}
+            assert metadata_by_arm["candidate"]["bounded_items"] == bounded
             assert metadata_by_arm["baseline"]["steps"] == metadata_by_arm["candidate"]["steps"]
-            left = torch.load(args.output / "baseline" / name / "tensors.pt", weights_only=True, map_location="cpu")
-            right = torch.load(args.output / "candidate" / name / "tensors.pt", weights_only=True, map_location="cpu")
+            left = torch.load(directories["baseline"] / "tensors.pt", weights_only=True, map_location="cpu")
+            right = torch.load(directories["candidate"] / "tensors.pt", weights_only=True, map_location="cpu")
+        if args.gate == "g4":
+            # Uninitialized scratch at setup (SETUP_SCRATCH_KEYS): ignored on both arms, also when
+            # an older capture (the frozen store) still holds it.
+            (left, dropped_left), (right, dropped_right) = drop_setup_scratch(left), drop_setup_scratch(right)
+            if dropped_left or dropped_right:
+                excluded[name] = {"baseline": dropped_left, "candidate": dropped_right}
+            # Material counter labels (MATERIAL_COUNTER_ATTRIBUTES) the candidate capture left out:
+            # dropped on both arms, also from an older capture (the frozen store) that holds them.
+            counter_keys = metadata_by_arm["candidate"].get("excluded_material_counters", [])
+            if counter_keys:
+                (left, held_left), (right, held_right) = (drop_material_counters(left, counter_keys),
+                                                          drop_material_counters(right, counter_keys))
+                material_excluded[name] = {"listed": counter_keys, "baseline": held_left, "candidate": held_right}
         assert left.keys() == right.keys() and left, name
         if mode == "rule2":
             horizons = {}
             if args.gate == "g1":
                 for arm in ("baseline", "candidate"):
-                    directory = args.output / arm / name
+                    directory = directories[arm]
                     half_metadata = json.loads((directory / "capture_half.json").read_text())
                     full_metadata = metadata_by_arm[arm]
                     assert half_metadata["gate"] == "g1" and half_metadata["arm"] == arm
@@ -690,11 +970,35 @@ def compare(args) -> None:
             print(f"{item}: equal={diff['equal']} abs={diff['max_abs']:.6g} rel={diff['max_rel']:.6g} pass={ok}")
     assert seen == bounded.keys(), "Every pre-named item must be compared"
     receipt = {"passed": passed, "items": results}
+    if excluded:
+        # Only present when scratch was dropped, so other receipts stay byte-identical.
+        receipt["excluded_setup_scratch"] = excluded
+    if material_excluded:
+        receipt["excluded_material_counters"] = material_excluded
     if mode == "rule2":
         receipt["summary"] = tier_summary(results)
     (args.output / "comparison.json").write_text(json.dumps(receipt, indent=2) + "\n")
     if not passed:
         raise SystemExit(1)
+
+
+def _load_snapshot(path: Path) -> dict:
+    """Load a capture file as a flat name -> tensor mapping, safely (weights_only=True).
+
+    tensors*.pt are plain dicts. physics-checkpoint.pt (dispersive scenes) holds an
+    FDTDCheckpointState: its tensors are compared, and its step and schema enter as tensors so a
+    drift in either fails the exact comparison too.
+    """
+    from witwin.maxwell.fdtd.checkpoint import FDTDCheckpointSchema, FDTDCheckpointState
+
+    with torch.serialization.safe_globals([FDTDCheckpointState, FDTDCheckpointSchema]):
+        value = torch.load(path, weights_only=True, map_location="cpu")
+    if isinstance(value, FDTDCheckpointState):
+        schema = json.dumps(asdict(value.schema), sort_keys=True).encode()
+        return {**{f"tensors/{name}": tensor for name, tensor in value.tensors.items()},
+                "step": torch.tensor(value.step, dtype=torch.int64),
+                "schema": torch.tensor(list(schema), dtype=torch.uint8)}
+    return value
 
 
 def determinism(args):
@@ -711,13 +1015,16 @@ def determinism(args):
     results = {}
     for filename in sorted(manifests[0]):
         metadata_name = {"tensors.pt": "capture.json", "tensors_half.pt": "capture_half.json"}.get(filename.name)
+        metadata = None
         if metadata_name is not None:
             metadata = [json.loads((root / filename.with_name(metadata_name)).read_text()) for root in roots]
             processes = [record.get("process_id") for record in metadata]
             if any(process is not None for process in processes):
                 assert all(type(process) is int and process > 0 for process in processes), "Missing capture process IDs"
                 assert len(set(processes)) == len(processes), "Captures must come from independent fresh processes"
-        snapshots = [torch.load(root / filename, weights_only=True, map_location="cpu") for root in roots]
+        snapshots = [_load_snapshot(root / filename) for root in roots]
+        if metadata is not None and metadata[0].get("gate") == "g4":
+            snapshots = [drop_setup_scratch(snapshot)[0] for snapshot in snapshots]
         reference = snapshots[0]
         assert reference and all(value.keys() == reference.keys() for value in snapshots), (filename, "Missing tensors")
         for key in sorted(reference):
@@ -750,10 +1057,10 @@ def main() -> None:
     parser.add_argument("--scenes", nargs="+", choices=GATE_SCENES)
     parser.add_argument("--steps", type=int, default=256)
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--baseline-json", type=Path)
+    parser.add_argument("--baseline", type=Path, help="baseline capture directory (default: the frozen store)")
     parser.add_argument("--bounded-items", type=Path)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--arm", choices=("baseline", "candidate"))
+    parser.add_argument("--arm", choices=("baseline", "candidate"), help="determinism capture arm")
     parser.add_argument("--equivalence", choices=("bitwise", "rule2"), default="bitwise")
     parser.add_argument("--half-horizon", action="store_true")
     parser.add_argument("--snapshot-half", action="store_true", help=argparse.SUPPRESS)
@@ -761,7 +1068,7 @@ def main() -> None:
     parser.add_argument("--scene", choices=GATE_SCENES)
     parser.add_argument("--chunk-size", type=int, choices=(1, 16, 32), default=32)
     args = parser.parse_args()
-    args.arm = args.arm or ("candidate" if args.action == "determinism" else "baseline")
+    args.arm = args.arm or "candidate"
     if args.action == "determinism":
         if not args.dirs:
             parser.error("determinism requires --dirs with at least 3 capture directories")
@@ -776,9 +1083,8 @@ def main() -> None:
         for name in names:
             print(json.dumps(build_core_case(name).plan()))
         print(json.dumps({"gate": args.gate, "action": args.action, "fresh_interpreters": True,
-                          "arms": ["baseline", "candidate"], "steps": args.steps,
-                          "comparison": "separate compare invocation", "output": str(args.output),
-                          "candidate_options": o1_candidate_simulation_options("candidate")}))
+                          "arms": ["candidate"], "baseline": "frozen existing-path store", "steps": args.steps,
+                          "comparison": "separate compare invocation", "output": str(args.output)}))
     elif args.action == "worker":
         capture_case(args)
     elif args.action == "compare":
@@ -792,23 +1098,18 @@ def main() -> None:
             policy.write_text(json.dumps(bounded, indent=2) + "\n")
             policy_args = ["--bounded-items", str(policy)]
         for name in names:
-            for arm in ("baseline", "candidate"):
-                for half in ((False, True) if args.half_horizon else (False,)):
-                    subprocess.run([
-                        sys.executable, "-m", "benchmark.core_path.gates", "worker",
-                        "--gate", args.gate, "--scene", name, "--arm", arm,
-                        "--steps", str(args.steps), "--output", str(args.output),
-                        "--chunk-size", str(args.chunk_size),
-                        *(["--half-horizon"] if args.half_horizon else []),
-                        *(["--snapshot-half"] if half else []),
-                        *policy_args,
-                    ], check=True, env=os.environ | THREAD_ENV | {
-                        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
-                    })
-        if args.gate == "g2":
-            baseline = {name: json.loads((args.output / "baseline" / name / "metrics.json").read_text())
-                        for name in names}
-            (args.output / "baseline.json").write_text(json.dumps(baseline, indent=2) + "\n")
+            for half in ((False, True) if args.half_horizon else (False,)):
+                subprocess.run([
+                    sys.executable, "-m", "benchmark.core_path.gates", "worker",
+                    "--gate", args.gate, "--scene", name,
+                    "--steps", str(args.steps), "--output", str(args.output),
+                    "--chunk-size", str(args.chunk_size),
+                    *(["--half-horizon"] if args.half_horizon else []),
+                    *(["--snapshot-half"] if half else []),
+                    *policy_args,
+                ], check=True, env=os.environ | THREAD_ENV | {
+                    "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+                })
 
 
 if __name__ == "__main__":

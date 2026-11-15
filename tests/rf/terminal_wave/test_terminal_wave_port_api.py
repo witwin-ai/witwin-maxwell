@@ -30,7 +30,6 @@ def _grid_scene(**kwargs):
         domain=mw.Domain(bounds=((nodes[0], nodes[-1]),) * 3),
         grid=mw.GridSpec.custom(nodes, nodes, nodes),
         boundary=mw.BoundarySpec.pec(),
-        device="cpu",
         **kwargs,
     )
 
@@ -51,12 +50,18 @@ def _plane(direction_sign=1):
 
 def _microstrip_scene(*, with_port=True, **port_kwargs):
     scene = _grid_scene()
-    scene.add_structure(mw.Structure(mw.Box(position=(0, 0, -0.065), size=(1.0, 1.0, 0.01)), mw.Material.pec(), name="ground"))
-    scene.add_structure(mw.Structure(mw.Box(position=(0, 0, 0.005), size=(1.0, 0.04, 0.01)), mw.Material.pec(), name="strip"))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(mw.Box(position=(0, 0, -0.065), size=(1.0, 1.0, 0.01)), mw.Material.pec(), name="ground"),
+        mw.Structure(mw.Box(position=(0, 0, 0.005), size=(1.0, 0.04, 0.01)), mw.Material.pec(), name="strip"),
+    ))
     if with_port:
-        scene.add_port(mw.TerminalWavePort(
-            "P", position=(0, 0, 0), size=(0, 0.16, 0.16), direction="+", reference_plane=0.0,
-            terminals=(mw.TerminalRef("strip"),), reference=mw.TerminalRef("ground"), **port_kwargs))
+        scene = scene.updated(ports=(
+            *scene.ports,
+            mw.rf.TerminalWavePort(
+                "P", position=(0, 0, 0), size=(0, 0.16, 0.16), direction="+", reference_plane=0.0,
+                terminals=(mw.rf.TerminalRef("strip"),), reference=mw.rf.TerminalRef("ground"), **port_kwargs),
+        ))
     return scene
 
 
@@ -66,29 +71,32 @@ def _microstrip_scene(*, with_port=True, **port_kwargs):
 def test_multi_terminal_and_multi_ground_ports_require_explicit_voltage_paths():
     common = dict(position=(0, 0, 0), size=(0, 0.16, 0.16), direction="+", reference_plane=0.0)
     with pytest.raises(ValueError, match="default voltage path is defined only for one signal"):
-        mw.TerminalWavePort("P", terminals=(mw.TerminalRef("a"), mw.TerminalRef("b")),
-                            reference=mw.TerminalRef("g"), **common)
+        mw.rf.TerminalWavePort("P", terminals=(mw.rf.TerminalRef("a"), mw.rf.TerminalRef("b")),
+                            reference=mw.rf.TerminalRef("g"), **common)
     with pytest.raises(ValueError, match="CPW and multi-ground"):
-        mw.TerminalWavePort("P", terminals=(mw.TerminalRef("s"),),
-                            reference=(mw.TerminalRef("g1"), mw.TerminalRef("g2")), **common)
+        mw.rf.TerminalWavePort("P", terminals=(mw.rf.TerminalRef("s"),),
+                            reference=(mw.rf.TerminalRef("g1"), mw.rf.TerminalRef("g2")), **common)
     with pytest.raises(ValueError, match="requires current_integrals"):
-        mw.TerminalWavePort("P", terminals=(mw.TerminalRef("s"),), reference=mw.TerminalRef("g"),
+        mw.rf.TerminalWavePort("P", terminals=(mw.rf.TerminalRef("s"),), reference=mw.rf.TerminalRef("g"),
                             impedance_definition="power_current", **common)
 
 
 def test_coplanar_single_ground_without_polyline_is_rejected_as_ambiguous():
     scene = _grid_scene()
-    scene.add_structure(mw.Structure(
-        mw.PlanarPEC(((-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)),
-                     holes=(((-0.4, -0.04), (0.4, -0.04), (0.4, 0.04), (-0.4, 0.04)),), normal_axis="z", coordinate=0.0),
-        mw.Material.pec(), name="ground"))
-    scene.add_structure(mw.Structure(
-        mw.PlanarPEC(((-0.3, -0.01), (0.3, -0.01), (0.3, 0.01), (-0.3, 0.01)), normal_axis="z", coordinate=0.0),
-        mw.Material.pec(), name="signal"))
-    port = mw.TerminalWavePort("cpw", position=(0, 0, 0), size=(0, 0.16, 0.16), direction="+", reference_plane=0.0,
-                               terminals=(mw.TerminalRef("signal"),), reference=mw.TerminalRef("ground"))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(
+            mw.geometry.PlanarPEC(((-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)),
+            holes=(((-0.4, -0.04), (0.4, -0.04), (0.4, 0.04), (-0.4, 0.04)),), normal_axis="z", coordinate=0.0),
+            mw.Material.pec(), name="ground"),
+        mw.Structure(
+            mw.geometry.PlanarPEC(((-0.3, -0.01), (0.3, -0.01), (0.3, 0.01), (-0.3, 0.01)), normal_axis="z", coordinate=0.0),
+            mw.Material.pec(), name="signal"),
+    ))
+    port = mw.rf.TerminalWavePort("cpw", position=(0, 0, 0), size=(0, 0.16, 0.16), direction="+", reference_plane=0.0,
+                               terminals=(mw.rf.TerminalRef("signal"),), reference=mw.rf.TerminalRef("ground"))
     with pytest.raises(ValueError, match="default voltage path is ambiguous"):
-        scene.add_port(port)
+        scene = scene.updated(ports=(*scene.ports, port))
 
 
 def test_microstrip_default_path_is_the_footprint_overlap_segment():
@@ -98,7 +106,6 @@ def test_microstrip_default_path_is_the_footprint_overlap_segment():
     assert record["path_axis"] == "z" and record["offset_axis"] == "y"
     assert record["start"] == pytest.approx(0.0) and record["end"] == pytest.approx(-0.06)
     assert record["offset"] == pytest.approx(0.0)
-    compiled = prepare_scene(scene).compile_ports  # scene compiles lazily; geometry compile is below
     from witwin.maxwell.compiler.terminal_waveports import compile_terminal_waveport
 
     compiled = compile_terminal_waveport(scene, port, device="cpu")
@@ -111,23 +118,23 @@ def test_microstrip_default_path_is_the_footprint_overlap_segment():
 
 def test_reference_impedance_scalar_vector_and_full_matrix():
     common = dict(position=(0, 0, 0), size=(0, 0.16, 0.16), direction="+", reference_plane=0.0,
-                  terminals=(mw.TerminalRef("a"), mw.TerminalRef("b")), reference=mw.TerminalRef("g"),
-                  voltage_integrals=(mw.CustomVoltageIntegral(mw.AxisSegment((0, -0.02, 0), (0, -0.02, -0.06))),
-                                     mw.CustomVoltageIntegral(mw.AxisSegment((0, 0.02, 0), (0, 0.02, -0.06)))))
-    assert mw.TerminalWavePort("P", **common).reference_impedance == ((50.0, 0.0), (0.0, 50.0))
-    assert mw.TerminalWavePort("P", reference_impedance=(40.0, 60.0), **common).reference_impedance == ((40.0, 0.0), (0.0, 60.0))
-    full = mw.TerminalWavePort("P", reference_impedance=((60.0, 15.0), (15.0, 60.0)), **common)
+                  terminals=(mw.rf.TerminalRef("a"), mw.rf.TerminalRef("b")), reference=mw.rf.TerminalRef("g"),
+                  voltage_integrals=(mw.rf.CustomVoltageIntegral(mw.rf.AxisSegment((0, -0.02, 0), (0, -0.02, -0.06))),
+                                     mw.rf.CustomVoltageIntegral(mw.rf.AxisSegment((0, 0.02, 0), (0, 0.02, -0.06)))))
+    assert mw.rf.TerminalWavePort("P", **common).reference_impedance == ((50.0, 0.0), (0.0, 50.0))
+    assert mw.rf.TerminalWavePort("P", reference_impedance=(40.0, 60.0), **common).reference_impedance == ((40.0, 0.0), (0.0, 60.0))
+    full = mw.rf.TerminalWavePort("P", reference_impedance=((60.0, 15.0), (15.0, 60.0)), **common)
     assert full.reference_impedance == ((60.0, 15.0), (15.0, 60.0))
-    assert mw.TerminalWavePort("P", reference_impedance="characteristic", **common).reference_impedance == "characteristic"
+    assert mw.rf.TerminalWavePort("P", reference_impedance="characteristic", **common).reference_impedance == "characteristic"
     for bad, message in ((((60.0, 15.0), (14.0, 60.0)), "symmetric"), (((10.0, 50.0), (50.0, 10.0)), "positive definite"),
                          (((60.0, 1j), (1j, 60.0)), "must be real")):
         with pytest.raises(ValueError, match=message):
-            mw.TerminalWavePort("P", reference_impedance=bad, **common)
+            mw.rf.TerminalWavePort("P", reference_impedance=bad, **common)
     with pytest.raises(ValueError, match="terminal basis only"):
-        mw.TerminalWavePort("P", basis="modal", reference_impedance=50.0, **common)
-    modal = mw.TerminalWavePort("P", basis="modal", **common)
+        mw.rf.TerminalWavePort("P", basis="modal", reference_impedance=50.0, **common)
+    modal = mw.rf.TerminalWavePort("P", basis="modal", **common)
     assert modal.channel_names == ("P::M1", "P::M2")
-    assert mw.TerminalWavePort("P", **common).channel_names == ("P::T1", "P::T2")
+    assert mw.rf.TerminalWavePort("P", **common).channel_names == ("P::T1", "P::T2")
 
 
 # --------------------------------------------------------------------------- #
@@ -142,7 +149,7 @@ def _gather(scene, compiled, fields):
 
 
 def test_polyline_staircase_integrates_any_gradient_exactly():
-    scene = prepare_scene(_grid_scene())
+    scene = prepare_scene(_grid_scene(), device="cpu")
     plane = _plane()
     generator = torch.Generator().manual_seed(7)
     phi = torch.randn((21, 21, 21), generator=generator, dtype=torch.float64)
@@ -152,34 +159,34 @@ def test_polyline_staircase_integrates_any_gradient_exactly():
         "Ez": -(phi[:, :, 1:] - phi[:, :, :-1]) / widths,
     }
     points = ((0.0, -0.05, -0.06), (0.0, 0.03, -0.01), (0.0, 0.03, 0.04), (0.0, -0.02, 0.07))
-    spec = mw.CustomVoltageIntegral(mw.PolylinePath(points))
+    spec = mw.rf.CustomVoltageIntegral(mw.rf.PolylinePath(points))
     compiled = compile_voltage_integral(scene, spec, plane, device="cpu")
     start, end = (10, 5, 4), (10, 8, 17)
     assert _gather(scene, compiled, fields) == pytest.approx(float(phi[start] - phi[end]), rel=1e-12, abs=1e-12)
-    composite = mw.CompositeVoltageIntegral(((0.5, spec), (-2.0, mw.CustomVoltageIntegral(
-        mw.AxisSegment((0.0, 0.0, 0.0), (0.0, 0.06, 0.0))))))
+    composite = mw.rf.CompositeVoltageIntegral(((0.5, spec), (-2.0, mw.rf.CustomVoltageIntegral(
+        mw.rf.AxisSegment((0.0, 0.0, 0.0), (0.0, 0.06, 0.0))))))
     compiled = compile_voltage_integral(scene, composite, plane, device="cpu")
     expected = 0.5 * float(phi[start] - phi[end]) - 2.0 * float(phi[10, 10, 10] - phi[10, 16, 10])
     assert _gather(scene, compiled, fields) == pytest.approx(expected, rel=1e-12, abs=1e-12)
 
 
 def test_off_grid_polyline_vertex_is_rejected_not_snapped():
-    scene = prepare_scene(_grid_scene())
-    spec = mw.CustomVoltageIntegral(mw.PolylinePath(((0.0, 0.0, 0.0), (0.0, 0.034, 0.0))))
+    scene = prepare_scene(_grid_scene(), device="cpu")
+    spec = mw.rf.CustomVoltageIntegral(mw.rf.PolylinePath(((0.0, 0.0, 0.0), (0.0, 0.034, 0.0))))
     with pytest.raises(ValueError, match="off-grid"):
         compile_voltage_integral(scene, spec, _plane(), device="cpu")
 
 
 @pytest.mark.parametrize("direction_sign", (1, -1))
 @pytest.mark.parametrize("loop", (
-    mw.RectangleLoop(center=(0.0, 0.003, -0.004), size=(0.0, 0.071, 0.053)),
-    mw.CircleLoop(center=(0.0, 0.001, 0.002), radius=0.047, axis="x", segments=48),
-    mw.PolygonLoop(((0.0, -0.055, -0.045), (0.0, 0.052, -0.035), (0.0, 0.015, 0.061))),
+    mw.rf.RectangleLoop(center=(0.0, 0.003, -0.004), size=(0.0, 0.071, 0.053)),
+    mw.rf.CircleLoop(center=(0.0, 0.001, 0.002), radius=0.047, axis="x", segments=48),
+    mw.rf.PolygonLoop(((0.0, -0.055, -0.045), (0.0, 0.052, -0.035), (0.0, 0.015, 0.061))),
 ))
 def test_current_loop_is_the_exact_dual_cell_ampere_boundary(loop, direction_sign):
-    scene = prepare_scene(_grid_scene())
+    scene = prepare_scene(_grid_scene(), device="cpu")
     plane = _plane(direction_sign)
-    compiled = compile_current_integral(scene, mw.CustomCurrentIntegral(loop), plane, device="cpu")
+    compiled = compile_current_integral(scene, mw.rf.CustomCurrentIntegral(loop), plane, device="cpu")
     generator = torch.Generator().manual_seed(3)
     hy = torch.randn((21, 20, 20), generator=generator, dtype=torch.float64)   # (x node, y half, z half)
     hz = torch.randn((20, 20, 21), generator=generator, dtype=torch.float64)   # (x half, y half, z node)
@@ -197,25 +204,25 @@ def test_current_loop_is_the_exact_dual_cell_ampere_boundary(loop, direction_sig
 
 
 def test_loop_through_a_node_and_integral_audits_are_rejected():
-    scene = prepare_scene(_grid_scene())
+    scene = prepare_scene(_grid_scene(), device="cpu")
     plane = _plane()
     with pytest.raises(ValueError, match="passes through a Yee node"):
-        compile_current_integral(scene, mw.CustomCurrentIntegral(
-            mw.RectangleLoop(center=(0.0, 0.0, 0.0), size=(0.0, 0.04, 0.05))), plane, device="cpu")
+        compile_current_integral(scene, mw.rf.CustomCurrentIntegral(
+            mw.rf.RectangleLoop(center=(0.0, 0.0, 0.0), size=(0.0, 0.04, 0.05))), plane, device="cpu")
     labels = -np.ones((17, 17), dtype=np.int64)
     labels[:, :3] = 0          # reference along low z
     labels[4:7, 9] = 1         # terminal 1
     labels[11:13, 9] = 2       # terminal 2
-    good = compile_voltage_integral(scene, mw.CustomVoltageIntegral(
-        mw.AxisSegment((0.0, -0.03, 0.01), (0.0, -0.03, -0.06))), plane, device="cpu")
+    good = compile_voltage_integral(scene, mw.rf.CustomVoltageIntegral(
+        mw.rf.AxisSegment((0.0, -0.03, 0.01), (0.0, -0.03, -0.06))), plane, device="cpu")
     assert audit_terminal_integral(good, labels, 0)["checked"] == "terminal_to_reference"
     with pytest.raises(ValueError, match="from that terminal to the reference"):
         audit_terminal_integral(good, labels, 1)
-    loop = compile_current_integral(scene, mw.CustomCurrentIntegral(
-        mw.RectangleLoop(center=(0.0, -0.03, 0.01), size=(0.0, 0.035, 0.025))), plane, device="cpu")
+    loop = compile_current_integral(scene, mw.rf.CustomCurrentIntegral(
+        mw.rf.RectangleLoop(center=(0.0, -0.03, 0.01), size=(0.0, 0.035, 0.025))), plane, device="cpu")
     assert audit_terminal_integral(loop, labels, 0)["checked"] == "encloses_terminal"
-    cut = compile_current_integral(scene, mw.CustomCurrentIntegral(
-        mw.RectangleLoop(center=(0.0, -0.035, 0.01), size=(0.0, 0.015, 0.025))), plane, device="cpu")
+    cut = compile_current_integral(scene, mw.rf.CustomCurrentIntegral(
+        mw.rf.RectangleLoop(center=(0.0, -0.035, 0.01), size=(0.0, 0.015, 0.025))), plane, device="cpu")
     with pytest.raises(ValueError, match="cuts through conductor 1"):
         audit_terminal_integral(cut, labels, 0)
 
@@ -237,13 +244,13 @@ def test_full_reference_matrix_network_round_trips_and_converts_to_mixed_mode(tm
     names = ("A::T1", "A::T2", "B::T1", "B::T2")
     block = torch.tensor([[60.0, 12.0], [12.0, 60.0]], dtype=torch.float64)
     matrix = torch.block_diag(block, block).to(torch.complex128).expand(2, 4, 4)
-    coupled = mw.NetworkData.from_z(frequencies=frequencies, z=z, z0=50.0, port_names=names, reference_matrix=matrix)
+    coupled = mw.rf.NetworkData.from_z(frequencies=frequencies, z=z, z0=50.0, port_names=names, reference_matrix=matrix)
     assert coupled.reference_matrix is not None
     assert torch.allclose(coupled.z0.real, torch.full((2, 4), 60.0, dtype=torch.float64))
     assert torch.allclose(coupled.to_z(), z, rtol=1e-10, atol=1e-9)
-    diagonal = mw.NetworkData.from_z(frequencies=frequencies, z=z, z0=60.0, port_names=names,
+    diagonal = mw.rf.NetworkData.from_z(frequencies=frequencies, z=z, z0=60.0, port_names=names,
                                      reference_matrix=torch.diag_embed(torch.full((2, 4), 60.0, dtype=torch.complex128)))
-    assert torch.allclose(diagonal.s, mw.NetworkData.from_z(frequencies=frequencies, z=z, z0=60.0, port_names=names).s,
+    assert torch.allclose(diagonal.s, mw.rf.NetworkData.from_z(frequencies=frequencies, z=z, z0=60.0, port_names=names).s,
                           rtol=1e-12, atol=1e-12)
     renormalized = coupled.renormalize(50.0)
     assert renormalized.reference_matrix is None
@@ -257,12 +264,12 @@ def test_full_reference_matrix_network_round_trips_and_converts_to_mixed_mode(tm
         coupled.terminate("A::T1", gamma=0.0)
     path = tmp_path / "coupled.pt"
     coupled.save(path)
-    loaded = mw.NetworkData.load(path)
+    loaded = mw.rf.NetworkData.load(path)
     assert torch.equal(loaded.reference_matrix, coupled.reference_matrix.cpu())
     assert torch.equal(loaded.s, coupled.s.cpu())
     # Generalized power waves conserve power: S is unitary for a lossless reactive Z.
     lossless = 1j * torch.imag(z)
-    unitary = mw.NetworkData.from_z(frequencies=frequencies, z=lossless, z0=50.0, port_names=names, reference_matrix=matrix)
+    unitary = mw.rf.NetworkData.from_z(frequencies=frequencies, z=lossless, z0=50.0, port_names=names, reference_matrix=matrix)
     identity = unitary.s.conj().transpose(-2, -1) @ unitary.s
     assert torch.allclose(identity, torch.eye(4, dtype=torch.complex128).expand(2, 4, 4), atol=1e-10)
 
@@ -270,7 +277,7 @@ def test_full_reference_matrix_network_round_trips_and_converts_to_mixed_mode(tm
 def test_to_basis_matches_to_mixed_mode():
     z = _random_z()
     frequencies = torch.tensor([1e9, 2e9], dtype=torch.float64)
-    network = mw.NetworkData.from_z(frequencies=frequencies, z=z, z0=50.0, port_names=("a", "b", "c", "d"))
+    network = mw.rf.NetworkData.from_z(frequencies=frequencies, z=z, z0=50.0, port_names=("a", "b", "c", "d"))
     transform = torch.tensor([[1.0, -1.0, 0, 0], [0.5, 0.5, 0, 0], [0, 0, 1.0, -1.0], [0, 0, 0.5, 0.5]], dtype=torch.float64)
     names = ("d(a,b)", "c(a,b)", "d(c,d)", "c(c,d)")
     based = network.to_basis(transform, z0=(100.0, 25.0, 100.0, 25.0), port_names=names)
@@ -287,12 +294,14 @@ def test_terminal_column_retains_small_power_wave_at_both_scales(length):
     from witwin.maxwell.terminal_waveport import _column_scene
 
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.1*length,.1*length),)*3),
-                     grid=mw.GridSpec.uniform(.01*length), boundary=mw.BoundarySpec.pec(), device="cpu")
-    for name, z, width in (("ground",-.065,1.), ("strip",.005,.04)):
-        scene.add_structure(mw.Structure(mw.Box(position=(0.,0.,z*length), size=(length,width*length,.01*length)), mw.Material.pec(), name=name))
-    port = mw.TerminalWavePort("P", position=(0.,0.,0.), size=(0.,.16*length,.16*length), direction="+", reference_plane=0.,
-                               terminals=(mw.TerminalRef("strip"),), reference=mw.TerminalRef("ground"))
-    scene.add_port(port)
+                     grid=mw.GridSpec.uniform(.01*length), boundary=mw.BoundarySpec.pec())
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(mw.Box(position=(0.,0.,z*length), size=(length,width*length,.01*length)), mw.Material.pec(), name=name) for name, z, width in (("ground",-.065,1.), ("strip",.005,.04))),
+    ))
+    port = mw.rf.TerminalWavePort("P", position=(0.,0.,0.), size=(0.,.16*length,.16*length), direction="+", reference_plane=0.,
+                               terminals=(mw.rf.TerminalRef("strip"),), reference=mw.rf.TerminalRef("ground"))
+    scene = scene.updated(ports=(*scene.ports, port))
     port = scene.ports[0]
     compiled = compile_terminal_waveport(scene, port, device="cpu")
     prepared = SimpleNamespace(port=port, compiled=compiled, polarization_axis="z",
@@ -300,6 +309,6 @@ def test_terminal_column_retains_small_power_wave_at_both_scales(length):
                                drive=torch.ones((1,1,1), dtype=torch.complex128))
     manifest = SimpleNamespace(frequencies=(1e9/length,), prepared_ports=(prepared,))
     amplitude = 1e-12*length
-    column = _column_scene(scene, manifest, active_port=0, active_channel=0, frequency_index=0, amplitude=amplitude)
+    column = _column_scene(scene, manifest, active_port=0, active_channel=0, frequency_index=0, amplitude=amplitude, device="cpu")
     assert len(column.sources) == 1
     assert column.sources[0].source_time.amplitude == pytest.approx(amplitude, rel=1e-12, abs=0)

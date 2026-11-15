@@ -202,7 +202,6 @@ def _plane_metadata_template(payload: Mapping[str, Any]) -> dict[str, Any]:
     excluded = {
         "components",
         "component",
-        "data",
         "coords",
         # ``cell_widths`` is a per-shard local quadrature table; the tiled merge
         # reassembles the global plane coordinates below, so a shard-local copy
@@ -337,7 +336,7 @@ def _merge_sampled_plane(entries, *, result_device):
     merged["cell_widths"] = dict(zip(names,(widths_x,widths_other)))
     if len(first["fields"])==1:
         component = first["fields"][0]
-        merged.update(component=component.lower(),data=merged[component])
+        merged.update(component=component.lower())
     if first.get("compute_flux",False):
         merged["flux"] = merged["power"] = _compute_plane_flux(merged)
     return merged
@@ -380,7 +379,6 @@ def _merge_tiled_plane(
         component = fields[0]
         component_payload = components[component]
         merged["component"] = component.lower()
-        merged["data"] = component_payload["data"]
         merged[component] = component_payload["data"]
         merged["coords"] = component_payload["coords"]
         merged[coord_names[0]] = component_payload["coords"][0]

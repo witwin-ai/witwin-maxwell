@@ -118,35 +118,33 @@ def _vacuum_scene(
     shape: tuple[int, int, int],
     *,
     spacing: float,
-    device: torch.device,
 ) -> mw.Scene:
     x, y, z = (_axis_nodes(count, spacing) for count in shape)
     source_position = (float(x[len(x) // 2]), 0.0, 0.0)
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (float(x[0]), float(x[-1])),
                 (float(y[0]), float(y[-1])),
                 (float(z[0]), float(z[-1])),
             )
-        ),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.none(),
-        device=str(device),
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=source_position,
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.CW(
-                frequency=_FREQUENCY,
-                amplitude=1.0,
             ),
-            name="source",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", source_position, fields=("Ez",)))
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.none(),
+                sources=(
+            mw.PointDipole(
+                position=source_position,
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(
+                    frequency=_FREQUENCY,
+                    amplitude=1.0,
+                ),
+                name="source",
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", source_position, fields=("Ez",)),),
+            )
     return scene
 
 
@@ -155,11 +153,10 @@ def _workload_scene(
     shape: tuple[int, int, int],
     *,
     spacing: float,
-    device: torch.device,
 ) -> mw.Scene:
     spec = _workload_spec(workload)
     if spec.name == "vacuum":
-        return _vacuum_scene(shape, spacing=spacing, device=device)
+        return _vacuum_scene(shape, spacing=spacing)
 
     x, y, z = (_axis_nodes(count, spacing) for count in shape)
     source_x_index = max(1, len(x) // 3)
@@ -181,11 +178,11 @@ def _workload_scene(
         ),
         grid=mw.GridSpec.custom(x, y, z),
         boundary=boundary,
-        device=str(device),
     )
     if spec.dielectric:
         spans = tuple(float(axis[-1] - axis[0]) for axis in (x, y, z))
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 name="dielectric_scatterer",
                 geometry=mw.Box(
@@ -193,23 +190,23 @@ def _workload_scene(
                     size=tuple(0.25 * span for span in spans),
                 ),
                 material=mw.Material(eps_r=4.0),
-            )
-        )
+            ),
+        ))
     source_time = (
         mw.GaussianPulse(frequency=_FREQUENCY, fwidth=0.5e9, amplitude=1.0)
         if spec.broadband_source
         else mw.CW(frequency=_FREQUENCY, amplitude=1.0)
     )
-    scene.add_source(
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=source_position,
             polarization="Ez",
             profile="ideal",
             source_time=source_time,
             name="source",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", probe_position, fields=("Ez",)))
+        ),
+    ), monitors=(*scene.monitors, mw.PointMonitor("probe", probe_position, fields=("Ez",))))
     return scene
 
 
@@ -219,24 +216,27 @@ def _simulation(
     *,
     spacing: float,
     steps: int,
-    device: torch.device,
-    parallel: mw.FDTDParallelConfig | None = None,
+    device: torch.device | str = "cuda",
+    parallel: mw.fdtd.FDTDParallelConfig | None = None,
 ):
     spec = _workload_spec(workload)
     cpml_options = (
-        {"cpml_config": {"memory_mode": spec.cpml_mode}}
+        {"cpml": mw.fdtd.CPMLConfig(memory_mode=spec.cpml_mode)}
         if spec.cpml_mode != "disabled"
         else {}
     )
     return mw.Simulation.fdtd(
-        _workload_scene(workload, shape, spacing=spacing, device=device),
+        _workload_scene(workload, shape, spacing=spacing),
         frequencies=spec.frequencies,
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=spec.full_field_dft,
-        cuda_graph=False,
-        parallel=parallel,
-        **cpml_options,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=spec.full_field_dft,
+            cuda_graph=False,
+            device=device,
+            parallel=parallel,
+            **cpml_options,
+        ),
     )
 
 
@@ -304,7 +304,7 @@ def _multi_sample(
 ) -> dict[str, object]:
     _release_cuda(devices)
     baseline = _baseline_allocated(devices)
-    parallel = mw.FDTDParallelConfig(
+    parallel = mw.fdtd.FDTDParallelConfig(
         devices=devices,
         transport="cuda_p2p",
         overlap=overlap,
@@ -316,7 +316,6 @@ def _multi_sample(
         shape,
         spacing=spacing,
         steps=steps,
-        device=devices[0],
         parallel=parallel,
     ).run()
     for device in devices:
@@ -493,9 +492,8 @@ def _parity_diagnostics(
         shape,
         spacing=spacing,
         steps=steps,
-        device=devices[0],
     ).run()
-    single_raw = single.raw_output if isinstance(single.raw_output, dict) else {}
+    single_raw = single._raw_output if isinstance(single._raw_output, dict) else {}
     references = {
         name: single_raw.get(name, getattr(single.solver, name)).detach().to(device="cpu")
         for name in _FIELD_NAMES
@@ -504,7 +502,7 @@ def _parity_diagnostics(
     del single
     _release_cuda(devices)
 
-    parallel = mw.FDTDParallelConfig(
+    parallel = mw.fdtd.FDTDParallelConfig(
         devices=devices,
         transport="cuda_p2p",
         overlap=True,
@@ -516,14 +514,13 @@ def _parity_diagnostics(
         shape,
         spacing=spacing,
         steps=steps,
-        device=devices[0],
         parallel=parallel,
     ).run()
     solver = distributed.solver
     per_component = {}
     for name in _FIELD_NAMES:
-        if name in distributed.raw_output:
-            actual = distributed.raw_output[name]
+        if name in distributed._raw_output:
+            actual = distributed._raw_output[name]
         else:
             local_values = tuple(getattr(shard.solver, name) for shard in solver.shards)
             actual = solver._gather_component(name, local_values)

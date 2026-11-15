@@ -42,11 +42,14 @@ def test_point_monitor_stores_only_python_scalars():
 
 
 def _scene(trainable):
-    scene = mw.Scene(domain=mw.Domain(bounds=((-0.5, 0.5),) * 3), grid=mw.GridSpec.uniform(0.05), device="cpu")
     size = torch.tensor([0.2, 0.2, 0.2], requires_grad=trainable)
-    scene.add_structure(mw.Structure(mw.Box(position=(0.0, 0.0, 0.0), size=size), mw.Material(eps_r=2.0)))
-    for index in range(256):
-        scene.add_monitor(mw.PointMonitor(f"p{index}", (0.01 * (index % 16), 0.0, 0.0), fields=("Ex", "Ey", "Ez")))
+    scene = mw.Scene(domain=mw.Domain(bounds=((-0.5, 0.5),) * 3), grid=mw.GridSpec.uniform(0.05), structures=(
+                mw.Structure(mw.Box(position=(0.0, 0.0, 0.0), size=size), mw.Material(eps_r=2.0)),
+            ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.PointMonitor(f"p{index}", (0.01 * (index % 16), 0.0, 0.0), fields=("Ex", "Ey", "Ez")) for index in range(256)),
+    ))
     return scene
 
 

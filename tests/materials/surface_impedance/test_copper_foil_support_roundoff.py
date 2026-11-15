@@ -14,10 +14,10 @@ def _faces(normal,shift=0.):
     position[transverse[0]]=(low+high)/2;size[transverse[0]]=high-low
     foil=mw.Structure(mw.Box(position=torch.tensor(position,dtype=torch.float64),
         size=torch.tensor(size,dtype=torch.float64)),
-        mw.CopperFoil(thickness=35e-6,frequency_range=(.5e9,2e9)),name="foil")
+        mw.media.CopperFoil(thickness=35e-6,frequency_range=(.5e9,2e9)),name="foil")
     scene=mw.Scene(domain=mw.Domain(bounds=((- .030,.030),)*3),grid=mw.GridSpec.uniform(.001),
-        boundary=mw.BoundarySpec.none(),structures=(foil,),device="cpu")
-    prepared=prepare_scene(scene)
+        boundary=mw.BoundarySpec.none(),structures=(foil,))
+    prepared=prepare_scene(scene, device="cpu")
     return prepared,compile_copper_faces(prepared,device="cpu")
 
 

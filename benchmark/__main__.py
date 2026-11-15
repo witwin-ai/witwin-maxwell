@@ -57,6 +57,15 @@ if __name__ == "__main__":
         sar_main(sys.argv[2:])
         sys.exit(0)
 
+    # `python -m benchmark analytic [scenes...]` scores rows against an analytic oracle
+    # (Berreman 4x4 for planar scenes, Mie and the Airy slab on a refined grid for the
+    # under-resolved sphere and slab rows) instead of the external reference cache.
+    if len(sys.argv) > 1 and sys.argv[1] == "analytic":
+        from benchmark.analytic.benchmark_rows import main as analytic_main
+
+        analytic_main(sys.argv[2:])
+        sys.exit(0)
+
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--inventory", action="store_true")
     known, _ = parser.parse_known_args()

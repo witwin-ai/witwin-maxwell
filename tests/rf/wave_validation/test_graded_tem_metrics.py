@@ -64,29 +64,27 @@ def cyclic_scene(scene,permutation):
     structures=[]
     for item in scene.structures:
         geometry=item.geometry
-        if isinstance(geometry,mw.PlanarPEC):
+        if isinstance(geometry,mw.geometry.PlanarPEC):
             normal='xyz'.index(geometry.normal_axis)
             points=torch.zeros((len(geometry.vertices),3),dtype=torch.float64)
             points[:,normal]=geometry.coordinate
             points[:,[i for i in range(3) if i!=normal]]=geometry.vertices
             rotated=points[:,permutation];new_normal=permutation.index(normal)
-            geometry=mw.PlanarPEC(rotated[:,[i for i in range(3) if i!=new_normal]],
+            geometry=mw.geometry.PlanarPEC(rotated[:,[i for i in range(3) if i!=new_normal]],
                 normal_axis='xyz'[new_normal],coordinate=geometry.coordinate,
                 physical_thickness=geometry.physical_thickness)
         else:geometry=box(geometry)
         structures.append(mw.Structure(geometry,item.material,name=item.name))
     ports=[]
     for port in scene.ports:
-        modes=[mw.WaveModeSpec(mode.family,
+        modes=[mw.rf.WaveModeSpec(mode.family,
             polarization='E'+'xyz'[permutation.index('xyz'.index(mode.polarization[-1].lower()))],
             voltage_path=tuple(vector(point) for point in mode.voltage_path),
             current_contour=box(mode.current_contour)) for mode in port.modes]
         axis=vector(port.size).index(0.)
-        ports.append(mw.WavePort(port.name,position=vector(port.position),size=vector(port.size),
+        ports.append(mw.rf.WavePort(port.name,position=vector(port.position),size=vector(port.size),
             direction=port.direction,reference_plane=vector(port.position)[axis],modes=modes))
-    return scene.clone(domain=mw.Domain(bounds=vector(scene.domain.bounds)),
-        grid=mw.GridSpec.custom(*vector((scene.grid.x_coords,scene.grid.y_coords,scene.grid.z_coords))),
-        structures=structures,ports=ports)
+    return scene.updated(domain=mw.Domain(bounds=vector(scene.domain.bounds)), grid=mw.GridSpec.custom(*vector((scene.grid.x_coords,scene.grid.y_coords,scene.grid.z_coords))), structures=structures, ports=ports)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(),reason='Native graded TEM launch requires CUDA')
@@ -96,9 +94,9 @@ def test_graded_native_launch_rotation_and_graph_fields(direction,kind):
     import witwin.maxwell as mw
     from benchmark.scenes.rf.printed_lines import printed_line_scene
     scene=printed_line_scene(kind,dx=.000625,longitudinal_dl=.0025,
-        transverse_refinement_radius=.020,sigma_e=.01 if kind=='stripline' else 0.,device='cuda:0')
+        transverse_refinement_radius=.020,sigma_e=.01 if kind=='stripline' else 0.)
     selected=scene.ports[0] if direction=='+' else scene.ports[1]
-    scene=scene.clone(ports=(selected,))
+    scene=scene.updated(ports=(selected,))
     reference=None;reference_projection=None
     for permutation,graph in [((0,1,2),False),((0,1,2),True),((2,0,1),True),((1,2,0),True)]:
         rotated=cyclic_scene(scene,permutation)
@@ -107,13 +105,15 @@ def test_graded_native_launch_rotation_and_graph_fields(direction,kind):
         observer=mw.ModeMonitor('graded_observer',position=position,size=port.size,
             direction=port.direction,polarization=port.modes[0].polarization,frequencies=(1e9,))
         object.__setattr__(observer,'_wave_family','tem')
-        rotated=rotated.clone(monitors=(observer,))
-        result=mw.Simulation.fdtd(rotated,frequencies=(1e9,),excitations=mw.PortExcitation(selected.name),
-            run_time=mw.TimeConfig(time_steps=96),spectral_sampler=mw.SpectralSampler(window='none'),
-            full_field_dft=False,cuda_graph=graph).run()
-        projection=result.monitor('graded_observer')
-        measured={key:complex(projection[key]) for key in
-            ('amplitude_forward','amplitude_backward','total_power')}
+        rotated=rotated.updated(monitors=(observer,))
+        result=mw.Simulation.fdtd(rotated,frequencies=(1e9,),excitations=mw.rf.PortExcitation(selected.name),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=96),spectral_sampler=mw.fdtd.SpectralSampler(window='none'),
+                full_field_dft=False,cuda_graph=graph,
+            )).run()
+        projection=result.monitor('graded_observer',freq_index=0).isel(mode=0)
+        measured=dict(amplitude_forward=complex(projection.sel(propagation='+').values),
+            amplitude_backward=complex(projection.sel(propagation='-').values),total_power=complex(projection.attrs['total_power']))
         if kind=='stripline':assert result.port(selected.name).beta.imag.item()>0
         if reference is None:
             reference=result

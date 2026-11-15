@@ -20,45 +20,42 @@ from benchmark.scenes.sar._tissue import BENCHMARK_FREQUENCY, tissue_material
 FREQUENCIES = (BENCHMARK_FREQUENCY,)
 
 
-def build_scene(*, dx: float = 0.004, device: str = "cuda") -> mw.Scene:
+def build_scene(*, dx: float = 0.004) -> mw.Scene:
     half = 0.06
     # Tissue block spans z in [0, thickness]; the plane wave enters at z=0.
     thickness = 0.04
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half, half), (-half, half), (-0.05, thickness + 0.05))),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pml(num_layers=10),
-        device=device,
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.5 * thickness), size=(10.0, 10.0, thickness)),
-            material=tissue_material("phantom"),
-            name="tissue",
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=mw.GaussianPulse(frequency=BENCHMARK_FREQUENCY, fwidth=0.5 * BENCHMARK_FREQUENCY),
-            name="pw",
-        )
-    )
-    scene.add_monitor(
-        mw.PowerLossMonitor(
-            "loss",
-            position=(0.0, 0.0, 0.5 * thickness),
-            size=(2.0 * half, 2.0 * half, thickness),
-            frequencies=FREQUENCIES,
-            channels=("conduction",),
-        )
-    )
-    scene.add_monitor(
-        mw.IncidentPowerDensityMonitor(
-            "incident", axis="z", position=-0.03, frequencies=FREQUENCIES
-        )
-    )
+                domain=mw.Domain(bounds=((-half, half), (-half, half), (-0.05, thickness + 0.05))),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.pml(num_layers=10),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.5 * thickness), size=(10.0, 10.0, thickness)),
+                material=tissue_material("phantom"),
+                name="tissue",
+            ),
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization=(1.0, 0.0, 0.0),
+                source_time=mw.GaussianPulse(frequency=BENCHMARK_FREQUENCY, fwidth=0.5 * BENCHMARK_FREQUENCY),
+                name="pw",
+            ),
+            ),
+                monitors=(
+            mw.monitors.PowerLossMonitor(
+                "loss",
+                position=(0.0, 0.0, 0.5 * thickness),
+                size=(2.0 * half, 2.0 * half, thickness),
+                frequencies=FREQUENCIES,
+                channels=("conduction",),
+            ),
+            mw.sar.IncidentPowerDensityMonitor(
+                "incident", axis="z", position=-0.03, frequencies=FREQUENCIES
+            ),
+            ),
+            )
     return scene
 
 

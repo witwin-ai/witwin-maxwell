@@ -11,16 +11,15 @@ from witwin.maxwell.postprocess.fdtd_loss import apply_split_trace_densities
 from witwin.maxwell.scene import prepare_scene
 
 
-def scene(graded=False, material=None, device='cpu'):
+def scene(graded=False, material=None):
     axes=((0.,1.,3.,6.), (0.,.5,2.,6.), (0.,2.,3.,6.)) if graded else ((0.,2.,4.,6.),)*3
     return prepare_scene(mw.Scene(domain=mw.Domain(bounds=((0.,6.),)*3),
-        grid=mw.GridSpec.custom(*axes), device=device,
-        structures=[mw.Structure(mw.Box(position=(3.,)*3,size=(100.,)*3),
-            material or mw.Material(sigma_e_tensor=mw.DiagonalTensor3(2.,3.,5.)))]))
+        grid=mw.GridSpec.custom(*axes), structures=[mw.Structure(mw.Box(position=(3.,)*3,size=(100.,)*3),
+            material or mw.Material(sigma_e_tensor=mw.DiagonalTensor3(2.,3.,5.)))]), device="cpu")
 
 
 def compile_window(prepared, bounds, quadrature='physical_intersection'):
-    return compile_power_loss_monitor(prepared, mw.PowerLossMonitor('roi',
+    return compile_power_loss_monitor(prepared, mw.monitors.PowerLossMonitor('roi',
         position=tuple((a+b)/2 for a,b in bounds),size=tuple(b-a for a,b in bounds),
         frequencies=(1e9,),quadrature=quadrature))
 
@@ -90,8 +89,8 @@ def test_native_conductivity_parameter_gradient_has_independent_watt_and_differe
 
 def test_intersection_integrates_homogenized_cell_density_without_claiming_subcell_material_fill():
     prepared=prepare_scene(mw.Scene(domain=mw.Domain(bounds=((0.,2.),)*3),
-        grid=mw.GridSpec.uniform(1.),device='cpu',structures=[mw.Structure(
-            mw.Box(position=(1.,)*3,size=(1.,10.,10.)),mw.Material(sigma_e=1.))]))
+        grid=mw.GridSpec.uniform(1.),structures=[mw.Structure(
+            mw.Box(position=(1.,)*3,size=(1.,10.,10.)),mw.Material(sigma_e=1.))]), device="cpu")
     compiled=compile_window(prepared,((.5,1.5),(0.,2.),(0.,2.)))
     # The two native Ex centers lie exactly on slab faces: each compiled sigma
     # is 1/2. Cutting their already homogenized cells does not recover the
@@ -109,15 +108,15 @@ def test_selection_includes_intersecting_cells_with_exterior_centers_and_retains
     assert not any(1.1<=x<=1.3 for x in prepared.x_half64)
     with pytest.raises(ValueError,match='contains no Ex'):
         compile_window(prepared,bounds,'native_cells')
-    assert mw.PowerLossMonitor('default',(3.,)*3,(1.,)*3).quadrature=='native_cells'
+    assert mw.monitors.PowerLossMonitor('default',(3.,)*3,(1.,)*3).quadrature=='native_cells'
     with pytest.raises(ValueError,match='quadrature'):
-        mw.PowerLossMonitor('bad',(3.,)*3,(1.,)*3,quadrature='center_guess')
+        mw.monitors.PowerLossMonitor('bad',(3.,)*3,(1.,)*3,quadrature='center_guess')
 
 
 @pytest.mark.parametrize('boundary',[mw.BoundarySpec.periodic(),mw.BoundarySpec.bloch((.1,0.,0.))])
 def test_physical_intersection_rejects_wrapped_cells_without_changing_native_ownership(boundary):
     prepared=prepare_scene(mw.Scene(domain=mw.Domain(bounds=((0.,6.),)*3),
-        grid=mw.GridSpec.uniform(2.),boundary=boundary,device='cpu'))
+        grid=mw.GridSpec.uniform(2.),boundary=boundary), device="cpu")
     native=compile_window(prepared,((0.,6.),)*3,'native_cells')
     assert native.component_cell_bounds is None
     with pytest.raises(NotImplementedError,match='wrapped control-volume fragments'):
@@ -126,7 +125,7 @@ def test_physical_intersection_rejects_wrapped_cells_without_changing_native_own
 
 def test_mapped_default_cells_remain_available_but_new_physical_window_is_explicitly_bounded():
     prepared=prepare_scene(mw.Scene(domain=mw.Domain(bounds=((0.,6.),)*3),
-        grid=mw.GridSpec.uniform(2.),device='cpu',coordinates=mw.BendCoordinates(curvature=.01)))
+        grid=mw.GridSpec.uniform(2.),coordinates=mw.coordinates.BendCoordinates(curvature=.01)), device="cpu")
     assert compile_window(prepared,((0.,6.),)*3,'native_cells').component_cell_bounds is None
     with pytest.raises(NotImplementedError,match='mapped partial-volume metrics'):
         compile_window(prepared,((0.,6.),)*3)
@@ -135,8 +134,7 @@ def test_mapped_default_cells_remain_available_but_new_physical_window_is_explic
 @pytest.mark.parametrize('normal_bounds',[(2.6,3.4),(2.4,2.8),(3.2,3.7)])
 def test_split_foil_bulk_work_clips_left_and_right_physical_volumes_separately(normal_bounds):
     prepared=prepare_scene(mw.Scene(domain=mw.Domain(bounds=((0.,6.),)*3),
-        grid=mw.GridSpec.custom(*((0.,1.,3.,6.),)*3),device='cpu',
-        structures=[mw.Structure(mw.Box(position=(3.,)*3,size=(100.,)*3),mw.Material(sigma_e=.5))]))
+        grid=mw.GridSpec.custom(*((0.,1.,3.,6.),)*3),structures=[mw.Structure(mw.Box(position=(3.,)*3,size=(100.,)*3),mw.Material(sigma_e=.5))]), device="cpu")
     bounds=((.1,.7),(.6,1.4),normal_bounds);compiled=compile_window(prepared,bounds)
     electric=fields(compiled,amplitudes=(2.,0.,0.))
     indices=torch.tensor([[0,1,2]])
@@ -159,6 +157,6 @@ def test_split_foil_bulk_work_clips_left_and_right_physical_volumes_separately(n
 @pytest.mark.skipif(not torch.cuda.is_available(),reason='requires CUDA')
 def test_cuda_physical_loss_constant_watts_and_cpu_parity():
     bounds=((.1,2.4),(1.2,3.4),(.7,4.3))
-    cpu=compile_window(scene(True),bounds);gpu=compile_window(scene(True,device='cuda'),bounds)
+    cpu=compile_window(scene(True),bounds);gpu=compile_window(scene(True),bounds)
     a,b=loss(cpu,fields(cpu)).total,loss(gpu,fields(gpu)).total.cpu()
     torch.testing.assert_close(a,b,rtol=2e-14,atol=1e-12)

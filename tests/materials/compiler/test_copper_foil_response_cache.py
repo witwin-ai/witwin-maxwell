@@ -12,7 +12,7 @@ from witwin.maxwell.compiler import copper_foil as compiler
 
 def test_fit_cache_exact_keys_and_private_response_tensors(monkeypatch):
     parameters = dict(thickness=35e-6, conductivity=5.8e7, frequency_range=(.1e9, 10e9))
-    expected = compiler.compile_copper_response(mw.CopperFoil(
+    expected = compiler.compile_copper_response(mw.media.CopperFoil(
         thickness=1e-6, frequency_range=(.5e9, 2e9), mode_count=16))
     calls = []
 
@@ -22,13 +22,13 @@ def test_fit_cache_exact_keys_and_private_response_tensors(monkeypatch):
 
     monkeypatch.setattr(compiler, "_COPPER_FIT_CACHE", OrderedDict())
     monkeypatch.setattr(compiler, "_fit_copper_response", fit)
-    first = compiler.compile_copper_response(mw.CopperFoil(**parameters))
+    first = compiler.compile_copper_response(mw.media.CopperFoil(**parameters))
     first.rates.fill_(-1)
-    second = compiler.compile_copper_response(mw.CopperFoil(**parameters))
+    second = compiler.compile_copper_response(mw.media.CopperFoil(**parameters))
     assert len(calls) == 1
     assert torch.equal(second.rates, expected.rates)
     second.state_space.B.zero_()
-    third = compiler.compile_copper_response(mw.CopperFoil(**parameters))
+    third = compiler.compile_copper_response(mw.media.CopperFoil(**parameters))
     assert torch.equal(third.state_space.B, expected.state_space.B)
 
     # One ULP changes are distinct, as are scalar/tensor arithmetic and fit options.
@@ -39,20 +39,20 @@ def test_fit_cache_exact_keys_and_private_response_tensors(monkeypatch):
                dict(thickness=torch.tensor(35e-6, dtype=torch.float64)),
                dict(thickness=torch.tensor(35e-6, dtype=torch.float32))]
     for changed in changes:
-        compiler.compile_copper_response(mw.CopperFoil(**(parameters | changed)))
-    compiler.compile_copper_response(mw.CopperFoil(**parameters),
+        compiler.compile_copper_response(mw.media.CopperFoil(**(parameters | changed)))
+    compiler.compile_copper_response(mw.media.CopperFoil(**parameters),
                                     tolerance=math.nextafter(2e-4, math.inf))
-    compiler.compile_copper_response(mw.CopperFoil(**parameters), max_modes=128)
+    compiler.compile_copper_response(mw.media.CopperFoil(**parameters), max_modes=128)
     assert len(calls) == 1 + len(changes) + 2
 
 
 def test_fit_cache_evicts_least_recently_used(monkeypatch):
-    expected = compiler.compile_copper_response(mw.CopperFoil(
+    expected = compiler.compile_copper_response(mw.media.CopperFoil(
         thickness=1e-6, frequency_range=(.5e9, 2e9), mode_count=16))
     monkeypatch.setattr(compiler, "_COPPER_FIT_CACHE", OrderedDict())
     monkeypatch.setattr(compiler, "_fit_copper_response", lambda *args: deepcopy(expected))
     assert compiler._COPPER_FIT_CACHE_CAPACITY == 64
-    materials = [mw.CopperFoil(thickness=(35 + i) * 1e-6, frequency_range=(.5e9, 2e9))
+    materials = [mw.media.CopperFoil(thickness=(35 + i) * 1e-6, frequency_range=(.5e9, 2e9))
                  for i in range(65)]
     for i, material in enumerate(materials[:64]):
         compiler.compile_copper_response(material)
@@ -69,11 +69,11 @@ def test_fit_cache_evicts_least_recently_used(monkeypatch):
 def test_fit_cache_eviction_preserves_response_tensors(monkeypatch):
     monkeypatch.setattr(compiler, "_COPPER_FIT_CACHE", OrderedDict())
     monkeypatch.setattr(compiler, "_COPPER_FIT_CACHE_CAPACITY", 2)
-    material = mw.CopperFoil(thickness=35e-6, frequency_range=(.1e9, 10e9))
+    material = mw.media.CopperFoil(thickness=35e-6, frequency_range=(.1e9, 10e9))
     first = compiler.compile_copper_response(material)
     key = next(iter(compiler._COPPER_FIT_CACHE))
     for thickness in (36e-6, 37e-6):
-        compiler.compile_copper_response(mw.CopperFoil(
+        compiler.compile_copper_response(mw.media.CopperFoil(
             thickness=thickness, frequency_range=material.frequency_range))
     assert len(compiler._COPPER_FIT_CACHE) == 2
     assert key not in compiler._COPPER_FIT_CACHE

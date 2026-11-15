@@ -59,13 +59,13 @@ def _port(dx: float, *, termination=None) -> mw.LumpedPort:
     )
 
 
-def _circuit(unknown_count: int) -> mw.Circuit:
-    circuit = mw.Circuit(f"rc_ladder_{unknown_count}")
+def _circuit(unknown_count: int) -> mw.circuits.Circuit:
+    circuit = mw.circuits.Circuit(f"rc_ladder_{unknown_count}")
     nodes = tuple(circuit.node(f"n{index}") for index in range(unknown_count))
     for index, node in enumerate(nodes):
         negative = nodes[index + 1] if index + 1 < unknown_count else circuit.ground
-        circuit.add(mw.Resistor(f"R{index}", node, negative, 50.0 + index % 7))
-        circuit.add(mw.Capacitor(f"C{index}", node, circuit.ground, (0.5 + 0.02 * index) * 1.0e-12))
+        circuit.add(mw.rf.Resistor(f"R{index}", node, negative, 50.0 + index % 7))
+        circuit.add(mw.rf.Capacitor(f"C{index}", node, circuit.ground, (0.5 + 0.02 * index) * 1.0e-12))
     circuit.bind_port("feed", positive=nodes[0], negative=circuit.ground)
     return circuit
 
@@ -79,42 +79,41 @@ def _scene(
     domain_size = 0.16
     dx = domain_size / grid_cells
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5 * domain_size, 0.5 * domain_size),) * 3),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.none(),
-        ports=(
+                domain=mw.Domain(bounds=((-0.5 * domain_size, 0.5 * domain_size),) * 3),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.none(),
+                ports=(
             ()
             if pure_no_rf
             else (
                 _port(
                     dx,
                     termination=(
-                        mw.SeriesRLC(r=50.0) if unknown_count is None else None
+                        mw.rf.SeriesRLC(r=50.0) if unknown_count is None else None
                     ),
                 ),
             )
-        ),
-        circuits=() if unknown_count is None else (_circuit(unknown_count),),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.2 * domain_size, 0.0, 0.0),
-            polarization="Ez",
-            width=1.5 * dx,
-            source_time=mw.GaussianPulse(
-                frequency=FREQUENCY_HZ,
-                fwidth=1.5e9,
             ),
-        )
-    )
-    scene.add_monitor(
-        mw.PointMonitor(
-            name="probe",
-            position=(0.2 * domain_size, 0.0, 0.0),
-            fields=("Ez",),
-        )
-    )
+                circuits=() if unknown_count is None else (_circuit(unknown_count),),
+                sources=(
+            mw.PointDipole(
+                position=(-0.2 * domain_size, 0.0, 0.0),
+                polarization="Ez",
+                width=1.5 * dx,
+                source_time=mw.GaussianPulse(
+                    frequency=FREQUENCY_HZ,
+                    fwidth=1.5e9,
+                ),
+            ),
+            ),
+                monitors=(
+            mw.PointMonitor(
+                name="probe",
+                position=(0.2 * domain_size, 0.0, 0.0),
+                fields=("Ez",),
+            ),
+            ),
+            )
     return scene
 
 
@@ -132,11 +131,13 @@ def _run_once(
             unknown_count=unknown_count,
             pure_no_rf=pure_no_rf,
         ),
-        frequency=FREQUENCY_HZ,
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
-        cuda_graph=cuda_graph,
+        frequencies=FREQUENCY_HZ,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+            cuda_graph=cuda_graph,
+        ),
     )
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
@@ -160,7 +161,7 @@ def _run_once(
     factorization_count = None
     checkpoint_tensor_bytes = 0
     if unknown_count is not None:
-        factorization_count = result.circuit(f"rc_ladder_{unknown_count}").diagnostics[
+        factorization_count = mw.circuits.circuit(result, f"rc_ladder_{unknown_count}").diagnostics[
             "factorization_count"
         ]
         checkpoint_tensor_bytes = sum(

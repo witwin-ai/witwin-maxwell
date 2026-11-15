@@ -61,8 +61,7 @@ def test_plane_payload_matches_native_observers(record_property, capsys):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.04, 0.04),) * 3),
         grid=mw.GridSpec.uniform(.004),
-        boundary=mw.BoundarySpec.pml(num_layers=4), device="cuda",
-        sources=[mw.PointDipole(name="drive", position=(.001, -.002, .003),
+        boundary=mw.BoundarySpec.pml(num_layers=4), sources=[mw.PointDipole(name="drive", position=(.001, -.002, .003),
                                polarization=(1., 2., 3.),
                                source_time=mw.GaussianPulse(frequency=2.45e9, fwidth=2.45e9))],
         monitors=[
@@ -71,7 +70,7 @@ def test_plane_payload_matches_native_observers(record_property, capsys):
             mw.FinitePlaneMonitor("sampled", position=(.001, .002, .011), size=(.029, .031, 0.),
                                   fields=FIELDS, sample_spacing=.006),
             mw.FluxMonitor("flux", axis="y", position=.009),
-            mw.ClosedSurfaceMonitor.box("surface", size=(.037, .035, .033)),
+            mw.monitors.ClosedSurfaceMonitor.box("surface", size=(.037, .035, .033)),
             mw.PlaneMonitor("single", axis="x", position=.009, fields=("Ez",)),
         ],
     )
@@ -82,19 +81,23 @@ def test_plane_payload_matches_native_observers(record_property, capsys):
     magnetic_planes = {}
     for component in FIELDS[3:]:
         magnetic_planes[component] = []
-        for index, position in enumerate(component_coords(prepared, component)[2]):
+        for index, position in enumerate(component_coords(prepared, component, device=prepared.device)[2]):
             name = f"reference_{component}_{index}"
-            scene.add_monitor(mw.PlaneMonitor(name, axis="z", position=float(position), fields=(component,)))
+            scene = scene.updated(monitors=(
+                *scene.monitors,
+                mw.PlaneMonitor(name, axis="z", position=float(position), fields=(component,)),
+            ))
             magnetic_planes[component].append(name)
     result = mw.Simulation.fdtd(
-        scene, frequencies=frequencies, full_field_dft=True,
+        scene, frequencies=frequencies, config=mw.FDTDConfig(full_field_dft=True,
         run_time=mw.TimeConfig(time_steps=128, transient_cycles=0, steady_cycles=1),
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False)),
     ).run()
-    fields = dict(result.fields)
+    phasors = {name: data.values for name, data in result.fields.items()}
+    fields = dict(phasors)
     assert set(fields) == {"EX", "EY", "EZ"}
     for component, names in magnetic_planes.items():
-        fields[component.upper()] = torch.stack([result._monitors[name]["data"] for name in names], dim=-1)
+        fields[component.upper()] = torch.stack([result._monitors[name][component] for name in names], dim=-1)
     payloads = {}
     # Compare the stored raw observer payload before Result's finite aperture crop.
     for monitor in target_monitors:
@@ -113,17 +116,17 @@ def test_plane_payload_matches_native_observers(record_property, capsys):
     external = mw.Result.from_fields(scene, frequencies=result.frequencies, kernel="t", fields=fields,
                                      monitors=payloads, prepared_scene=result.prepared_scene)
     for name in ("plane", "flux"):
-        expected = dict(result.monitor(name))
+        expected = dict(result.raw_monitor(name))
         expected.pop("samples")
-        _compare(external.monitor(name), expected)
-    single = mw.postprocess.plane_payload(scene, scene.monitors[5], result.fields, frequencies=result.frequencies)
+        _compare(external.raw_monitor(name), expected)
+    single = mw.postprocess.plane_payload(scene, scene.monitors[5], phasors, frequencies=result.frequencies)
     _compare(single, payloads["single"])
     selected_monitor = mw.PlaneMonitor("selected", axis="x", position=.009, fields=("Ez",),
                                        frequencies=(frequencies[1],))
-    selected = mw.postprocess.plane_payload(scene, selected_monitor, result.fields, frequencies=frequencies)
-    assert torch.equal(selected["data"], single["data"][1])
+    selected = mw.postprocess.plane_payload(scene, selected_monitor, phasors, frequencies=frequencies)
+    assert torch.equal(selected["Ez"], single["Ez"][1])
     scalar = mw.postprocess.plane_payload(scene, scene.monitors[5],
-                                         {key.lower(): value[1] for key, value in result.fields.items()},
+                                         {key.lower(): value[1] for key, value in phasors.items()},
                                          frequencies=(frequencies[1],))
     _compare(scalar, selected)
     rebuilt = mw.postprocess.plane_payload(scene, scene.monitors[0], fields, frequencies=result.frequencies)

@@ -6,14 +6,14 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.compiler.curved_copper import compile_copper_channels
+from tests.oracles.curved_copper_channels import compile_copper_channels
 from tests.materials.surface_impedance.test_copper_foil import DELTA, FREQUENCY, _film_transfer
 
 
 @pytest.mark.parametrize("ratio", (.01,.1,1.,3.,10.,30.))
 @pytest.mark.parametrize("surroundings", ((1.,1.),(1.,4.),(4.,4.)))
 def test_separate_electric_magnetic_channels_match_independent_full_maxwell_film(ratio,surroundings):
-    material=mw.CopperFoil(thickness=ratio*DELTA,frequency_range=(.5e9,2e9))
+    material=mw.media.CopperFoil(thickness=ratio*DELTA,frequency_range=(.5e9,2e9))
     # The transmission floor is stricter than the slab model's default band
     # contract, so request a correspondingly tighter analytic mode reduction.
     channels=compile_copper_channels(material,tolerance=2e-5)
@@ -35,7 +35,7 @@ def test_separate_electric_magnetic_channels_match_independent_full_maxwell_film
 def test_both_channel_midpoint_states_have_exact_positive_storage_and_heat(device):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA required")
-    material=mw.CopperFoil(thickness=torch.tensor(2e-6,device=device,dtype=torch.float64),
+    material=mw.media.CopperFoil(thickness=torch.tensor(2e-6,device=device,dtype=torch.float64),
         frequency_range=(.5e9,2e9))
     channels=compile_copper_channels(material)
     dt=5e-12
@@ -68,7 +68,7 @@ def test_channel_parameters_retain_native_continuous_material_gradients():
     thickness=torch.tensor(2e-6,dtype=torch.float64,requires_grad=True)
     conductivity=torch.tensor(5.8e7,dtype=torch.float64,requires_grad=True)
     def objective(t,sigma):
-        channel=compile_copper_channels(mw.CopperFoil(thickness=t,conductivity=sigma,
+        channel=compile_copper_channels(mw.media.CopperFoil(thickness=t,conductivity=sigma,
             frequency_range=(.5e9,2e9),mode_count=32))
         electric,magnetic=channel.evaluate([1e9])
         return electric.real.sum()+1e4*magnetic.real.sum()

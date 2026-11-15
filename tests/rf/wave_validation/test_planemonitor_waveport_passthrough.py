@@ -53,8 +53,8 @@ _MONITOR = "guide_plane"
 
 
 def _scene_with_probe():
-    scene = coax_thru_scene(dx=_DX, device="cuda")
-    scene.add_monitor(mw.PlaneMonitor(_MONITOR, axis="x", position=0.0, fields=("Ey",)))
+    scene = coax_thru_scene(dx=_DX)
+    scene = scene.updated(monitors=(*scene.monitors, mw.PlaneMonitor(_MONITOR, axis="x", position=0.0, fields=("Ey",))))
     return scene
 
 
@@ -74,15 +74,17 @@ def _waveport_excitation_result():
     return mw.Simulation.fdtd(
         _scene_with_probe(),
         frequencies=(_FREQ,),
-        excitations=mw.PortExcitation("left"),
-        run_time=mw.TimeConfig(time_steps=1500),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortExcitation("left"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1500),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
 
 def _plain_modesource_result():
-    scene = coax_thru_scene(dx=_DX, device="cuda")
+    scene = coax_thru_scene(dx=_DX)
     launch = mw.ModeSource(
         position=(-PORT_X - _DX, 0.0, 0.0),
         size=(0.0, 0.40, 0.40),
@@ -92,17 +94,15 @@ def _plain_modesource_result():
         source_time=mw.CW(frequency=_FREQ, amplitude=1.0),
         name="tem_launch",
     )
-    scene = scene.clone(
-        ports=(),
-        sources=(launch,),
-        monitors=(mw.PlaneMonitor(_MONITOR, axis="x", position=0.0, fields=("Ey",)),),
-    )
+    scene = scene.updated(ports=(), sources=(launch,), monitors=(mw.PlaneMonitor(_MONITOR, axis="x", position=0.0, fields=("Ey",)),))
     return mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQ,),
-        run_time=mw.TimeConfig(time_steps=1500),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1500),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
 
@@ -120,7 +120,7 @@ def test_planemonitor_present_on_waveport_excitation(waveport_result):
     """The user PlaneMonitor is not dropped from a direct WavePort excitation."""
 
     assert _MONITOR in waveport_result.monitors
-    payload = waveport_result.monitor(_MONITOR)
+    payload = waveport_result.raw_monitor(_MONITOR)
     assert "Ey" in payload
     ey = payload["Ey"].cpu()
     assert ey.ndim == 2
@@ -131,7 +131,7 @@ def test_planemonitor_field_is_physical_coax_tem(waveport_result):
     """The ridden-through field is the injected TEM mode: annulus-concentrated,
     exactly zero inside the PEC conductors (independent correctness anchor)."""
 
-    payload = waveport_result.monitor(_MONITOR)
+    payload = waveport_result.raw_monitor(_MONITOR)
     ey = payload["Ey"].cpu()
     annulus, inner_pec, outer_pec = _radial_masks(payload, tuple(ey.shape))
     mag = ey.abs()
@@ -146,10 +146,10 @@ def test_planemonitor_matches_plain_modesource_run(waveport_result, plain_result
     """Correct vs a plain-FDTD run of the same scene: an independent bare
     ModeSource launch reproduces the same transverse |Ey| mode profile."""
 
-    payload_wp = waveport_result.monitor(_MONITOR)
-    payload_ms = plain_result.monitor(_MONITOR)
+    payload_wp = waveport_result.raw_monitor(_MONITOR)
+    payload_ms = plain_result.monitor(_MONITOR, freq_index=0)
     ey_wp = payload_wp["Ey"].cpu()
-    ey_ms = payload_ms["Ey"].cpu()
+    ey_ms = payload_ms.sel(component="Ey").values.cpu()
     assert ey_wp.shape == ey_ms.shape
 
     annulus, _inner, _outer = _radial_masks(payload_wp, tuple(ey_wp.shape))
@@ -174,17 +174,19 @@ def test_planemonitor_rides_through_portsweep():
     result = mw.Simulation.fdtd(
         _scene_with_probe(),
         frequencies=(_FREQ,),
-        excitations=mw.PortSweep(),
-        run_time=mw.TimeConfig(time_steps=1200),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortSweep(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1200),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     # Flat top-level: present and tagged with the drive channel it belongs to.
     assert _MONITOR in result.monitors
     assert result._metadata.get("user_monitor_drive_channel") == "left::TEM0"
-    top = result.monitor(_MONITOR)
-    assert float(top["Ey"].cpu().abs().max()) > 1.0
+    top = result.monitor(_MONITOR, freq_index=0)
+    assert float(top.sel(component="Ey").values.cpu().abs().max()) > 1.0
 
     # Per drive column: one payload per driven channel (no silent drop).
     columns = result._array_run_data.column_results
@@ -204,10 +206,12 @@ def test_planemonitor_passthrough_falsification(monkeypatch):
     result = mw.Simulation.fdtd(
         _scene_with_probe(),
         frequencies=(_FREQ,),
-        excitations=mw.PortExcitation("left"),
-        run_time=mw.TimeConfig(time_steps=1200),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortExcitation("left"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1200),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     assert _MONITOR not in result.monitors

@@ -1,3 +1,4 @@
+from unittest.mock import patch
 from types import SimpleNamespace
 
 import pytest
@@ -82,17 +83,15 @@ def _solver(device: torch.device):
         model_id="unit-load",
         frequency_band=(0.0, 1.0),
     )
-    scene = SimpleNamespace(
-        compile_networks=lambda *, dt, device: (compiled,),
-    )
     solver = SimpleNamespace(
-        scene=scene,
+        scene=SimpleNamespace(),
         device=device,
         dt=0.2,
         Ex=field,
         _port_runtimes=(port_runtime,),
     )
-    prepare_network_runtimes(solver)
+    with patch("witwin.maxwell.fdtd.networks.compile_networks", lambda prepared, *, dt, device: (compiled,)):
+        prepare_network_runtimes(solver)
     return solver
 
 
@@ -205,7 +204,7 @@ def test_cuda_bilinear_stability_check_preserves_transition_matrix() -> None:
         inductance=0.5e-9,
         capacitance=1.0e-12,
     )
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=model.A.cuda(),
         B=model.B.cuda(),
         C=model.C.cuda(),
@@ -230,9 +229,9 @@ def _series_rlc_state_space(
     resistance: float,
     inductance: float,
     capacitance: float,
-) -> mw.StateSpaceNetwork:
+) -> mw.rf.rational.StateSpaceNetwork:
     dtype = torch.float64
-    return mw.StateSpaceNetwork(
+    return mw.rf.rational.StateSpaceNetwork(
         A=torch.tensor(
             (
                 (-resistance / inductance, -1.0 / inductance),
@@ -277,7 +276,6 @@ def _fdtd_scene(*, termination=None, network=None) -> mw.Scene:
         ),
         ports=(port,),
         networks=() if network is None else (network,),
-        device="cuda",
     )
 
 
@@ -293,7 +291,7 @@ def test_touchstone_fitted_series_rlc_matches_native_fdtd_termination(tmp_path) 
         inductance=inductance,
         capacitance=capacitance,
     )
-    source_data = mw.NetworkData.from_y(
+    source_data = mw.rf.NetworkData.from_y(
         frequencies=file_frequencies,
         y=model.evaluate(file_frequencies),
         z0=50.0,
@@ -301,11 +299,11 @@ def test_touchstone_fitted_series_rlc_matches_native_fdtd_termination(tmp_path) 
     )
     path = tmp_path / "series_rlc.s1p"
     source_data.to_touchstone(path, format="ri")
-    block = mw.TouchstoneNetwork(
+    block = mw.rf.TouchstoneNetwork(
         name="load_network",
         path=path,
         connections={"load": "feed"},
-        fit=mw.RationalFitConfig(
+        fit=mw.rf.rational.RationalFitConfig(
             order=2,
             iterations=2,
             relative_tolerance=1.0e-3,
@@ -320,14 +318,16 @@ def test_touchstone_fitted_series_rlc_matches_native_fdtd_termination(tmp_path) 
     )
     run_args = dict(
         frequencies=tuple(frequencies.tolist()),
-        run_time=mw.TimeConfig(time_steps=96),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        cuda_graph=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=96),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            cuda_graph=True,
+        ),
     )
 
     native = mw.Simulation.fdtd(
         _fdtd_scene(
-            termination=mw.SeriesRLC(
+            termination=mw.rf.SeriesRLC(
                 r=resistance,
                 l=inductance,
                 c=capacitance,
@@ -373,7 +373,7 @@ def test_touchstone_fitted_series_rlc_matches_native_fdtd_termination(tmp_path) 
         ) * (180.0 / torch.pi)
         assert torch.max(magnitude_error) < 0.01
         assert torch.max(phase_error_degrees) < 2.0
-    diagnostics = embedded.embedded_network("load_network")
+    diagnostics = mw.rf.embedded_network(embedded, "load_network")
     torch.testing.assert_close(diagnostics.voltage[0], embedded_port.voltage)
     torch.testing.assert_close(diagnostics.current[0], -embedded_port.current)
     signed_power = 0.5 * torch.real(
@@ -401,7 +401,7 @@ def test_embedded_network_stays_finite_over_a_long_run(tmp_path) -> None:
     # finite and bounded.
     model = _series_rlc_state_space(resistance=25.0, inductance=0.5e-9, capacitance=1.0e-12)
     file_frequencies = torch.linspace(1.0e9, 5.0e9, 41, dtype=torch.float64)
-    source_data = mw.NetworkData.from_y(
+    source_data = mw.rf.NetworkData.from_y(
         frequencies=file_frequencies,
         y=model.evaluate(file_frequencies),
         z0=50.0,
@@ -409,18 +409,20 @@ def test_embedded_network_stays_finite_over_a_long_run(tmp_path) -> None:
     )
     path = tmp_path / "series_rlc.s1p"
     source_data.to_touchstone(path, format="ri")
-    block = mw.TouchstoneNetwork(
+    block = mw.rf.TouchstoneNetwork(
         name="load_network",
         path=path,
         connections={"load": "feed"},
-        fit=mw.RationalFitConfig(order=2, iterations=2, relative_tolerance=1.0e-3),
+        fit=mw.rf.rational.RationalFitConfig(order=2, iterations=2, relative_tolerance=1.0e-3),
         device="cuda",
     )
     result = mw.Simulation.fdtd(
         _fdtd_scene(network=block),
         frequencies=(2.5e9, 3.0e9),
-        run_time=mw.TimeConfig(time_steps=1200),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1200),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     voltage = result.port("feed").voltage
     assert torch.all(torch.isfinite(voltage))
@@ -435,13 +437,13 @@ def test_embedding_rejects_excitation_spectrum_outside_model_band() -> None:
         inductance=0.5e-9,
         capacitance=1.0e-12,
     )
-    data = mw.NetworkData.from_y(
+    data = mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=model.evaluate(frequencies),
         z0=50.0,
         port_names=("load",),
     )
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="band_limited_load",
         network=data,
         connections={"load": "feed"},
@@ -452,8 +454,8 @@ def test_embedding_rejects_excitation_spectrum_outside_model_band() -> None:
     with pytest.raises(ValueError, match="excitation effective bands"):
         mw.Simulation.fdtd(
             _fdtd_scene(network=block),
-            frequency=2.75e9,
-            run_time=mw.TimeConfig(time_steps=8),
+            frequencies=2.75e9,
+            config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
         ).prepare()
 
 

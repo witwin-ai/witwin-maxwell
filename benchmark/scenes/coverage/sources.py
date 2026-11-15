@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 import witwin.maxwell as mw
-from benchmark.scenes._common import HALF_SPAN, base_scene, with_plot_monitors
+from benchmark.scenes._common import DX, HALF_SPAN, base_scene, with_plot_monitors
 from benchmark.scenes.planned import FREQUENCIES, PULSE, _make, _observed, _source_scene
 
 CW_DRIVE = mw.CW(frequency=FREQUENCIES[0])
@@ -16,91 +16,114 @@ def _tfsf_scene(*, bounds, geometry=None, flux_positions) -> mw.Scene:
     """Plane wave injected through a TFSF box, optionally around a scatterer."""
     scene = base_scene()
     if geometry is not None:
-        scene.add_structure(
-            mw.Structure(geometry=geometry, material=mw.Material(eps_r=4.0), name="scatterer")
-        )
-    scene.add_source(
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=geometry, material=mw.Material(eps_r=4.0), name="scatterer"),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(0.0, 0.0, 1.0),
             polarization="Ex",
             source_time=PULSE,
             injection=mw.TFSF(bounds=bounds),
             name="tfsf",
-        )
-    )
+        ),
+    ))
     return _observed(scene, flux_positions=flux_positions)
 
 
 def _higher_order_waveguide_scene() -> mw.Scene:
     """Straight guide launched and probed on the mode_index=1 order."""
-    scene = base_scene()
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0, 0, 0), size=(2 * HALF_SPAN, 0.30, 0.15)),
-            material=mw.Material(eps_r=4.0),
-            name="waveguide",
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(-0.35, 0, 0),
-            size=(0, 0.525, 0.375),
-            mode_index=1,
-            polarization="Ez",
-            source_time=PULSE,
-            name="mode",
-        )
-    )
-    scene.add_monitor(
-        mw.FinitePlaneMonitor(
-            "field",
-            position=(0.20, 0, 0),
-            size=(0, 0.525, 0.375),
-            fields=("Ex", "Ey", "Ez"),
-            frequencies=FREQUENCIES,
-        )
-    )
-    scene.add_monitor(
-        mw.ModeMonitor(
-            "mode_out",
-            position=(0.35, 0, 0),
-            size=(0, 0.525, 0.375),
-            mode_index=1,
-            polarization="Ez",
-            frequencies=FREQUENCIES,
-        )
-    )
-    scene.add_monitor(
-        mw.FluxMonitor(
-            "reflected", axis="x", position=-0.5, frequencies=FREQUENCIES, normal_direction="-"
-        )
-    )
-    scene.add_monitor(
-        mw.FluxMonitor("transmitted", axis="x", position=0.5, frequencies=FREQUENCIES)
-    )
+    base = base_scene()
+    # On the shared 25 mm grid the mode_index=1 order (n_eff 1.878 at 2 GHz)
+    # has ~3.2 cells per guided wavelength: sin(beta*dx/2) = 0.984, so 2 GHz sits
+    # ~1.6% below the Yee axial band edge (~2.03 GHz), the axial group velocity
+    # is ~0.18 of its low-frequency value and the upper half of the pulse band
+    # cannot propagate. The 2 GHz spectrum then changes by 19-275% per run-time
+    # doubling (8x to 64x). At 12.5 mm (sin(beta*dx/2) = 0.495) the eps 4 core
+    # still had only 6.0 cells per wavelength along the guide and the guided
+    # phase moved 0.6 rad between 8.3 and 6.2 mm (diag17). The mode needs 2 GHz
+    # (mode_index=1), so the grid is refined, not the band: 6.25 mm along the
+    # guide (12.0 cells per wavelength in the core), 12.5 mm across it (the
+    # guided field's transverse period is 18 cells there). Against an isotropic
+    # 6.25 mm grid this moves the display field by 4.7% (0.002 rad) and n_eff by
+    # 8e-4, against 143% (1.66 rad) for the 12.5 mm grid (bench-respec
+    # 2026-11-12); 16 absorber layers.
+    scene = mw.Scene(
+                domain=base.domain,
+                grid=mw.GridSpec.anisotropic(DX / 4, DX / 2, DX / 2),
+                boundary=mw.BoundarySpec.pml(num_layers=16),
+                subpixel=base.subpixel,
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0, 0, 0), size=(2 * HALF_SPAN, 0.30, 0.15)),
+                material=mw.Material(eps_r=4.0),
+                name="waveguide",
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(-0.35, 0, 0),
+                size=(0, 0.525, 0.375),
+                mode_index=1,
+                polarization="Ez",
+                source_time=PULSE,
+                name="mode",
+            ),
+            ),
+                monitors=(
+            mw.FinitePlaneMonitor(
+                "field",
+                position=(0.20, 0, 0),
+                size=(0, 0.525, 0.375),
+                fields=("Ex", "Ey", "Ez"),
+                frequencies=FREQUENCIES,
+            ),
+            mw.ModeMonitor(
+                "mode_out",
+                position=(0.35, 0, 0),
+                size=(0, 0.525, 0.375),
+                mode_index=1,
+                polarization="Ez",
+                frequencies=FREQUENCIES,
+            ),
+            mw.FluxMonitor(
+                "reflected", axis="x", position=-0.5, frequencies=FREQUENCIES, normal_direction="-"
+            ),
+            mw.FluxMonitor("transmitted", axis="x", position=0.5, frequencies=FREQUENCIES),
+            ),
+            )
     return with_plot_monitors(scene, frequencies=FREQUENCIES)
 
 
 def _magnetic_current_scene() -> mw.Scene:
     """Uniform Mz volume current in vacuum (adapter maps M* to Tidy3D H* components)."""
     coords = np.linspace(-0.06, 0.06, 5)
-    scene = base_scene().add_source(
-        mw.CustomCurrentSource(
-            mw.CurrentDataset(
+    scene = base_scene()
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomCurrentSource(
+            mw.sources.CurrentDataset(
                 (coords, coords, coords - 0.2), {"Mz": np.ones((5, 5, 5))}
             ),
             source_time=PULSE,
             name="magnetic_current",
-        )
-    )
-    scene.add_monitor(mw.FluxMonitor("radiated", axis="z", position=0.3, frequencies=FREQUENCIES))
+        ),
+    ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.FluxMonitor("radiated", axis="z", position=0.3, frequencies=FREQUENCIES),
+    ))
     # A z-directed magnetic dipole radiates a phi-directed E field, i.e. Ey on the y=0 cut.
     return _observed(scene, axis="y", position=0.0, component="Ey")
 
 
 def _ricker_axis_x_anisotropic_scene() -> mw.Scene:
     """Negative-x Ricker launch through a slab whose Ez response uses eps_zz."""
-    scene = base_scene().add_structure(
+    scene = base_scene()
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=mw.Box(
                 position=(0.0, 0.0, 0.0),
@@ -108,16 +131,17 @@ def _ricker_axis_x_anisotropic_scene() -> mw.Scene:
             ),
             material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
             name="axis_x_anisotropic_slab",
-        )
-    )
-    scene.add_source(
+        ),
+    ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(-1.0, 0.0, 0.0),
             polarization="Ez",
-            source_time=mw.RickerWavelet(frequency=FREQUENCIES[0]),
+            source_time=mw.sources.RickerWavelet(frequency=FREQUENCIES[0]),
             name="ricker_axis_x",
-        )
-    )
+        ),
+    ))
     return _observed(
         scene,
         axis="y",
@@ -164,14 +188,14 @@ SOURCE_COVERAGE_SCENARIOS = (
         "sources",
         "continuous-wave plane wave in vacuum",
         lambda: _observed(
-            base_scene().add_source(
+            base_scene().updated(sources=(
                 mw.PlaneWave(
                     direction=(0, 0, 1),
                     polarization="Ex",
                     source_time=CW_DRIVE,
                     name="cw_plane_wave",
-                )
-            )
+                ),
+            ))
         ),
         run_time_factor=CW_RUN_TIME_FACTOR,
     ),
@@ -195,6 +219,7 @@ SOURCE_COVERAGE_SCENARIOS = (
         "sources",
         "TFSF box in vacuum (zero scattered field outside the box)",
         lambda: _tfsf_scene(bounds=((-0.30, 0.30),) * 3, flux_positions=(-0.40, 0.40)),
+        flux_change_scale="incident",
     ),
     _make(
         "tfsf_dielectric_sphere",
@@ -205,6 +230,7 @@ SOURCE_COVERAGE_SCENARIOS = (
             geometry=mw.Sphere(position=(0, 0, 0), radius=0.16),
             flux_positions=(-0.40, 0.40),
         ),
+        run_time_factor=64.0,  # 8x the default window: the ring-down settles (benchmark-references-2026-11-11)
     ),
     _make(
         "mode_source_higher_order",

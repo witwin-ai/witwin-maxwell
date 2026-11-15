@@ -6,27 +6,26 @@ import witwin.maxwell as mw
 
 def _build_mode_source_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
-            material=mw.Material(eps_r=12.0),
-            name='core',
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(-0.32, 0.0, 0.0),
-            size=(0.0, 0.56, 0.56),
-            polarization="Ez",
-            source_time=mw.CW(frequency=1.0e9, amplitude=50.0),
-            name="mode0",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
+                material=mw.Material(eps_r=12.0),
+                name='core',
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(-0.32, 0.0, 0.0),
+                size=(0.0, 0.56, 0.56),
+                polarization="Ez",
+                source_time=mw.CW(frequency=1.0e9, amplitude=50.0),
+                name="mode0",
+            ),
+            ),
+            )
     return scene
 
 

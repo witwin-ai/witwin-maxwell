@@ -1,4 +1,5 @@
 """Requested spectra allocate and differentiate only selected Yee components."""
+from dataclasses import replace
 import pytest
 import torch
 import witwin.maxwell as mw
@@ -45,8 +46,8 @@ def test_omitted_components_cover_coarsened_and_split_native_launches(frequencie
 def test_selected_spectrum_storage_and_values_match_full_dft(components, frequency_count):
     frequencies = tuple(.9e9 + i * .01e9 for i in range(frequency_count))
     sims = [simulation(i, steps=19, frequencies=frequencies) for i in range(2)]
-    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("drive",)),
-        outputs=mw.BatchOutput(fields=components), execution=mw.BatchExecution(
+    batch = mw.Simulation.batch(sims, variation=mw.execution.BatchVariation(sources=("drive",)),
+        outputs=mw.execution.BatchOutput(fields=components), execution=mw.execution.BatchExecution(
             devices=("cuda:0",), batch_size=2, graph="required", graph_steps=8))
     with batch.prepare() as prepared:
         results = prepared.run()
@@ -60,29 +61,31 @@ def test_selected_spectrum_storage_and_values_match_full_dft(components, frequen
             assert solver._dft_empty_field.untyped_storage().nbytes() == 0
         repeated = prepared.run()
     for i, sim in enumerate(sims):
-        sim.config.full_field_dft = True
+        sim.config = replace(sim.config, full_field_dft=True)
         reference = sim.run()
         assert set(results[i].field("E")) == {c.upper() for c in components}
         for component in components:
-            torch.testing.assert_close(results[i].tensor(component), reference.tensor(component), rtol=1e-4, atol=1e-6)
-            torch.testing.assert_close(repeated[i].tensor(component), results[i].tensor(component), rtol=0, atol=0)
+            torch.testing.assert_close(results[i].field(component).values, reference.field(component).values,
+                                       rtol=1e-4, atol=1e-6)
+            torch.testing.assert_close(repeated[i].field(component).values, results[i].field(component).values,
+                                       rtol=0, atol=0)
 
 
 def test_selected_spectrum_gradient_matches_source_scale_finite_difference():
     scales = torch.tensor([.7, -1.2], device="cuda:0", requires_grad=True)
     batch = mw.Simulation.batch(simulation(steps=27, frequencies=(.9e9, 1e9)),
-        parameters=mw.BatchParameters(source_scales={"drive": scales}),
-        outputs=mw.BatchOutput(fields=("Ez",)), execution=mw.BatchExecution(
+        parameters=mw.execution.BatchParameters(source_scales={"drive": scales}),
+        outputs=mw.execution.BatchOutput(fields=("Ez",)), execution=mw.execution.BatchExecution(
             devices=("cuda:0",), batch_size=2, graph="required", memory_limit_bytes=128 * 1024**2))
     with batch.prepare() as prepared:
         results = prepared.run()
-        loss = sum(r.tensor("Ez").abs().square().sum() for r in results)
+        loss = sum(r.field("Ez").values.abs().square().sum() for r in results)
         loss.backward()
         actual = scales.grad.clone()
         def objective(value):
             with torch.no_grad():
-                output = prepared.run(parameters=mw.BatchParameters(source_scales={"drive": value}))
-                return sum(r.tensor("Ez").abs().square().sum() for r in output)
+                output = prepared.run(parameters=mw.execution.BatchParameters(source_scales={"drive": value}))
+                return sum(r.field("Ez").values.abs().square().sum() for r in output)
         for i in range(2):
             delta = torch.zeros_like(scales)
             delta[i] = .002

@@ -59,12 +59,10 @@ def main():
         lateral = [-.2,-.15,-.12,-.08] + np.linspace(-.06,.06,m+1).tolist() + [.08,.12,.15,.2]
         vertical = [-.2,-.15,-.12,-.08,-.04,-.02,0.,.02,.04,.08,.12,.15,.2]
         scene = mw.Scene(domain=template.scene.domain, grid=mw.GridSpec.custom(lateral,lateral,vertical),
-                         boundary=template.scene.boundary,device='cuda')
-        for structure in template.scene.structures:
-            scene.add_structure(structure)
-        for source in template.scene.sources:
-            scene.add_source(source)
-        prepared_grid = mw.Simulation.fdfd(scene,frequency=.9e9).prepare().solver.scene
+                         boundary=template.scene.boundary)
+        scene = scene.updated(structures=(*scene.structures, *template.scene.structures))
+        scene = scene.updated(sources=(*scene.sources, *template.scene.sources))
+        prepared_grid = mw.Simulation.fdfd(scene,frequencies=.9e9).prepare().solver.scene
         nx, ny, nz = prepared_grid.Nx, prepared_grid.Ny, prepared_grid.Nz
         start = int((prepared_grid.x+.06).abs().argmin())
         plane = int(prepared_grid.z.abs().argmin())
@@ -72,8 +70,8 @@ def main():
         indices = [(start+i)*ny*nz+(start+j)*nz+plane for j in range(m+1) for i in range(m)]
         indices += [(nx-1)*ny*nz+(start+i)*(ny-1)*nz+(start+j)*nz+plane for j in range(m) for i in range(m+1)]
         design = torch.tensor(indices,device='cuda',dtype=torch.int64)
-        config = replace(template.config.local_response,design=mw.LocalDesignRegion(indices=design),rhs_batch_size=32)
-        response,cold = timed(lambda: mw.Simulation.fdfd(scene,frequency=.9e9,solver=mw.GMRES(solver_type='direct',precision='double'),local_response=config).prepare())
+        config = replace(template.config.local_response,design=mw.fdfd.LocalDesignRegion(indices=design),rhs_batch_size=32)
+        response,cold = timed(lambda: mw.Simulation.fdfd(scene,frequencies=.9e9,config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type='direct',precision='double'),local_response=config)).prepare())
         with response:
             n=design.numel()
             permutation=torch.searchsorted(response.design_indices,design)

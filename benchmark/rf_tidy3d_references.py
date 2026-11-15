@@ -3,14 +3,14 @@
 Reference-solver policy (audit 2026-07-18, section 3): for the RF port and antenna
 families an external reference solver covers, the cross-reference is generated
 through the *existing* benchmark adapter (``witwin.maxwell.adapters``, exported via
-``Scene.to_tidy3d``) and cached under ``benchmark/cache/`` alongside the standard
+``scene_to_tidy3d``) and cached under ``benchmark/cache/`` alongside the standard
 field-vs-reference scenes. The analytic transmission-line / waveguide / dipole
 reference remains the binding first-line gate regardless.
 
 M3 wiring (this module): the generation path is now REAL, not a pending-marker
 stub. For each target scene it:
 
-1. builds the ``Scene`` and exports it through the adapter (``Scene.to_tidy3d``),
+1. builds the ``Scene`` and exports it through the adapter (``scene_to_tidy3d``),
    capturing any adapter ``NotImplementedError`` (unsupported construct);
 2. gates the export on being *physically runnable* -- a reference simulation with
    zero sources cannot produce a scattering matrix or a radiation pattern, so a
@@ -51,6 +51,7 @@ from pathlib import Path
 
 from benchmark.cache import cache_path, save_tidy3d_result
 from benchmark.paths import CACHE_DIR, RESULTS_MD
+from witwin.maxwell.adapters.tidy3d import scene_to_tidy3d
 
 # Per-scene cloud-cost ceiling (FlexCredits). Mirrors the standard runner budget;
 # a reference whose estimate exceeds this is refused rather than run.
@@ -67,7 +68,7 @@ NO_CLOUD_ENV_VAR = "WITWIN_BENCHMARK_NO_CLOUD"
 def _coax_thru():
     from benchmark.scenes.rf.coax_thru import coax_thru_scene
 
-    scene = coax_thru_scene(dx=0.01, device="cpu")
+    scene = coax_thru_scene(dx=0.01)
     freqs = (0.6e9, 1.0e9, 1.6e9)
     return scene, freqs
 
@@ -82,7 +83,7 @@ def _rectangular_waveguide():
     # of the band). The reference solver auto-meshes, so this only sets the exported
     # structure resolution; the TE10 ModeSource makes the export genuinely runnable.
     freqs = sweep_frequencies()
-    scene = rectangular_waveguide_reference_scene(dx=0.05, frequencies=freqs, device="cpu")
+    scene = rectangular_waveguide_reference_scene(dx=0.05, frequencies=freqs)
     return scene, freqs
 
 
@@ -98,7 +99,7 @@ def _lossy_waveguide_attenuation():
     # and two forward ModeMonitors a known distance apart give the conductor attenuation
     # alpha from the forward-mode decay in ONE run (no second length needed).
     freqs = design_frequencies()
-    scene = lossy_waveguide_reference_scene(dx=0.0025, frequencies=freqs, device="cpu")
+    scene = lossy_waveguide_reference_scene(dx=0.0025, frequencies=freqs)
     return scene, freqs
 
 
@@ -108,7 +109,7 @@ def _lumped_open_short_match():
         default_frequencies,
     )
 
-    scene = coax_sol_scene("matched", dx=0.01, device="cpu")
+    scene = coax_sol_scene("matched", dx=0.01)
     return scene, default_frequencies()
 
 
@@ -119,7 +120,7 @@ def _half_wave_dipole():
     )
 
     design = 3.0e9
-    scene = half_wave_dipole_scene(design_frequency=design, device="cpu")
+    scene = half_wave_dipole_scene(design_frequency=design)
     return scene, default_frequencies(design)
 
 
@@ -127,7 +128,7 @@ def _patch():
     from benchmark.scenes.antenna.patch import patch_antenna_scene
 
     freqs = tuple(f * 1e9 for f in (2.9, 3.0, 3.1, 3.2, 3.3, 3.4, 3.5))
-    scene = patch_antenna_scene(frequencies=freqs, device="cpu")
+    scene = patch_antenna_scene(frequencies=freqs)
     return scene, freqs
 
 
@@ -172,7 +173,7 @@ def _export_simulation(scene, frequencies):
     """Export a Scene through the adapter. Raises on an unsupported construct."""
     domain_size = max(hi - lo for lo, hi in scene.domain.bounds)
     run_time = 20.0 * domain_size / 299_792_458.0
-    return scene.to_tidy3d(frequencies=tuple(frequencies), run_time=run_time)
+    return scene_to_tidy3d(scene, frequencies=tuple(frequencies), run_time=run_time)
 
 
 def _runnable_reason(td_sim) -> tuple[bool, str]:
@@ -340,7 +341,7 @@ def _results_section(records: list[ReferenceRecord]) -> str:
         "External reference-solver cross-reference generation for the RF / antenna "
         "scenes (M3, 2026-07-19). Each row is the honest outcome of an adapter-driven "
         "generation attempt (`python -m benchmark.rf_tidy3d_references`): the scene is "
-        "exported through `Scene.to_tidy3d`, gated on being physically runnable (>= 1 "
+        "exported through `scene_to_tidy3d`, gated on being physically runnable (>= 1 "
         "source), and only then cost-estimated and cloud-run. A `pending-generation` "
         "status is NOT a fabricated comparison -- it records that no numerical "
         "cross-reference exists yet and names the concrete reason; the analytic "

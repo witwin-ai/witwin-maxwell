@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import pytest
 import torch
 
@@ -28,96 +29,98 @@ def _wire_simulation(
 ):
     uses_pml = boundary is not None
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+        subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.20, 0.20),) * 3 if uses_pml else ((-0.12, 0.12),) * 3),
         grid=mw.GridSpec.uniform(0.04),
         boundary=mw.BoundarySpec.none() if boundary is None else boundary,
-        device="cuda",
     )
     if density is not None:
-        scene.add_material_region(
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
             mw.MaterialRegion(
                 name="host",
                 geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.48, 0.48, 0.48)),
                 density=density,
                 eps_bounds=(1.0, 3.0),
                 mu_bounds=(1.0, 1.0),
-            )
-        )
-    scene.add_thin_wire(
-        mw.ThinWire(
+            ),
+        ))
+    scene = scene.updated(thin_wires=(
+        *scene.thin_wires,
+        mw.rf.ThinWire(
             name="wire",
             points=((0.0, 0.0, -0.08), (0.0, 0.0, 0.08)),
             radius=radius,
-            conductor=mw.WireConductor.pec(),
-        )
-    )
-    scene.add_source(
+            conductor=mw.rf.WireConductor.pec(),
+        ),
+    ), sources=(
+        *scene.sources,
         mw.PointDipole(
             name="drive",
             position=(0.04, 0.0, 0.0),
             polarization="Ez",
             width=0.04,
             source_time=mw.CW(frequency=frequency, amplitude=10.0),
-        )
-    )
-    scene.add_monitor(
-        mw.WireMonitor(
+        ),
+    ), monitors=(
+        *scene.monitors,
+        mw.rf.WireMonitor(
             name="wire_state",
             wire="wire",
             frequencies=(frequency,),
             quantities=("current", "charge"),
-        )
-    )
+        ),
+    ))
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=(frequency,),
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
-    simulation.config.adjoint_checkpoint_stride = checkpoint_stride
+    simulation.config = replace(simulation.config, adjoint_checkpoint_stride=checkpoint_stride)
     return simulation
 
 
 def _branch_solver():
-    junction = mw.WireEnd.node("J")
+    junction = mw.rf.WireEnd.node("J")
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
         grid=mw.GridSpec.uniform(0.04),
         boundary=mw.BoundarySpec.none(),
-        device="cuda",
     )
-    for name, points, endpoints in (
+    scene = scene.updated(thin_wires=(
+        *scene.thin_wires,
+        *(mw.rf.ThinWire(
+              name=name,
+              points=points,
+              radius=2.0e-3,
+              conductor=mw.rf.WireConductor.pec(),
+              endpoints=endpoints,
+          ) for name, points, endpoints in (
         (
             "a_top",
             ((0.0, 0.0, 0.0), (0.0, 0.08, 0.0)),
-            (junction, mw.WireEnd.open()),
+            (junction, mw.rf.WireEnd.open()),
         ),
         (
             "b_left",
             ((-0.08, 0.0, 0.0), (0.0, 0.0, 0.0)),
-            (mw.WireEnd.open(), junction),
+            (mw.rf.WireEnd.open(), junction),
         ),
         (
             "c_right",
             ((0.0, 0.0, 0.0), (0.08, 0.0, 0.0)),
-            (junction, mw.WireEnd.open()),
+            (junction, mw.rf.WireEnd.open()),
         ),
-    ):
-        scene.add_thin_wire(
-            mw.ThinWire(
-                name=name,
-                points=points,
-                radius=2.0e-3,
-                conductor=mw.WireConductor.pec(),
-                endpoints=endpoints,
-            )
-        )
+    )),
+    ))
     return mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=2),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2)),
     ).prepare().solver
 
 

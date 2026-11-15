@@ -25,14 +25,13 @@ def fixture():
                     position=torch.zeros(3, dtype=torch.float64),
                     size=torch.tensor((0.02, 0.02, 0.0), dtype=torch.float64),
                 ),
-                material=mw.CopperFoil(
+                material=mw.media.CopperFoil(
                     thickness=2e-6, frequency_range=(0.5e9, 2e9)
                 ),
             ),
         ),
-        device="cpu",
     )
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     plan = FDTDPartitionPlan(
         (prepared.Nx, prepared.Ny, prepared.Nz),
         ("cuda:0", "cuda:1"),

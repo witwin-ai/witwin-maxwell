@@ -36,27 +36,35 @@ def build_simulation(workload, *, index=0, identical=False, device="cuda:0"):
     """Build a fixed-grid problem with a bounded local material perturbation."""
     cell = 0.6 / workload.grid_cells
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3),) * 3),
-        grid=mw.GridSpec.uniform(cell),
-        boundary=mw.BoundarySpec.pml(num_layers=4), device=device,
-    )
-    scene.add_structure(mw.Structure(
-        name="design",
-        geometry=mw.Box(position=(0.08, 0.0, 0.0), size=(0.06, 0.06, 0.06), device=device),
-        material=mw.Material(eps_r=2.0 if identical else 2.0 + 0.01 * index),
-    ))
-    scene.add_source(mw.PointDipole(
-        name="drive", position=(-0.1, 0.0, 0.0), polarization="Ez", width=1.5 * cell,
-        source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.5e9),
-    ))
-    scene.add_monitor(mw.PointMonitor(
-        name="probe", position=(0.15, 0.0, 0.0), fields=("Ez",),
-    ))
+                domain=mw.Domain(bounds=((-0.3, 0.3),) * 3),
+                grid=mw.GridSpec.uniform(cell),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                structures=(
+            mw.Structure(
+                name="design",
+                geometry=mw.Box(position=(0.08, 0.0, 0.0), size=(0.06, 0.06, 0.06), device=device),
+                material=mw.Material(eps_r=2.0 if identical else 2.0 + 0.01 * index),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                name="drive", position=(-0.1, 0.0, 0.0), polarization="Ez", width=1.5 * cell,
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.5e9),
+            ),
+            ),
+                monitors=(
+            mw.PointMonitor(
+                name="probe", position=(0.15, 0.0, 0.0), fields=("Ez",),
+            ),
+            ),
+            )
     return mw.Simulation.fdtd(
         scene, frequencies=workload.frequencies,
-        run_time=mw.TimeConfig(time_steps=workload.time_steps, dt=cell / (2 * 3e8)),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        cuda_graph=False, full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=workload.time_steps, dt=cell / (2 * 3e8)),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            cuda_graph=False, full_field_dft=False, device=device,
+        ),
     )
 
 
@@ -226,7 +234,7 @@ def _baseline_worker(connection, workload, device, mode, concurrency, native_gra
                     if prepared_batch is not None:
                         prepared_batch.close()
                     simulations = [build_simulation(workload, index=i, identical=identical, device=device) for i in indices]
-                    prepared_batch = mw.Simulation.batch(simulations, execution=mw.BatchExecution(
+                    prepared_batch = mw.Simulation.batch(simulations, execution=mw.execution.BatchExecution(
                         devices=(device,), batch_size=min(concurrency, len(indices)),
                         max_batch_size=concurrency, graph=native_graph)).prepare()
                     prepared_key = key
@@ -239,7 +247,7 @@ def _baseline_worker(connection, workload, device, mode, concurrency, native_gra
                     del item
             elif mode == "run_many":
                 simulations = [build_simulation(workload, index=i, identical=identical, device=device) for i in indices]
-                sequence = mw.run_many(simulations, execution=mw.MultiGPUExecution.ensemble(
+                sequence = mw.execution.run_many(simulations, execution=mw.execution.MultiGPUExecution.ensemble(
                     devices=(device,), max_concurrency=concurrency,
                     per_device_concurrency=concurrency,
                 ))

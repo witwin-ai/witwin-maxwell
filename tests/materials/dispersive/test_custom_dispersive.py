@@ -5,6 +5,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.core import Box, Sphere
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials, compile_relative_materials
 
 _FREQUENCY = 1.0e9
 
@@ -12,17 +13,15 @@ _FREQUENCY = 1.0e9
 _NODE_SAMPLING = mw.SubpixelSpec(samples=1, averaging="arithmetic")
 
 
-def _build_scene(*structures, device="cpu", sources=(), subpixel_samples=None):
+def _build_scene(*structures, sources=(), subpixel_samples=None):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device=device,
         sources=list(sources),
-        **({} if subpixel_samples is None else {"subpixel_samples": subpixel_samples}),
+        **({} if subpixel_samples is None else {"subpixel": subpixel_samples}),
     )
-    for structure in structures:
-        scene.add_structure(structure)
+    scene = scene.updated(structures=(*scene.structures, *structures))
     return scene
 
 
@@ -60,36 +59,36 @@ def _piecewise_reference_boxes():
 
 def test_custom_pole_parameter_grid_validation():
     with pytest.raises(TypeError, match="torch.Tensor"):
-        mw.CustomDebyePole(delta_eps=3.0, tau=1.0e-10)
+        mw.media.CustomDebyePole(delta_eps=3.0, tau=1.0e-10)
     with pytest.raises(ValueError, match="3D"):
-        mw.CustomDebyePole(delta_eps=torch.ones(4, 4), tau=1.0e-10)
+        mw.media.CustomDebyePole(delta_eps=torch.ones(4, 4), tau=1.0e-10)
     with pytest.raises(ValueError, match=">= 0"):
-        mw.CustomLorentzPole(
+        mw.media.CustomLorentzPole(
             delta_eps=torch.full((2, 2, 2), -1.0),
             resonance_frequency=1.0e9,
             gamma=1.0e8,
         )
     with pytest.raises(ValueError, match="positive value"):
-        mw.CustomDrudePole(plasma_frequency=torch.zeros(2, 2, 2), gamma=1.0e8)
+        mw.media.CustomDrudePole(plasma_frequency=torch.zeros(2, 2, 2), gamma=1.0e8)
     with pytest.raises(ValueError, match="tau"):
-        mw.CustomDebyePole(delta_eps=torch.ones(2, 2, 2), tau=0.0)
+        mw.media.CustomDebyePole(delta_eps=torch.ones(2, 2, 2), tau=0.0)
     with pytest.raises(ValueError, match="finite"):
-        mw.CustomDebyePole(delta_eps=torch.full((2, 2, 2), float("nan")), tau=1.0e-10)
+        mw.media.CustomDebyePole(delta_eps=torch.full((2, 2, 2), float("nan")), tau=1.0e-10)
 
 
 def test_custom_pole_susceptibility_matches_scalar_pole():
     omega = 2.0 * np.pi * _FREQUENCY
-    debye = mw.CustomDebyePole(delta_eps=torch.full((2, 2, 2), 3.0), tau=1.0e-10)
+    debye = mw.media.CustomDebyePole(delta_eps=torch.full((2, 2, 2), 3.0), tau=1.0e-10)
     assert torch.allclose(
         debye.susceptibility(omega),
         torch.full((2, 2, 2), mw.DebyePole(delta_eps=3.0, tau=1.0e-10).susceptibility(omega)),
     )
-    drude = mw.CustomDrudePole(plasma_frequency=torch.full((2, 2, 2), 2.0e9), gamma=1.0e8)
+    drude = mw.media.CustomDrudePole(plasma_frequency=torch.full((2, 2, 2), 2.0e9), gamma=1.0e8)
     assert torch.allclose(
         drude.susceptibility(omega),
         torch.full((2, 2, 2), mw.DrudePole(plasma_frequency=2.0e9, gamma=1.0e8).susceptibility(omega)),
     )
-    lorentz = mw.CustomLorentzPole(
+    lorentz = mw.media.CustomLorentzPole(
         delta_eps=torch.full((2, 2, 2), 2.0), resonance_frequency=2.0e9, gamma=2.0e8
     )
     assert torch.allclose(
@@ -109,7 +108,7 @@ def test_material_rejects_non_pole_entries():
 def test_custom_pole_material_blocks_scalar_frequency_evaluation():
     material = mw.Material(
         eps_r=2.0,
-        debye_poles=(mw.CustomDebyePole(delta_eps=torch.ones(2, 2, 2), tau=1.0e-10),),
+        debye_poles=(mw.media.CustomDebyePole(delta_eps=torch.ones(2, 2, 2), tau=1.0e-10),),
     )
     assert material.is_dispersive
     assert material.has_custom_poles
@@ -117,7 +116,7 @@ def test_custom_pole_material_blocks_scalar_frequency_evaluation():
         material.relative_permittivity(_FREQUENCY)
 
     magnetic = mw.Material(
-        mu_debye_poles=(mw.CustomDebyePole(delta_eps=torch.ones(2, 2, 2), tau=1.0e-10),),
+        mu_debye_poles=(mw.media.CustomDebyePole(delta_eps=torch.ones(2, 2, 2), tau=1.0e-10),),
     )
     with pytest.raises(NotImplementedError, match="spatially-varying"):
         magnetic.relative_permeability(_FREQUENCY)
@@ -126,28 +125,28 @@ def test_custom_pole_material_blocks_scalar_frequency_evaluation():
 def test_custom_pole_requires_box_geometry():
     material = mw.Material(
         eps_r=2.0,
-        debye_poles=(mw.CustomDebyePole(delta_eps=torch.ones(2, 2, 2), tau=1.0e-10),),
+        debye_poles=(mw.media.CustomDebyePole(delta_eps=torch.ones(2, 2, 2), tau=1.0e-10),),
     )
     scene = _build_scene(
         mw.Structure(geometry=Sphere(position=(0.0, 0.0, 0.0), radius=0.2), material=material)
     )
     with pytest.raises(ValueError, match="Box structure geometry only"):
-        prepare_scene(scene).compile_materials()
+        compile_materials(prepare_scene(scene, device="cpu"))
 
 
 def test_uniform_custom_debye_matches_scalar_debye_compiled_model():
     custom = mw.Material(
         eps_r=2.0,
-        debye_poles=(mw.CustomDebyePole(delta_eps=torch.full(_GRID_SHAPE, 3.0), tau=1.0e-10),),
+        debye_poles=(mw.media.CustomDebyePole(delta_eps=torch.full(_GRID_SHAPE, 3.0), tau=1.0e-10),),
     )
     scalar = mw.Material.debye(eps_inf=2.0, delta_eps=3.0, tau=1.0e-10)
 
-    eps_custom, _ = prepare_scene(
-        _build_scene(mw.Structure(geometry=_SLAB_BOX, material=custom))
-    ).compile_relative_materials(frequency=_FREQUENCY)
-    eps_scalar, _ = prepare_scene(
-        _build_scene(mw.Structure(geometry=_SLAB_BOX, material=scalar))
-    ).compile_relative_materials(frequency=_FREQUENCY)
+    eps_custom, _ = compile_relative_materials(prepare_scene(
+        _build_scene(mw.Structure(geometry=_SLAB_BOX, material=custom)), device="cpu"
+    ), frequency=_FREQUENCY)
+    eps_scalar, _ = compile_relative_materials(prepare_scene(
+        _build_scene(mw.Structure(geometry=_SLAB_BOX, material=scalar)), device="cpu"
+    ), frequency=_FREQUENCY)
 
     assert torch.allclose(eps_custom, eps_scalar, rtol=1e-6, atol=1e-6)
 
@@ -157,18 +156,18 @@ def test_custom_parameter_grid_is_resampled_to_node_coverage():
     # the same uniform per-node values.
     coarse = mw.Material(
         eps_r=2.0,
-        debye_poles=(mw.CustomDebyePole(delta_eps=torch.full((14, 30, 30), 3.0), tau=1.0e-10),),
+        debye_poles=(mw.media.CustomDebyePole(delta_eps=torch.full((14, 30, 30), 3.0), tau=1.0e-10),),
     )
     exact = mw.Material(
         eps_r=2.0,
-        debye_poles=(mw.CustomDebyePole(delta_eps=torch.full(_GRID_SHAPE, 3.0), tau=1.0e-10),),
+        debye_poles=(mw.media.CustomDebyePole(delta_eps=torch.full(_GRID_SHAPE, 3.0), tau=1.0e-10),),
     )
-    eps_coarse, _ = prepare_scene(
-        _build_scene(mw.Structure(geometry=_SLAB_BOX, material=coarse))
-    ).compile_relative_materials(frequency=_FREQUENCY)
-    eps_exact, _ = prepare_scene(
-        _build_scene(mw.Structure(geometry=_SLAB_BOX, material=exact))
-    ).compile_relative_materials(frequency=_FREQUENCY)
+    eps_coarse, _ = compile_relative_materials(prepare_scene(
+        _build_scene(mw.Structure(geometry=_SLAB_BOX, material=coarse)), device="cpu"
+    ), frequency=_FREQUENCY)
+    eps_exact, _ = compile_relative_materials(prepare_scene(
+        _build_scene(mw.Structure(geometry=_SLAB_BOX, material=exact)), device="cpu"
+    ), frequency=_FREQUENCY)
     assert torch.allclose(eps_coarse, eps_exact, rtol=1e-5, atol=1e-6)
 
 
@@ -179,7 +178,7 @@ def test_custom_parameter_grid_is_resampled_to_node_coverage():
             mw.Material(
                 eps_r=2.0,
                 lorentz_poles=(
-                    mw.CustomLorentzPole(
+                    mw.media.CustomLorentzPole(
                         delta_eps=_split_grid(2.0, 0.5),
                         resonance_frequency=2.0e9,
                         gamma=2.0e8,
@@ -193,7 +192,7 @@ def test_custom_parameter_grid_is_resampled_to_node_coverage():
             mw.Material(
                 eps_r=1.0,
                 drude_poles=(
-                    mw.CustomDrudePole(plasma_frequency=_split_grid(2.0e9, 1.0e9), gamma=1.0e8),
+                    mw.media.CustomDrudePole(plasma_frequency=_split_grid(2.0e9, 1.0e9), gamma=1.0e8),
                 ),
             ),
             mw.Material.drude(eps_inf=1.0, plasma_frequency=2.0e9, gamma=1.0e8),
@@ -215,8 +214,8 @@ def test_graded_custom_pole_matches_piecewise_uniform_reference(
         subpixel_samples=_NODE_SAMPLING,
     )
 
-    eps_graded, _ = prepare_scene(graded_scene).compile_relative_materials(frequency=_FREQUENCY)
-    eps_reference, _ = prepare_scene(reference_scene).compile_relative_materials(frequency=_FREQUENCY)
+    eps_graded, _ = compile_relative_materials(prepare_scene(graded_scene, device="cpu"), frequency=_FREQUENCY)
+    eps_reference, _ = compile_relative_materials(prepare_scene(reference_scene, device="cpu"), frequency=_FREQUENCY)
 
     assert torch.allclose(eps_graded, eps_reference, rtol=1e-5, atol=1e-6)
 
@@ -226,22 +225,23 @@ def test_fdtd_uniform_custom_drude_matches_scalar_drude_run():
     def run(material):
         scene = _build_scene(
             mw.Structure(geometry=_SLAB_BOX, material=material),
-            device="cuda",
             sources=(_plane_wave(),),
         )
-        scene.add_monitor(mw.PointMonitor("probe", (0.5, 0.0, 0.0), fields=("Ez",)))
+        scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.5, 0.0, 0.0), fields=("Ez",))))
         result = mw.Simulation.fdtd(
             scene,
             frequencies=[_FREQUENCY],
-            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-            spectral_sampler=mw.SpectralSampler(window="hanning"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                full_field_dft=False,
+            ),
         ).run()
-        return result.monitor("probe")["data"]
+        return result.monitor("probe", freq_index=0).sel(component="Ez").values
 
     custom = mw.Material(
         eps_r=1.0,
-        drude_poles=(mw.CustomDrudePole(plasma_frequency=torch.full(_GRID_SHAPE, 2.0e9), gamma=1.0e8),),
+        drude_poles=(mw.media.CustomDrudePole(plasma_frequency=torch.full(_GRID_SHAPE, 2.0e9), gamma=1.0e8),),
     )
     scalar = mw.Material.drude(eps_inf=1.0, plasma_frequency=2.0e9, gamma=1.0e8)
 
@@ -254,21 +254,23 @@ def test_fdtd_uniform_custom_drude_matches_scalar_drude_run():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_graded_custom_lorentz_matches_piecewise_uniform_run():
     def run(*structures, dt=None):
-        scene = _build_scene(*structures, device="cuda", sources=(_plane_wave(),), subpixel_samples=_NODE_SAMPLING)
-        scene.add_monitor(mw.PointMonitor("probe", (0.5, 0.0, 0.0), fields=("Ez",)))
+        scene = _build_scene(*structures, sources=(_plane_wave(),), subpixel_samples=_NODE_SAMPLING)
+        scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.5, 0.0, 0.0), fields=("Ez",))))
         result = mw.Simulation.fdtd(
             scene,
             frequencies=[_FREQUENCY],
-            run_time=mw.TimeConfig(steady_cycles=8, transient_cycles=18, dt=dt),
-            spectral_sampler=mw.SpectralSampler(window="hanning"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(steady_cycles=8, transient_cycles=18, dt=dt),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                full_field_dft=False,
+            ),
         ).run()
-        return result.monitor("probe")["data"], result.solver.dt
+        return result.monitor("probe", freq_index=0).sel(component="Ez").values, result.solver.dt
 
     graded = mw.Material(
         eps_r=2.0,
         lorentz_poles=(
-            mw.CustomLorentzPole(
+            mw.media.CustomLorentzPole(
                 delta_eps=_split_grid(2.0, 0.5), resonance_frequency=2.0e9, gamma=2.0e8
             ),
         ),
@@ -309,11 +311,10 @@ def test_fdtd_custom_drude_auto_dt_uses_peak_plasma_frequency():
             material=mw.Material(
                 eps_r=1.0,
                 drude_poles=(
-                    mw.CustomDrudePole(plasma_frequency=_split_grid(2.0e9, 1.0e9), gamma=1.0e8),
+                    mw.media.CustomDrudePole(plasma_frequency=_split_grid(2.0e9, 1.0e9), gamma=1.0e8),
                 ),
             ),
         ),
-        device="cuda",
         sources=(_plane_wave(),),
     )
     scalar_scene = _build_scene(
@@ -321,7 +322,6 @@ def test_fdtd_custom_drude_auto_dt_uses_peak_plasma_frequency():
             geometry=_SLAB_BOX,
             material=mw.Material.drude(eps_inf=1.0, plasma_frequency=2.0e9, gamma=1.0e8),
         ),
-        device="cuda",
         sources=(_plane_wave(),),
     )
 

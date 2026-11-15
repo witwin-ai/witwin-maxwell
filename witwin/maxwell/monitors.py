@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ._enums import Direction, FieldComponent, ModePolarization, parse_enum
 from ._fixed_inputs import require_fixed_input
 
 import math
@@ -16,6 +17,7 @@ from .sources import (
     polarization_vector,
 )
 from .thin_wire import normalize_wire_quantities
+from ._stability import experimental
 
 _AXES = ("x", "y", "z")
 POWER_LOSS_CHANNELS = (
@@ -29,12 +31,12 @@ POWER_LOSS_CHANNELS = (
 )
 
 
-def _normalize_fields(fields):
+def _normalize_fields(fields) -> tuple[FieldComponent, ...]:
     if isinstance(fields, str):
-        return (fields,)
+        fields = (fields,)
     if not fields:
         raise ValueError("fields must not be empty.")
-    return tuple(str(field) for field in fields)
+    return tuple(parse_enum(FieldComponent, field, name="field component") for field in fields)
 
 
 def normalize_component(component):
@@ -65,23 +67,20 @@ def normalize_axis(axis):
     return axis_name
 
 
-def _normalize_normal_direction(normal_direction):
-    direction = str(normal_direction)
-    if direction not in {"+", "-"}:
-        raise ValueError("normal_direction must be '+' or '-'.")
-    return direction
+def _normalize_normal_direction(normal_direction) -> Direction:
+    return parse_enum(Direction, normal_direction, name="normal_direction")
 
 
 def required_flux_fields(axis):
     axis_name = normalize_axis(axis)
     if axis_name == "x":
-        return ("Ey", "Ez", "Hy", "Hz")
+        return (FieldComponent.EY, FieldComponent.EZ, FieldComponent.HY, FieldComponent.HZ)
     if axis_name == "y":
-        return ("Ex", "Ez", "Hx", "Hz")
-    return ("Ex", "Ey", "Hx", "Hy")
+        return (FieldComponent.EX, FieldComponent.EZ, FieldComponent.HX, FieldComponent.HZ)
+    return (FieldComponent.EX, FieldComponent.EY, FieldComponent.HX, FieldComponent.HY)
 
 
-def _validate_flux_fields(axis: str, fields: tuple[str, ...], *, monitor_name: str) -> None:
+def _validate_flux_fields(axis: str, fields: tuple[FieldComponent, ...], *, monitor_name: str) -> None:
     required_fields = required_flux_fields(axis)
     missing_fields = tuple(field for field in required_fields if field not in fields)
     if missing_fields:
@@ -190,7 +189,7 @@ def _validate_closed_surface_area_balance(faces: tuple["FinitePlaneMonitor", ...
         for face in faces:
             if face.axis != axis:
                 continue
-            if face.normal_direction == "+":
+            if face.normal_direction is Direction.PLUS:
                 positive_area += _face_area(face)
             else:
                 negative_area += _face_area(face)
@@ -209,10 +208,10 @@ def _validate_closed_surface_area_balance(faces: tuple["FinitePlaneMonitor", ...
 class PointMonitor:
     name: str
     position: tuple[float, float, float]
-    fields: tuple[str, ...]
+    fields: tuple[FieldComponent, ...]
     kind: str = "point"
 
-    def __init__(self, name, position, fields=("Ez",)):
+    def __init__(self, name, position, fields=(FieldComponent.EZ,)):
         if len(position) != 3:
             raise ValueError("position must contain exactly three values.")
         require_fixed_input(position, name="PointMonitor.position")
@@ -222,6 +221,7 @@ class PointMonitor:
         object.__setattr__(self, "kind", "point")
 
 
+@experimental("thin_wire")
 @dataclass(frozen=True)
 class WireMonitor:
     """Sample frequency-domain state from one declared thin wire."""
@@ -266,10 +266,10 @@ class PlaneMonitor:
     name: str
     axis: str
     position: float
-    fields: tuple[str, ...]
+    fields: tuple[FieldComponent, ...]
     frequencies: tuple[float, ...] | None = None
     compute_flux: bool = False
-    normal_direction: str = "+"
+    normal_direction: Direction = Direction.PLUS
     kind: str = "plane"
 
     def __init__(
@@ -277,10 +277,10 @@ class PlaneMonitor:
         name,
         axis="z",
         position=0.0,
-        fields=("Ez",),
+        fields=(FieldComponent.EZ,),
         frequencies=None,
         compute_flux=False,
-        normal_direction="+",
+        normal_direction=Direction.PLUS,
     ):
         axis_name = normalize_axis(axis)
         normalized_fields = _normalize_fields(fields)
@@ -299,7 +299,7 @@ class PlaneMonitor:
 
 
 class FluxMonitor(PlaneMonitor):
-    def __init__(self, name, axis="z", position=0.0, frequencies=None, normal_direction="+"):
+    def __init__(self, name, axis="z", position=0.0, frequencies=None, normal_direction=Direction.PLUS):
         super().__init__(
             name=name,
             axis=axis,
@@ -322,7 +322,7 @@ class IncidentPowerDensityMonitor(PlaneMonitor):
 
     A plane monitor variant that carries the tangential fields required to form
     the normal Poynting component ``S.n = 0.5 * Re((E x conj(H)).n_hat)``. The
-    result-domain accessor :meth:`Result.incident_power_density` returns the
+    result-domain accessor ``mw.sar.incident_power_density(result, name)`` returns the
     signed per-cell normal Poynting, its magnitude ``|S.n|`` (the exposure
     incident power density), the plane-integrated flux (identically equal to the
     :class:`FluxMonitor` integral on the same plane), and, when
@@ -349,7 +349,7 @@ class IncidentPowerDensityMonitor(PlaneMonitor):
         axis="z",
         position=0.0,
         frequencies=None,
-        normal_direction="+",
+        normal_direction=Direction.PLUS,
         spatial_average=None,
     ):
         super().__init__(
@@ -396,10 +396,10 @@ class FinitePlaneMonitor:
     name: str
     position: tuple[float, float, float]
     size: tuple[float, float, float]
-    fields: tuple[str, ...]
+    fields: tuple[FieldComponent, ...]
     frequencies: tuple[float, ...] | None = None
     compute_flux: bool = False
-    normal_direction: str = "+"
+    normal_direction: Direction = Direction.PLUS
     axis: str = "z"
     plane_position: float = 0.0
     tangential_bounds: dict[str, tuple[float, float]] | None = None
@@ -414,10 +414,10 @@ class FinitePlaneMonitor:
         name,
         position=(0.0, 0.0, 0.0),
         size=(1.0, 1.0, 0.0),
-        fields=("Ez",),
+        fields=(FieldComponent.EZ,),
         frequencies=None,
         compute_flux=False,
-        normal_direction="+",
+        normal_direction=Direction.PLUS,
         *,
         face_label=None,
         surface_name=None,
@@ -570,7 +570,7 @@ class ClosedSurfaceMonitor:
                 fields=required_flux_fields("x"),
                 frequencies=frequencies,
                 sample_spacing=sample_spacing,
-                normal_direction="-",
+                normal_direction=Direction.MINUS,
             ),
             FinitePlaneMonitor(
                 "x_pos",
@@ -579,7 +579,7 @@ class ClosedSurfaceMonitor:
                 fields=required_flux_fields("x"),
                 frequencies=frequencies,
                 sample_spacing=sample_spacing,
-                normal_direction="+",
+                normal_direction=Direction.PLUS,
             ),
             FinitePlaneMonitor(
                 "y_neg",
@@ -588,7 +588,7 @@ class ClosedSurfaceMonitor:
                 fields=required_flux_fields("y"),
                 frequencies=frequencies,
                 sample_spacing=sample_spacing,
-                normal_direction="-",
+                normal_direction=Direction.MINUS,
             ),
             FinitePlaneMonitor(
                 "y_pos",
@@ -597,7 +597,7 @@ class ClosedSurfaceMonitor:
                 fields=required_flux_fields("y"),
                 frequencies=frequencies,
                 sample_spacing=sample_spacing,
-                normal_direction="+",
+                normal_direction=Direction.PLUS,
             ),
             FinitePlaneMonitor(
                 "z_neg",
@@ -606,7 +606,7 @@ class ClosedSurfaceMonitor:
                 fields=required_flux_fields("z"),
                 frequencies=frequencies,
                 sample_spacing=sample_spacing,
-                normal_direction="-",
+                normal_direction=Direction.MINUS,
             ),
             FinitePlaneMonitor(
                 "z_pos",
@@ -615,7 +615,7 @@ class ClosedSurfaceMonitor:
                 fields=required_flux_fields("z"),
                 frequencies=frequencies,
                 sample_spacing=sample_spacing,
-                normal_direction="+",
+                normal_direction=Direction.PLUS,
             ),
         )
         return cls(name, faces, frequencies=frequencies)
@@ -757,6 +757,7 @@ class PowerLossMonitor:
 BREAKDOWN_QUANTITIES = ("electric_field", "exposure", "dissipated_energy", "damage")
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class BreakdownMonitor:
     """Non-feedback dielectric-stress accumulator over an axis-aligned region.
@@ -847,6 +848,7 @@ class BreakdownMonitor:
         object.__setattr__(self, "kind", "breakdown")
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class ComponentStressMonitor:
     """Bind a :class:`ComponentRating` to a port's recorded V(t)/I(t) series.
@@ -918,6 +920,7 @@ def _resolve_region_geometry(region, position, size):
     )
 
 
+@experimental("monitors")
 @dataclass(frozen=True)
 class DipoleEmissionMonitor:
     """Measure the power a named ``PointDipole`` delivers to the field.
@@ -962,7 +965,7 @@ def _validate_time_sampling(start, stop, interval) -> tuple[int, int | None, int
 class FieldTimeMonitor:
     """Record detached raw Yee fields; use spectral monitors for adjoint objectives."""
     name: str
-    components: tuple[str, ...]
+    components: tuple[FieldComponent, ...]
     position: tuple[float, float, float]
     size: tuple[float, float, float]
     start: int
@@ -977,14 +980,14 @@ class FieldTimeMonitor:
     def __init__(
         self,
         name,
-        components=("Ez",),
+        components=(FieldComponent.EZ,),
         position=(0.0, 0.0, 0.0),
         size=(0.0, 0.0, 0.0),
         start=0,
         stop=None,
         interval=1,
     ):
-        normalized_components = tuple(normalize_component(component).capitalize() for component in _normalize_fields(components))
+        normalized_components = _normalize_fields(components)
         resolved_position = _require_length3("position", position)
         resolved_size = _require_nonnegative_length3("size", size)
         resolved_start, resolved_stop, resolved_interval = _validate_time_sampling(start, stop, interval)
@@ -1030,8 +1033,8 @@ class FluxTimeMonitor:
     name: str
     axis: str
     position: float
-    fields: tuple[str, ...]
-    normal_direction: str
+    fields: tuple[FieldComponent, ...]
+    normal_direction: Direction
     start: int
     stop: int | None
     interval: int
@@ -1045,7 +1048,7 @@ class FluxTimeMonitor:
         start=0,
         stop=None,
         interval=1,
-        normal_direction="+",
+        normal_direction=Direction.PLUS,
     ):
         axis_name = normalize_axis(axis)
         resolved_start, resolved_stop, resolved_interval = _validate_time_sampling(start, stop, interval)
@@ -1068,13 +1071,13 @@ class ModeMonitor:
     position: tuple[float, float, float]
     size: tuple[float, float, float]
     mode_index: int
-    direction: str
+    direction: Direction
     polarization: tuple[float, float, float]
     frequencies: tuple[float, ...] | None = None
-    normal_direction: str = "+"
+    normal_direction: Direction = Direction.PLUS
     axis: str = "z"
     plane_position: float = 0.0
-    fields: tuple[str, ...] = ()
+    fields: tuple[FieldComponent, ...] = ()
     compute_flux: bool = True
     normal_axis: str = "z"
     polarization_axis: str = "x"
@@ -1088,8 +1091,8 @@ class ModeMonitor:
         position=(0.0, 0.0, 0.0),
         size=(1.0, 1.0, 0.0),
         mode_index=0,
-        direction="+",
-        polarization="auto",
+        direction=Direction.PLUS,
+        polarization=ModePolarization.AUTO,
         frequencies=None,
         normal_direction=None,
         bend_radius=None,
@@ -1152,19 +1155,20 @@ class ModeMonitor:
         return spec
 
 
+@experimental("monitors")
 @dataclass(frozen=True)
 class DiffractionMonitor:
     name: str
     position: tuple[float, float, float]
     size: tuple[float, float, float]
     frequencies: tuple[float, ...] | None
-    normal_direction: str
+    normal_direction: Direction
     orders: int | None
     axis: str
     plane_position: float
     tangential_axes: tuple[str, str]
     periods: dict[str, float]
-    fields: tuple[str, ...]
+    fields: tuple[FieldComponent, ...]
     compute_flux: bool = True
     kind: str = "diffraction"
 
@@ -1174,7 +1178,7 @@ class DiffractionMonitor:
         position=(0.0, 0.0, 0.0),
         size=(1.0, 1.0, 0.0),
         frequencies=None,
-        normal_direction="+",
+        normal_direction=Direction.PLUS,
         orders=None,
     ):
         resolved_position, resolved_size, axis, plane_position, _ = _resolve_finite_plane_geometry(
@@ -1288,7 +1292,7 @@ def _resolve_declared_surface(
     if len(zero_axes) == 1:
         if exclusions:
             raise ValueError(f"{owner} exclude_surfaces applies to box surfaces only.")
-        direction = "+" if normal_direction is None else _normalize_normal_direction(normal_direction)
+        direction = Direction.PLUS if normal_direction is None else _normalize_normal_direction(normal_direction)
         axis = _AXES[zero_axes[0]]
         return "planar", center, extents, direction, (), (("plane", axis, direction, center, extents),)
     if zero_axes:
@@ -1307,7 +1311,7 @@ def _resolve_declared_surface(
             face_position[axis_index] = center[axis_index] + sign * 0.5 * extents[axis_index]
             face_size = list(extents)
             face_size[axis_index] = 0.0
-            faces.append((label, axis, "+" if sign > 0 else "-", tuple(face_position), tuple(face_size)))
+            faces.append((label, axis, Direction.PLUS if sign > 0 else Direction.MINUS, tuple(face_position), tuple(face_size)))
     if not faces:
         raise ValueError(f"{owner} must keep at least one face after exclude_surfaces.")
     return "box", center, extents, None, exclusions, tuple(faces)
@@ -1439,7 +1443,7 @@ class AngleProjectionMonitor(_ProjectionSurfaceMonitor):
     radius: float
     far_field_approx: bool
     origin: tuple[float, float, float]
-    normal_direction: str | None
+    normal_direction: Direction | None
     exclude_surfaces: tuple[str, ...]
     window_size: tuple[float, float] | None
     sample_spacing: float | None
@@ -1501,7 +1505,7 @@ class CartesianProjectionMonitor(_ProjectionSurfaceMonitor):
     frequencies: tuple[float, ...] | None
     far_field_approx: bool
     origin: tuple[float, float, float]
-    normal_direction: str | None
+    normal_direction: Direction | None
     exclude_surfaces: tuple[str, ...]
     window_size: tuple[float, float] | None
     sample_spacing: float | None
@@ -1565,7 +1569,7 @@ class KSpaceProjectionMonitor(_ProjectionSurfaceMonitor):
     radius: float
     frequencies: tuple[float, ...] | None
     origin: tuple[float, float, float]
-    normal_direction: str | None
+    normal_direction: Direction | None
     exclude_surfaces: tuple[str, ...]
     window_size: tuple[float, float] | None
     sample_spacing: float | None
@@ -1612,7 +1616,7 @@ class KSpaceProjectionMonitor(_ProjectionSurfaceMonitor):
             hemisphere = (
                 planar_face.normal_direction
                 if planar_face is not None and planar_face.axis == axis_name
-                else "+"
+                else Direction.PLUS
             )
         object.__setattr__(self, "hemisphere", _normalize_normal_direction(hemisphere))
 
@@ -1652,7 +1656,7 @@ class _GaussianOverlapPlaneMonitor:
         ):
             raise ValueError(f"{owner} frequencies must be finite and strictly positive.")
         resolved_focus = resolved_position if focus is None else _require_length3("focus", focus)
-        normal_direction = "+" if normal_component > 0.0 else "-"
+        normal_direction = Direction.PLUS if normal_component > 0.0 else Direction.MINUS
         plane = FinitePlaneMonitor(
             monitor_name,
             position=resolved_position,
@@ -1706,7 +1710,7 @@ class GaussianOverlapMonitor(_GaussianOverlapPlaneMonitor):
     focus: tuple[float, float, float]
     axis: str
     plane_position: float
-    normal_direction: str
+    normal_direction: Direction
     tangential_bounds: dict[str, tuple[float, float]]
     plane: FinitePlaneMonitor
     kind: str = "gaussian_overlap"
@@ -1761,7 +1765,7 @@ class AstigmaticGaussianOverlapMonitor(_GaussianOverlapPlaneMonitor):
     focus_v: float
     axis: str
     plane_position: float
-    normal_direction: str
+    normal_direction: Direction
     tangential_bounds: dict[str, tuple[float, float]]
     plane: FinitePlaneMonitor
     kind: str = "astigmatic_gaussian_overlap"
@@ -1834,7 +1838,7 @@ class SurfaceFieldTimeMonitor:
     """
 
     name: str
-    components: tuple[str, ...]
+    components: tuple[FieldComponent, ...]
     position: tuple[float, float, float]
     size: tuple[float, float, float]
     start: int
@@ -1850,7 +1854,7 @@ class SurfaceFieldTimeMonitor:
         name,
         position=(0.0, 0.0, 0.0),
         size=(1.0, 1.0, 1.0),
-        components=("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"),
+        components=tuple(FieldComponent),
         start=0,
         stop=None,
         interval=1,
@@ -1860,9 +1864,7 @@ class SurfaceFieldTimeMonitor:
         monitor_name = str(name).strip()
         if not monitor_name:
             raise ValueError("SurfaceFieldTimeMonitor name must not be empty.")
-        normalized_components = tuple(
-            normalize_component(component).capitalize() for component in _normalize_fields(components)
-        )
+        normalized_components = _normalize_fields(components)
         if len(set(normalized_components)) != len(normalized_components):
             raise ValueError("SurfaceFieldTimeMonitor components must be unique.")
         surface_kind, center, extents, _, exclusions, face_specs = _resolve_declared_surface(
@@ -1936,7 +1938,7 @@ class AuxFieldTimeMonitor:
     """
 
     name: str
-    components: tuple[str, ...]
+    components: tuple[FieldComponent, ...]
     position: tuple[float, float, float]
     size: tuple[float, float, float]
     start: int
@@ -1983,3 +1985,33 @@ IN_SIMULATION_MONITOR_TYPES = (
     SurfaceFieldTimeMonitor,
     AuxFieldTimeMonitor,
 )
+
+
+# Public namespace ``mw.monitors``: the monitors beyond the core ones at the top level.
+
+__all__ = [
+    "AngleProjectionMonitor",
+    "AstigmaticGaussianOverlapMonitor",
+    "AuxFieldTimeMonitor",
+    "CartesianProjectionMonitor",
+    "ClosedSurfaceMonitor",
+    "DiffractionMonitor",
+    "DipoleEmissionMonitor",
+    "Direction",
+    "FieldComponent",
+    "FieldTimeMonitor",
+    "FluxTimeMonitor",
+    "GaussianOverlapMonitor",
+    "KSpaceProjectionMonitor",
+    "MediumMonitor",
+    "ModePolarization",
+    "PermittivityMonitor",
+    "PowerLossData",
+    "PowerLossMonitor",
+    "SurfaceFieldTimeMonitor",
+]
+
+from ._lazy import lazy_attributes  # noqa: E402
+
+__getattr__, __dir__ = lazy_attributes(__name__, names={".power_loss": ("PowerLossData",)})
+del lazy_attributes

@@ -3,7 +3,7 @@ import copy
 import hashlib
 import json
 import math
-from dataclasses import asdict
+from .options import option_asdict
 import torch
 from .dual_static_snapshot import _tensor_identity
 from .static_current import FaceCurrentBalance,FixedStaticCurrentInverse
@@ -31,7 +31,7 @@ def _validate_bound(bound,rule,size):
     if (not isinstance(bound,dict) or set(bound)!=keys or bound['method']!='complete_streamed_inverse_residual'
             or type(bound['columns_checked']) is not int or bound['columns_checked']!=size
             or type(bound['column_batch']) is not int or bound['column_batch']<1
-            or bound['tangent_rule']!=asdict(rule) or bound['complete'] is not True
+            or bound['tangent_rule']!=option_asdict(rule) or bound['complete'] is not True
             or bound['admitted'] is not True or bound['inconclusive'] is not False or bound['solve_failure'] is not None
             or any(bound[k] is not False for k in ('underlying_action_error_certified','interval_certified',
                                                   'physical_qualification','fast_work_qualified'))):
@@ -49,7 +49,7 @@ def snapshot_projector(projector):
     if type(projector) is not StaticCurrentProjector:raise TypeError('Native current projector required')
     projector.assert_current()
     record={'schema_version':'static-current-projector-v1','block':_block_record(projector.block),
-        'rule':asdict(projector.inverse.rule),'refinement_steps':projector.inverse.refinement_steps,
+        'rule':option_asdict(projector.inverse.rule),'refinement_steps':projector.inverse.refinement_steps,
         'receipt':copy.deepcopy(projector.receipt)}
     binding={'schema_version':record['schema_version'],'sha256':_digest(record)}
     # Validate the record without repeating its numerical admission.
@@ -71,7 +71,7 @@ def restore_projector(record,block,*,expected_binding):
     if not isinstance(record['rule'],dict):raise ValueError('Invalid stored projector rule')
     try:rule=StoppingRule(**record['rule'])
     except (TypeError,ValueError) as error:raise ValueError('Invalid stored projector rule') from error
-    if (asdict(rule)!=record['rule'] or rule.method!='gmres' or rule.preconditioner!='none'
+    if (option_asdict(rule)!=record['rule'] or rule.method!='gmres' or rule.preconditioner!='none'
             or rule.recycle_size or rule.fallback!='none' or type(record['refinement_steps']) is not int
             or record['refinement_steps']<0):raise ValueError('Invalid stored projector inverse policy')
     receipt=record['receipt']

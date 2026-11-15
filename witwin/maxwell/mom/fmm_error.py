@@ -6,9 +6,10 @@ Native bound evaluation is not a floating-point or RWG integration certificate.
 import math
 import torch
 from .interpolation_error import KernelErrorBudget, KernelBoundUnavailable
+from ..errors import SetupError
 
 
-class MultipoleTruncationError(ValueError):
+class MultipoleTruncationError(SetupError):
     def __init__(self, receipt):
         super().__init__('Cartesian M2L truncation bound exceeds the declared kernel budget')
         self.receipt = receipt

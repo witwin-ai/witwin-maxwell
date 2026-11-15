@@ -5,6 +5,7 @@ import torch
 
 from ..cuda.backend import get_compiled_extension
 from .stepping import cpml_layout_params
+from ...errors import UnsupportedFeatureError
 
 FIELDS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 COEFFICIENTS = tuple(f"c{f.lower()}_{kind}" for f in FIELDS for kind in ("decay", "curl"))
@@ -55,27 +56,32 @@ def _psi_layout(solver, name):
 
 def validate_native_solver(solver):
     """Fail before advancing when the shared field block omits active physics."""
-    if getattr(solver.scene,"coordinates",None) is not None:
-        raise NotImplementedError("Mapped native batching requires coordinate-aware cohort and output qualification.")
+    if getattr(solver.scene.scene,"coordinates",None) is not None:
+        raise UnsupportedFeatureError("Mapped native batching requires coordinate-aware cohort and output qualification.",
+                                      feature="coordinates", method="fdtd")
     unsupported = (
         "complex_fields_enabled", "nonlinear_enabled", "modulation_enabled",
         "full_aniso_enabled", "gyromagnetic_enabled", "breakdown_enabled", "tfsf_enabled",
     )
     for name in unsupported:
         if getattr(solver, name, False):
-            raise NotImplementedError(f"Native batch field execution does not yet support {name}.")
+            raise UnsupportedFeatureError(f"Native batch field execution does not yet support {name}.",
+                                          feature="guard:1419545a", method="fdtd")
     for name in ("_magnetic_source_terms", "_electric_source_terms", "_wire_runtime",
                  "_surface_impedance", "_mur_state", "_abc_higdon_state", "_thin_sheets"):
         if getattr(solver, name, None):
-            raise NotImplementedError(f"Native batch field execution does not yet support {name}.")
+            raise UnsupportedFeatureError(f"Native batch field execution does not yet support {name}.",
+                                          feature="guard:c0d7cc25", method="fdtd")
     for name in FIELDS:
         value = getattr(solver, name)
         if value.dtype != torch.float32 or value.ndim != 3 or min(value.shape) < 2:
-            raise NotImplementedError("Native batch requires real float32 three-dimensional Yee fields.")
+            raise UnsupportedFeatureError("Native batch requires real float32 three-dimensional Yee fields.",
+                                          feature="guard:5aecb3bf", method="fdtd")
     for axis in "xyz":
         for face in ("low", "high"):
             if getattr(solver, f"boundary_{axis}_{face}_code") not in (0, 1, 2, 4, 5):
-                raise NotImplementedError("Native batch supports none, CPML, periodic, PEC and PMC boundaries.")
+                raise UnsupportedFeatureError("Native batch supports none, CPML, periodic, PEC and PMC boundaries.",
+                                              feature="guard:c93c7a37", method="fdtd")
 
 
 class NativeFieldSlot:
@@ -211,54 +217,42 @@ class NativeFieldSlot:
         self.active.zero_()
         self.active[:len(self.solvers)].fill_(1)
 
-    def advance(self):
+    def advance(self, lanes=None):
+        """One Yee step of the bound lanes; ``lanes`` lists the running ones (default all).
+
+        Retired lanes keep ``active`` at zero for the activity-masked pieces and get no
+        fused Yee launch, so their fields stay frozen at their final step.
+        """
         from ..copper_foil import begin_copper_step, correct_copper_magnetic, advance_copper_electric, accumulate_copper_spectra
+        cores = self._core if lanes is None else tuple(self._core[lane] for lane in lanes)
         for solver, _activity in self._foil_lanes:
             begin_copper_step(solver)
         for lane in self._material_lanes:
             lane.advance_magnetic()
-        for operation, args in self._operations[:3]:
-            operation(*args)
+        for core in cores:
+            core.magnetic()
         for solver, activity in self._foil_lanes:
             correct_copper_magnetic(solver, activity=activity)
         for lane in self._material_lanes:
             lane.correct_magnetic()
             lane.advance_electric()
-        for operation, args in self._operations[3:]:
-            operation(*args)
+        for core in cores:
+            core.electric()
         for solver, activity in self._foil_lanes:
             advance_copper_electric(solver, activity=activity)
             accumulate_copper_spectra(solver, activity=activity)
 
     def _bind_operations(self):
-        self._operations = []
-        reference = self.solvers[0]
-        for kind in ("h", "e"):
-            for component, axis in enumerate("xyz"):
-                others = [a for a in "xyz" if a != axis]
-                field_name = kind.upper() + axis
-                source_kind = "E" if kind == "h" else "H"
-                axis_a = "y" if component == 0 else "x"
-                axis_b = "y" if component == 2 else "z"
-                args = [self.buffers[field_name],
-                        self.buffers[source_kind + others[0]], self.buffers[source_kind + others[1]],
-                        self.buffers[f"c{kind}{axis}_decay"], self.buffers[f"c{kind}{axis}_curl"],
-                        self.shared[f"inv_d{axis_a}_{kind}"], self.shared[f"inv_d{axis_b}_{kind}"],
-                        self.active, component]
-                if reference.uses_cpml:
-                    psi_a, psi_b = (f"psi_{kind}{axis}_{a}" for a in (axis_a, axis_b))
-                    args.extend((self.buffers[psi_a], self.buffers[psi_b]))
-                    args.extend(self.shared[f"cpml_{p}_{kind}_{a}"]
-                                for a in (axis_a, axis_b) for p in ("inv_kappa", "b", "c"))
-                    args.extend(_psi_layout(reference, psi_a))
-                    args.extend(_psi_layout(reference, psi_b))
-                    operation = (self.native.update_magnetic_cpml_batch if kind == "h"
-                                 else self.native.update_electric_cpml_batch)
-                else:
-                    operation = self.native.update_magnetic_batch if kind == "h" else self.native.update_electric_batch
-                if kind == "e":
-                    args.extend(getattr(reference, f"boundary_{a}_{f}_code")
-                                for a in (axis_a, axis_b) for f in ("low", "high"))
-                if reference.uses_cpml:
-                    args.append(reference._cpml_memory_mode == "dense")
-                self._operations.append((operation, tuple(args)))
+        """Bind one core runtime's fused Yee H/E launches to each lane's slot storage.
+
+        Lanes advance in a host loop: two launches per lane and step instead of one
+        lane-strided launch, with the same bytes per cell. Lanes that share a coefficient
+        bank share its compressed coefficient tables.
+        """
+        from .core_path import CorePathRuntime
+
+        tables = {}
+        self._core = tuple(CorePathRuntime(solver, coefficient_tables=tables) for solver in self.solvers)
+        for solver in self.solvers:
+            # A solo core runtime from an ordinary preparation still points at the replaced storage.
+            solver.__dict__.pop("_core_runtime", None)

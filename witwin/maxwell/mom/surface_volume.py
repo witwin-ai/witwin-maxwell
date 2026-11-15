@@ -9,6 +9,7 @@ from .quadrature import triangle_rule
 from .volume_mesh import BoundVolumeRegion
 from .vie_operator import evaluate_cell_current_fields, cell_green_potentials
 from .fields import FieldQueryConfig
+from ..errors import ConvergenceError
 
 
 def build_volume_source_rhs(surface_operator, bindings, currents, *, order=3, query_config=None):
@@ -276,13 +277,13 @@ class DenseVolumeResponse(VolumeFieldResponse):
 
 
 
-class CoupledFieldConvergenceError(RuntimeError):
+class CoupledFieldConvergenceError(ConvergenceError):
     def __init__(self, receipt):
         super().__init__('Complete surface-volume field quadrature did not converge')
         self.receipt = receipt
 
 
-class VolumeTestingConvergenceError(RuntimeError):
+class VolumeTestingConvergenceError(ConvergenceError):
     def __init__(self, receipt):
         super().__init__(f"Volume-to-surface testing exhausted its quadrature order budget: {receipt['checks']}")
         self.receipt = receipt

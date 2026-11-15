@@ -27,7 +27,7 @@ def test_native_planes_retain_real_dipole_geometry_and_cover_all_compiled_sigma(
 def _check_native_planes(metal):
     config=dict(lateral_dl=.001,substrate_cells=4,metal=metal,dielectric_sigma=.001)
     scene,schema,bounds=driver.loss_observation_geometry(config,FREQUENCIES,'native_planes')
-    original=driver.printed_dipole_scene(device='cpu',frequencies=FREQUENCIES,**config)
+    original=driver.printed_dipole_scene(frequencies=FREQUENCIES,**config)
     assert bounds==scene.domain.bounds==original.domain.bounds
     for name in ('name','positive_terminal','negative_terminal','reference_plane','reference_impedance'):
         assert getattr(scene.ports[0],name)==getattr(original.ports[0],name)
@@ -41,7 +41,7 @@ def _check_native_planes(metal):
     assert not any(isinstance(monitor,mw.PointMonitor) for monitor in scene.monitors)
     monitor=next(m for m in scene.monitors if m.name=='line_roi_bulk')
     assert monitor.frequencies is None and monitor.quadrature=='physical_intersection'
-    prepared=prepare_scene(scene);compiled=compile_power_loss_monitor(prepared,monitor)
+    prepared=prepare_scene(scene,device='cpu');compiled=compile_power_loss_monitor(prepared,monitor)
     records={plane['name']:plane for selection in schema.values() for plane in selection['planes']}
     observers={r['monitor_name']:r for r in compile_fdtd_observers(scene) if r['monitor_name'] in records}
     assert set(observers)==set(records)
@@ -72,8 +72,8 @@ def test_unknown_loss_observation_is_rejected():
 def test_new_queue_configurations_retain_exterior_normal_samples_and_finite_feed(case):
     config,duration=driver.case_configuration(case,FREQUENCIES)
     reference,_=driver.case_configuration('medium_air05_pml48_final',FREQUENCIES)
-    actual=driver.printed_dipole_scene(device='cpu',frequencies=FREQUENCIES,**config)
-    original=driver.printed_dipole_scene(device='cpu',frequencies=FREQUENCIES,**reference)
+    actual=driver.printed_dipole_scene(frequencies=FREQUENCIES,**config)
+    original=driver.printed_dipole_scene(frequencies=FREQUENCIES,**reference)
     a,b=[np.asarray(scene.grid.z_coords) for scene in (actual,original)]
     np.testing.assert_array_equal(a[abs(a)>.002],b[abs(b)>.002])
     for field in ('voltage_aperture','current_surface'):

@@ -20,17 +20,16 @@ _F = 1.0e9
 
 def _dipole_scene(spacing=0.04):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.64, 0.64),) * 3),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0), polarization="Ez", width=0.05,
-            source_time=mw.GaussianPulse(frequency=_F, fwidth=0.5e9), name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.64, 0.64),) * 3),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0), polarization="Ez", width=0.05,
+                source_time=mw.GaussianPulse(frequency=_F, fwidth=0.5e9), name="src",
+            ),
+            ),
+            )
     return scene
 
 
@@ -38,9 +37,11 @@ def _run(scene, frequencies=(_F,), **kwargs):
     return mw.Simulation.fdtd(
         scene,
         frequencies=list(frequencies),
-        run_time=kwargs.pop("run_time", mw.TimeConfig.auto(steady_cycles=4, transient_cycles=10)),
-        full_field_dft=False,
-        **kwargs,
+        config=mw.FDTDConfig(
+            run_time=kwargs.pop("run_time", mw.TimeConfig.auto(steady_cycles=4, transient_cycles=10)),
+            full_field_dft=False,
+            **kwargs,
+        ),
     ).run()
 
 
@@ -54,18 +55,21 @@ def test_projection_monitors_reproduce_field_projector_on_the_same_run():
     theta = torch.linspace(0.2, 2.9, 9).tolist()
     phi = [0.0, 1.0]
     scene = _dipole_scene()
-    scene.add_monitor(mw.AngleProjectionMonitor("angle", size=(0.6, 0.6, 0.6), theta=theta, phi=phi, radius=5.0))
-    scene.add_monitor(mw.CartesianProjectionMonitor(
-        "cart", size=(0.6, 0.6, 0.6), x=[-0.5, 0.0, 0.5], y=[0.0, 0.2], axis="x", distance=2.0))
-    scene.add_monitor(mw.KSpaceProjectionMonitor(
-        "ks", size=(0.6, 0.6, 0.6), ux=[-0.5, 0.0, 0.5, 0.95], uy=[0.0, 0.9], axis="x"))
-    scene.add_monitor(mw.ClosedSurfaceMonitor.box("huygens", size=(0.6, 0.6, 0.6)))
-    scene.add_monitor(mw.AngleProjectionMonitor(
-        "planar", position=(0.0, 0.0, 0.3), size=(0.6, 0.6, 0.0), theta=[0.2, 0.6], phi=[0.0], radius=5.0,
-        origin=(0.0, 0.0, 0.0)))
-    scene.add_monitor(mw.FinitePlaneMonitor(
-        "planar_ref", position=(0.0, 0.0, 0.3), size=(0.6, 0.6, 0.0), fields=("Ex", "Ey", "Hx", "Hy")))
-    scene.add_monitor(mw.AuxFieldTimeMonitor("aux_vacuum", components=("Pz",), position=(0.1, 0.0, 0.0)))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.AngleProjectionMonitor("angle", size=(0.6, 0.6, 0.6), theta=theta, phi=phi, radius=5.0),
+        mw.monitors.CartesianProjectionMonitor(
+            "cart", size=(0.6, 0.6, 0.6), x=[-0.5, 0.0, 0.5], y=[0.0, 0.2], axis="x", distance=2.0),
+        mw.monitors.KSpaceProjectionMonitor(
+            "ks", size=(0.6, 0.6, 0.6), ux=[-0.5, 0.0, 0.5, 0.95], uy=[0.0, 0.9], axis="x"),
+        mw.monitors.ClosedSurfaceMonitor.box("huygens", size=(0.6, 0.6, 0.6)),
+        mw.monitors.AngleProjectionMonitor(
+            "planar", position=(0.0, 0.0, 0.3), size=(0.6, 0.6, 0.0), theta=[0.2, 0.6], phi=[0.0], radius=5.0,
+            origin=(0.0, 0.0, 0.0)),
+        mw.FinitePlaneMonitor(
+            "planar_ref", position=(0.0, 0.0, 0.3), size=(0.6, 0.6, 0.0), fields=("Ex", "Ey", "Hx", "Hy")),
+        mw.monitors.AuxFieldTimeMonitor("aux_vacuum", components=("Pz",), position=(0.1, 0.0, 0.0)),
+    ))
     result = _run(scene, frequencies=(_F, 1.2e9))
 
     projector = FieldProjector.from_monitor(result, "huygens")
@@ -93,9 +97,9 @@ def test_projection_monitors_reproduce_field_projector_on_the_same_run():
     assert float(torch.max(torch.abs(ratio / ratio.mean() - 1.0))) < 0.07
     assert float(torch.max(torch.abs(angle.E_phi[0]))) < 0.02 * float(pattern.max())
 
-    aux = result.monitor("aux_vacuum")
+    aux = result.raw_monitor("aux_vacuum")
     assert aux["present"] == {"Pz": False}
-    assert float(torch.max(torch.abs(aux["data"]))) == 0.0
+    assert float(torch.max(torch.abs(aux["components"]["Pz"]))) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -121,12 +125,11 @@ def _gaussian_power_overlap(a_u1, a_v1, a_u2, a_v2):
 
 def _beam_scene(source):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.9, 0.9), (-0.9, 0.9), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.03),
-        boundary=mw.BoundarySpec.pml(num_layers=10, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(source)
+                domain=mw.Domain(bounds=((-0.9, 0.9), (-0.9, 0.9), (-0.6, 0.6))),
+                grid=mw.GridSpec.uniform(0.03),
+                boundary=mw.BoundarySpec.pml(num_layers=10, strength=1.0),
+                sources=(source,),
+            )
     return scene
 
 
@@ -134,7 +137,7 @@ def _beam_run(scene):
     return _run(
         scene,
         run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
     )
 
 
@@ -146,54 +149,60 @@ def test_gaussian_overlap_decomposes_an_injected_gaussian_beam():
         direction=(0, 0, 1), polarization=(1, 0, 0), beam_waist=waist, focus=focus,
         source_time=mw.CW(frequency=_F, amplitude=1.0), name="beam"))
     plane = dict(position=(0.0, 0.0, 0.35), size=(1.6, 1.6, 0.0))
-    scene.add_monitor(mw.GaussianOverlapMonitor("match", **plane, beam_waist=waist, focus=focus))
-    scene.add_monitor(mw.GaussianOverlapMonitor("orthogonal", **plane, beam_waist=waist, focus=focus, polarization=(0, 1, 0)))
-    scene.add_monitor(mw.GaussianOverlapMonitor("shifted", **plane, beam_waist=waist, focus=(2.5 * waist, 0.0, -0.3)))
-    scene.add_monitor(mw.GaussianOverlapMonitor("wide", **plane, beam_waist=1.6 * waist, focus=focus))
-    scene.add_monitor(mw.AstigmaticGaussianOverlapMonitor("round_astigmatic", **plane, beam_waist=(waist, waist), focus=focus))
-    scene.add_monitor(mw.GaussianOverlapMonitor(
-        "reverse", position=(0.0, 0.0, -0.3), size=(1.6, 1.6, 0.0), beam_waist=waist, focus=focus, direction=(0, 0, -1)))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.GaussianOverlapMonitor("match", **plane, beam_waist=waist, focus=focus),
+        mw.monitors.GaussianOverlapMonitor("orthogonal", **plane, beam_waist=waist, focus=focus, polarization=(0, 1, 0)),
+        mw.monitors.GaussianOverlapMonitor("shifted", **plane, beam_waist=waist, focus=(2.5 * waist, 0.0, -0.3)),
+        mw.monitors.GaussianOverlapMonitor("wide", **plane, beam_waist=1.6 * waist, focus=focus),
+        mw.monitors.AstigmaticGaussianOverlapMonitor("round_astigmatic", **plane, beam_waist=(waist, waist), focus=focus),
+        mw.monitors.GaussianOverlapMonitor(
+            "reverse", position=(0.0, 0.0, -0.3), size=(1.6, 1.6, 0.0), beam_waist=waist, focus=focus, direction=(0, 0, -1)),
+    ))
     result = _beam_run(scene)
 
     match = result.monitor("match")
-    assert match["amplitude_forward"].shape == (1,) and match["amplitude_forward"].is_complex()
-    assert float(match["power_fraction_forward"][0]) >= 0.985
-    assert float(match["power_fraction_backward"][0]) < 5e-3
-    torch.testing.assert_close(match["power_forward"], torch.abs(match["amplitude_forward"]) ** 2)
-    assert float(result.monitor("orthogonal")["power_fraction_forward"][0]) < 1e-6
-    assert float(result.monitor("shifted")["power_fraction_forward"][0]) < 1e-2
+    assert match.isel(mode=0).sel(propagation="+").values.shape == (1,) and match.isel(mode=0).sel(propagation="+").values.is_complex()
+    assert float(match.isel(mode=0).sel(propagation="+").attrs["power_fraction"][0]) >= 0.985
+    assert float(match.isel(mode=0).sel(propagation="-").attrs["power_fraction"][0]) < 5e-3
+    torch.testing.assert_close(match.isel(mode=0).sel(propagation="+").attrs["power"], torch.abs(match.isel(mode=0).sel(propagation="+").values) ** 2)
+    assert float(result.monitor("orthogonal").isel(mode=0).sel(propagation="+").attrs["power_fraction"][0]) < 1e-6
+    assert float(result.monitor("shifted").isel(mode=0).sel(propagation="+").attrs["power_fraction"][0]) < 1e-2
 
     distance = 0.35 - focus[2]
     a_beam = _gaussian_parameter(waist, distance, wavelength)
     a_wide = _gaussian_parameter(1.6 * waist, distance, wavelength)
     expected = _gaussian_power_overlap(a_beam, a_beam, a_wide, a_wide)
-    assert float(result.monitor("wide")["power_fraction_forward"][0]) == pytest.approx(expected, abs=0.02)
+    assert float(result.monitor("wide").isel(mode=0).sel(propagation="+").attrs["power_fraction"][0]) == pytest.approx(expected, abs=0.02)
 
     round_astigmatic = result.monitor("round_astigmatic")
-    torch.testing.assert_close(round_astigmatic["amplitude_forward"], match["amplitude_forward"])
+    torch.testing.assert_close(round_astigmatic.isel(mode=0).sel(propagation="+").values, match.isel(mode=0).sel(propagation="+").values)
 
     # At the waist plane a -z-declared monitor sees the +z beam as its backward wave.
     reverse = result.monitor("reverse")
-    assert float(reverse["power_fraction_backward"][0]) >= 0.985
-    assert float(reverse["power_fraction_forward"][0]) < 5e-3
+    assert float(reverse.isel(mode=0).sel(propagation="-").attrs["power_fraction"][0]) >= 0.985
+    assert float(reverse.isel(mode=0).sel(propagation="+").attrs["power_fraction"][0]) < 5e-3
 
 
 def test_astigmatic_gaussian_overlap_matches_an_astigmatic_beam():
     """Matching astigmatic profile >= 0.98; a round profile recovers the analytic mismatch (+/-0.02)."""
     waists, wavelength = (0.3, 0.45), C_0 / _F
     focus = (0.0, 0.0, -0.2)
-    scene = _beam_scene(mw.AstigmaticGaussianBeam(
+    scene = _beam_scene(mw.sources.AstigmaticGaussianBeam(
         direction=(0, 0, 1), polarization=(1, 0, 0), beam_waist=waists, focus=focus, focus_v=0.2,
         source_time=mw.CW(frequency=_F, amplitude=1.0), name="beam"))
     plane = dict(position=(0.0, 0.0, 0.3), size=(1.6, 1.6, 0.0))
-    scene.add_monitor(mw.AstigmaticGaussianOverlapMonitor("match", **plane, beam_waist=waists, focus=focus, focus_v=0.2))
-    scene.add_monitor(mw.GaussianOverlapMonitor("round", **plane, beam_waist=waists[0], focus=focus))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.AstigmaticGaussianOverlapMonitor("match", **plane, beam_waist=waists, focus=focus, focus_v=0.2),
+        mw.monitors.GaussianOverlapMonitor("round", **plane, beam_waist=waists[0], focus=focus),
+    ))
     result = _beam_run(scene)
-    assert float(result.monitor("match")["power_fraction_forward"][0]) >= 0.98
+    assert float(result.monitor("match").isel(mode=0).sel(propagation="+").attrs["power_fraction"][0]) >= 0.98
     a_u = _gaussian_parameter(waists[0], 0.5, wavelength)
     a_v = _gaussian_parameter(waists[1], 0.3, wavelength)
     expected = _gaussian_power_overlap(a_u, a_v, a_u, a_u)
-    assert float(result.monitor("round")["power_fraction_forward"][0]) == pytest.approx(expected, abs=0.02)
+    assert float(result.monitor("round").isel(mode=0).sel(propagation="+").attrs["power_fraction"][0]) == pytest.approx(expected, abs=0.02)
 
 
 # ---------------------------------------------------------------------------
@@ -208,16 +217,19 @@ def test_surface_field_time_faces_equal_full_plane_field_time_traces():
     scene = _dipole_scene(spacing=0.08)
     start, stop, interval = 7, 120, 3
     # Faces at +/-0.26 avoid equidistant Yee planes, so the nearest native plane is unique.
-    scene.add_monitor(mw.SurfaceFieldTimeMonitor(
-        "surface", size=(0.52, 0.52, 0.52), components=("Ez", "Hx"), start=start, stop=stop, interval=interval))
-    scene.add_monitor(mw.FieldTimeMonitor(
-        "zplane", components=("Ez", "Hx"), position=(0.0, 0.0, 0.26), size=(1.28, 1.28, 0.0),
-        start=start, stop=stop, interval=interval))
-    scene.add_monitor(mw.FieldTimeMonitor(
-        "point", components=("Ez",), position=(0.26, 0.0, 0.0), start=start, stop=stop, interval=interval))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.SurfaceFieldTimeMonitor(
+            "surface", size=(0.52, 0.52, 0.52), components=("Ez", "Hx"), start=start, stop=stop, interval=interval),
+        mw.monitors.FieldTimeMonitor(
+            "zplane", components=("Ez", "Hx"), position=(0.0, 0.0, 0.26), size=(1.28, 1.28, 0.0),
+            start=start, stop=stop, interval=interval),
+        mw.monitors.FieldTimeMonitor(
+            "point", components=("Ez",), position=(0.26, 0.0, 0.0), start=start, stop=stop, interval=interval),
+    ))
     result = _run(scene, run_time=mw.TimeConfig(time_steps=160))
 
-    surface = result.monitor("surface")
+    surface = result.raw_monitor("surface")
     assert surface["kind"] == "surface_field_time" and surface["differentiable"] is False
     steps = torch.round(surface["t"] / result.solver.dt).to(torch.int64).cpu()
     # A sample taken after update n carries the physical post-update label (n + 1) * dt.
@@ -232,7 +244,7 @@ def test_surface_field_time_faces_equal_full_plane_field_time_traces():
         ix = np.nonzero(np.isclose(x_coords[:, None], face_x[None, :]).any(axis=1))[0]
         iy = np.nonzero(np.isclose(y_coords[:, None], face_y[None, :]).any(axis=1))[0]
         assert ix.size == face_x.size and iy.size == face_y.size
-        expected = plane["components"][component][:, ix][:, :, iy]
+        expected = plane[component].values[:, ix][:, :, iy]
         assert torch.equal(face["components"][component], expected)
 
     # A point on the x_pos face reproduces the point FieldTimeMonitor trace.
@@ -240,7 +252,7 @@ def test_surface_field_time_faces_equal_full_plane_field_time_traces():
     face_y, face_z = (np.asarray(value) for value in face["coords"]["Ez"])
     iy = int(np.argmin(np.abs(face_y)))
     iz = int(np.argmin(np.abs(face_z)))
-    assert torch.equal(face["components"]["Ez"][:, iy, iz], result.monitor("point")["data"])
+    assert torch.equal(face["components"]["Ez"][:, iy, iz], result.monitor("point").sel(component="Ez").values)
 
 
 # ---------------------------------------------------------------------------
@@ -257,21 +269,25 @@ def test_aux_field_time_records_native_ade_state():
     magnetic = mw.DebyePole(delta_eps=0.5, tau=tau)
     material = mw.Material(eps_r=1.0, debye_poles=(debye,), drude_poles=(drude,), mu_debye_poles=(magnetic,))
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.4, 0.4),) * 3),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(mw.Structure(mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)), material, name="block"))
-    scene.add_source(mw.PointDipole(position=(0, 0, 0), polarization="Ez", width=0.03,
-                                    source_time=mw.CW(frequency=_F, amplitude=1.0), name="src"))
+                domain=mw.Domain(bounds=((-0.4, 0.4),) * 3),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+                structures=(mw.Structure(mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)), material, name="block"),),
+                sources=(
+            mw.PointDipole(position=(0, 0, 0), polarization="Ez", width=0.03,
+                           source_time=mw.CW(frequency=_F, amplitude=1.0), name="src"),
+            ),
+            )
     box = dict(position=(0.06, 0.0, 0.0), size=(0.04, 0.04, 0.04))
     with pytest.warns(UserWarning, match="volume time series"):
-        scene.add_monitor(mw.FieldTimeMonitor("fields", components=("Ez", "Hy"), **box))
-        scene.add_monitor(mw.AuxFieldTimeMonitor("aux", components=("Pz", "Jpz", "My"), **box))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.monitors.FieldTimeMonitor("fields", components=("Ez", "Hy"), **box),
+            mw.monitors.AuxFieldTimeMonitor("aux", components=("Pz", "Jpz", "My"), **box),
+        ))
         result = _run(scene, run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=10))
 
-    fields, aux = result.monitor("fields"), result.monitor("aux")
+    fields, aux = result.raw_monitor("fields"), result.raw_monitor("aux")
     assert aux["present"] == {"Pz": True, "Jpz": True, "My": True}
     assert aux["components"]["Pz"].shape == fields["components"]["Ez"].shape
     t = fields["t"].cpu().numpy()
@@ -322,35 +338,40 @@ class _DesignScene(mw.SceneModule):
 
     def to_scene(self):
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.36, 0.36),) * 3),
-            grid=mw.GridSpec.uniform(0.06),
-            boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-            device="cuda",
-        )
-        scene.add_material_region(mw.MaterialRegion(
-            name="design", geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
-            density=torch.sigmoid(self.logits), eps_bounds=(1.0, 6.0), mu_bounds=(1.0, 1.0)))
-        scene.add_source(mw.PointDipole(
-            position=(0.0, 0.0, -0.06), polarization="Ez", width=0.04,
-            source_time=mw.GaussianPulse(frequency=_F, fwidth=0.25e9, amplitude=50.0)))
-        scene.add_monitor(mw.AngleProjectionMonitor(
-            "proj", size=(0.36, 0.36, 0.36), theta=[0.6, 1.2, 1.8], phi=[0.0, 0.8], radius=4.0))
-        scene.add_monitor(mw.GaussianOverlapMonitor(
-            "overlap", position=(0.0, 0.0, 0.18), size=(0.36, 0.36, 0.0), beam_waist=0.12, polarization=(0, 1, 0),
-            focus=(0.06, 0.06, 0.18)))  # off-axis: a centred profile is orthogonal by symmetry
-        scene.add_monitor(mw.AuxFieldTimeMonitor("aux", components=("Pz",), position=(0.0, 0.0, 0.06)))
-        scene.add_monitor(mw.SurfaceFieldTimeMonitor("trace", size=(0.24, 0.24, 0.0), components=("Ez",), interval=4))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.36, 0.36),) * 3),
+                    grid=mw.GridSpec.uniform(0.06),
+                    boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design", geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
+                    density=torch.sigmoid(self.logits), eps_bounds=(1.0, 6.0), mu_bounds=(1.0, 1.0)),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.06), polarization="Ez", width=0.04,
+                    source_time=mw.GaussianPulse(frequency=_F, fwidth=0.25e9, amplitude=50.0)),
+                ),
+                    monitors=(
+                mw.monitors.AngleProjectionMonitor(
+                    "proj", size=(0.36, 0.36, 0.36), theta=[0.6, 1.2, 1.8], phi=[0.0, 0.8], radius=4.0),
+                mw.monitors.GaussianOverlapMonitor(
+                    "overlap", position=(0.0, 0.0, 0.18), size=(0.36, 0.36, 0.0), beam_waist=0.12, polarization=(0, 1, 0),
+                    focus=(0.06, 0.06, 0.18)),
+                mw.monitors.AuxFieldTimeMonitor("aux", components=("Pz",), position=(0.0, 0.0, 0.06)),
+                mw.monitors.SurfaceFieldTimeMonitor("trace", size=(0.24, 0.24, 0.0), components=("Ez",), interval=4),
+                ),
+                )
         return scene
 
 
 def _objectives(model):
     result = mw.Simulation.fdtd(
-        model, frequencies=[_F], run_time=mw.TimeConfig(time_steps=60),
-        spectral_sampler=mw.SpectralSampler(window="none"), full_field_dft=False,
+        model, frequencies=[_F], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=60),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"), full_field_dft=False),
     ).run()
     projection = result.monitor("proj").E_intensity.sum()
-    overlap = torch.abs(result.monitor("overlap")["amplitude_forward"]).square().sum()
+    overlap = torch.abs(result.monitor("overlap").isel(mode=0).sel(propagation="+").values).square().sum()
     return result, projection, overlap
 
 
@@ -379,10 +400,10 @@ def test_projection_and_overlap_objectives_are_differentiable_and_time_traces_re
     assert float(gradient_projection) == pytest.approx(fd_projection, rel=1e-2)
     assert float(gradient_overlap) == pytest.approx(fd_overlap, rel=1e-2)
 
-    aux = result.monitor("aux")
-    trace = result.monitor("trace")
-    assert aux["differentiable"] is False and aux["data"].requires_grad
+    aux = result.raw_monitor("aux")
+    trace = result.raw_monitor("trace")
+    assert aux["differentiable"] is False and aux["components"]["Pz"].requires_grad
     with pytest.raises(RuntimeError, match="detached time-domain traces"):
-        (aux["data"].square().sum() + projection).backward()
+        (aux["components"]["Pz"].square().sum() + projection).backward()
     with pytest.raises(RuntimeError, match="detached time-domain traces"):
         trace["faces"]["plane"]["components"]["Ez"].sum().backward()

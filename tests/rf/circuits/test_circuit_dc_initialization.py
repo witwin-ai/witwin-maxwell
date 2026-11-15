@@ -17,7 +17,7 @@ from witwin.maxwell.fdtd import circuits as runtime
 
 def test_coupled_mna_rejects_circuit_without_em_port_binding():
     """The DC port-current bound in circuits.py relies on an EM binding and a non-ground node."""
-    circuit = mw.Circuit("unbound")
+    circuit = mw.circuits.Circuit("unbound")
 
     with pytest.raises(ValueError, match="requires at least one EM port binding"):
         compile_coupled_mna_system(circuit, dt=1e-12, device="cpu", dtype=torch.float64)
@@ -49,7 +49,7 @@ def device(request, monkeypatch):
 
 def _prepare(circuit, impedance_scale, device, dtype):
     solver = SimpleNamespace(
-        scene=SimpleNamespace(circuits=(circuit,)),
+        scene=SimpleNamespace(scene=SimpleNamespace(circuits=(circuit,))),
         device=device,
         dt=torch.tensor(1e-12, device=device, dtype=dtype),
         Ex=torch.zeros(1, device=device, dtype=dtype),
@@ -73,17 +73,17 @@ def _prepare(circuit, impedance_scale, device, dtype):
 def test_biased_series_dc_block_admits_roundoff_port_current(
     device, dtype, integration, impedance_scale, voltage_scale,
 ):
-    circuit = mw.Circuit("dc_blocked", config=mw.MNAConfig(integration=integration))
+    circuit = mw.circuits.Circuit("dc_blocked", config=mw.circuits.MNAConfig(integration=integration))
     source = circuit.node("source")
     bias = circuit.node("bias")
     feed = circuit.node("feed")
     voltage = torch.tensor(3.7 * voltage_scale, device=device, dtype=dtype)
     r1 = torch.tensor(2.3 * impedance_scale, device=device, dtype=dtype)
     r2 = torch.tensor(4.9 * impedance_scale, device=device, dtype=dtype)
-    circuit.add(mw.VoltageSource("V1", source, circuit.ground, voltage))
-    circuit.add(mw.Resistor("R1", source, bias, r1))
-    circuit.add(mw.Resistor("R2", bias, circuit.ground, r2))
-    circuit.add(mw.Capacitor("C1", source, feed, 1e-12 / impedance_scale))
+    circuit.add(mw.circuits.VoltageSource("V1", source, circuit.ground, voltage))
+    circuit.add(mw.rf.Resistor("R1", source, bias, r1))
+    circuit.add(mw.rf.Resistor("R2", bias, circuit.ground, r2))
+    circuit.add(mw.rf.Capacitor("C1", source, feed, 1e-12 / impedance_scale))
     circuit.bind_port("feed", positive=feed, negative=bias)
 
     prepared = _prepare(circuit, impedance_scale, device, dtype)
@@ -110,13 +110,13 @@ def test_biased_series_dc_block_admits_roundoff_port_current(
 def test_dc_driven_port_rejects_even_tiny_physical_current(
     device, dtype, integration, impedance_scale, voltage_scale,
 ):
-    circuit = mw.Circuit("dc_driven", config=mw.MNAConfig(integration=integration))
+    circuit = mw.circuits.Circuit("dc_driven", config=mw.circuits.MNAConfig(integration=integration))
     feed = circuit.node("feed")
-    circuit.add(mw.VoltageSource(
+    circuit.add(mw.circuits.VoltageSource(
         "V1", feed, circuit.ground,
         torch.tensor(3.7 * voltage_scale, device=device, dtype=dtype),
     ))
-    circuit.add(mw.Resistor("R1", feed, circuit.ground, 2.3 * impedance_scale))
+    circuit.add(mw.rf.Resistor("R1", feed, circuit.ground, 2.3 * impedance_scale))
     circuit.bind_port("feed", positive=feed, negative=circuit.ground)
 
     with pytest.raises(ValueError, match="nonzero DC port current.*zero initial Yee field"):

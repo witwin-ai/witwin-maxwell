@@ -71,40 +71,40 @@ class _TwoPointDipoleScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                # Half-cell offset keeps the voxel window off the node knife edge.
-                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.06, 0.0, -0.18),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    # Half-cell offset keeps the voxel window off the node knife edge.
+                    geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.06, 0.0, -0.18),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                )
         if self.enable_second:
-            scene.add_source(
+            scene = scene.updated(sources=(
+                *scene.sources,
                 mw.PointDipole(
                     position=(-0.06, 0.0, -0.18),
                     polarization="Ez",
                     width=0.04,
                     source_time=mw.GaussianPulse(frequency=1.4e9, fwidth=0.25e9, amplitude=50.0),
-                )
-            )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+                ),
+            ))
+        scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",))))
         return scene
 
 
@@ -112,9 +112,11 @@ def _build_multifreq_sim(model, *, time_steps=200, freqs=(1.0e9, 1.4e9)):
     return mw.Simulation.fdtd(
         model,
         frequencies=list(freqs),
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=True,
+        ),
     )
 
 
@@ -122,7 +124,7 @@ def _two_dipole_multifreq_loss(model, *, time_steps=200, freqs=(1.0e9, 1.4e9)):
     result = _build_multifreq_sim(model, time_steps=time_steps, freqs=freqs).run()
     total = torch.zeros((), device="cuda")
     for index in range(len(freqs)):
-        total = total + _abs2(result.monitor("probe", freq_index=index)["data"])
+        total = total + _abs2(result.monitor("probe", freq_index=index).sel(component="Ez").values)
     return total
 
 
@@ -174,7 +176,7 @@ def test_second_point_source_shifts_solution_and_gradient():
     def transmitted_at_f1(enable_second):
         model = _TwoPointDipoleScene(enable_second=enable_second).cuda()
         result = _build_multifreq_sim(model, freqs=freqs).run()
-        return abs(result.monitor("probe", freq_index=1)["data"].detach().cpu().item())
+        return abs(result.monitor("probe", freq_index=1).sel(component="Ez").values.detach().cpu().item())
 
     one = transmitted_at_f1(False)
     two = transmitted_at_f1(True)
@@ -229,40 +231,40 @@ class _TwoPortModeScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.72, 0.72), (-0.60, 0.60), (-0.60, 0.60))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="waveguide",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.20, 0.36, 0.36)),
-                material=mw.Material(eps_r=8.0),
-            )
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.06, 0.0, 0.0), size=(0.24, 0.12, 0.12)),
-                density=density,
-                eps_bounds=(8.0, 12.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.ModeSource(
-                position=(-0.24, 0.0, 0.0),
-                size=(0.0, 0.36, 0.36),
-                polarization="Ez",
-                direction="+",
-                source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
-                name="port1",
-            )
-        )
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.72, 0.72), (-0.60, 0.60), (-0.60, 0.60))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    structures=(
+                mw.Structure(
+                    name="waveguide",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.20, 0.36, 0.36)),
+                    material=mw.Material(eps_r=8.0),
+                ),
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.06, 0.0, 0.0), size=(0.24, 0.12, 0.12)),
+                    density=density,
+                    eps_bounds=(8.0, 12.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.ModeSource(
+                    position=(-0.24, 0.0, 0.0),
+                    size=(0.0, 0.36, 0.36),
+                    polarization="Ez",
+                    direction="+",
+                    source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
+                    name="port1",
+                ),
+                ),
+                )
         if self.enable_second:
-            scene.add_source(
+            scene = scene.updated(sources=(
+                *scene.sources,
                 mw.ModeSource(
                     position=(0.24, 0.0, 0.0),
                     size=(0.0, 0.36, 0.36),
@@ -270,9 +272,9 @@ class _TwoPortModeScene(mw.SceneModule):
                     direction="-",
                     source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
                     name="port2",
-                )
-            )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",)))
+                ),
+            ))
+        scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",))))
         return scene
 
 
@@ -280,11 +282,13 @@ def _mode_loss(model, *, time_steps=192):
     result = mw.Simulation.fdtd(
         model,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).run()
-    return _abs2(result.monitor("probe")["data"])
+    return _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values)
 
 
 @_CUDA
@@ -345,40 +349,37 @@ class _TwoDipoleNormalizeScene(mw.SceneModule):
 
     def to_scene(self):
         density = torch.sigmoid(self.logits)
-        scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.12, 0.12)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
         second_frequency = 1.4e9 if self.distinct_spectrum else 1.0e9
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.06, 0.0, -0.18),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(-0.06, 0.0, -0.18),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=second_frequency, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+        scene = mw.Scene(
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.12, 0.12)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.06, 0.0, -0.18),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                mw.PointDipole(
+                    position=(-0.06, 0.0, -0.18),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=second_frequency, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -386,8 +387,10 @@ def _run_normalized(model, *, time_steps=48):
     return mw.Simulation.fdtd(
         model,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=True),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=True),
+        ),
     ).run()
 
 
@@ -396,7 +399,7 @@ def test_normalize_source_shared_spectrum_runs_multi_source():
     """normalize_source is well-defined when all sources share one spectrum."""
     model = _TwoDipoleNormalizeScene(distinct_spectrum=False).cuda()
     result = _run_normalized(model)
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).sel(component="Ez").values
     loss = _abs2(data)
     loss.backward()
     assert model.logits.grad is not None

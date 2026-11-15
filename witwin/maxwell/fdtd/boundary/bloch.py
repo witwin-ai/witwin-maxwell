@@ -17,7 +17,7 @@ def _domain_lengths(solver) -> tuple[float, float, float]:
 
 
 def _bloch_axes(solver) -> tuple[str, ...]:
-    return tuple(axis for axis in _AXES if solver.scene.boundary.axis_kind(axis) == "bloch")
+    return tuple(axis for axis in _AXES if solver.scene.scene.boundary.axis_kind(axis) == "bloch")
 
 
 def _tfsf_slab_sources(solver) -> list[dict]:
@@ -39,7 +39,7 @@ def validate_grating_tfsf_slab_topology(solver) -> dict:
 
     injection = source["injection"]
     normal_axis = injection["axis"]
-    boundary = solver.scene.boundary
+    boundary = solver.scene.scene.boundary
     normal_faces = boundary.axis_face_kinds(normal_axis)
     if boundary.axis_kind(normal_axis) == "bloch" or normal_faces != ("pml", "pml"):
         raise ValueError("Mixed Bloch/PML TFSF slab support requires the TFSF slab normal axis to use PML.")
@@ -58,7 +58,7 @@ def _require_auto_bloch_source(solver) -> dict:
 
 
 def resolve_bloch_wavevector(solver) -> tuple[float, float, float]:
-    boundary = solver.scene.boundary
+    boundary = solver.scene.scene.boundary
     wavevector = boundary.bloch_wavevector
     if wavevector != "auto":
         return tuple(float(component) for component in wavevector)
@@ -82,7 +82,7 @@ def resolve_bloch_phase_factors(solver) -> tuple[complex, complex, complex]:
         wavevector = resolve_bloch_wavevector(solver)
     phases = []
     for axis, wave_number, length in zip(_AXES, wavevector, _domain_lengths(solver)):
-        if solver.scene.boundary.axis_kind(axis) == "bloch":
+        if solver.scene.scene.boundary.axis_kind(axis) == "bloch":
             angle = float(wave_number) * float(length)
             phases.append(complex(math.cos(angle), math.sin(angle)))
         else:

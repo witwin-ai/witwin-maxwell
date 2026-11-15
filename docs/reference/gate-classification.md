@@ -55,7 +55,7 @@
 ### 2.4 `postprocess-only`（反例）
 
 - **门**：Phase 4 天线 gain / realized gain / 轴比 / 方向图。
-- **实测**：喂教科书方向图 / 构造 CP 场（`tests/rf/antenna/test_antenna_data.py`），**无任何 FDTD 天线**；`Result.antenna` 集成测试 **monkeypatch 掉远场计算**（审计 §1.1 Phase 4）。
+- **实测**：喂教科书方向图 / 构造 CP 场（`tests/rf/antenna/test_antenna_data.py`），**无任何 FDTD 天线**；`mw.antenna.antenna` 集成测试 **monkeypatch 掉远场计算**（审计 §1.1 Phase 4）。
 - **为何不充分**：后处理管道正确 ≠ 端到端物理正确；求解器被绕过。
 
 ### 2.5 `wave-level`（正例）

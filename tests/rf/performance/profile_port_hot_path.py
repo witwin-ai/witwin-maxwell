@@ -106,7 +106,7 @@ def _lumped_port(mw: Any, index: int, *, series_rlc: bool):
     # state advancement that dominated the audit's 14.4x diagnosis; a bare
     # reference impedance is the matched passive load used for the marginal sweep.
     termination = (
-        mw.SeriesRLC(r=60.0, l=1.2e-9, c=0.8e-12) if series_rlc else None
+        mw.rf.SeriesRLC(r=60.0, l=1.2e-9, c=0.8e-12) if series_rlc else None
     )
     return mw.LumpedPort(
         name=f"p{index}",
@@ -149,14 +149,15 @@ def _build_solver(
         grid=mw.GridSpec.uniform(0.005),
         boundary=mw.BoundarySpec.none(),
         ports=ports,
-        device="cuda",
     )
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=frequencies,
-        run_time=mw.TimeConfig(time_steps=64),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=64),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).prepare()
     return prepared.solver
 

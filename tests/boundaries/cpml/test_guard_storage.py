@@ -1,4 +1,4 @@
-"""CPU storage and time-level controls for the CPML energy guard."""
+"""Storage and time-level controls for the CPML energy guard."""
 from types import SimpleNamespace
 
 import pytest
@@ -11,13 +11,16 @@ from witwin.maxwell.fdtd.runtime.passivity import (
 from witwin.maxwell.fdtd.copper_foil import advance_copper_electric
 from witwin.maxwell.fdtd.runtime.stepping import _field_update_block, enforce_pec_boundaries
 from witwin.maxwell.fdtd.thin_sheet import (
-    _copper_rhs_torch, _chord_forcing_torch, _copper_state_torch,
     _sheet_flux, _prepare_sheet_flux, _SheetRuntime, thin_sheet_energy, thin_sheet_energy_device,
 )
+from tests.oracles.thin_sheet_torch import chord_forcing, copper_rhs, copper_state
 from tests.materials.thin_sheet import test_thin_sheet_runtime as cavity
 from tests.materials.thin_sheet.harness import rectangle_mesh
 from tests.boundaries.cpml.test_auto_passivity import host_preparation
 from witwin.maxwell.fdtd.runtime import passivity
+
+
+CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD preparation and runs")
 
 
 @pytest.fixture(autouse=True)
@@ -37,13 +40,12 @@ def _flux_plan(matrix):
 @pytest.mark.parametrize("complex_fields", [False, True])
 def test_foil_guard_counts_modes_and_both_traces(host_preparation, complex_fields, monkeypatch):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.1, .1),)*3), grid=mw.GridSpec.uniform(.025), device="cpu",
-        boundary=mw.BoundarySpec.faces(x="bloch" if complex_fields else "pec", y="pec", z="pml",
+        domain=mw.Domain(bounds=((-0.1, .1),)*3), grid=mw.GridSpec.uniform(.025), boundary=mw.BoundarySpec.faces(x="bloch" if complex_fields else "pec", y="pec", z="pml",
                                       num_layers=2, bloch_wavevector=(1., 0., 0.) if complex_fields else (0., 0., 0.)),
         structures=[mw.Structure(geometry=mw.Box(position=(0., 0., 0.), size=(.1, 0., .1)),
-                                 material=mw.CopperFoil(thickness=2e-6, frequency_range=(.5e9, 2e9)))])
-    solver = mw.Simulation.fdtd(scene, frequency=1e9, absorber="cpml",
-                                run_time=mw.TimeConfig(time_steps=1)).prepare().solver
+                                 material=mw.media.CopperFoil(thickness=2e-6, frequency_range=(.5e9, 2e9)))])
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(absorber="cpml",
+                                run_time=mw.TimeConfig(time_steps=1), device="cpu")).prepare().solver
     assert solver._copper_foils
     assert uncounted_storage(solver) == []
     assert make_passivity_state(solver) is not None
@@ -69,11 +71,12 @@ def test_foil_guard_counts_modes_and_both_traces(host_preparation, complex_field
     assert any(e["imaginary"] for e in solver._copper_foils) == complex_fields
 
 
+@CUDA
 @pytest.mark.parametrize("material", ["pec", "copper"])
 @pytest.mark.parametrize("modified", [False, True])
 def test_device_sheet_functional_matches_qualified_reference(material, modified, monkeypatch):
     foil = (mw.Material.pec() if material == "pec" else
-            mw.CopperFoil(thickness=2e-6, frequency_range=(.5e9, 4e9)))
+            mw.media.CopperFoil(thickness=2e-6, frequency_range=(.5e9, 4e9)))
     kwargs = dict(sheet_model="conformal_two_sided") if material == "pec" else {}
     solver = cavity._run(cavity._cavity(cavity._plate(foil, **kwargs)), 80).solver
     expected = thin_sheet_energy(solver, modified=modified)
@@ -92,38 +95,43 @@ def test_device_sheet_functional_matches_qualified_reference(material, modified,
             patch.setattr(torch.Tensor, name, host_read)
         actual = thin_sheet_energy_device(solver, modified=modified)
         guarded = total_energy(solver) if modified else actual
-    torch.testing.assert_close(actual, torch.tensor(expected, dtype=torch.float64), rtol=4e-14, atol=0)
+    torch.testing.assert_close(actual, torch.tensor(expected, dtype=torch.float64, device=actual.device),
+                               rtol=4e-14, atol=0)
     torch.testing.assert_close(guarded, actual, rtol=0, atol=0)
 
 
+@CUDA
 def test_explicit_cpml_copper_sheet_guard_is_active():
-    scene = cavity._cavity(cavity._plate(mw.CopperFoil(thickness=2e-6, frequency_range=(.5e9, 4e9))))
-    scene.boundary = mw.BoundarySpec.faces(x="pec", y="pec", z="pml", num_layers=2)
-    solver = mw.Simulation.fdtd(scene, frequency=2e9, backend="cpu_reference", absorber="cpml",
-                                run_time=mw.TimeConfig(time_steps=80)).run().solver
+    scene = cavity._cavity(cavity._plate(mw.media.CopperFoil(thickness=2e-6, frequency_range=(.5e9, 4e9))))
+    scene = scene.updated(boundary=mw.BoundarySpec.faces(x="pec", y="pec", z="pml", num_layers=2))
+    solver = mw.Simulation.fdtd(scene, frequencies=2e9, config=mw.FDTDConfig(absorber="cpml",
+                                run_time=mw.TimeConfig(time_steps=80))).run().solver
     assert solver.passivity_guard_status == "active"
     assert solver._passivity_state is not None
     assert uncounted_storage(solver) == []
-    torch.testing.assert_close(total_energy(solver),
-                               torch.tensor(thin_sheet_energy(solver, modified=True), dtype=torch.float64),
+    energy = total_energy(solver)
+    torch.testing.assert_close(energy,
+                               torch.tensor(thin_sheet_energy(solver, modified=True), dtype=torch.float64,
+                                            device=energy.device),
                                rtol=4e-14, atol=0)
 
 
 def _mixed_copper_scene(boundary):
-    copper = mw.CopperFoil(thickness=2e-6, frequency_range=(.5e9, 4e9))
+    copper = mw.media.CopperFoil(thickness=2e-6, frequency_range=(.5e9, 4e9))
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.09, .09),)*3), grid=mw.GridSpec.uniform(.01),
-        boundary=boundary, device="cpu", structures=[
+        boundary=boundary, structures=[
             mw.Structure(name="planar", geometry=mw.Box(position=(-.04, 0., 0.), size=(0., .04, .04)),
                          material=copper),
             mw.Structure(name="sheet", geometry=rectangle_mesh((.04, .003, .002), (1., .4, .25), .012, .01),
                          material=copper)])
 
 
+@CUDA
 def test_mixed_guard_keeps_native_and_sheet_widths_independent(monkeypatch):
     scene = _mixed_copper_scene(mw.BoundarySpec.faces(x="pec", y="pec", z="pml", num_layers=2))
-    solver = mw.Simulation.fdtd(scene, frequency=2e9, backend="cpu_reference", absorber="cpml",
-                                run_time=mw.TimeConfig(time_steps=1)).prepare().solver
+    solver = mw.Simulation.fdtd(scene, frequencies=2e9, config=mw.FDTDConfig(absorber="cpml",
+                                run_time=mw.TimeConfig(time_steps=1))).prepare().solver
     assert solver._copper_foils and solver._thin_sheets
     assert make_passivity_state(solver) is not None
     assert solver.passivity_guard_status == "active"
@@ -154,14 +162,17 @@ def test_mixed_guard_keeps_native_and_sheet_widths_independent(monkeypatch):
     torch.testing.assert_close(total_energy(solver), expected, rtol=0, atol=0)
 
 
+@CUDA
 @pytest.mark.parametrize("loss_rate", [0., 1e9], ids=["lossless", "lossy"])
 def test_mixed_copper_cavity_energy_plus_heat_is_constant(loss_rate, monkeypatch):
-    """Two separate conductor owners in one closed, source-free CPU cavity.
+    """Two separate conductor owners in one closed, source-free cavity.
 
     Use two passive canonical copper modes, as in the chord balance control,
     and float64 prepared tensors to isolate the discrete work identity from
-    float32 material rounding. Native FP64 admission is unchanged.
+    float32 material rounding. Native FP64 admission is unchanged: the native
+    Yee kernels are FP32-only, so the Torch Yee oracle steps the float64 fields.
     """
+    from tests.oracles.yee_cpu_reference import get_cpu_reference_module
     from witwin.maxwell.scene import prepare_scene
 
     def prepare_double(scene, **kwargs):
@@ -174,16 +185,17 @@ def test_mixed_copper_cavity_energy_plus_heat_is_constant(loss_rate, monkeypatch
     monkeypatch.setattr("witwin.maxwell.simulation.prepare_scene", prepare_double)
     monkeypatch.setattr("witwin.maxwell.fdtd.copper_foil.compile_copper_response", lambda _: response)
     monkeypatch.setattr("witwin.maxwell.compiler.copper_foil.compile_copper_response", lambda _: response)
-    solver = mw.Simulation.fdtd(_mixed_copper_scene(mw.BoundarySpec.pec()), frequency=2e9,
-                                backend="cpu_reference", run_time=mw.TimeConfig(time_steps=300)).prepare().solver
+    solver = mw.Simulation.fdtd(_mixed_copper_scene(mw.BoundarySpec.pec()), frequencies=2e9,
+                                config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=300))).prepare().solver
     assert solver.Ex.dtype == torch.float64
     assert len(solver._thin_sheets) == 1 and solver._copper_foils
-    generator = torch.Generator().manual_seed(901)
+    solver.fdtd_module = get_cpu_reference_module()
+    generator = torch.Generator(device=solver.Ex.device).manual_seed(901)
     for name in ("Ex", "Ey", "Ez"):
         getattr(solver, name).normal_(generator=generator)
     runtime = solver._thin_sheets[0]
     runtime.scatter(solver, runtime.plan_all_e, runtime.e_extra,
-                    torch.zeros(runtime.plan_all_e["size"], dtype=torch.float64))
+                    torch.zeros(runtime.plan_all_e["size"], dtype=torch.float64, device=solver.Ex.device))
     enforce_pec_boundaries(solver)
     for entry in solver._copper_foils:
         entry["right_e"].copy_(getattr(solver, entry["electric_name"])[entry["index"]])
@@ -260,11 +272,11 @@ def test_modified_copper_resonance_energy_plus_heat_is_constant(loss_rate):
     initial = total_energy(solver)
     values, plain, energies, heats = [], [], [], []
     for _ in range(600):
-        _, rhs = _copper_rhs_torch(rt, solver, rt.e_old, rt.e_new)
+        _, rhs = copper_rhs(rt, solver, rt.e_old, rt.e_new)
         updated = torch.linalg.solve(S, rhs)
-        _chord_forcing_torch(rt, solver, rt.e_old, rt.e_new, updated)
-        _copper_state_torch(rt, solver, rt.e_old, rt.e_new, updated,
-                            torch.empty((0, 2), dtype=torch.float64), torch.empty((0, 2), dtype=torch.float64))
+        chord_forcing(rt, solver, rt.e_old, rt.e_new, updated)
+        copper_state(rt, solver, rt.e_old, rt.e_new, updated,
+                     torch.empty((0, 2), dtype=torch.float64), torch.empty((0, 2), dtype=torch.float64))
         energy = total_energy(solver)
         energies.append(energy)
         heats.append(rt.loss.clone())

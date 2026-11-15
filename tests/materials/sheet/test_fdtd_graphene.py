@@ -7,6 +7,7 @@ from tests.materials.sheet.sheet_measurement import Z0 as _Z0, measure_sheet_sca
 from witwin.core import Box
 from witwin.core.material import VACUUM_PERMITTIVITY
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_components, compile_materials
 
 _ELEMENTARY_CHARGE = 1.602176634e-19  # [C]
 _REDUCED_PLANCK = 1.054571817e-34  # [J*s]
@@ -68,7 +69,7 @@ def _kubo_interband_sigma_t0(mu_c_ev, tau, omega):
 
 
 def test_graphene_construction_and_kubo_intraband_conductivity():
-    material = mw.Graphene(chemical_potential=0.2, scattering_time=1.0e-13, temperature=300.0)
+    material = mw.media.Graphene(chemical_potential=0.2, scattering_time=1.0e-13, temperature=300.0)
     assert material.is_medium2d
     assert material.sigma_s == 0.0
 
@@ -92,9 +93,9 @@ def test_graphene_construction_and_kubo_intraband_conductivity():
     assert material.sheet_lorentz_terms() == ()
 
     with pytest.raises(ValueError):
-        mw.Graphene(chemical_potential=0.2, scattering_time=0.0)
+        mw.media.Graphene(chemical_potential=0.2, scattering_time=0.0)
     with pytest.raises(ValueError):
-        mw.Graphene(chemical_potential=-0.1, scattering_time=1.0e-13)
+        mw.media.Graphene(chemical_potential=-0.1, scattering_time=1.0e-13)
 
 
 def _build_cpu_graphene_scene(material):
@@ -103,21 +104,20 @@ def _build_cpu_graphene_scene(material):
             domain=mw.Domain(bounds=((-50.0e-6, 50.0e-6), (-20.0e-6, 20.0e-6), (-20.0e-6, 20.0e-6))),
             grid=mw.GridSpec.uniform(5.0e-6),
             boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-            device="cpu",
             structures=[
                 mw.Structure(
                     geometry=Box(position=(0.0, 0.0, 0.0), size=(0.0, 1.0e-3, 1.0e-3)),
                     material=material,
                 )
             ],
-        )
+        ), device="cpu"
     )
 
 
 def test_graphene_compiles_to_tangential_sheet_drude_pole():
-    material = mw.Graphene(chemical_potential=0.2, scattering_time=1.0e-13)
+    material = mw.media.Graphene(chemical_potential=0.2, scattering_time=1.0e-13)
     scene = _build_cpu_graphene_scene(material)
-    model = scene.compile_materials()
+    model = compile_materials(scene)
 
     assert len(model["drude_poles"]) == 1
     entry = model["drude_poles"][0]
@@ -143,7 +143,7 @@ def test_graphene_compiles_to_tangential_sheet_drude_pole():
         assert torch.all(model["sigma_e_components"][axis] == 0)
 
     # Frequency evaluation applies the sheet susceptibility to tangential axes only.
-    eps_components, _ = scene.compile_material_components(frequency=1.0e12)
+    eps_components, _ = compile_material_components(scene, frequency=1.0e12)
     assert torch.all(eps_components["x"].imag == 0)
     assert bool(torch.any(eps_components["y"][node_index].imag != 0))
     assert bool(torch.any(eps_components["z"][node_index].imag != 0))
@@ -152,7 +152,7 @@ def test_graphene_compiles_to_tangential_sheet_drude_pole():
 def test_graphene_characteristic_frequency_feeds_auto_dt_bound():
     from witwin.maxwell.fdtd.runtime.initialization import _material_characteristic_frequency
 
-    material = mw.Graphene(chemical_potential=0.2, scattering_time=1.0e-13)
+    material = mw.media.Graphene(chemical_potential=0.2, scattering_time=1.0e-13)
     assert _material_characteristic_frequency(material) == pytest.approx(
         material.scattering_rate / (2.0 * np.pi), rel=1e-12
     )
@@ -162,7 +162,7 @@ def test_graphene_characteristic_frequency_feeds_auto_dt_bound():
 def test_fdtd_graphene_sheet_transmission_matches_kubo_fresnel():
     # Free-standing graphene sheet at normal incidence with the Kubo intraband
     # sigma_s(omega): t = 2 / (2 + Z0*sigma_s(omega)), r = t - 1.
-    material = mw.Graphene(chemical_potential=0.2, scattering_time=1.0e-13, temperature=300.0)
+    material = mw.media.Graphene(chemical_potential=0.2, scattering_time=1.0e-13, temperature=300.0)
     for frequency in (1.0e12, 3.0e12):
         t, r = measure_sheet_scattering(
             material,
@@ -200,11 +200,11 @@ def test_kubo_interband_reference_pv_converges_to_t0_log():
 
 
 def test_graphene_interband_construction_and_fit():
-    intraband = mw.Graphene(chemical_potential=0.4, scattering_time=1.0e-13, temperature=300.0)
+    intraband = mw.media.Graphene(chemical_potential=0.4, scattering_time=1.0e-13, temperature=300.0)
     assert intraband.include_interband is False
     assert intraband.sheet_lorentz_terms() == ()
 
-    material = mw.Graphene(
+    material = mw.media.Graphene(
         chemical_potential=0.4, scattering_time=1.0e-13, temperature=300.0, include_interband=True
     )
     assert material.is_medium2d
@@ -230,7 +230,7 @@ def test_graphene_interband_construction_and_fit():
 
 def test_graphene_interband_sheet_conductivity_matches_kubo():
     for mu_c, tau, temperature in ((0.5, 1.0e-13, 300.0), (0.3, 1.0e-13, 300.0), (0.2, 5.0e-13, 300.0)):
-        material = mw.Graphene(
+        material = mw.media.Graphene(
             chemical_potential=mu_c, scattering_time=tau, temperature=temperature, include_interband=True
         )
         omega_gap = 2.0 * mu_c * _ELEMENTARY_CHARGE / _REDUCED_PLANCK
@@ -254,11 +254,11 @@ def test_graphene_interband_sheet_conductivity_matches_kubo():
 
 
 def test_graphene_interband_compiles_to_tangential_lorentz_poles():
-    material = mw.Graphene(
+    material = mw.media.Graphene(
         chemical_potential=0.4, scattering_time=1.0e-13, temperature=300.0, include_interband=True
     )
     scene = _build_cpu_graphene_scene(material)
-    model = scene.compile_materials()
+    model = compile_materials(scene)
 
     # One intraband Drude pole; one Lorentz pole per fitted interband term.
     assert len(model["drude_poles"]) == 1
@@ -283,7 +283,7 @@ def test_graphene_interband_compiles_to_tangential_lorentz_poles():
     # Frequency evaluation applies the interband susceptibility to tangential
     # axes only; the normal (x) axis stays real.
     frequency = 0.6 * (2.0 * 0.4 * _ELEMENTARY_CHARGE / _REDUCED_PLANCK) / (2.0 * np.pi)
-    eps_components, _ = scene.compile_material_components(frequency=frequency)
+    eps_components, _ = compile_material_components(scene, frequency=frequency)
     assert torch.all(eps_components["x"].imag == 0)
     assert bool(torch.any(eps_components["y"][node_index].imag != 0))
     assert bool(torch.any(eps_components["z"][node_index].imag != 0))
@@ -297,7 +297,7 @@ def test_fdtd_graphene_interband_sheet_scattering_matches_realized_sigma():
     # Fresnel sheet relations at the descriptor sigma_s(omega) the poles
     # reproduce, and the sheet conductivity is inverted back from t.
     mu_c, tau = 0.3, 1.0e-13
-    material = mw.Graphene(
+    material = mw.media.Graphene(
         chemical_potential=mu_c, scattering_time=tau, temperature=300.0, include_interband=True
     )
     omega_gap = 2.0 * mu_c * _ELEMENTARY_CHARGE / _REDUCED_PLANCK

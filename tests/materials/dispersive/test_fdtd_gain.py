@@ -31,7 +31,6 @@ def _build_plane_wave_scene(frequency, *, amplitude=1.0):
         domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
         grid=mw.GridSpec.uniform(0.04),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
         sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
@@ -47,9 +46,11 @@ def _run_fdtd(scene, frequency):
     return mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
 
@@ -122,22 +123,28 @@ def test_fdtd_linear_gain_slab_amplifies_vs_analytic_single_pass():
         )
 
     vacuum_scene = _build_plane_wave_scene(frequency)
-    vacuum_scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.4, fields=("Ez",)))
+    vacuum_scene = vacuum_scene.updated(monitors=(
+        *vacuum_scene.monitors,
+        mw.PlaneMonitor("post", axis="x", position=0.4, fields=("Ez",)),
+    ))
 
     gain_scene = _build_plane_wave_scene(frequency)
-    gain_scene.add_structure(
+    gain_scene = gain_scene.updated(structures=(
+        *gain_scene.structures,
         mw.Structure(
             geometry=Box(position=(0.0, 0.0, 0.0), size=(slab_thickness, 0.8, 0.8)),
             material=gain_material,
-        )
-    )
-    gain_scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.4, fields=("Ez",)))
+        ),
+    ), monitors=(
+        *gain_scene.monitors,
+        mw.PlaneMonitor("post", axis="x", position=0.4, fields=("Ez",)),
+    ))
 
     vacuum_result = _run_fdtd(vacuum_scene, frequency)
     gain_result = _run_fdtd(gain_scene, frequency)
 
-    vacuum_post = _plane_field_mean(vacuum_result.monitor("post")["data"])
-    gain_post = _plane_field_mean(gain_result.monitor("post")["data"])
+    vacuum_post = _plane_field_mean(vacuum_result.monitor("post", freq_index=0).sel(component="Ez").values)
+    gain_post = _plane_field_mean(gain_result.monitor("post", freq_index=0).sel(component="Ez").values)
     measured_amplitude_gain = gain_post / max(vacuum_post, 1e-12)
 
     # Analytic single-pass amplitude gain exp(|Im(n)| * k0 * L) at the design

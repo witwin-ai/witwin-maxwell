@@ -37,7 +37,7 @@ def snapshot_pair(tmp_path, reference, candidate, *, gate="g4", half=None):
             metadata["horizon_steps"] = 4
             (directory / "capture_half.json").write_text(json.dumps(metadata))
             torch.save(half[arm == "candidate"], directory / "tensors_half.pt")
-    return SimpleNamespace(output=tmp_path, gate=gate, scenes=["vacuum"],
+    return SimpleNamespace(output=tmp_path, gate=gate, scenes=["vacuum"], baseline=tmp_path / "baseline",
                            equivalence="rule2", bounded_items=None)
 
 
@@ -245,6 +245,32 @@ def test_determinism_rejects_bad_captures(tmp_path, failure):
         gates.determinism(SimpleNamespace(dirs=directories, arm="candidate", output=tmp_path))
 
 
+@pytest.mark.parametrize("drift", [None, "tensor", "step"])
+def test_determinism_loads_physics_checkpoints_safely(tmp_path, drift):
+    # Dispersive captures also save an FDTDCheckpointState; it loads with weights_only=True.
+    from witwin.maxwell.fdtd.checkpoint import FDTDCheckpointSchema, FDTDCheckpointState
+
+    directories = repeated_captures(tmp_path)
+    schema = FDTDCheckpointSchema(version=1, field_names=("Ex",), complex_field_names=(),
+                                  cpml_state_names=(), tfsf_auxiliary_state_names=(),
+                                  dispersive_state_names=("P",))
+    for index, directory in enumerate(directories):
+        last = index == len(directories) - 1
+        state = FDTDCheckpointState(
+            step=9 if last and drift == "step" else 8, schema=schema,
+            tensors={"Ex": torch.ones(2), "P": torch.full((2,), 2.0 if last and drift == "tensor" else 1.0)})
+        torch.save(state, directory / "candidate" / "vacuum" / "physics-checkpoint.pt")
+    args = SimpleNamespace(dirs=directories, arm="candidate", output=tmp_path)
+    if drift is not None:
+        with pytest.raises(SystemExit):
+            gates.determinism(args)
+        return
+    report = gates.determinism(args)
+    assert report["passed"]
+    assert {"vacuum/physics-checkpoint.pt/tensors/P", "vacuum/physics-checkpoint.pt/step",
+            "vacuum/physics-checkpoint.pt/schema"} <= set(report["items"])
+
+
 def test_cpu_cli_in_fresh_process(tmp_path):
     directories = repeated_captures(tmp_path)
     script = ("import runpy, torch; from unittest.mock import patch; "
@@ -262,31 +288,36 @@ def test_capture_dispatches_fresh_half_and_full_workers(tmp_path, monkeypatch):
                                      "--output", str(tmp_path)])
     with patch.object(gates.subprocess, "run") as run:
         gates.main()
-    assert run.call_count == 4
+    # Only the candidate is captured; the baseline arm is the frozen existing-path store.
+    assert run.call_count == 2
     commands = [call.args[0] for call in run.call_args_list]
-    assert all("--half-horizon" in command for command in commands)
-    assert ["--snapshot-half" in command for command in commands] == [False, True, False, True]
+    assert all("--half-horizon" in command and "--arm" not in command for command in commands)
+    assert ["--snapshot-half" in command for command in commands] == [False, True]
 
 
 def test_half_capture_uses_full_configuration_and_stop(tmp_path, monkeypatch):
     fields = {name: torch.ones(1) for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
     solver = SimpleNamespace(**fields, _dft_batched_fields={}, _shutoff_triggered=False,
                              _shutoff_step=None, dft_enabled=False, _observer_spectral_entries=[],
-                             tfsf_enabled=False)
+                             tfsf_enabled=False, _core_runtime=SimpleNamespace(chunk_size=None))
+    from witwin.maxwell.fdtd.runtime import core_path
+    # A per-step core closure: the stub never captures whole steps.
+    monkeypatch.setattr(core_path, "core_path_step_loop_blockers", lambda target: ["stub"])
     result = SimpleNamespace(fields={"EX": torch.ones(1)}, monitors={})
     simulation = SimpleNamespace(prepare=lambda: SimpleNamespace(solver=solver))
     stops = []
-    simulation._execute_fdtd_solve = lambda target, **kwargs: stops.append((target, kwargs))
+    simulation._execute_fdtd_solve = lambda target, **kwargs: (stops.append((target, kwargs)), None)[1]
     case = SimpleNamespace(steps=8, name="vacuum", initial_fields=False, boundaries=False,
-                           capture_failure=False, shutoff=0, plan=lambda: {})
+                           capture_failure=False, shutoff=0, material_cache=None, plan=lambda: {})
     monkeypatch.setattr(gates, "build_core_case", lambda name: case)
     monkeypatch.setattr(gates, "make_simulation", lambda *args, **kwargs: simulation)
     monkeypatch.setattr(gates, "partial_result", lambda target: result)
-    args = SimpleNamespace(output=tmp_path, gate="g1", scene="vacuum", arm="baseline", steps=256,
+    args = SimpleNamespace(output=tmp_path, gate="g1", scene="vacuum", steps=256,
                            bounded_items=None, half_horizon=True, snapshot_half=True, chunk_size=32)
     gates.capture_case(args)
     assert stops == [(solver, {"stop_step": 4})]
-    path = tmp_path / "baseline" / "vacuum"
+    assert solver._core_runtime.chunk_size == 32
+    path = tmp_path / "candidate" / "vacuum"
     assert (path / "tensors_half.pt").is_file() and not (path / "tensors.pt").exists()
     metadata = json.loads((path / "capture_half.json").read_text())
     assert metadata["steps"] == 8 and metadata["horizon_steps"] == 4
@@ -322,15 +353,14 @@ def test_partial_export_matches_public_field_names(monkeypatch):
 ])
 def test_accelerated_g4_modes(tmp_path, monkeypatch, equivalence, delta, passed):
     scene = SimpleNamespace(subpixel=SimpleNamespace(pec=None))
-    scene.clone = lambda **kwargs: scene
+    scene.updated = lambda **kwargs: scene
     monkeypatch.setattr(setup_gates, "scene_for", lambda name: scene)
     monkeypatch.setattr(setup_gates, "MODES", ((1, "arithmetic"),))
     monkeypatch.setattr(setup_gates.mw, "SubpixelSpec", lambda **kwargs: kwargs)
 
-    def simulation(target, *, accelerated):
-        solver = SimpleNamespace(Nx=1, Ny=1, Nz=1,
-                                 _compiled_material_model={"table": torch.tensor([1. + delta * accelerated])})
-        return SimpleNamespace(prepare=lambda: SimpleNamespace(solver=solver))
+    def solver(simulation, *, accelerated):
+        return SimpleNamespace(Nx=1, Ny=1, Nz=1,
+                               _compiled_material_model={"table": torch.tensor([1. + delta * accelerated])})
 
     @contextmanager
     def record():
@@ -338,7 +368,8 @@ def test_accelerated_g4_modes(tmp_path, monkeypatch, equivalence, delta, passed)
             pieces = {}
         yield Calls([True])
 
-    monkeypatch.setattr(setup_gates, "setup_simulation", simulation)
+    monkeypatch.setattr(setup_gates, "setup_simulation", lambda target: SimpleNamespace())
+    monkeypatch.setattr(setup_gates, "setup_solver", solver)
     monkeypatch.setattr(setup_gates, "record_setup", record)
     monkeypatch.setattr(setup_gates, "coefficient_payload", lambda target: {})
     for method in ("empty_cache", "max_memory_allocated", "max_memory_reserved"):
@@ -357,3 +388,72 @@ def test_accelerated_g4_modes(tmp_path, monkeypatch, equivalence, delta, passed)
             with pytest.raises(AssertionError):
                 setup_gates.g4(["synthetic"], tmp_path, equivalence=equivalence)
             assert len(json.loads((tmp_path / "g4.json").read_text())) == 2
+
+
+# --- G4 setup scratch (uninitialized nonlinear coefficient storage) ---------------------------
+SCRATCH = "setup/cex_curl_dynamic"
+
+
+@pytest.mark.parametrize("equivalence", ["bitwise", "rule2"])
+@pytest.mark.parametrize("arms", ["both", "baseline_only"])
+def test_g4_compare_ignores_setup_scratch(tmp_path, equivalence, arms):
+    real = {"setup/cex_curl": torch.tensor([0.5, 0.25])}
+    # A frozen capture still holds the scratch; a new capture holds different garbage or none.
+    reference = real | {SCRATCH: torch.tensor([float("nan"), 3.0]), "setup/cez_decay_dynamic": torch.ones(2)}
+    candidate = real | ({SCRATCH: torch.tensor([7.0, -1.0])} if arms == "both" else {})
+    args = snapshot_pair(tmp_path, reference, candidate)
+    args.equivalence = equivalence
+    gates.compare(args)
+    report = json.loads((tmp_path / "comparison.json").read_text())
+    assert report["passed"] and set(report["items"]) == {"vacuum/setup/cex_curl"}
+    assert report["excluded_setup_scratch"] == {"vacuum": {
+        "baseline": [SCRATCH, "setup/cez_decay_dynamic"], "candidate": [SCRATCH] if arms == "both" else []}}
+
+
+def test_g4_scratch_exclusion_keeps_real_setup_tensors(tmp_path):
+    # Only the six exact scratch names are dropped: the static coefficients stay compared.
+    assert gates.SETUP_SCRATCH_KEYS == {f"setup/ce{axis}_{kind}_dynamic"
+                                        for axis in "xyz" for kind in ("curl", "decay")}
+    reference = {"setup/cex_curl": torch.ones(2), "setup/cex_curl_dynamic_x": torch.ones(2)}
+    for key in reference:
+        candidate = reference | {key: torch.tensor([1.0, 2.0])}
+        args = snapshot_pair(tmp_path / key.replace("/", "_"), reference, candidate)
+        with pytest.raises(SystemExit, match="1"):
+            gates.compare(args)
+
+
+def test_g1_compare_keeps_scratch_named_items(tmp_path):
+    # Outside G4 the names are ordinary (run-end) tensors and stay compared.
+    reference = {SCRATCH: torch.ones(2)}
+    args = snapshot_pair(tmp_path, reference, {SCRATCH: torch.zeros(2)}, gate="g1")
+    del args.equivalence
+    with pytest.raises(SystemExit, match="1"):
+        gates.compare(args)
+
+
+def test_setup_tensors_skip_scratch_attributes():
+    solver = SimpleNamespace(**{name: None for name in (
+        "_compiled_material_model", "_coefficient_uniformity", "_compiled_sources", "_source_terms",
+        "_electric_source_terms", "_magnetic_source_terms", "observers", "_point_observer_groups",
+        "_plane_observer_groups", "_observer_spectral_entries")})
+    solver.cex_curl = torch.ones(2)
+    solver.eps_Ex = torch.ones(2)
+    for name in gates.SETUP_SCRATCH_ATTRIBUTES:
+        setattr(solver, name, torch.full((2,), float("nan")))
+    assert set(gates.setup_tensors(solver)) == {"setup/cex_curl", "setup/eps_Ex"}
+    assert gates.setup_scratch_attributes(solver) == list(gates.SETUP_SCRATCH_ATTRIBUTES)
+    solver.cex_decay_dynamic = None
+    assert "cex_decay_dynamic" not in gates.setup_scratch_attributes(solver)
+
+
+def test_g4_determinism_ignores_setup_scratch(tmp_path):
+    directories = []
+    for index in range(3):
+        scene = tmp_path / str(index) / "candidate" / "vacuum"
+        scene.mkdir(parents=True)
+        torch.save({"setup/cex_curl": torch.ones(2), SCRATCH: torch.full((2,), float(index))},
+                   scene / "tensors.pt")
+        (scene / "capture.json").write_text(json.dumps({"gate": "g4", "process_id": index + 1}))
+        directories.append(tmp_path / str(index))
+    report = gates.determinism(SimpleNamespace(dirs=directories, arm="candidate", output=tmp_path))
+    assert report["passed"] and set(report["items"]) == {"vacuum/tensors.pt/setup/cex_curl"}

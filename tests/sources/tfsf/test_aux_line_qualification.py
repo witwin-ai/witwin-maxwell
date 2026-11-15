@@ -16,6 +16,10 @@ from scripts.dev.tfsf_aux_line_termination import (
 )
 
 
+# prepare_line prepares the incident line on a CUDA scene (the CPU reference profile is gone).
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+
+
 @pytest.fixture(scope="module", autouse=True)
 def one_cpu_thread():
     previous = torch.get_num_threads()

@@ -14,6 +14,7 @@ from ..fdfd_response import LocalResponseConfig
 from ..result import Result
 from ..scene import SceneModule, prepare_scene
 from .observations import compile_projection
+from .results import observation_data
 from .materials import compile_fdfd_materials
 
 
@@ -45,9 +46,9 @@ def _same(a, b):
     return a == b
 
 
-def _fixed_context(scene):
+def _fixed_context(scene, device):
     return _snapshot((scene.domain, scene.grid, scene.boundary, scene.sources, scene.ports,
-                      scene.symmetry, scene.subpixel, scene.device))
+                      scene.symmetry, scene.subpixel, str(device)))
 
 
 def _matches(snapshot, value):
@@ -169,10 +170,10 @@ class PreparedLocalResponse:
         self.device = self.scene.x.device
         self.dtype = torch.complex128 if solver.precision == 'double' else torch.complex64
         self.frequency = solver.frequency
-        self._context = _fixed_context(self.scene)
-        self._public_context = _fixed_context(simulation.scene)
+        self._context = _fixed_context(self.scene.scene, self.scene.device)
+        self._public_context = _fixed_context(simulation.scene, simulation.config.device)
         self._config_context = _snapshot(simulation.config)
-        if _trainable((self.scene.sources, self.scene.ports)):
+        if _trainable((self.scene.scene.sources, self.scene.scene.ports)):
             raise ValueError("Local responses require fixed sources and ports; only material inputs may be trainable.")
         self._indices = design_indices(self.config.design, self.scene)
         self._projection = compile_projection(self.config.observations, self.scene, self.dtype, self.frequency)
@@ -251,11 +252,12 @@ class PreparedLocalResponse:
             raise RuntimeError("Local response context is closed.")
         self.simulation._refresh_scene()
         scene = self.simulation.scene
+        device = self.simulation.config.device
         context = (scene.domain, scene.grid, scene.boundary, scene.sources, scene.ports,
-                   scene.symmetry, scene.subpixel, scene.device)
+                   scene.symmetry, scene.subpixel, device)
         if self.frequency != self.simulation.frequency or not _matches(self._public_context, context):
             raise ValueError("Background grid, boundary, source or frequency changed; prepare a new response.")
-        if scene.grid.is_auto and not _same(self._context,_fixed_context(prepare_scene(scene))):
+        if scene.grid.is_auto and not _same(self._context, _fixed_context(prepare_scene(scene, device=device).scene, device)):
             raise ValueError("Background grid, boundary, source or frequency changed; prepare a new response.")
         if not _matches(self._config_context, self.simulation.config):
             raise ValueError("FDFD configuration changed; prepare a new response.")
@@ -270,16 +272,16 @@ class PreparedLocalResponse:
             result = delta.to(self.dtype)
         else:
             candidate = self.simulation.scene if scene is None else (scene.to_scene() if isinstance(scene, SceneModule) else scene)
-            prepared = prepare_scene(candidate)
-            if _trainable((prepared.sources, prepared.ports)):
+            prepared = prepare_scene(candidate, device=self.simulation.config.device)
+            if _trainable((prepared.scene.sources, prepared.scene.ports)):
                 raise ValueError("Local response sources and ports must be fixed.")
-            for structure in prepared.structures:
+            for structure in prepared.scene.structures:
                 if getattr(structure.material, 'is_pec', False) and _trainable(structure.geometry):
                     raise ValueError("Binary PEC geometry is not differentiable; use finite dielectric materials for gradients.")
-            if not _same(self._context, _fixed_context(prepared)):
+            if not _same(self._context, _fixed_context(prepared.scene, prepared.device)):
                 raise ValueError("Candidate must preserve grid, boundary, sources and fixed solver context.")
-            from .solver import _validate_supported_fdfd_materials
-            _validate_supported_fdfd_materials(prepared)
+            from ..capability import check_scene
+            check_scene(prepared.scene, "fdfd", frequencies=(self.frequency,)).raise_if_unsupported()
             from .magnetic import flatten_permeability, require_fixed_permeability
             from ..adjoint_inputs import scene_trainable_material_tensors
             _, permeability = compile_fdfd_materials(prepared, self.frequency, edges=True)
@@ -315,7 +317,7 @@ class PreparedLocalResponse:
             if pec is not None:
                 raise ValueError("Explicit PEC mask requires an explicit delta.")
             candidate = self.simulation.scene if scene is None else (scene.to_scene() if isinstance(scene, SceneModule) else scene)
-            prepared = prepare_scene(candidate)
+            prepared = prepare_scene(candidate, device=self.simulation.config.device)
             from ..fdtd.runtime.materials import _staircase_pec_shorted_edges
             shorted = _staircase_pec_shorted_edges(prepared)
             candidate_mask = torch.zeros_like(self._base_pec)
@@ -342,7 +344,7 @@ class PreparedLocalResponse:
                 if component[1].lower() == axis:
                     continue
                 for side, index in (('low', 0), ('high', -1)):
-                    if self.scene.boundary.face_kind(axis, side) == 'pec':
+                    if self.scene.scene.boundary.face_kind(axis, side) == 'pec':
                         selection = [slice(None)] * 3; selection[normal] = index
                         mask[tuple(selection)] = True
             masks.append(mask.flatten())
@@ -379,9 +381,10 @@ class PreparedLocalResponse:
                 fields[component.upper()] = electric[offset:offset+count].reshape(shape)
                 offset += count
         return Result(method='fdfd', scene=result_scene,
-                      prepared_scene=prepare_scene(result_scene) if _prepared_scene is None else _prepared_scene, frequency=self.frequency, fields=fields,
-                      monitors={name: {'value': observed[i], 'frequency': self.frequency, 'kind': 'linear_projection'}
-                                for i, name in enumerate(self._names)},
+                      prepared_scene=(prepare_scene(result_scene, device=self.simulation.config.device)
+                                      if _prepared_scene is None else _prepared_scene), frequency=self.frequency, fields=fields,
+                      monitors=observation_data(self.config.observations, observed, self.frequency),
+                      metadata=self.simulation.metadata,
                       solver_stats={'converged': True, 'final_residual': residual,
                                     'local_response': {'design_dofs': self._indices.numel(),
                                      'observation_count': len(self._names), 'precompute_seconds': self.precompute_seconds,

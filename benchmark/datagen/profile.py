@@ -15,6 +15,7 @@ removable monitor/DFT cost, not all instrumentation cost.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import gc
 from io import BytesIO
 import json
@@ -61,11 +62,12 @@ def _release():
 def _repeat(builder, device, repeat_index):
     _release()
     stages = {}
-    sample, stages["build"] = _measure(lambda: builder.build(device=device), device)
-    cache = (mw.FDTDMaterialCache(max_entries=1, max_bytes=4 * 1024**3)
+    sample, stages["build"] = _measure(lambda: builder.build(), device)
+    cache = (mw.fdtd.FDTDMaterialCache(max_entries=1, max_bytes=4 * 1024**3)
              if sample.cache_unavailable is None else None)
+    config = replace(sample.fdtd_kwargs["config"], material_cache=cache)
     simulation, stages["configure"] = _measure(
-        lambda: mw.Simulation.fdtd(sample.scene, material_cache=cache, **sample.fdtd_kwargs),
+        lambda: mw.Simulation.fdtd(sample.scene, **(sample.fdtd_kwargs | {"config": config})),
         device,
     )
     prepared, stages["prepare_cold"] = _measure(simulation.prepare, device)
@@ -83,7 +85,7 @@ def _repeat(builder, device, repeat_index):
         stages["prepare_warm"] = dict(status="unsupported", reason=sample.cache_unavailable)
 
     result, stages["run"] = _measure(prepared.run, device)
-    stats = result.solver_stats
+    stats = result.stats()
     run_stats = {key: stats[key] for key in ("dt", "time_steps", "steps_run")}
     run_stats["cell_updates_per_second"] = cells * stats["steps_run"] / stages["run"]["seconds"]
     run_stats["cuda_graph_active"] = stats["cuda_graph_active"]
@@ -96,23 +98,26 @@ def _repeat(builder, device, repeat_index):
     del readouts, result, prepared, simulation
     _release()
 
-    sample.scene.monitors.clear()
+    sample.scene = sample.scene.updated(monitors=())
     # FDTD refuses a run without outputs; one single-component point probe is the
     # minimal observable and its per-step cost is negligible.
     center = tuple(sum(bounds) / 2 for bounds in sample.scene.domain.bounds)
-    sample.scene.add_monitor(mw.PointMonitor("control_probe", position=center, fields=("Ez",)))
-    control_kwargs = dict(sample.fdtd_kwargs)
-    control_kwargs["full_field_dft"] = False
+    sample.scene = sample.scene.updated(monitors=(
+        *sample.scene.monitors,
+        mw.PointMonitor("control_probe", position=center, fields=("Ez",)),
+    ))
     # Freeze the measured time plan: deleting monitor requests must not change
     # the integration duration, even when automatic planning uses those requests.
-    control_kwargs["run_time"] = mw.TimeConfig(time_steps=run_stats["time_steps"], dt=run_stats["dt"])
+    control_config = replace(config, full_field_dft=False,
+                             run_time=mw.TimeConfig(time_steps=run_stats["time_steps"], dt=run_stats["dt"]))
+    control_kwargs = sample.fdtd_kwargs | {"config": control_config}
 
     def prepare_control():
-        return mw.Simulation.fdtd(sample.scene, material_cache=cache, **control_kwargs).prepare()
+        return mw.Simulation.fdtd(sample.scene, **control_kwargs).prepare()
 
     control, control_setup = _measure(prepare_control, device)
     control_result, stages["run_no_monitors"] = _measure(control.run, device)
-    control_stats = {key: control_result.solver_stats[key]
+    control_stats = {key: control_result.stats()[key]
                      for key in ("dt", "time_steps", "steps_run")}
     control_stats["cell_updates_per_second"] = (
         cells * control_stats["steps_run"] / stages["run_no_monitors"]["seconds"])

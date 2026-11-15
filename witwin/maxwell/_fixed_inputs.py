@@ -4,12 +4,15 @@ from collections.abc import Mapping
 import numpy as np
 import torch
 
+from .errors import UnsupportedFeatureError
+
 
 def require_fixed_input(value, *, name):
     """Inspect input metadata without reading tensor values or allocating fields."""
     if isinstance(value, torch.Tensor):
         if value.requires_grad:
-            raise NotImplementedError(f"Trainable {name} is not supported by this constructor; provide a fixed value.")
+            raise UnsupportedFeatureError(f"Trainable {name} is not supported by this constructor; provide a fixed value.",
+                                          feature="guard:347d2fe6", method=None)
     elif isinstance(value, np.ndarray) and value.dtype == object:
         for item in value.flat:
             require_fixed_input(item, name=name)

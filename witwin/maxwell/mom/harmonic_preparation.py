@@ -6,6 +6,7 @@ from .volume_mesh import bind_volume_region
 from .volume_response_matrix import prepare_cell_field_response
 from .harmonic_material import HarmonicMaterial,cell_nonlinear_coefficients
 from .harmonic_balance import DenseHarmonicBalance
+from ..errors import UnsupportedFeatureError
 
 
 def prepare_static_cell_response(system,bindings,epsilon_exterior,epsilon_interiors,*,testing_order=4):
@@ -53,7 +54,8 @@ def prepare_harmonic_balance(operators,volumes,body_materials,exterior_material,
     if not operators or not volumes or not all(isinstance(m,HarmonicMaterial) for m in (*materials,exterior_material)):
         raise ValueError('Physical HB requires operators, volumes and sampled harmonic materials')
     if any(m.chi2_tensor is not None or m.chi3_tensor is not None for m in (*materials,exterior_material)):
-        raise NotImplementedError('Tensor susceptibility sources require mixed harmonic preparation')
+        raise UnsupportedFeatureError('Tensor susceptibility sources require mixed harmonic preparation',
+                                      feature="guard:acbf6238", method="mom")
     compressed = compressed_settings is not None
     if compressed and (not isinstance(compressed_settings,dict) or matrix_settings):
         raise ValueError('Compressed HB requires separate compressed settings, not dense matrix settings')
@@ -71,9 +73,11 @@ def prepare_harmonic_balance(operators,volumes,body_materials,exterior_material,
     current_dc = any(current_flags)
     mixed_dc = current_dc and not all(current_flags)
     if dc_policy and dc_policy.get('tangent_rule') is not None and not current_dc:
-        raise NotImplementedError('DC tangent policy requires electric current or mixed current closure')
+        raise UnsupportedFeatureError('DC tangent policy requires electric current or mixed current closure',
+                                      feature="guard:59121153", method="mom")
     if current_dc and any(m.electric_dc.kind not in ('finite_positive_dielectric','conductive_limit') for m in materials):
-        raise NotImplementedError('Current DC preparation does not resolve plasma or complex static channels')
+        raise UnsupportedFeatureError('Current DC preparation does not resolve plasma or complex static channels',
+                                      feature="guard:1589f4d4", method="mom")
     eps_i = (tuple(None if flag else m.electric_dc.dielectric_sample(EPSILON_0)
                    for m,flag in zip(materials,current_flags)) if mixed_dc else
              None if current_dc else tuple(m.electric_dc.dielectric_sample(EPSILON_0) for m in materials))
@@ -90,7 +94,7 @@ def prepare_harmonic_balance(operators,volumes,body_materials,exterior_material,
         raise ValueError('Every current DC body requires an explicit volume discretization')
     reuse_count = 0
     if reuse_prepared is not None:
-        from .harmonic_state import preparation_signature
+        from .harmonic_recovery import preparation_signature
         if (not isinstance(reuse_prepared,dict) or
                 preparation_signature(reuse_prepared) != reuse_prepared.get('_signature')):
             raise ValueError('Reused harmonic preparation changed after validation')
@@ -215,7 +219,7 @@ def prepare_harmonic_balance(operators,volumes,body_materials,exterior_material,
                    'mixed_dc_state_recovery_supported':mixed_dc,
                    'harmonic_truncation_converged':False}}
 
-    from .harmonic_state import preparation_signature
+    from .harmonic_recovery import preparation_signature
     prepared['_signature'] = preparation_signature(prepared)
     return model,prepared
 

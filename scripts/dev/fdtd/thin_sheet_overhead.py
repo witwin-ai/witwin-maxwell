@@ -49,10 +49,10 @@ def _mesh(half, normal=NORMAL, **kwargs):
     p = np.array((1.3e-4, -0.7e-4, 0.4e-4))
     corners = np.stack([p - half[0] * u - half[1] * v, p + half[0] * u - half[1] * v,
                         p + half[0] * u + half[1] * v, p - half[0] * u + half[1] * v])
-    return mw.SurfaceMesh(corners, [(0, 1, 2), (0, 2, 3)], **kwargs)
+    return mw.geometry.SurfaceMesh(corners, [(0, 1, 2), (0, 2, 3)], **kwargs)
 
 
-def _scene(spec, with_sheet, *, device="cuda"):
+def _scene(spec, with_sheet):
     structures = []
     if with_sheet:
         if spec["material"] == "pec":
@@ -60,13 +60,12 @@ def _scene(spec, with_sheet, *, device="cuda"):
                                            material=mw.Material.pec() if hasattr(mw.Material, "pec") else mw.PEC))
         else:
             structures.append(mw.Structure(geometry=_mesh(spec["half"], _normal(spec)),
-                                           material=mw.CopperFoil(thickness=35e-6, frequency_range=(1e9, 4e9))))
+                                           material=mw.media.CopperFoil(thickness=35e-6, frequency_range=(1e9, 4e9))))
     extent = np.broadcast_to(np.asarray(spec["extent"], dtype=np.float64), (3,))
     offset = (0.8 if extent.min() == extent.max() else 0.6) * extent.min() * _normal(spec)
     return mw.Scene(
         domain=mw.Domain(bounds=tuple((-float(e), float(e)) for e in extent)), grid=mw.GridSpec.uniform(spec["cell"]),
-        boundary=mw.BoundarySpec.faces(default="pml", num_layers=10), device=device,
-        sources=[mw.PointDipole(position=tuple(-offset), polarization=(0.3, 0.5, 0.8), profile="ideal",
+        boundary=mw.BoundarySpec.faces(default="pml", num_layers=10), sources=[mw.PointDipole(position=tuple(-offset), polarization=(0.3, 0.5, 0.8), profile="ideal",
                                 source_time=mw.GaussianPulse(frequency=2.4e9, fwidth=1.5e9))],
         structures=structures,
         monitors=[mw.PointMonitor("p", tuple(offset), fields=("Ez",))])
@@ -107,7 +106,7 @@ def measure(name, steps=200, warmup=20):
     torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     prepared = mw.Simulation.fdtd(_scene(spec, True), frequencies=[2.4e9],
-                                  run_time=mw.TimeConfig(time_steps=1)).prepare()
+                                  config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare()
     torch.cuda.synchronize()
     prepare_s = time.perf_counter() - start
     solver = prepared.solver
@@ -130,7 +129,7 @@ def measure(name, steps=200, warmup=20):
     # One public step initializes the runtime before capturing the timed blocks.
     results = {"sheet": prepared.run()}
     results["plain"] = mw.Simulation.fdtd(_scene(spec, False), frequencies=[2.4e9],
-                                         run_time=mw.TimeConfig(time_steps=1, dt=dt)).run()
+                                         config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1, dt=dt))).run()
     runs = {key: _make_field_update_runner(result.solver, True) for key, result in results.items()}
     for key, result in results.items():
         assert result.solver._cuda_graph_active

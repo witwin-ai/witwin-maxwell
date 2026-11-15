@@ -9,6 +9,7 @@ def validate_fp64_forward(simulation, scene):
     from ...media import Material
     from ...copper_foil import CopperFoil
     from ...monitors import PointMonitor, FinitePlaneMonitor, ClosedSurfaceMonitor, PowerLossMonitor
+    from ...fdtd_cpml import CPMLMemoryMode
     config=simulation.config
     def has_gradient(value, seen):
         if id(value) in seen:
@@ -31,10 +32,10 @@ def validate_fp64_forward(simulation, scene):
         raise ValueError('FP64 native forward currently requires a fixed declared grid; auto-grid precision is unqualified.')
     if any(type(monitor) not in (PointMonitor, FinitePlaneMonitor, ClosedSurfaceMonitor, PowerLossMonitor) for monitor in scene.monitors):
         raise ValueError('FP64 native forward currently supports point, finite-plane, closed-surface and bulk-loss declarations only.')
-    if config.parallel is not None or simulation.material_cache is not None:
+    if config.parallel is not None or config.material_cache is not None:
         raise ValueError('FP64 native forward requires one uncached device; distributed and material-cache ownership are not qualified.')
-    if config.cuda_graph or config.full_field_dft or len(simulation.frequencies)!=1:
-        raise ValueError('FP64 native forward requires eager execution, no full-field DFT, and one frequency.')
+    if config.full_field_dft or len(simulation.frequencies)!=1:
+        raise ValueError('FP64 native forward requires no full-field DFT and one frequency.')
     if config.spectral_sampler.observer_dtype!=torch.float64 or config.spectral_sampler.normalize_source:
         raise ValueError('FP64 native forward requires unnormalized FP64 spectral observers.')
     if config.initial_condition is not None or config.shutoff:
@@ -46,7 +47,7 @@ def validate_fp64_forward(simulation, scene):
     absorber, _ = resolve_absorber(scene, config.absorber, complex_fields=scene.boundary.uses_kind("bloch"))
     if absorber!='cpml':
         raise ValueError('FP64 native forward requires the CPML absorber.')
-    if config.cpml_config.get('memory_mode','auto')not in('auto','dense'):
+    if config.cpml.memory_mode not in(CPMLMemoryMode.AUTO,CPMLMemoryMode.DENSE):
         raise ValueError('FP64 native forward currently supports dense CPML memory only.')
     if scene.sources or scene.material_regions or scene.thin_wires or scene.circuits or scene.networks or scene.lumped_elements:
         raise ValueError('FP64 native forward currently requires fixed Box materials and direct Norton ports; other source/device runtimes are unqualified.')

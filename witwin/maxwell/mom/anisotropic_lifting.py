@@ -16,7 +16,9 @@ from .dyadic_contrast import DyadicContrastKernel
 from .tensor_medium import TensorMedium, scalar_medium_if_isotropic
 from .lifting import incident_trace, build_lifted_rhs, FORMULATION_ID, CURRENT_KIND
 from .operator import local_geometry
+from .ordered_reduction import ordered_index_add_
 from .quadrature import classify_all_pairs, touching_pair_rule, triangle_rule
+from ..errors import UnsupportedFeatureError
 
 
 def _pair_rhs(handle, rows, cols, category, order, contrast_kernel):
@@ -81,13 +83,15 @@ def build_tensor_lifted_rhs(handle, *, interior_kernel=None, contrast_kernel=Non
             or medium.epsilon_r.real.dtype != basis.mesh.dtype):
         raise ValueError('Tensor carrier medium, mesh and exterior frequency must agree')
     if medium.epsilon_r.requires_grad or medium.mu_r.requires_grad:
-        raise NotImplementedError('Tensor carrier assembly currently requires fixed material samples')
+        raise UnsupportedFeatureError('Tensor carrier assembly currently requires fixed material samples',
+                                      feature="guard:2af6e637", method="mom")
     if interior_kernel is not None and interior_kernel.medium is not medium:
         raise ValueError('Tensor carrier kernel must bind the exact interior sample')
     tensor_exterior = isinstance(handle.exterior, TensorMedium)
     handle.incident_carrier.validate_medium(handle.exterior)
     if tensor_exterior and (handle.exterior.epsilon_r.requires_grad or handle.exterior.mu_r.requires_grad):
-        raise NotImplementedError('Tensor carrier assembly currently requires fixed material samples')
+        raise UnsupportedFeatureError('Tensor carrier assembly currently requires fixed material samples',
+                                      feature="guard:0d7a319d", method="mom")
     scalar = scalar_medium_if_isotropic(medium)
     if scalar is not None and not tensor_exterior:
         scalar_handle = SimpleNamespace(basis=basis, exterior=handle.exterior, interior=scalar,
@@ -182,12 +186,12 @@ def build_tensor_lifted_rhs(handle, *, interior_kernel=None, contrast_kernel=Non
         records.append(receipt)
         if selection is None:
             indices=basis.face_edges[rows].flatten()
-            for block in range(2):rhs[block].index_add_(0,indices,local[:,block].flatten())
+            for block in range(2):ordered_index_add_(rhs[block],0,indices,local[:,block].flatten())
         else:
             from .nearfield import _local_indices
             edges,positions,_=selection
             indices,keep=_local_indices(basis.face_edges[rows],edges,positions)
-            for block in range(2):rhs[block].index_add_(0,indices[keep],local[:,block][keep])
+            for block in range(2):ordered_index_add_(rhs[block],0,indices[keep],local[:,block][keep])
     torch.cuda.synchronize(rhs.device)
     return rhs.flatten(), {'formulation_id': FORMULATION_ID, 'current_kind': CURRENT_KIND,
         'incident_carrier_identity': handle.incident_carrier.identity,

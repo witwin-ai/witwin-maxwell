@@ -116,7 +116,7 @@ def test_complex_port_extraction_preserves_physical_vi_and_kurokawa_power(monkey
         mode_data=(({'beta_complex':20.+1j},),),
         tracking=SimpleNamespace(orientation=orientation),
         characteristic_impedance=torch.tensor([[40.-12j]],dtype=torch.complex128))
-    result=SimpleNamespace(prepared_scene=None,monitor=lambda *args,**kwargs:{
+    result=SimpleNamespace(prepared_scene=None,_mode_overlap=lambda *args,**kwargs:{
         'mode_power':torch.tensor(1.),'amplitude_forward':torch.tensor(forward,dtype=torch.complex128),
         'amplitude_backward':torch.tensor(backward,dtype=torch.complex128)})
     # Ratio reductions read through Result._spectral_ratio_view(); a non-mixed result views itself.

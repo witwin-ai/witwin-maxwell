@@ -9,6 +9,7 @@ from witwin.maxwell.fdtd.coords import component_coords
 from witwin.maxwell.fdtd.copper_foil import copper_sampling_provenance
 from witwin.maxwell.postprocess.selected_query import query_selected, validate_sampling, selections
 from witwin.maxwell.postprocess.yee_interpolation import copper_query_faces
+import witwin.maxwell as mw
 
 FREQUENCIES=(1e9,1.5e9,2e9)
 AMPLITUDES=torch.tensor((1.,.3+.7j,-.8+.4j),dtype=torch.complex128)
@@ -34,7 +35,7 @@ def prescribed(normal=0, *, planes=True):
     result._fields.clear();result._monitors.clear()
     if planes:
         for trace in record['bulk_electric_traces']:
-            component=trace['component'];axes=[torch.tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,component)]
+            component=trace['component'];axes=[torch.tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,component, device=result.prepared_scene.device)]
             normal_index=int(trace['indices'][0,normal]);tangents=[a for a in range(3) if a!=normal]
             indices=[torch.arange(2,len(axes[a])-2) for a in tangents]
             coords=[axes[a][index] for a,index in zip(tangents,indices)]
@@ -111,7 +112,7 @@ def test_exact_native_point_and_plane_primitive_agree_without_fitted_scale():
     result,_,_=prescribed();entry=result._monitors['Ey']['components']['Ey'];coords=entry['coords']
     points=torch.tensor(((0.,float(coords[0][2]),float(coords[1][2])),),dtype=torch.float64)
     face=next(f for f in copper_query_faces(result,device='cpu') if f['component']==1)
-    axes=component_coords(result.prepared_scene,'Ey');index=(face['normal'],int(np.nonzero(axes[1]==float(points[0,1]))[0][0]),int(np.nonzero(axes[2]==float(points[0,2]))[0][0]))
+    axes=component_coords(result.prepared_scene,'Ey', device=result.prepared_scene.device);index=(face['normal'],int(np.nonzero(axes[1]==float(points[0,1]))[0][0]),int(np.nonzero(axes[2]==float(points[0,2]))[0][0]))
     result._monitors['original_point']=dict(kind='point',frequencies=FREQUENCIES,samples=(16,16,16),field_indices={'Ey':index},components={'Ey':entry['data'][:,2,2]})
     actual=sample(result,points,'Ey',representation='published_native')
     torch.testing.assert_close(actual[:,0],entry['data'][[2,0],2,2].to(torch.complex128),rtol=0,atol=0)
@@ -226,7 +227,7 @@ def test_clock_record_dtype_cannot_be_silently_promoted_into_provenance(key):
 def test_lossy_dielectric_is_not_mistaken_for_nonunit_permeability():
     import witwin.maxwell as mw
     result,points,_=prescribed()
-    result.scene=result.scene.clone(structures=(*result.scene.structures,mw.Structure(mw.Box(size=(.5,.5,.5)),mw.Material(eps_r=4.,sigma_e=.01),name='dielectric')))
+    result.scene=result.scene.updated(structures=(*result.scene.structures,mw.Structure(mw.Box(size=(.5,.5,.5)),mw.Material(eps_r=4.,sigma_e=.01),name='dielectric')))
     sample(result,points,'Ey','positive')
 
 
@@ -239,7 +240,7 @@ def test_selected_singleton_axes_and_actual_metadata_save_load(tmp_path):
     loaded=mw.Result.load(tmp_path/'prescribed-algebra.pt',scene=result.scene,prepared_scene=result.prepared_scene,map_location='cpu')
     after=sample(loaded,points[:1],'Ey','positive',frequencies=(1.5e9,))
     torch.testing.assert_close(after,before,rtol=0,atol=0)
-    metadata=loaded.conductor_losses['foil']['bulk_electric_traces'][0]['sampling']
+    metadata=mw.rf.conductor_losses(loaded)['foil']['bulk_electric_traces'][0]['sampling']
     assert metadata['schema']=='native-copper-electric-sampling/1' and float(metadata['completed_steps'])==16
 
 
@@ -247,7 +248,7 @@ def test_selected_ordinary_components_reuse_native_dense_stencils_without_heads(
     result,_,expected=prescribed(planes=False)
     result._solver_stats['dft_sample_counts']=(16,16,16)
     for component in ('Ey','Hz'):
-        axes=[torch.tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,component)]
+        axes=[torch.tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,component, device=result.prepared_scene.device)]
         points=torch.stack(torch.meshgrid(*axes,indexing='ij'),-1)
         result._fields[component.upper()]=AMPLITUDES[:,None,None,None]*expected(points,component)
     points=torch.tensor(((.43,.44,.45),),dtype=torch.float64)
@@ -282,8 +283,8 @@ def test_shared_face_join_keeps_requested_frequency_separate_from_each_record_in
     from witwin.maxwell.scene import prepare_scene
     from witwin.maxwell.compiler.copper_foil import compile_copper_faces
     result,_,_=prescribed()
-    other=mw.Structure(mw.Box(position=(.19,0.,0.),size=torch.tensor((0.,.8,.8),dtype=torch.float64)),mw.CopperFoil(thickness=1e-6,conductivity=5.8e7,frequency_range=(1e9,2e9)),name='other')
-    result.scene=result.scene.clone(structures=(*result.scene.structures,other));result._prepared_scene=prepare_scene(result.scene)
+    other=mw.Structure(mw.Box(position=(.19,0.,0.),size=torch.tensor((0.,.8,.8),dtype=torch.float64)),mw.media.CopperFoil(thickness=1e-6,conductivity=5.8e7,frequency_range=(1e9,2e9)),name='other')
+    result.scene=result.scene.updated(structures=(*result.scene.structures,other));result._prepared_scene=prepare_scene(result.scene, device="cpu")
     all_faces=compile_copper_faces(result.prepared_scene,device='cpu')
     orders={'foil':(1.5e9,2e9) if subset else (2e9,1e9,1.5e9),
             'other':(1e9,1.5e9) if subset else (1.5e9,2e9,1e9)}
@@ -319,7 +320,7 @@ def test_strict_head_precision_and_finiteness_cannot_be_repaired_by_native_sampl
 
 def test_real_instantaneous_dense_field_uses_retained_complex_native_spectrum():
     result,points,_=prescribed()
-    shape=tuple(len(axis) for axis in component_coords(result.prepared_scene,'Ey'))
+    shape=tuple(len(axis) for axis in component_coords(result.prepared_scene,'Ey', device=result.prepared_scene.device))
     result._fields['EY']=torch.full(shape,123.,dtype=torch.float32)
     actual=sample(result,points,'Ey',representation='published_native')
     oracle=independent_plane_value(result,points,'Ey');scale=independent_plane_value(result,points,'Ey',absolute_sum=True)
@@ -329,7 +330,7 @@ def test_real_instantaneous_dense_field_uses_retained_complex_native_spectrum():
 
 def test_instantaneous_only_field_never_becomes_a_complex_spectral_fallback():
     result,points,_=prescribed(planes=False)
-    shape=tuple(len(axis) for axis in component_coords(result.prepared_scene,'Ey'))
+    shape=tuple(len(axis) for axis in component_coords(result.prepared_scene,'Ey', device=result.prepared_scene.device))
     result._fields['EY']=torch.full(shape,123.,dtype=torch.float32)
     with pytest.raises(ValueError,match='No retained spectral native Ey'):
         sample(result,points,'Ey',representation='published_native')
@@ -352,7 +353,7 @@ def test_selected_point_coordinate_gradient_is_explicitly_rejected_without_detac
 
 @pytest.mark.parametrize('presentation',('collocated','normal_interpolation'))
 def test_complete_native_points_remain_usable_with_unrelated_derived_plane(presentation):
-    result,points,_=prescribed();payload=result._monitors['Ey'];entry=payload['components']['Ey'];axes=component_coords(result.prepared_scene,'Ey');normal_index=entry['plane_indices'][0]
+    result,points,_=prescribed();payload=result._monitors['Ey'];entry=payload['components']['Ey'];axes=component_coords(result.prepared_scene,'Ey', device=result.prepared_scene.device);normal_index=entry['plane_indices'][0]
     oracle=independent_plane_value(result,points,'Ey');scale=independent_plane_value(result,points,'Ey',absolute_sum=True)
     for i,y in enumerate(entry['coords'][0]):
         for j,z in enumerate(entry['coords'][1]):
@@ -376,16 +377,16 @@ def test_selected_unsupported_scopes_are_explicit_capability_boundaries_for_gene
     result,points,_=prescribed()
     if kind=='mapped':
         result,points,_=prescribed(normal=1)
-        result.scene=result.scene.clone(coordinates=mw.BendCoordinates(curvature=.3))
-    elif kind=='periodic':result.scene=result.scene.clone(boundary=mw.BoundarySpec.periodic())
-    elif kind=='bloch_real_projected':result.scene=result.scene.clone(boundary=mw.BoundarySpec.bloch((1.,0.,0.)))
+        result.scene=result.scene.updated(coordinates=mw.coordinates.BendCoordinates(curvature=.3))
+    elif kind=='periodic':result.scene=result.scene.updated(boundary=mw.BoundarySpec.periodic())
+    elif kind=='bloch_real_projected':result.scene=result.scene.updated(boundary=mw.BoundarySpec.bloch((1.,0.,0.)))
     elif kind=='analytic':
-        result.scene=result.scene.clone(boundary=mw.BoundarySpec.bloch((1.,0.,0.)))
+        result.scene=result.scene.updated(boundary=mw.BoundarySpec.bloch((1.,0.,0.)))
         result._solver_stats['time_plan']['source_representation']='analytic_cw'
     elif kind=='normalized':result._solver_stats['normalize_source']=True
     else:result._solver_stats['dft_window']=kind
     waveform=mw.GaussianPulse(1.5e9,fwidth=.1e9) if kind=='bloch_real_projected' else mw.CW(1.5e9)
-    result.scene=result.scene.clone(sources=(mw.UniformCurrentSource(name='declared_drive',center=(-.5,-.5,0.),size=(.05,)*3,polarization='Ez',source_time=waveform),))
+    result.scene=result.scene.updated(sources=(mw.UniformCurrentSource(name='declared_drive',center=(-.5,-.5,0.),size=(.05,)*3,polarization='Ez',source_time=waveform),))
     if kind in ('hanning','ramp'):
         for trace in result._metadata['conductor_losses']['foil']['bulk_electric_traces']:
             trace['sampling']['window']=kind
@@ -407,8 +408,8 @@ def test_selected_matched_reference_fields_remain_explicit_pending_capability(ki
     import witwin.maxwell as mw
     from witwin.maxwell.scene import prepare_scene
     from witwin.maxwell.result import _validate_fdtd_query_reference
-    result,points,_=prescribed();empty=result.scene.clone(structures=())
-    reference=mw.Result(method='fdtd',scene=empty,prepared_scene=prepare_scene(empty),frequencies=FREQUENCIES,
+    result,points,_=prescribed();empty=result.scene.updated(structures=())
+    reference=mw.Result(method='fdtd',scene=empty,prepared_scene=prepare_scene(empty, device="cpu"),frequencies=FREQUENCIES,
         monitors=copy.deepcopy(result._monitors),solver_stats=copy.deepcopy(result._solver_stats))
     _validate_fdtd_query_reference(result,reference)
     with pytest.raises(NotImplementedError,match='matched-reference frequency and sampling records'):
@@ -420,9 +421,9 @@ def test_geometry_only_face_planning_needs_no_field_frequency():
     # compiled faces but no recorded traces, and therefore no field frequency.
     from witwin.maxwell.postprocess.yee_interpolation import interpolation_stencil
     result,points,_=prescribed(planes=False)
-    stub=SimpleNamespace(prepared_scene=result.prepared_scene,conductor_losses={})
+    stub=SimpleNamespace(prepared_scene=result.prepared_scene,_conductor_losses=lambda:{})
     faces=copper_query_faces(stub,device='cpu')
     assert faces and all(face['electric_fields'] is None for face in faces)
-    axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,'Hy')]
+    axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,'Hy', device=result.prepared_scene.device)]
     for side in ('negative','positive'):
         assert len(interpolation_stencil(stub,points,'Hy',axes,trace_side=side))==8

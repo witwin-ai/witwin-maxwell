@@ -30,6 +30,7 @@ Gate calibration (recorded):
 
 from __future__ import annotations
 
+from dataclasses import replace
 import numpy as np
 import pytest
 import torch
@@ -53,38 +54,37 @@ def _parallel(devices):
     )
 
 
-def _scene(density, *, source_x, monitor_x, device):
+def _scene(density, *, source_x, monitor_x):
     x = np.linspace(-0.5, 0.5, 11, dtype=np.float64)
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.none(),
-        device=device,
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design",
-            # Region x in [-0.3, 0.3] over six physical cells, split 3/3 at x = 0
-            # (the partition interface of the 11-node grid). The density x-dimension
-            # is 5, so texel column 2 rasterizes onto the x = 0 split.
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
-            density=density,
-            eps_bounds=(1.0, 6.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(source_x, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
-            name="drive",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (monitor_x, 0.0, 0.0), fields=("Ez",)))
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.none(),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                # Region x in [-0.3, 0.3] over six physical cells, split 3/3 at x = 0
+                # (the partition interface of the 11-node grid). The density x-dimension
+                # is 5, so texel column 2 rasterizes onto the x = 0 split.
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(source_x, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+                name="drive",
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (monitor_x, 0.0, 0.0), fields=("Ez",)),),
+            )
     return scene
 
 
@@ -92,15 +92,15 @@ def _solve(density_values, *, parallel_devices, source_x, monitor_x, want_grad, 
     density = density_values.clone().to("cuda:0")
     if want_grad:
         density.requires_grad_(True)
-    scene = _scene(density, source_x=source_x, monitor_x=monitor_x, device="cuda:0")
-    kwargs = dict(frequency=_FREQUENCY, run_time=mw.TimeConfig(time_steps=_STEPS))
+    scene = _scene(density, source_x=source_x, monitor_x=monitor_x)
+    kwargs = dict(run_time=mw.TimeConfig(time_steps=_STEPS))
     if parallel_devices is not None:
         kwargs["parallel"] = _parallel(parallel_devices)
-    simulation = mw.Simulation.fdtd(scene, **kwargs)
+    simulation = mw.Simulation.fdtd(scene, frequencies=_FREQUENCY, config=mw.FDTDConfig(**kwargs))
     if checkpoint_stride is not None:
-        simulation.config.adjoint_checkpoint_stride = int(checkpoint_stride)
+        simulation.config = replace(simulation.config, adjoint_checkpoint_stride=int(checkpoint_stride))
     result = simulation.run()
-    spectrum = result.monitors["probe"]["Ez"]
+    spectrum = result.monitor("probe").sel(component="Ez").values
     loss = (spectrum.real ** 2 + spectrum.imag ** 2).sum()
     if want_grad:
         loss.backward()
@@ -302,17 +302,16 @@ def _solve_full_field_dft(base, *, parallel_devices, source_x, want_grad):
     density = base.clone().to("cuda:0")
     if want_grad:
         density.requires_grad_(True)
-    scene = _scene(density, source_x=source_x, monitor_x=0.1, device="cuda:0")
+    scene = _scene(density, source_x=source_x, monitor_x=0.1)
     kwargs = dict(
-        frequency=_FREQUENCY,
         run_time=mw.TimeConfig(time_steps=_STEPS),
         full_field_dft=True,
     )
     if parallel_devices is not None:
         kwargs["parallel"] = _parallel_gather(parallel_devices)
-    result = mw.Simulation.fdtd(scene, **kwargs).run()
+    result = mw.Simulation.fdtd(scene, frequencies=_FREQUENCY, config=mw.FDTDConfig(**kwargs)).run()
 
-    field = result.fields["EZ"]
+    field = result.fields["EZ"].values
     power = field.real ** 2 + field.imag ** 2
     # x is the third-from-last axis of the DFT field; restrict the loss to the right
     # half (shard 1's owned columns) to isolate the non-result-device scatter leg.
@@ -361,14 +360,16 @@ def test_full_field_dft_objective_gradient_parity_single_vs_two_gpu(
 
 def _solve_capture_grad_eps(base, *, parallel_devices, source_x, monitor_x):
     density = base.clone().to("cuda:0").requires_grad_(True)
-    scene = _scene(density, source_x=source_x, monitor_x=monitor_x, device="cuda:0")
+    scene = _scene(density, source_x=source_x, monitor_x=monitor_x)
     result = mw.Simulation.fdtd(
         scene,
-        frequency=_FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=_STEPS),
-        parallel=_parallel(parallel_devices),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=_STEPS),
+            parallel=_parallel(parallel_devices),
+        ),
     ).run()
-    spectrum = result.monitors["probe"]["Ez"]
+    spectrum = result.monitor("probe").sel(component="Ez").values
     loss = (spectrum.real ** 2 + spectrum.imag ** 2).sum()
     loss.backward()
     grad_eps = {
@@ -423,11 +424,10 @@ _GUARD_PARALLEL = FDTDParallelConfig(
 def _guard_scene(**overrides):
     boundary = overrides.pop("boundary", mw.BoundarySpec.none())
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
+        subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"),
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=boundary,
-        device="cpu",
     )
     return scene
 
@@ -443,36 +443,38 @@ def _trainable_density_region():
 
 def _prepare_parallel(scene, **sim_kwargs):
     simulation = mw.Simulation.fdtd(
-        scene, frequency=_FREQUENCY, parallel=_GUARD_PARALLEL, **sim_kwargs
+        scene, frequencies=_FREQUENCY, config=mw.FDTDConfig(parallel=_GUARD_PARALLEL, **sim_kwargs)
     )
     simulation.prepare()
 
 
 def test_guard_trainable_geometry_rejected_at_prepare():
     scene = _guard_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="dielectric",
             geometry=mw.Box(position=torch.zeros(3, requires_grad=True), size=(0.2, 0.2, 0.2)),
             material=mw.Material(eps_r=3.0),
-        )
-    )
+        ),
+    ))
     with pytest.raises(ValueError, match="trainable geometry"):
         _prepare_parallel(scene)
 
 
 def test_guard_trainable_material_perturbation_rejected_at_prepare():
     scene = _guard_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="dielectric",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2)),
-            material=mw.PerturbationMedium(
+            material=mw.media.PerturbationMedium(
                 mw.Material(eps_r=3.0),
                 perturbation=torch.zeros((2, 2, 2), requires_grad=True),
             ),
-        )
-    )
+        ),
+    ))
     with pytest.raises(ValueError, match="trainable"):
         _prepare_parallel(scene)
 
@@ -494,15 +496,15 @@ def test_guard_graded_sigma_absorber_rejected_at_prepare(absorber):
     """
 
     scene = _guard_scene(boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0))
-    scene.add_material_region(_trainable_density_region())
+    scene = scene.updated(material_regions=(*scene.material_regions, _trainable_density_region()))
     with pytest.raises(ValueError, match="graded-sigma"):
         _prepare_parallel(scene, absorber=absorber)
 
 
 def test_guard_dispersive_medium_rejected_at_prepare():
     scene = _guard_scene()
-    scene.add_material_region(_trainable_density_region())
-    scene.add_structure(
+    scene = scene.updated(material_regions=(*scene.material_regions, _trainable_density_region()), structures=(
+        *scene.structures,
         mw.Structure(
             name="lorentz",
             geometry=mw.Box(position=(0.2, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
@@ -512,48 +514,45 @@ def test_guard_dispersive_medium_rejected_at_prepare():
                     mw.LorentzPole(delta_eps=0.5, resonance_frequency=2.0e9, gamma=2.0e8),
                 ),
             ),
-        )
-    )
+        ),
+    ))
     with pytest.raises(ValueError, match="dispersive"):
         _prepare_parallel(scene)
 
 
 def test_guard_conductive_medium_rejected_at_prepare():
     scene = _guard_scene()
-    scene.add_material_region(_trainable_density_region())
-    scene.add_structure(
+    scene = scene.updated(material_regions=(*scene.material_regions, _trainable_density_region()), structures=(
+        *scene.structures,
         mw.Structure(
             name="lossy",
             geometry=mw.Box(position=(0.2, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
             material=mw.Material(eps_r=2.0, sigma_e=0.02),
-        )
-    )
+        ),
+    ))
     with pytest.raises(ValueError, match="conductive"):
         _prepare_parallel(scene)
 
 
 def test_guard_tiled_plane_monitor_objective_rejected_at_prepare():
     scene = _guard_scene()
-    scene.add_material_region(_trainable_density_region())
-    scene.add_source(
+    scene = scene.updated(material_regions=(*scene.material_regions, _trainable_density_region()), sources=(
+        *scene.sources,
         mw.PointDipole(
             position=(-0.3, 0.0, 0.0),
             polarization="Ez",
             profile="ideal",
             source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
             name="drive",
-        )
-    )
-    scene.add_monitor(
-        mw.PlaneMonitor("plane", axis="y", position=0.0, fields=("Ez",))
-    )
+        ),
+    ), monitors=(*scene.monitors, mw.PlaneMonitor("plane", axis="y", position=0.0, fields=("Ez",))))
     with pytest.raises(ValueError, match="point-monitor spectra and"):
         _prepare_parallel(scene)
 
 
 def test_guard_shutoff_rejected_at_prepare():
     scene = _guard_scene()
-    scene.add_material_region(_trainable_density_region())
+    scene = scene.updated(material_regions=(*scene.material_regions, _trainable_density_region()))
     with pytest.raises(ValueError, match="shutoff"):
         _prepare_parallel(scene, shutoff=1.0e-4)
 
@@ -571,12 +570,14 @@ def test_valid_trainable_parallel_scene_prepares(cuda_p2p_devices, cuda_memory_c
     from witwin.maxwell.fdtd.distributed import DistributedFDTD
 
     density = _base_density().clone().to("cuda:0").requires_grad_(True)
-    scene = _scene(density, source_x=-0.3, monitor_x=0.1, device="cuda:0")
+    scene = _scene(density, source_x=-0.3, monitor_x=0.1)
     simulation = mw.Simulation.fdtd(
         scene,
-        frequency=_FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=_STEPS),
-        parallel=_parallel(cuda_p2p_devices),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=_STEPS),
+            parallel=_parallel(cuda_p2p_devices),
+        ),
     )
     prepared = simulation.prepare()
     assert isinstance(prepared.solver, DistributedFDTD)

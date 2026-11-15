@@ -13,6 +13,7 @@ from ..checkpoint import (
     preflight_checkpoint_state, restore_checkpoint_state, validate_checkpoint_state,
 )
 from ..observation_resume import _clone
+from ...errors import UnsupportedFeatureError
 
 
 def is_distributed_solver(solver):
@@ -21,7 +22,8 @@ def is_distributed_solver(solver):
 
 def _require_support(solver):
     if solver._nccl:
-        raise NotImplementedError("Distributed resume currently requires in-process cuda_p2p transport.")
+        raise UnsupportedFeatureError("Distributed resume currently requires in-process cuda_p2p transport.",
+                                      feature="guard:4131ed9c", method="fdtd")
 
 
 def _signature(solver):

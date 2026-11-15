@@ -44,28 +44,26 @@ _MATERIAL_CASES = {
 
 def _run(boundary, material_kwargs, *, phase=0.):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(0.05),
-        boundary=boundary,
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=Box(position=(0.0, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
-            material=mw.Material(**material_kwargs),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0), polarization="Ez", width=0.05,
-            source_time=mw.CW(frequency=_FREQ, amplitude=20.0, phase=phase), name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=boundary,
+                structures=(
+            mw.Structure(
+                geometry=Box(position=(0.0, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
+                material=mw.Material(**material_kwargs),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0), polarization="Ez", width=0.05,
+                source_time=mw.CW(frequency=_FREQ, amplitude=20.0, phase=phase), name="src",
+            ),
+            ),
+            )
     result = mw.Simulation.fdtd(
-        scene, absorber="cpml", frequencies=[_FREQ],
-        run_time=mw.TimeConfig.auto(steady_cycles=3, transient_cycles=3),
-        full_field_dft=True, cpml_config={"alpha_max": 0.0}).run()
-    ez = result.field("Ez")
+        scene, frequencies=[_FREQ], config=mw.FDTDConfig(absorber="cpml", run_time=mw.TimeConfig.auto(steady_cycles=3, transient_cycles=3),
+        full_field_dft=True, cpml=mw.fdtd.CPMLConfig(alpha_max=0.0))).run()
+    ez = result.field("Ez").isel(f=0).values
     peak = (ez["data"] if isinstance(ez, dict) else ez).detach().cpu().numpy()
     real = result.solver.Ez.detach().cpu().numpy().copy()
     imaginary = (result.solver.Ez_imag.detach().cpu().numpy().copy()

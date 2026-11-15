@@ -22,24 +22,24 @@ def _simulation(cache=None, *, kind="debye", thickness=2e-6, conductivity=5.8e7,
             resonance_frequency=2.5e9, gamma=.3e9),)),
     }
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.02, .02),)*3), grid=mw.GridSpec.uniform(.005),
-        boundary=mw.BoundarySpec.none(), device="cuda:0", structures=[
+        boundary=mw.BoundarySpec.none(), structures=[
             mw.Structure(name="substrate", geometry=mw.Box(position=(0., 0., 0.), size=(.04,)*3),
                 material=mw.Material(eps_r=eps, sigma_e=.01, **poles[kind])),
             mw.Structure(name="foil", geometry=mw.Box(
                 position=torch.tensor([coordinate, 0., 0.], dtype=torch.float64),
                 size=torch.tensor([0., .02, .02], dtype=torch.float64)),
-                material=mw.CopperFoil(thickness=thickness, conductivity=conductivity,
+                material=mw.media.CopperFoil(thickness=thickness, conductivity=conductivity,
                     frequency_range=band, mode_count=mode_count))],
         sources=[mw.UniformCurrentSource(center=(-.01, 0., -.0025), size=(.005,)*3, polarization="Ez",
             source_time=mw.CW(frequency=1e9))])
-    return mw.Simulation.fdtd(scene, frequency=1e9, material_cache=cache, full_field_dft=True,
+    return mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(material_cache=cache, full_field_dft=True,
         cuda_graph=False, run_time=mw.TimeConfig(time_steps=64, dt=5e-12),
-        spectral_sampler=mw.SpectralSampler(window="none"))
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"), device="cuda:0"))
 
 
 @pytest.mark.parametrize("kind", ["debye", "drude", "lorentz", "magnetic"])
 def test_cached_foil_and_static_poles_have_private_histories_and_exact_forward_parity(kind):
-    cache = mw.FDTDMaterialCache(max_entries=2)
+    cache = mw.fdtd.FDTDMaterialCache(max_entries=2)
     reference = _simulation(kind=kind).prepare()
     first = _simulation(cache, kind=kind).prepare()
     second = _simulation(cache, kind=kind).prepare()
@@ -55,11 +55,11 @@ def test_cached_foil_and_static_poles_have_private_histories_and_exact_forward_p
         torch.testing.assert_close(value, b[name], rtol=0, atol=0)
     expected, actual = reference.run(), second.run()
     for name in expected.fields:
-        torch.testing.assert_close(actual.tensor(name), expected.tensor(name), rtol=0, atol=0)
+        torch.testing.assert_close(actual.field(name).isel(f=0).values, expected.field(name).isel(f=0).values, rtol=0, atol=0)
     for name in ("surface_power", "frequencies"):
-        torch.testing.assert_close(actual.conductor_losses["foil"][name],
-                                   expected.conductor_losses["foil"][name], rtol=0, atol=0)
-    assert actual.conductor_losses["foil"]["dissipated_energy"] == expected.conductor_losses["foil"]["dissipated_energy"]
+        torch.testing.assert_close(mw.rf.conductor_losses(actual)["foil"][name],
+                                   mw.rf.conductor_losses(expected)["foil"][name], rtol=0, atol=0)
+    assert mw.rf.conductor_losses(actual)["foil"]["dissipated_energy"] == mw.rf.conductor_losses(expected)["foil"]["dissipated_energy"]
 
 
 def test_foil_cache_identity_covers_response_substrate_poles_and_support():
@@ -77,12 +77,12 @@ def test_foil_cache_identity_covers_response_substrate_poles_and_support():
 
 
 def test_foil_cache_lru_and_budget_exclude_live_state():
-    cache = mw.FDTDMaterialCache(max_entries=1)
+    cache = mw.fdtd.FDTDMaterialCache(max_entries=1)
     _simulation(cache).prepare()
     _simulation(cache, thickness=3e-6).prepare()
     assert cache.stats["evictions"] == 1
     _simulation(cache).prepare()
     assert cache.stats["misses"] == 3
-    small = mw.FDTDMaterialCache(max_bytes=1)
+    small = mw.fdtd.FDTDMaterialCache(max_bytes=1)
     _simulation(small).prepare()
     assert small.stats["entries"] == 0 and small.stats["oversized"] == 1

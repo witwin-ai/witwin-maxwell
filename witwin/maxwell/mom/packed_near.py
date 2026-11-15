@@ -9,6 +9,8 @@ from dataclasses import asdict
 import math
 import torch
 
+from .ordered_reduction import ordered_index_add_
+
 
 def _check_node_maps(records, size, device, range_message, consistency_message):
     """Validate (node, indices) maps with one CUDA reduction per index length.
@@ -194,7 +196,7 @@ class PackedNearBlocks:
                     rhs_stop = rhs_start+self.action_batch
                     gathered = flat[rhs_start:rhs_stop, source_ids].permute(1, 2, 0)
                     product = torch.bmm(matrix, gathered).permute(2, 0, 1).flatten(1)
-                    output[rhs_start:rhs_stop].index_add_(1, target_ids, product)
+                    ordered_index_add_(output[rhs_start:rhs_stop], 1, target_ids, product)
         self.assert_current()
         return output.reshape(value.shape)
 
@@ -320,7 +322,7 @@ class PackedScalarNearChannels(PackedNearBlocks):
                     product = torch.cat((kj+a*dm, b*dj+km), dim=1).permute(2, 0, 1).flatten(1)
                     if not bool(torch.isfinite(product).all()):
                         raise ValueError('Packed scalar action exceeds native precision')
-                    output[rhs_start:rhs_start+len(chunk)].index_add_(1, target_ids, product)
+                    ordered_index_add_(output[rhs_start:rhs_start+len(chunk)], 1, target_ids, product)
         if not bool(torch.isfinite(output).all()):
             raise ValueError('Packed scalar accumulated action exceeds native precision')
         self.assert_current()

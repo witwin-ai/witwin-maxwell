@@ -26,7 +26,7 @@ def rectangle_mesh(center, normal, half_u, half_v, *, u_direction=None, **kwargs
     p = np.asarray(center, dtype=np.float64)
     vertices = np.stack([p - half_u * u - half_v * v, p + half_u * u - half_v * v,
                          p + half_u * u + half_v * v, p - half_u * u + half_v * v])
-    return mw.SurfaceMesh(vertices, [(0, 1, 2), (0, 2, 3)], **kwargs)
+    return mw.geometry.SurfaceMesh(vertices, [(0, 1, 2), (0, 2, 3)], **kwargs)
 
 
 def extruded_polyline_mesh(points, z_range, *, closed=False, **kwargs):
@@ -44,7 +44,7 @@ def extruded_polyline_mesh(points, z_range, *, closed=False, **kwargs):
         j = (i + 1) % count
         # Strip i: (i, j) at z0 and (i, j) at z1, normal (dy, -dx).
         triangles += [(i, j, count + i), (j, count + j, count + i)]
-    return mw.SurfaceMesh(vertices, triangles, **kwargs)
+    return mw.geometry.SurfaceMesh(vertices, triangles, **kwargs)
 
 
 def polygon_points(radius, sides, *, center=(0.0, 0.0), phase=0.0):
@@ -58,12 +58,12 @@ def pec_material():
 
 def resistive_foil(sheet_conductance, *, conductivity=1.0e5, band=(0.3e9, 2.0e9)):
     """Electrically thin CopperFoil with sigma*t = sheet_conductance (siemens)."""
-    return mw.CopperFoil(thickness=sheet_conductance / conductivity, conductivity=conductivity, frequency_range=band)
+    return mw.media.CopperFoil(thickness=sheet_conductance / conductivity, conductivity=conductivity, frequency_range=band)
 
 
 def oblique_transmission_scene(*, material, angle_deg, polarization, dl, frequency=1.0e9, half_length=None,
                                observer_offset=None, with_sheet=True, pml_layers=10, sheet_shift=0.0, nz=2,
-                               plus_side_eps=None, device="cpu", aligned_foil=False):
+                               plus_side_eps=None, aligned_foil=False):
     """Quasi-2D plane-wave transmission through a sheet tilted about z.
 
     The sheet normal is (cos a, sin a, 0); the plane wave travels along +x so
@@ -135,36 +135,30 @@ def oblique_transmission_scene(*, material, angle_deg, polarization, dl, frequen
                  "ref0": (float(x_nodes[ref_index]), front[1], z_obs),
                  "ref1": (float(x_nodes[ref_index + 1]), front[1], z_obs)}
     mirror_fraction = (mirror_x - x_nodes[ref_index]) / dl
-    monitors = [mw.FieldTimeMonitor(name, components=("Ez",) if polarization == "te" else ("Ey", "Ex"),
+    monitors = [mw.monitors.FieldTimeMonitor(name, components=("Ez",) if polarization == "te" else ("Ey", "Ex"),
                                     position=position) for name, position in observers.items()]
     scene = mw.Scene(
         domain=mw.Domain(bounds=bounds), grid=mw.GridSpec.uniform(dl),
-        boundary=mw.BoundarySpec.faces(default="pml", num_layers=pml_layers, z=wall), device=device,
-        sources=[mw.PlaneWave(direction=direction, polarization=e_pol,
+        boundary=mw.BoundarySpec.faces(default="pml", num_layers=pml_layers, z=wall), sources=[mw.PlaneWave(direction=direction, polarization=e_pol,
                               source_time=mw.GaussianPulse(frequency=frequency, fwidth=0.5 * frequency))],
         structures=structures, monitors=monitors)
     return scene, dict(normal=normal, tangent=tangent, half_length=half_length, observers=observers,
                        mirror_fraction=float(mirror_fraction))
 
 
-def backend_for(scene):
-    """CPU scenes use the explicit CPU reference profile, CUDA scenes the native kernels."""
-    return "cpu_reference" if torch.device(scene.device).type == "cpu" else "native"
-
-
-def run(scene, *, time_steps=None, run_time=None, frequency=1.0e9):
+def run(scene, *, time_steps=None, run_time=mw.TimeConfig.auto(), frequency=1.0e9):
     config = mw.TimeConfig(time_steps=time_steps) if time_steps is not None else run_time
-    return mw.Simulation.fdtd(scene, absorber="cpml", frequencies=[frequency], run_time=config, backend=backend_for(scene)).run()
+    return mw.Simulation.fdtd(scene, frequencies=[frequency], config=mw.FDTDConfig(absorber="cpml", run_time=config)).run()
 
 
 def time_series(result, name, component):
-    data = result.monitors[name]
+    data = result.raw_monitor(name)
     values = data["values"][component] if "values" in data else data[component]
     return np.asarray(torch.as_tensor(values).detach().cpu().double()).reshape(-1)
 
 
 def field_series(result, name, component):
-    data = result.monitors[name]
+    data = result.raw_monitor(name)
     return (np.asarray(torch.as_tensor(data["t"]).detach().cpu().double()).reshape(-1),
             np.asarray(torch.as_tensor(data["components"][component]).detach().cpu().double()).reshape(-1))
 
@@ -202,8 +196,7 @@ def thin_sheet_transmission(sheet_conductance, angle_deg, polarization):
 
 
 def prepared_dt(scene, *, frequency=1.0e9, absorber="cpml"):
-    probe = mw.Simulation.fdtd(scene, absorber=absorber, frequencies=[frequency], run_time=mw.TimeConfig(time_steps=1),
-                               backend=backend_for(scene)).prepare()
+    probe = mw.Simulation.fdtd(scene, frequencies=[frequency], config=mw.FDTDConfig(absorber=absorber, run_time=mw.TimeConfig(time_steps=1))).prepare()
     # Compare grids at the accepted PEC bound, keeping dt/h consistent.
     timing = probe.solver._time_step_metadata
     dt = timing["safety_factor"] * timing["stability_limit"]
@@ -214,13 +207,12 @@ def prepared_dt(scene, *, frequency=1.0e9, absorber="cpml"):
 
 def run_with_dt(scene, dt, duration, *, frequency=1.0e9, absorber="cpml"):
     steps = int(math.ceil(duration / dt))
-    return mw.Simulation.fdtd(scene, absorber=absorber, frequencies=[frequency], run_time=mw.TimeConfig(time_steps=steps, dt=dt),
-                              backend=backend_for(scene)).run()
+    return mw.Simulation.fdtd(scene, frequencies=[frequency], config=mw.FDTDConfig(absorber=absorber, run_time=mw.TimeConfig(time_steps=steps, dt=dt))).run()
 
 
 def measure_transmission(material, angle_deg, polarization, dl, *, half_length_wavelengths=6.0, sheet_shift=0.0,
                          observer_offset=None, plus_side_eps=None, reference_material=None,
-                         frequency=1.0e9, frequencies=(0.8e9, 1.0e9, 1.2e9), device="cpu",
+                         frequency=1.0e9, frequencies=(0.8e9, 1.0e9, 1.2e9), 
                          aligned_foil=False, dt=None, absorber="cpml"):
     wavelength = C0 / frequency
     series = {}
@@ -232,8 +224,7 @@ def measure_transmission(material, angle_deg, polarization, dl, *, half_length_w
                   material=material if with_sheet else reference_material, angle_deg=angle_deg,
                   polarization=polarization, dl=dl, half_length=half_length_wavelengths * wavelength,
                   with_sheet=with_sheet or reference_material is not None, frequency=frequency,
-                  sheet_shift=sheet_shift, observer_offset=observer_offset, plus_side_eps=plus_side_eps,
-                  device=device, aligned_foil=aligned_foil)
+                  sheet_shift=sheet_shift, observer_offset=observer_offset, plus_side_eps=plus_side_eps, aligned_foil=aligned_foil)
               for with_sheet in (False, True)}
     # Both runs share one dt (the sheet-tightened step, capped below the
     # explicit-dt safety limit) so source and sampling clocks are identical.
@@ -290,7 +281,7 @@ def _bessel_series(kind, ka, kr, phi, terms=None):
 
 
 def cylinder_scattering(material, polarization, dl, *, sides=32, radius_wl=0.5, observer_wl=1.0, frequency=1.0e9,
-                        device="cuda", angles=8, center_cells=(0.37, 0.21), phase=0.1, pml_layers=12, absorber="cpml"):
+                        angles=8, center_cells=(0.37, 0.21), phase=0.1, pml_layers=12, absorber="cpml"):
     """Quasi-2D scattering by a faceted closed sheet vs the circular-cylinder series.
 
     The prism has ``sides`` planar facets extruded across the two z cells (PEC
@@ -323,10 +314,10 @@ def cylinder_scattering(material, polarization, dl, *, sides=32, radius_wl=0.5, 
     theta = 0.2 + 2 * np.pi * np.arange(angles) / angles
     observers = [snap(center + observer_wl * wavelength * np.array((np.cos(t), np.sin(t)))) for t in theta]
     reference = snap(np.zeros(2))
-    monitors = [mw.FieldTimeMonitor(f"o{i}", components=(component,), position=(p[0], p[1], z_obs))
+    monitors = [mw.monitors.FieldTimeMonitor(f"o{i}", components=(component,), position=(p[0], p[1], z_obs))
                 for i, p in enumerate(observers)]
-    monitors.append(mw.FieldTimeMonitor("ref", components=(component,), position=(reference[0], reference[1], z_obs)))
-    mesh_kwargs = {} if getattr(material, "is_copper_foil", False) or isinstance(material, mw.CopperFoil) else dict(
+    monitors.append(mw.monitors.FieldTimeMonitor("ref", components=(component,), position=(reference[0], reference[1], z_obs)))
+    mesh_kwargs = {} if getattr(material, "is_copper_foil", False) or isinstance(material, mw.media.CopperFoil) else dict(
         sheet_model="conformal_two_sided")
     mesh = extruded_polyline_mesh(polygon_points(circumradius, sides, center=center, phase=phase),
                                   (-2 * dl, (nz + 2) * dl), closed=True, **mesh_kwargs)
@@ -334,8 +325,7 @@ def cylinder_scattering(material, polarization, dl, *, sides=32, radius_wl=0.5, 
     for with_sheet in (False, True):
         scenes[with_sheet] = mw.Scene(
             domain=mw.Domain(bounds=bounds), grid=mw.GridSpec.uniform(dl),
-            boundary=mw.BoundarySpec.faces(default="pml", num_layers=pml_layers, z=wall), device=device,
-            sources=[mw.PlaneWave(direction=(1.0, 0.0, 0.0), polarization=e_pol,
+            boundary=mw.BoundarySpec.faces(default="pml", num_layers=pml_layers, z=wall), sources=[mw.PlaneWave(direction=(1.0, 0.0, 0.0), polarization=e_pol,
                                   source_time=mw.GaussianPulse(frequency=frequency, fwidth=0.5 * frequency))],
             structures=[mw.Structure(geometry=mesh, material=material)] if with_sheet else [], monitors=monitors)
     dt = min(prepared_dt(scenes[True], frequency=frequency, absorber=absorber), 0.9 * dl / (C0 * math.sqrt(3.0)))

@@ -24,29 +24,28 @@ def _scene(*items, half=3.0e-3, length=4.0e-3):
         domain=mw.Domain(bounds=((-half, half), (-half, half), (0.0, length))),
         grid=mw.GridSpec.uniform(H),
         boundary=mw.BoundarySpec.pec(),
-        device="cpu",
     )
     for item in items:
-        if isinstance(item, mw.CoaxialLumpedPort):
-            scene.add_port(item)
+        if isinstance(item, mw.rf.CoaxialLumpedPort):
+            scene = scene.updated(ports=(*scene.ports, item))
         else:
-            scene.add_lumped_element(item)
+            scene = scene.updated(lumped_elements=(*scene.lumped_elements, item))
     return scene
 
 
 def _port(**overrides):
     values = dict(center=(0.0, 0.0, 1.0e-3), inner_diameter=2 * A, outer_diameter=2 * B, normal_axis="z")
     values.update(overrides)
-    return mw.CoaxialLumpedPort("coax", **values)
+    return mw.rf.CoaxialLumpedPort("coax", **values)
 
 
 def test_coaxial_port_and_resistor_public_contract():
-    port = _port(direction="-", reference_impedance=75.0, termination=mw.SeriesRLC(r=75.0))
+    port = _port(direction="-", reference_impedance=75.0, termination=mw.rf.SeriesRLC(r=75.0))
     assert port.kind == "coaxial_lumped_port"
     assert port.normal_axis == "z" and port.direction_sign == -1
     assert port.reference_impedance == 75.0
     assert port.power_convention == "0.5*Re(V*conj(I))"
-    resistor = mw.CoaxialLumpedResistor("load", center=(0, 0, 1e-3), inner_diameter=2 * A,
+    resistor = mw.rf.CoaxialLumpedResistor("load", center=(0, 0, 1e-3), inner_diameter=2 * A,
                                         outer_diameter=2 * B, normal_axis=2, resistance=50.0)
     assert resistor.normal_axis == "z"
     assert resistor.sheet_conductance == pytest.approx(math.log(B / A) / (2 * math.pi * 50.0))
@@ -59,7 +58,7 @@ def test_coaxial_port_and_resistor_public_contract():
     (dict(normal_axis="w"), ValueError),
     (dict(normal_axis=True), TypeError),
     (dict(direction="up"), ValueError),
-    (dict(termination=mw.ParallelRLC(r=50.0)), TypeError),
+    (dict(termination=mw.rf.ParallelRLC(r=50.0)), TypeError),
     (dict(reference_impedance=-5.0), ValueError),
 ])
 def test_coaxial_port_rejects_invalid_declarations(overrides, error):
@@ -70,9 +69,9 @@ def test_coaxial_port_rejects_invalid_declarations(overrides, error):
 def test_coaxial_resistor_rejects_nonpositive_or_trainable_resistance():
     arguments = dict(center=(0, 0, 0), inner_diameter=2 * A, outer_diameter=2 * B, normal_axis="z")
     with pytest.raises(ValueError):
-        mw.CoaxialLumpedResistor("r", resistance=0.0, **arguments)
+        mw.rf.CoaxialLumpedResistor("r", resistance=0.0, **arguments)
     with pytest.raises(NotImplementedError, match="Trainable CoaxialLumpedResistor.resistance"):
-        mw.CoaxialLumpedResistor("r", resistance=torch.tensor(50.0, requires_grad=True), **arguments)
+        mw.rf.CoaxialLumpedResistor("r", resistance=torch.tensor(50.0, requires_grad=True), **arguments)
 
 
 def test_scene_rejects_annulus_outside_domain_and_duplicate_names():
@@ -106,8 +105,8 @@ def _tem_fields(scene):
 
 @pytest.mark.parametrize("direction", ["+", "-"])
 def test_annular_row_and_loop_integrate_a_unit_tem_field(direction):
-    scene = prepare_scene(_scene(_port(direction=direction)))
-    geometry = compile_coaxial_geometry(scene, scene.ports[0], device="cpu")
+    scene = prepare_scene(_scene(_port(direction=direction)), device="cpu")
+    geometry = compile_coaxial_geometry(scene, scene.scene.ports[0], device="cpu")
     fields = _tem_fields(scene)
     assert geometry.voltage_components == ("Ex", "Ey")
     # Unit-voltage TEM field: the row is the azimuthal mean of the radial voltage.
@@ -137,9 +136,9 @@ def _masked_solver(scene):
 def test_discrete_harmonic_row_obeys_kirchhoff_and_measures_the_conductor_voltage():
     from witwin.maxwell.fdtd.coaxial import harmonic_coaxial_geometry
 
-    scene = prepare_scene(_scene(_port()))
+    scene = prepare_scene(_scene(_port()), device="cpu")
     solver = _masked_solver(scene)
-    geometry = harmonic_coaxial_geometry(solver, compile_coaxial_geometry(scene, scene.ports[0], device="cpu"))
+    geometry = harmonic_coaxial_geometry(solver, compile_coaxial_geometry(scene, scene.scene.ports[0], device="cpu"))
     assert geometry.metadata["row"] == "discrete_harmonic"
     nx, ny = len(scene.x_nodes64), len(scene.y_nodes64)
     net = np.zeros((nx, ny))
@@ -179,21 +178,21 @@ def test_discrete_harmonic_row_obeys_kirchhoff_and_measures_the_conductor_voltag
 def test_discrete_harmonic_row_rejects_a_missing_outer_conductor():
     from witwin.maxwell.fdtd.coaxial import harmonic_coaxial_geometry
 
-    scene = prepare_scene(_scene(_port()))
+    scene = prepare_scene(_scene(_port()), device="cpu")
     solver = _masked_solver(scene)
     solver.cex_curl = torch.ones_like(solver.cex_curl)
     solver.cey_curl = torch.ones_like(solver.cey_curl)
     solver.cez_curl = torch.ones_like(solver.cez_curl)
     with pytest.raises(ValueError, match="not enclosed by PEC conductors"):
-        harmonic_coaxial_geometry(solver, compile_coaxial_geometry(scene, scene.ports[0], device="cpu"))
+        harmonic_coaxial_geometry(solver, compile_coaxial_geometry(scene, scene.scene.ports[0], device="cpu"))
 
 
 def test_annular_compile_rejects_off_grid_plane_and_coarse_annulus():
     with pytest.raises(ValueError, match="node plane"):
-        compile_coaxial_geometry(_scene(_port(center=(0.0, 0.0, 1.1e-3))), _port(center=(0.0, 0.0, 1.1e-3)))
+        compile_coaxial_geometry(_scene(_port(center=(0.0, 0.0, 1.1e-3))), _port(center=(0.0, 0.0, 1.1e-3)), device="cpu")
     coarse = _port(inner_diameter=2 * A, outer_diameter=2 * (A + 0.3e-3))
     with pytest.raises(ValueError, match="fewer than two Yee cells"):
-        compile_coaxial_geometry(_scene(coarse), coarse)
+        compile_coaxial_geometry(_scene(coarse), coarse, device="cpu")
 
 
 def _fake_solver(seed=0):
@@ -209,7 +208,7 @@ def _fake_solver(seed=0):
     )
 
 
-@pytest.mark.parametrize("termination", [mw.SeriesRLC(r=37.0), mw.SeriesRLC(r=20.0, l=2.0e-9, c=3.0e-12), None])
+@pytest.mark.parametrize("termination", [mw.rf.SeriesRLC(r=37.0), mw.rf.SeriesRLC(r=20.0, l=2.0e-9, c=3.0e-12), None])
 def test_one_component_annular_branch_reproduces_the_lumped_runtime_bitwise(termination):
     solver = _fake_solver()
     indices = torch.tensor([[1, 2, 3], [2, 2, 3], [3, 2, 3], [4, 5, 3]])
@@ -260,10 +259,13 @@ def test_annular_branch_drops_pec_suppressed_edges_and_rejects_an_all_pec_row():
 
 def test_trainable_scene_with_coaxial_objects_is_rejected_by_the_adjoint_gate():
     scene = _scene(_port())
-    scene.add_structure(mw.Structure(mw.Box(position=(0, 0, 3e-3), size=(1e-3, 1e-3, 0.5e-3)),
-                                     mw.Material(eps_r=torch.tensor(2.0, requires_grad=True))))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(mw.Box(position=(0, 0, 3e-3), size=(1e-3, 1e-3, 0.5e-3)),
+                     mw.Material(eps_r=torch.tensor(2.0, requires_grad=True))),
+    ))
     with pytest.raises(NotImplementedError, match="forward-only"):
-        mw.Simulation.fdtd(scene, frequencies=(1e9,), run_time=mw.TimeConfig(time_steps=10))
+        mw.Simulation.fdtd(scene, frequencies=(1e9,), config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=10), device="cpu"))
 
 
 @pytest.mark.parametrize("bound, network", [(True, None), (False, "net")])

@@ -8,7 +8,7 @@ from witwin.maxwell.compiler.delay import _path_group_delay
 
 
 def _network(z0):
-    return mw.NetworkData(frequencies=torch.tensor([1e9], dtype=torch.float64),
+    return mw.rf.NetworkData(frequencies=torch.tensor([1e9], dtype=torch.float64),
                           s=torch.tensor([[[0.,.5],[.5,0.]]], dtype=torch.complex128),
                           z0=z0, port_names=("in","out"))
 
@@ -37,18 +37,18 @@ def test_group_delay_normalization_scales_with_frequency(length):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD port preparation requires CUDA")
 @pytest.mark.parametrize("length", [1., 1e-6])
 def test_small_dc_current_is_inconsistent_at_both_aperture_scales(length):
-    circuit = mw.Circuit("dc_driven")
+    circuit = mw.circuits.Circuit("dc_driven")
     node = circuit.node("input")
-    circuit.add(mw.VoltageSource("V1", node, circuit.ground, 1e-8*length))
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 50.))
+    circuit.add(mw.circuits.VoltageSource("V1", node, circuit.ground, 1e-8*length))
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 50.))
     circuit.bind_port("feed", positive=node, negative=circuit.ground)
     port = mw.LumpedPort(name="feed", positive=(0.,0.,.005*length), negative=(0.,0.,-.005*length),
                          voltage_path=mw.AxisPath("z"), current_surface=mw.Box(position=(0.,0.,-.0025*length), size=(.015*length,.015*length,0.)), reference_impedance=50.)
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.02*length,.02*length),)*3),
                      grid=mw.GridSpec.uniform(.005*length), boundary=mw.BoundarySpec.none(),
-                     ports=[port], circuits=[circuit], device="cuda")
+                     ports=[port], circuits=[circuit])
     with pytest.raises(ValueError, match="nonzero DC port current"):
-        mw.Simulation.fdtd(scene, frequency=3e9/length).prepare()
+        mw.Simulation.fdtd(scene, frequencies=3e9/length).prepare()
 
 
 @pytest.mark.parametrize("length", [1., 1e-6])
@@ -74,17 +74,17 @@ def test_waveport_column_retains_small_power_wave_at_both_scales(length):
     from types import SimpleNamespace
     from witwin.maxwell.waveport_sweep import _column_scene
 
-    port = mw.WavePort("port", position=(0.,0.,0.), size=(0.,.8*length,.6*length), direction="+", reference_plane=0.,
-                       modes=(mw.WaveModeSpec("te", polarization="Ey"),))
+    port = mw.rf.WavePort("port", position=(0.,0.,0.), size=(0.,.8*length,.6*length), direction="+", reference_plane=0.,
+                       modes=(mw.rf.WaveModeSpec("te", polarization="Ey"),))
     scene = mw.Scene(domain=mw.Domain(bounds=((-length,length),)*3),
                      grid=mw.GridSpec.uniform(.1*length), boundary=mw.BoundarySpec.none(),
-                     ports=[port], device="cpu")
+                     ports=[port])
     mode = SimpleNamespace(mode_index=0, polarization_axis="y", family="te", conductor_model=None)
     prepared = SimpleNamespace(port=port, compiled=SimpleNamespace(modes=(mode,), electric_plane_index=10),
                                tracking=SimpleNamespace(orientation=torch.ones((1,1,1), dtype=torch.complex128)))
     manifest = SimpleNamespace(frequencies=(1e9/length,), prepared_ports=(prepared,))
     amplitude = 1e-12 * length
-    column = _column_scene(scene, manifest, active_port_index=0, active_mode_index=0, frequency_index=0, amplitude=amplitude)
+    column = _column_scene(scene, manifest, active_port_index=0, active_mode_index=0, frequency_index=0, amplitude=amplitude, device="cpu")
     assert len(column.sources) == 1
     assert column.sources[0].source_time.amplitude == pytest.approx(amplitude, rel=1e-12, abs=0)
 
@@ -97,12 +97,12 @@ def test_modal_drive_columns_prune_roundoff_relative_to_own_vector(length, dtype
     from witwin.maxwell import terminal_waveport, waveport_sweep
 
     scene = mw.Scene(domain=mw.Domain(bounds=((-length, length),) * 3),
-                     grid=mw.GridSpec.uniform(.1 * length), boundary=mw.BoundarySpec.none(), device="cpu")
+                     grid=mw.GridSpec.uniform(.1 * length), boundary=mw.BoundarySpec.none())
     port = SimpleNamespace(name="P", position=(0., 0., 0.), size=(0., length, length),
                            direction="+", terminal_count=3)
     mode = SimpleNamespace(mode_index=0, polarization_axis="y", family="te", conductor_model=None)
     eps = torch.finfo(dtype).eps
-    monkeypatch.setattr(waveport_sweep, "_source_plane", lambda scene, prepared: port.position)
+    monkeypatch.setattr(waveport_sweep, "_source_plane", lambda scene, prepared, *, device: port.position)
     monkeypatch.setattr(terminal_waveport, "_tag_terminal_mode", lambda *args: None)
 
     def terminal_source(port, compiled, polarization_axis, *, frequency, position, coefficient, **kwargs):
@@ -120,8 +120,8 @@ def test_modal_drive_columns_prune_roundoff_relative_to_own_vector(length, dtype
         manifest = SimpleNamespace(frequencies=(1e9 / length,), prepared_ports=(prepared,))
         if lowering == "terminal":
             column = terminal_waveport._column_scene(scene, manifest, active_port=0, active_channel=0,
-                                                      frequency_index=0, amplitude=1e-12 * length)
+                                                      frequency_index=0, amplitude=1e-12 * length, device="cpu")
         else:
             column = waveport_sweep._column_scene(scene, manifest, active_port_index=0, active_mode_index=0,
-                                                  frequency_index=0, amplitude=1e-12 * length)
+                                                  frequency_index=0, amplitude=1e-12 * length, device="cpu")
         assert len(column.sources) == (2 if peak else 0)

@@ -19,10 +19,12 @@ def test_static_conductivity_tem_two_length_propagation_and_roundtrip(tmp_path):
     frequency=1e9
     results=[]
     for length in (.04,.08):
-        scene=printed_line_scene('stripline',sigma_e=.01,port_separation=length,device='cuda:0')
-        result=mw.Simulation.fdtd(scene,frequencies=(frequency,),excitations=mw.PortSweep(),
-            run_time=mw.TimeConfig.auto(transient_cycles=16,steady_cycles=6),
-            spectral_sampler=mw.SpectralSampler(window='hanning'),full_field_dft=False).run()
+        scene=printed_line_scene('stripline',sigma_e=.01,port_separation=length)
+        result=mw.Simulation.fdtd(scene,frequencies=(frequency,),excitations=mw.rf.PortSweep(),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(transient_cycles=16,steady_cycles=6),
+                spectral_sampler=mw.fdtd.SpectralSampler(window='hanning'),full_field_dft=False,
+            )).run()
         results.append(result)
         assert result.port('in').beta.imag.item()>0
         assert result.port('in').characteristic_impedance.imag.item()<0

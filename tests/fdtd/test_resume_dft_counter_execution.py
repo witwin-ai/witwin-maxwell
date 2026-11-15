@@ -14,6 +14,7 @@ import witwin.maxwell as mw
 from witwin.maxwell.fdtd import observation_resume, resume
 from witwin.maxwell.fdtd.checkpoint import capture_checkpoint_state, graph_state_tensors
 from tests.fdtd.test_short_spectral_tail_execution import _scene as _short_copper_scene
+from witwin.maxwell.scene import place_scene
 
 FREQUENCIES = (0.8e9, 1.0e9, 1.2e9)
 TOTAL_STEPS = 8
@@ -27,12 +28,14 @@ def _scene():
 
 def _execution(graph):
     simulation = mw.Simulation.fdtd(
-        _scene().clone(device="cuda"),
+        place_scene(_scene(), "cuda"),
         frequencies=FREQUENCIES,
-        run_time=mw.TimeConfig(time_steps=TOTAL_STEPS),
-        full_field_dft=True,
-        cuda_graph=graph,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=TOTAL_STEPS),
+            full_field_dft=True,
+            cuda_graph=graph,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+        ),
     )
     execution = simulation.prepare()
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
@@ -105,7 +108,7 @@ def _assert_final_parity(actual, expected):
     for frequency in FREQUENCIES:
         for component in ("Ex", "Ey", "Ez"):
             torch.testing.assert_close(
-                actual.tensor(component, frequency=frequency), expected.tensor(component, frequency=frequency), rtol=0, atol=0
+                actual.field(component, frequency=frequency).values, expected.field(component, frequency=frequency).values, rtol=0, atol=0
             )
     a_physics = capture_checkpoint_state(actual.solver, TOTAL_STEPS)
     b_physics = capture_checkpoint_state(expected.solver, TOTAL_STEPS)
@@ -114,8 +117,8 @@ def _assert_final_parity(actual, expected):
         torch.testing.assert_close(a_physics.tensors[name], b_physics.tensors[name], rtol=0, atol=0)
     for name in ("same_owned_Ey", "published_Ey"):
         for frequency in FREQUENCIES:
-            a = actual.monitor(name, frequency=frequency)["components"]
-            b = expected.monitor(name, frequency=frequency)["components"]
+            a = actual.raw_monitor(name, frequency=frequency)["components"]
+            b = expected.raw_monitor(name, frequency=frequency)["components"]
             for component in a:
                 av = a[component]["data"] if isinstance(a[component], dict) else a[component]
                 bv = b[component]["data"] if isinstance(b[component], dict) else b[component]
@@ -144,7 +147,7 @@ def test_actual_full_dft_counter_rejects_before_restore_and_disk_resume_matches_
         path = tmp_path / f"checkpoint-{checkpoint_step}.pt"
         checkpoint.save(path)
         del checkpoint, execution
-        valid = mw.FDTDResumeCheckpoint.load(path, map_location="cpu")
+        valid = mw.fdtd.FDTDResumeCheckpoint.load(path, map_location="cpu")
         saved_counter = valid.auxiliary["observations"]["arrays"]["_dft_step"]
         assert saved_counter.device.type == "cpu" and int(saved_counter.item()) == checkpoint_step
 
@@ -160,7 +163,7 @@ def test_actual_full_dft_counter_rejects_before_restore_and_disk_resume_matches_
             entry["right_e"].fill_(-2.0)
         before = _snapshot(target.solver)
         for bad_value in (-1, 0, checkpoint_step + 1, TOTAL_STEPS + 1):
-            bad = mw.FDTDResumeCheckpoint.load(path, map_location="cpu")
+            bad = mw.fdtd.FDTDResumeCheckpoint.load(path, map_location="cpu")
             counter = bad.auxiliary["observations"]["arrays"]["_dft_step"]
             assert counter.device.type == "cpu"
             counter.fill_(bad_value)

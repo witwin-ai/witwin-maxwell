@@ -33,8 +33,8 @@ def _to_numpy(value, dtype=None):
     return array
 
 
-def _closed_surface_box_monitor(name: str, half: float, frequency: float) -> mw.ClosedSurfaceMonitor:
-    return mw.ClosedSurfaceMonitor.box(
+def _closed_surface_box_monitor(name: str, half: float, frequency: float) -> mw.monitors.ClosedSurfaceMonitor:
+    return mw.monitors.ClosedSurfaceMonitor.box(
         name,
         position=(0.0, 0.0, 0.0),
         size=(2.0 * half, 2.0 * half, 2.0 * half),
@@ -42,7 +42,7 @@ def _closed_surface_box_monitor(name: str, half: float, frequency: float) -> mw.
     )
 
 
-def _nonrect_closed_surface_monitor(name: str, frequency: float) -> mw.ClosedSurfaceMonitor:
+def _nonrect_closed_surface_monitor(name: str, frequency: float) -> mw.monitors.ClosedSurfaceMonitor:
     half_x = 0.10
     half_y_left = 0.12
     half_y_right = 0.08
@@ -145,7 +145,7 @@ def _nonrect_closed_surface_monitor(name: str, frequency: float) -> mw.ClosedSur
             normal_direction="+",
         ),
     )
-    return mw.ClosedSurfaceMonitor(name, faces, frequencies=(frequency,))
+    return mw.monitors.ClosedSurfaceMonitor(name, faces, frequencies=(frequency,))
 
 
 def _crop_indices(coords, lower: float, upper: float) -> np.ndarray:
@@ -322,41 +322,42 @@ def dipole_closed_surface_validation():
     box_half = 0.08
     surface_monitor = _closed_surface_box_monitor("huygens", box_half, frequency)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.48, 0.48))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.CW(frequency=frequency, amplitude=1.0),
-            name="dipole",
-        )
-    )
-    scene.add_monitor(surface_monitor)
-    scene.add_monitor(
-        mw.PlaneMonitor(
-            "target",
-            axis="z",
-            position=0.20,
-            fields=("Ex", "Ey", "Ez", "Hx", "Hy"),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.48, 0.48))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(frequency=frequency, amplitude=1.0),
+                name="dipole",
+            ),
+            ),
+                monitors=(
+            surface_monitor,
+            mw.PlaneMonitor(
+                "target",
+                axis="z",
+                position=0.20,
+                fields=("Ex", "Ey", "Ez", "Hx", "Hy"),
+            ),
+            ),
+            )
 
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=25),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=25),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     currents = equivalent_surface_currents_from_monitor(result, surface_monitor.name)
     propagator = StrattonChuPropagator(currents, solver=result.solver, device="cuda")
-    target_monitor = result.monitor("target")
+    target_monitor = result.raw_monitor("target")
     reconstructed = propagator.propagate_plane(
         axis="z",
         position=0.20,
@@ -386,7 +387,7 @@ def dipole_closed_surface_validation():
     computed_line = _to_numpy(torch.real(directivity["directivity"][:, phi0_index]), float)
     reference_line = 1.5 * np.sin(theta_np) ** 2
     line_rel = float(np.linalg.norm(computed_line - reference_line) / np.linalg.norm(reference_line))
-    surface_payload = result.monitor(surface_monitor.name)
+    surface_payload = result.raw_monitor(surface_monitor.name)
     power_flux = sum(_manual_cropped_flux(face_payload) for face_payload in surface_payload["faces"].values())
     power_ratio = float(directivity["P_rad"].item() / power_flux)
 
@@ -402,7 +403,7 @@ def dipole_closed_surface_validation():
     }
 
 
-def _rayleigh_scenes(dx, *, subpixel_samples, device="cuda"):
+def _rayleigh_scenes(dx, *, subpixel_samples):
     """Keep the physical sphere, domain, TFSF and Huygens geometry fixed."""
     frequency = 1.0e9
     amplitude = 1.0
@@ -410,61 +411,57 @@ def _rayleigh_scenes(dx, *, subpixel_samples, device="cuda"):
     box_half = 0.06
     surface_monitor = _closed_surface_box_monitor("huygens", box_half, frequency)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.uniform(dx),
-        subpixel_samples=subpixel_samples,
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device=device,
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="rayleigh_sphere",
-            geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=sphere_radius),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization="Ex",
-            source_time=mw.CW(frequency=frequency, amplitude=amplitude),
-            injection=mw.TFSF(bounds=((-0.04, 0.04), (-0.04, 0.04), (-0.04, 0.04))),
-            name="tfsf_pw",
-        )
-    )
-    scene.add_monitor(surface_monitor)
+                domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.uniform(dx),
+                subpixel=subpixel_samples,
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+                structures=(
+            mw.Structure(
+                name="rayleigh_sphere",
+                geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=sphere_radius),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization="Ex",
+                source_time=mw.CW(frequency=frequency, amplitude=amplitude),
+                injection=mw.TFSF(bounds=((-0.04, 0.04), (-0.04, 0.04), (-0.04, 0.04))),
+                name="tfsf_pw",
+            ),
+            ),
+                monitors=(surface_monitor,),
+            )
 
     reference_scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.uniform(dx),
-        subpixel_samples=subpixel_samples,
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device=device,
-    )
-    reference_scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization="Ex",
-            source_time=mw.CW(frequency=frequency, amplitude=amplitude),
-            injection=mw.TFSF(bounds=((-0.04, 0.04), (-0.04, 0.04), (-0.04, 0.04))),
-            name="tfsf_pw",
-        )
-    )
-    reference_scene.add_monitor(
-        mw.PointMonitor("incident_probe", (0.0, 0.0, 0.0), fields=("Ex",))
-    )
+                          domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
+                          grid=mw.GridSpec.uniform(dx),
+                          subpixel=subpixel_samples,
+                          boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+                          sources=(
+                          mw.PlaneWave(
+                          direction=(0.0, 0.0, 1.0),
+                          polarization="Ex",
+                          source_time=mw.CW(frequency=frequency, amplitude=amplitude),
+                          injection=mw.TFSF(bounds=((-0.04, 0.04), (-0.04, 0.04), (-0.04, 0.04))),
+                          name="tfsf_pw",
+                      ),
+                      ),
+                          monitors=(mw.PointMonitor("incident_probe", (0.0, 0.0, 0.0), fields=("Ex",)),),
+                      )
     return scene, reference_scene
 
 
 def _run_tfsf_rayleigh_rcs_validation(
-    dx, *, subpixel_samples, device="cuda", backend="native", output_dir=None,
+    dx, *, subpixel_samples, device="cuda", output_dir=None,
     run_time=None, angular_shape=(121, 241), batch_size=4096,
 ):
     """Shared simulation and analytic pattern measurement, with optional plots."""
     frequency = 1.0e9
     sphere_radius = 0.01
     scene, reference_scene = _rayleigh_scenes(
-        dx, subpixel_samples=subpixel_samples, device=device,
+        dx, subpixel_samples=subpixel_samples,
     )
     run_time = run_time or mw.TimeConfig.auto(steady_cycles=12, transient_cycles=30)
 
@@ -472,12 +469,13 @@ def _run_tfsf_rayleigh_rcs_validation(
     reference_result = mw.Simulation.fdtd(
         reference_scene,
         frequencies=[frequency],
-        run_time=run_time,
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
-        backend=backend,
+        config=mw.FDTDConfig(
+            run_time=run_time,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
-    incident_amplitude = abs(reference_result.monitor("incident_probe")["data"].item())
+    incident_amplitude = abs(reference_result.monitor("incident_probe", freq_index=0).sel(component="Ex").values.item())
     del reference_result, reference_scene
     gc.collect()
     if torch.device(device).type == "cuda":
@@ -486,10 +484,11 @@ def _run_tfsf_rayleigh_rcs_validation(
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
-        run_time=run_time,
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
-        backend=backend,
+        config=mw.FDTDConfig(
+            run_time=run_time,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     currents = equivalent_surface_currents_from_monitor(result, "huygens")
@@ -528,7 +527,7 @@ def _run_tfsf_rayleigh_rcs_validation(
         )
         _save_scattered_field_plot(
             output_dir / "tfsf_rayleigh_scattered_ex_xy.png",
-            result.monitor("huygens")["faces"]["z_pos"], None,
+            result.raw_monitor("huygens")["faces"]["z_pos"], None,
         )
 
     sigma_max = float(np.max(sigma))
@@ -567,28 +566,29 @@ def dipole_nonrect_closed_surface_validation():
     frequency = 1.0e9
     surface_monitor = _nonrect_closed_surface_monitor("huygens_poly", frequency)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.48, 0.48))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.CW(frequency=frequency, amplitude=1.0),
-            name="dipole",
-        )
-    )
-    scene.add_monitor(surface_monitor)
+                domain=mw.Domain(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.48, 0.48))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(frequency=frequency, amplitude=1.0),
+                name="dipole",
+            ),
+            ),
+                monitors=(surface_monitor,),
+            )
 
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=25),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=25),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     currents = equivalent_surface_currents_from_monitor(result, surface_monitor.name)
@@ -608,7 +608,7 @@ def dipole_nonrect_closed_surface_validation():
     theta90_index = int(np.argmin(np.abs(np.degrees(theta_np) - 90.0)))
     theta90_ring = _to_numpy(torch.real(directivity["directivity"][theta90_index]), float)
 
-    surface_payload = result.monitor(surface_monitor.name)
+    surface_payload = result.raw_monitor(surface_monitor.name)
     _save_directivity_plot(
         OUTPUT_DIR / "directivity_nonrect_closed_surface_dipole_phi0.png",
         theta_np,

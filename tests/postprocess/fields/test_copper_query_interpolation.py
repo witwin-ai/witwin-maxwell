@@ -14,11 +14,10 @@ def fixture(normal=0, *, graded=False, quadratic=False, device='cpu', normalized
     nodes=nodes*scale
     size=[.8*scale]*3;size[normal]=0.
     scene=mw.Scene(domain=mw.Domain(bounds=((- .6*scale,.6*scale),)*3),
-        grid=mw.GridSpec.custom(x_coords=nodes,y_coords=nodes,z_coords=nodes),device=device,
-        boundary=mw.BoundarySpec.pec(), structures=(mw.Structure(
-            mw.Box(size=torch.tensor(size,dtype=torch.float64)),mw.CopperFoil(thickness=1e-6,
+        grid=mw.GridSpec.custom(x_coords=nodes,y_coords=nodes,z_coords=nodes),boundary=mw.BoundarySpec.pec(), structures=(mw.Structure(
+            mw.Box(size=torch.tensor(size,dtype=torch.float64)),mw.media.CopperFoil(thickness=1e-6,
                 conductivity=5.8e7,frequency_range=(1e9,2e9)),name='foil'),))
-    prepared=prepare_scene(scene)
+    prepared=prepare_scene(scene, device=device)
     fields={}
     def expected(points,component,positive=None):
         own='xyz'.index(component[1].lower())
@@ -27,13 +26,13 @@ def fixture(normal=0, *, graded=False, quadratic=False, device='cpu', normalized
         return 1.2+(.8+.2j)*points[...,0]+(.4-.1j)*points[...,1]-.7*points[...,2]+jump*positive+(points[...,normal].square() if quadratic else 0)
     factor=(.3+.7j) if normalized else 1.
     for component in ('Ex','Ey','Ez','Hx','Hy','Hz'):
-        axes=[torch.as_tensor(a,dtype=torch.float64,device=device) for a in component_coords(prepared,component)]
+        axes=[torch.as_tensor(a,dtype=torch.float64,device=device) for a in component_coords(prepared,component, device=prepared.device)]
         q=torch.stack(torch.meshgrid(*axes,indexing='ij'),-1)
         fields[component.upper()]=expected(q,component).to(torch.complex128)*factor
     traces=[]
     for face in compile_copper_faces(prepared,device=device):
         component='E'+'xyz'[face.component]
-        axes=[torch.as_tensor(a,dtype=torch.float64,device=device) for a in component_coords(prepared,component)]
+        axes=[torch.as_tensor(a,dtype=torch.float64,device=device) for a in component_coords(prepared,component, device=prepared.device)]
         q=torch.stack([axis[index] for axis,index in zip(axes,face.indices.T)],-1)
         traces.append(dict(component=component,indices=face.indices,electric_fields=torch.stack((expected(q,component,False),expected(q,component,True)))[None]))
     result=mw.Result(method='fdtd',scene=scene,prepared_scene=prepared,frequency=1e9,fields=fields,
@@ -89,7 +88,7 @@ def test_sparse_native_stencil_and_both_side_spectra_are_used_without_dense_fiel
     points=torch.tensor(((.025,.027,.033),(-.025,.027,.033)),dtype=torch.float64)
     fields=result._fields.copy()
     for component in ('Ex','Ey','Ez','Hx','Hy','Hz'):
-        axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,component)]
+        axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,component, device=result.prepared_scene.device)]
         indices=torch.unique(torch.cat([index for index,_,_ in interpolation_stencil(result,points,component,axes)]),dim=0)
         for offset,index in enumerate(indices):
             result._monitors[component+str(offset)]={'kind':'point','field_indices':{component:tuple(index.tolist())},
@@ -125,7 +124,7 @@ def test_finite_footprint_does_not_change_an_unrelated_interpolation_stencil():
     result,_,_=fixture()
     points=torch.tensor(((.025,.525,.525),),dtype=torch.float64)
     for component in ('Ex','Ey','Ez','Hx','Hy','Hz'):
-        axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,component)]
+        axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,component, device=result.prepared_scene.device)]
         corners=interpolation_stencil(result,points,component,axes)
         for indices,weight,overrides in corners:
             assert not overrides
@@ -173,11 +172,11 @@ def test_normal_flux_charge_and_surface_continuity_converge_for_independent_maxw
             if component=='Hz':return -omega*eps/k*normal
             return torch.zeros_like(normal)
         for component in ('Ex','Ey','Ez','Hx','Hy','Hz'):
-            axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,component)]
+            axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,component, device=result.prepared_scene.device)]
             q=torch.stack(torch.meshgrid(*axes,indexing='ij'),-1)
             result._fields[component.upper()]=exact(q,component)
         for trace in result._metadata['conductor_losses']['foil']['bulk_electric_traces']:
-            axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,trace['component'])]
+            axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(result.prepared_scene,trace['component'], device=result.prepared_scene.device)]
             q=torch.stack([axis[index] for axis,index in zip(axes,trace['indices'].T)],-1)
             trace['electric_fields']=torch.stack((exact(q,trace['component'],False),exact(q,trace['component'],True)))[None]
         half_height=.0001/refinement
@@ -212,7 +211,7 @@ def multiple_planes(planes):
     for number,plane in enumerate(planes):
         structures.append(mw.Structure(mw.Box(position=torch.tensor((plane,0.,0.),dtype=torch.float64),
             size=torch.tensor((0.,.8,.8),dtype=torch.float64)),original.material,name='foil'+str(number)))
-    scene=result.scene.clone(structures=structures);prepared=prepare_scene(scene)
+    scene=result.scene.updated(structures=structures);prepared=prepare_scene(scene, device="cpu")
     faces=compile_copper_faces(prepared,device='cpu')
     resolved={face.name:float(prepared.x_nodes64[face.normal_index]) for face in faces}
     def expected(q,component):
@@ -223,12 +222,12 @@ def multiple_planes(planes):
         return value
     fields={};records={}
     for component in ('Ex','Ey','Ez','Hx','Hy','Hz'):
-        axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(prepared,component)]
+        axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(prepared,component, device=prepared.device)]
         q=torch.stack(torch.meshgrid(*axes,indexing='ij'),-1)
         fields[component.upper()]=expected(q,component)
     for face in faces:
         component='E'+'xyz'[face.component]
-        axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(prepared,component)]
+        axes=[torch.as_tensor(a,dtype=torch.float64) for a in component_coords(prepared,component, device=prepared.device)]
         q=torch.stack([axis[index] for axis,index in zip(axes,face.indices.T)],-1)
         left=expected(q,component)
         jump=(int(face.name[-1])+1)*(1.+2j)
@@ -281,8 +280,8 @@ def test_intersecting_copper_faces_remain_an_explicit_unsupported_topology():
     original=result.scene.structures[0]
     cross=mw.Structure(mw.Box(position=torch.zeros(3,dtype=torch.float64),
         size=torch.tensor((.8,0.,.8),dtype=torch.float64)),original.material,name='cross')
-    scene=result.scene.clone(structures=(*result.scene.structures,cross))
-    result=mw.Result(method='fdtd',scene=scene,prepared_scene=prepare_scene(scene),frequency=1e9,
+    scene=result.scene.updated(structures=(*result.scene.structures,cross))
+    result=mw.Result(method='fdtd',scene=scene,prepared_scene=prepare_scene(scene, device="cpu"),frequency=1e9,
         fields=result._fields,metadata=result._metadata)
     records=result._metadata['conductor_losses']
     records['cross']={'frequencies':torch.tensor((1e9,),dtype=torch.float64),'bulk_electric_traces':[]}

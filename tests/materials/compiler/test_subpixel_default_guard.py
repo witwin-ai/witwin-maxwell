@@ -6,6 +6,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 MESSAGE = (
@@ -24,22 +25,25 @@ class GeometryScene(mw.SceneModule):
 
 
 def scene(*, geometry=None, material=None, spec=None, region=False, density=None):
-    kwargs = {} if spec is None else {"subpixel_samples": spec}
+    kwargs = {} if spec is None else {"subpixel": spec}
     geometry = mw.Box(size=(.37, .41, .43)) if geometry is None else geometry
     material = mw.Material(eps_r=4.) if material is None else material
     result = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
         grid=mw.GridSpec.uniform(.125), boundary=mw.BoundarySpec.none(),
-        device="cpu", **kwargs,
+        **kwargs,
     )
     if region:
-        result.add_material_region(mw.MaterialRegion(
-            name="design", geometry=geometry,
-            density=torch.full((2, 2, 2), .5) if density is None else density,
-            eps_bounds=(1., 4.),
+        result = result.updated(material_regions=(
+            *result.material_regions,
+            mw.MaterialRegion(
+                name="design", geometry=geometry,
+                density=torch.full((2, 2, 2), .5) if density is None else density,
+                eps_bounds=(1., 4.),
+            ),
         ))
     else:
-        result.add_structure(mw.Structure(geometry, material))
+        result = result.updated(structures=(*result.structures, mw.Structure(geometry, material)))
     return result
 
 
@@ -49,21 +53,21 @@ def test_trainable_geometry_fails_closed(kind, explicit):
     parameter = torch.tensor(.37, requires_grad=True)
     geometry = mw.Box(size=(parameter, .41, .43))
     if kind == "nested":
-        geometry = mw.Difference(geometry, mw.Sphere(radius=.1))
+        geometry = mw.geometry.Difference(geometry, mw.Sphere(radius=.1))
     value = GeometryScene().to_scene() if kind == "module" else scene(
         geometry=geometry, region=kind == "region",
     )
     if explicit:
-        value.subpixel = mw.SubpixelSpec(samples=4, averaging="kottke_edge")
+        value = value.updated(subpixel=mw.SubpixelSpec(samples=4, averaging="kottke_edge"))
     with pytest.raises(ValueError, match=re.escape(MESSAGE)):
-        prepare_scene(value).compile_materials()
+        compile_materials(prepare_scene(value, device="cpu"))
     assert value.subpixel.averaging == "kottke_edge"
 
 
 def test_default_allows_material_only_gradients():
     epsilon = torch.tensor(4., requires_grad=True)
     value = scene(material=mw.Material(eps_r=epsilon))
-    model = prepare_scene(value).compile_materials()
+    model = compile_materials(prepare_scene(value, device="cpu"))
     gradient, = torch.autograd.grad(sum(x.sum() for x in model["edge_components"]["eps"].values()), epsilon)
     assert torch.isfinite(gradient) and gradient > 0
     assert value.subpixel == mw.SubpixelSpec()
@@ -78,10 +82,10 @@ def test_trainable_density_requires_explicit_averaging():
         "for density/topology optimization."
     )
     with pytest.raises(ValueError, match=re.escape(message)):
-        prepare_scene(value).compile_materials()
+        compile_materials(prepare_scene(value, device="cpu"))
 
-    value.subpixel = mw.SubpixelSpec(averaging="polarized")
-    prepare_scene(value).compile_materials()
+    value = value.updated(subpixel=mw.SubpixelSpec(averaging="polarized"))
+    compile_materials(prepare_scene(value, device="cpu"))
 
 
 @pytest.mark.parametrize("mode", ["kottke_smooth", "polarized"])
@@ -89,7 +93,7 @@ def test_explicit_differentiable_geometry_modes_are_allowed(mode):
     size = torch.tensor(.37, requires_grad=True)
     value = scene(geometry=mw.Box(size=(size, .41, .43)),
                   spec=mw.SubpixelSpec(samples=4, averaging=mode))
-    model = prepare_scene(value).compile_materials()
+    model = compile_materials(prepare_scene(value, device="cpu"))
     gradient, = torch.autograd.grad(sum(x.sum() for x in model["edge_components"]["eps"].values()), size)
     assert torch.isfinite(gradient) and gradient.abs() > 0
     assert value.subpixel.averaging == mode

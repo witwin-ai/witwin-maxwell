@@ -64,7 +64,7 @@ def test_public_scene_compilation_preserves_enabled_order_and_single_body():
     structures = [mw.Structure(mw.Mesh(x.mesh.vertices, x.mesh.faces, recenter=False, fill_mode='solid', device='cuda'), mw.Material(eps_r=2.), name=name)
                   for x, name in ((a, 'a'), (b, 'b'))]
     scene = mw.Scene(structures=structures)
-    config = mw.MoMConfig(subdivisions=0)
+    config = mw.mom.MoMConfig(subdivisions=0)
     system, exterior = compile_surfaces(scene, 3e8, config)
     assert [body.name for body in system.bodies] == ['a', 'b']
     single_scene = mw.Scene(structures=structures[:1])

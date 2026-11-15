@@ -25,7 +25,7 @@ def test_split_radial_complete_domain_moments_and_identity():
         torch.testing.assert_close(actual,actual.new_tensor(1/decay**2),rtol=1e-12,atol=1e-13)
     config=dg.DyadicIntegrationConfig(radial_map='material_split_v1')
     assert asdict(config)['radial_map']=='material_split_v1'
-    with pytest.raises(ValueError,match='radial mapping'):dg.DyadicIntegrationConfig(radial_map='cutoff')
+    with pytest.raises(ValueError,match='radial_map must be one of'):dg.DyadicIntegrationConfig(radial_map='cutoff')
     with pytest.raises(ValueError,match='single regional'):
         dg.integrate_spatial_green(nodes.new_tensor([[.1,.02,.03]]),medium(),radial_order=4,azimuthal_order=4,
             radial_map='material_split_v1',_exterior=medium())
@@ -60,7 +60,7 @@ def test_split_cache_isolation_and_adaptive_receipt():
     assert receipt['finite_transverse_cutoff'] is None and receipt['artificial_loss']==0
     import witwin.maxwell as mw
     from witwin.maxwell.mom.runtime import _numerical_identity
-    assert _numerical_identity(mw.MoMConfig(dyadic_integration=config))['dyadic_integration']['radial_map']=='material_split_v1'
+    assert _numerical_identity(mw.mom.MoMConfig(dyadic_integration=config))['dyadic_integration']['radial_map']=='material_split_v1'
 
 
 @pytest.mark.parametrize('dimension', (1, 2, 3))

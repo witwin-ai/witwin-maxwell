@@ -25,7 +25,7 @@ from witwin.maxwell.compiler.delay import delay_phase_matrix
 def _delayed_two_port(
     frequencies: torch.Tensor,
     delays: tuple[float, float],
-) -> tuple[mw.NetworkData, mw.StateSpaceNetwork]:
+) -> tuple[mw.rf.NetworkData, mw.rf.rational.StateSpaceNetwork]:
     core = torch.tensor(
         ((0.1, 0.25), (0.25, 0.1)),
         dtype=torch.float64,
@@ -34,13 +34,13 @@ def _delayed_two_port(
     scattering = core.to(torch.complex128)[None, ...] * delay_phase_matrix(
         frequencies, delays
     )
-    data = mw.NetworkData(
+    data = mw.rf.NetworkData(
         frequencies=frequencies,
         s=scattering,
         z0=50.0,
         port_names=("left", "right"),
     )
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.zeros((0, 0), dtype=torch.float64),
         B=torch.zeros((0, 2), dtype=torch.float64),
         C=torch.zeros((2, 0), dtype=torch.float64),
@@ -62,11 +62,11 @@ def _port(name: str, x: float) -> mw.LumpedPort:
     )
 
 
-def _block() -> mw.NetworkBlock:
+def _block() -> mw.rf.NetworkBlock:
     frequencies = torch.linspace(0.0, 4.0e9, 81, dtype=torch.float64)
     delays = (0.2e-9, 0.3e-9)
     data, model = _delayed_two_port(frequencies, delays)
-    return mw.NetworkBlock(
+    return mw.rf.NetworkBlock(
         name="delayed_link",
         network=data,
         connections={"left": "p_left", "right": "p_right"},
@@ -91,7 +91,6 @@ def _scene() -> mw.Scene:
         ),
         ports=(_port("p_left", -0.01), _port("p_right", 0.01)),
         networks=(_block(),),
-        device="cuda",
     )
 
 
@@ -99,9 +98,11 @@ def _simulation() -> mw.Simulation:
     return mw.Simulation.fdtd(
         _scene(),
         frequencies=(2.0e9,),
-        run_time=mw.TimeConfig(time_steps=48),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        cuda_graph=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=48),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            cuda_graph=False,
+        ),
     )
 
 
@@ -115,7 +116,7 @@ def test_delayed_network_resume_matches_uninterrupted_run(tmp_path) -> None:
     checkpoint = _simulation().prepare().run_until(24)
     path = tmp_path / "delayed-network.pt"
     checkpoint.save(path)
-    checkpoint = mw.FDTDResumeCheckpoint.load(path)
+    checkpoint = mw.fdtd.FDTDResumeCheckpoint.load(path)
 
     keys = _delay_state_keys(checkpoint)
     assert keys, "bidirectional-delay state was not captured into the checkpoint"
@@ -127,14 +128,14 @@ def test_delayed_network_resume_matches_uninterrupted_run(tmp_path) -> None:
 
     resumed = _simulation().prepare().run(resume_from=checkpoint)
 
-    assert torch.equal(resumed.field("Ez"), reference.field("Ez"))
+    assert torch.equal(resumed.time_snapshot["EZ"].values, reference.time_snapshot["EZ"].values)
     assert torch.equal(
-        resumed.embedded_network("delayed_link").voltage,
-        reference.embedded_network("delayed_link").voltage,
+        mw.rf.embedded_network(resumed, "delayed_link").voltage,
+        mw.rf.embedded_network(reference, "delayed_link").voltage,
     )
     assert torch.equal(
-        resumed.embedded_network("delayed_link").current,
-        reference.embedded_network("delayed_link").current,
+        mw.rf.embedded_network(resumed, "delayed_link").current,
+        mw.rf.embedded_network(reference, "delayed_link").current,
     )
 
 
@@ -151,7 +152,7 @@ def test_zeroing_captured_delay_state_breaks_resume() -> None:
 
     corrupted = _simulation().prepare().run(resume_from=checkpoint)
 
-    assert not torch.equal(corrupted.field("Ez"), reference.field("Ez")), (
+    assert not torch.equal(corrupted.time_snapshot["EZ"].values, reference.time_snapshot["EZ"].values), (
         "zeroing the captured delay ring/filter state left the resumed field "
         "unchanged, so the state is not actually load-bearing in resume"
     )

@@ -34,7 +34,6 @@ def _base_scene():
         domain=mw.Domain(bounds=((-_HALF, _HALF),) * 3),
         grid=mw.GridSpec.uniform(_H),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1e6),
-        device="cuda",
     )
 
 
@@ -42,7 +41,7 @@ def _breakdown_material(critical_field: float = 1.0):
     return mw.Material(
         eps_r=3.0,
         sigma_e=0.0,
-        breakdown=mw.DielectricBreakdown(
+        breakdown=mw.breakdown.DielectricBreakdown(
             critical_field=critical_field,
             minimum_duration=0.0,
             post_breakdown_conductivity=5.0,
@@ -52,25 +51,29 @@ def _breakdown_material(critical_field: float = 1.0):
 
 
 def _add_breakdown_box(scene, *, size, position=(0.0, 0.0, 0.0), priority=0, critical_field=1.0):
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="breakdown",
             geometry=mw.Box(position=position, size=size),
             material=_breakdown_material(critical_field),
             priority=priority,
-        )
-    )
+        ),
+    ))
+    return scene
 
 
 def _add_plain_box(scene, *, size, position=(0.0, 0.0, 0.0), priority=1):
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="plain_override",
             geometry=mw.Box(position=position, size=size),
             material=mw.Material(eps_r=3.0, sigma_e=0.0),
             priority=priority,
-        )
-    )
+        ),
+    ))
+    return scene
 
 
 def test_later_nonbreakdown_structure_clears_overlapped_cells():
@@ -81,14 +84,14 @@ def test_later_nonbreakdown_structure_clears_overlapped_cells():
     """
     # Reference: breakdown box alone.
     ref = _base_scene()
-    _add_breakdown_box(ref, size=(0.12, 0.12, 0.12))
+    ref = _add_breakdown_box(ref, size=(0.12, 0.12, 0.12))
     ref_mask = _layout(ref).node_mask.clone()
     assert int(ref_mask.sum().item()) > 0
 
     # Same breakdown box, then a plain box (higher priority) over its right half.
     scene = _base_scene()
-    _add_breakdown_box(scene, size=(0.12, 0.12, 0.12), priority=0)
-    _add_plain_box(scene, size=(0.30, 0.30, 0.30), position=(0.15, 0.0, 0.0), priority=1)
+    scene = _add_breakdown_box(scene, size=(0.12, 0.12, 0.12), priority=0)
+    scene = _add_plain_box(scene, size=(0.30, 0.30, 0.30), position=(0.15, 0.0, 0.0), priority=1)
     layout = _layout(scene)
     mask = layout.node_mask
 
@@ -111,9 +114,9 @@ def test_later_nonbreakdown_structure_clears_overlapped_cells():
 def test_fully_overwritten_breakdown_box_never_triggers():
     """A breakdown box fully covered by a later plain box triggers nothing."""
     scene = _base_scene()
-    _add_breakdown_box(scene, size=(0.10, 0.10, 0.10), priority=0, critical_field=1.0)
+    scene = _add_breakdown_box(scene, size=(0.10, 0.10, 0.10), priority=0, critical_field=1.0)
     # Plain box strictly larger, higher priority -> owns every breakdown cell.
-    _add_plain_box(scene, size=(0.16, 0.16, 0.16), priority=1)
+    scene = _add_plain_box(scene, size=(0.16, 0.16, 0.16), priority=1)
 
     layout = _layout(scene)
     assert int(layout.node_mask.sum().item()) == 0
@@ -129,12 +132,12 @@ def test_partial_overwrite_only_survivors_trigger():
     their count matches the (shrunk) capable mask -- the overwritten cells are
     absent from the runtime entirely, so they cannot trigger."""
     ref = _base_scene()
-    _add_breakdown_box(ref, size=(0.12, 0.12, 0.12))
+    ref = _add_breakdown_box(ref, size=(0.12, 0.12, 0.12))
     ref_count = int(_layout(ref).node_mask.sum().item())
 
     scene = _base_scene()
-    _add_breakdown_box(scene, size=(0.12, 0.12, 0.12), priority=0, critical_field=1.0)
-    _add_plain_box(scene, size=(0.30, 0.30, 0.30), position=(0.15, 0.0, 0.0), priority=1)
+    scene = _add_breakdown_box(scene, size=(0.12, 0.12, 0.12), priority=0, critical_field=1.0)
+    scene = _add_plain_box(scene, size=(0.30, 0.30, 0.30), position=(0.15, 0.0, 0.0), priority=1)
 
     solver = prepare_solver(scene)
     rt = solver.breakdown_runtime

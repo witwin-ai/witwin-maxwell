@@ -8,6 +8,7 @@ quadrature singularity or duplicate linear material contrast.
 import torch
 from .static_tensor_green import StaticTensorGreen
 from .volume_mesh import BoundVolumeRegion
+from .ordered_reduction import ordered_index_add_
 from .fields import _pair_triangle_distance
 
 
@@ -105,8 +106,8 @@ class StaticTensorPolarization:
                 tolerance=128*torch.finfo(points.dtype).eps*lengths.amax(-1)
                 mask=_pair_triangle_distance(observers,panels)<=tolerance
             scalar,derivative=self.kernel.panel_integrals(observers,panels,principal_value=mask)
-            potential=potential.index_add(0,i,scalar*density[j])
-            gradient=gradient.index_add(0,i,derivative*density[j,None])
+            potential=ordered_index_add_(potential.clone(),0,i,scalar*density[j])
+            gradient=ordered_index_add_(gradient.clone(),0,i,derivative*density[j,None])
         if not bool(torch.isfinite(potential).all() & torch.isfinite(gradient).all()):
             raise ValueError('Static polarization field is not representable')
         return potential,-gradient

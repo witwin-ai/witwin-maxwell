@@ -1,4 +1,5 @@
 """Physical-state regressions for composed boundaries, materials, and RF loads."""
+from dataclasses import replace
 import pytest
 import torch
 
@@ -14,25 +15,30 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires 
 
 
 def _material_scene(material):
-    scene = _prepared_embedded_solver().scene.clone()
-    scene.add_structure(mw.Structure(
-        geometry=mw.Box(position=(0.,) * 3, size=(0.04,) * 3), material=material))
+    scene = _prepared_embedded_solver().scene.scene.updated()
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(
+            geometry=mw.Box(position=(0.,) * 3, size=(0.04,) * 3), material=material),
+    ))
     return scene
 
 
 def _ferrite(bias=1.75e5):
-    return mw.GyromagneticFerrite(eps_r=2., saturation_magnetization=1.4e5,
+    return mw.media.GyromagneticFerrite(eps_r=2., saturation_magnetization=1.4e5,
         bias_field=(0., 0., bias), gilbert_damping=0.01)
 
 
 def _simulation(scene, *, graph=False, initial=None):
     return mw.Simulation.fdtd(scene, frequencies=(2.5e9, 3e9),
-        run_time=mw.TimeConfig(time_steps=40), spectral_sampler=mw.SpectralSampler(window="none"),
-        initial_condition=initial, cuda_graph=graph, full_field_dft=False)
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=40), spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            initial_condition=initial, cuda_graph=graph, full_field_dft=False,
+        ))
 
 
 def _dc_initial():
-    return mw.ElectrostaticInitialCondition.from_result(_uniform_dc_result(
+    return mw.electrostatic.ElectrostaticInitialCondition.from_result(_uniform_dc_result(
         device="cuda", bounds=((-0.02, 0.02),) * 3, h=0.005))
 
 
@@ -75,7 +81,7 @@ def test_resume_rejects_changed_ferrite_bias_and_ignores_magnetization_history(t
     checkpoint = prepared.run_until(12)
     assert _configuration_fingerprint(prepared.solver) == before
     checkpoint.save(tmp_path / "ferrite.pt")
-    checkpoint = mw.FDTDResumeCheckpoint.load(tmp_path / "ferrite.pt")
+    checkpoint = mw.fdtd.FDTDResumeCheckpoint.load(tmp_path / "ferrite.pt")
     changed = _simulation(_material_scene(_ferrite(2.75e5)), initial=_dc_initial()).prepare()
     assert changed.solver.dt == prepared.solver.dt
     with pytest.raises(ValueError, match="layout"):
@@ -83,16 +89,16 @@ def test_resume_rejects_changed_ferrite_bias_and_ignores_magnetization_history(t
 
 
 def _breakdown_scene(*, minimum_duration=2e-10):
-    scene = _material_scene(mw.Material(eps_r=2., breakdown=mw.DielectricBreakdown(
+    scene = _material_scene(mw.Material(eps_r=2., breakdown=mw.breakdown.DielectricBreakdown(
         critical_field=1., minimum_duration=minimum_duration, post_breakdown_conductivity=0.1)))
     # A changing conductivity needs a refreshed RF coupling operator, which is
     # explicitly unsupported. Exercise the complete breakdown state separately.
-    return scene.clone(ports=(), networks=(), monitors=(
+    return scene.updated(ports=(), networks=(), monitors=(
         mw.PointMonitor("breakdown_field", (0., 0., 0.), fields=("Ez",)),))
 
 
 def test_dynamic_breakdown_rejects_a_stale_rf_coupling_operator():
-    scene = _material_scene(mw.Material(eps_r=2., breakdown=mw.DielectricBreakdown(
+    scene = _material_scene(mw.Material(eps_r=2., breakdown=mw.breakdown.DielectricBreakdown(
         critical_field=1., minimum_duration=2e-10, post_breakdown_conductivity=0.1)))
     with pytest.raises(NotImplementedError, match="refreshing.*coupled field/circuit"):
         _simulation(scene, initial=_dc_initial()).prepare()
@@ -109,7 +115,7 @@ def test_breakdown_disk_resume_preserves_timer_ramp_events_and_energy(tmp_path, 
     assert _configuration_fingerprint(prepared.solver) == fingerprint
     assert len(checkpoint.physics.schema.breakdown_state_names) == 7
     checkpoint.save(tmp_path / "breakdown.pt")
-    loaded = mw.FDTDResumeCheckpoint.load(tmp_path / "breakdown.pt")
+    loaded = mw.fdtd.FDTDResumeCheckpoint.load(tmp_path / "breakdown.pt")
     assert loaded.physics.schema == checkpoint.physics.schema
 
     # Restoring coefficients itself must not advance the timer or duplicate heat.
@@ -124,12 +130,12 @@ def test_breakdown_disk_resume_preserves_timer_ramp_events_and_energy(tmp_path, 
     actual = _simulation(scene, initial=initial).prepare().run(resume_from=loaded)
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         torch.testing.assert_close(getattr(actual.solver, name), getattr(expected.solver, name), rtol=0, atol=0)
-    assert actual.breakdown_events == expected.breakdown_events
+    assert mw.breakdown.breakdown_events(actual) == mw.breakdown.breakdown_events(expected)
     assert int(actual.solver.breakdown_runtime["state"].sum()) > 0
     for name in ("state", "timer", "trigger_step", "field_before", "deposited_at_trigger", "dissipated_energy", "total_dissipated"):
         torch.testing.assert_close(actual.solver.breakdown_runtime[name], expected.solver.breakdown_runtime[name])
-    torch.testing.assert_close(actual.monitor("breakdown_field")["data"],
-                               expected.monitor("breakdown_field")["data"], rtol=0, atol=0)
+    torch.testing.assert_close(actual.monitor("breakdown_field").sel(component="Ez").values,
+                               expected.monitor("breakdown_field").sel(component="Ez").values, rtol=0, atol=0)
 
 
 def test_breakdown_resume_rejects_changed_duration_before_trigger():
@@ -147,17 +153,18 @@ def test_mur_network_material_gradient_matches_central_difference(objective_kind
     def evaluate(value, trainable=False):
         block, _, _ = _rational_network(residue_value=2e8, direct_value=1e-2, trainable=False)
         logit = torch.tensor(value, device="cuda", dtype=torch.float64, requires_grad=trainable)
-        scene = _fdtd_scene(network=block).clone(
-            boundary=mw.BoundarySpec.mur(), subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
-        scene.add_material_region(mw.MaterialRegion(name="design",
-            geometry=mw.Box(position=(0.005, 0., 0.005), size=(0.005,) * 3),
-            density=torch.sigmoid(logit).reshape(1, 1, 1), eps_bounds=(1., 4.), mu_bounds=(1., 1.)))
-        scene.add_monitor(mw.PointMonitor("probe", (0.005, 0., 0.005), fields=("Ez",)))
-        simulation = mw.Simulation.fdtd(scene, frequency=2.75e9,
-            run_time=mw.TimeConfig(time_steps=200), spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False)
-        simulation.config.adjoint_checkpoint_stride = 31
+        scene = _fdtd_scene(network=block).updated(boundary=mw.BoundarySpec.mur(), subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
+            mw.MaterialRegion(name="design",
+                geometry=mw.Box(position=(0.005, 0., 0.005), size=(0.005,) * 3),
+                density=torch.sigmoid(logit).reshape(1, 1, 1), eps_bounds=(1., 4.), mu_bounds=(1., 1.)),
+        ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.005, 0., 0.005), fields=("Ez",))))
+        simulation = mw.Simulation.fdtd(scene, frequencies=2.75e9,
+            config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=200), spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False))
+        simulation.config = replace(simulation.config, adjoint_checkpoint_stride=31)
         result = simulation.run()
-        spectrum = result.port("feed").voltage if objective_kind == "port" else result.monitor("probe")["data"]
+        spectrum = result.port("feed").voltage if objective_kind == "port" else result.monitor("probe", freq_index=0).sel(component="Ez").values
         return spectrum.abs().square().sum(), logit
 
     objective, logit = evaluate(0.3, trainable=True)
@@ -172,16 +179,21 @@ def test_mur_network_material_gradient_matches_central_difference(objective_kind
 
 
 def test_full_tensor_absorber_disk_resume_preserves_offdiagonal_memory(tmp_path):
-    scene = _material_scene(mw.Material(epsilon_tensor=mw.Tensor3x3(
+    scene = _material_scene(mw.Material(epsilon_tensor=mw.media.Tensor3x3(
         ((2., 0.2, 0.1), (0.2, 3., 0.3), (0.1, 0.3, 2.5)))))
-    scene = scene.clone(boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.), ports=(), networks=())
-    scene.add_source(mw.PointDipole(position=(0., 0., 0.), polarization="Ez",
-        source_time=mw.CW(frequency=2.5e9)))
+    scene = scene.updated(boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.), ports=(), networks=())
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(0., 0., 0.), polarization="Ez",
+            source_time=mw.CW(frequency=2.5e9)),
+    ))
 
     def simulation():
-        return mw.Simulation.fdtd(scene, frequency=2.5e9,
-            run_time=mw.TimeConfig(time_steps=40), spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False, cuda_graph=False)
+        return mw.Simulation.fdtd(scene, frequencies=2.5e9,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=40), spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False, cuda_graph=False,
+            ))
 
     expected = simulation().prepare()
     expected.simulation._execute_fdtd_solve(expected.solver)
@@ -191,7 +203,7 @@ def test_full_tensor_absorber_disk_resume_preserves_offdiagonal_memory(tmp_path)
     assert any(bool(checkpoint.physics.tensors[name].abs().max() > 0) for name in names)
     path = tmp_path / "tensor_absorber.pt"
     checkpoint.save(path)
-    restored = mw.FDTDResumeCheckpoint.load(path)
+    restored = mw.fdtd.FDTDResumeCheckpoint.load(path)
     actual = simulation().prepare()
     actual.simulation._execute_fdtd_solve(actual.solver, resume_from=restored)
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz", *names):

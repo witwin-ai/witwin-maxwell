@@ -21,6 +21,7 @@ from tests.fdtd.multi_gpu.test_review_regressions import (
 )
 from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.scene import prepare_scene
+from tests.support.core_solver import bind_core
 
 
 _PAYLOAD_KEYS = ("patch", "cw_cos_patch")
@@ -29,6 +30,7 @@ _PAYLOAD_KEYS = ("patch", "cw_cos_patch")
 def _solve_pair(scene, devices):
     single = FDTD(prepare_scene(scene), frequency=_FREQUENCY, absorber_type="cpml")
     single.init_field()
+    bind_core(single)
     single.solve(time_steps=24, dft_frequency=_FREQUENCY, dft_window="none", full_field_dft=False,
                  normalize_source=False, use_cuda_graph=False)
     distributed = _direct_distributed(scene, devices, gather_fields=True)
@@ -84,6 +86,6 @@ def test_seam_straddling_uniform_current_matches_single_device(cuda_p2p_devices,
     # second rank cropped nonzero planes, which must reach its own owned cells.
     scene = _ex_interface_scene("y_periodic")
     source_time = scene.sources[0].source_time
-    scene.sources = [mw.UniformCurrentSource(size=(0.3, 0.15, 0.2), center=(0.0, -0.15, 0.0), polarization="Ex",
-                                             source_time=source_time, name="seam_box_ex")]
+    scene = scene.updated(sources=[mw.UniformCurrentSource(size=(0.3, 0.15, 0.2), center=(0.0, -0.15, 0.0), polarization="Ex",
+                                             source_time=source_time, name="seam_box_ex")])
     _assert_parity(*_solve_pair(scene, cuda_p2p_devices))

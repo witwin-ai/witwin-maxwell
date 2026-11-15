@@ -6,9 +6,10 @@ from .cluster import support_block_partition
 from .physics import Medium
 from .interpolation_error import KernelErrorBudget, KernelBoundUnavailable, scalar_box_interpolation_bound
 from .rwg_interpolation_error import block_error_log
+from ..errors import SetupError
 
 
-class KernelOrderSelectionError(ValueError):
+class KernelOrderSelectionError(SetupError):
     def __init__(self, receipt):
         super().__init__('No admissible interpolation order within the declared error and table budgets')
         self.receipt = receipt

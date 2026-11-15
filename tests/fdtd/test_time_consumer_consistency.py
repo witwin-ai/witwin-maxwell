@@ -52,8 +52,7 @@ def test_lower_monitor_frequency_does_not_change_default_incident_waveform(compi
     from witwin.maxwell.compiler.sources import compile_fdtd_sources
     from witwin.maxwell.fdtd.runtime.timeplan import compile_fdtd_time_plan
 
-    scene = mw.Scene(domain=mw.Domain(bounds=((-0.1, .1),) * 3), device="cpu",
-        sources=(mw.PointDipole((0., 0., 0.)),))
+    scene = mw.Scene(domain=mw.Domain(bounds=((-0.1, .1),) * 3), sources=(mw.PointDipole((0., 0., 0.)),))
     solver = SimpleNamespace(dt=1e-11, c=299792458.)
     solver._compiled_sources = compile_fdtd_sources(scene, default_frequency=1e9)
     for source in solver._compiled_sources:
@@ -80,8 +79,7 @@ def _port_scene(*, field_source=True):
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.02, .02),) * 3),
         grid=mw.GridSpec.uniform(.005), boundary=mw.BoundarySpec.mur(),
-        ports=(port,), device="cuda",
-        sources=(mw.PointDipole(position=(.005, 0., 0.), polarization="Ez",
+        ports=(port,), sources=(mw.PointDipole(position=(.005, 0., 0.), polarization="Ez",
             source_time=mw.GaussianPulse(3e9, .6e9)),) if field_source else (),
         monitors=(mw.PointMonitor("point", (0., 0., 0.), fields=("Ez",)),),
     )
@@ -93,14 +91,14 @@ def test_port_pulse_window_and_field_line_integral_share_the_public_clock(graph)
     results = []
     for window in ("hanning", "none"):
         result = mw.Simulation.fdtd(
-            _port_scene(), frequency=3e9, run_time=mw.TimeConfig(time_steps=500),
-            spectral_sampler=mw.SpectralSampler(window=window),
-            full_field_dft=True, cuda_graph=graph,
+            _port_scene(), frequencies=3e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=500),
+            spectral_sampler=mw.fdtd.SpectralSampler(window=window),
+            full_field_dft=True, cuda_graph=graph),
         ).run()
         results.append(result)
         assert result.stats()["time_plan"]["window"] == "none"
         assert result.solver._port_runtimes[0].window_type == "none"
-        fields = {component: result.field(component) for component in ("Ex", "Ey", "Ez")}
+        fields = {component: result.field(component).isel(f=0).values for component in ("Ex", "Ey", "Ez")}
         integrated = result.solver._port_runtimes[0].geometry.integrate_voltage(fields)
         torch.testing.assert_close(
             result.port("feed").voltage.squeeze(), integrated.to(torch.complex128),
@@ -125,11 +123,16 @@ def _unit_pulse_spectrum(solver, steps):
 
 @requires_cuda
 def test_public_default_drive_frequency_survives_lower_frequency_monitor():
-    scene = _port_scene().clone(sources=(mw.PointDipole((.005, 0., 0.), polarization="Ez"),))
-    scene.add_monitor(mw.PlaneMonitor("lower", axis="z", position=0., fields=("Ez",), frequencies=(1.5e9,)))
-    solver = mw.Simulation.fdtd(scene, frequency=3e9, excitations=mw.PortExcitation("feed"),
-        run_time=mw.TimeConfig(time_steps=10), spectral_sampler=mw.SpectralSampler(normalize_source=True),
-        cuda_graph=False).prepare().solver
+    scene = _port_scene().updated(sources=(mw.PointDipole((.005, 0., 0.), polarization="Ez"),))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PlaneMonitor("lower", axis="z", position=0., fields=("Ez",), frequencies=(1.5e9,)),
+    ))
+    solver = mw.Simulation.fdtd(scene, frequencies=3e9, excitations=mw.rf.PortExcitation("feed"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=10), spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True),
+            cuda_graph=False,
+        )).prepare().solver
     assert solver._normalization_source_time["frequency"] == 3e9
     assert solver._compiled_sources[0]["source_time"]["frequency"] == 3e9
     assert solver._port_runtimes[0].source_frequency == 3e9
@@ -142,17 +145,19 @@ def test_port_only_normalization_matches_independent_unit_pulse_spectrum(graph):
     results = []
     for normalize in (False, True):
         result = mw.Simulation.fdtd(
-            _port_scene(field_source=False), frequency=3e9,
-            excitations=(mw.PortExcitation("feed", source_time=mw.GaussianPulse(3e9, .6e9, amplitude=2., phase=.3)),),
-            run_time=mw.TimeConfig(time_steps=500),
-            spectral_sampler=mw.SpectralSampler(window="none", normalize_source=normalize),
-            full_field_dft=True, cuda_graph=graph,
+            _port_scene(field_source=False), frequencies=3e9,
+            excitations=(mw.rf.PortExcitation("feed", source_time=mw.GaussianPulse(3e9, .6e9, amplitude=2., phase=.3)),),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=500),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=normalize),
+                full_field_dft=True, cuda_graph=graph,
+            ),
         ).run()
         results.append(result)
     reference = _unit_pulse_spectrum(results[0].solver, 500).to("cuda")
     for actual, raw in (
-        (results[1].field("Ez"), results[0].field("Ez")),
-        (results[1].monitor("point")["data"], results[0].monitor("point")["data"]),
+        (results[1].field("Ez").isel(f=0).values, results[0].field("Ez").isel(f=0).values),
+        (results[1].monitor("point", freq_index=0).sel(component="Ez").values, results[0].monitor("point", freq_index=0).sel(component="Ez").values),
     ):
         torch.testing.assert_close(actual.to(torch.complex128), raw.to(torch.complex128) / reference, rtol=3e-5, atol=1e-6)
 
@@ -161,14 +166,16 @@ def test_port_only_normalization_matches_independent_unit_pulse_spectrum(graph):
 def test_normalized_port_amplitude_gradient_preserves_physical_drive_scale():
     amplitude = torch.tensor(1.5, device="cuda", requires_grad=True)
     result = mw.Simulation.fdtd(
-        _port_scene(field_source=False), frequency=3e9,
-        excitations=(mw.PortExcitation("feed", amplitude=amplitude,
+        _port_scene(field_source=False), frequencies=3e9,
+        excitations=(mw.rf.PortExcitation("feed", amplitude=amplitude,
             source_time=mw.GaussianPulse(3e9, .6e9)),),
-        run_time=mw.TimeConfig(time_steps=240),
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=True),
-        cuda_graph=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=240),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=True),
+            cuda_graph=False,
+        ),
     ).run()
-    loss = result.monitor("point")["data"].abs().square().sum()
+    loss = result.monitor("point", freq_index=0).sel(component="Ez").values.abs().square().sum()
     loss.backward()
     torch.testing.assert_close(amplitude.grad, 2. * loss.detach() / amplitude.detach(), rtol=3e-4, atol=1e-5)
 
@@ -181,11 +188,10 @@ def test_complex_field_time_record_retains_both_bloch_quadratures(region):
         domain=mw.Domain(bounds=((-0.4, .4),) * 3), grid=mw.GridSpec.uniform(.1),
         boundary=mw.BoundarySpec.faces(default="mur", x="bloch", bloch_wavevector=(math.pi / 1.6, 0., 0.)),
         sources=(mw.PointDipole(position=(-.2, 0., 0.), polarization="Ez", width=.1, source_time=mw.CW(1e9)),),
-        monitors=(mw.FieldTimeMonitor("trace", components=("Ez", "Hy"), position=(.2, 0., 0.), size=size),),
-        device="cuda",
+        monitors=(mw.monitors.FieldTimeMonitor("trace", components=("Ez", "Hy"), position=(.2, 0., 0.), size=size),),
     )
-    result = mw.Simulation.fdtd(scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=150),
-        spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False).run()
+    result = mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=150),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False)).run()
     payload = result.monitor("trace")
     record = result.solver.time_observers[0]
     for component in ("Ez", "Hy"):
@@ -194,7 +200,8 @@ def test_complex_field_time_record_retains_both_bloch_quadratures(region):
         actual = torch.complex(getattr(result.solver, component)[selection], getattr(result.solver, component + "_imag")[selection])
         if region == "plane":
             actual = actual.squeeze(metadata["axis_code"])
-        trace = payload["components"][component]
+        # Plane and volume traces keep each component on its own Yee sub-grid.
+        trace = payload.sel(component=component).values if region == "point" else payload[component].values
         assert trace.is_complex() and not trace.requires_grad
         assert float(actual.imag.abs().max()) > 1e-4
         torch.testing.assert_close(trace[-1], actual, rtol=0, atol=0)
@@ -204,6 +211,6 @@ def test_complex_field_time_record_retains_both_bloch_quadratures(region):
 def test_flux_time_rejects_complex_bloch_fields():
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.4, .4),) * 3), grid=mw.GridSpec.uniform(.1),
         boundary=mw.BoundarySpec.faces(default="mur", x="bloch", bloch_wavevector=(math.pi / 1.6, 0., 0.)),
-        monitors=(mw.FluxTimeMonitor("flux"),), device="cuda")
+        monitors=(mw.monitors.FluxTimeMonitor("flux"),))
     with pytest.raises(ValueError, match="FluxTimeMonitor requires real"):
-        mw.Simulation.fdtd(scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=10)).run()
+        mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=10))).run()

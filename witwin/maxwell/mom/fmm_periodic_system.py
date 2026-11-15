@@ -12,6 +12,7 @@ from .fmm_moments import NestedRWGMultipoles
 from .fmm_regional import MultipoleRegionalOperator
 from .fmm_periodic_regional import PeriodicMultipoleRegionalOperator
 from .direct_system import DirectSystemActions
+from ..errors import UnsupportedFeatureError
 
 
 class PeriodicMultipoleSystemActions:
@@ -27,11 +28,14 @@ class PeriodicMultipoleSystemActions:
                  table_storage="dense", m2l_row_batch=16, near_action_batch=32, exterior_kernel_error_budget=None,
                  action_retained_budget_bytes=1024**3, max_order=None, interior_kernel_error_budget=None, max_shells=None, ewald_kernel=None,shift_storage='dense'):
         if table_storage=='compact_shared_displacement_v1':
-            raise NotImplementedError('Shared compact FMM currently requires free space')
+            raise UnsupportedFeatureError('Shared compact FMM currently requires free space',
+                                          feature="guard:aa7c9f35", method="mom")
         if table_storage == 'fft_v1':
-            raise NotImplementedError('Periodic FFT M2L requires separately admitted screened coefficients')
+            raise UnsupportedFeatureError('Periodic FFT M2L requires separately admitted screened coefficients',
+                                          feature="boundary.periodic", method="mom")
         if table_storage == 'fft_ewald_v1' and ewald_kernel is None:
-            raise NotImplementedError('Ewald FFT requires actual screened Ewald coefficients')
+            raise UnsupportedFeatureError('Ewald FFT requires actual screened Ewald coefficients',
+                                          feature="guard:1234461f", method="mom")
         if type(near_action_batch) is not int or near_action_batch < 1:
             raise ValueError('Near action batch must be a positive integer')
         if not isinstance(provider, ScalarSystemBlocks):
@@ -40,14 +44,16 @@ class PeriodicMultipoleSystemActions:
             from .fmm_storage import m2l_storage_bytes
             m2l_storage_bytes(order, provider.system.dtype.itemsize, 'fft_v1')
             if interior_kernel_error_budget is not None:
-                raise NotImplementedError('Ewald FFT error admission requires a complete Ewald error plan')
+                raise UnsupportedFeatureError('Ewald FFT error admission requires a complete Ewald error plan',
+                                              feature="guard:544cecba", method="mom")
         provider.assert_current()
         self._ewald_mode = ewald_kernel is not None
         if self._ewald_mode:
             if not isinstance(provider, EwaldSystemBlocks) or provider.kernel is not ewald_kernel or ewald_kernel.lattice is not lattice:
                 raise ValueError('Ewald actions require matching original Ewald blocks and lattice')
             if any(value is not None for value in (max_order, max_shells, exterior_kernel_error_budget, remote_kernel_error_budget)):
-                raise NotImplementedError('Ewald automatic/kernel admission requires a complete Ewald error plan')
+                raise UnsupportedFeatureError('Ewald automatic/kernel admission requires a complete Ewald error plan',
+                                              feature="guard:dfce7670", method="mom")
             shells = ewald_kernel.real_shells
         elif isinstance(provider, PeriodicImageSystemBlocks):
             if provider.lattice is not lattice or provider.shells != shells:

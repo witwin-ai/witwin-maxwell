@@ -129,7 +129,7 @@ def run_case(level,cutoffs,angular_order=12,rhs_order=6):
     torch.cuda.empty_cache();torch.cuda.reset_peak_memory_stats();start=time.perf_counter()
     radius=.1;control_radius=.3; frequency=3e8
     scene=mw.Scene(structures=[mw.Structure(mw.Sphere(radius=radius),mw.Material(eps_r=2.5,sigma_e=.003))],sources=[mw.PlaneWave()])
-    prepared=mw.Simulation.mom(scene,frequency=frequency,config=mw.MoMConfig(subdivisions=level,integration=IntegrationConfig(order=4,singular_order=4))).prepare()
+    prepared=mw.Simulation.mom(scene,frequencies=frequency,config=mw.mom.MoMConfig(subdivisions=level,integration=IntegrationConfig(order=4,singular_order=4))).prepare()
     handle=prepared.solver.handle
     rows=[];previous=None;previous_count=0
     for cutoff in cutoffs:

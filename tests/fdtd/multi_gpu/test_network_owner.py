@@ -16,6 +16,7 @@ from witwin.maxwell.fdtd.distributed.solver import DistributedFDTD
 from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd_parallel import FDTDParallelConfig, FDTDPartitionPlan
 from witwin.maxwell.scene import prepare_scene
+from tests.support.core_solver import bind_core
 
 
 def _geometry(name: str, component: str, indices) -> CompiledPortGeometry:
@@ -48,7 +49,7 @@ def _structural_plan(connection_names, geometries):
         global_shape=(9, 5, 5),
         devices=("cuda:0", "cuda:1"),
     )
-    scene = SimpleNamespace(networks=(_network_block(connection_names),))
+    scene = SimpleNamespace(scene=SimpleNamespace(networks=(_network_block(connection_names),)))
     return compile_distributed_network_plan(
         scene,
         partition,
@@ -120,7 +121,7 @@ def _port(name: str, x: float, *, termination=None) -> mw.LumpedPort:
     )
 
 
-def _two_port_network() -> mw.NetworkBlock:
+def _two_port_network() -> mw.rf.NetworkBlock:
     resistance = 50.0
     capacitance = 5.0e-12
     shunt = 2.0e-3
@@ -128,7 +129,7 @@ def _two_port_network() -> mw.NetworkBlock:
     direct = torch.outer(incidence, incidence) / resistance + shunt * torch.eye(
         2, dtype=torch.float64
     )
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.tensor(((-1.0 / (resistance * capacitance),),), dtype=torch.float64),
         B=(incidence / (resistance * capacitance)).reshape(1, 2),
         C=(-incidence / resistance).reshape(2, 1),
@@ -137,13 +138,13 @@ def _two_port_network() -> mw.NetworkBlock:
         port_order=("net_0", "net_1"),
     )
     frequencies = torch.linspace(0.2e9, 6.0e9, 30, dtype=torch.float64)
-    data = mw.NetworkData.from_y(
+    data = mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=model.evaluate(frequencies),
         z0=50.0,
         port_names=model.port_order,
     )
-    return mw.NetworkBlock(
+    return mw.rf.NetworkBlock(
         name="split_net",
         network=data,
         connections={"net_0": "left_port", "net_1": "right_port"},
@@ -152,8 +153,7 @@ def _two_port_network() -> mw.NetworkBlock:
     )
 
 
-def _two_shard_network_scene(
-    *, device: str = "cuda:0", left_termination=None
+def _two_shard_network_scene(*, left_termination=None
 ) -> mw.Scene:
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.024, 0.024),) * 3),
@@ -172,14 +172,13 @@ def _two_shard_network_scene(
             _port("right_port", 0.008),
         ),
         networks=(_two_port_network(),),
-        device=device,
     )
 
 
-def _one_port_load(name: str, connection_port: str) -> mw.NetworkBlock:
+def _one_port_load(name: str, connection_port: str) -> mw.rf.NetworkBlock:
     resistance = 50.0
     capacitance = 5.0e-12
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.tensor(((-1.0 / (resistance * capacitance),),), dtype=torch.float64),
         B=torch.tensor(((1.0 / (resistance * capacitance),),), dtype=torch.float64),
         C=torch.tensor(((-1.0 / resistance,),), dtype=torch.float64),
@@ -188,13 +187,13 @@ def _one_port_load(name: str, connection_port: str) -> mw.NetworkBlock:
         port_order=("load",),
     )
     frequencies = torch.linspace(0.2e9, 6.0e9, 30, dtype=torch.float64)
-    data = mw.NetworkData.from_y(
+    data = mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=model.evaluate(frequencies),
         z0=50.0,
         port_names=("load",),
     )
-    return mw.NetworkBlock(
+    return mw.rf.NetworkBlock(
         name=name,
         network=data,
         connections={"load": connection_port},
@@ -203,7 +202,7 @@ def _one_port_load(name: str, connection_port: str) -> mw.NetworkBlock:
     )
 
 
-def _two_network_scene(*, device: str = "cuda:0") -> mw.Scene:
+def _two_network_scene() -> mw.Scene:
     # Two independent single-port networks, one per port, exercise the multi-GPU
     # "exactly one network per scene" guard without an unrelated failure.
     return mw.Scene(
@@ -223,24 +222,23 @@ def _two_network_scene(*, device: str = "cuda:0") -> mw.Scene:
             _one_port_load("load_left", "left_port"),
             _one_port_load("load_right", "right_port"),
         ),
-        device=device,
     )
 
 
-def _delayed_two_shard_network() -> mw.NetworkBlock:
+def _delayed_two_shard_network() -> mw.rf.NetworkBlock:
     frequencies = torch.linspace(0.0, 6.0e9, 64, dtype=torch.float64)
     delays = (0.5e-9, 0.5e-9)
     core = torch.tensor(((0.1, 0.25), (0.25, 0.1)), dtype=torch.float64)
     scattering = core.to(torch.complex128)[None, ...] * delay_phase_matrix(
         frequencies, delays
     )
-    data = mw.NetworkData(
+    data = mw.rf.NetworkData(
         frequencies=frequencies,
         s=scattering,
         z0=50.0,
         port_names=("net_0", "net_1"),
     )
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.zeros((0, 0), dtype=torch.float64),
         B=torch.zeros((0, 2), dtype=torch.float64),
         C=torch.zeros((2, 0), dtype=torch.float64),
@@ -248,7 +246,7 @@ def _delayed_two_shard_network() -> mw.NetworkBlock:
         representation="S",
         port_order=data.port_names,
     )
-    return mw.NetworkBlock(
+    return mw.rf.NetworkBlock(
         name="delayed_split",
         network=data,
         connections={"net_0": "left_port", "net_1": "right_port"},
@@ -259,7 +257,7 @@ def _delayed_two_shard_network() -> mw.NetworkBlock:
     )
 
 
-def _delayed_two_shard_network_scene(*, device: str = "cuda:0") -> mw.Scene:
+def _delayed_two_shard_network_scene() -> mw.Scene:
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.024, 0.024),) * 3),
         grid=mw.GridSpec.uniform(0.004),
@@ -274,7 +272,6 @@ def _delayed_two_shard_network_scene(*, device: str = "cuda:0") -> mw.Scene:
         ),
         ports=(_port("left_port", -0.008), _port("right_port", 0.008)),
         networks=(_delayed_two_shard_network(),),
-        device=device,
     )
 
 
@@ -285,17 +282,17 @@ def _trainable_network_scene() -> tuple[mw.Scene, torch.Tensor]:
     poles = torch.tensor((-8.0e9 + 0.0j,), dtype=torch.complex128)
     residues = torch.tensor((((1.0e8 + 0.0j,),),), dtype=torch.complex128)
     direct = torch.tensor(((0.02 + 0.0j,),), dtype=torch.complex128, requires_grad=True)
-    model = mw.RationalModel(
+    model = mw.rf.rational.RationalModel(
         poles=poles, residues=residues, direct=direct, representation="Y"
     )
     frequencies = torch.linspace(0.25e9, 6.0e9, 33, dtype=torch.float64)
-    data = mw.NetworkData.from_y(
+    data = mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=model.evaluate(frequencies).detach(),
         z0=50.0,
         port_names=("load",),
     )
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="trainable_load",
         network=data,
         connections={"load": "feed"},
@@ -316,7 +313,6 @@ def _trainable_network_scene() -> tuple[mw.Scene, torch.Tensor]:
         ),
         ports=(_port("feed", 0.008),),
         networks=(block,),
-        device="cuda:0",
     )
     return scene, direct
 
@@ -324,8 +320,8 @@ def _trainable_network_scene() -> tuple[mw.Scene, torch.Tensor]:
 def test_public_simulation_validation_accepts_distributed_network_scene():
     simulation = mw.Simulation.fdtd(
         _two_shard_network_scene(),
-        frequency=_FREQUENCY,
-        parallel=mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1")),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(parallel=mw.fdtd.FDTDParallelConfig(devices=("cuda:0", "cuda:1"))),
     )
 
     # The FDTD-only network guard must accept the multi-GPU network scene.
@@ -337,8 +333,8 @@ def test_trainable_network_plus_parallel_is_rejected_before_solver_build():
     assert direct.requires_grad
     simulation = mw.Simulation.fdtd(
         scene,
-        frequency=_FREQUENCY,
-        parallel=mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1")),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(parallel=mw.fdtd.FDTDParallelConfig(devices=("cuda:0", "cuda:1"))),
     )
 
     assert simulation.has_trainable_parameters
@@ -353,6 +349,7 @@ def _run_single(scene):
     solver = FDTD(prepare_scene(scene), frequency=_FREQUENCY)
     solver._requested_port_frequencies = (_FREQUENCY,)
     solver.init_field()
+    bind_core(solver)
     output = solver.solve(
         time_steps=_TIME_STEPS,
         dft_frequency=_FREQUENCY,
@@ -387,11 +384,11 @@ def _run_distributed(scene, devices):
 
 
 def test_network_plus_circuit_scene_is_rejected(cuda_p2p_devices, cuda_memory_cleanup):
-    circuit = mw.Circuit("stray")
+    circuit = mw.circuits.Circuit("stray")
     node = circuit.node("n")
-    circuit.add(mw.Resistor("R", node, circuit.ground, 50.0))
-    scene = _two_shard_network_scene(device=str(cuda_p2p_devices[0]))
-    scene = scene.clone(circuits=(circuit,))
+    circuit.add(mw.rf.Resistor("R", node, circuit.ground, 50.0))
+    scene = _two_shard_network_scene()
+    scene = scene.updated(circuits=(circuit,))
 
     with pytest.raises(ValueError, match="both embedded networks"):
         DistributedFDTD(
@@ -405,7 +402,7 @@ def test_physical_two_gpu_network_matches_single_gpu_and_reports_scalar_contract
     cuda_p2p_devices,
     cuda_memory_cleanup,
 ):
-    scene = _two_shard_network_scene(device=str(cuda_p2p_devices[0]))
+    scene = _two_shard_network_scene()
     single_solver, single_output = _run_single(scene)
     distributed_solver, distributed_output = _run_distributed(
         scene,
@@ -509,17 +506,17 @@ def test_distributed_out_of_band_frequency_request_is_rejected_like_single_devic
     # against the requested output frequency.
     with pytest.raises(ValueError, match="rejects requested frequencies"):
         mw.Simulation.fdtd(
-            _two_shard_network_scene(device=str(cuda_p2p_devices[0])),
-            frequency=_OUT_OF_BAND_FREQUENCY,
+            _two_shard_network_scene(),
+            frequencies=_OUT_OF_BAND_FREQUENCY,
         ).prepare()
 
     # The distributed path must propagate the requested frequencies to the owner
     # shard so the identical rejection fires instead of silently passing.
     with pytest.raises(ValueError, match="rejects requested frequencies"):
         mw.Simulation.fdtd(
-            _two_shard_network_scene(device=str(cuda_p2p_devices[0])),
-            frequency=_OUT_OF_BAND_FREQUENCY,
-            parallel=FDTDParallelConfig(devices=cuda_p2p_devices),
+            _two_shard_network_scene(),
+            frequencies=_OUT_OF_BAND_FREQUENCY,
+            config=mw.FDTDConfig(parallel=FDTDParallelConfig(devices=cuda_p2p_devices)),
         ).prepare()
 
 
@@ -537,9 +534,9 @@ def test_distributed_multi_frequency_out_of_band_request_is_rejected_via_simulat
     # the time-stepping frequency that DistributedFDTD sees by default.
     with pytest.raises(ValueError, match="rejects requested frequencies"):
         mw.Simulation.fdtd(
-            _two_shard_network_scene(device=str(cuda_p2p_devices[0])),
+            _two_shard_network_scene(),
             frequencies=(_FREQUENCY, _OUT_OF_BAND_FREQUENCY),
-            parallel=FDTDParallelConfig(devices=cuda_p2p_devices),
+            config=mw.FDTDConfig(parallel=FDTDParallelConfig(devices=cuda_p2p_devices)),
         ).prepare()
 
 
@@ -550,7 +547,7 @@ def test_in_band_frequency_request_is_accepted_on_distributed_path(
     # The propagated-frequency guard must not reject an in-band request; the
     # owner shard prepares its network runtime without raising.
     solver = DistributedFDTD(
-        _two_shard_network_scene(device=str(cuda_p2p_devices[0])),
+        _two_shard_network_scene(),
         frequency=_FREQUENCY,
         parallel=FDTDParallelConfig(devices=cuda_p2p_devices),
     )
@@ -566,16 +563,16 @@ def test_excitation_on_network_connected_port_is_rejected_on_both_paths():
     with pytest.raises(ValueError, match=match):
         mw.Simulation.fdtd(
             _two_shard_network_scene(),
-            frequency=_FREQUENCY,
-            excitations=mw.PortExcitation(port_name="left_port", amplitude=1.0),
+            frequencies=_FREQUENCY,
+            excitations=mw.rf.PortExcitation(port_name="left_port", amplitude=1.0),
         ).prepare()
 
     with pytest.raises(ValueError, match=match):
         mw.Simulation.fdtd(
             _two_shard_network_scene(),
-            frequency=_FREQUENCY,
-            excitations=mw.PortExcitation(port_name="left_port", amplitude=1.0),
-            parallel=mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1")),
+            frequencies=_FREQUENCY,
+            excitations=mw.rf.PortExcitation(port_name="left_port", amplitude=1.0),
+            config=mw.FDTDConfig(parallel=mw.fdtd.FDTDParallelConfig(devices=("cuda:0", "cuda:1"))),
         ).prepare()
 
 
@@ -584,15 +581,15 @@ def test_termination_on_network_connected_port_is_rejected_on_both_paths():
 
     with pytest.raises(ValueError, match=match):
         mw.Simulation.fdtd(
-            _two_shard_network_scene(left_termination=mw.SeriesRLC(r=50.0)),
-            frequency=_FREQUENCY,
+            _two_shard_network_scene(left_termination=mw.rf.SeriesRLC(r=50.0)),
+            frequencies=_FREQUENCY,
         ).prepare()
 
     with pytest.raises(ValueError, match=match):
         mw.Simulation.fdtd(
-            _two_shard_network_scene(left_termination=mw.SeriesRLC(r=50.0)),
-            frequency=_FREQUENCY,
-            parallel=mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1")),
+            _two_shard_network_scene(left_termination=mw.rf.SeriesRLC(r=50.0)),
+            frequencies=_FREQUENCY,
+            config=mw.FDTDConfig(parallel=mw.fdtd.FDTDParallelConfig(devices=("cuda:0", "cuda:1"))),
         ).prepare()
 
 
@@ -602,7 +599,7 @@ def test_multiple_networks_per_distributed_scene_are_rejected(
 ):
     with pytest.raises(ValueError, match="exactly one network per scene"):
         DistributedFDTD(
-            _two_network_scene(device=str(cuda_p2p_devices[0])),
+            _two_network_scene(),
             frequency=_FREQUENCY,
             parallel=FDTDParallelConfig(devices=cuda_p2p_devices),
         )
@@ -612,7 +609,7 @@ def test_delayed_network_owner_matches_single_gpu_fields_phases_and_ring_state(
     cuda_p2p_devices,
     cuda_memory_cleanup,
 ):
-    scene=_delayed_two_shard_network_scene(device=str(cuda_p2p_devices[0]))
+    scene=_delayed_two_shard_network_scene()
     single,single_output=_run_single(scene)
     distributed,output=_run_distributed(scene,cuda_p2p_devices)
     for name in ('Ex','Ey','Ez','Hx','Hy','Hz'):

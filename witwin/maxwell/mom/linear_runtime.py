@@ -48,7 +48,7 @@ class LinearSurfaceData(SurfaceData):
         return dict(body, sha256=_digest(body))
 
     @classmethod
-    def restore(cls, payload, scene, frequency):
+    def restore(cls, payload, scene, frequency, device):
         keys = {'schema_version', 'payload_kind', 'executable', 'surface',
                 'volume_state', 'representation', 'sha256'}
         if (type(payload) is not dict or set(payload) != keys
@@ -59,7 +59,7 @@ class LinearSurfaceData(SurfaceData):
             raise ValueError('Invalid linear coupled snapshot identity')
         if type(payload['surface']) is not dict or payload['surface'].get('schema_version') == 20:
             raise ValueError('Linear state requires one underlying surface solution')
-        surface = SurfaceData.restore(payload['surface'], scene, frequency)
+        surface = SurfaceData.restore(payload['surface'], scene, frequency, device)
         state = LinearVolumeState.restore(payload['volume_state'], surface.handle.system,
                                           dtype=surface.config.dtype)
         result = cls(surface, state)
@@ -97,7 +97,8 @@ class LinearCoupledRuntime:
             raise ValueError('Linear coupled simulation changed after preparation')
         self.volume_state.assert_current()
         result = self.surface_runtime.run()
-        data = LinearSurfaceData(result.surface_currents, self.volume_state)
+        from .accessors import surface_currents
+        data = LinearSurfaceData(surface_currents(result), self.volume_state)
         result._surface_data = data
         result.solver = self
         result._metadata.update(data.representation_metadata())

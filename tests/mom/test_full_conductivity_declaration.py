@@ -19,23 +19,23 @@ cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA required')
 ))
 def test_full_conductivity_descriptor_rejects_invalid_structure(rows, message):
     with pytest.raises(ValueError, match=message):
-        mw.Material(sigma_e_tensor=mw.Tensor3x3(rows))
+        mw.Material(sigma_e_tensor=mw.media.Tensor3x3(rows))
     with pytest.raises(TypeError, match='real tensor descriptor'):
         mw.Material(sigma_e_tensor=ROWS)
 
 
-@pytest.mark.parametrize('epsilon', (None, mw.Tensor3x3(((2., .1, 0.), (.1, 3., 0.), (0., 0., 4.)))))
+@pytest.mark.parametrize('epsilon', (None, mw.media.Tensor3x3(((2., .1, 0.), (.1, 3., 0.), (0., 0., 4.)))))
 def test_reference_export_does_not_discard_full_conductivity(epsilon):
     from witwin.maxwell.adapters.tidy3d import _convert_material
-    material = mw.Material(epsilon_tensor=epsilon, sigma_e_tensor=mw.Tensor3x3(ROWS))
+    material = mw.Material(epsilon_tensor=epsilon, sigma_e_tensor=mw.media.Tensor3x3(ROWS))
     with pytest.raises(NotImplementedError, match='full sigma_e_tensor'):
         _convert_material(material, object())
 
 
 def test_adjoint_conductivity_detection_handles_full_declarations():
     from witwin.maxwell.fdtd.adjoint.bridge import _material_has_conductivity
-    assert _material_has_conductivity(mw.Material(sigma_e_tensor=mw.Tensor3x3(ROWS)))
-    assert not _material_has_conductivity(mw.Material(sigma_e_tensor=mw.Tensor3x3(((0.,)*3,)*3)))
+    assert _material_has_conductivity(mw.Material(sigma_e_tensor=mw.media.Tensor3x3(ROWS)))
+    assert not _material_has_conductivity(mw.Material(sigma_e_tensor=mw.media.Tensor3x3(((0.,)*3,)*3)))
 
 
 @cuda
@@ -44,7 +44,7 @@ def test_full_conductivity_ac_dc_power_and_exact_sample_replay(dtype):
     complex_dtype = torch.complex64 if dtype == torch.float32 else torch.complex128
     # Rank-deficient PSD conductivity is legal. The tensor replaces the unused
     # scalar conductivity, and the off-diagonal SI entries remain intact.
-    material = mw.Material(eps_r=2., sigma_e=50., sigma_e_tensor=mw.Tensor3x3(ROWS))
+    material = mw.Material(eps_r=2., sigma_e=50., sigma_e_tensor=mw.media.Tensor3x3(ROWS))
     sigma = torch.tensor(ROWS, device='cuda', dtype=dtype)
     dc = compile_static_tensor_material(material, device='cuda', dtype=dtype).electric_dc
     assert dc.kind == 'conductive_limit'
@@ -78,9 +78,9 @@ def test_full_conductivity_harmonics_preserve_poles_nonlinearity_and_identity():
     from witwin.maxwell.mom.harmonic_material import compile_tensor_harmonic_material, material_signature
     pole = mw.DrudePole(plasma_frequency=1e8, gamma=2e7)
     def declaration(rows):
-        return mw.Material(eps_r=2., sigma_e=50., sigma_e_tensor=mw.Tensor3x3(rows),
-            drude_poles=(pole,), nonlinearity=(mw.NonlinearSusceptibility(chi2=.002, chi3=.001),
-            mw.TwoPhotonAbsorption(beta=1e-12, n0=1.5)))
+        return mw.Material(eps_r=2., sigma_e=50., sigma_e_tensor=mw.media.Tensor3x3(rows),
+            drude_poles=(pole,), nonlinearity=(mw.media.NonlinearSusceptibility(chi2=.002, chi3=.001),
+            mw.media.TwoPhotonAbsorption(beta=1e-12, n0=1.5)))
     material = declaration(ROWS)
     compiled = compile_tensor_harmonic_material(material, 3e8, 2, device='cuda')
     sigma = torch.tensor(ROWS, device='cuda', dtype=torch.float64)
@@ -107,7 +107,7 @@ def test_full_conductivity_harmonics_preserve_poles_nonlinearity_and_identity():
 def test_native_compilers_reject_indefinite_full_conductivity(poles):
     # The passive Drude increment exceeds the negative eigenvalue at DC; it
     # must not hide an invalid declared background from the static compiler.
-    material = mw.Material(sigma_e_tensor=mw.Tensor3x3(((.001, .002, 0.), (.002, .001, 0.), (0., 0., 0.))),
+    material = mw.Material(sigma_e_tensor=mw.media.Tensor3x3(((.001, .002, 0.), (.002, .001, 0.), (0., 0., 0.))),
                            drude_poles=poles)
     with pytest.raises(ValueError, match='conductivity'):
         compile_tensor_medium(material, 3e8, device='cuda')

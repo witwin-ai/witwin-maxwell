@@ -4,6 +4,7 @@ Ordinary forward uses an explicitly labelled primary FP64 reference only for
 weak negative-curvature radiated power. No admission bypass or CUDA fallback.
 Historical private23PASS/1FAIL remains independent evidence.
 """
+from dataclasses import replace
 import math
 import pytest
 import torch
@@ -29,29 +30,28 @@ class FixedBendMaterials(mw.SceneModule):
         if self.foil:
             structures.append(mw.Structure(name='foil',geometry=mw.Box(
                 position=torch.tensor((0.,.005,0.),dtype=torch.float64),size=torch.tensor((.02,0.,.02),dtype=torch.float64)),
-                material=mw.CopperFoil(thickness=self.log_thickness.exp(),conductivity=self.log_copper_sigma.exp(),
+                material=mw.media.CopperFoil(thickness=self.log_thickness.exp(),conductivity=self.log_copper_sigma.exp(),
                     frequency_range=(2e9,4e9),mode_count=16)))
         port=mw.LumpedPort('feed',positive=(-.015,-.005,.005),negative=(-.015,-.005,-.005),
             voltage_path=mw.AxisPath('z'),current_surface=mw.Box(
                 position=torch.tensor((-.015,-.005,-.0025),dtype=torch.float64),size=torch.tensor((.015,.015,0.),dtype=torch.float64)),
             voltage_aperture=mw.Box(position=torch.tensor((-.015,-.005,0.),dtype=torch.float64),
                 size=torch.tensor((.01,.01,.01),dtype=torch.float64)))
-        chart=None if self.curvature is None else mw.BendCoordinates(curvature=self.curvature,origin=(.2,-.1,.3))
+        chart=None if self.curvature is None else mw.coordinates.BendCoordinates(curvature=self.curvature,origin=(.2,-.1,.3))
         scene=mw.Scene(domain=mw.Domain(bounds=((- .03,.03),)*3),grid=mw.GridSpec.uniform(.005),
-            boundary=mw.BoundarySpec.pml(num_layers=4),coordinates=chart,device=self.target_device,ports=(port,),structures=structures,
-            subpixel_samples=mw.SubpixelSpec(samples=(2,4,2),averaging='arithmetic'),monitors=(
-                mw.PowerLossMonitor('bulk',position=(0.,.005,0.),size=(.035,.025,.035)),
-                mw.ClosedSurfaceMonitor.box('radiation',size=(.05,.05,.05),sample_spacing=.007)))
+            boundary=mw.BoundarySpec.pml(num_layers=4),coordinates=chart,ports=(port,),structures=structures,
+            subpixel=mw.SubpixelSpec(samples=(2,4,2),averaging='arithmetic'),monitors=(
+                mw.monitors.PowerLossMonitor('bulk',position=(0.,.005,0.),size=(.035,.025,.035)),
+                mw.monitors.ClosedSurfaceMonitor.box('radiation',size=(.05,.05,.05),sample_spacing=.007)))
         # Retain actual H samples on both sides for the shared query path.
         from tests.postprocess.fields.test_copper_query_execution import retain_h_stencils,query_points
         return retain_h_stencils(scene,query_points(1,.005))
 
     def simulation(self,*,graph=False,stride=7):
-        simulation=mw.Simulation.fdtd(self,frequency=3e9,full_field_dft=True,cuda_graph=graph,
-            excitations=mw.PortExcitation('feed',source_time=mw.CW(3e9,phase=.37)),
+        simulation=mw.Simulation.fdtd(self,frequencies=3e9,excitations=mw.rf.PortExcitation('feed',source_time=mw.CW(3e9,phase=.37)), config=mw.FDTDConfig(full_field_dft=True,cuda_graph=graph,
             run_time=mw.TimeConfig(time_steps=96,dt=5e-12,transient_cycles=0,steady_cycles=1),
-            spectral_sampler=mw.SpectralSampler(window='none',normalize_source=False))
-        simulation.config.adjoint_checkpoint_stride=stride
+            spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=False)))
+        simulation.config = replace(simulation.config, adjoint_checkpoint_stride=stride)
         return simulation
 
 
@@ -62,17 +62,17 @@ def functional(result,kind):
     if kind=='reflection':
         reflection=result.port('feed').b/result.port('feed').a
         return reflection.real.sum()+.31*reflection.imag.sum()
-    if kind=='bulk':return result.power_loss('bulk').total.sum()
-    if kind=='surface':return result.conductor_losses['foil']['surface_power'].sum()
-    if kind=='energy':return result.conductor_losses['foil']['dissipated_energy']
-    if kind=='stored':return result.conductor_losses['foil']['stored_energy']
+    if kind=='bulk':return result.monitor('bulk').total.sum()
+    if kind=='surface':return mw.rf.conductor_losses(result)['foil']['surface_power'].sum()
+    if kind=='energy':return mw.rf.conductor_losses(result)['foil']['dissipated_energy']
+    if kind=='stored':return mw.rf.conductor_losses(result)['foil']['stored_energy']
     if kind=='query':
         from tests.postprocess.fields.test_copper_query_execution import query_points
         chart_points=query_points(1,.005).cuda()
-        points=result.scene.physical_positions(chart_points)if result.scene.coordinates is not None else chart_points
+        points=result.scene.coordinates.position(chart_points)if result.scene.coordinates is not None else chart_points
         electric,magnetic=result.query_fields(points,region_id='interior',field_kind='total',trace_side='positive')
         return electric.real.sum()+.31*electric.imag.sum()+100*(magnetic.real.sum()+.23*magnetic.imag.sum())
-    antenna=result.antenna(surface='radiation',driven_port='feed',theta_points=9,phi_points=13,radius=10.)
+    antenna=mw.antenna.antenna(result, surface='radiation',driven_port='feed',theta_points=9,phi_points=13,radius=10.)
     if kind=='radiated_power':return antenna.p_rad.sum()
     if kind=='radiation_complex':return antenna.e_theta.real.sum()+.31*antenna.e_phi.imag.sum()
     raise ValueError(kind)
@@ -87,11 +87,10 @@ def objective(model,kind,**kwargs):
     if precise_reference:
         if kwargs:
             raise ValueError('The explicit FP64 ordinary reference is eager only.')
-        simulation=mw.Simulation.fdtd(model,frequency=3e9,field_dtype=torch.float64,
-            full_field_dft=False,cuda_graph=False,cpml_config={'memory_mode':'dense'},
-            excitations=mw.PortExcitation('feed',source_time=mw.CW(3e9,phase=.37)),
+        simulation=mw.Simulation.fdtd(model,frequencies=3e9,excitations=mw.rf.PortExcitation('feed',source_time=mw.CW(3e9,phase=.37)), config=mw.FDTDConfig(field_dtype=torch.float64,
+            full_field_dft=False,cuda_graph=False,cpml=mw.fdtd.CPMLConfig(memory_mode='dense'),
             run_time=mw.TimeConfig(time_steps=96,dt=5e-12,transient_cycles=0,steady_cycles=1),
-            spectral_sampler=mw.SpectralSampler(window='none',normalize_source=False,observer_dtype=torch.float64))
+            spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=False,observer_dtype=torch.float64)))
     else:
         simulation=model.simulation(**kwargs)
     result=simulation.run()
@@ -154,7 +153,7 @@ def test_graph_checkpoint_strides_and_detached_disk_resume_preserve_material_wor
             torch.testing.assert_close(parameter.grad,gradients[name],rtol=.001,atol=1e-25)
     model.requires_grad_(False);expected=model.simulation().run()
     checkpoint=model.simulation().prepare().run_until(47);path=tmp_path/'mapped.pt';checkpoint.save(path)
-    loaded=mw.FDTDResumeCheckpoint.load(path,map_location='cpu')
+    loaded=mw.fdtd.FDTDResumeCheckpoint.load(path,map_location='cpu')
     resumed=model.simulation(graph=True).prepare().run(resume_from=loaded)
     kinds=('bulk','query','radiation_complex')+(('surface',)if foil else ())
     for kind in kinds:
@@ -166,8 +165,8 @@ def test_cartesian_bulk_only_native_batch_reuse_keeps_direct_sigma_heads():
     with torch.no_grad():models[1].log_bulk_sigma.add_(.2)
     simulations=[model.simulation()for model in models]
     parameters=tuple(parameter for model in models for parameter in model.parameters())
-    batch=mw.Simulation.batch(simulations,outputs=mw.BatchOutput(fields=("Ex","Ey","Ez")),
-        execution=mw.BatchExecution(devices=("cuda:0",),batch_size=2,graph="required",graph_steps=7))
+    batch=mw.Simulation.batch(simulations,outputs=mw.execution.BatchOutput(fields=("Ex","Ey","Ez")),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",),batch_size=2,graph="required",graph_steps=7))
     with batch.prepare()as prepared:
         first=prepared.run().results();second=prepared.run().results()
     def evaluate(results):return sum(functional(result,'bulk')for result in results)

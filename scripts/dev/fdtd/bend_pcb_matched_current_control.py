@@ -1,5 +1,6 @@
 """Native high-R intrinsic response with explicitly measured source current."""
 from __future__ import annotations
+from dataclasses import replace
 import argparse
 import hashlib
 import json
@@ -42,27 +43,26 @@ def run(output,*,spacing=.01,duration=96e-9,resistance=1e12,vacuum=False,normal_
     if metal=='pec':
         replacements=[]
         for structure in structures:
-            if isinstance(structure.material,mw.CopperFoil):
+            if isinstance(structure.material,mw.media.CopperFoil):
                 box=structure.geometry;size=box.size.detach().cpu().tolist();position=box.position.detach().cpu().tolist()
                 vertices=[(position[0]+a*size[0]/2,position[2]+b*size[2]/2) for a,b in ((-1,-1),(1,-1),(1,1),(-1,1))]
-                structure=mw.Structure(name=structure.name,geometry=mw.PlanarPEC(vertices,normal_axis='y',coordinate=position[1]),material=mw.Material.pec())
+                structure=mw.Structure(name=structure.name,geometry=mw.geometry.PlanarPEC(vertices,normal_axis='y',coordinate=position[1]),material=mw.Material.pec())
             replacements.append(structure)
         structures=replacements
-    scene=base.scene.clone(ports=(port,),structures=structures)
+    scene=base.scene.updated(ports=(port,), structures=structures)
     samples=(1,normal_samples,1) if material_samples is None else tuple(material_samples)
     if any(value>1 for value in samples):
-        scene=scene.clone(subpixel_samples=mw.SubpixelSpec(samples=samples,averaging=averaging))
-    configuration=mw.Simulation.fdtd(scene,frequency=1e9,cuda_graph=True,full_field_dft=True,
-        excitations=mw.PortExcitation('feed',source_time=mw.GaussianPulse(frequency=1e9,fwidth=.7e9,phase=math.pi/2)),
-        run_time=mw.TimeConfig(time_steps=1),spectral_sampler=mw.SpectralSampler(window='none'))
-    prepared=configuration.prepare();configuration.config.run_time=mw.TimeConfig(time_steps=math.ceil(duration/prepared.solver.dt))
+        scene=scene.updated(subpixel=mw.SubpixelSpec(samples=samples,averaging=averaging))
+    configuration=mw.Simulation.fdtd(scene,frequencies=1e9,excitations=mw.rf.PortExcitation('feed',source_time=mw.GaussianPulse(frequency=1e9,fwidth=.7e9,phase=math.pi/2)), config=mw.FDTDConfig(cuda_graph=True,full_field_dft=True,
+        run_time=mw.TimeConfig(time_steps=1),spectral_sampler=mw.fdtd.SpectralSampler(window='none')))
+    prepared=configuration.prepare();configuration.config=replace(configuration.config,run_time=mw.TimeConfig(time_steps=math.ceil(duration/prepared.solver.dt)))
     result=prepared.run();result.save(output.with_suffix('.pt'))
     runtime=result.solver._port_runtimes[0]
     drive,_=runtime.drive_accumulator.phasors(normalization='peak',integration_dt=result.solver._spectral_integration_dt,
         reference_frequency=result.solver._spectral_reference_frequency)
     current=drive/resistance;observed=result.port('feed');voltage=observed.voltage
     impedance=voltage/current
-    antenna=result.antenna(surface='huygens',driven_port='feed',theta_points=25,phi_points=49,radius=12.,batch_size=128)
+    antenna=mw.antenna.antenna(result, surface='huygens',driven_port='feed',theta_points=25,phi_points=49,radius=12.,batch_size=128)
     report=dict(schema='native-bend-known-current-response/1',spacing_m=spacing,curvature_m_inverse=3.,
         frequency_hz=1e9,duration_s=duration,steps=result.stats().get('steps_run'),dt_s=result.stats().get('dt'),
         graph_active=bool(result.solver._cuda_graph_active),elapsed_s=time.perf_counter()-start,
@@ -75,8 +75,8 @@ def run(output,*,spacing=.01,duration=96e-9,resistance=1e12,vacuum=False,normal_
         E_theta_per_amp=serial(antenna.e_theta/current[:,None,None]),E_phi_per_amp=serial(antenna.e_phi/current[:,None,None]),
         radiated_w_per_amp2=float((antenna.p_rad/current.abs().square())[0]),
         accepted_w_per_amp2=float((.5*(voltage*current.conj()).real/current.abs().square())[0]),
-        copper_w_per_amp2=sum(float(record['surface_power'][0]/current.abs().square()[0]) for record in result.conductor_losses.values()),
-        dielectric_w_per_amp2=0. if vacuum else float(result.power_loss('dielectric').total[0]/current.abs().square()[0]),
+        copper_w_per_amp2=sum(float(record['surface_power'][0]/current.abs().square()[0]) for record in mw.rf.conductor_losses(result).values()),
+        dielectric_w_per_amp2=0. if vacuum else float(result.monitor('dielectric').total[0]/current.abs().square()[0]),
         vacuum=vacuum,metal=metal,
         substrate_normal_samples=normal_samples,
         material_samples=samples,material_averaging=averaging if any(value>1 for value in samples) else 'arithmetic point',

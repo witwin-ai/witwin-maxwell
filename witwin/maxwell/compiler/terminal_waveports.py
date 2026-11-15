@@ -62,8 +62,8 @@ def _compile_plane(scene, port: TerminalWavePort) -> tuple[PortPlane, tuple, tup
     lower = position - 0.5 * size
     upper = position + 0.5 * size
     roundoff = np.asarray(port._position_roundoff) + .5 * np.asarray(port._size_roundoff)
-    scale = max(1.0, *(abs(float(value)) for bounds in scene.domain.bounds for value in bounds))
-    for axis, low, high, bounds, uncertainty in zip(_AXES, lower, upper, scene.domain.bounds, roundoff):
+    scale = max(1.0, *(abs(float(value)) for bounds in scene.scene.domain.bounds for value in bounds))
+    for axis, low, high, bounds, uncertainty in zip(_AXES, lower, upper, scene.scene.domain.bounds, roundoff):
         if low < float(bounds[0]) - 1e-12 * scale - uncertainty or high > float(bounds[1]) + 1e-12 * scale + uncertainty:
             raise _error(port, f"aperture lies outside the Scene domain along {axis}.")
     normal_index = _AXES.index(port.normal_axis)
@@ -152,7 +152,7 @@ def compile_terminal_waveport(scene, port: TerminalWavePort, *, device=None) -> 
 
     if not isinstance(port, TerminalWavePort):
         raise TypeError("compile_terminal_waveport expects a TerminalWavePort.")
-    resolved = prepare_scene(scene)
+    resolved = prepare_scene(scene, device=device)
     target_device = torch.device(resolved.device if device is None else device)
     try:
         plane, lower_indices, upper_indices = _compile_plane(resolved, port)
@@ -160,7 +160,7 @@ def compile_terminal_waveport(scene, port: TerminalWavePort, *, device=None) -> 
         if str(error).startswith("TerminalWavePort"):
             raise
         raise _error(port, str(error)) from error
-    terminal_supports, reference_supports = wave_terminal_supports(port, resolved.structures)
+    terminal_supports, reference_supports = wave_terminal_supports(port, resolved.scene.structures)
     terminal_masks = tuple(_support_mask(resolved, plane, support) for support in terminal_supports)
     reference_mask = tuple(sorted({index for support in reference_supports
                                    for index in _support_mask(resolved, plane, support)}))
@@ -197,9 +197,4 @@ def compile_terminal_waveport(scene, port: TerminalWavePort, *, device=None) -> 
     )
 
 
-def compile_terminal_waveports(scene, ports=None, *, device=None) -> tuple[CompiledTerminalWavePort, ...]:
-    selected = tuple(port for port in scene.ports if isinstance(port, TerminalWavePort)) if ports is None else tuple(ports)
-    return tuple(compile_terminal_waveport(scene, port, device=device) for port in selected)
-
-
-__all__ = ["CompiledTerminalWavePort", "compile_terminal_waveport", "compile_terminal_waveports"]
+__all__ = ["CompiledTerminalWavePort", "compile_terminal_waveport"]

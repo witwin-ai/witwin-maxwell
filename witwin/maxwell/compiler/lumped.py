@@ -64,10 +64,10 @@ def compile_lumped_elements(
 ) -> tuple[CompiledLumpedElement, ...]:
     """Compile all passive two-terminal elements into sparse voltage weights."""
 
-    resolved_scene = prepare_scene(scene)
+    resolved_scene = prepare_scene(scene, device=device)
     target_device = torch.device(resolved_scene.device if device is None else device)
     compiled = []
-    for element in resolved_scene.lumped_elements:
+    for element in resolved_scene.scene.lumped_elements:
         if isinstance(element, CoaxialLumpedResistor):
             continue
         if not isinstance(element, _LUMPED_ELEMENT_TYPES):

@@ -37,10 +37,10 @@ __global__ void batch_observer_weights_kernel(int64_t count, int64_t frequencies
   s[0] = next_c;
 }
 
-template <typename AccumT>
+template <typename AccumT, typename FieldT = float>
 __global__ void batch_observer_gather_kernel(int64_t count, int64_t points,
     int64_t frequencies, int64_t field_size, int64_t weight_count, int retard,
-    const float* field, const int64_t* offsets, const int64_t* frequency_map,
+    const FieldT* field, const int64_t* offsets, const int64_t* frequency_map,
     const AccumT* weights, const int* active, AccumT* real, AccumT* imag) {
   const int64_t q = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (q >= count) return;
@@ -48,7 +48,7 @@ __global__ void batch_observer_gather_kernel(int64_t count, int64_t points,
   if (!active[lane]) return;
   const int64_t offset = offsets[lane*points+q%points], f = frequency_map[row];
   if (offset < 0 || offset >= field_size || f < 0 || f >= weight_count) return;
-  const float value = field[offset];
+  const FieldT value = field[offset];
   real[q] += value * weights[4*f+retard];
   imag[q] += value * weights[4*f+retard+1];
 }
@@ -115,7 +115,11 @@ void batch_observer_gather_cuda(const torch::stable::Tensor& field,
     const torch::stable::Tensor& weights, const torch::stable::Tensor& active,
     torch::stable::Tensor real, torch::stable::Tensor imag, bool magnetic) {
   using torch::headeronly::ScalarType;
-  batch_check(field, field, ScalarType::Float, "field");
+  // float32 fields accumulate into float32 or float64 spectra; float64 fields only into float64.
+  STD_TORCH_CHECK(field.scalar_type() == ScalarType::Float ||
+      (field.scalar_type() == ScalarType::Double && weights.scalar_type() == ScalarType::Double),
+      "observer field must be float32, or float64 with float64 weights");
+  batch_check(field, field, field.scalar_type(), "field");
   batch_check(field, offsets, ScalarType::Long, "offsets");
   batch_check(field, frequency_map, ScalarType::Long, "frequency_map");
   STD_TORCH_CHECK(weights.scalar_type() == ScalarType::Float || weights.scalar_type() == ScalarType::Double,
@@ -138,7 +142,13 @@ void batch_observer_gather_cuda(const torch::stable::Tensor& field,
   }
   batch_disjoint(real, imag);
   torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
-  if (weights.scalar_type() == ScalarType::Double) {
+  if (field.scalar_type() == ScalarType::Double) {
+  batch_observer_gather_kernel<double, double><<<linear_grid(real.numel(), 256), 256, 0, current_cuda_stream()>>>(
+      real.numel(), p, f, field.numel(), weights.numel()/4, magnetic ? 2 : 0,
+      field.mutable_data_ptr<double>(), offsets.mutable_data_ptr<int64_t>(),
+      frequency_map.mutable_data_ptr<int64_t>(), weights.mutable_data_ptr<double>(), active.mutable_data_ptr<int>(),
+      real.mutable_data_ptr<double>(), imag.mutable_data_ptr<double>());
+  } else if (weights.scalar_type() == ScalarType::Double) {
   batch_observer_gather_kernel<double><<<linear_grid(real.numel(), 256), 256, 0, current_cuda_stream()>>>(
       real.numel(), p, f, field.numel(), weights.numel()/4, magnetic ? 2 : 0,
       field.mutable_data_ptr<float>(), offsets.mutable_data_ptr<int64_t>(),
@@ -461,9 +471,13 @@ void accumulate_point_observers_indexed_cuda(
     torch::stable::Tensor imag_accum,
     const torch::stable::Tensor& weights,
     const torch::stable::Tensor& step) {
-  check_float32_tensor(field, "field");
-  check_contiguous_tensor(field, "field");
   using torch::headeronly::ScalarType;
+  check_cuda_tensor(field, "field");
+  check_contiguous_tensor(field, "field");
+  // float64 fields accumulate only into float64 spectra.
+  STD_TORCH_CHECK(field.scalar_type() == ScalarType::Float ||
+      (field.scalar_type() == ScalarType::Double && real_accum.scalar_type() == ScalarType::Double),
+      "observer field must be float32, or float64 with float64 accumulators");
   STD_TORCH_CHECK(field.dim() == 3, "field must be rank 3");
   STD_TORCH_CHECK(real_accum.scalar_type() == ScalarType::Float ||
       real_accum.scalar_type() == ScalarType::Double, "observer accumulators must be float32 or float64");
@@ -485,7 +499,13 @@ void accumulate_point_observers_indexed_cuda(
   const auto sizes = field.sizes();
   const int64_t count = real_accum.numel();
   const int block_size = count <= 64 ? 64 : (count >= 262144 ? 512 : 256);
-  if (real_accum.scalar_type() == ScalarType::Double) {
+  if (field.scalar_type() == ScalarType::Double) {
+    accumulate_point_observer_kernel<int, double, double, true><<<linear_grid(count, block_size), block_size, 0, current_cuda_stream()>>>(
+        count, sizes[1], sizes[2], field.mutable_data_ptr<double>(), point_i.mutable_data_ptr<int>(),
+        point_j.mutable_data_ptr<int>(), point_k.mutable_data_ptr<int>(), 0.0, 0.0,
+        real_accum.mutable_data_ptr<double>(), imag_accum.mutable_data_ptr<double>(),
+        weights.mutable_data_ptr<double>(), step.mutable_data_ptr<int64_t>());
+  } else if (real_accum.scalar_type() == ScalarType::Double) {
     accumulate_point_observer_kernel<int, double, float, true><<<linear_grid(count, block_size), block_size, 0, current_cuda_stream()>>>(
         count, sizes[1], sizes[2], field.mutable_data_ptr<float>(), point_i.mutable_data_ptr<int>(),
         point_j.mutable_data_ptr<int>(), point_k.mutable_data_ptr<int>(), 0.0, 0.0,

@@ -236,28 +236,34 @@ def add_field_monitors(scene, plan, frequencies):
     from witwin.maxwell.scene import prepare_scene
 
     points, plane = query_positions(plan)
-    grid = prepare_scene(scene)
+    grid = prepare_scene(scene, device="cpu")  # node coordinates only
     sampling = {}
     for component in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-        axes = component_coords(grid, component)
+        axes = component_coords(grid, component, device=grid.device)
         indices, weights = interpolation_stencil(axes, points)
         unique, gather = np.unique(indices.reshape(-1, 3), axis=0, return_inverse=True)
         names = []
         for index, loc in enumerate(unique):
             name = f"sparse_{component}_{index}"
             names.append(name)
-            scene.add_monitor(mw.PointMonitor(
-                name, tuple(axes[d][loc[d]] for d in range(3)),
-                fields=(component,),
+            scene = scene.updated(monitors=(
+                *scene.monitors,
+                mw.PointMonitor(
+                    name, tuple(axes[d][loc[d]] for d in range(3)),
+                    fields=(component,),
+                ),
             ))
         high = np.searchsorted(axes[2], plane[0, 2])
         plane_names = []
         for index in (high - 1, high):
             name = f"plane_{component}_{index}"
             plane_names.append(name)
-            scene.add_monitor(mw.PlaneMonitor(
-                name, axis="z", position=axes[2][index],
-                fields=(component,), frequencies=frequencies,
+            scene = scene.updated(monitors=(
+                *scene.monitors,
+                mw.PlaneMonitor(
+                    name, axis="z", position=axes[2][index],
+                    fields=(component,), frequencies=frequencies,
+                ),
             ))
         plane_indices, plane_weights = interpolation_stencil(axes[:2], plane[:, :2])
         normal_weight = (plane[0, 2] - axes[2][high - 1]) / (axes[2][high] - axes[2][high - 1])
@@ -265,7 +271,7 @@ def add_field_monitors(scene, plan, frequencies):
                                    point_weights=weights, plane_names=plane_names,
                                    plane_gather=plane_indices[:, :, 0] * len(axes[1]) + plane_indices[:, :, 1],
                                    plane_weights=plane_weights, normal_weight=normal_weight)
-    return sampling
+    return scene, sampling
 
 
 def recorded_fields(result, sampling):
@@ -279,14 +285,14 @@ def recorded_fields(result, sampling):
 
     points, planes = {}, {}
     for component, s in sampling.items():
-        values = torch.stack([result.monitor(name)["components"][component].reshape(-1)
+        values = torch.stack([result.raw_monitor(name)["components"][component].reshape(-1)
                               for name in s["point_names"]], dim=-1)
         gather = torch.as_tensor(s["point_gather"], device=values.device)
         weights = torch.as_tensor(s["point_weights"], device=values.device)
         points[component] = (values[:, gather] * weights).sum(dim=-1)
         gather = torch.as_tensor(s["plane_gather"], device=values.device)
         weights = torch.as_tensor(s["plane_weights"], device=values.device)
-        slices = [result.monitor(name)["components"][component]["data"].reshape(len(result.frequencies), -1)
+        slices = [result.raw_monitor(name)["components"][component]["data"].reshape(len(result.frequencies), -1)
                   for name in s["plane_names"]]
         lower, upper = [(v[:, gather] * weights).sum(dim=-1) for v in slices]
         planes[component] = lower * (1 - s["normal_weight"]) + upper * s["normal_weight"]
@@ -305,9 +311,9 @@ def build_sample(plan, *, device):
     if family == "F1":
         sample = builders.dielectric(
             name, n=s["n"], wavelengths=s["wavelengths"], bodies=s["bodies"],
-            kind=s["kind"], eps=s["eps"], lossy=s["lossy"], device=device,
+            kind=s["kind"], eps=s["eps"], lossy=s["lossy"],
         )
-        sample.scene = sample.scene.clone(subpixel_samples=mw.SubpixelSpec(
+        sample.scene = sample.scene.updated(subpixel=mw.SubpixelSpec(
             samples=3 if s["f1_averaging"] == "polarized" else 4,
             averaging=s["f1_averaging"],
         ))
@@ -317,33 +323,36 @@ def build_sample(plan, *, device):
                                                       phase=builders.DIELECTRIC_SOURCE_PHASE)
     elif family == "F2":
         sample = builders.conductor(name, n=math.ceil(20 * s["wavelengths"]),
-                                    kind=s["kind"], device=device)
+                                    kind=s["kind"])
         structure = sample.scene.structures[0]
         if s["kind"] == "box":
             geometry = builders._box((0., 0., 0.), (f2_box_size(s),) * 3)
         else:
             g = structure.geometry
-            geometry = mw.PlanarPEC(g.vertices * s["scale"],
+            geometry = mw.geometry.PlanarPEC(g.vertices * s["scale"],
                                     holes=tuple(h * s["scale"] for h in g.holes), device=device)
-        sample.scene.structures[0] = replace(structure, geometry=geometry)
+        sample.scene = sample.scene.updated(
+            structures=(replace(structure, geometry=geometry), *sample.scene.structures[1:]))
     elif family == "F3":
         sample = builders.printed(name, lateral=.002, air=.004, finest=.0002,
-                                  height=s["height"], count=11, lossy=s["lossy"], device=device)
+                                  height=s["height"], count=11, lossy=s["lossy"])
+        structures = list(sample.scene.structures)
         for index in (1, 2):
-            structure = sample.scene.structures[index]
+            structure = structures[index]
             sign = -1 if index == 1 else 1
             end = s["arm_length"]
             geometry = builders._box((sign * (end + .001) / 2, 0., 0.), (end - .001, .002, 0.))
-            sample.scene.structures[index] = replace(
+            structures[index] = replace(
                 structure, geometry=geometry,
-                material=mw.CopperFoil(thickness=35e-6, frequency_range=(frequencies[0], frequencies[-1])),
+                material=mw.media.CopperFoil(thickness=35e-6, frequency_range=(frequencies[0], frequencies[-1])),
             )
+        sample.scene = sample.scene.updated(structures=structures)
     else:
         # Construct ONCE at the base wire grid: changing n in this builder would
         # change the physical feed gap, wire radius and centerline segmentation.
         sample = builders.wire(name, n=40, kind=s["kind"], count=11,
-                               finite=s["lossy"], device=device)
-        sample.scene = sample.scene.clone(thin_wires=[mw.ThinWire(
+                               finite=s["lossy"])
+        sample.scene = sample.scene.updated(thin_wires=[mw.rf.ThinWire(
             w.name, torch.as_tensor(w.points, dtype=torch.float64, device=device) * s["scale"],
             w.radius * s["wire_radius_scale"], w.conductor, endpoints=w.endpoints or None,
             snap="continuous",
@@ -354,21 +363,23 @@ def build_sample(plan, *, device):
     if family == "F2" and s["kind"] == "box":
         # The face-anchored box grid rounds the domain to whole cells (< dx/2 per side).
         extra["domain"] = mw.Domain(tuple((float(a[0]), float(a[-1])) for a in axes))
-    scene = sample.scene.clone(grid=mw.GridSpec.custom(*axes),
-                               boundary=mw.BoundarySpec.pml(num_layers=plan["pml"]), **extra)
-    scene.monitors.clear()
+    scene = sample.scene.updated(grid=mw.GridSpec.custom(*axes),
+                                 boundary=mw.BoundarySpec.pml(num_layers=plan["pml"]), monitors=(), **extra)
     surface_size = {"F1": (1.9 * C0 / F0,) * 3, "F2": (1.4 * C0 / F0,) * 3,
                     "F3": (.110, .035, .035), "F4": (1.2 * C0 / F0,) * 3}[family]
-    builders._surface(scene, frequencies, surface_size)
-    sampling = add_field_monitors(scene, plan, frequencies)
+    scene = builders._surface(scene, frequencies, surface_size)
+    scene, sampling = add_field_monitors(scene, plan, frequencies)
     sample.scene = scene
     sample.fdtd_kwargs.update(
         frequencies=frequencies,
-        run_time=mw.TimeConfig.auto(steady_cycles=plan["long_cycles"], transient_cycles=8),
-        shutoff=STOPS[plan["stopping"]],
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
-        # Explicit, so raw pulse spectra do not depend on the default reference period.
-        reference_frequency=F0,
+        config=replace(
+            sample.fdtd_kwargs["config"],
+            run_time=mw.TimeConfig.auto(steady_cycles=plan["long_cycles"], transient_cycles=8),
+            shutoff=STOPS[plan["stopping"]],
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+            # Explicit, so raw pulse spectra do not depend on the default reference period.
+            reference_frequency=F0,
+        ),
     )
     sample.readouts.clear()
     return sample, sampling
@@ -443,13 +454,13 @@ def execute_task(task, output_dir, commit, builders, device_name):
     sample, sampling = measure("build", lambda: build_sample(plan, device="cuda:0"))
     prepared = measure("prepare", lambda: mw.Simulation.fdtd(sample.scene, **sample.fdtd_kwargs).prepare())
     result = measure("run", prepared.run)
-    stats, solver = result.solver_stats, prepared.solver
+    stats, solver = result.stats(), prepared.solver
 
     def readouts():
         spectrum = source_spectrum(solver, result.frequencies, stats)
         labels = {name: values / spectrum[:, None, None]
                   for name, values in recorded_fields(result, sampling).items()}
-        flux = torch.as_tensor(result.monitor("radiation")["flux"], device=solver.device).reshape(-1)
+        flux = torch.as_tensor(result.raw_monitor("radiation")["flux"], device=solver.device).reshape(-1)
         labels["closed_surface_flux"] = flux / spectrum.abs().square()
         if plan["spec"]["family"] == "F2":
             labels["C_sca"] = labels["closed_surface_flux"] * (2 * 376.730313668)

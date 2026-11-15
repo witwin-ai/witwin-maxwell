@@ -32,16 +32,16 @@ def validate_frequency_axis(raw, harmonics):
 
 def setup():
     vertices=torch.tensor([[0.,0.,0.],[.07,0.,0.],[0.,.07,0.],[0.,0.,.07]],device='cuda',dtype=torch.float64)
-    one=mw.TetrahedralVolumeMesh(vertices,torch.tensor([[0,1,2,3]],device='cuda'),region_id=1)
+    one=mw.mom.TetrahedralVolumeMesh(vertices,torch.tensor([[0,1,2,3]],device='cuda'),region_id=1)
     vertices=torch.cat((vertices,vertices.mean(0,keepdim=True)))
     cells=torch.cat((one.boundary.faces[:,[0,2,1]],torch.full((4,1),4,device='cuda',dtype=torch.int64)),dim=1)
-    volume=mw.TetrahedralVolumeMesh(vertices,cells,region_id=1)
+    volume=mw.mom.TetrahedralVolumeMesh(vertices,cells,region_id=1)
     material=mw.Material(eps_r=2.,sigma_e=.001,sigma_m=.002,nonlinearity=(
-        mw.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.TwoPhotonAbsorption(beta=5.)))
+        mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.media.TwoPhotonAbsorption(beta=5.)))
     scene=mw.Scene(structures=[mw.Structure(geometry=mw.Mesh(one.boundary.vertices,one.boundary.faces,
         recenter=False,fill_mode='solid'),material=material)],sources=[mw.PlaneWave()])
-    hb=mw.HarmonicBalanceConfig(harmonics=2,volumes=(volume,),branch_id='linear_start',pump_scales=(.5,1.))
-    config=mw.MoMConfig(harmonic_balance=hb,riesz_storage='compact_rwg_v1',
+    hb=mw.mom.HarmonicBalanceConfig(harmonics=2,volumes=(volume,),branch_id='linear_start',pump_scales=(.5,1.))
+    config=mw.mom.MoMConfig(harmonic_balance=hb,riesz_storage='compact_rwg_v1',
         integration=IntegrationConfig(order=3,singular_order=3),
         query_config=FieldQueryConfig(relative_tolerance=1e-5,absolute_tolerance=1e-10,max_order=48))
     return scene,config
@@ -90,7 +90,7 @@ def main():
                 raise ValueError('Snapshot volume discretization differs from the control')
             result=mw.Result.load(BytesIO(snapshot),scene=scene)
         else:
-            result=mw.Simulation.mom(scene,frequency=3e8,config=config).run()
+            result=mw.Simulation.mom(scene,frequencies=3e8,config=config).run()
         result.save(root/'result.pt');write('solver-stats.json',result.stats())
         record['result_sha256']=hashlib.sha256((root/'result.pt').read_bytes()).hexdigest()
         record['phase']='power_refinement';print(record['phase'],flush=True)
@@ -100,7 +100,7 @@ def main():
             write(name,step);observations.append(name)
             record['completed_power_steps']=list(observations)
             print(name,step['axis'],flush=True)
-        report=result.refine_harmonic_power(sphere_mesh(radius=.2,subdivisions=0,device='cuda'),
+        report=mw.mom.refine_harmonic_power(result, sphere_mesh(radius=.2,subdivisions=0,device='cuda'),
             surface_orders=tuple(args.surface_orders),volume_orders=tuple(args.volume_orders),
             relative_tolerance=1e-4,absolute_tolerance=1e-20,
             query_config=replace(config.query_config,max_order=args.max_query_order),

@@ -51,21 +51,20 @@ def _isolated_conductor_scene(length, h, cube=0.2):
     """A single conducting cube at the origin inside a domain [-L/2, L/2]^3."""
     domain = mw.Domain(bounds=((-length / 2, length / 2),) * 3)
     grid = mw.GridSpec.uniform(h)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(
             name="c", geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(cube, cube, cube)),
             potential=1.0,
-        )
-    )
+            ),
+            ))
     return scene
 
 
 def _self_capacitance(length, h, cube=0.2):
     scene = _isolated_conductor_scene(length, h, cube=cube)
-    cap = mw.Simulation.capacitance(
-        scene, terminals=("c",), boundary=ElectrostaticBoundarySpec.grounded_box()
-    ).run().capacitance
+    cap = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+        scene, config=mw.electrostatic.CapacitanceConfig(terminals=("c",), boundary=ElectrostaticBoundarySpec.grounded_box())
+    ).run())
     return float(cap.matrix[0, 0])
 
 
@@ -123,9 +122,9 @@ def test_grid_convergence_at_fixed_size():
 def test_truncation_estimate_is_opt_in():
     """No enlarged solve, and no truncation report, unless explicitly requested."""
     scene = _isolated_conductor_scene(1.0, 0.05)
-    data = mw.Simulation.capacitance(
-        scene, terminals=("c",), boundary=ElectrostaticBoundarySpec.grounded_box()
-    ).run().capacitance
+    data = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+        scene, config=mw.electrostatic.CapacitanceConfig(terminals=("c",), boundary=ElectrostaticBoundarySpec.grounded_box())
+    ).run())
     assert data.truncation_estimate is None
 
 
@@ -134,15 +133,17 @@ def test_truncation_estimate_reports_domain_error():
     pad = 8
     result = mw.Simulation.capacitance(
         scene,
-        terminals=("c",),
-        boundary=ElectrostaticBoundarySpec.grounded_box(),
-        truncation_estimate=TruncationEstimate(padding_cells=pad),
+        config=mw.electrostatic.CapacitanceConfig(
+            terminals=("c",),
+            boundary=ElectrostaticBoundarySpec.grounded_box(),
+            truncation_estimate=TruncationEstimate(padding_cells=pad),
+        ),
     ).run()
-    report = result.capacitance.truncation_estimate
+    report = mw.electrostatic.capacitance(result).truncation_estimate
     assert isinstance(report, TruncationReport)
 
     # Base matrix in the report matches the returned matrix.
-    assert torch.equal(report.base_matrix, result.capacitance.matrix)
+    assert torch.equal(report.base_matrix, mw.electrostatic.capacitance(result).matrix)
     # The enlarged domain grew by exactly 2 * pad cells per axis (interior grid fixed).
     assert math.isclose(report.enlarged_size, report.base_size + 2 * pad * 0.05, rel_tol=1e-9)
     # Pushing the grounded box out lowers the self-capacitance (delta < 0) and the
@@ -158,23 +159,25 @@ def test_truncation_estimate_reports_domain_error():
     assert report.richardson_max_relative_shift > 0.0
 
     # Surfaced in the standard Result solver_stats.
-    assert "truncation_max_relative_delta" in result.solver_stats
+    assert "truncation_max_relative_delta" in result.stats()
 
 
 def test_truncation_estimate_reduces_with_larger_padding():
     """A larger enclosure already truncates less: the incremental delta shrinks."""
     scene = _isolated_conductor_scene(1.6, 0.05)
-    small = mw.Simulation.capacitance(
-        scene, terminals=("c",), boundary=ElectrostaticBoundarySpec.grounded_box(),
-        truncation_estimate=TruncationEstimate(padding_cells=4),
-    ).run().capacitance.truncation_estimate
+    small = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+        scene, config=mw.electrostatic.CapacitanceConfig(
+            terminals=("c",), boundary=ElectrostaticBoundarySpec.grounded_box(),
+            truncation_estimate=TruncationEstimate(padding_cells=4)),
+    ).run()).truncation_estimate
     scene2 = _isolated_conductor_scene(1.6, 0.05)
     # Base is the same, but a larger base enclosure would be closer to converged;
     # here we compare the sensitivity of the SAME base for two padding amounts.
-    big = mw.Simulation.capacitance(
-        scene2, terminals=("c",), boundary=ElectrostaticBoundarySpec.grounded_box(),
-        truncation_estimate=TruncationEstimate(padding_cells=12),
-    ).run().capacitance.truncation_estimate
+    big = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+        scene2, config=mw.electrostatic.CapacitanceConfig(
+            terminals=("c",), boundary=ElectrostaticBoundarySpec.grounded_box(),
+            truncation_estimate=TruncationEstimate(padding_cells=12)),
+    ).run()).truncation_estimate
     # A larger extension moves the capacitance more in absolute terms (it captures
     # more of the residual truncation), so its max_relative_delta is larger.
     assert big.max_relative_delta > small.max_relative_delta
@@ -187,18 +190,16 @@ def test_truncation_estimate_requires_dirichlet_enclosure():
     """A pure-Neumann boundary has no enclosure to extend; reject the request."""
     domain = mw.Domain(bounds=((-0.5, 0.5),) * 3)
     grid = mw.GridSpec.uniform(0.05)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="a", geometry=mw.Box(position=(-0.2, 0.0, 0.0), size=(0.1, 0.2, 0.2)), potential=1.0)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="b", geometry=mw.Box(position=(0.2, 0.0, 0.0), size=(0.1, 0.2, 0.2)), grounded=True)
-    )
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(name="a", geometry=mw.Box(position=(-0.2, 0.0, 0.0), size=(0.1, 0.2, 0.2)), potential=1.0),
+                mw.electrostatic.ElectrostaticTerminal(name="b", geometry=mw.Box(position=(0.2, 0.0, 0.0), size=(0.1, 0.2, 0.2)), grounded=True),
+            ))
     with pytest.raises(ValueError, match="Dirichlet enclosure"):
         mw.Simulation.capacitance(
-            scene, terminals=("a", "b"), reference="b",
-            boundary=ElectrostaticBoundarySpec.neumann(),
-            truncation_estimate=TruncationEstimate(padding_cells=4),
+            scene, config=mw.electrostatic.CapacitanceConfig(
+                terminals=("a", "b"), reference="b",
+                boundary=ElectrostaticBoundarySpec.neumann(),
+                truncation_estimate=TruncationEstimate(padding_cells=4)),
         ).run()
 
 
@@ -223,23 +224,23 @@ def test_truncation_estimate_rejects_structure_touching_boundary():
     """
     domain = mw.Domain(bounds=((-0.5, 0.5),) * 3)
     grid = mw.GridSpec.uniform(0.05)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
     # A dielectric bar spanning the full x extent reaches both x walls.
-    scene.add_structure(
-        mw.Structure(
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), structures=(
+                mw.Structure(
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2.0, 0.4, 0.4)),
             material=mw.Material(eps_r=4.0),
-        )
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="c", geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)), potential=1.0)
-    )
+            ),
+            ), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(name="c", geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)), potential=1.0),
+            ))
     with pytest.raises(ValueError, match="reaches the base domain boundary"):
         mw.Simulation.capacitance(
             scene,
-            terminals=("c",),
-            boundary=ElectrostaticBoundarySpec.grounded_box(),
-            truncation_estimate=TruncationEstimate(padding_cells=4),
+            config=mw.electrostatic.CapacitanceConfig(
+                terminals=("c",),
+                boundary=ElectrostaticBoundarySpec.grounded_box(),
+                truncation_estimate=TruncationEstimate(padding_cells=4),
+            ),
         ).run()
 
 
@@ -247,22 +248,22 @@ def test_truncation_estimate_allows_interior_structure():
     """A dielectric structure that keeps a background margin from the walls is fine."""
     domain = mw.Domain(bounds=((-0.5, 0.5),) * 3)
     grid = mw.GridSpec.uniform(0.05)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    scene.add_structure(
-        mw.Structure(
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), structures=(
+                mw.Structure(
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2)),
             material=mw.Material(eps_r=4.0),
-        )
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="c", geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)), potential=1.0)
-    )
-    report = mw.Simulation.capacitance(
+            ),
+            ), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(name="c", geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)), potential=1.0),
+            ))
+    report = mw.electrostatic.capacitance(mw.Simulation.capacitance(
         scene,
-        terminals=("c",),
-        boundary=ElectrostaticBoundarySpec.grounded_box(),
-        truncation_estimate=TruncationEstimate(padding_cells=4),
-    ).run().capacitance.truncation_estimate
+        config=mw.electrostatic.CapacitanceConfig(
+            terminals=("c",),
+            boundary=ElectrostaticBoundarySpec.grounded_box(),
+            truncation_estimate=TruncationEstimate(padding_cells=4),
+        ),
+    ).run()).truncation_estimate
     assert isinstance(report, TruncationReport)
 
 
@@ -270,7 +271,7 @@ def test_truncation_estimate_type_check():
     scene = _isolated_conductor_scene(1.0, 0.05)
     with pytest.raises(TypeError, match="TruncationEstimate"):
         mw.Simulation.capacitance(
-            scene, terminals=("c",), truncation_estimate=object()
+            scene, config=mw.electrostatic.CapacitanceConfig(terminals=("c",), truncation_estimate=object())
         )
 
 
@@ -283,30 +284,28 @@ def test_capacitance_trainable_tensor_fails_closed():
     Phase 4 delivers the forward SPD tensor-eps operator; the off-diagonal
     cross-flux has no reverse-mode VJP, so a differentiable run under an
     anisotropic dielectric fails closed (gradients are Phase 5) rather than
-    silently detaching. A trainable free-charge density alongside an anisotropic
-    Structure is the reachable public trigger.
+    silently detaching. A trainable isotropic permittivity alongside an anisotropic
+    Structure is the reachable public trigger (capacitance refuses free charge).
     """
     domain = mw.Domain(bounds=((0.0, 1.0),) * 3)
     grid = mw.GridSpec.uniform(1.0 / 12)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
     rows = ((3.0, 0.5, 0.0), (0.5, 4.0, 0.0), (0.0, 0.0, 5.0))
-    scene.add_structure(
-        mw.Structure(
+    eps = torch.tensor(2.5, dtype=torch.float64, device="cuda", requires_grad=True)
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), structures=(
+                mw.Structure(
             geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(2.0, 2.0, 2.0)),
-            material=mw.Material(epsilon_tensor=mw.Tensor3x3(rows)),
-        )
-    )
-    density = torch.ones((), dtype=torch.float64, device="cuda", requires_grad=True)
-    scene.add_charge_density(
-        mw.ChargeDensity(geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(0.2, 0.2, 0.2)), density=density)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="a", geometry=mw.Box(position=(0.3, 0.5, 0.5), size=(0.1, 0.3, 0.3)), potential=1.0)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="b", geometry=mw.Box(position=(0.7, 0.5, 0.5), size=(0.1, 0.3, 0.3)), potential=0.0)
-    )
+            material=mw.Material(epsilon_tensor=mw.media.Tensor3x3(rows)),
+            ),
+                mw.Structure(
+            geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(0.2, 0.2, 0.2)),
+            material=mw.Material(eps_r=eps),
+            priority=1,
+            ),
+            ), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(name="a", geometry=mw.Box(position=(0.3, 0.5, 0.5), size=(0.1, 0.3, 0.3)), potential=1.0),
+                mw.electrostatic.ElectrostaticTerminal(name="b", geometry=mw.Box(position=(0.7, 0.5, 0.5), size=(0.1, 0.3, 0.3)), potential=0.0),
+            ))
     with pytest.raises(NotImplementedError, match="tensor"):
         mw.Simulation.capacitance(
-            scene, terminals=("a", "b"), boundary=ElectrostaticBoundarySpec.grounded_box()
+            scene, config=mw.electrostatic.CapacitanceConfig(terminals=("a", "b"), boundary=ElectrostaticBoundarySpec.grounded_box())
         ).run()

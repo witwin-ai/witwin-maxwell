@@ -7,6 +7,10 @@ import torch
 
 from witwin.core import Structure
 
+from .._fixed_inputs import require_fixed_input
+from ..errors import SetupError, UnsupportedFeatureError
+from .._stability import experimental
+
 _AXES = ("x", "y", "z")
 _SIDES = ("low", "high")
 _FACES = tuple(f"{axis}_{side}" for axis in _AXES for side in _SIDES)
@@ -34,6 +38,7 @@ def _resolve_geometry(geometry, structure):
     return geometry
 
 
+@experimental("electrostatics")
 @dataclass(frozen=True)
 class ElectrostaticTerminal:
     """Equipotential conductor constraint for the electrostatic solver.
@@ -44,7 +49,7 @@ class ElectrostaticTerminal:
     whose potential is unknown but whose induced free charge is prescribed.
     ``potential`` and ``charge`` are mutually exclusive.
 
-    Terminals live in a solver-specific collection (``Scene.add_electrostatic_terminal``)
+    Terminals live in a solver-specific collection (``Scene.electrostatic_terminals``)
     and never enter the RF ``Scene.ports`` set: an electrostatic terminal is an
     equipotential constraint, not an RF excitation/measurement path.
     """
@@ -61,6 +66,9 @@ class ElectrostaticTerminal:
         if not name:
             raise ValueError("ElectrostaticTerminal name must not be empty.")
         object.__setattr__(self, "name", name)
+        # Terminal levels are stored as Python floats; a trainable value would detach.
+        require_fixed_input(self.potential, name=f"ElectrostaticTerminal {name!r} potential")
+        require_fixed_input(self.charge, name=f"ElectrostaticTerminal {name!r} charge")
 
         resolved_geometry = _resolve_geometry(self.geometry, self.structure)
         object.__setattr__(self, "geometry", resolved_geometry)
@@ -95,6 +103,7 @@ class ElectrostaticTerminal:
         return self.potential is None and self.charge is not None
 
 
+@experimental("electrostatics")
 @dataclass(frozen=True)
 class ChargeDensity:
     """Volumetric free-charge source, ``density`` in C/m^3 over ``geometry``."""
@@ -117,11 +126,12 @@ def _normalize_bc_entry(name: str, value) -> tuple[str, float]:
         magnitude = 0.0
     else:
         if len(value) != 2:
-            raise ValueError(f"{name} boundary override must be a kind or a (kind, value) pair.")
+            raise SetupError(f"{name} boundary override must be a kind or a (kind, value) pair.")
         kind = str(value[0]).strip().lower()
+        require_fixed_input(value[1], name=f"ElectrostaticBoundarySpec {name} value")
         magnitude = float(value[1])
     if kind == "open":
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Open (infinite-domain) electrostatic boundaries are not implemented: a "
             "grounded-box (Dirichlet) or insulating (Neumann) enclosure is a finite "
             "truncation of an open problem, and there is no exact radiation condition on "
@@ -129,17 +139,19 @@ def _normalize_bc_entry(name: str, value) -> tuple[str, float]:
             "by enlarging the grounded-box domain until the capacitance converges, and "
             "quantify the residual truncation error with the opt-in truncation_estimate on "
             "Simulation.capacitance(...). A boundary-element exact open boundary is a later "
-            "phase."
+            "phase.",
+            feature="guard:128616df", method="electrostatic"
         )
     if kind not in _BC_KINDS:
-        raise ValueError(
+        raise SetupError(
             f"{name} boundary kind must be one of {_BC_KINDS!r}, got {kind!r}."
         )
     if kind != "dirichlet" and magnitude != 0.0:
-        raise ValueError(f"{name}: only Dirichlet boundaries carry a non-zero value.")
+        raise SetupError(f"{name}: only Dirichlet boundaries carry a non-zero value.")
     return (kind, magnitude)
 
 
+@experimental("electrostatics")
 @dataclass(frozen=True)
 class ElectrostaticBoundarySpec:
     """Per-face outer boundary conditions for the electrostatic domain.
@@ -177,6 +189,7 @@ class ElectrostaticBoundarySpec:
 
     @classmethod
     def dirichlet(cls, value: float = 0.0, **faces) -> "ElectrostaticBoundarySpec":
+        require_fixed_input(value, name="ElectrostaticBoundarySpec.dirichlet value")
         return cls(default="dirichlet", value=float(value), **faces)
 
     @classmethod
@@ -198,6 +211,7 @@ class ElectrostaticBoundarySpec:
         return any(kind == "dirichlet" for kind, _ in self._faces.values())
 
 
+@experimental("electrostatics")
 @dataclass(frozen=True)
 class ElectrostaticSolverConfig:
     """Preconditioned conjugate-gradient configuration.
@@ -214,11 +228,39 @@ class ElectrostaticSolverConfig:
     def __post_init__(self):
         tol = float(self.tolerance)
         if tol <= 0.0:
-            raise ValueError("ElectrostaticSolverConfig.tolerance must be > 0.")
+            raise SetupError("ElectrostaticSolverConfig.tolerance must be > 0.")
         object.__setattr__(self, "tolerance", tol)
         iters = int(self.max_iterations)
         if iters <= 0:
-            raise ValueError("ElectrostaticSolverConfig.max_iterations must be > 0.")
+            raise SetupError("ElectrostaticSolverConfig.max_iterations must be > 0.")
         object.__setattr__(self, "max_iterations", iters)
         if self.dtype not in (torch.float32, torch.float64):
-            raise ValueError("ElectrostaticSolverConfig.dtype must be torch.float32 or torch.float64.")
+            raise SetupError("ElectrostaticSolverConfig.dtype must be torch.float32 or torch.float64.")
+
+
+def _require_boundary_and_solver(config) -> None:
+    """Type-check the ``boundary``/``solver`` fields shared by the static configs."""
+    if not isinstance(config.boundary, ElectrostaticBoundarySpec):
+        raise TypeError("boundary must be an ElectrostaticBoundarySpec.")
+    if not isinstance(config.solver, ElectrostaticSolverConfig):
+        raise TypeError("solver must be an ElectrostaticSolverConfig.")
+
+
+@experimental("electrostatics")
+@dataclass(frozen=True)
+class ElectrostaticConfig:
+    """Run options of ``Simulation.electrostatic(scene, config=...)``.
+
+    ``boundary`` sets the six outer faces of the electrostatic domain (default: a
+    grounded box, Dirichlet 0 V on every face); it is independent of the
+    full-wave ``Scene.boundary``, which must stay ``BoundarySpec.none()``.
+    ``solver`` sets the conjugate-gradient tolerance, iteration cap and dtype.
+    """
+
+    boundary: ElectrostaticBoundarySpec = field(default_factory=ElectrostaticBoundarySpec.grounded_box)
+    solver: ElectrostaticSolverConfig = field(default_factory=ElectrostaticSolverConfig)
+    device: str = "cuda"
+
+    def __post_init__(self):
+        object.__setattr__(self, "device", str(torch.device(self.device)))
+        _require_boundary_and_solver(self)

@@ -149,12 +149,6 @@ __device__ __forceinline__ bool batch_field_index(
   return true;
 }
 
-struct Index3D {
-  unsigned int i;
-  unsigned int j;
-  unsigned int k;
-};
-
 // Dispatch a kernel templated on a single Uniform flag. The scalar fast path is
 // taken only when BOTH decay and curl are uniform, so the only instantiations
 // ever launched are the all-scalar one and the all-array one; mixed
@@ -195,15 +189,6 @@ constexpr int BOUNDARY_PERIODIC = 2;
 constexpr int BOUNDARY_BLOCH = 3;
 constexpr int BOUNDARY_PEC = 4;
 constexpr int BOUNDARY_PMC = 5;
-
-__device__ __forceinline__ Index3D unflatten3d(unsigned int linear, unsigned int size_y, unsigned int size_z) {
-  const unsigned int plane = size_y * size_z;
-  const unsigned int i = linear / plane;
-  const unsigned int remainder = linear - i * plane;
-  const unsigned int j = remainder / size_z;
-  const unsigned int k = remainder - j * size_z;
-  return {i, j, k};
-}
 
 __device__ __forceinline__ long long offset3d(unsigned int i, unsigned int j, unsigned int k, unsigned int size_y, unsigned int size_z) {
   return (static_cast<long long>(i) * size_y + j) * size_z + k;

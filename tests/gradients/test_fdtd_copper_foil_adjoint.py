@@ -1,4 +1,5 @@
 """Two-sided foil state and continuous-parameter gradients on a fixed planar grid."""
+from dataclasses import replace
 import math
 
 import pytest
@@ -22,9 +23,8 @@ class FoilDesign(mw.SceneModule):
             return tuple(values[(axis - self.normal_axis) % 3] for axis in range(3))
         field_axis = "xyz"[(self.normal_axis + 2) % 3]
         return mw.Scene(domain=mw.Domain(bounds=((-0.03, .03),) * 3), grid=mw.GridSpec.uniform(.005),
-            boundary=mw.BoundarySpec.pec(), device="cuda",
-            structures=(mw.Structure(name="foil", geometry=mw.Box(position=(0., 0., 0.), size=rotate((0., .02, .02))),
-                material=mw.CopperFoil(thickness=self.log_thickness.exp(), conductivity=self.log_conductivity.exp(),
+            boundary=mw.BoundarySpec.pec(), structures=(mw.Structure(name="foil", geometry=mw.Box(position=(0., 0., 0.), size=rotate((0., .02, .02))),
+                material=mw.media.CopperFoil(thickness=self.log_thickness.exp(), conductivity=self.log_conductivity.exp(),
                                        frequency_range=(2.e9, 4.e9), mode_count=16)),),
             ports=(mw.LumpedPort(name="feed", positive=rotate((-.01, 0., .005)), negative=rotate((-.01, 0., -.005)),
                 voltage_path=mw.AxisPath(field_axis), current_surface=mw.Box(
@@ -32,19 +32,19 @@ class FoilDesign(mw.SceneModule):
             monitors=(mw.PointMonitor("probe", rotate((.01, 0., 0.)), fields=("E" + field_axis,)),))
 
     def simulation(self):
-        simulation = mw.Simulation.fdtd(self, frequency=3.e9, run_time=mw.TimeConfig(time_steps=48),
-            cuda_graph=self.graph, spectral_sampler=mw.SpectralSampler(window="none"),
-            excitations=mw.PortExcitation("feed", source_time=mw.CW(3.e9)))
-        simulation.config.adjoint_checkpoint_stride = self.stride
+        simulation = mw.Simulation.fdtd(self, frequencies=3.e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=48),
+            cuda_graph=self.graph, spectral_sampler=mw.fdtd.SpectralSampler(window="none")),
+            excitations=mw.rf.PortExcitation("feed", source_time=mw.CW(3.e9)))
+        simulation.config = replace(simulation.config, adjoint_checkpoint_stride=self.stride)
         return simulation
 
 
 def _objective(model, kind):
     result = model.simulation().run()
     if kind == "field":
-        return result.monitor("probe")["data"].abs().square().sum(), result
+        return result.monitor("probe", freq_index=0).sel(component="Ez").values.abs().square().sum(), result
     if kind in {"dissipated_energy", "stored_energy"}:
-        return result.conductor_losses["foil"][kind], result
+        return mw.rf.conductor_losses(result)["foil"][kind], result
     port = result.port("feed")
     return (port.b / port.a).abs().square().sum(), result
 
@@ -155,11 +155,11 @@ def test_local_foil_material_history_and_parameter_gradients(kind, record_proper
         def to_scene(self):
             scene = super().to_scene()
             medium = _local_material(kind)
-            scene.structures = (*scene.structures, mw.Structure(name="substrate", geometry=mw.Box(
+            scene = scene.updated(structures=(*scene.structures, mw.Structure(name="substrate", geometry=mw.Box(
                 position=(.01, 0., 0.), size=(.02, .04, .04)),
                 material=mw.Material(eps_r=self.log_substrate_eps.exp(), sigma_e=.1,
                     debye_poles=medium.debye_poles, drude_poles=medium.drude_poles,
-                    lorentz_poles=medium.lorentz_poles, mu_lorentz_poles=medium.mu_lorentz_poles)))
+                    lorentz_poles=medium.lorentz_poles, mu_lorentz_poles=medium.mu_lorentz_poles))))
             return scene
     model = LocalMaterialDesign()
     energy, result = _objective(model, "dissipated_energy")
@@ -207,16 +207,15 @@ class BlochFoilDesign(FoilDesign):
         scene = super().to_scene()
         foil = mw.Structure(name="foil", geometry=mw.Box(position=(0., 0., 0.), size=(0., .06, .06)),
                             material=scene.structures[0].material)
-        return scene.clone(boundary=(mw.BoundarySpec.faces(default="bloch", x="pml", num_layers=2,
+        return scene.updated(boundary=mw.BoundarySpec.faces(default="bloch", x="pml", num_layers=2,
                       bloch_wavevector=(0., 7., 11.)) if self.phase == "pml" else
-                      mw.BoundarySpec.bloch(wavevector=(0., 7., 11.)) if self.phase else mw.BoundarySpec.periodic()),
-            ports=(), structures=(foil,), sources=(mw.UniformCurrentSource(name="drive", center=(-.015, 0., -.0025),
+                      mw.BoundarySpec.bloch(wavevector=(0., 7., 11.)) if self.phase else mw.BoundarySpec.periodic(), ports=(), structures=(foil,), sources=(mw.UniformCurrentSource(name="drive", center=(-.015, 0., -.0025),
                 size=(.005, .005, .005), polarization="Ez", source_time=mw.CW(3.e9, amplitude=1e4)),))
 
     def simulation(self):
-        simulation = mw.Simulation.fdtd(self, frequency=3.e9, run_time=mw.TimeConfig(time_steps=48),
-            cuda_graph=self.graph, spectral_sampler=mw.SpectralSampler(window="none"))
-        simulation.config.adjoint_checkpoint_stride = self.stride
+        simulation = mw.Simulation.fdtd(self, frequencies=3.e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=48),
+            cuda_graph=self.graph, spectral_sampler=mw.fdtd.SpectralSampler(window="none")))
+        simulation.config = replace(simulation.config, adjoint_checkpoint_stride=self.stride)
         return simulation
 
 
@@ -259,7 +258,7 @@ def test_periodic_foil_graph_and_checkpoint_partition_gradient_agree(phase):
     for graph, stride in ((False, 1), (True, 7), (True, 13)):
         model = BlochFoilDesign(phase=phase, graph=graph, stride=stride)
         energy, result = _objective(model, "dissipated_energy")
-        field = result.monitor("probe")["data"].abs().square().sum()
+        field = result.monitor("probe", freq_index=0).sel(component="Ez").values.abs().square().sum()
         objective = energy / energy.detach() + field / field.detach()
         objective.backward()
         evaluated.append(torch.stack((energy.detach(), field.detach(), model.log_thickness.grad, model.log_conductivity.grad)))

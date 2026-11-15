@@ -14,27 +14,27 @@ def test_actual_native_planes_match_points_and_full_electric_loss(metal,sigma,gr
     frequencies=(.8e9,1e9,1.2e9);bounds=((-0.015,.015),(-.012,.012),(-.007,.007))
     cpu=printed_line_scene('stripline',dx=.0025,longitudinal_dl=.0025,metal=metal,sigma_e=sigma,
         axial_half_length=.06,port_separation=.06,transverse_padding=.02,
-        transverse_refinement_radius=.02,device='cpu')
+        transverse_refinement_radius=.02)
     planes,plane_schema=regional_monitors(cpu,bounds,frequencies,observation='planes')
     points,point_schema=regional_monitors(cpu,bounds,frequencies)
     monitors=[*planes,*(monitor for monitor in points if isinstance(monitor,mw.PointMonitor))]
-    cpu=cpu.clone(monitors=monitors)
+    cpu=cpu.updated(monitors=monitors)
     gpu=printed_line_scene('stripline',dx=.0025,longitudinal_dl=.0025,metal=metal,sigma_e=sigma,
         axial_half_length=.06,port_separation=.06,transverse_padding=.02,
-        transverse_refinement_radius=.02,device='cuda')
+        transverse_refinement_radius=.02)
     ports,groups=physical_sources(gpu,'stripline',.0025)
     active=groups[0]
-    gpu=gpu.clone(monitors=monitors,ports=[port_copy(port,None if port.name in active else mw.SeriesRLC(r=50.))
+    gpu=gpu.updated(monitors=monitors, ports=[port_copy(port,None if port.name in active else mw.rf.SeriesRLC(r=50.))
         for port in ports])
-    execution=mw.Simulation.fdtd(gpu,frequencies=frequencies,cuda_graph=graph,full_field_dft=True,
-        run_time=mw.TimeConfig(time_steps=1024),spectral_sampler=mw.SpectralSampler(window='none',normalize_source=False),
-        excitations=[mw.PortExcitation(name,source_time=mw.GaussianPulse(1e9,fwidth=.8e9)) for name in active]).prepare()
+    execution=mw.Simulation.fdtd(gpu,frequencies=frequencies,config=mw.FDTDConfig(cuda_graph=graph,full_field_dft=True,
+        run_time=mw.TimeConfig(time_steps=1024),spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=False)),
+        excitations=[mw.rf.PortExcitation(name,source_time=mw.GaussianPulse(1e9,fwidth=.8e9)) for name in active]).prepare()
     result=execution.run()
     assert execution.solver._cuda_graph_active==graph
     assert execution.solver._observer_cuda_graph_active==graph
     plane=regional_plane_power(result,cpu,plane_schema,bounds)
     point=regional_power(result,cpu,point_schema,bounds)
-    full=result.power_loss('line_roi_bulk').conduction.detach().cpu()
+    full=result.monitor('line_roi_bulk').conduction.detach().cpu()
     torch.testing.assert_close(torch.tensor(plane['bulk_conduction_w'],dtype=torch.float64),full,rtol=3e-6,atol=1e-18)
     for channel in ('bulk_conduction_w','copper_film_w','net_outward_flux_w'):
         torch.testing.assert_close(torch.as_tensor(plane[channel],dtype=torch.float64),

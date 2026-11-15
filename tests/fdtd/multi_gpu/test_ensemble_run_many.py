@@ -20,52 +20,61 @@ from witwin.maxwell.execution import (
     run_many,
 )
 
+
+def _snapshot(result):
+    """Last-step real fields by Yee component (Result.time_snapshot, as plain tensors)."""
+    return {name: data.values for name, data in result.time_snapshot.items()}
+
+
 _FREQUENCY = 1.0e9
 
 
-def _vacuum_scene(*, device, amplitude=1.0, trainable=False):
+def _vacuum_scene(*, amplitude=1.0, trainable=False):
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.25, 0.25), (-0.25, 0.25))),
-        grid=mw.GridSpec.uniform(0.05),
-        boundary=mw.BoundarySpec.none(),
-        device=device,
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=amplitude),
-            name="src",
-        )
-    )
-    scene.add_monitor(
-        mw.PointMonitor(
-            "probe",
-            (0.0, 0.0, 0.0),
-            fields=("Ex", "Ey", "Ez"),
-        )
-    )
+                subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.25, 0.25), (-0.25, 0.25))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.none(),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=amplitude),
+                name="src",
+            ),
+            ),
+                monitors=(
+            mw.PointMonitor(
+                "probe",
+                (0.0, 0.0, 0.0),
+                fields=("Ex", "Ey", "Ez"),
+            ),
+            ),
+            )
     if trainable:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=mw.Box(
                     position=(0.0, 0.0, 0.0),
                     size=torch.tensor([0.2, 0.2, 0.2], requires_grad=True),
                 ),
                 material=mw.Material(eps_r=2.0),
-            )
-        )
+            ),
+        ))
     return scene
 
 
-def _sim(scene, *, time_steps=8):
+def _sim(scene, *, time_steps=8, device="cuda"):
     return mw.Simulation.fdtd(
         scene,
-        frequency=_FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            device=device,
+        ),
     )
 
 
@@ -101,20 +110,22 @@ def test_run_many_rejects_non_simulation_and_bad_execution():
 
 def test_ensemble_rejects_trainable_simulation():
     execution = MultiGPUExecution.ensemble(devices=("cuda:0", "cuda:1"))
-    sim = _sim(_vacuum_scene(device="cpu", trainable=True))
+    sim = _sim(_vacuum_scene(trainable=True))
     with pytest.raises(ValueError, match="trainable"):
         build_ensemble_plan([sim], execution)
 
 
 def test_ensemble_rejects_joint_solve_parallel_config():
     execution = MultiGPUExecution.ensemble(devices=("cuda:0", "cuda:1"))
-    scene = _vacuum_scene(device="cpu")
+    scene = _vacuum_scene()
     sim = mw.Simulation.fdtd(
         scene,
-        frequency=_FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=8),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        parallel=mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1")),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=8),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            parallel=mw.fdtd.FDTDParallelConfig(devices=("cuda:0", "cuda:1")),
+        ),
     )
     with pytest.raises(ValueError, match="joint-solve"):
         build_ensemble_plan([sim], execution)
@@ -122,7 +133,7 @@ def test_ensemble_rejects_joint_solve_parallel_config():
 
 def test_ensemble_rejects_shared_scene_object():
     execution = MultiGPUExecution.ensemble(devices=("cuda:0", "cuda:1"))
-    scene = _vacuum_scene(device="cpu")
+    scene = _vacuum_scene()
     sim_a = _sim(scene)
     sim_b = _sim(scene)
     with pytest.raises(ValueError, match="share the same"):
@@ -139,14 +150,14 @@ def test_ensemble_rejects_scene_module_input():
             return self._scene
 
     execution = MultiGPUExecution.ensemble(devices=("cuda:0", "cuda:1"))
-    module = _Module(_vacuum_scene(device="cpu"))
+    module = _Module(_vacuum_scene())
     sim = _sim(module)
     with pytest.raises(ValueError, match="SceneModule"):
         build_ensemble_plan([sim], execution)
 
 
 def test_footprint_estimate_uniform_grid_is_positive_int():
-    scene = _vacuum_scene(device="cpu")
+    scene = _vacuum_scene()
     estimated = estimate_scene_footprint_bytes(scene, frequencies=(_FREQUENCY,))
     assert isinstance(estimated, int)
     assert estimated > 0
@@ -161,7 +172,6 @@ def test_footprint_estimate_returns_none_for_auto_grid():
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.25, 0.25), (-0.25, 0.25))),
         grid=mw.GridSpec.auto(wavelength=0.3),
         boundary=mw.BoundarySpec.none(),
-        device="cpu",
     )
     assert estimate_scene_footprint_bytes(scene, frequencies=(_FREQUENCY,)) is None
 
@@ -172,9 +182,9 @@ def test_footprint_estimate_returns_none_for_auto_grid():
 
 
 def _serial_fields_on_device(scene_kwargs, device):
-    scene = _vacuum_scene(device=str(device), **scene_kwargs)
-    result = _sim(scene).run()
-    return {name: value.detach().clone() for name, value in result.fields.items()}
+    scene = _vacuum_scene(**scene_kwargs)
+    result = _sim(scene, device=device).run()
+    return {name: value.detach().clone() for name, value in _snapshot(result).items()}
 
 
 def test_run_many_matches_serial_and_respects_lease(cuda_p2p_devices, cuda_memory_cleanup):
@@ -183,7 +193,7 @@ def test_run_many_matches_serial_and_respects_lease(cuda_p2p_devices, cuda_memor
 
     amplitudes = (1.0, 2.0, 3.0, 4.0)
     sims = [
-        _sim(_vacuum_scene(device=devices[0], amplitude=amp)) for amp in amplitudes
+        _sim(_vacuum_scene(amplitude=amp)) for amp in amplitudes
     ]
 
     plan = build_ensemble_plan(sims, execution)
@@ -203,16 +213,12 @@ def test_run_many_matches_serial_and_respects_lease(cuda_p2p_devices, cuda_memor
         leased = seq.records[index].device
         assert leased in execution.devices
         # Device lease respected: returned tensors live on the leased device.
-        for tensor in result.fields.values():
+        for tensor in _snapshot(result).values():
             assert str(tensor.device) == leased
-        # Result.scene reports the device its tensors actually live on (the leased
-        # device), not the caller's original scene device: the per-run scene copy
-        # is pinned to the lease instead of being restored to the original.
-        assert str(result.scene.device) == leased
         # Identical to an isolated serial run on the very same device: proves no
         # cross-task state bleed and order fidelity (amplitude drives the field).
         reference = _serial_fields_on_device({"amplitude": amp}, leased)
-        for name, tensor in result.fields.items():
+        for name, tensor in _snapshot(result).items():
             assert torch.equal(tensor, reference[name])
 
 
@@ -220,13 +226,13 @@ def test_run_many_end_to_end_orders_results(cuda_p2p_devices, cuda_memory_cleanu
     devices = tuple(str(device) for device in cuda_p2p_devices)
     execution = MultiGPUExecution.ensemble(devices=devices, max_concurrency=2)
     sims = [
-        _sim(_vacuum_scene(device=devices[0], amplitude=amp)) for amp in (1.0, 5.0)
+        _sim(_vacuum_scene(amplitude=amp)) for amp in (1.0, 5.0)
     ]
     seq = run_many(sims, execution=execution)
     assert len(seq) == 2
     assert not seq.failed
     # Larger amplitude yields a strictly larger peak |Ez|; order must be preserved.
-    peaks = [float(torch.abs(seq[i].fields["EZ"]).max()) for i in range(2)]
+    peaks = [float(torch.abs(_snapshot(seq[i])["EZ"]).max()) for i in range(2)]
     assert peaks[1] > peaks[0]
 
 
@@ -235,14 +241,14 @@ def test_run_many_isolates_a_failing_task(cuda_p2p_devices, cuda_memory_cleanup)
     execution = MultiGPUExecution.ensemble(
         devices=devices, max_concurrency=2, fail_fast=False
     )
-    good = _sim(_vacuum_scene(device=devices[0], amplitude=1.0))
-    bad = _sim(_vacuum_scene(device=devices[0], amplitude=1.0))
+    good = _sim(_vacuum_scene(amplitude=1.0))
+    bad = _sim(_vacuum_scene(amplitude=1.0))
     # Inject a deterministic failure inside the worker after device binding.
     def _boom():
         raise RuntimeError("injected task failure")
 
     bad.run = _boom
-    good2 = _sim(_vacuum_scene(device=devices[0], amplitude=2.0))
+    good2 = _sim(_vacuum_scene(amplitude=2.0))
 
     seq = run_many([good, bad, good2], execution=execution)
     assert not isinstance(seq.entries[0], DistributedFailure)

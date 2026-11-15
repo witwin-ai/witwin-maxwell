@@ -15,7 +15,7 @@ from witwin.maxwell.mom.layered.build import build_extension
 from tests.support.layered_green_oracle import C0, homogeneous, spatial, spectral
 
 
-pytestmark = pytest.mark.cuda
+pytestmark = [pytest.mark.cuda, pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")]
 
 
 def rfic_stack():
@@ -256,3 +256,23 @@ def test_image_budget_keeps_the_green_function(rfic):
             assert ((kept - full).abs().amax(-1) <= 1e-10 * scale).all()
     with pytest.raises(ValueError, match="thinnest layer"):
         LayeredGreenTable.build(stack, planes, (1e9,), 40e-6, device="cuda", extract_distance=.05e-6)
+
+
+def test_pec_plane_rows_use_the_family_floor():
+    """A tangential row with one end on a PEC plane cancels against its image to roundoff (~1e-14 of its
+    family); the horizontal admission floors it at 1e-6 of the frequency/component family maximum (the C1
+    rule), so the accurate {0 PEC, 100, 110} um via-stack table admits. Before the floor it read 6e4."""
+    import math
+    stack = LayerStack((Layer("gaas", 100e-6, 12.9), Layer("polymer", 10e-6, 3.0)), "pec", HalfSpace())
+    planes = (0.0, 100e-6, 110e-6)
+    build = lambda: LayeredGreenTable.build(stack, planes, (1e9,), 1.01 * math.hypot(1e-3, 50e-6), device="cuda",
+                                            extract_distance=2 * math.sqrt(2) * 50e-6)
+    table = build()
+    assert table.interpolation_error.item() <= 1e-6
+    ext = build_extension()
+    coarse, grid = table.remainder[..., ::2].contiguous(), table.rho[::2].contiguous()
+    error = ext.admission(coarse, ext.slopes(coarse, grid), table.remainder[..., 1::2].contiguous(), grid,
+                          table.image_offsets, table.image_distances, table.image_coefficients)
+    assert torch.equal(error, table.interpolation_error)
+    again = build()
+    assert torch.equal(again.remainder, table.remainder) and torch.equal(again.interpolation_error, table.interpolation_error)

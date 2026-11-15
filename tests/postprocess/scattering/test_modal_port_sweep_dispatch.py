@@ -13,24 +13,21 @@ _FREQUENCIES = (2.9e8, 3.0e8, 3.1e8)
 
 def _scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=2),
-        device="cpu",
-    )
-    scene.add_port(
-        mw.ModePort("left", position=(-0.5, 0.0, 0.0), size=(0.0, 0.6, 0.6),
-                    direction="+", polarization="Ez", monitor_offset=0.1)
-    )
-    scene.add_port(
-        mw.ModePort("right", position=(0.5, 0.0, 0.0), size=(0.0, 0.6, 0.6),
-                    direction="-", polarization="Ez", monitor_offset=-0.1)
-    )
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.pml(num_layers=2),
+                ports=(
+            mw.ModePort("left", position=(-0.5, 0.0, 0.0), size=(0.0, 0.6, 0.6),
+                        direction="+", polarization="Ez", monitor_offset=0.1),
+            mw.ModePort("right", position=(0.5, 0.0, 0.0), size=(0.0, 0.6, 0.6),
+                        direction="-", polarization="Ez", monitor_offset=-0.1),
+            ),
+            )
     return scene
 
 
 def test_fdtd_simulation_stores_modal_port_sweep_without_rf_excitations():
-    sweep = mw.ModalPortSweep(modes={"left": (0, 1)})
+    sweep = mw.rf.ModalPortSweep(modes={"left": (0, 1)})
     simulation = mw.Simulation.fdtd(_scene(), frequencies=_FREQUENCIES, excitations=sweep)
 
     assert simulation.modal_port_sweep is sweep
@@ -49,19 +46,18 @@ def test_non_fdtd_backends_reject_modal_port_sweep():
         domain=mw.Domain(bounds=((-1.0, 1.0), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.pml(num_layers=2),
-        device="cpu",
     )
     with pytest.raises(ValueError, match=r"Simulation\.fdtd\(\.\.\.\) only"):
         mw.Simulation(
             scene=scene,
             method=mw.SimulationMethod.FDFD,
             frequencies=(3.0e8,),
-            excitations=mw.ModalPortSweep(),
+            excitations=mw.rf.ModalPortSweep(),
         )
 
 
 def test_run_dispatches_to_run_modal_port_sweep(monkeypatch):
-    sweep = mw.ModalPortSweep(run_only=("left::Ez0",))
+    sweep = mw.rf.ModalPortSweep(run_only=("left::Ez0",))
     simulation = mw.Simulation.fdtd(_scene(), frequencies=_FREQUENCIES, excitations=sweep)
     calls = []
     sentinel = object()
@@ -74,3 +70,13 @@ def test_run_dispatches_to_run_modal_port_sweep(monkeypatch):
 
     assert simulation.run() is sentinel
     assert calls == [(simulation, sweep, {})]
+
+
+def test_modal_port_sweep_refuses_a_material_cache_it_would_not_apply():
+    sweep = mw.rf.ModalPortSweep(run_only=("left::Ez0",))
+    simulation = mw.Simulation.fdtd(_scene(), frequencies=_FREQUENCIES, excitations=sweep,
+                                    config=mw.FDTDConfig(material_cache=mw.fdtd.FDTDMaterialCache()))
+
+    with pytest.raises(mw.UnsupportedFeatureError, match="ModalPortSweep runs each column") as error:
+        simulation.run()
+    assert error.value.method == "fdtd" and error.value.feature.startswith("guard:")

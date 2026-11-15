@@ -106,7 +106,7 @@ def test_body_kinds_and_scene_formulation():
     with pytest.raises(NotImplementedError, match='combined-field'):
         scene_formulation([mw.Structure(mw.Sphere(radius=1), mw.Material.pec())])
     with pytest.raises(NotImplementedError, match='impedance sheets'):
-        scene_formulation([mw.Structure(mw.Box(size=(1, 1, 0)), mw.Medium2D(sigma_s=1e-3))])
+        scene_formulation([mw.Structure(mw.Box(size=(1, 1, 0)), mw.media.Medium2D(sigma_s=1e-3))])
     with pytest.raises(ValueError, match='dielectric sheet'):
         body_kind(mw.Structure(mw.Box(size=(1, 1, 0)), mw.Material(eps_r=2)))
     with pytest.raises(ValueError, match='exactly one zero'):
@@ -173,7 +173,7 @@ def test_open_mesh_rejects_junctions_and_refines_conformingly():
 def test_pmchwt_scope_rejects_sheet_bodies_by_formulation():
     from witwin.maxwell.mom.physics import validate_scene_structure
     scene = mw.Scene(structures=[mw.Structure(mw.Box(size=(1, 1, 0)), mw.Material.pec())],
-                     sources=[mw.PlaneWave()], device='cpu')
+                     sources=[mw.PlaneWave()])
     with pytest.raises(ValueError, match="'efie_open_pec' formulation"):
         validate_scene_structure(scene, 1e9)
     assert len(validate_scene_structure(scene, 1e9, formulation='efie_open_pec')) == 1

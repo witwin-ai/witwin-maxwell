@@ -17,6 +17,7 @@ from .checkpoint import (
     restore_checkpoint_state,
     validate_checkpoint_state,
 )
+from ..errors import UnsupportedFeatureError
 
 
 _RESUME_SCHEMA_VERSION = 6
@@ -154,24 +155,13 @@ class FDTDResumeCheckpoint:
             tensors=dict(payload["physics_tensors"]),
         )
         validate_checkpoint_state(physics)
-        auxiliary = dict(payload["auxiliary"])
-        modulation_time = auxiliary.get("modulation_time")
-        if modulation_time is not None and "modulation_step" not in auxiliary:
-            # The saved step counts completed updates. Old FP32 accumulated times
-            # are lossy; reconstruct the intended endpoints from that exact index.
-            dt = float(payload["dt"])
-            auxiliary["modulation_time"] = modulation_time.new_tensor(
-                [((step - 2) if step else -1) * dt, (step - 1) * dt],
-                dtype=torch.float64,
-            )
-            auxiliary["modulation_step"] = modulation_time.new_tensor([step - 1], dtype=torch.int64)
         return cls(
             step=step,
             total_steps=int(payload["total_steps"]),
             dt=float(payload["dt"]),
             physics=physics,
             signature=dict(payload["signature"]),
-            auxiliary=auxiliary,
+            auxiliary=dict(payload["auxiliary"]),
         )
 
 
@@ -193,8 +183,9 @@ def _additive_j_signature(solver) -> dict[str, str]:
 def _preflight_additive_j_timing(solver, signature) -> None:
     # Before this metadata existed, additive electric currents sampled at n*dt.
     if _additive_j_signature(solver) and signature.get("additive_j_injection", "n") != "n+1/2":
-        raise NotImplementedError(
-            "checkpoint predates the additive-J n+1/2 source timing; re-run from the start"
+        raise UnsupportedFeatureError(
+            "checkpoint predates the additive-J n+1/2 source timing; re-run from the start",
+            feature="guard:abad252c", method="fdtd"
         )
 
 
@@ -211,8 +202,9 @@ def _pulsed_tfsf_signature(solver) -> dict[str, str]:
 def _preflight_pulsed_tfsf_reference(solver, signature) -> None:
     if (_pulsed_tfsf_signature(solver)
             and signature.get("pulsed_tfsf_reference") != "physical_entry_plane"):
-        raise NotImplementedError(
-            "checkpoint predates the pulsed TFSF physical entry-plane reference; re-run from the start"
+        raise UnsupportedFeatureError(
+            "checkpoint predates the pulsed TFSF physical entry-plane reference; re-run from the start",
+            feature="source.injection_tfsf", method="fdtd"
         )
 
 
@@ -236,8 +228,9 @@ def _tfsf_termination_signature(solver):
 def _preflight_tfsf_termination(solver, signature):
     expected = _tfsf_termination_signature(solver)
     if any(signature.get(key) != value for key, value in expected.items()):
-        raise NotImplementedError(
-            "checkpoint predates the qualified TFSF auxiliary-line termination; re-run from the start"
+        raise UnsupportedFeatureError(
+            "checkpoint predates the qualified TFSF auxiliary-line termination; re-run from the start",
+            feature="source.injection_tfsf", method="fdtd"
         )
 
 
@@ -260,15 +253,17 @@ def _tfsf_timing_signature(solver):
 def _preflight_tfsf_timing(solver, signature):
     if (_tfsf_timing_signature(solver)
             and signature.get("tfsf_incident_timing") != "physical_yee_v2"):
-        raise NotImplementedError(
-            "checkpoint predates the physical TFSF incident timing; re-run from the start")
+        raise UnsupportedFeatureError(
+            "checkpoint predates the physical TFSF incident timing; re-run from the start",
+            feature="source.injection_tfsf", method="fdtd")
 
 
 def _preflight_observer_origin(solver, signature):
     expected = _observer_origin_signature(solver)
     if any(signature.get(key) != value for key, value in expected.items()):
-        raise NotImplementedError(
-            "checkpoint lacks the physical Yee observer origin or compiled provider reference; re-run from the start")
+        raise UnsupportedFeatureError(
+            "checkpoint lacks the physical Yee observer origin or compiled provider reference; re-run from the start",
+            feature="guard:6c09f708", method="fdtd")
 
 
 def _solver_signature(solver) -> dict[str, object]:
@@ -406,7 +401,7 @@ def _configuration_fingerprint(solver) -> str:
     termination = _tfsf_termination_signature(solver)
     if termination:
         _hash_value(hasher, "tfsf_auxiliary_termination", termination)
-    chart=getattr(solver.scene,"coordinates",None)
+    chart=getattr(solver.scene.scene,"coordinates",None)
     _hash_value(hasher, "coordinate_frame",None if chart is None else chart.snapshot())
     _hash_value(hasher, "time_plan", _without_derived_time_plan_keys(getattr(solver, "_time_plan", None)))
     _hash_value(
@@ -420,10 +415,11 @@ def _configuration_fingerprint(solver) -> str:
     _hash_value(hasher, "port_excitations", getattr(solver, "_port_excitations", ()))
     _hash_value(hasher, "material_model", _without_unset_material_keys(getattr(solver, "_compiled_material_model", None)))
     _hash_value(hasher, "gyromagnetic_layout", getattr(solver, "_gyromagnetic_layout", None))
-    _hash_value(hasher, "boundary", solver.scene.boundary)
-    if getattr(solver.scene, "internal_absorbers", ()):
-        _hash_value(hasher, "internal_absorbers", tuple(solver.scene.internal_absorbers))
-    _hash_value(hasher, "monitors", solver.scene.monitors)
+    _hash_value(hasher, "boundary", solver.scene.scene.boundary)
+    if solver.scene.scene.internal_absorbers:
+        _hash_value(hasher, "internal_absorbers", tuple(solver.scene.scene.internal_absorbers))
+    # Hashed as the list the prepared scene held before 0.7.0, so existing checkpoints still resume.
+    _hash_value(hasher, "monitors", list(solver.scene.scene.monitors))
     breakdown = getattr(solver, "breakdown_runtime", None)
     if breakdown is not None:
         _hash_value(hasher, "breakdown.layout", breakdown["layout"])
@@ -499,7 +495,7 @@ def _configuration_fingerprint(solver) -> str:
         # Coalesced GPU sums can differ in their last float64 bit. Identity is
         # the exact physical geometry and metric, not a reduction's summation
         # order. This still rejects every changed physical vertex/topology.
-        for index, structure in enumerate(solver.scene.structures):
+        for index, structure in enumerate(solver.scene.scene.structures):
             if getattr(structure.geometry, "kind", None) == "surface_mesh":
                 for name in ("vertices", "triangles", "position", "rotation", "physical_thickness"):
                     _hash_value(hasher, f"cut_surface.geometry[{index}].{name}", getattr(structure.geometry, name))

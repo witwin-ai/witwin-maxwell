@@ -7,7 +7,7 @@ import copy
 import math
 import torch
 from .volume_h_snapshot import _digest
-from .harmonic_state import HarmonicCoupledState, preparation_signature
+from .harmonic_recovery import HarmonicCoupledState, preparation_signature
 from .static_tensor_snapshot import (snapshot_static_tensor_response,
     restore_static_tensor_response, _preparation, _volume)
 from .tensor_medium import sampled_medium_payload

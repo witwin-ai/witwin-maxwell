@@ -34,7 +34,7 @@ def main():
     assert os.environ.get("WITWIN_MAXWELL_THIN_SHEET_KERNEL", "fused") == "fused"
     torch.cuda.set_per_process_memory_fraction(5 * 1024**3 / torch.cuda.get_device_properties(0).total_memory)
     prepared = mw.Simulation.fdtd(_scene(SCENARIOS[args.scenario], True), frequencies=[2.4e9],
-                                  run_time=mw.TimeConfig(time_steps=1)).prepare()
+                                  config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare()
     solver = prepared.solver
     sheet = solver._thin_sheets[0]
     replay = _make_field_update_runner(solver, True)

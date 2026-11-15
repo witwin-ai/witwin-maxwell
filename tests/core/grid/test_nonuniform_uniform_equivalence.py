@@ -31,40 +31,41 @@ def _boundary_spec(boundary_kind):
     return mw.BoundarySpec(kind=boundary_kind)
 
 
-def _cpml_config(boundary_kind):
+def _cpml(boundary_kind):
     if boundary_kind == "pml_slab":
-        return {"memory_mode": "slab"}
-    return None
+        return mw.fdtd.CPMLConfig(memory_mode="slab")
+    return mw.fdtd.CPMLConfig()
 
 
 def _dipole_scene(domain_bounds, grid, boundary_kind):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=domain_bounds),
-        grid=grid,
-        boundary=_boundary_spec(boundary_kind),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.1,
-            source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=domain_bounds),
+                grid=grid,
+                boundary=_boundary_spec(boundary_kind),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.1,
+                source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
+                name="src",
+            ),
+            ),
+            )
     return scene
 
 
-def _run_fields(scene, cpml_config=None):
+def _run_fields(scene, cpml):
     prepared = mw.Simulation.fdtd(
         scene,
-        frequency=1.0e9,
+        frequencies=1.0e9,
         # The mixed case deliberately exercises the CPML kernels: pin CPML explicitly.
-        absorber="cpml",
-        cpml_config=cpml_config,
-        run_time=mw.TimeConfig(time_steps=40),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            absorber="cpml",
+            cpml=cpml,
+            run_time=mw.TimeConfig(time_steps=40),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).prepare()
     prepared.solver.solve(time_steps=40, dft_frequency=None, dft_window="none", full_field_dft=False)
     fields = {}
@@ -95,8 +96,8 @@ def test_custom_constant_grid_matches_uniform_bitwise(boundary_kind):
         "xyz",
         (prepared_uniform.x_nodes64, prepared_uniform.y_nodes64, prepared_uniform.z_nodes64),
     ):
-        low = prepared_uniform.pml_thickness_for_face(axis, "low")
-        high = prepared_uniform.pml_thickness_for_face(axis, "high")
+        low = prepared_uniform.scene.pml_thickness_for_face(axis, "low")
+        high = prepared_uniform.scene.pml_thickness_for_face(axis, "high")
         stop = len(nodes) - high if high else len(nodes)
         physical_nodes.append(nodes[low:stop])
     custom_grid = mw.GridSpec.custom(*physical_nodes)
@@ -106,9 +107,9 @@ def test_custom_constant_grid_matches_uniform_bitwise(boundary_kind):
     )
     custom_scene = _dipole_scene(custom_bounds, custom_grid, boundary_kind)
 
-    cpml_config = _cpml_config(boundary_kind)
-    uniform_fields = _run_fields(uniform_scene, cpml_config)
-    custom_fields = _run_fields(custom_scene, cpml_config)
+    cpml = _cpml(boundary_kind)
+    uniform_fields = _run_fields(uniform_scene, cpml)
+    custom_fields = _run_fields(custom_scene, cpml)
 
     assert set(uniform_fields) == set(custom_fields)
     for name, uniform_value in uniform_fields.items():
@@ -130,30 +131,29 @@ class _DesignScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=self._bounds),
-            grid=self._grid,
-            boundary=mw.BoundarySpec(kind="pec"),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.18),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=self._bounds),
+                    grid=self._grid,
+                    boundary=mw.BoundarySpec(kind="pec"),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.18),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -161,10 +161,12 @@ def _adjoint_gradient(model):
     result = mw.Simulation.fdtd(
         model,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=80),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=80),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).sel(component="Ez").values
     loss = (data * data.conj()).real if data.is_complex() else data * data
     loss.backward()
     return model.logits.grad.detach().clone()

@@ -84,20 +84,19 @@ def test_sqmr_converges_on_complex_symmetric_system(preconditioned):
 
 def _dipole_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.16, 0.16), (-0.16, 0.16), (-0.16, 0.16))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=4.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization=(0.0, 0.0, 1.0),
-            width=0.05,
-            source_time=mw.CW(frequency=1e9, amplitude=100.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.16, 0.16), (-0.16, 0.16), (-0.16, 0.16))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=4.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization=(0.0, 0.0, 1.0),
+                width=0.05,
+                source_time=mw.CW(frequency=1e9, amplitude=100.0),
+                name="src",
+            ),
+            ),
+            )
     return scene
 
 
@@ -106,14 +105,14 @@ def _dipole_scene():
 def test_engines_run_through_public_fdfd_path(engine):
     result = mw.Simulation.fdfd(
         _dipole_scene(),
-        frequency=1e9,
-        solver=mw.GMRES(max_iter=400, tol=1e-6, solver_type=engine),
+        frequencies=1e9,
+        config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(max_iter=400, tol=1e-6, solver_type=engine)),
     ).run()
     stats = result.stats()
     assert stats["solver"]["type"] == engine
     assert stats["final_residual"] is not None
     for name in ("EX", "EY", "EZ"):
-        assert torch.isfinite(result.fields[name].abs()).all()
+        assert torch.isfinite(result.fields[name].values.abs()).all()
 
 
 @requires_cuda
@@ -123,9 +122,11 @@ def test_double_precision_sqmr_ssor_converges_where_single_floors():
     def run(precision):
         return mw.Simulation.fdfd(
             _dipole_scene(),
-            frequency=1e9,
-            solver=mw.GMRES(max_iter=3000, tol=1e-6, solver_type="sqmr",
-                            preconditioner="ssor", precision=precision),
+            frequencies=1e9,
+            config=mw.FDFDConfig(
+                solver=mw.fdfd.FDFDSolverConfig(max_iter=3000, tol=1e-6, solver_type="sqmr",
+                                preconditioner="ssor", precision=precision),
+            ),
         ).run()
 
     single = run("single")
@@ -136,7 +137,7 @@ def test_double_precision_sqmr_ssor_converges_where_single_floors():
     assert stats["solver"]["precision"] == "double"
     assert stats["final_residual"] < 2e-6
     for name in ("EX", "EY", "EZ"):
-        field = double.fields[name]
+        field = double.fields[name].values
         assert field.dtype == torch.complex128  # Requested precision includes returned fields.
         assert torch.isfinite(field.abs()).all()
 
@@ -145,14 +146,16 @@ def test_double_precision_sqmr_ssor_converges_where_single_floors():
 def test_precision_and_ssor_omega_reach_solver():
     solver = mw.Simulation.fdfd(
         _dipole_scene(),
-        frequency=1e9,
-        solver=mw.GMRES(solver_type="sqmr", preconditioner="ssor",
-                        precision="double", ssor_omega=0.7),
+        frequencies=1e9,
+        config=mw.FDFDConfig(
+            solver=mw.fdfd.FDFDSolverConfig(solver_type="sqmr", preconditioner="ssor",
+                            precision="double", ssor_omega=0.7),
+        ),
     ).prepare().solver
     assert solver.precision == "double"
     assert solver.ssor_omega == 0.7
     with pytest.raises(ValueError):
         mw.Simulation.fdfd(
-            _dipole_scene(), frequency=1e9,
-            solver=mw.GMRES(precision="quad"),
+            _dipole_scene(), frequencies=1e9,
+            config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(precision="quad")),
         ).prepare()

@@ -105,8 +105,7 @@ def test_dual_volume_rejects_disconnected_or_mixed_fold_kinds(kind):
 
 def _coarse_compile(mesh, *, material=None, boundary=None):
     scene = prepare_scene(mw.Scene(domain=mw.Domain(bounds=((-3., 3.),) * 3),
-                                   grid=mw.GridSpec.uniform(1.), device="cpu",
-                                   boundary=boundary or mw.BoundarySpec.faces(default="pec")))
+                                   grid=mw.GridSpec.uniform(1.), boundary=boundary or mw.BoundarySpec.faces(default="pec")), device="cpu")
     return compile_thin_sheet(scene, SimpleNamespace(geometry=mesh, material=material or mw.Material.pec()))
 
 
@@ -134,7 +133,7 @@ def test_saddle_with_four_crossings_of_one_face_is_rejected():
     scene = prepare_scene(mw.Scene(
         domain=mw.Domain(bounds=((0., 1.), (0., 1.), (-1., 1.))),
         grid=mw.GridSpec.custom([0., 1.], [0., 1.], [-1., 0., 1.]),
-        boundary=mw.BoundarySpec.faces(default="pec"), device="cpu"))
+        boundary=mw.BoundarySpec.faces(default="pec")), device="cpu")
     with pytest.raises(NotImplementedError, match="A Yee face is cut more than once"):
         compile_thin_sheet(scene, SimpleNamespace(geometry=mesh, material=mw.Material.pec()))
 
@@ -149,7 +148,7 @@ def test_mass_partition_cannot_reach_across_a_nearby_prism_wall():
 
 
 def _bent(**kwargs):
-    return mw.SurfaceMesh.bent_rectangle(width=0.06, length=0.05, radius=0.04, segments=8,
+    return mw.geometry.SurfaceMesh.bent_rectangle(width=0.06, length=0.05, radius=0.04, segments=8,
                                          position=(0.001, 0.0013, -0.0207), **kwargs)
 
 
@@ -168,13 +167,13 @@ MESHES = {"bent": _bent, "vee": _vee, "prism": _prism}
 def _structure(kind, material):
     if material == "pec":
         return mw.Structure(geometry=MESHES[kind](sheet_model="conformal_two_sided"), material=h.pec_material())
-    foil = mw.CopperFoil(**FOIL) if material == "copper" else material
+    foil = mw.media.CopperFoil(**FOIL) if material == "copper" else material
     return mw.Structure(geometry=MESHES[kind](), material=foil)
 
 
 def _complex(kind, material):
-    scene = prepare_scene(runtime_tests._cavity(_structure(kind, material)))
-    return compile_thin_sheet(scene, scene.structures[0])
+    scene = prepare_scene(runtime_tests._cavity(_structure(kind, material)), device="cpu")
+    return compile_thin_sheet(scene, scene.scene.structures[0])
 
 
 def test_facets_and_folds_are_extracted():
@@ -272,11 +271,11 @@ def _wedge_reference(surface, lower, upper, columns=4000, rows=64):
 
 def test_planar_trace_widths_are_exact_strip_widths():
     """A straight cut's trace width is exactly dual * sqrt(1 - n_a^2) of its face axis (no length round trip)."""
-    foil = mw.CopperFoil(**FOIL)
+    foil = mw.media.CopperFoil(**FOIL)
     structure = mw.Structure(geometry=h.rectangle_mesh(runtime_tests.CENTER, runtime_tests.NORMAL, 0.03, 0.025),
                              material=foil)
-    scene = prepare_scene(runtime_tests._cavity(structure))
-    complex_ = compile_thin_sheet(scene, scene.structures[0])
+    scene = prepare_scene(runtime_tests._cavity(structure), device="cpu")
+    complex_ = compile_thin_sheet(scene, scene.scene.structures[0])
     from witwin.maxwell.compiler.thin_sheet import _dual_extent
     normal = sheet_surface(structure.geometry).facets[0].normal
     candidates = set()
@@ -303,8 +302,8 @@ def test_spanning_faceted_complex_never_mixes_sides(kind, material):
 
 @pytest.mark.parametrize("kind", ["bent", "vee", "prism"])
 def test_faceted_circulations_are_exact_for_linear_fields(kind):
-    scene = prepare_scene(runtime_tests._cavity(_structure(kind, "copper")))
-    complex_ = compile_thin_sheet(scene, scene.structures[0])
+    scene = prepare_scene(runtime_tests._cavity(_structure(kind, "copper")), device="cpu")
+    complex_ = compile_thin_sheet(scene, scene.scene.structures[0])
     spacing = max(float(np.diff(getattr(scene, axis + "_nodes64")).max()) for axis in "xyz")
     runtime_tests._check_chord_structure_and_circulations(complex_, spacing)
 
@@ -312,7 +311,7 @@ def test_faceted_circulations_are_exact_for_linear_fields(kind):
 def _chord_structure(kind, material):
     if kind == "plate":
         kwargs = dict(sheet_model="conformal_two_sided") if material == "pec" else {}
-        return runtime_tests._plate(h.pec_material() if material == "pec" else mw.CopperFoil(**FOIL), **kwargs)
+        return runtime_tests._plate(h.pec_material() if material == "pec" else mw.media.CopperFoil(**FOIL), **kwargs)
     return _structure(kind, material)
 
 
@@ -333,8 +332,8 @@ def test_chord_complex_preserves_pec_operator(kind):
     """V2/V7 structural: unchanged historical PEC and identical held-chord operator."""
     complexes = []
     for material in ("pec", "copper"):
-        scene = prepare_scene(runtime_tests._cavity(_chord_structure(kind, material)))
-        complexes.append(compile_thin_sheet(scene, scene.structures[0]))
+        scene = prepare_scene(runtime_tests._cavity(_chord_structure(kind, material)), device="cpu")
+        complexes.append(compile_thin_sheet(scene, scene.scene.structures[0]))
     pec, copper = complexes
     arrays = ("k_rows", "k_cols", "k_vals", "e_volume", "h_area", "h_true_area", "h_dual")
     digest = hashlib.sha256(b"".join(getattr(pec, name).tobytes() for name in arrays)).hexdigest()
@@ -350,18 +349,18 @@ def test_chord_complex_preserves_pec_operator(kind):
 
 @pytest.mark.parametrize("kind", ["plate", "bent", "vee", "prism"])
 def test_chord_complex_structure_and_linear_circulations(kind):
-    scene = prepare_scene(runtime_tests._cavity(_chord_structure(kind, "copper")))
+    scene = prepare_scene(runtime_tests._cavity(_chord_structure(kind, "copper")), device="cpu")
     spacing = max(float(np.diff(getattr(scene, axis + "_nodes64")).max()) for axis in "xyz")
-    runtime_tests._check_chord_structure_and_circulations(compile_thin_sheet(scene, scene.structures[0]), spacing)
+    runtime_tests._check_chord_structure_and_circulations(compile_thin_sheet(scene, scene.scene.structures[0]), spacing)
 
 
 @pytest.mark.parametrize("normal", [(0., 0., 1.), (1., 1., 0.)], ids=["aligned", "grid_edge"])
 def test_chord_complex_on_grid_coincidences(normal):
     """V6: only on-sheet pairs belonging to cut-cell loops become chords."""
     structure = mw.Structure(geometry=h.rectangle_mesh((0., 0., 0.), normal, 0.03, 0.025),
-                             material=mw.CopperFoil(**FOIL))
-    scene = prepare_scene(runtime_tests._cavity(structure))
-    c = compile_thin_sheet(scene, scene.structures[0])
+                             material=mw.media.CopperFoil(**FOIL))
+    scene = prepare_scene(runtime_tests._cavity(structure), device="cpu")
+    c = compile_thin_sheet(scene, scene.scene.structures[0])
     if normal == (0., 0., 1.):
         assert c.statistics["on_sheet_traces"] > 0
         assert c.chord_face.shape == (0, 4) and c.sheet_face_area.size == 0 and c.k_c_vals.size == 0
@@ -391,7 +390,7 @@ def _two_facet_plate(angle, **kwargs):
     vertices = np.stack([p - 0.03 * u - 0.025 * v, p - 0.025 * v, p + 0.03 * bend - 0.025 * v,
                          p + 0.03 * bend + 0.025 * v, p + 0.025 * v, p - 0.03 * u + 0.025 * v])
     triangles = [(0, 1, 4), (0, 4, 5), (1, 2, 3), (1, 3, 4)]
-    return mw.SurfaceMesh(vertices, triangles, **kwargs)
+    return mw.geometry.SurfaceMesh(vertices, triangles, **kwargs)
 
 
 FOLD_ANGLES = (1e-4, 1e-5, 1e-6, 1e-7)
@@ -401,6 +400,7 @@ FOLD_ANGLES = (1e-4, 1e-5, 1e-6, 1e-7)
 FOLD_FLOAT32_FLOOR = 1e-5
 
 
+@cuda
 @pytest.mark.parametrize("material", ["pec", "copper"])
 def test_vanishing_fold_converges_to_the_planar_sheet(material):
     """The fold's effect on the cavity fields falls linearly with the fold angle.
@@ -414,11 +414,11 @@ def test_vanishing_fold_converges_to_the_planar_sheet(material):
     kwargs = dict(sheet_model="conformal_two_sided") if material == "pec" else {}
 
     def series(mesh):
-        structure = mw.Structure(geometry=mesh, material=h.pec_material() if material == "pec" else mw.CopperFoil(**FOIL))
+        structure = mw.Structure(geometry=mesh, material=h.pec_material() if material == "pec" else mw.media.CopperFoil(**FOIL))
         scene = runtime_tests._cavity(structure)
-        scene.monitors = (mw.FieldTimeMonitor("p", components=("Ex", "Ey", "Ez"), position=(0.03, -0.02, 0.01)),)
+        scene = scene.updated(monitors=(mw.monitors.FieldTimeMonitor("p", components=("Ex", "Ey", "Ez"), position=(0.03, -0.02, 0.01)),))
         result = runtime_tests._run(scene, 600)
-        values = torch.cat([torch.as_tensor(result.monitors["p"]["components"][c]).double().cpu().reshape(-1)
+        values = torch.cat([torch.as_tensor(result.monitor("p").sel(component=c).values).double().cpu().reshape(-1)
                             for c in ("Ex", "Ey", "Ez")])
         return values, result.solver._thin_sheets[0].complex.statistics
 
@@ -436,6 +436,7 @@ def test_vanishing_fold_converges_to_the_planar_sheet(material):
             assert changes[large] >= 5 * changes[small]
 
 
+@cuda
 @pytest.mark.parametrize("material", ["pec", "copper"])
 def test_bent_sheet_cavity_is_stable_for_twenty_thousand_steps(material):
     scene = runtime_tests._cavity(_structure("bent", material))
@@ -458,7 +459,7 @@ def test_bent_sheet_cavity_is_stable_for_twenty_thousand_steps(material):
 
 
 def _inside_outside(structure, inside, *, source=(-0.04, 0.035, 0.01)):
-    scene = runtime_tests._cavity(structure, source_position=source, frequency=3e9, fwidth=0.6e9, device="cuda")
+    scene = runtime_tests._cavity(structure, source_position=source, frequency=3e9, fwidth=0.6e9)
     solver = runtime_tests._run(scene, 600).solver
     nodes = [torch.as_tensor(getattr(solver.scene, axis + "_nodes64"), device=solver.Ez.device) for axis in "xyz"]
     x, y, z = torch.meshgrid(nodes[0], nodes[1], 0.5 * (nodes[2][1:] + nodes[2][:-1]), indexing="ij")
@@ -493,7 +494,7 @@ def test_spanning_folded_pec_sheet_is_watertight():
 @cuda
 def test_closed_faceted_copper_prism_leaks_only_through_the_copper_model():
     from witwin.maxwell.compiler.copper_foil import compile_copper_response
-    foil = mw.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9))
+    foil = mw.media.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9))
     inside, outside = _inside_outside(mw.Structure(geometry=_prism(), material=foil), _prism_interior)
     model = compile_copper_response(foil).state_space.evaluate(torch.tensor([3e9], dtype=torch.float64))[0]
     floor = float(model[0, 1].abs() / model[0, 0].abs())
@@ -507,7 +508,7 @@ _SCATTERING = {}
 def _scattering(material, polarization, dl):
     key = (material, polarization, dl)
     if key not in _SCATTERING:
-        foil = h.pec_material() if material == "pec" else mw.CopperFoil(thickness=35e-6, frequency_range=(0.3e9, 2e9))
+        foil = h.pec_material() if material == "pec" else mw.media.CopperFoil(thickness=35e-6, frequency_range=(0.3e9, 2e9))
         _SCATTERING[key] = h.cylinder_scattering(foil, polarization, dl, absorber="cpml")
         error, info = _SCATTERING[key]
         print(dict(material=material, pol=polarization, dl=dl, error=error, facet_cells=info["facet_width"] / dl,
@@ -554,7 +555,7 @@ def _l_bracket(**kwargs):
     """Two 20 x 40 mm facets meeting at an exact right angle along a grid line (h = 5 mm)."""
     profile = np.array([(-0.02, 0.0), (0.0, 0.0), (0.0, -0.02)])
     vertices = [(x, y, z) for y in (-0.0201, 0.0199) for (x, z) in profile]
-    return mw.SurfaceMesh(np.array(vertices), [(0, 1, 3), (1, 4, 3), (1, 2, 4), (2, 5, 4)], **kwargs)
+    return mw.geometry.SurfaceMesh(np.array(vertices), [(0, 1, 3), (1, 4, 3), (1, 2, 4), (2, 5, 4)], **kwargs)
 
 
 def _closed_box(half, **kwargs):
@@ -568,7 +569,7 @@ def _closed_box(half, **kwargs):
     for quad in quads:
         a, b, c, d = (corner(*v) for v in quad)
         triangles += [(a, b, c), (a, c, d)]
-    return mw.SurfaceMesh(vertices, triangles, **kwargs)
+    return mw.geometry.SurfaceMesh(vertices, triangles, **kwargs)
 
 
 @pytest.mark.parametrize("material", ["pec", "copper"])
@@ -580,9 +581,9 @@ def test_right_angle_fold_on_grid_lines_adds_no_phantom_sheet(material):
     phantom trace pairs ran out to the compilation box.
     """
     kwargs = dict(sheet_model="conformal_two_sided") if material == "pec" else {}
-    foil = h.pec_material() if material == "pec" else mw.CopperFoil(**FOIL)
-    scene = prepare_scene(runtime_tests._cavity(mw.Structure(geometry=_l_bracket(**kwargs), material=foil)))
-    c = compile_thin_sheet(scene, scene.structures[0])
+    foil = h.pec_material() if material == "pec" else mw.media.CopperFoil(**FOIL)
+    scene = prepare_scene(runtime_tests._cavity(mw.Structure(geometry=_l_bracket(**kwargs), material=foil)), device="cpu")
+    c = compile_thin_sheet(scene, scene.scene.structures[0])
     on_sheet = c.e_split
     position = c.e_position[on_sheet]
     on_horizontal = (np.abs(position[:, 2]) <= 1e-9) & (position[:, 0] >= -0.02 - 1e-9) & (position[:, 0] <= 1e-9)
@@ -593,13 +594,14 @@ def test_right_angle_fold_on_grid_lines_adds_no_phantom_sheet(material):
     assert c.statistics["on_sheet_traces"] == 2 * (4 * 8 + 5 * 7) - 7
 
 
+@cuda
 def test_closed_right_angle_box_on_grid_lines_is_watertight():
     """A PEC shield can on grid lines: exact 90-degree folds and three-facet corners, interior exactly zero."""
     structure = mw.Structure(geometry=_closed_box(0.015, sheet_model="conformal_two_sided"), material=h.pec_material())
     scene = runtime_tests._cavity(structure, source_position=(-0.035, 0.03, 0.01))
     solver = runtime_tests._run(scene, 600).solver
     statistics = solver._thin_sheets[0].complex.statistics
-    nodes = [torch.as_tensor(getattr(solver.scene, axis + "_nodes64")) for axis in "xyz"]
+    nodes = [torch.as_tensor(getattr(solver.scene, axis + "_nodes64"), device=solver.Ez.device) for axis in "xyz"]
     x, y, z = torch.meshgrid(nodes[0], nodes[1], 0.5 * (nodes[2][1:] + nodes[2][:-1]), indexing="ij")
     inside = (x.abs() < 0.0149) & (y.abs() < 0.0149) & (z.abs() < 0.0149)
     interior, exterior = float(solver.Ez[inside].abs().max()), float(solver.Ez[~inside].abs().max())

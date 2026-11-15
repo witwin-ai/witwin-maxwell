@@ -106,10 +106,10 @@ def run_case(geometry, material, mesh, *, size, direction=DIRECTION, polarizatio
     torch.cuda.reset_peak_memory_stats()
     scene = mw.Scene(structures=[mw.Structure(geometry, mw.Material(**material))],
                      sources=[mw.PlaneWave(direction=_normalize(direction), polarization=_normalize(polarization))])
-    config = mw.MoMConfig(integration=replace(INTEGRATION, pair_batch=pair_batch), surface_mesh=mesh,
-                          query_config=mw.FieldQueryConfig(max_order=128))
-    result = mw.Simulation.mom(scene, frequency=FREQUENCY, config=config).run()
-    data = result.surface_currents
+    config = mw.mom.MoMConfig(integration=replace(INTEGRATION, pair_batch=pair_batch), surface_mesh=mesh,
+                          query_config=mw.mom.FieldQueryConfig(max_order=128))
+    result = mw.Simulation.mom(scene, frequencies=FREQUENCY, config=config).run()
+    data = mw.mom.surface_currents(result)
     directions, weights = sphere_rule()
     sections = data.plane_wave_cross_sections(directions, weights)
     far, _ = data.far_field(directions)
@@ -225,8 +225,8 @@ def reciprocity_study(report, write, pair_batch, epw=16.):
         scene = mw.Scene(structures=[mw.Structure(mw.Box(size=(CUBE,)*3, rotation=(.2, .1, .3)),
                                                   mw.Material(**MATERIALS['eps4_lossy']))],
                          sources=[mw.PlaneWave(direction=direction, polarization=polarization)])
-        config = mw.MoMConfig(integration=replace(INTEGRATION, pair_batch=pair_batch), surface_mesh=_mesh(epw, False))
-        results.append(mw.Simulation.mom(scene, frequency=FREQUENCY, config=config).run().surface_currents)
+        config = mw.mom.MoMConfig(integration=replace(INTEGRATION, pair_batch=pair_batch), surface_mesh=_mesh(epw, False))
+        results.append(mw.mom.surface_currents(mw.Simulation.mom(scene, frequencies=FREQUENCY, config=config).run()))
     back = lambda data, d: data.far_field(-torch.tensor([d], device='cuda', dtype=torch.float64))[0][0]
     p1 = torch.tensor(first[1], device='cuda', dtype=torch.complex128)
     p2 = torch.tensor(second[1], device='cuda', dtype=torch.complex128)

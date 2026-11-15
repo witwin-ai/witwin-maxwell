@@ -33,34 +33,34 @@ def _provider():
 def _construction():
     return dict(order=8,quadrature_order=12,leaf_size=2,separation_ratio=.25,
         table_storage='fft_v1',shift_storage='separable_v1',near_storage='scalar_reciprocal_dk_v1',
-        kernel_bound_rule='direct_first_wave_min_v1',kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5),
+        kernel_bound_rule='direct_first_wave_min_v1',kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5),
         near_action_batch=2)
 
 
 def test_reciprocal_policy_exact_version_all_fields_and_early_public_rejection(tmp_path):
     for table in ('dense','compact','fft_v1'):
         for shift in ('dense','separable_v1'):
-            config = mw.FMMConfig(table_storage=table,shift_storage=shift,
-                near_storage='scalar_reciprocal_dk_v1',kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5))
+            config = mw.mom.FMMConfig(table_storage=table,shift_storage=shift,
+                near_storage='scalar_reciprocal_dk_v1',kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5))
             payload = json.loads(json.dumps(config.payload()))
             assert payload['version']=='cartesian_fmm_reciprocal_dk_config_v1'
-            assert mw.FMMConfig.restore(payload)==config
+            assert mw.mom.FMMConfig.restore(payload)==config
             assert config.construction()['near_storage']=='scalar_reciprocal_dk_v1'
             for field in payload['parameters']:
                 bad = copy.deepcopy(payload);del bad['parameters'][field]
-                with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+                with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
             for policy in ('full_matrix','scalar_dk_v1'):
                 bad = copy.deepcopy(payload);bad['parameters']['near_storage']=policy
-                with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+                with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
             bad = copy.deepcopy(payload);bad['version']='cartesian_fmm_scalar_dk_config_v1'
-            with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+            with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     with pytest.raises(NotImplementedError,match='free space'):
-        mw.FMMConfig(near_storage='scalar_reciprocal_dk_v1',table_storage='fft_ewald_v1')
+        mw.mom.FMMConfig(near_storage='scalar_reciprocal_dk_v1',table_storage='fft_ewald_v1')
     options = dict(operator_backend='fmm',riesz_storage='local_rwg_v1',stopping=StoppingRule(preconditioner='rwg_diagonal'))
     with pytest.raises(ValueError,match='complex128'):
-        mw.MoMConfig(fmm=config,dtype=torch.complex64,**options)
+        mw.mom.MoMConfig(fmm=config,dtype=torch.complex64,**options)
     with pytest.raises(NotImplementedError,match='free space'):
-        mw.MoMConfig(fmm=config,periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)),**options)
+        mw.mom.MoMConfig(fmm=config,periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)),**options)
     (tmp_path/'configuration.json').write_text(json.dumps(dict(explicit_version=payload['version'],
         all_fields_required=True,old_policy_version_mismatch_rejected=True,periodic_and_complex64_rejected=True,
         qualification=False),indent=2)+'\n')
@@ -155,36 +155,36 @@ def test_reciprocal_whole_action_capacity_before_maps(physical,monkeypatch,tmp_p
 def test_public_reciprocal_FMM_solve_and_constructor_free_exact_result_restore(tmp_path,monkeypatch):
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.01,position=(x,0.,0.)),
         mw.Material(eps_r=2.+i,mu_r=1.2+.1*i)) for i,x in enumerate((-.2,.2))],sources=[mw.PlaneWave()])
-    fmm = mw.FMMConfig(order=6,max_order=10,kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5),
+    fmm = mw.mom.FMMConfig(order=6,max_order=10,kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5),
         kernel_bound_rule='direct_first_wave_min_v1',table_storage='fft_v1',shift_storage='separable_v1',
         near_storage='scalar_reciprocal_dk_v1',leaf_size=8,separation_ratio=.25,
         leaf_factor_kernel='primary',leaf_factor_max_edges=16)
-    config = mw.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3),
+    config = mw.mom.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3),
         operator_backend='fmm',fmm=fmm,riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='gmres',preconditioner='rwg_diagonal',fallback='none',
             rtol=1e-12,atol=0.,maxiter=240,restart=120))
-    result = mw.Simulation.mom(scene,frequency=9e7,config=config).run()
+    result = mw.Simulation.mom(scene,frequencies=9e7,config=config).run()
     stats = result.stats();assert stats['converged'] and stats['error_budget']['checked']
-    actions = result.surface_currents.handle.actions
+    actions = mw.mom.surface_currents(result).handle.actions
     near = [r.near.receipt() for r in (actions.exterior,*actions.interiors)]
     assert actions.near_storage=='scalar_reciprocal_dk_v1'
     assert all(p['version']=='grouped_reciprocal_scalar_original_dk_csr_v1' for p in near)
     assert any(p['stored_blocks']<p['logical_blocks'] for p in near)
     assert actions.exterior.far and actions.capacity_plan['near_storage']==fmm.near_storage
-    current = result.surface_currents.scattered_coefficients
+    current = mw.mom.surface_currents(result).scattered_coefficients
     path = tmp_path/'reciprocal-fmm-result.pt';result.save(path)
     def forbidden(*args,**kwargs):raise AssertionError('Exact reciprocal result restore constructed or solved an operator')
     with monkeypatch.context() as patch:
         for cls in (MultipoleOperator,MultipoleSystemActions,SystemOperator):patch.setattr(cls,'__init__',forbidden)
         patch.setattr(torch.linalg,'solve',forbidden)
         restored = mw.Result.load(path,scene=scene)
-        assert restored.surface_currents.config.fmm==fmm
-        torch.testing.assert_close(restored.surface_currents.scattered_coefficients,current,rtol=0,atol=0)
-        assert restored.surface_currents.snapshot()['fmm_config']==fmm.payload()
+        assert mw.mom.surface_currents(restored).config.fmm==fmm
+        torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,current,rtol=0,atol=0)
+        assert mw.mom.surface_currents(restored).snapshot()['fmm_config']==fmm.payload()
         for field,value in (('near_storage','scalar_dk_v1'),('table_storage','compact'),
                 ('kernel_bound_rule','bivariate_cauchy_v1'),('shift_storage','dense')):
-            bad = copy.deepcopy(result.surface_currents.snapshot());bad['fmm_config']['parameters'][field]=value
-            with pytest.raises(ValueError):SurfaceData.restore(bad,scene,9e7)
+            bad = copy.deepcopy(mw.mom.surface_currents(result).snapshot());bad['fmm_config']['parameters'][field]=value
+            with pytest.raises(ValueError):SurfaceData.restore(bad,scene,9e7,'cuda')
     (tmp_path/'public.json').write_text(json.dumps(dict(artifact=str(path),
         artifact_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),fmm_config=fmm.payload(),stats=stats,
         selected_order=actions.order_plan['selected_order'],near_receipts=near,

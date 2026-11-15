@@ -77,30 +77,29 @@ def build_scene(size: int, source_time=None) -> mw.Scene:
     cube_side = (interior_cells / 3.0) * RESOLUTION
     cube_offset_y = (interior_cells / 4.0) * RESOLUTION
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
-        grid=mw.GridSpec.uniform(RESOLUTION),
-        boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS, strength=PML_STRENGTH),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="cube",
-            geometry=mw.Box(
-                position=(0.0, cube_offset_y, 0.0),
-                size=(cube_side, cube_side, cube_side),
+                domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
+                grid=mw.GridSpec.uniform(RESOLUTION),
+                boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS, strength=PML_STRENGTH),
+                structures=(
+            mw.Structure(
+                name="cube",
+                geometry=mw.Box(
+                    position=(0.0, cube_offset_y, 0.0),
+                    size=(cube_side, cube_side, cube_side),
+                ),
+                material=mw.Material(eps_r=4.0),
             ),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization=(0.0, 0.0, 1.0),
-            width=0.05,
-            source_time=source_time,
-            name="src",
-        )
-    )
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization=(0.0, 0.0, 1.0),
+                width=0.05,
+                source_time=source_time,
+                name="src",
+            ),
+            ),
+            )
     return scene
 
 
@@ -142,10 +141,12 @@ def run_case(size: int, solver_type: str, max_iter: int, tol: float, restart: in
     scene = build_scene(size)
     solver = mw.Simulation.fdfd(
         scene,
-        frequency=FREQUENCY,
-        solver=mw.GMRES(max_iter=max_iter, tol=tol, restart=restart,
-                        solver_type=solver_type, preconditioner=preconditioner,
-                        precision=precision),
+        frequencies=FREQUENCY,
+        config=mw.FDFDConfig(
+            solver=mw.fdfd.FDFDSolverConfig(max_iter=max_iter, tol=tol, restart=restart,
+                            solver_type=solver_type, preconditioner=preconditioner,
+                            precision=precision),
+        ),
     ).prepare().solver
 
     pool = cp.get_default_memory_pool()

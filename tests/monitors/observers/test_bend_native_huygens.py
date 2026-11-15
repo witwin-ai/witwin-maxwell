@@ -10,8 +10,8 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='Native curve
 
 def _simulation(graph=False):
     scene=build_simulation().scene
-    return mw.Simulation.fdtd(scene,frequency=1e9,excitations=mw.PortExcitation('feed'),cuda_graph=graph,
-        run_time=mw.TimeConfig(time_steps=64),spectral_sampler=mw.SpectralSampler(window='none'))
+    return mw.Simulation.fdtd(scene,frequencies=1e9,excitations=mw.rf.PortExcitation('feed'),config=mw.FDTDConfig(cuda_graph=graph,
+        run_time=mw.TimeConfig(time_steps=64),spectral_sampler=mw.fdtd.SpectralSampler(window='none')))
 
 
 def test_native_mapped_closed_surface_graph_disk_resume_and_world_current_identity(tmp_path):
@@ -19,7 +19,7 @@ def test_native_mapped_closed_surface_graph_disk_resume_and_world_current_identi
     assert graph.solver._cuda_graph_active
     checkpoint=_simulation().prepare().run_until(32)
     path=tmp_path/'surface-execution.pt';checkpoint.save(path)
-    loaded=mw.FDTDResumeCheckpoint.load(path,map_location='cpu')
+    loaded=mw.fdtd.FDTDResumeCheckpoint.load(path,map_location='cpu')
     resumed=_simulation().prepare().run(resume_from=loaded)
     expected=equivalent_surface_currents_from_monitor(eager,'huygens')
     for actual in (graph,resumed):
@@ -40,9 +40,9 @@ def test_native_mapped_closed_surface_graph_disk_resume_and_world_current_identi
 
 def test_mapped_world_query_requires_retained_native_stencil_samples():
     scene=build_simulation(pcb=True).scene
-    result=mw.Simulation.fdtd(scene,frequency=1e9,excitations=mw.PortExcitation('feed'),
-        run_time=mw.TimeConfig(time_steps=8),spectral_sampler=mw.SpectralSampler(window='none')).run()
+    result=mw.Simulation.fdtd(scene,frequencies=1e9,excitations=mw.rf.PortExcitation('feed'),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8),spectral_sampler=mw.fdtd.SpectralSampler(window='none'))).run()
     points=torch.tensor(((0.,.001,0.),),device='cuda',dtype=torch.float64)
-    for positions,coordinates in ((points,'chart'),(scene.physical_positions(points),'world')):
+    for positions,coordinates in ((points,'chart'),(scene.coordinates.position(points),'world')):
         with pytest.raises(ValueError,match='No spectral|Missing .* interpolation stencil'):
             result.query_fields(positions,region_id='interior',field_kind='total',coordinates=coordinates)

@@ -9,11 +9,13 @@ from .fields import FieldQueryConfig
 from .linalg import StoppingRule
 from .harmonic_config import HarmonicBalanceConfig,HarmonicCutoffConfig
 from .harmonic_material import compile_harmonic_material,material_signature,cell_nonlinear_coefficients
-from .harmonic_state import HarmonicCoupledState,preparation_signature
+from .harmonic_recovery import HarmonicCoupledState,preparation_signature
 from .mesh import SurfaceSystem
 from .volume_mesh import TetrahedralVolumeMesh,bind_volume_region
 from .physics import validate_scene_structure
+from .options import option_asdict
 from ..media import Material
+from ..errors import UnsupportedFeatureError
 
 IDENTITY = {'schema_version':2,'payload_kind':'coupled_sie_vie_hb_dielectric',
     'phasor':'exp(-i*n*omega*t); positive_peak; real_DC','volume_basis':'constant_cell_xyz',
@@ -48,7 +50,8 @@ def snapshot(data):
     data.decoder._assert_current()
     prepared,state,config = data.decoder.prepared,data.state,data.config
     if state.dc_tensor_response is not None:
-        raise NotImplementedError('Tensor DC harmonic snapshots require the dedicated potential/conormal schema')
+        raise UnsupportedFeatureError('Tensor DC harmonic snapshots require the dedicated potential/conormal schema',
+                                      feature="guard:95afeede", method="mom")
     mixed_dc = bool(state.dc_current_regions)
     dual_dc = state.dc_dual_state is not None
     current_dc = dual_dc or state.dc_potential_offsets is not None
@@ -70,9 +73,9 @@ def snapshot(data):
         saved_prepared['harmonics']=tuple(encode_compressed(part,sources=op.sources)
             for part,op in zip(prepared['harmonics'],prepared['operators']))
     settings = config.harmonic_balance
-    numerical = {name:getattr(config,name) for name in ('subdivisions','riesz_storage')}
+    numerical = {'subdivisions':config.subdivisions,'riesz_storage':config.riesz_storage.value}
     numerical.update(dtype=str(config.dtype),integration=asdict(config.integration),
-        stopping=asdict(config.stopping),query_config=asdict(config.query_config))
+        stopping=option_asdict(config.stopping),query_config=asdict(config.query_config))
     if compressed and config.operator_backend in ('hmatrix','h2'):
         from .runtime import _numerical_identity
         numerical=_numerical_identity(config)
@@ -91,10 +94,10 @@ def snapshot(data):
                  'receipt':state.receipt,**({'induced_surface_coefficients':state.induced_surface_coefficients} if compressed else {})}},'cpu')
 
 
-def restore(payload,scene):
+def restore(payload,scene,device):
     if isinstance(payload,dict) and payload.get('schema_version') in (21,22,23):
         from .tensor_harmonic_runtime import restore as restore_tensor
-        return restore_tensor(payload,scene)
+        return restore_tensor(payload,scene,device)
     compressed = isinstance(payload,dict) and payload.get('schema_version') == 15
     kind = payload.get('payload_kind','') if isinstance(payload,dict) else ''
     if compressed: kind = kind.removeprefix('compressed_')
@@ -107,14 +110,14 @@ def restore(payload,scene):
     if not isinstance(payload,dict) or set(payload) != expected or not _same_metadata(
             {k:payload[k] for k in identity},identity):
         raise ValueError('Unsupported coupled harmonic snapshot identity or fields')
-    if torch.device(scene.device).type != 'cuda':
-        raise ValueError('Harmonic restore requires a CUDA Scene')
+    if torch.device(device).type != 'cuda':
+        raise ValueError('Harmonic restore requires a CUDA device')
     numerical = payload['numerical']
     compressed_config=compressed and isinstance(numerical,dict) and numerical.get('operator_backend') in ('hmatrix','h2')
     if not compressed_config and (not isinstance(numerical,dict) or set(numerical) != {'subdivisions','riesz_storage','dtype','integration','stopping','query_config'}):
         raise ValueError('Invalid harmonic numerical configuration')
     dtype = {'torch.complex64':torch.complex64,'torch.complex128':torch.complex128}.get(numerical.get('dtype'))
-    volumes = tuple(TetrahedralVolumeMesh(v['vertices'].to(scene.device),v['cells'].to(scene.device),
+    volumes = tuple(TetrahedralVolumeMesh(v['vertices'].to(device),v['cells'].to(device),
                     region_id=v['region_id']) for v in payload['volumes'])
     settings = dict(payload['harmonic_config'])
     if 'dc_tangent_rule' in settings:
@@ -135,10 +138,11 @@ def restore(payload,scene):
         raise ValueError('Stored harmonic policy is not canonical')
     config = MoMConfig(subdivisions=numerical['subdivisions'],dtype=dtype,
         integration=IntegrationConfig(**numerical['integration']),stopping=StoppingRule(**numerical['stopping']),
-        query_config=FieldQueryConfig(**numerical['query_config']),riesz_storage='compact_rwg_v1' if compressed_config else numerical['riesz_storage'],harmonic_balance=hb)
+        query_config=FieldQueryConfig(**numerical['query_config']),riesz_storage='compact_rwg_v1' if compressed_config else numerical['riesz_storage'],harmonic_balance=hb,
+        device=device)
     if compressed_config:
         from .physical_surface_snapshot import _restore_config
-        config=replace(_restore_config(numerical),harmonic_balance=hb)
+        config=replace(_restore_config(numerical),harmonic_balance=hb,device=device)
     raw = payload['state']
     if not isinstance(raw,dict) or set(raw) != {*STATE_ARRAYS,*(('dc_dual_state',)+(('dc_dual_binding',) if hb.dc_tangent_rule is not None else ()) if dual_dc else MIXED_ARRAYS if mixed_dc else CURRENT_ARRAYS if current_dc else ()), 'receipt',*(('induced_surface_coefficients',) if compressed else ())}:
         raise ValueError('Invalid harmonic state fields')
@@ -153,7 +157,7 @@ def restore(payload,scene):
         raise ValueError('Harmonic frequency axis does not match integer harmonics')
     structures = validate_scene_structure(scene,frequency)
     from .runtime import _validate_surface_queries
-    _validate_surface_queries(scene)
+    _validate_surface_queries(scene,device)
     materials = tuple(compile_harmonic_material(s.material,frequency,hb.harmonics) for s in structures)
     exterior = compile_harmonic_material(Material(),frequency,hb.harmonics)
     signature = (_signature(scene,exterior.linear_samples[0],tuple(m.linear_samples[0] for m in materials)),
@@ -161,7 +165,7 @@ def restore(payload,scene):
     if not _same_metadata(payload['scene_signature'],signature):
         raise ValueError('Harmonic snapshot does not match the supplied Scene')
     enabled = [(i,s) for i,s in enumerate(scene.structures) if s.enabled]
-    bases = tuple(_compile_basis(scene,s.geometry,config) for _,s in enabled)
+    bases = tuple(_compile_basis(s.geometry,config) for _,s in enabled)
     if not isinstance(payload['prepared'],dict) or set(payload['prepared']) != {
             'static','harmonics','dc_permittivities','dc_testing_order','receipt'}:
         raise ValueError('Invalid stored harmonic preparation')
@@ -188,7 +192,7 @@ def restore(payload,scene):
         for mesh,body in zip(record['meshes'],system.bodies):
             for key,reference in (('vertices',body.mesh.vertices),('faces',body.mesh.faces)):
                 value = mesh[key]
-                if not isinstance(value,torch.Tensor) or value.dtype != reference.dtype or not torch.equal(value.to(scene.device),reference):
+                if not isinstance(value,torch.Tensor) or value.dtype != reference.dtype or not torch.equal(value.to(device),reference):
                     raise ValueError('Harmonic surface mesh mismatch')
         sources = scene.sources if n == 0 else []
         if compressed:
@@ -215,13 +219,13 @@ def restore(payload,scene):
             sources = scene.sources if n == 0 else []
             operator = SystemDecodeHandle(system,exterior.linear_samples[n],sources,config,copy.deepcopy(record['metadata']))
             IncidentCarrier.restore(record['carrier'],expected_identity=record['carrier_identity'],sources=sources,exterior=operator.exterior)
-            operator.matrix = matrix.to(scene.device).clone()
+            operator.matrix = matrix.to(device).clone()
             operator.shape,operator.dtype,operator.device = operator.matrix.shape,dtype,operator.matrix.device
             group=tuple(bind_volume_region(volume,system) for volume in volumes)
         IncidentCarrier.restore(record['carrier'],expected_identity=record['carrier_identity'],sources=sources,exterior=operator.exterior)
         operators.append(operator)
         bindings.append(group)
-    prepared = tensors({k:v for k,v in payload['prepared'].items() if not (compressed and k=='harmonics')},scene.device)
+    prepared = tensors({k:v for k,v in payload['prepared'].items() if not (compressed and k=='harmonics')},device)
     if compressed: prepared.update(response_backend='compressed',harmonics=tuple(dynamic))
     prepared.update(operators=tuple(operators),bindings=tuple(bindings))
     from ..constants import EPSILON_0
@@ -356,7 +360,7 @@ def restore(payload,scene):
     if threshold != expected_threshold:
         raise ValueError('Stored harmonic solver threshold disagrees with configured tolerances')
     prepared['_signature'] = preparation_signature(prepared)
-    values = tensors(raw,scene.device)
+    values = tensors(raw,device)
     state = HarmonicCoupledState(**values,preparation_identity=id(prepared))
     # Recompute the local constitutive law and current convention without solving.
     from .nonlinear import instantaneous_harmonic_sources

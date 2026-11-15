@@ -23,10 +23,10 @@ def _scene():
 
 
 def _pfft_config(**kwargs):
-    return mw.MoMConfig(integration=INTEGRATION, operator_backend='pfft', riesz_storage='local_rwg_v1',
+    return mw.mom.MoMConfig(integration=INTEGRATION, operator_backend='pfft', riesz_storage='local_rwg_v1',
                         # Original sampled rows see the accelerator error (about 1e-3 here), so their
                         # budget sits above it; the compressed dual residual is checked tightly.
-                        pfft=mw.PFFTConfig(**{'points_per_wavelength': 15., 'order': 3,
+                        pfft=mw.mom.PFFTConfig(**{'points_per_wavelength': 15., 'order': 3,
                                               'solve_dual_tolerance': 1e-4, 'original_sample_tolerance': 3e-2,
                                               **kwargs.pop('pfft', {})}),
                         # complex64 grids put a floor near 1e-6 under the achievable residual.
@@ -54,10 +54,10 @@ def _relative(a, b):
 
 @pytest.fixture(scope='module')
 def prepared():
-    dense = mw.Simulation.mom(_scene(), frequency=FREQUENCY, config=mw.MoMConfig(
+    dense = mw.Simulation.mom(_scene(), frequencies=FREQUENCY, config=mw.mom.MoMConfig(
         integration=INTEGRATION, riesz_storage='compact_rwg_v1',
         stopping=StoppingRule(method='direct', rtol=1e-10, atol=0.))).prepare()
-    fast = mw.Simulation.mom(_scene(), frequency=FREQUENCY, config=_pfft_config()).prepare()
+    fast = mw.Simulation.mom(_scene(), frequencies=FREQUENCY, config=_pfft_config()).prepare()
     return dense, fast
 
 
@@ -97,25 +97,25 @@ def test_system_action_and_adjoint_match_dense(prepared):
 def test_public_solve_matches_dense_lu_with_admission(prepared):
     dense, _ = prepared
     reference = dense.run()
-    config = _pfft_config(right_preconditioner=mw.FunctionRightPreconditioner(_body_lu, name='body_lu'))
-    result = mw.Simulation.mom(_scene(), frequency=FREQUENCY, config=config).run()
+    config = _pfft_config(right_preconditioner=mw.mom.FunctionRightPreconditioner(_body_lu, name='body_lu'))
+    result = mw.Simulation.mom(_scene(), frequencies=FREQUENCY, config=config).run()
     stats = result.stats()
     assert stats['iterations'] < 60, (stats['reason'], stats['relative_residual'])
     assert stats['converged'] and stats['error_budget']['checked']
     assert stats['error_budget']['original_sampled_pass']
-    x, x_ref = result.surface_currents.scattered_coefficients, reference.surface_currents.scattered_coefficients
+    x, x_ref = mw.mom.surface_currents(result).scattered_coefficients, mw.mom.surface_currents(reference).scattered_coefficients
     directions = torch.nn.functional.normalize(torch.randn((64, 3), device='cuda', dtype=torch.float64), dim=-1)
-    far, _ = result.surface_currents.far_field(directions)
-    far_ref, _ = reference.surface_currents.far_field(directions)
+    far, _ = mw.mom.surface_currents(result).far_field(directions)
+    far_ref, _ = mw.mom.surface_currents(reference).far_field(directions)
     assert _relative(far, far_ref) < 5e-3
     assert _relative(x, x_ref) < 2e-2
     with pytest.raises(NotImplementedError):
-        result.surface_currents.snapshot()
+        mw.mom.surface_currents(result).snapshot()
 
 
 def test_right_preconditioner_hook_on_pfft():
-    config = _pfft_config(right_preconditioner=mw.LeafBlockRightPreconditioner(32))
-    result = mw.Simulation.mom(_scene(), frequency=FREQUENCY, config=config).run()
+    config = _pfft_config(right_preconditioner=mw.mom.LeafBlockRightPreconditioner(32))
+    result = mw.Simulation.mom(_scene(), frequencies=FREQUENCY, config=config).run()
     stats = result.stats()
     assert stats['converged'] and stats['krylov_method'] == 'flexible_right_gmres', (stats['reason'], stats.get('relative_residual'))
     assert stats['right_preconditioner']['block_source'] == 'hierarchical'
@@ -125,25 +125,25 @@ def test_unsupported_combinations_fail_closed():
     good = dict(operator_backend='pfft', riesz_storage='local_rwg_v1',
                 stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal'))
     with pytest.raises(ValueError):
-        mw.MoMConfig(**{**good, 'stopping': StoppingRule(method='direct')})
+        mw.mom.MoMConfig(**{**good, 'stopping': StoppingRule(method='direct')})
     with pytest.raises(ValueError):
-        mw.MoMConfig(**{**good, 'stopping': StoppingRule(method='gmres', preconditioner='row_norm')})
+        mw.mom.MoMConfig(**{**good, 'stopping': StoppingRule(method='gmres', preconditioner='row_norm')})
     with pytest.raises(ValueError):
-        mw.MoMConfig(**{**good, 'dtype': torch.complex64})
+        mw.mom.MoMConfig(**{**good, 'dtype': torch.complex64})
     with pytest.raises(ValueError):
-        mw.MoMConfig(**good, fmm=mw.FMMConfig())
+        mw.mom.MoMConfig(**good, fmm=mw.mom.FMMConfig())
     with pytest.raises(NotImplementedError):
-        mw.MoMConfig(**good, periodic=mw.MoMPeriodicConfig(vectors_m=((1., 0., 0.),)))
+        mw.mom.MoMConfig(**good, periodic=mw.mom.MoMPeriodicConfig(vectors_m=((1., 0., 0.),)))
     with pytest.raises(ValueError):
-        mw.MoMConfig(pfft=mw.PFFTConfig())
-    with pytest.raises(NotImplementedError, match='hmatrix/h2/direct_h2/fmm/pfft'):
-        mw.MoMConfig(**{**good, 'operator_backend': 'precorrected'})
+        mw.mom.MoMConfig(pfft=mw.mom.PFFTConfig())
+    with pytest.raises(mw.SetupError, match="MoMConfig.operator_backend must be one of .*'fmm', 'pfft', got 'precorrected'"):
+        mw.mom.MoMConfig(**{**good, 'operator_backend': 'precorrected'})
     with pytest.raises(ValueError):
-        mw.PFFTConfig(points_per_wavelength=2.)
-    payload = mw.PFFTConfig(order=4).payload()
-    assert mw.PFFTConfig.restore(payload) == mw.PFFTConfig(order=4)
+        mw.mom.PFFTConfig(points_per_wavelength=2.)
+    payload = mw.mom.PFFTConfig(order=4).payload()
+    assert mw.mom.PFFTConfig.restore(payload) == mw.mom.PFFTConfig(order=4)
     with pytest.raises(ValueError):
-        mw.PFFTConfig.restore({**payload, 'version': 'pfft_precorrected_config_v0'})
+        mw.mom.PFFTConfig.restore({**payload, 'version': 'pfft_precorrected_config_v0'})
 
 
 def test_grid_spacing_is_tied_to_the_mesh_and_recorded():
@@ -155,18 +155,18 @@ def test_grid_spacing_is_tied_to_the_mesh_and_recorded():
     edge = float(basis.edge_lengths.mean())
     vacuum = compile_medium(mw.Material(), FREQUENCY, background=True)
     wavelength = 2*3.141592653589793/complex(vacuum.k).real
-    spec = mw.PFFTConfig().grid_spec(vacuum, [basis])
+    spec = mw.mom.PFFTConfig().grid_spec(vacuum, [basis])
     assert spec.order == 3 and spec.mean_edge == pytest.approx(edge)
     assert spec.spacing == pytest.approx(min(wavelength/15, edge)) and spec.spacing_rule in ('wavelength', 'mesh')
     # A tighter target raises the stencil order; the spacing never drops below a quarter edge.
-    assert mw.PFFTConfig(target_accuracy=1e-4).grid_spec(vacuum, [basis]).order == 4
+    assert mw.mom.PFFTConfig(target_accuracy=1e-4).grid_spec(vacuum, [basis]).order == 4
     dense = compile_medium(mw.Material(eps_r=400.), FREQUENCY)
-    floor = mw.PFFTConfig().grid_spec(dense, [basis])
+    floor = mw.mom.PFFTConfig().grid_spec(dense, [basis])
     assert floor.spacing == pytest.approx(MINIMUM_SPACING_TO_EDGE*edge) and floor.spacing_rule == 'quarter_edge_floor'
     with pytest.raises(ValueError, match='quarter|0.25'):
-        mw.PFFTConfig(points_per_wavelength=wavelength/(0.2*edge)).grid_spec(vacuum, [basis])
+        mw.mom.PFFTConfig(points_per_wavelength=wavelength/(0.2*edge)).grid_spec(vacuum, [basis])
     with pytest.raises(ValueError):
-        mw.PFFTConfig(target_accuracy=1e-6)
+        mw.mom.PFFTConfig(target_accuracy=1e-6)
 
 
 def test_prepared_receipt_records_the_mesh_tied_grid(prepared):
@@ -194,7 +194,7 @@ def test_precorrection_follows_the_dense_rules_on_sliver_meshes(kind):
     scene = mw.Scene(structures=[mw.Structure(mw.Mesh(surface.vertices, surface.faces, recenter=False,
                                                       fill_mode='solid'), mw.Material(eps_r=2.))],
                      sources=[mw.PlaneWave(source_time=mw.CW(frequency=3e8))])
-    fast = mw.Simulation.mom(scene, frequency=3e8, config=_pfft_config(pfft={'points_per_wavelength': None,
+    fast = mw.Simulation.mom(scene, frequencies=3e8, config=_pfft_config(pfft={'points_per_wavelength': None,
                                                                              'order': None})).prepare()
     handle = fast.solver.handle
     basis, n = handle.system.bodies[0].basis, handle.system.total_edges
@@ -211,7 +211,7 @@ def test_precorrection_follows_the_dense_rules_on_sliver_meshes(kind):
         assert float((correction.delta_d+grid_d-dense_d).abs().max()/scale) < 1e-12
         assert float((correction.delta_k+grid_k-dense_k).abs().max()/dense_k.abs().max()) < 1e-12
         del matrix
-    dense = mw.Simulation.mom(scene, frequency=3e8, config=mw.MoMConfig(
+    dense = mw.Simulation.mom(scene, frequencies=3e8, config=mw.mom.MoMConfig(
         integration=INTEGRATION, riesz_storage='compact_rwg_v1',
         stopping=StoppingRule(method='direct', rtol=1e-10, atol=0.))).prepare()
     x = torch.randn(2*n, generator=torch.Generator(device='cuda').manual_seed(9), device='cuda',
@@ -225,7 +225,7 @@ def test_pfft_prepared_rhs_matches_dense_lifting_and_batch_receipt():
     vertices = surface.vertices
     scene = mw.Scene(structures=[mw.Structure(mw.Mesh(vertices, surface.faces, recenter=False, fill_mode='solid'),
                                             mw.Material(eps_r=4.))], sources=[mw.PlaneWave()])
-    fast = mw.Simulation.mom(scene, frequency=FREQUENCY,
+    fast = mw.Simulation.mom(scene, frequencies=FREQUENCY,
         config=_pfft_config(pfft={'points_per_wavelength': None, 'order': None})).prepare()
     handle = fast.solver.handle
     dense, _ = build_lifted_rhs(handle.body_handles[0])
@@ -254,7 +254,7 @@ def test_pfft_batched_leaf_blocks_and_factors_match_selected_blocks(prepared):
     assert _relative(batched, original) < 1e-14
     assert [a-b for a, b in zip(provider.metadata['triangle_pair_counts'], before)] == selected_counts
 
-    factory = mw.LeafBlockRightPreconditioner(32)
+    factory = mw.mom.LeafBlockRightPreconditioner(32)
     groups = context.leaf_partition(32)
     residual = torch.randn(handle.shape[0], device='cuda', dtype=torch.complex128,
                            generator=torch.Generator(device='cuda').manual_seed(18))

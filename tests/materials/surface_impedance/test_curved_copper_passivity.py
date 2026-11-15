@@ -3,8 +3,8 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.compiler.curved_copper import compile_copper_channels
-from witwin.maxwell.fdtd.curved_copper import JointCopperMortar
+from tests.oracles.curved_copper_channels import compile_copper_channels
+from tests.oracles.curved_copper import JointCopperMortar
 
 
 @pytest.mark.parametrize("device",("cpu","cuda"))
@@ -24,7 +24,7 @@ def test_joint_two_current_response_matches_full_passive_field_state_system(devi
     ge=torch.randn((2,4),device=device,dtype=dtype,generator=generator)*.4
     gh=torch.randn((2,3),device=device,dtype=dtype,generator=generator)*.4
     mass=torch.tensor(((1.,.2),(.2,1.3)),device=device,dtype=dtype)
-    material=mw.CopperFoil(thickness=torch.tensor(2e-6,device=device,dtype=dtype),frequency_range=(.5e9,2e9))
+    material=mw.media.CopperFoil(thickness=torch.tensor(2e-6,device=device,dtype=dtype),frequency_range=(.5e9,2e9))
     channel=compile_copper_channels(material)
     rates=channel.rates
     coefficients=channel.midpoint_coefficients(dt)

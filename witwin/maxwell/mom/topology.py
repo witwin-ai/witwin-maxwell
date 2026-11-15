@@ -18,6 +18,8 @@ from enum import Enum
 
 import torch
 
+from ..errors import UnsupportedFeatureError
+
 INTERIOR, BOUNDARY, JUNCTION = 0, 1, 2
 EDGE_KIND_NAMES = ('interior', 'boundary', 'junction')
 
@@ -142,9 +144,10 @@ def classify_surface(faces, vertex_count):
 def require_open_sheet(topology):
     """Fail closed unless the surface is an oriented manifold sheet without junctions."""
     if topology.junction_edges:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             f'Surface has {topology.junction_edges} junction edges shared by three or more faces; '
-            'junction RWG functions are not implemented, so T-junctions are rejected.')
+            'junction RWG functions are not implemented, so T-junctions are rejected.',
+            feature="guard:5e596bfb", method="mom")
     if not topology.manifold_vertices:
         raise ValueError('Surface has a non-manifold vertex (sheets touching at a single vertex)')
     if not topology.orientable:
@@ -197,7 +200,8 @@ def body_kind(structure):
                 return BodyKind.PEC_CLOSED
         return BodyKind.PEC_OPEN
     if isinstance(material, LossyMetalMedium):
-        raise NotImplementedError('MoM surface-impedance (Leontovich) conductors are not implemented')
+        raise UnsupportedFeatureError('MoM surface-impedance (Leontovich) conductors are not implemented',
+                                      feature="material.surface_impedance", method="mom")
     if sheet:
         raise ValueError('A zero-thickness dielectric sheet has no MoM model; use Material.pec() '
                          'or a closed dielectric body')
@@ -215,12 +219,14 @@ def scene_formulation(structures):
     kinds = [body_kind(structure) for structure in structures]
     for kind in kinds:
         if kind in _UNIMPLEMENTED:
-            raise NotImplementedError(f'MoM body kind {kind.value!r}: {_UNIMPLEMENTED[kind]}')
+            raise UnsupportedFeatureError(f'MoM body kind {kind.value!r}: {_UNIMPLEMENTED[kind]}',
+                                          feature="guard:f22af596", method="mom")
     if kinds and all(kind is BodyKind.PEC_OPEN for kind in kinds):
         return EFIE_OPEN_PEC
     if BodyKind.PEC_OPEN in kinds:
-        raise NotImplementedError('MoM scenes mixing open PEC sheets with dielectric bodies require a '
-                                  'multiregion formulation, which is not implemented')
+        raise UnsupportedFeatureError('MoM scenes mixing open PEC sheets with dielectric bodies require a '
+                                  'multiregion formulation, which is not implemented',
+                                      feature="guard:5c2d69bb", method="mom")
     return PMCHWT
 
 

@@ -7,6 +7,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell import invdes
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_tensors
 
 
 def test_density_parameterization_pipeline_and_symmetric_gradient():
@@ -34,21 +35,20 @@ def test_density_parameterization_pipeline_and_symmetric_gradient():
 def test_density_parameterization_feeds_material_region_gradients():
     design = invdes.DensityParameterization((8, 8, 1), (0.4, 0.4, 0.1), radius=0.1, beta=4.0, init=torch.rand(8, 8, 1))
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.4, 0.4),) * 3),
-        grid=mw.GridSpec.uniform(0.05),
-        boundary=mw.BoundarySpec.pml(num_layers=2),
-        device="cpu",
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.1)),
-            density=design(),
-            eps_bounds=(1.0, 4.0),
-        )
-    )
-    eps, _ = prepare_scene(scene).compile_material_tensors()
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.4, 0.4),) * 3),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.pml(num_layers=2),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.1)),
+                density=design(),
+                eps_bounds=(1.0, 4.0),
+            ),
+            ),
+            )
+    eps, _ = compile_material_tensors(prepare_scene(scene, device="cpu"))
     assert 1.0 <= float(eps.detach().min()) and float(eps.detach().max()) <= 4.0
     eps.sum().backward()
     assert design.params.grad is not None and design.params.grad.abs().sum() > 0

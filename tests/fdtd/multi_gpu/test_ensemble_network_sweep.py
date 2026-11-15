@@ -31,14 +31,13 @@ def _port(name, x):
     )
 
 
-def _four_port_scene(*, device):
+def _four_port_scene():
     xs = (-0.008, -0.004, 0.004, 0.008)
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.024, 0.024),) * 3),
         grid=mw.GridSpec.uniform(0.004),
         boundary=mw.BoundarySpec.none(),
         ports=tuple(_port(f"p{i + 1}", x) for i, x in enumerate(xs)),
-        device=device,
     )
 
 
@@ -46,8 +45,10 @@ def _sweep_sim(scene):
     return mw.Simulation.fdtd(
         scene,
         frequencies=_FREQUENCIES,
-        run_time=mw.TimeConfig(time_steps=24),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=24),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
         excitations=PortSweep(),
     )
 
@@ -56,10 +57,10 @@ def test_single_device_ensemble_sweep_matches_serial_exactly(
     cuda_p2p_devices, cuda_memory_cleanup
 ):
     device = str(cuda_p2p_devices[0])
-    serial = _sweep_sim(_four_port_scene(device=device)).run()
+    serial = _sweep_sim(_four_port_scene()).run()
 
     execution = MultiGPUExecution.ensemble(devices=(device,), max_concurrency=1)
-    prepared = _sweep_sim(_four_port_scene(device=device)).prepare()
+    prepared = _sweep_sim(_four_port_scene()).prepare()
     ensemble = prepared.run(execution=execution)
 
     assert ensemble.network.port_names == serial.network.port_names == (
@@ -78,10 +79,10 @@ def test_two_gpu_ensemble_sweep_matches_serial_with_provenance(
     cuda_p2p_devices, cuda_memory_cleanup
 ):
     devices = tuple(str(device) for device in cuda_p2p_devices)
-    serial = _sweep_sim(_four_port_scene(device=devices[0])).run()
+    serial = _sweep_sim(_four_port_scene()).run()
 
     execution = MultiGPUExecution.ensemble(devices=devices, max_concurrency=2)
-    prepared = _sweep_sim(_four_port_scene(device=devices[0])).prepare()
+    prepared = _sweep_sim(_four_port_scene()).prepare()
     ensemble = prepared.run(execution=execution)
 
     assert ensemble.network.port_names == serial.network.port_names
@@ -93,7 +94,7 @@ def test_two_gpu_ensemble_sweep_matches_serial_with_provenance(
         ensemble.network.z0, serial.network.z0, rtol=1e-5, atol=1e-6
     )
 
-    provenance = ensemble.solver_stats["ensemble"]
+    provenance = ensemble.stats()["ensemble"]
     column_devices = provenance["column_devices"]
     # Per-column provenance: one leased device per excitation column, and both
     # pool GPUs were actually exercised. Equality (not just subset) catches a

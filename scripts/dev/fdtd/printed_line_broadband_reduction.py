@@ -26,7 +26,7 @@ def main():
         raise ValueError('Retained native samples require their exact original physical fixture and integration helpers.')
     if 'integration_rows' in record:rows=record['integration_rows']
     else:
-        scene=configuration(options,'cpu')
+        scene=configuration(options)
         if options.kind=='differential_pair':_,rows,expected=helper.probes(scene,options.dx,options.longitudinal_dl,options.padding,options.positions,options.metal)
         else:
             _,single,expected=helper.native_probe_monitors(scene,options.kind,options.dx,options.longitudinal_dl,options.padding,options.positions,options.metal)

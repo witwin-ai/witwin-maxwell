@@ -44,27 +44,52 @@ def outside_masks(region, kind):
     return masks
 
 
+def yee_e_phasors(result, scene, freq_index=0):
+    """Raw Yee E phasors and float64 primal nodes (metres), cropped to scene.domain.bounds.
+
+    Public 0.7.0 API only: result.fields holds one FieldData per component, dims (f, x, y, z), whose
+    values are the raw DFT arrays on that component's Yee grid and whose float64 coords are the
+    primal nodes on the two transverse axes. The PML layers lie outside the domain bounds.
+    """
+    data = [result.fields[name].isel(f=freq_index) for name in ('EX', 'EY', 'EZ')]
+    nodes = [data[(axis+1) % 3].coords['xyz'[axis]] for axis in range(3)]
+    crop = []
+    for axis, n in enumerate(nodes):
+        lo, hi = (float(v) for v in scene.domain.bounds[axis])
+        tol = 1e-9*(hi-lo)
+        inside = torch.nonzero((n >= lo-tol) & (n <= hi+tol)).flatten()
+        crop.append((int(inside[0]), int(inside[-1])))
+    arrays = [d.values[tuple(slice(a, b+(axis != c)) for axis, (a, b) in enumerate(crop))].contiguous()
+              for c, d in enumerate(data)]
+    return arrays, tuple(n[a:b+1] for n, (a, b) in zip(nodes, crop))
+
+
 def run(name, eps, mu):
     h, f, n, pml = .015, 1e9, 24, 10
     scene = mw.Scene(domain=mw.Domain(bounds=((-n*h/2,n*h/2),)*3),
-        grid=mw.GridSpec.uniform(h), boundary=mw.BoundarySpec.pml(num_layers=pml), device='cuda')
+        grid=mw.GridSpec.uniform(h), boundary=mw.BoundarySpec.pml(num_layers=pml))
     if eps != 1 or mu != 1:
-        scene.add_structure(mw.Structure(geometry=mw.Box(position=(.03,0,0), size=(.06,.06,.06)),
-                                        material=mw.Material(eps_r=eps, mu_r=mu)))
-    scene.add_source(mw.PointDipole(position=(-.045,0,0), width=.015,
-        polarization=(.3,.5,1.), source_time=mw.GaussianPulse(frequency=f, fwidth=.5e9)))
-    result = mw.Simulation.fdtd(scene, frequency=f, run_time=mw.TimeConfig(time_steps=args.steps),
-        spectral_sampler=mw.SpectralSampler(window='none', normalize_source=True),
-        full_field_dft=True).run()
-    arrays = []
-    for c, a in enumerate((result.E.x,result.E.y,result.E.z)):
-        arrays.append(a[tuple(slice(pml,pml+n+(axis!=c)) for axis in range(3))].contiguous())
-    nodes = tuple(torch.as_tensor(getattr(result.prepared_scene, axis+'_nodes64')[pml:pml+n+1], device='cuda') / h
-                  for axis in ('x','y','z'))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=mw.Box(position=(.03,0,0), size=(.06,.06,.06)),
+                        material=mw.Material(eps_r=eps, mu_r=mu)),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(-.045,0,0), width=.015,
+            polarization=(.3,.5,1.), source_time=mw.GaussianPulse(frequency=f, fwidth=.5e9)),
+    ))
+    result = mw.Simulation.fdtd(scene, frequencies=f, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=args.steps),
+        spectral_sampler=mw.fdtd.SpectralSampler(window='none', normalize_source=True),
+        full_field_dft=True)).run()
+    arrays, nodes = yee_e_phasors(result, scene)
+    assert all(a.shape[c] == n and all(a.shape[k] == n+1 for k in range(3) if k != c) for c, a in enumerate(arrays))
+    nodes = tuple(axis/h for axis in nodes)
+    dt = float(result.stats()['dt'])
     field = emfc.StaggeredData(tuple(arrays), nodes, reference_spacing_m=h)
     original = field.to_emec()
-    kappa2 = emec.kappa_squared(f, h, dt=result.solver.dt)
-    row = dict(case=name, frequency_hz=f, dt=result.solver.dt, steps=args.steps, cells=n,
+    kappa2 = emec.kappa_squared(f, h, dt=dt)
+    row = dict(case=name, frequency_hz=f, dt=dt, steps=args.steps, cells=n,
                kappa2=kappa2, raw_bytes=sum(a.numel()*a.element_size() for a in arrays))
     if args.compare:
         previous = emfc.load_staggered(args.compare / f'{name}-exact.emfc')
@@ -123,7 +148,7 @@ def run(name, eps, mu):
     print(json.dumps(row),flush=True)
     return row
 
-report = dict(torch=torch.__version__,gpu=torch.cuda.get_device_name(),emfc_source=emfc.__file__,
+report = dict(torch=torch.__version__,maxwell_version=mw.__version__,maxwell_source=mw.__file__,gpu=torch.cuda.get_device_name(),emfc_source=emfc.__file__,
               emec_source=emec.__file__,cases=[])
 for case in [('vacuum',1.,1.),('dielectric',3.,1.),('magnetic',2.,1.5)]:
     report['cases'].append(run(*case))

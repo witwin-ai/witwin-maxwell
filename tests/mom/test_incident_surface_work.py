@@ -18,7 +18,7 @@ def test_surface_work_matches_rayleigh_interference_and_gradient():
         mw.PlaneWave(direction=(.6, 0., -.8), polarization=(0., 1., 0.),
                      source_time=mw.CW(frequency=3e8, amplitude=.4))]
     handle = SystemDecodeHandle(original.system, original.exterior, sources,
-        mw.MoMConfig(integration=original.integration), {})
+        mw.mom.MoMConfig(integration=original.integration), {})
     sample = original.system.bodies[0].mesh.vertices
     lattice = LatticeSpec(sample.new_tensor([[1., 0., 0.], [0., 1., 0.]]),
                           sample.new_tensor([.6*original.exterior.k.real, 0., 0.]))
@@ -48,7 +48,7 @@ def test_original_exterior_work_matches_radiated_modes():
     body = original.system.bodies[0]
     system = SurfaceSystem.create([(0, body.name, body.basis, body.interior)])
     handle = SystemDecodeHandle(system, original.exterior, original.sources,
-        mw.MoMConfig(integration=original.integration), {})
+        mw.mom.MoMConfig(integration=original.integration), {})
     sample = body.mesh.vertices
     lattice = LatticeSpec(sample.new_tensor([[.7, 0., 0.], [0., .8, 0.]]), sample.new_zeros(3))
     kernel = EwaldHelmholtzKernel(lattice, 3.5, real_shells=3, reciprocal_shells=4, quadrature_order=64)

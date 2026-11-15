@@ -18,24 +18,24 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA requ
 def problem(dimension=2):
     original = carrier(False)
     material = mw.Material(
-        epsilon_tensor=mw.ComplexTensor3x3(original.medium.epsilon_r.detach().cpu().tolist()),
-        mu_tensor=mw.ComplexTensor3x3(original.medium.mu_r.detach().cpu().tolist(), reciprocal=False))
+        epsilon_tensor=mw.media.ComplexTensor3x3(original.medium.epsilon_r.detach().cpu().tolist()),
+        mu_tensor=mw.media.ComplexTensor3x3(original.medium.mu_r.detach().cpu().tolist(), reciprocal=False))
     bodies = []
     for x in (-.2, .2):
         basis = basis_at(x)
         bodies.append(mw.Structure(mw.Mesh(basis.mesh.vertices, basis.mesh.faces,
             recenter=False, fill_mode='solid'), material))
-    source = mw.MaxwellPlaneModes(original.medium.frequency, original.wavevectors,
+    source = mw.mom.MaxwellPlaneModes(original.medium.frequency, original.wavevectors,
         original.electric, original.magnetic, original.origin)
     beta = [float(original.wavevectors[0, 0].real),
             float(original.wavevectors[0, 1].real) if dimension == 2 else 0., 0.]
-    periodic = mw.MoMDyadicPeriodicConfig(
+    periodic = mw.mom.MoMDyadicPeriodicConfig(
         vectors_m=((1., 0., 0.), (0., 1., 0.))[:dimension], bloch_rad_per_m=beta,
         shells=4, max_shells=8, height_m=.1, max_halvings=3, absolute_tolerance=.02,
         normal=(0., 0., 1.) if dimension == 1 else None, cache_max_bytes=0)
-    config = mw.MoMConfig(integration=IntegrationConfig(order=1, singular_order=2),
-        query_config=mw.FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1',
-        periodic=periodic, dyadic_integration=mw.DyadicIntegrationConfig(), dyadic_cache_max_bytes=2)
+    config = mw.mom.MoMConfig(integration=IntegrationConfig(order=1, singular_order=2),
+        query_config=mw.mom.FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1',
+        periodic=periodic, dyadic_integration=mw.mom.DyadicIntegrationConfig(), dyadic_cache_max_bytes=2)
     return mw.Scene(background=material, structures=bodies, sources=[source]), config
 
 
@@ -53,16 +53,16 @@ def test_public_dyadic_solve_incident_and_schema18_restore(dimension, monkeypatc
         return torch.eye(2*system.total_edges, device=system.device,
                          dtype=reference.medium.epsilon_r.dtype), {'physical_qualification': False}
     monkeypatch.setattr(assembly, 'assemble_periodic_dyadic_system', manufactured)
-    result = mw.Simulation.mom(scene, frequency=3e8, config=config).run()
+    result = mw.Simulation.mom(scene, frequencies=3e8, config=config).run()
     assert calls == ['checked_quasiperiodic_dyadic_regular_v1']
-    assert torch.count_nonzero(result.surface_currents.scattered_coefficients) == 0
+    assert torch.count_nonzero(mw.mom.surface_currents(result).scattered_coefficients) == 0
     assert result.stats()['converged']
     points = torch.tensor([[.1, .2, .3], [1.1, .2, .3]], device='cuda', dtype=torch.float64)
     fields = result.query_fields(points, region_id=0, field_kind='incident')
     phase = torch.exp(1j*points.new_tensor(config.periodic.bloch_rad_per_m[0]))
     for field in fields:
         torch.testing.assert_close(field[1], phase*field[0], rtol=1e-12, atol=1e-13)
-    payload = result.surface_currents.snapshot()
+    payload = mw.mom.surface_currents(result).snapshot()
     assert payload['schema_version'] == 18
     assert payload['kernel_id'] == 'checked_quasiperiodic_dyadic_regular_v1'
     assert payload['operator_metadata']['physical_qualification'] is False
@@ -74,9 +74,9 @@ def test_public_dyadic_solve_incident_and_schema18_restore(dimension, monkeypatc
     with monkeypatch.context() as patch:
         patch.setattr(torch.linalg, 'solve', forbidden)
         restored = mw.Result.load(path, scene=scene)
-        assert restored.surface_currents.config == config
-        assert torch.equal(restored.surface_currents.scattered_coefficients,
-                           result.surface_currents.scattered_coefficients)
+        assert mw.mom.surface_currents(restored).config == config
+        assert torch.equal(mw.mom.surface_currents(restored).scattered_coefficients,
+                           mw.mom.surface_currents(result).scattered_coefficients)
         for actual, expected in zip(restored.query_fields(points, region_id=0, field_kind='incident'), fields):
             assert torch.equal(actual, expected)
         for mutation in ('schema', 'regular', 'carrier', 'exterior', 'decoder', 'operator'):
@@ -88,9 +88,9 @@ def test_public_dyadic_solve_incident_and_schema18_restore(dimension, monkeypatc
             elif mutation == 'decoder': damaged['decoder_version'] = 'periodic_tensor_analytic_lifted_fields_v1'
             else: damaged['operator_metadata']['operator_identity'] = 'changed'
             with pytest.raises(ValueError):
-                SurfaceData.restore(damaged, scene, 3e8)
+                SurfaceData.restore(damaged, scene, 3e8, 'cuda')
     with pytest.raises(NotImplementedError, match='normalization'):
-        restored.surface_currents.rayleigh_orders([[0, 0]], side='+', plane_offset=.3)
+        mw.mom.surface_currents(restored).rayleigh_orders([[0, 0]], side='+', plane_offset=.3)
 
 
 def test_public_dyadic_complete_field_refinement_and_component_failure_logs(monkeypatch):
@@ -105,8 +105,8 @@ def test_public_dyadic_complete_field_refinement_and_component_failure_logs(monk
         return torch.eye(2*system.total_edges, device=system.device,
                          dtype=reference.medium.epsilon_r.dtype), {'physical_qualification': False}
     monkeypatch.setattr(assembly, 'assemble_periodic_dyadic_system', matrix)
-    result = mw.Simulation.mom(scene, frequency=3e8, config=config).run()
-    data = result.surface_currents
+    result = mw.Simulation.mom(scene, frequencies=3e8, config=config).run()
+    data = mw.mom.surface_currents(result)
     points = torch.tensor([[.1, .2, .3]], device='cuda', dtype=torch.float64)
     orders = []
     def manufactured(system, coefficients, points, *, order, **kwargs):
@@ -124,7 +124,7 @@ def test_public_dyadic_complete_field_refinement_and_component_failure_logs(monk
     orders.clear()
     with pytest.raises(TensorFieldConvergenceError) as error:
         result.query_fields(points, region_id=0, field_kind='scattered',
-            query_config=mw.FieldQueryConfig(max_order=4, relative_tolerance=0., absolute_tolerance=1e-9))
+            query_config=mw.mom.FieldQueryConfig(max_order=4, relative_tolerance=0., absolute_tolerance=1e-9))
     assert orders == [2, 4]
     assert data.handle.last_field_query_log is error.value.receipt
     assert data.handle.metadata['last_field_query']['failure_reason'] == 'surface_quadrature_order_budget_exhausted'

@@ -6,7 +6,7 @@ import torch
 from tests.support.rfic_fixtures import fixture_fa
 from witwin.maxwell.mom.layered.build import build_extension
 
-pytestmark = pytest.mark.cuda
+pytestmark = [pytest.mark.cuda, pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")]
 
 
 def test_shared_vertical_bessel_panels_match_full_batch(monkeypatch, record_property):

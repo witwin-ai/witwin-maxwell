@@ -40,7 +40,6 @@ def _port_scene(*, termination=None):
         grid=mw.GridSpec.uniform(0.005),
         boundary=mw.BoundarySpec.none(),
         ports=(port,),
-        device="cuda",
     )
 
 
@@ -48,14 +47,16 @@ def test_one_port_fdtd_run_returns_finite_device_resident_port_data():
     simulation = mw.Simulation.fdtd(
         _port_scene(),
         frequencies=(2.5e9, 3.0e9),
-        excitations=mw.PortExcitation(
+        excitations=mw.rf.PortExcitation(
             "feed",
             amplitude=1.0,
             source_impedance="matched",
             source_time=mw.GaussianPulse(frequency=2.75e9, fwidth=1.0e9),
         ),
-        run_time=mw.TimeConfig(time_steps=96),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=96),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     )
 
     result = simulation.run()
@@ -80,12 +81,12 @@ def test_one_port_fdtd_run_returns_finite_device_resident_port_data():
 def test_port_only_gaussian_uses_a_full_pulse_window_by_default():
     simulation = mw.Simulation.fdtd(
         _port_scene(),
-        frequency=2.75e9,
-        excitations=mw.PortExcitation(
+        frequencies=2.75e9,
+        excitations=mw.rf.PortExcitation(
             "feed",
             source_time=mw.GaussianPulse(frequency=2.75e9, fwidth=1.0e9),
         ),
-        run_time=mw.TimeConfig(time_steps=96),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=96)),
     )
 
     data = simulation.run().port("feed")
@@ -98,10 +99,12 @@ def test_port_only_gaussian_uses_a_full_pulse_window_by_default():
 def test_cw_port_remains_stable_for_4096_steps_at_the_base_courant_limit():
     simulation = mw.Simulation.fdtd(
         _port_scene(),
-        frequency=3.0e9,
-        excitations=mw.PortExcitation("feed", source_time=mw.CW(3.0e9)),
-        run_time=mw.TimeConfig(time_steps=4096),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
+        frequencies=3.0e9,
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.CW(3.0e9)),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=4096),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+        ),
     )
     prepared = simulation.prepare()
     solver = prepared.solver
@@ -131,10 +134,12 @@ def test_cw_port_remains_stable_for_4096_steps_at_the_base_courant_limit():
 
 def test_passive_rlc_port_prepares_device_resident_auxiliary_state():
     simulation = mw.Simulation.fdtd(
-        _port_scene(termination=mw.SeriesRLC(r=25.0, l=0.5e-9, c=1.0e-12)),
-        frequency=3.0e9,
-        run_time=mw.TimeConfig(time_steps=8),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        _port_scene(termination=mw.rf.SeriesRLC(r=25.0, l=0.5e-9, c=1.0e-12)),
+        frequencies=3.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=8),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     )
 
     prepared = simulation.prepare()
@@ -147,7 +152,7 @@ def test_passive_rlc_port_prepares_device_resident_auxiliary_state():
 
 
 def test_scene_lumped_element_is_compiled_into_the_same_device_runtime():
-    element = mw.Capacitor(
+    element = mw.rf.Capacitor(
         "matching_c",
         positive=(0.0, 0.0, 0.005),
         negative=(0.0, 0.0, -0.005),
@@ -160,9 +165,8 @@ def test_scene_lumped_element_is_compiled_into_the_same_device_runtime():
         grid=mw.GridSpec.uniform(0.005),
         boundary=mw.BoundarySpec.none(),
         lumped_elements=(element,),
-        device="cuda",
     )
-    prepared = mw.Simulation.fdtd(scene, frequency=3.0e9).prepare()
+    prepared = mw.Simulation.fdtd(scene, frequencies=3.0e9).prepare()
 
     runtime, field_name = prepared.solver._lumped_element_runtimes[0]
 
@@ -173,9 +177,9 @@ def test_scene_lumped_element_is_compiled_into_the_same_device_runtime():
 
 def test_active_port_rejects_a_simultaneous_passive_termination():
     simulation = mw.Simulation.fdtd(
-        _port_scene(termination=mw.SeriesRLC(r=50.0)),
-        frequency=3.0e9,
-        excitations=mw.PortExcitation("feed"),
+        _port_scene(termination=mw.rf.SeriesRLC(r=50.0)),
+        frequencies=3.0e9,
+        excitations=mw.rf.PortExcitation("feed"),
     )
 
     with pytest.raises(ValueError, match="cannot also declare a passive termination"):
@@ -183,25 +187,26 @@ def test_active_port_rejects_a_simultaneous_passive_termination():
 
 
 def test_prepare_rejects_overlapping_port_and_lumped_element_edges():
-    scene = _port_scene(termination=mw.SeriesRLC(r=50.0))
-    scene.add_lumped_element(
-        mw.Capacitor(
+    scene = _port_scene(termination=mw.rf.SeriesRLC(r=50.0))
+    scene = scene.updated(lumped_elements=(
+        *scene.lumped_elements,
+        mw.rf.Capacitor(
             "overlap",
             positive=(0.0, 0.0, 0.005),
             negative=(0.0, 0.0, -0.005),
             capacitance=1.0e-12,
-        )
-    )
+        ),
+    ))
 
     with pytest.raises(ValueError, match="overlap the same Ez Yee edge"):
-        mw.Simulation.fdtd(scene, frequency=3.0e9).prepare()
+        mw.Simulation.fdtd(scene, frequencies=3.0e9).prepare()
 
 
 def test_port_step_profiler_has_no_scalar_sync_or_host_device_copy():
     solver = mw.Simulation.fdtd(
         _port_scene(),
-        frequency=3.0e9,
-        excitations=mw.PortExcitation("feed", source_time=mw.CW(3.0e9)),
+        frequencies=3.0e9,
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.CW(3.0e9)),
     ).prepare().solver
     prepare_port_spectral_accumulators(solver, 64, "none")
 
@@ -252,10 +257,12 @@ def test_passive_series_rlc_port_step_stays_within_op_count_ceiling():
     # (LumpedRuntime.diagnostics_enabled) or reintroducing per-step allocations
     # pushes these tallies over the ceiling and turns this red.
     solver = mw.Simulation.fdtd(
-        _port_scene(termination=mw.SeriesRLC(r=25.0, l=0.5e-9, c=1.0e-12)),
-        frequency=3.0e9,
-        run_time=mw.TimeConfig(time_steps=96),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        _port_scene(termination=mw.rf.SeriesRLC(r=25.0, l=0.5e-9, c=1.0e-12)),
+        frequencies=3.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=96),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).prepare().solver
     prepare_port_spectral_accumulators(solver, 96, "none")
 

@@ -7,6 +7,7 @@ from .direct_capacity import storage_bytes
 from .fmm_storage import m2l_storage_bytes
 from .fmm_periodic_error import periodic_image_partition
 from .fmm_shift import shift_storage_bytes
+from ..errors import UnsupportedFeatureError
 
 
 def _provider_cache(provider):
@@ -28,10 +29,12 @@ def plan_periodic_storage(provider, trees, lattice, *, order, shells, separation
     if type(budget_bytes) is not int or budget_bytes < 1:
         raise ValueError('Periodic action retained budget must be a positive integer')
     if table_storage == 'fft_v1':
-        raise NotImplementedError('Periodic FFT capacity planning requires separately admitted screened coefficients')
+        raise UnsupportedFeatureError('Periodic FFT capacity planning requires separately admitted screened coefficients',
+                                      feature="boundary.periodic", method="mom")
     if table_storage == 'fft_ewald_v1':
         if not ewald:
-            raise NotImplementedError('Ewald FFT capacity requires actual screened Ewald coefficients')
+            raise UnsupportedFeatureError('Ewald FFT capacity requires actual screened Ewald coefficients',
+                                          feature="guard:40449a53", method="mom")
         from .ewald_nearfield import EwaldSystemBlocks
         if not isinstance(provider, EwaldSystemBlocks) or provider.kernel.lattice is not lattice:
             raise ValueError('Ewald FFT capacity requires matching original Ewald provider and lattice')
@@ -42,7 +45,8 @@ def plan_periodic_storage(provider, trees, lattice, *, order, shells, separation
     lattice.assert_current()
     trees = tuple(trees)
     if any(tree.expansion_centers is not None for tree in trees):
-        raise NotImplementedError('Dyadic expansion centers currently require free space')
+        raise UnsupportedFeatureError('Dyadic expansion centers currently require free space',
+                                      feature="guard:db90d056", method="mom")
     root, *interiors = trees
     real = root.lower.element_size()
     pair_bytes = m2l_storage_bytes(order, real, 'fft_v1' if table_storage == 'fft_ewald_v1' else table_storage)

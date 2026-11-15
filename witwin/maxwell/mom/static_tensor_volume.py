@@ -10,6 +10,7 @@ from .ordered_reduction import add_ordered_rows
 from .static_tensor_green import StaticTensorGreen
 from .volume_mesh import TetrahedralVolumeMesh
 from .fields import _pair_triangle_distance
+from ..errors import ConvergenceError
 
 
 def cell_tensor_static_potentials(mesh,points,kernel,*,cell_indices=None,
@@ -121,7 +122,7 @@ def _cell_static_integrals(mesh,points,kernel,panel_integrals,*,cell_indices,
             hessians.reshape(queries,count,3,3))
 
 
-class StaticCellConvergenceError(RuntimeError):
+class StaticCellConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         self.receipt=receipt
         super().__init__('Static cell integration exhausted its order budget')

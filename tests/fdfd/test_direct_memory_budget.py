@@ -1,3 +1,4 @@
+from dataclasses import replace
 import gc
 import os
 import subprocess
@@ -18,22 +19,25 @@ DEVICE_LIMIT = 576 * MIB
 
 def _simulation(limit=None, cells=20, eps_r=4.0, boundary=None):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
-        grid=mw.GridSpec.uniform(0.4 / cells),
-        boundary=mw.BoundarySpec.pml(num_layers=4) if boundary is None else boundary,
-        device="cuda",
-    )
-    scene.add_structure(mw.Structure(
-        name="block", geometry=mw.Box(position=(0.0, 0.05, 0.0), size=(0.1,) * 3),
-        material=mw.Material(eps_r=eps_r),
-    ))
-    scene.add_source(mw.PointDipole(
-        position=(0.0, 0.0, 0.0), polarization="Ez", width=0.05,
-        source_time=mw.CW(frequency=1e9),
-    ))
+                domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
+                grid=mw.GridSpec.uniform(0.4 / cells),
+                boundary=mw.BoundarySpec.pml(num_layers=4) if boundary is None else boundary,
+                structures=(
+            mw.Structure(
+                name="block", geometry=mw.Box(position=(0.0, 0.05, 0.0), size=(0.1,) * 3),
+                material=mw.Material(eps_r=eps_r),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0), polarization="Ez", width=0.05,
+                source_time=mw.CW(frequency=1e9),
+            ),
+            ),
+            )
     return mw.Simulation.fdfd(
-        scene, frequency=1e9,
-        solver=mw.GMRES(solver_type="direct", precision="double", device_memory_limit_bytes=limit),
+        scene, frequencies=1e9,
+        config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type="direct", precision="double", device_memory_limit_bytes=limit)),
     )
 
 
@@ -104,9 +108,9 @@ def test_direct_budget_matches_unlimited_fields_and_limits_peak(warmed_device):
     limited.release_solver()
     _trim_pools()
     unlimited = _simulation().run()
-    numerator = sum((limited.fields[key] - field).abs().square().sum()
+    numerator = sum((limited.fields[key].values - field.values).abs().square().sum()
                     for key, field in unlimited.fields.items())
-    denominator = sum(field.abs().square().sum() for field in unlimited.fields.values())
+    denominator = sum(field.values.abs().square().sum() for field in unlimited.fields.values())
     assert float((numerator / denominator).sqrt()) <= 1e-6
     unlimited.release_solver()
 
@@ -119,7 +123,7 @@ def test_release_solver_reclaims_direct_memory_and_is_idempotent(warmed_device):
     result = simulation.run()
     result.release_solver()
     _trim_pools()
-    field_bytes = sum(field.numel() * field.element_size() for field in result.fields.values())
+    field_bytes = sum(field.values.numel() * field.values.element_size() for field in result.fields.values())
     after_release = _used_memory()
     release_delta = after_release - baseline
     print(f"after-release delta: {release_delta} bytes ({release_delta / MIB:.2f} MiB)")
@@ -132,11 +136,11 @@ def test_release_solver_reclaims_direct_memory_and_is_idempotent(warmed_device):
 def test_direct_budget_constructor_validation():
     for limit in (True, False, 0, -1, 1.5, "1024"):
         with pytest.raises(ValueError, match="positive integer"):
-            mw.GMRES(solver_type="direct", device_memory_limit_bytes=limit)
+            mw.fdfd.FDFDSolverConfig(solver_type="direct", device_memory_limit_bytes=limit)
     with pytest.raises(ValueError, match="applies to solver_type='direct'"):
-        mw.GMRES(solver_type="gmres", device_memory_limit_bytes=MIB)
-    assert mw.GMRES().device_memory_limit_bytes is None
-    assert mw.GMRES(solver_type="direct", device_memory_limit_bytes=MIB).device_memory_limit_bytes == MIB
+        mw.fdfd.FDFDSolverConfig(solver_type="gmres", device_memory_limit_bytes=MIB)
+    assert mw.fdfd.FDFDSolverConfig().device_memory_limit_bytes is None
+    assert mw.fdfd.FDFDSolverConfig(solver_type="direct", device_memory_limit_bytes=MIB).device_memory_limit_bytes == MIB
 
 
 @requires_cuda
@@ -144,10 +148,10 @@ def test_direct_budget_below_hybrid_minimum(warmed_device):
     with pytest.raises(ValueError, match="device_memory_limit_bytes=1048576.*hybrid minimum"):
         _simulation(MIB).run()
     simulation = _simulation(DEVICE_LIMIT)
-    simulation.config.local_response = mw.LocalResponseConfig(
-        mw.LocalDesignRegion(bounds=((-0.025, 0.025),) * 3),
-        (mw.FieldProjection("probe", position=(0.07, 0.07, 0.0)),),
-    )
+    simulation.config = replace(simulation.config, local_response=mw.fdfd.LocalResponseConfig(
+        mw.fdfd.LocalDesignRegion(bounds=((-0.025, 0.025),) * 3),
+        (mw.fdfd.FieldProjection("probe", position=(0.07, 0.07, 0.0)),),
+    ))
     with pytest.raises(ValueError, match="local responses require GPU-resident direct factors"):
         simulation.prepare()
 
@@ -158,7 +162,7 @@ def test_limited_direct_refactorization_in_autograd_backward(warmed_device):
     for release in (False, True):
         eps_r = torch.tensor(4.0, dtype=torch.float64, device="cuda", requires_grad=True)
         result = _simulation(DEVICE_LIMIT, cells=8, eps_r=eps_r).run()
-        loss = sum(field.abs().square().mean() for field in result.fields.values())
+        loss = sum(field.values.abs().square().mean() for field in result.fields.values())
         if release:
             result.release_solver()
         loss.backward()
@@ -198,6 +202,6 @@ def test_limited_direct_forward_in_worker_thread(warmed_device):
         raise errors[0]
     assert len(results) == 1
     assert results[0].fields.keys() == reference.fields.keys()
-    assert any(torch.count_nonzero(field) > 0 for field in reference.fields.values())
+    assert any(torch.count_nonzero(field.values) > 0 for field in reference.fields.values())
     for key, field in reference.fields.items():
-        assert torch.equal(results[0].fields[key], field)
+        assert torch.equal(results[0].fields[key].values, field.values)

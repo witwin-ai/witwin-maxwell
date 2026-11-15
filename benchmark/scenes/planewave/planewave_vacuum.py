@@ -10,20 +10,21 @@ FREQUENCIES = (2.0e9,)
 
 
 def build_scene() -> mw.Scene:
-    scene = (
-        base_scene()
-        .add_source(
-            mw.PlaneWave(
-                direction=(0.0, 0.0, 1.0),
-                polarization=(1.0, 0.0, 0.0),
-                source_time=mw.GaussianPulse(frequency=2.0e9, fwidth=0.5e9),
-                name="plane_wave",
-            )
-        )
-        .add_monitor(mw.PlaneMonitor(name="field_xz", axis="y", position=0.0, fields=("Ex", "Ey", "Ez"), frequencies=FREQUENCIES))
-        .add_monitor(mw.FluxMonitor(name="flux_pos_z", axis="z", position=0.30, frequencies=FREQUENCIES))
-        .add_monitor(mw.FluxMonitor(name="flux_neg_z", axis="z", position=-0.30, frequencies=FREQUENCIES, normal_direction="-"))
-    )
+    scene = base_scene()
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PlaneWave(
+            direction=(0.0, 0.0, 1.0),
+            polarization=(1.0, 0.0, 0.0),
+            source_time=mw.GaussianPulse(frequency=2.0e9, fwidth=0.5e9),
+            name="plane_wave",
+        ),
+    ), monitors=(
+        *scene.monitors,
+        mw.PlaneMonitor(name="field_xz", axis="y", position=0.0, fields=("Ex", "Ey", "Ez"), frequencies=FREQUENCIES),
+        mw.FluxMonitor(name="flux_pos_z", axis="z", position=0.30, frequencies=FREQUENCIES),
+        mw.FluxMonitor(name="flux_neg_z", axis="z", position=-0.30, frequencies=FREQUENCIES, normal_direction="-"),
+    ))
     return with_plot_monitors(scene, frequencies=FREQUENCIES)
 
 

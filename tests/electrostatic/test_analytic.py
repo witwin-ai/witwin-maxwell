@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="electrost
 
 
 def _tol_config(tol=1e-11):
-    return mw.ElectrostaticSolverConfig(tolerance=tol)
+    return mw.electrostatic.ElectrostaticSolverConfig(tolerance=tol)
 
 
 def test_parallel_plate_linear_potential_and_capacitance():
@@ -38,13 +38,13 @@ def test_parallel_plate_linear_potential_and_capacitance():
     domain = mw.Domain(bounds=((0.0, lateral), (0.0, lateral), (0.0, gap)))
     grid = mw.GridSpec.uniform(gap / 20.0)
     scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    boundary = mw.ElectrostaticBoundarySpec(
+    boundary = mw.electrostatic.ElectrostaticBoundarySpec(
         default="neumann",
         z_low=("dirichlet", 1.0),
         z_high=("dirichlet", 0.0),
     )
-    result = mw.Simulation.electrostatic(scene, boundary=boundary, solver=_tol_config(1e-12)).run()
-    es = result.electrostatic
+    result = mw.Simulation.electrostatic(scene, config=mw.electrostatic.ElectrostaticConfig(boundary=boundary, solver=_tol_config(1e-12))).run()
+    es = mw.electrostatic.electrostatic(result)
 
     # Linear potential profile phi(z) = 1 - z/gap.
     zc = es.zc
@@ -65,22 +65,22 @@ def _run_concentric_sphere(n, a=0.2, b=0.8, eps_r=1.0):
     grid = mw.GridSpec.uniform(2.0 * half / n)
     scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
     if eps_r != 1.0:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=mw.Box(position=(0, 0, 0), size=(2 * half, 2 * half, 2 * half)),
                 material=mw.Material(eps_r=eps_r),
-            )
-        )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="inner", geometry=Sphere(position=(0, 0, 0), radius=a), potential=1.0)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="outer", geometry=OutsideSphere(b), grounded=True)
-    )
+            ),
+        ))
+    scene = scene.updated(electrostatic_terminals=(
+        *scene.electrostatic_terminals,
+        mw.electrostatic.ElectrostaticTerminal(name="inner", geometry=Sphere(position=(0, 0, 0), radius=a), potential=1.0),
+        mw.electrostatic.ElectrostaticTerminal(name="outer", geometry=OutsideSphere(b), grounded=True),
+    ))
     result = mw.Simulation.electrostatic(
-        scene, boundary=mw.ElectrostaticBoundarySpec.neumann(), solver=_tol_config()
+        scene, config=mw.electrostatic.ElectrostaticConfig(boundary=mw.electrostatic.ElectrostaticBoundarySpec.neumann(), solver=_tol_config())
     ).run()
-    return result.electrostatic
+    return mw.electrostatic.electrostatic(result)
 
 
 def test_concentric_spheres_potential_and_capacitance():
@@ -125,14 +125,15 @@ def test_coaxial_cylinder_capacitance_and_convergence():
         nz = max(4, int(n * lz / (2 * half)))
         domain = mw.Domain(bounds=((-half, half), (-half, half), (0.0, lz)))
         grid = mw.GridSpec.anisotropic(2 * half / n, 2 * half / n, lz / nz)
-        scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
         inner = Cylinder(position=(0, 0, lz / 2), radius=a, height=4 * lz, axis="z")
-        scene.add_electrostatic_terminal(mw.ElectrostaticTerminal(name="inner", geometry=inner, potential=1.0))
-        scene.add_electrostatic_terminal(mw.ElectrostaticTerminal(name="outer", geometry=OutsideCylinder(b), grounded=True))
+        scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), electrostatic_terminals=(
+                    mw.electrostatic.ElectrostaticTerminal(name="inner", geometry=inner, potential=1.0),
+                    mw.electrostatic.ElectrostaticTerminal(name="outer", geometry=OutsideCylinder(b), grounded=True),
+                ))
         result = mw.Simulation.electrostatic(
-            scene, boundary=mw.ElectrostaticBoundarySpec.neumann(), solver=_tol_config()
+            scene, config=mw.electrostatic.ElectrostaticConfig(boundary=mw.electrostatic.ElectrostaticBoundarySpec.neumann(), solver=_tol_config())
         ).run()
-        es = result.electrostatic
+        es = mw.electrostatic.electrostatic(result)
         c_per_len = float(es.terminal_charge("inner")) / lz
         errors.append(abs(c_per_len - c_analytic) / c_analytic)
     assert errors[0] > errors[1] > errors[2]

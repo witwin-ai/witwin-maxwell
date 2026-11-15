@@ -8,6 +8,8 @@ import torch
 
 from ..constants import EPSILON_0
 from ..fdtd.runtime.materials import pole_component_weight
+from ..errors import UnsupportedFeatureError
+from ..compiler.materials import compile_materials
 
 
 def native_pole_work_conductivity(kind, decay, drive, dt, frequencies, restoring=0.):
@@ -29,7 +31,7 @@ def native_pole_work_conductivity(kind, decay, drive, dt, frequencies, restoring
 
 def automatic_electric_dispersion_density(scene, compiled, frequencies, fields, dt):
     """Evaluate actual native bulk pole work on the monitor's sparse E edges."""
-    model = scene.compile_materials()
+    model = compile_materials(scene)
     output = {}
     for component in ("Ex", "Ey", "Ez"):
         mask = compiled.component_masks[component]
@@ -97,7 +99,8 @@ def apply_split_trace_densities(data, compiled, fields, records, *, correct_disp
             if not bool(selected.any()):
                 continue
             if fields[component].requires_grad and not trace["electric_fields"].requires_grad:
-                raise NotImplementedError("Split-foil spectral bulk loss requires differentiable side spectra; use the qualified conductor energy objective for foil gradients.")
+                raise UnsupportedFeatureError("Split-foil spectral bulk loss requires differentiable side spectra; use the qualified conductor energy objective for foil gradients.",
+                                              feature="material.copper_foil", method=None)
             locations = []
             for frequency in data.frequencies:
                 matches = torch.nonzero(frequencies.to(frequency.device) == frequency).flatten()
@@ -179,9 +182,11 @@ def conductor_region_power(record, bounds):
     if traces is None:
         raise ValueError("Regional conductor power requires retained per-edge work and physical tile geometry.")
     if record.get("coordinate_frame") != "cartesian":
-        raise NotImplementedError("Regional conductor power currently requires Cartesian surface tiles; mapped partial-tile metrics are not implemented.")
+        raise UnsupportedFeatureError("Regional conductor power currently requires Cartesian surface tiles; mapped partial-tile metrics are not implemented.",
+                                      feature="coordinates", method=None)
     if record.get("periodic_axes"):
-        raise NotImplementedError("Regional conductor power requires nonperiodic axes; wrapped surface-tile fragments are not implemented.")
+        raise UnsupportedFeatureError("Regional conductor power requires nonperiodic axes; wrapped surface-tile fragments are not implemented.",
+                                      feature="boundary.periodic", method=None)
     total = torch.zeros_like(record["surface_power"])
     for trace in traces:
         normal = "xyz".index(trace["normal_axis"])

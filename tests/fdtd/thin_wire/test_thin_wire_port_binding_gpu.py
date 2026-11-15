@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 
 import pytest
@@ -12,6 +13,8 @@ from witwin.maxwell.fdtd.ports import (
     prepare_port_spectral_accumulators,
 )
 from witwin.maxwell.fdtd.observers import _compute_plane_flux
+from witwin.maxwell.compiler import compile_ports, compile_thin_wires
+from witwin.maxwell.scene import prepare_scene
 
 
 pytestmark = pytest.mark.skipif(
@@ -22,7 +25,7 @@ _FREQUENCY = 1.0e9
 
 
 def _wire_port_scene(*, termination=None) -> mw.Scene:
-    wire = mw.ThinWire(
+    wire = mw.rf.ThinWire(
         name="dipole",
         points=(
             (-0.08, -0.08, 0.0),
@@ -31,13 +34,13 @@ def _wire_port_scene(*, termination=None) -> mw.Scene:
             (0.08, 0.08, 0.0),
         ),
         radius=2.0e-3,
-        conductor=mw.WireConductor.pec(),
-        endpoints=(mw.WireEnd.open(), mw.WireEnd.open()),
+        conductor=mw.rf.WireConductor.pec(),
+        endpoints=(mw.rf.WireEnd.open(), mw.rf.WireEnd.open()),
         snap="strict",
     )
-    binding = mw.WirePortBinding.gap(
-        negative=mw.WireNodeRef("dipole", 1),
-        positive=mw.WireNodeRef("dipole", 2),
+    binding = mw.rf.WirePortBinding.gap(
+        negative=mw.rf.WireNodeRef("dipole", 1),
+        positive=mw.rf.WireNodeRef("dipole", 2),
     )
     port = mw.LumpedPort(
         "feed",
@@ -51,30 +54,29 @@ def _wire_port_scene(*, termination=None) -> mw.Scene:
         boundary=mw.BoundarySpec.none(),
         thin_wires=(wire,),
         ports=(port,),
-        device="cuda",
     )
 
 
 def _wire_node_port_scene(*, termination=None) -> mw.Scene:
-    negative = mw.ThinWire(
+    negative = mw.rf.ThinWire(
         "negative_arm",
         ((-0.08, -0.08, 0.0), (-0.04, -0.04, 0.0)),
         2.0e-3,
-        mw.WireConductor.pec(),
-        endpoints=(mw.WireEnd.open(), mw.WireEnd.open()),
+        mw.rf.WireConductor.pec(),
+        endpoints=(mw.rf.WireEnd.open(), mw.rf.WireEnd.open()),
     )
-    positive = mw.ThinWire(
+    positive = mw.rf.ThinWire(
         "positive_arm",
         ((0.04, 0.04, 0.0), (0.08, 0.08, 0.0)),
         2.0e-3,
-        mw.WireConductor.pec(),
-        endpoints=(mw.WireEnd.open(), mw.WireEnd.open()),
+        mw.rf.WireConductor.pec(),
+        endpoints=(mw.rf.WireEnd.open(), mw.rf.WireEnd.open()),
     )
-    port = mw.TerminalPort(
+    port = mw.rf.TerminalPort(
         "feed",
-        wire_binding=mw.WirePortBinding.nodes(
-            negative=mw.WireNodeRef("negative_arm", 1),
-            positive=mw.WireNodeRef("positive_arm", 0),
+        wire_binding=mw.rf.WirePortBinding.nodes(
+            negative=mw.rf.WireNodeRef("negative_arm", 1),
+            positive=mw.rf.WireNodeRef("positive_arm", 0),
         ),
         termination=termination,
     )
@@ -84,7 +86,6 @@ def _wire_node_port_scene(*, termination=None) -> mw.Scene:
         boundary=mw.BoundarySpec.none(),
         thin_wires=(negative, positive),
         ports=(port,),
-        device="cuda",
     )
 
 
@@ -118,8 +119,8 @@ def _generalized_coordinate(solver, port_runtime) -> torch.Tensor:
 
 def test_gap_compiler_builds_cuda_csr_and_removes_source_segment_from_wire_state():
     scene = _wire_port_scene()
-    network = scene.compile_thin_wires()
-    geometry = scene.compile_ports()[0]
+    network = compile_thin_wires(prepare_scene(scene))
+    geometry = compile_ports(prepare_scene(scene))[0]
 
     assert network.port_binding_names == ("feed",)
     assert network.port_binding_kinds == ("gap",)
@@ -160,10 +161,12 @@ def test_gap_compiler_builds_cuda_csr_and_removes_source_segment_from_wire_state
 
 def test_passive_gap_runtime_conserves_charge_and_closes_one_step_energy_on_cuda():
     solver = mw.Simulation.fdtd(
-        _wire_port_scene(termination=mw.SeriesRLC(r=50.0)),
-        frequency=_FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=4),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        _wire_port_scene(termination=mw.rf.SeriesRLC(r=50.0)),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=4),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).prepare().solver
     port_runtime = solver._port_runtimes[0]
     provider = port_runtime.wire_provider
@@ -241,14 +244,16 @@ def test_active_gap_port_runs_finite_fdtd_and_returns_wire_provider_port_data():
     simulation = mw.Simulation.fdtd(
         _wire_port_scene(),
         frequencies=(_FREQUENCY, 1.25e9),
-        excitations=mw.PortExcitation(
+        excitations=mw.rf.PortExcitation(
             "feed",
             source_impedance="matched",
             source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=0.5e9),
         ),
-        run_time=mw.TimeConfig(time_steps=64),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=64),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
 
     result = simulation.run()
@@ -273,11 +278,11 @@ def test_active_gap_port_runs_finite_fdtd_and_returns_wire_provider_port_data():
     assert result.stats()["num_ports"] == 1
 
 
-def test_node_bound_port_is_charge_conservative_and_has_no_gap_field_coordinate():
+def test_node_bound_port_is_charge_conservative_and_owns_its_terminal_chord():
     solver = mw.Simulation.fdtd(
-        _wire_node_port_scene(termination=mw.SeriesRLC(r=50.0)),
-        frequency=_FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=2),
+        _wire_node_port_scene(termination=mw.rf.SeriesRLC(r=50.0)),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2)),
     ).prepare().solver
     runtime = solver._port_runtimes[0]
     provider = runtime.wire_provider
@@ -285,9 +290,12 @@ def test_node_bound_port_is_charge_conservative_and_has_no_gap_field_coordinate(
 
     assert provider is not None
     assert lumped is not None
-    assert provider.field_count == 0
-    assert provider.geometry.edge_weights.numel() == 0
-    assert provider.voltage_weights.tolist() == [1.0, -1.0]
+    # The port voltage is the node-potential difference plus the Yee line integral along
+    # the straight chord between the terminals, (-0.04, -0.04, 0) -> (0.04, 0.04, 0).
+    assert provider.field_count == provider.geometry.edge_weights.numel() > 0
+    assert set(provider.geometry.edge_components.tolist()) == {0, 1}
+    assert float(provider.geometry.edge_weights.sum()) == pytest.approx(0.16, rel=1e-12)
+    assert provider.voltage_weights[provider.field_count:].tolist() == [1.0, -1.0]
 
     charge = solver._wire_runtime.charge
     negative_node, positive_node = provider.node_ids
@@ -315,12 +323,12 @@ def test_node_bound_port_is_charge_conservative_and_has_no_gap_field_coordinate(
 def test_wire_gap_port_step_has_no_scalar_sync_or_host_device_copy():
     solver = mw.Simulation.fdtd(
         _wire_port_scene(),
-        frequency=_FREQUENCY,
-        excitations=mw.PortExcitation(
+        frequencies=_FREQUENCY,
+        excitations=mw.rf.PortExcitation(
             "feed",
             source_time=mw.CW(_FREQUENCY),
         ),
-        run_time=mw.TimeConfig(time_steps=32),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=32)),
     ).prepare().solver
     prepare_port_spectral_accumulators(solver, 32, "none")
 
@@ -355,28 +363,28 @@ def test_pec_wire_port_accepted_power_closes_against_radiated_surface_flux():
     arm_segments = 32
     negative = torch.linspace(-0.025, -0.00025, arm_segments + 1)
     positive = torch.linspace(0.00025, 0.025, arm_segments + 1)
-    negative_wire = mw.ThinWire(
+    negative_wire = mw.rf.ThinWire(
         "negative_arm",
         tuple((0.0, 0.0, float(value)) for value in negative),
         1.0e-4,
-        mw.WireConductor.pec(),
+        mw.rf.WireConductor.pec(),
         snap="continuous",
     )
-    positive_wire = mw.ThinWire(
+    positive_wire = mw.rf.ThinWire(
         "positive_arm",
         tuple((0.0, 0.0, float(value)) for value in positive),
         1.0e-4,
-        mw.WireConductor.pec(),
+        mw.rf.WireConductor.pec(),
         snap="continuous",
     )
     port = mw.LumpedPort(
         "feed",
-        wire_binding=mw.WirePortBinding.nodes(
-            negative=mw.WireNodeRef("negative_arm", arm_segments),
-            positive=mw.WireNodeRef("positive_arm", 0),
+        wire_binding=mw.rf.WirePortBinding.nodes(
+            negative=mw.rf.WireNodeRef("negative_arm", arm_segments),
+            positive=mw.rf.WireNodeRef("positive_arm", 0),
         ),
     )
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "radiation",
         position=(0.0, 0.0, 0.0),
         size=(0.09, 0.09, 0.09),
@@ -389,27 +397,28 @@ def test_pec_wire_port_accepted_power_closes_against_radiated_surface_flux():
         thin_wires=(negative_wire, positive_wire),
         ports=(port,),
         monitors=(surface,),
-        device="cuda",
     )
     simulation = mw.Simulation.fdtd(
         scene,
-        frequency=frequency,
-        excitations=mw.PortExcitation(
+        frequencies=frequency,
+        excitations=mw.rf.PortExcitation(
             "feed",
             source_time=mw.GaussianPulse(frequency=frequency, fwidth=0.5e9),
         ),
-        run_time=mw.TimeConfig(time_steps=1),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
     prepared = simulation.prepare()
-    simulation.config.run_time = mw.TimeConfig(
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(
         time_steps=math.ceil(8.0e-9 / float(prepared.solver.dt))
-    )
+    ))
     result = prepared.run()
     port_data = result.port("feed")
     accepted = port_data.accepted_power[0]
-    payload = result.monitor("radiation")
+    payload = result.raw_monitor("radiation")
     radiated = sum(
         _compute_plane_flux(face)
         for face in payload["faces"].values()

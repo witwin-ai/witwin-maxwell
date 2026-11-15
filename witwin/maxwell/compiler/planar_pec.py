@@ -10,6 +10,7 @@ from witwin.core import Box
 from ..geometry.planar_pec import PlanarPEC
 from ..geometry.surface_mesh import SurfaceMesh
 from .structures import pec_structures
+from ..errors import UnsupportedFeatureError
 
 _AXES = ("x", "y", "z")
 
@@ -90,7 +91,7 @@ def _compile_planar_sheet(scene, structure, nodes, normal, index):
     physical = scene.physical_domain_range
     for dim in transverse:
         span = float(physical[2*dim+1] - physical[2*dim])
-        shifts.append((-span, 0., span) if scene.boundary.axis_kind(_AXES[dim]) in ("periodic", "bloch") else (0.,))
+        shifts.append((-span, 0., span) if scene.scene.boundary.axis_kind(_AXES[dim]) in ("periodic", "bloch") else (0.,))
     images = tuple(product(*shifts))
     support = torch.zeros_like(u, dtype=torch.bool)
     for du, dv in images:
@@ -140,7 +141,7 @@ def compile_planar_pec(scene, *, sheets=None):
     """
     from dataclasses import replace
     indexed = []
-    for i, structure in enumerate(scene.structures):
+    for i, structure in enumerate(scene.scene.structures):
         if not getattr(structure, "enabled", True):
             continue
         if isinstance(structure.geometry, SurfaceMesh):
@@ -148,7 +149,8 @@ def compile_planar_pec(scene, *, sheets=None):
             if owns_thin_sheet(structure):
                 continue
             if not bool(getattr(structure.material, "is_pec", False)):
-                raise NotImplementedError("SurfaceMesh requires PEC; finite copper needs independent two-sided cut traces.")
+                raise UnsupportedFeatureError("SurfaceMesh requires PEC; finite copper needs independent two-sided cut traces.",
+                                              feature="geometry.surface_mesh", method="fdtd")
             planar = structure.geometry.planar_pec(scene)
             if planar is not None:
                 structure = replace(structure, geometry=planar)
@@ -173,19 +175,22 @@ def compile_planar_pec(scene, *, sheets=None):
     for owner, structure in indexed:
         geometry = structure.geometry
         if any(loop.requires_grad for loop in (geometry.vertices, *geometry.holes, geometry.position, geometry.rotation)):
-            raise NotImplementedError("PlanarPEC has discrete edge ownership; shape gradients are unsupported.")
+            raise UnsupportedFeatureError("PlanarPEC has discrete edge ownership; shape gradients are unsupported.",
+                                          feature="geometry.planar_pec", method="fdtd")
         rotation = geometry.rotation.detach().cpu().numpy()
         if not np.array_equal(np.abs(rotation), (1., 0., 0., 0.)):
-            raise NotImplementedError("PlanarPEC supports axis-aligned planes; rotated sheets need a cut-surface discretization.")
+            raise UnsupportedFeatureError("PlanarPEC supports axis-aligned planes; rotated sheets need a cut-surface discretization.",
+                                          feature="geometry.planar_pec", method="fdtd")
         normal = _AXES.index(geometry.normal_axis)
         declared_position = torch.zeros_like(geometry.position)
         declared_position[normal] = geometry.coordinate
         if not torch.equal(geometry.position, declared_position):
             raise ValueError("PlanarPEC.position is derived from its plane coordinate; construct a new polygon with translated vertices/coordinate rather than mutating position.")
         index = int(np.argmin(abs(nodes[normal] - geometry.coordinate)))
-        if (scene.boundary.axis_kind(geometry.normal_axis) in ("periodic", "bloch")
+        if (scene.scene.boundary.axis_kind(geometry.normal_axis) in ("periodic", "bloch")
                 and index in (0, len(nodes[normal])-1)):
-            raise NotImplementedError("A PlanarPEC plane coincident with a periodic normal seam requires duplicate-plane ownership; place the plane inside the periodic domain.")
+            raise UnsupportedFeatureError("A PlanarPEC plane coincident with a periodic normal seam requires duplicate-plane ownership; place the plane inside the periodic domain.",
+                                          feature="geometry.planar_pec", method="fdtd")
         spacing = np.diff(nodes[normal])
         local = float(min(spacing[max(0, index - 1):min(len(spacing), index + 1)]))
         tol = max(local * 1e-10, abs(geometry.coordinate) * np.finfo(np.float64).eps * 8)

@@ -25,7 +25,7 @@ def _port(name: str, x: float) -> mw.LumpedPort:
 def _scene(element_count: int) -> mw.Scene:
     positions = (torch.arange(element_count, dtype=torch.float64) - 0.5 * (element_count - 1))
     positions *= 0.01
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "array_nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(0.05, 0.05, 0.05),
@@ -37,18 +37,19 @@ def _scene(element_count: int) -> mw.Scene:
         boundary=mw.BoundarySpec.pml(num_layers=4),
         ports=tuple(_port(f"p{index + 1}", float(x)) for index, x in enumerate(positions)),
         monitors=(surface,),
-        device="cuda",
     )
 
 
 def _simulation(scene, excitations):
     return mw.Simulation.fdtd(
         scene,
-        frequency=2.5e9,
+        frequencies=2.5e9,
         excitations=excitations,
-        run_time=mw.TimeConfig(time_steps=192),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=192),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
 
 
@@ -84,7 +85,7 @@ def _phase_rms_degrees(actual_theta, actual_phi, expected_theta, expected_phi) -
 def test_fullwave_basis_matches_direct_multi_source_fdtd(element_count, steering):
     scene = _scene(element_count)
     source_time = mw.GaussianPulse(frequency=2.5e9, fwidth=1.0e9, delay=0.3e-9)
-    sweep = mw.PortSweep(source_time=source_time)
+    sweep = mw.rf.PortSweep(source_time=source_time)
     result = _simulation(scene, sweep).run()
     retained = result._array_run_data.column_results
     assert all(not hasattr(column[0].solver, "Ex") for column in retained)
@@ -96,12 +97,10 @@ def test_fullwave_basis_matches_direct_multi_source_fdtd(element_count, steering
     assert all(
         set(column[0].monitors) == retained_monitor_names for column in retained
     )
-    basis = result.array_basis(
-        monitor="array_nf2ff",
+    basis = mw.antenna.array_basis(result, monitor="array_nf2ff",
         theta_points=31,
         phi_points=61,
-        radius=1.0,
-    )
+        radius=1.0,)
 
     # Q_rad is symmetrized on construction, so asserting Hermiticity here would be
     # tautological and prove nothing. Positive semidefiniteness is the property
@@ -128,7 +127,7 @@ def test_fullwave_basis_matches_direct_multi_source_fdtd(element_count, steering
         ) * spacing
         drive_amplitudes = torch.exp(1j * wave_number * positions).to(dtype=basis.dtype)
     excitations = tuple(
-        mw.PortExcitation(
+        mw.rf.PortExcitation(
             name,
             amplitude=amplitude.detach().cpu(),
             source_impedance="matched",
@@ -205,59 +204,43 @@ def test_fullwave_basis_matches_direct_multi_source_fdtd(element_count, steering
     assert basis.metadata["solver_rerun"] is False
     if element_count == 2 and steering == "broadside":
         with pytest.raises(ValueError, match="configuration tensors must be on device"):
-            result.array_basis(
-                monitor="array_nf2ff",
+            mw.antenna.array_basis(result, monitor="array_nf2ff",
                 theta=torch.linspace(0.0, math.pi, 5, dtype=basis.eep.theta.dtype),
                 phi=torch.linspace(
                     0.0, 2.0 * math.pi, 7, dtype=basis.eep.theta.dtype
-                ),
-            )
+                ),)
         with pytest.raises(ValueError, match="radius tensor must be on device"):
-            result.array_basis(
-                monitor="array_nf2ff",
-                radius=torch.tensor(1.0, dtype=basis.eep.theta.dtype),
-            )
+            mw.antenna.array_basis(result, monitor="array_nf2ff",
+                radius=torch.tensor(1.0, dtype=basis.eep.theta.dtype),)
         wrong_dtype = (
             torch.float32
             if basis.frequencies.dtype == torch.float64
             else torch.float64
         )
         with pytest.raises(TypeError, match="configuration tensors must use dtype"):
-            result.array_basis(
-                monitor="array_nf2ff",
+            mw.antenna.array_basis(result, monitor="array_nf2ff",
                 theta=torch.linspace(0.0, math.pi, 5, device="cuda", dtype=wrong_dtype),
                 phi=torch.linspace(
                     0.0, 2.0 * math.pi, 7, device="cuda", dtype=wrong_dtype
-                ),
-            )
+                ),)
         with pytest.raises(TypeError, match="configuration tensors must use dtype"):
-            result.array_basis(
-                monitor="array_nf2ff",
-                phase_center=torch.zeros(3, device="cuda", dtype=wrong_dtype),
-            )
+            mw.antenna.array_basis(result, monitor="array_nf2ff",
+                phase_center=torch.zeros(3, device="cuda", dtype=wrong_dtype),)
         with pytest.raises(TypeError, match="configuration tensors must use dtype"):
-            result.array_basis(
-                monitor="array_nf2ff",
-                frame=torch.eye(3, device="cuda", dtype=wrong_dtype),
-            )
+            mw.antenna.array_basis(result, monitor="array_nf2ff",
+                frame=torch.eye(3, device="cuda", dtype=wrong_dtype),)
         with pytest.raises(TypeError, match="radius tensor must use real dtype"):
-            result.array_basis(
-                monitor="array_nf2ff",
-                radius=torch.tensor(1.0, device="cuda", dtype=wrong_dtype),
-            )
+            mw.antenna.array_basis(result, monitor="array_nf2ff",
+                radius=torch.tensor(1.0, device="cuda", dtype=wrong_dtype),)
 
-        polarized = result.array_basis(
-            monitor="array_nf2ff",
+        polarized = mw.antenna.array_basis(result, monitor="array_nf2ff",
             theta=basis.eep.theta,
             phi=basis.eep.phi,
-            polarization=mw.Ludwig3(reference_angle=0.5),
-        )
-        farther = result.array_basis(
-            monitor="array_nf2ff",
+            polarization=mw.antenna.Ludwig3(reference_angle=0.5),)
+        farther = mw.antenna.array_basis(result, monitor="array_nf2ff",
             theta=basis.eep.theta,
             phi=basis.eep.phi,
-            radius=2.0,
-        )
+            radius=2.0,)
         assert polarized.fingerprint != basis.fingerprint
         assert farther.fingerprint != basis.fingerprint
 
@@ -265,22 +248,21 @@ def test_fullwave_basis_matches_direct_multi_source_fdtd(element_count, steering
 def test_direct_multi_source_contract_rejects_waveport_mixing():
     scene = mw.Scene(
         ports=(
-            mw.WavePort(
+            mw.rf.WavePort(
                 "wave",
                 position=(0.0, 0.0, 0.0),
                 size=(0.0, 0.02, 0.02),
                 direction="+",
                 reference_plane=0.0,
-                modes=(mw.WaveModeSpec("te", polarization="Ez"),),
+                modes=(mw.rf.WaveModeSpec("te", polarization="Ez"),),
             ),
             _port("lumped", 0.01),
         ),
-        device="cpu",
     )
     simulation = mw.Simulation.fdtd(
         scene,
-        frequency=1.0e9,
-        excitations=(mw.PortExcitation("wave"), mw.PortExcitation("lumped")),
+        frequencies=1.0e9,
+        excitations=(mw.rf.PortExcitation("wave"), mw.rf.PortExcitation("lumped")), config=mw.FDTDConfig(device="cpu"),
     )
 
     with pytest.raises(NotImplementedError, match="WavePort channels require"):

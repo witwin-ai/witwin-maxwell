@@ -19,16 +19,17 @@ def _sample_deferred_storage(monkeypatch):
     monkeypatch.setattr(passivity, "DEFERRED_STORAGE", ())
 
 
-def _simulation(case, device="cpu"):
+def _simulation(case):
     scene = _mixed_copper_scene(mw.BoundarySpec.faces(x="pec", y="pec", z="pml", num_layers=2))
-    scene.device = torch.device(device)
-    scene.structures = [s for s in scene.structures
-                        if case == "mixed" or s.name == ("planar" if case == "copper" else "sheet")]
-    scene.add_monitor(mw.PointMonitor("probe", position=(-.06, .04, .04), fields=("Ez",)))
+    scene = scene.updated(structures=[s for s in scene.structures
+                        if case == "mixed" or s.name == ("planar" if case == "copper" else "sheet")])
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PointMonitor("probe", position=(-.06, .04, .04), fields=("Ez",)),
+    ))
     return mw.Simulation.fdtd(
-        scene, frequency=2e9, absorber="cpml", cuda_graph=True, shutoff=0.,
-        backend="cpu_reference" if device == "cpu" else "native",
-        run_time=mw.TimeConfig(time_steps=2*passivity.SAMPLE_INTERVAL, transient_cycles=0))
+        scene, frequencies=2e9, config=mw.FDTDConfig(absorber="cpml", cuda_graph=True, shutoff=0.,
+        run_time=mw.TimeConfig(time_steps=2*passivity.SAMPLE_INTERVAL, transient_cycles=0)))
 
 
 def _storages(value):
@@ -86,9 +87,6 @@ def _diagnostic_model_sizes(solver):
     if not sheets:
         return []
     sizes = [8*n for N in (solver.Nx, solver.Ny, solver.Nz) for n in (N-1, N)]
-    # Host primal arrays alias the native cache; CUDA copies have distinct storage.
-    if torch.device(solver.device).type == "cpu":
-        sizes = sizes[1::2]
     for rt in sheets:
         c = rt.complex
         ne, nh = len(c.e_volume), len(c.h_area)
@@ -116,6 +114,7 @@ def _diagnostic_model_sizes(solver):
     return sizes
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD preparation and runs")
 @pytest.mark.parametrize("case", ["copper", "sheet", "mixed"])
 def test_guard_storage_bytes(case, monkeypatch):
     solver = _simulation(case).prepare().solver
@@ -165,12 +164,11 @@ def test_pcb_grid_storage_totals(name, closed_z, expected):
     if name == "planar":
         # Exact grid/domain/boundary of test_copper_fused_kernel._simulation.
         scene = mw.Scene(domain=mw.Domain(((-.3, .3), (-.01, .01), (-.01, .01))),
-                         grid=mw.GridSpec.uniform(.005), device="cpu",
-                         boundary=mw.BoundarySpec.faces(default="pml", num_layers=12, y="pmc", z="pec"))
+                         grid=mw.GridSpec.uniform(.005), boundary=mw.BoundarySpec.faces(default="pml", num_layers=12, y="pmc", z="pec"))
     else:
-        scene = _scene(SCENARIOS[name], True, device="cpu")
+        scene = _scene(SCENARIOS[name], True)
         if closed_z:
-            scene = scene.clone(boundary=mw.BoundarySpec.faces(default="pml", num_layers=10, z="pec"))
+            scene = scene.updated(boundary=mw.BoundarySpec.faces(default="pml", num_layers=10, z="pec"))
     widths = {}
     cells = []
     for axis, (lo, hi) in zip("xyz", scene.domain.bounds):
@@ -179,8 +177,8 @@ def test_pcb_grid_storage_totals(name, closed_z, expected):
             tuple(scene.pml_thickness_for_face(axis, side) for side in ("low", "high")))
         widths[f"d{axis}_primal64"], widths[f"d{axis}_dual64"] = primal, dual
         cells.append(len(primal))
-    energy_scene = SimpleNamespace(domain=scene.domain, **widths,
-                                  boundary=mw.BoundarySpec.faces(x="pec", y="pec", z="pml", num_layers=2))
+    energy_scene = SimpleNamespace(**widths, scene=SimpleNamespace(
+        domain=scene.domain, boundary=mw.BoundarySpec.faces(x="pec", y="pec", z="pml", num_layers=2)))
     solver = SimpleNamespace(scene=energy_scene, device="cpu", c=299792458., dt=1e-12,
                              source_frequency=2.4e9, active_absorber_type="cpml")
     solver._passivity_state = passivity.make_passivity_state(solver)
@@ -209,7 +207,7 @@ def test_guard_allocated_bytes_and_graph(case, monkeypatch, cuda_time_budget):
     original = passivity.make_passivity_state
     deltas = {}
     for enabled in (False, True):
-        prepared = _simulation(case, "cuda").prepare()
+        prepared = _simulation(case).prepare()
         solver = prepared.solver
         torch.cuda.synchronize()
         before = torch.cuda.memory_allocated(solver.device)

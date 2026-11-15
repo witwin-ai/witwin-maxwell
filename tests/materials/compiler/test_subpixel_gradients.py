@@ -2,6 +2,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_components, compile_materials
 
 
 def test_polarized_eps_is_differentiable_wrt_box_size():
@@ -15,19 +16,18 @@ def test_polarized_eps_is_differentiable_wrt_box_size():
     grid = mw.GridSpec.uniform(0.25)
     size = torch.tensor([0.4, 0.4, 0.4], requires_grad=True)
     scene = mw.Scene(
-        domain=domain,
-        grid=grid,
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="slab",
-            geometry=mw.Box(position=(0.5, 0.5, 0.5), size=size),
-            material=mw.Material(eps_r=12.0),
-        )
-    )
-    eps, _ = prepare_scene(scene).compile_material_components()
+                domain=domain,
+                grid=grid,
+                subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"),
+                structures=(
+            mw.Structure(
+                name="slab",
+                geometry=mw.Box(position=(0.5, 0.5, 0.5), size=size),
+                material=mw.Material(eps_r=12.0),
+            ),
+            ),
+            )
+    eps, _ = compile_material_components(prepare_scene(scene, device="cpu"))
     loss = sum(eps[axis].sum() for axis in ("x", "y", "z"))
     (grad,) = torch.autograd.grad(loss, size)
     assert grad is not None
@@ -40,19 +40,18 @@ def test_conformal_pec_occupancy_is_differentiable_wrt_box_size():
     grid = mw.GridSpec.uniform(0.1)
     size = torch.tensor([0.35, 0.35, 0.35], requires_grad=True)
     scene = mw.Scene(
-        domain=domain,
-        grid=grid,
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="pec",
-            geometry=mw.Box(position=(0.5, 0.5, 0.5), size=size),
-            material=mw.Material.pec(),
-        )
-    )
-    occupancy = prepare_scene(scene).compile_materials()["pec_occupancy"]
+                domain=domain,
+                grid=grid,
+                subpixel=mw.SubpixelSpec(pec="conformal", averaging="arithmetic", samples=1),
+                structures=(
+            mw.Structure(
+                name="pec",
+                geometry=mw.Box(position=(0.5, 0.5, 0.5), size=size),
+                material=mw.Material.pec(),
+            ),
+            ),
+            )
+    occupancy = compile_materials(prepare_scene(scene, device="cpu"))["pec_occupancy"]
     (grad,) = torch.autograd.grad(occupancy.sum(), size)
     assert grad is not None
     assert torch.isfinite(grad).all()

@@ -1,4 +1,5 @@
 """Full fixed-horizon foil-to-Huygens radiation derivatives on a fixed mesh."""
+from dataclasses import replace
 import math
 
 import pytest
@@ -17,23 +18,22 @@ class RadiatingFoil(mw.SceneModule):
 
     def to_scene(self):
         return mw.Scene(domain=mw.Domain(bounds=((-0.05, .05),)*3), grid=mw.GridSpec.uniform(.005),
-            boundary=mw.BoundarySpec.pml(num_layers=4), device='cuda',
-            structures=[mw.Structure(mw.Box(size=(0., .02, .02)), mw.CopperFoil(
+            boundary=mw.BoundarySpec.pml(num_layers=4), structures=[mw.Structure(mw.Box(size=(0., .02, .02)), mw.media.CopperFoil(
                 thickness=self.log_thickness.exp(), conductivity=self.log_conductivity.exp(),
                 frequency_range=(2e9, 4e9), mode_count=16), name='foil')],
             ports=[mw.LumpedPort('feed', positive=(-.01, 0., .005), negative=(-.01, 0., -.005),
                 voltage_path=mw.AxisPath('z'), current_surface=mw.Box(position=(-.01, 0., -.0025), size=(.015, .015, 0.)))],
-            monitors=[mw.ClosedSurfaceMonitor.box('radiation', size=(.045, .045, .045), sample_spacing=self.sample_spacing)])
+            monitors=[mw.monitors.ClosedSurfaceMonitor.box('radiation', size=(.045, .045, .045), sample_spacing=self.sample_spacing)])
 
 
 def objective(model, graph=False, stride=7):
-    simulation = mw.Simulation.fdtd(model, frequency=3e9, cuda_graph=graph, full_field_dft=False,
+    simulation = mw.Simulation.fdtd(model, frequencies=3e9, config=mw.FDTDConfig(cuda_graph=graph, full_field_dft=False,
         run_time=mw.TimeConfig(time_steps=96, transient_cycles=0, steady_cycles=1),
-        spectral_sampler=mw.SpectralSampler(window='none', normalize_source=False),
-        excitations=mw.PortExcitation('feed', source_time=mw.CW(3e9)))
-    simulation.config.adjoint_checkpoint_stride = stride
+        spectral_sampler=mw.fdtd.SpectralSampler(window='none', normalize_source=False)),
+        excitations=mw.rf.PortExcitation('feed', source_time=mw.CW(3e9)))
+    simulation.config = replace(simulation.config, adjoint_checkpoint_stride=stride)
     result = simulation.run()
-    antenna = result.antenna(surface='radiation', driven_port='feed', theta_points=31, phi_points=25, radius=10.)
+    antenna = mw.antenna.antenna(result, surface='radiation', driven_port='feed', theta_points=31, phi_points=25, radius=10.)
     return antenna.p_rad.sum(), result
 
 

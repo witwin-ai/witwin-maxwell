@@ -18,19 +18,18 @@ from witwin.maxwell.breakdown_stress import BreakdownStressData, ComponentRating
 
 def _base_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(0.03),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.UniformCurrentSource(
-            size=(0.06, 0.06, 0.06),
-            polarization="Ez",
-            source_time=mw.GaussianPulse(frequency=1e9, fwidth=5e8),
-            center=(0.0, 0.0, 0.0),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(0.03),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=(
+            mw.UniformCurrentSource(
+                size=(0.06, 0.06, 0.06),
+                polarization="Ez",
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=5e8),
+                center=(0.0, 0.0, 0.0),
+            ),
+            ),
+            )
     return scene
 
 
@@ -38,17 +37,20 @@ def _run(scene):
     return mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=120),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=120),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=True,
+        ),
     ).run()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for native FDTD")
 def test_breakdown_monitor_produces_device_stress_maps_and_provenance():
     scene = _base_scene()
-    scene.add_monitor(
-        mw.BreakdownMonitor(
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.esd.BreakdownMonitor(
             "stress",
             position=(0.0, 0.0, 0.0),
             size=(0.12, 0.12, 0.12),
@@ -56,12 +58,12 @@ def test_breakdown_monitor_produces_device_stress_maps_and_provenance():
             minimum_duration=2e-11,
             damage_exponent=2.0,
             quantities=("electric_field", "exposure", "dissipated_energy", "damage"),
-        )
-    )
+        ),
+    ))
     result = _run(scene)
 
-    assert result.breakdown_names() == ("stress",)
-    data = result.breakdown("stress")
+    assert mw.breakdown.breakdown_names(result) == ("stress",)
+    data = mw.breakdown.breakdown(result, "stress")
     assert isinstance(data, BreakdownStressData)
     assert data.capability_level == "stress-only"
     assert data.peak_field > 0.0
@@ -89,19 +91,20 @@ def test_breakdown_monitor_does_not_perturb_fields():
     # produce bitwise-identical fields (non-feedback observer, no per-step effect).
     baseline = _run(_base_scene())
     scene = _base_scene()
-    scene.add_monitor(
-        mw.BreakdownMonitor(
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.esd.BreakdownMonitor(
             "stress", position=(0.0, 0.0, 0.0), size=(0.12, 0.12, 0.12), critical_field=1e-3
-        )
-    )
+        ),
+    ))
     monitored = _run(scene)
 
-    assert baseline.breakdown_names() == ()
+    assert mw.breakdown.breakdown_names(baseline) == ()
     b, m = baseline.fields, monitored.fields
     assert set(b) == set(m)
     for key in b:
         assert np.array_equal(
-            b[key].detach().cpu().numpy(), m[key].detach().cpu().numpy()
+            b[key].values.detach().cpu().numpy(), m[key].values.detach().cpu().numpy()
         ), f"BreakdownMonitor perturbed field component {key}"
 
 
@@ -117,30 +120,31 @@ def _terminal_stress_scene():
     # Aligned two-terminal geometry (footprint edges + reference plane on the Yee
     # half-grid for a 0.02 m uniform grid) so the bound TerminalPort compiles.
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(_pec_box("signal", (0.0, 0.0, 0.06), (0.10, 0.10, 0.04)))
-    scene.add_structure(_pec_box("ground", (0.0, 0.0, -0.06), (0.10, 0.10, 0.04)))
-    scene.add_port(
-        mw.TerminalPort(
-            "feed",
-            mw.TerminalRef("signal"),
-            mw.TerminalRef("ground"),
-            mw.AxisPath("z"),
-            0.01,
-        )
-    )
-    scene.add_source(
-        mw.UniformCurrentSource(
-            size=(0.06, 0.06, 0.04),
-            polarization="Ez",
-            source_time=mw.GaussianPulse(frequency=1e9, fwidth=5e8),
-            center=(0.0, 0.0, 0.0),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                structures=(
+            _pec_box("signal", (0.0, 0.0, 0.06), (0.10, 0.10, 0.04)),
+            _pec_box("ground", (0.0, 0.0, -0.06), (0.10, 0.10, 0.04)),
+            ),
+                ports=(
+            mw.rf.TerminalPort(
+                "feed",
+                mw.rf.TerminalRef("signal"),
+                mw.rf.TerminalRef("ground"),
+                mw.AxisPath("z"),
+                0.01,
+            ),
+            ),
+                sources=(
+            mw.UniformCurrentSource(
+                size=(0.06, 0.06, 0.04),
+                polarization="Ez",
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=5e8),
+                center=(0.0, 0.0, 0.0),
+            ),
+            ),
+            )
     return scene
 
 
@@ -149,29 +153,29 @@ def test_component_stress_reduction_matches_float64_reference_on_run():
     scene = _terminal_stress_scene()
     # Two point time series used as V(t) and I(t) proxies for the reduction; the
     # ComponentStressMonitor binds a real scene port ("feed").
-    scene.add_monitor(
-        mw.FieldTimeMonitor("vprobe", components=("Ez",), position=(0.0, 0.0, 0.0), interval=1)
-    )
-    scene.add_monitor(
-        mw.FieldTimeMonitor("iprobe", components=("Ez",), position=(0.02, 0.0, 0.0), interval=1)
-    )
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.FieldTimeMonitor("vprobe", components=("Ez",), position=(0.0, 0.0, 0.0), interval=1),
+        mw.monitors.FieldTimeMonitor("iprobe", components=("Ez",), position=(0.02, 0.0, 0.0), interval=1),
+    ))
     rating = ComponentRating(voltage=1e-2, current=1e-2, energy=1e-6, model="demo-rev1")
-    scene.add_monitor(
-        mw.ComponentStressMonitor(
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.esd.ComponentStressMonitor(
             "part", port="feed", rating=rating, voltage_series="vprobe", current_series="iprobe"
-        )
-    )
+        ),
+    ))
     result = _run(scene)
 
-    data = result.component_stress("part")
+    data = mw.esd.component_stress(result, "part")
     assert data.name == "part"
     assert data.port_name == "feed"
     assert data.capability_level == "stress-only"
 
     # Float64 reference recomputation from the same recorded samples.
-    t = result.monitor("vprobe")["t"].detach().cpu().numpy().astype(np.float64)
-    v = result.monitor("vprobe")["field"].detach().cpu().numpy().reshape(len(t), -1)[:, 0].astype(np.float64)
-    i = result.monitor("iprobe")["field"].detach().cpu().numpy().reshape(len(t), -1)[:, 0].astype(np.float64)
+    t = result.monitor("vprobe").coords["t"].detach().cpu().numpy().astype(np.float64)
+    v = result.monitor("vprobe").sel(component="Ez").values.detach().cpu().numpy().reshape(len(t), -1)[:, 0].astype(np.float64)
+    i = result.monitor("iprobe").sel(component="Ez").values.detach().cpu().numpy().reshape(len(t), -1)[:, 0].astype(np.float64)
     power = v * i
     ref_peak_power = float(power.max())
     ref_energy = float(np.trapezoid(power, t))

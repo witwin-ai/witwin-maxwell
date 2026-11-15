@@ -379,7 +379,7 @@ def sample_is_complete(config: Config, sample_id: int) -> bool:
     )
 
 
-def build_scene(config: Config, sample_seed: int, device: str):
+def build_scene(config: Config, sample_seed: int):
     import witwin.maxwell as mw
 
     rng = np.random.default_rng(sample_seed)
@@ -393,8 +393,7 @@ def build_scene(config: Config, sample_seed: int, device: str):
         domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
         grid=mw.GridSpec.uniform(dl),
         boundary=mw.BoundarySpec.pml(num_layers=config.pml_layers, strength=1.0),
-        device=device,
-        subpixel_samples=1,
+        subpixel=1,
     )
 
     source_position = rng.uniform(-0.72 * interior_half, 0.72 * interior_half, size=3)
@@ -435,13 +434,14 @@ def build_scene(config: Config, sample_seed: int, device: str):
             )
             parameters = {"radius": radius, "height": height, "axis": axis}
 
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 name=f"object_{object_id:02d}",
                 geometry=geometry,
                 material=mw.Material(eps_r=eps_r),
-            )
-        )
+            ),
+        ))
         occupied.append((center, scale))
         geometries.append(
             {
@@ -452,7 +452,8 @@ def build_scene(config: Config, sample_seed: int, device: str):
             }
         )
 
-    scene.add_source(
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             name="source",
             position=tuple(source_position),
@@ -463,8 +464,8 @@ def build_scene(config: Config, sample_seed: int, device: str):
                 fwidth=PULSE_FWIDTH,
                 amplitude=1.0,
             ),
-        )
-    )
+        ),
+    ))
 
     direction = -source_position
     norm = float(np.linalg.norm(direction))
@@ -488,15 +489,15 @@ def build_scene(config: Config, sample_seed: int, device: str):
         }
         for index, geometry in enumerate(geometries)
     )
-    for probe in probes:
-        scene.add_monitor(
-            mw.FieldTimeMonitor(
-                probe["name"],
-                components=("Ex", "Ey", "Ez"),
-                position=tuple(probe["position"]),
-                interval=1,
-            )
-        )
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.monitors.FieldTimeMonitor(
+              probe["name"],
+              components=("Ex", "Ey", "Ez"),
+              position=tuple(probe["position"]),
+              interval=1,
+          ) for probe in probes),
+    ))
 
     return scene, {
         "source": {
@@ -520,7 +521,7 @@ def generate_one(config: Config, sample_id: int, device: str) -> dict[str, Any]:
     data_path, metadata_path = sample_paths(output_dir, sample_id)
     sample_seed = config.seed + sample_id
     started = time.perf_counter()
-    scene, scene_description = build_scene(config, sample_seed, device)
+    scene, scene_description = build_scene(config, sample_seed)
     scene_seconds = time.perf_counter() - started
 
     torch.cuda.reset_peak_memory_stats()
@@ -546,10 +547,13 @@ def generate_one(config: Config, sample_id: int, device: str) -> dict[str, Any]:
         result = mw.Simulation.fdtd(
             scene,
             frequencies=(config.frequency,),
-            run_time=run_time,
-            spectral_sampler=mw.SpectralSampler(window="none", normalize_source=True),
-            full_field_dft=True,
-            cuda_graph=config.cuda_graph,
+            config=mw.FDTDConfig(
+                run_time=run_time,
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=True),
+                full_field_dft=True,
+                cuda_graph=config.cuda_graph,
+                device=device,
+            ),
         ).run()
         torch.cuda.synchronize()
         attempt_seconds = time.perf_counter() - solve_started

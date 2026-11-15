@@ -87,7 +87,7 @@ def prescribed_observation():
         plane_positions=(.01,), collocated=False)
     monitor = dict(kind='plane', frequency=1e9, frequencies=frequencies, axis='z', components={'Ex': entry}, Ex=electric)
     scene = mw.Scene(domain=mw.Domain(bounds=((- .01, .01),) * 3), grid=mw.GridSpec.uniform(.005),
-        boundary=mw.BoundarySpec.none(), device='cpu')
+        boundary=mw.BoundarySpec.none())
     result = mw.Result(method='fdtd', scene=scene, frequencies=frequencies, solver_stats={'normalize_source': False},
         monitors={'plane': monitor, 'surface': {'kind': 'closed_surface', 'frequency': 1e9,
             'frequencies': frequencies, 'faces': {'z+': face}}})
@@ -98,13 +98,13 @@ def prescribed_observation():
 def test_coherent_actual_result_view_recomputes_flux_and_native_data_without_stale_single_drive_power(phase, expected_factor):
     result, basis = prescribed_observation()
     observation = CoherentObservations([result, result], [basis, basis], [[1., phase]])
-    plane = observation.monitor('plane', frequency=1e9)
+    plane = observation.raw_monitor('plane', frequency=1e9)
     torch.testing.assert_close(plane['components']['Ex']['data'], torch.full((2, 2), 1 + phase, dtype=torch.complex128))
     assert 'Ex' not in plane
-    surface = observation.monitor('surface', frequency=1e9)
+    surface = observation.raw_monitor('surface', frequency=1e9)
     assert float(surface['flux']) == pytest.approx(.5 * 3 * .02 ** 2 * expected_factor, rel=2e-14, abs=1e-25)
     assert float(surface['faces']['z+']['flux']) != 999
-    assert float(result.monitor('surface')['faces']['z+']['flux']) == 999
+    assert float(result.raw_monitor('surface')['faces']['z+']['flux']) == 999
 
 
 def test_coherent_result_view_rejects_shifted_native_geometry():
@@ -113,7 +113,7 @@ def test_coherent_result_view_rejects_shifted_native_geometry():
     other._monitors['plane']['components']['Ex']['plane_positions'] = (.01000000001,)
     observation = CoherentObservations([result, other], [basis, basis], [[1., 1.]])
     with pytest.raises(ValueError, match='native-plane geometry'):
-        observation.monitor('plane', frequency=1e9)
+        observation.raw_monitor('plane', frequency=1e9)
 
 
 @pytest.fixture(autouse=True)

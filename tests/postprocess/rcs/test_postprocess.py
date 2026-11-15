@@ -86,7 +86,7 @@ def _hertzian_far_e_theta(frequency, radius, theta, moment=1.0):
 
 
 def _synthetic_closed_surface_result(*, layered_exterior: bool = False) -> mw.Result:
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "huygens",
         position=(0.0, 0.0, 0.0),
         size=(0.4, 0.4, 0.4),
@@ -95,16 +95,17 @@ def _synthetic_closed_surface_result(*, layered_exterior: bool = False) -> mw.Re
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.1),
-        device="cpu",
-    ).add_monitor(surface)
+        monitors=(surface,),
+    )
     if layered_exterior:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 name="layer",
                 geometry=mw.Box(position=(0.0, 0.0, 0.35), size=(1.0, 1.0, 0.3)),
                 material=mw.Material(eps_r=2.5),
-            )
-        )
+            ),
+        ))
 
     coords = np.linspace(-0.3, 0.3, 7)
     monitors = {}
@@ -219,7 +220,7 @@ def test_equivalent_surface_currents_from_monitor_defaults_to_monitor_normal_dir
     hy = np.full((coords_u.size, coords_v.size), -7.0 + 4.0j)
 
     class DummyResult:
-        def monitor(self, name, **kwargs):
+        def raw_monitor(self, name, **kwargs):
             assert name == "nf"
             return {
                 "kind": "plane",
@@ -260,7 +261,7 @@ def test_equivalent_surface_currents_from_monitor_crops_tangential_bounds():
     hy = np.add.outer(coords_u * 0.5, coords_v * 0.25) + 0.0j
 
     class DummyResult:
-        def monitor(self, name, **kwargs):
+        def raw_monitor(self, name, **kwargs):
             assert name == "nf"
             return {
                 "kind": "plane",
@@ -471,11 +472,10 @@ def test_infer_incident_plane_wave_amplitude_from_source_and_scene():
     assert infer_incident_plane_wave_amplitude(source=source) == 12.5
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_source(source)
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                sources=(source,),
+            )
     assert infer_incident_plane_wave_amplitude(scene=scene) == 12.5
 
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import torch
 
+from ..errors import UnsupportedFeatureError
+
 
 def copper_query_faces(result, *, device, frequency_index=0):
     """Join physical face geometry with the actual (PEC-contact filtered) traces."""
@@ -17,7 +19,7 @@ def copper_query_faces(result, *, device, frequency_index=0):
     compiled = {(face.name, 'E'+'xyz'[face.component]): face
                 for face in compile_copper_faces(result.prepared_scene, device=device)}
     faces = []
-    for name, record in result.conductor_losses.items():
+    for name, record in result._conductor_losses().items():
         for trace in record.get('bulk_electric_traces', ()):
             face = compiled.get((name, trace['component']))
             if face is None:
@@ -155,7 +157,8 @@ def interpolation_stencil(result, points, component, axes, *, trace_side=None, p
                 continue
             for previous_normal, previous_plane, previous_mask in altered:
                 if (normal, n) != (previous_normal, previous_plane) and bool((interval & previous_mask).any()):
-                    raise NotImplementedError('Copper query stencil crosses ambiguous intersecting interfaces.')
+                    raise UnsupportedFeatureError('Copper query stencil crosses ambiguous intersecting interfaces.',
+                                                  feature="material.copper_foil", method=None)
             insufficient = ((~positive) & (n < 2)) | (positive & (n+1 >= len(axis)))
             if bool((interval & insufficient).any()):
                 raise ValueError('Copper field reconstruction requires two retained half nodes on the requested side.')

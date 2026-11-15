@@ -8,6 +8,10 @@ from typing import Mapping
 import torch
 
 from ..constants import resolve_complex_dtype, resolve_real_dtype
+from ..errors import UnsupportedFeatureError
+from ..compiler.materials import compile_material_components
+from ..compiler.materials import compile_materials
+from ..compiler.materials import compile_relative_materials
 
 WINDOW_FACTOR = 15.0
 
@@ -746,8 +750,9 @@ def _coord_indices_from_bounds(coords: torch.Tensor, lower: float, upper: float)
     mask = (coord_tensor >= lower - tolerance) & (coord_tensor <= upper + tolerance)
     indices = torch.nonzero(mask, as_tuple=False).reshape(-1)
     if indices.numel() < 2:
-        raise NotImplementedError(
-            "Closed-surface Huygens validation requires at least two exterior material samples on each tangential axis."
+        raise UnsupportedFeatureError(
+            "Closed-surface Huygens validation requires at least two exterior material samples on each tangential axis.",
+            feature="monitor.ClosedSurfaceMonitor", method=None
         )
     return indices.to(device=coords.device)
 
@@ -768,14 +773,16 @@ def _exterior_patch_indices(
     face_index = int(torch.argmin(torch.abs(normal_coords - plane_position)).item())
     outside_index = face_index + sign
     if outside_index < 0 or outside_index >= normal_coords.numel():
-        raise NotImplementedError(
-            "Closed-surface Huygens faces must have at least one material cell outside the surface."
+        raise UnsupportedFeatureError(
+            "Closed-surface Huygens faces must have at least one material cell outside the surface.",
+            feature="monitor.ClosedSurfaceMonitor", method=None
         )
 
     tangential_bounds = face_payload.get("tangential_bounds")
     if tangential_bounds is None:
-        raise NotImplementedError(
-            "Closed-surface Huygens faces must expose tangential_bounds metadata."
+        raise UnsupportedFeatureError(
+            "Closed-surface Huygens faces must expose tangential_bounds metadata.",
+            feature="monitor.ClosedSurfaceMonitor", method=None
         )
 
     coord_a_name = _INDEX_TO_AXIS[tangential[0]]
@@ -812,12 +819,12 @@ def _validate_homogeneous_exterior(
 
     prepared_scene = result.prepared_scene
     if chart is None:
-        eps_r, mu_r = prepared_scene.compile_relative_materials(frequency=frequency)
+        eps_r, mu_r = compile_relative_materials(prepared_scene, frequency=frequency)
     else:
         # Registration currently permits physical scalar bulk media. Undo the
         # u-component constitutive metric for the physical exterior check;
         # varying chart coefficients do not imply a varying physical medium.
-        eps_components,mu_components=prepared_scene.compile_material_components(frequency=frequency)
+        eps_components,mu_components=compile_material_components(prepared_scene, frequency=frequency)
         u=torch.as_tensor(prepared_scene.y_nodes64,device=eps_components["y"].device,dtype=torch.float64)
         h=(1-chart.curvature*u)[None,:,None]
         eps_r=eps_components["y"]/h.to(eps_components["y"])
@@ -848,8 +855,9 @@ def _validate_homogeneous_exterior(
             rtol=1e-4,
             atol=1e-4,
         ):
-            raise NotImplementedError(
-                "Closed-surface Huygens currently requires a homogeneous exterior medium immediately outside every face."
+            raise UnsupportedFeatureError(
+                "Closed-surface Huygens currently requires a homogeneous exterior medium immediately outside every face.",
+                feature="monitor.ClosedSurfaceMonitor", method=None
             )
 
         if reference_eps is None:
@@ -862,9 +870,10 @@ def _validate_homogeneous_exterior(
             rtol=1e-4,
             atol=1e-4,
         ):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Closed-surface Huygens currently requires a single homogeneous exterior medium across all faces; "
-                "layered or piecewise exteriors are not supported."
+                "layered or piecewise exteriors are not supported.",
+                feature="monitor.ClosedSurfaceMonitor", method=None
             )
 
     if reference_eps is None:
@@ -1117,14 +1126,14 @@ def _equivalent_surface_currents_from_monitor_spectrum(result, monitor_name, fre
     from ..result import _resolve_frequency_index, _select_monitor_frequency
 
     chart = getattr(getattr(result, "scene", None), "coordinates", None)
-    getter = result.monitor if chart is None else result._native_raw_monitor
+    getter = result.raw_monitor if chart is None else result._native_raw_monitor
     monitor = getter(monitor_name)
     # The compiler returns the same tensors at every frequency only when neither
     # poles nor bulk conductivity participate. Otherwise preserve each spectral
     # material evaluation, even when its dispersive bodies are inside the box.
     independent = monitor.get("kind") != "closed_surface" and chart is None
     if not independent:
-        model = result.prepared_scene.compile_materials()
+        model = compile_materials(result.prepared_scene)
         independent = not (
             _material_model_has_electric_dispersion(model)
             or _material_model_has_magnetic_dispersion(model)
@@ -1174,12 +1183,12 @@ def equivalent_surface_currents_from_monitor(
     window_size: tuple[float, float] | None = None,
 ) -> PlanarEquivalentCurrents | EquivalentCurrentsSurface | SurfaceEquivalentCurrents:
     chart=getattr(getattr(result,"scene",None),"coordinates",None)
-    getter=result.monitor if chart is None else result._native_raw_monitor
+    getter=result.raw_monitor if chart is None else result._native_raw_monitor
     monitor = getter(monitor_name, frequency=frequency, freq_index=freq_index)
     monitor_frequencies = _payload_monitor_frequencies(monitor)
     if len(monitor_frequencies) > 1:
         monitor = getter(monitor_name, freq_index=0)
-    resolved_frequency = float(monitor.get("frequency", getattr(result, "frequency", None)))
+    resolved_frequency = float(monitor["frequency"] if "frequency" in monitor else result.frequencies[0])
     background = _validate_homogeneous_exterior(result, monitor, resolved_frequency)
     if background is None:
         background = (1.0, 1.0)

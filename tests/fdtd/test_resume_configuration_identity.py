@@ -18,7 +18,7 @@ def test_resume_identity_distinguishes_equal_shape_ade_coefficients():
 
 
 def test_nonlinear_update_work_buffers_do_not_change_resume_identity():
-    solver = _simulation(mw.Material(eps_r=2., nonlinearity=[mw.NonlinearSusceptibility(chi2=1e-4)]), dt=1e-12).prepare().solver
+    solver = _simulation(mw.Material(eps_r=2., nonlinearity=[mw.media.NonlinearSusceptibility(chi2=1e-4)]), dt=1e-12).prepare().solver
     before = _configuration_fingerprint(solver)
     solver.Ex.fill_(2.)
     solver._update_nonlinear_electric_coefficients()

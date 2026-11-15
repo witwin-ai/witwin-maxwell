@@ -2,81 +2,104 @@ from __future__ import annotations
 
 import math
 import warnings
-from dataclasses import dataclass, field, replace
-from enum import Enum
+import weakref
+from dataclasses import dataclass, field, fields, replace
 from typing import Any, Iterable
 
 import torch
 
-from .compiler.accel.dispatch import requires_grad_scope
+from ._enums import StrEnum, parse_enum
+from .adjoint_inputs import geometry_tensors, named_scene_tensors, require_material_gradient_channels
+from .capability import CapabilityReport, check_scene
+from .compiler.accel.dispatch import requires_grad, requires_grad_scope
+from .electrostatic.api import ElectrostaticConfig
+from .electrostatic.capacitance import CapacitanceConfig
+from .errors import MaxwellWarning, SetupError, UnsupportedFeatureError
+from .fdtd_cpml import CPMLConfig, CPMLMemoryMode
 from .fdtd_parallel import FDTDParallelConfig
 from .fdfd_response import FieldProjection, FarFieldProjection, LocalResponseConfig
 from .lumped import CoaxialLumpedResistor, PortExcitation, PortSweep
+from .material_cache import FDTDMaterialCache
 from .modal_sweep import ModalPortSweep
 from .monitors import MediumMonitor, PermittivityMonitor
 from .ports import CoaxialLumpedPort, LumpedPort, TerminalPort, TerminalWavePort, WavePort
 from .rational import RationalModel, StateSpaceNetwork
 from .result import Result
+from ._stability import experimental
 from .mom.runtime import MoMConfig
-from .scene import Scene, SceneModule, prepare_scene
+from .scene import Scene, SceneModule, SubpixelAveraging, prepare_scene, scene_declarations
+from .compiler.circuits import compile_circuits
 
 FDFD = None
 FDTD = None
 calculate_required_steps = None
 
 
-class FDTDCoreFallbackWarning(UserWarning):
-    """Automatic FDTD acceleration fell back to the existing execution path."""
+class _AcceleratedSetupFailure(RuntimeError):
+    """The accelerated CUDA setup of an FDTD preparation failed; the owner retries with the torch setup."""
 
 
-def _validate_auto_flag(value, name):
-    if type(value) is bool or (type(value) is str and value == "auto"):
-        return value
-    raise ValueError(f"{name} must be 'auto', True or False.")
-
-
-class SimulationMethod(str, Enum):
+class SimulationMethod(StrEnum):
     FDFD = "fdfd"
     FDTD = "fdtd"
     MOM = "mom"
+    ELECTROSTATIC = "electrostatic"
+    CAPACITANCE = "capacitance"
 
-    def __str__(self) -> str:
-        return self.value
+
+# Static (zero-frequency) methods and the configuration each one takes.
+_STATIC_CONFIGS = {SimulationMethod.ELECTROSTATIC: ElectrostaticConfig, SimulationMethod.CAPACITANCE: CapacitanceConfig}
 
 
-class SpectralWindowKind(str, Enum):
+class SpectralWindowKind(StrEnum):
     NONE = "none"
     HANNING = "hanning"
     RAMP = "ramp"
 
-    def __str__(self) -> str:
-        return self.value
 
-
-class AbsorberKind(str, Enum):
+class AbsorberKind(StrEnum):
     AUTO = "auto"
     CPML = "cpml"
     PML = "pml"
     ABSORBER = "absorber"
     STABLE_PML = "stablepml"
 
-    def __str__(self) -> str:
-        return self.value
+
+class FDFDSolverType(StrEnum):
+    """The linear solve of ``FDFDSolverConfig.solver_type``."""
+
+    GMRES = "gmres"
+    CG = "cg"
+    BICGSTAB = "bicgstab"
+    TFQMR = "tfqmr"
+    IDR = "idr"
+    SQMR = "sqmr"
+    DIRECT = "direct"
 
 
-def _normalize_frequencies(*, frequencies=None, frequency=None) -> tuple[float, ...]:
+class FDFDPreconditioner(StrEnum):
+    """The preconditioner of the iterative FDFD solver types (``ILU`` is ILU(0))."""
+
+    JACOBI = "jacobi"
+    SSOR = "ssor"
+    ILU = "ilu"
+    AMS = "ams"
+    NONE = "none"
+
+
+class Precision(StrEnum):
+    """The working precision of the iterative FDFD solve."""
+
+    SINGLE = "single"
+    DOUBLE = "double"
+
+
+def _normalize_frequencies(*, frequencies) -> tuple[float, ...]:
     from ._fixed_inputs import require_fixed_input
-    def fixed_frequency(value):
-        require_fixed_input(value, name="Simulation frequency")
-        return float(value)
-    if frequency is not None and frequencies is not None:
-        raise ValueError("Pass either frequency or frequencies, not both.")
     if frequencies is None:
-        if frequency is None:
-            raise ValueError("A target frequency is required.")
-        return (fixed_frequency(frequency),)
-
-    if isinstance(frequencies, Iterable) and not isinstance(frequencies, (str, bytes)):
+        raise ValueError("A target frequency is required.")
+    if getattr(frequencies, "ndim", None) != 0 and isinstance(frequencies, Iterable) \
+            and not isinstance(frequencies, (str, bytes)):
         raw_values = tuple(frequencies)
     else:
         raw_values = (frequencies,)
@@ -100,19 +123,32 @@ def _validate_fixed_fdtd_controls(config):
     those have separately registered differentiable paths.
     """
     from ._fixed_inputs import require_fixed_input
-    for name in ("enable_plot", "full_field_dft", "shutoff", "shutoff_check_interval",
-                 "cuda_graph", "fdtd_core_path", "accelerated_setup", "adjoint_checkpoint_stride", "cpml_config", "absorber", "field_dtype", "reference_frequency"):
+    for name in ("enable_plot", "full_field_dft", "volume_dft_components", "shutoff", "shutoff_check_interval",
+                 "cuda_graph", "adjoint_checkpoint_stride", "absorber", "field_dtype", "reference_frequency",
+                 "verbose"):
         require_fixed_input(getattr(config, name, None), name="FDTDConfig." + name)
+    for item in fields(config.cpml):
+        require_fixed_input(getattr(config.cpml, item.name), name="CPMLConfig." + item.name)
     _require_fixed_time_inputs(config.run_time)
     for name in ("window", "normalize_source", "observer_dtype"):
         require_fixed_input(getattr(config.spectral_sampler, name, None), name="SpectralSampler." + name)
 
 
-def _normalize_single_frequency(*, frequency=None) -> float:
-    values = _normalize_frequencies(frequency=frequency)
-    if len(values) != 1:
-        raise ValueError("This solver path only supports a single frequency.")
-    return values[0]
+_ELECTRIC_COMPONENTS = ("Ex", "Ey", "Ez")
+_MAGNETIC_COMPONENTS = ("Hx", "Hy", "Hz")
+
+
+def _normalize_volume_dft_components(value) -> tuple[str, ...]:
+    """``FDTDConfig.volume_dft_components`` in canonical ``Ex ... Hz`` order (E always recorded)."""
+    if isinstance(value, str) or not isinstance(value, Iterable):
+        raise TypeError("volume_dft_components must be a tuple of Yee component names.")
+    names = tuple(str(name) for name in value)
+    allowed = _ELECTRIC_COMPONENTS + _MAGNETIC_COMPONENTS
+    if len(set(names)) != len(names) or any(name not in allowed for name in names):
+        raise ValueError("volume_dft_components must be unique Yee component names among Ex, Ey, Ez, Hx, Hy, Hz.")
+    if not set(_ELECTRIC_COMPONENTS) <= set(names):
+        raise ValueError("volume_dft_components must contain Ex, Ey and Ez; Hx, Hy and Hz are optional additions.")
+    return tuple(name for name in allowed if name in names)
 
 
 def _resolve_full_field_dft(requested: bool | None, frequencies, ports) -> bool:
@@ -140,43 +176,35 @@ def _normalize_port_excitations(excitations) -> tuple[PortExcitation, ...]:
     return resolved
 
 
-def _normalize_spectral_window_kind(value) -> SpectralWindowKind:
-    if isinstance(value, SpectralWindowKind):
-        return value
-    try:
-        return SpectralWindowKind(str(value).strip().lower())
-    except ValueError as exc:
-        choices = ", ".join(item.value for item in SpectralWindowKind)
-        raise ValueError(f"window must be one of: {choices}.") from exc
-
-
-def _normalize_absorber_kind(value) -> AbsorberKind:
-    if isinstance(value, AbsorberKind):
-        return value
-    try:
-        return AbsorberKind(str(value).strip().lower())
-    except ValueError as exc:
-        choices = ", ".join(item.value for item in AbsorberKind)
-        raise ValueError(f"absorber must be one of: {choices}.") from exc
-
-
 @dataclass(frozen=True)
-class GMRES:
+class FDFDSolverConfig:
+    """Linear-solver settings of ``FDFDConfig.solver``.
+
+    ``solver_type`` selects the solve (``FDFDSolverType``, default ``"gmres"``); the
+    iterative types use ``preconditioner`` (``FDFDPreconditioner``) and work in
+    ``precision`` (``Precision``).
+    """
+
     max_iter: int = 5000
     tol: float = 1e-6
     restart: int = 200
-    solver_type: str = "gmres"
-    preconditioner: str = "jacobi"
-    precision: str = "single"  # 'single' | 'double': working precision of the iterative solve
+    solver_type: FDFDSolverType = FDFDSolverType.GMRES
+    preconditioner: FDFDPreconditioner = FDFDPreconditioner.JACOBI
+    precision: Precision = Precision.SINGLE
     ssor_omega: float = 0.8  # relaxation factor for the 'ssor' preconditioner
     device_memory_limit_bytes: int | None = None
 
     def __post_init__(self):
+        set_field = object.__setattr__
+        set_field(self, "solver_type", parse_enum(FDFDSolverType, self.solver_type, name="FDFDSolverConfig.solver_type"))
+        set_field(self, "preconditioner",
+                  parse_enum(FDFDPreconditioner, self.preconditioner, name="FDFDSolverConfig.preconditioner"))
+        set_field(self, "precision", parse_enum(Precision, self.precision, name="FDFDSolverConfig.precision"))
         limit = self.device_memory_limit_bytes
         if limit is not None:
             if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
                 raise ValueError("device_memory_limit_bytes must be a positive integer.")
-            if self.solver_type != "direct":
+            if self.solver_type is not FDFDSolverType.DIRECT:
                 raise ValueError("device_memory_limit_bytes applies to solver_type='direct'")
 
 
@@ -210,7 +238,7 @@ class TimeConfig:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class SpectralSampler:
     window: SpectralWindowKind = SpectralWindowKind.HANNING
     normalize_source: bool = False
@@ -219,39 +247,41 @@ class SpectralSampler:
     def __post_init__(self):
         from ._fixed_inputs import require_fixed_input
         require_fixed_input((self.window, self.normalize_source), name="SpectralSampler controls")
-        self.window = _normalize_spectral_window_kind(self.window)
-        self.normalize_source = bool(self.normalize_source)
+        object.__setattr__(self, "window", parse_enum(SpectralWindowKind, self.window, name="SpectralSampler.window"))
+        object.__setattr__(self, "normalize_source", bool(self.normalize_source))
         if self.observer_dtype not in (torch.float32, torch.float64):
             raise ValueError("observer_dtype must be torch.float32 or torch.float64.")
         if self.observer_dtype == torch.float64 and self.normalize_source:
             raise ValueError("Float64 spectral observers currently require normalize_source=False.")
 
 
-@dataclass
+@dataclass(frozen=True)
 class FDFDConfig:
-    solver: GMRES = field(default_factory=GMRES)
+    solver: FDFDSolverConfig = field(default_factory=FDFDSolverConfig)
     enable_plot: bool = False
     verbose: bool = False
     local_response: LocalResponseConfig | None = None
     observations: tuple = ()
+    device: str = "cuda"
 
     def __post_init__(self):
-        if not isinstance(self.solver, GMRES):
-            raise TypeError("solver must be a GMRES instance.")
+        object.__setattr__(self, "device", str(torch.device(self.device)))
+        if not isinstance(self.solver, FDFDSolverConfig):
+            raise TypeError("solver must be an FDFDSolverConfig instance.")
         if self.local_response is not None and not isinstance(self.local_response, LocalResponseConfig):
             raise TypeError("local_response must be a LocalResponseConfig.")
-        self.observations = tuple(self.observations)
+        object.__setattr__(self, "observations", tuple(self.observations))
         if any(not isinstance(value, (FieldProjection, FarFieldProjection)) for value in self.observations):
             raise TypeError("observations must contain field or far-field projections.")
         if len({value.name for value in self.observations}) != len(self.observations):
             raise ValueError("Observation names must be unique.")
         if self.local_response is not None and self.observations:
             raise ValueError("Specify observations inside local_response when precomputation is enabled.")
-        self.enable_plot = bool(self.enable_plot)
-        self.verbose = bool(self.verbose)
+        object.__setattr__(self, "enable_plot", bool(self.enable_plot))
+        object.__setattr__(self, "verbose", bool(self.verbose))
 
 
-@dataclass
+@dataclass(frozen=True)
 class FDTDConfig:
     run_time: TimeConfig = field(default_factory=TimeConfig.auto)
     spectral_sampler: SpectralSampler = field(default_factory=SpectralSampler)
@@ -260,58 +290,78 @@ class FDTDConfig:
     full_field_dft: bool | None = None
     field_dtype: torch.dtype = torch.float32
     absorber: AbsorberKind = AbsorberKind.AUTO
-    cpml_config: dict[str, Any] = field(default_factory=dict)
+    cpml: CPMLConfig = field(default_factory=CPMLConfig)
     adjoint_checkpoint_stride: int | None = None
     shutoff: float = 0.0  # relative E-energy threshold for auto-shutoff; 0 disables (opt-in)
     shutoff_check_interval: int = 100
     cuda_graph: bool = True  # capture the field-update core into a CUDA graph (default; eager fallback)
-    fdtd_core_path: bool | str = "auto"
-    accelerated_setup: bool | str = "auto"
     parallel: FDTDParallelConfig | None = None
     initial_condition: Any = None  # ElectrostaticInitialCondition pre-bias (opt-in)
-    backend: str = "native"  # "native" CUDA kernels or the restricted "cpu_reference" Torch profile
+    material_cache: FDTDMaterialCache | None = None  # static material compilation reuse (opt-in)
+    device: str = "cuda"
+    verbose: bool = False
+    # Yee components of the full-field (volume) DFT; adding Hx/Hy/Hz records H phasors (opt-in).
+    volume_dft_components: tuple[str, ...] = _ELECTRIC_COMPONENTS
 
     def __post_init__(self):
-        if self.backend not in ("native", "cpu_reference"):
-            raise ValueError("FDTD backend must be 'native' or 'cpu_reference'.")
         if not isinstance(self.run_time, TimeConfig):
             raise TypeError("run_time must be a TimeConfig instance.")
         if not isinstance(self.spectral_sampler, SpectralSampler):
             raise TypeError("spectral_sampler must be a SpectralSampler instance.")
+        if not isinstance(self.cpml, CPMLConfig):
+            raise SetupError(
+                f"FDTDConfig.cpml must be a CPMLConfig instance, not {type(self.cpml).__name__}; "
+                "the cpml_config dict was removed in 0.7.0."
+            )
         _validate_fixed_fdtd_controls(self)
+        set_field = object.__setattr__
         if self.reference_frequency is not None:
-            self.reference_frequency = float(self.reference_frequency)
+            set_field(self, "reference_frequency", float(self.reference_frequency))
             if not math.isfinite(self.reference_frequency) or self.reference_frequency <= 0:
                 raise ValueError("reference_frequency must be finite and positive.")
-        self.enable_plot = bool(self.enable_plot)
+        set_field(self, "enable_plot", bool(self.enable_plot))
+        set_field(self, "verbose", bool(self.verbose))
+        set_field(self, "device", str(torch.device(self.device)))
         if self.field_dtype not in (torch.float32, torch.float64):
             raise ValueError("FDTD field_dtype must be torch.float32 or torch.float64.")
-        self.absorber = _normalize_absorber_kind(self.absorber)
-        self.cpml_config = dict(self.cpml_config or {})
-        self.shutoff = float(self.shutoff)
+        set_field(self, "absorber", parse_enum(AbsorberKind, self.absorber, name="FDTDConfig.absorber"))
+        set_field(self, "shutoff", float(self.shutoff))
         if self.shutoff < 0:
             raise ValueError("shutoff must be >= 0.")
-        self.shutoff_check_interval = int(self.shutoff_check_interval)
+        set_field(self, "shutoff_check_interval", int(self.shutoff_check_interval))
         if self.shutoff_check_interval <= 0:
             raise ValueError("shutoff_check_interval must be > 0.")
         if self.parallel is not None and not isinstance(self.parallel, FDTDParallelConfig):
             raise TypeError("parallel must be an FDTDParallelConfig instance or None.")
-        self.cuda_graph = bool(self.cuda_graph)
-        self.fdtd_core_path = _validate_auto_flag(self.fdtd_core_path, "fdtd_core_path")
-        self.accelerated_setup = _validate_auto_flag(self.accelerated_setup, "accelerated_setup")
+        if self.material_cache is not None and not isinstance(self.material_cache, FDTDMaterialCache):
+            raise TypeError("material_cache must be an FDTDMaterialCache instance or None.")
+        set_field(self, "cuda_graph", bool(self.cuda_graph))
         if self.parallel is not None:
             # Multi-GPU FDTD does not capture peer communication in CUDA graphs;
             # keep the distributed path on eager stepping regardless of the
             # single-GPU default.
-            self.cuda_graph = False
+            set_field(self, "cuda_graph", False)
         if self.parallel is not None and self.enable_plot:
             raise ValueError(
                 "Multi-GPU FDTD plotting requires running first and requesting gathered fields."
             )
         if self.adjoint_checkpoint_stride is not None:
-            self.adjoint_checkpoint_stride = int(self.adjoint_checkpoint_stride)
+            set_field(self, "adjoint_checkpoint_stride", int(self.adjoint_checkpoint_stride))
             if self.adjoint_checkpoint_stride <= 0:
                 raise ValueError("adjoint_checkpoint_stride must be > 0 when provided.")
+        set_field(self, "volume_dft_components", _normalize_volume_dft_components(self.volume_dft_components))
+        if self.records_magnetic_volume_dft:
+            if self.full_field_dft is not True:
+                raise ValueError("Magnetic volume_dft_components (Hx, Hy, Hz) require full_field_dft=True.")
+            if self.parallel is not None:
+                raise UnsupportedFeatureError(
+                    "Multi-GPU FDTD records no magnetic volume DFT; remove Hx/Hy/Hz from volume_dft_components "
+                    "or run on one device.", feature="guard:ae727bf9", method="fdtd")
+
+    @property
+    def records_magnetic_volume_dft(self) -> bool:
+        """Whether the volume DFT also records H (``volume_dft_components`` includes Hx, Hy or Hz)."""
+        return any(name in _MAGNETIC_COMPONENTS for name in self.volume_dft_components)
 
 
 def _to_tensor_fields(field_mapping: dict[str, Any], device: str | torch.device) -> dict[str, torch.Tensor]:
@@ -324,7 +374,7 @@ def _to_tensor_fields(field_mapping: dict[str, Any], device: str | torch.device)
 def _resolve_fdfd_backend():
     global FDFD
     if FDFD is None:
-        from .fdfd import FDFD as backend
+        from .fdfd.solver import FDFD as backend
 
         FDFD = backend
     return FDFD
@@ -333,8 +383,8 @@ def _resolve_fdfd_backend():
 def _resolve_fdtd_backend():
     global FDTD, calculate_required_steps
     if FDTD is None or calculate_required_steps is None:
-        from .fdtd import FDTD as fdtd_backend
-        from .fdtd import calculate_required_steps as calculate_steps_backend
+        from .fdtd.solver import FDTD as fdtd_backend
+        from .fdtd.solver import calculate_required_steps as calculate_steps_backend
 
         FDTD = fdtd_backend
         calculate_required_steps = calculate_steps_backend
@@ -351,7 +401,7 @@ def _resolve_scene_input(scene_like):
 
 def _scene_trainable_density_parameters(scene: Scene) -> tuple[torch.Tensor, ...]:
     trainable = []
-    for region in getattr(scene, "material_regions", ()):
+    for region in scene.material_regions:
         density = getattr(region, "density", None)
         if isinstance(density, torch.Tensor) and density.requires_grad:
             trainable.append(density)
@@ -359,15 +409,11 @@ def _scene_trainable_density_parameters(scene: Scene) -> tuple[torch.Tensor, ...
 
 
 def _scene_trainable_geometry_parameters(scene: Scene) -> tuple[torch.Tensor, ...]:
-    trainable = []
-    for structure in scene.structures:
-        geometry = getattr(structure, "geometry", None)
-        if geometry is None:
-            continue
-        for value in vars(geometry).values():
-            if isinstance(value, torch.Tensor) and value.requires_grad:
-                trainable.append(value)
-    return tuple(trainable)
+    return tuple(
+        value
+        for owner in (*scene.structures, *scene.material_regions)
+        for value in geometry_tensors(getattr(owner, "geometry", None))
+    )
 
 
 def _scene_trainable_material_parameters(scene: Scene) -> tuple[torch.Tensor, ...]:
@@ -409,7 +455,7 @@ def _scene_trainable_circuit_parameters(scene: Scene) -> tuple[torch.Tensor, ...
 
 def _scene_trainable_wire_parameters(scene: Scene) -> tuple[torch.Tensor, ...]:
     trainable = []
-    for wire in getattr(scene, "thin_wires", ()):
+    for wire in scene.thin_wires:
         for value in (getattr(wire, "points", None), getattr(wire, "radius", None)):
             if isinstance(value, torch.Tensor) and value.requires_grad:
                 trainable.append(value)
@@ -433,7 +479,7 @@ def _trainable_rf_parameters(
             )
     for element in scene.lumped_elements:
         candidates.append(getattr(element, "value", None))
-    for block in getattr(scene, "networks", ()):
+    for block in scene.networks:
         model = getattr(block, "model", None)
         candidates.extend(
             getattr(model, name, None)
@@ -459,6 +505,45 @@ def _trainable_rf_parameters(
     )
 
 
+def _scene_trainable_census(scene: Scene) -> tuple[torch.Tensor, ...]:
+    """Every grad-carrying scene tensor that a gradient channel of the FDTD bridge declares."""
+    return (
+        _scene_trainable_density_parameters(scene)
+        + _scene_trainable_geometry_parameters(scene)
+        + _scene_trainable_material_parameters(scene)
+        + _scene_trainable_circuit_parameters(scene)
+        + _scene_trainable_wire_parameters(scene)
+        + _trainable_rf_parameters(scene)
+    )
+
+
+def _reject_uncensused_trainable_tensors(scene: Scene) -> None:
+    """Refuse grad-carrying scene tensors that no FDTD gradient channel reads.
+
+    The trainable census decides whether a run goes through the gradient bridge.
+    A grad-carrying tensor outside it, such as ``Material(mu_r=tensor)`` or a
+    tensor ``ModulationSpec.amplitude``, would leave the run forward-only with
+    detached outputs, so it is refused by attribute path. A ``mass_density`` only
+    feeds SAR post-processing, which differentiates it directly.
+    """
+    if not requires_grad(scene):
+        return
+    claimed = {id(tensor) for tensor in _scene_trainable_census(scene)}
+    claimed.update(id(getattr(structure.material, "mass_density", None)) for structure in scene.structures)
+    unclaimed = tuple(path for path, tensor in named_scene_tensors(scene) if id(tensor) not in claimed)
+    if unclaimed:
+        raise UnsupportedFeatureError(
+            f"Simulation.fdtd(...) has no gradient channel for {len(unclaimed)} grad-carrying scene tensor(s); "
+            "the run would return outputs detached from them:\n"
+            + "\n".join(f"- {path}" for path in unclaimed)
+            + "\nKeep these values fixed (requires_grad=False or .detach()), or run under torch.no_grad().",
+            feature="gradient.unclaimed_tensor",
+            method="fdtd",
+            alternative="keep the listed values fixed",
+            items=unclaimed,
+        )
+
+
 def _nonstandard_medium_reason(scene: Scene) -> str | None:
     """Describe the first medium that leaves the pure real standard reverse class.
 
@@ -468,7 +553,7 @@ def _nonstandard_medium_reason(scene: Scene) -> str | None:
     reaches the distributed bridge. Returns ``None`` when every material is standard.
     """
 
-    for structure in getattr(scene, "structures", ()):
+    for structure in scene.structures:
         material = getattr(structure, "material", None)
         if material is None:
             continue
@@ -536,11 +621,16 @@ def _tiled_monitor_objective_reason(scene: Scene) -> str | None:
     return None
 
 
-def _require_cuda_scene(scene: Scene, *, method: str) -> None:
-    device = torch.device(scene.device)
+# Mode-source gauges chosen by a preparation, per Scene or SceneModule. A later preparation of
+# the same input reuses them, so replays keep one gauge. Kept beside the immutable Scene.
+MODE_SOURCE_GAUGES: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _require_cuda_device(device, *, method: str) -> None:
+    device = torch.device(device)
     if device.type != "cuda":
         raise ValueError(
-            f"Simulation.{method}(...) requires scene.device to be CUDA, got {device}."
+            f"Simulation.{method}(...) requires config.device to be CUDA, got {device}."
         )
     if not torch.cuda.is_available():
         raise RuntimeError(
@@ -550,6 +640,7 @@ def _require_cuda_scene(scene: Scene, *, method: str) -> None:
 
 class Simulation:
     @staticmethod
+    @experimental("batch")
     def batch(simulations, *, execution, parameters=None, variant_ids=None,
               variation=None, outputs=None):
         """Plan and execute supported same-scene variants through native CUDA cohorts."""
@@ -566,31 +657,27 @@ class Simulation:
         scene,
         method: SimulationMethod,
         frequencies: tuple[float, ...],
-        config: FDFDConfig | FDTDConfig | MoMConfig | None = None,
+        config: FDFDConfig | FDTDConfig | MoMConfig | ElectrostaticConfig | CapacitanceConfig | None = None,
         excitations=None,
         metadata: dict[str, Any] | None = None,
-        material_cache=None,
-        reference_frequency: float | None = None,
     ):
         from ._fixed_inputs import require_fixed_input
         frequencies = tuple(frequencies)
         require_fixed_input(frequencies, name="Simulation.frequencies")
-        if not frequencies:
+        self.method = SimulationMethod(method)
+        if self.method in _STATIC_CONFIGS:
+            if frequencies:
+                raise ValueError("Electrostatic and capacitance simulations are static and take no frequencies.")
+        elif not frequencies:
             raise ValueError("At least one frequency is required.")
         resolved_scene, scene_module = _resolve_scene_input(scene)
         self.scene_input = scene
         self.scene = resolved_scene
         self.scene_module = scene_module
-        self.method = SimulationMethod(method)
-        if reference_frequency is not None and self.method != SimulationMethod.FDTD:
-            raise ValueError("reference_frequency requires an FDTD simulation.")
-        if material_cache is not None:
-            from .material_cache import FDTDMaterialCache
-            if self.method != SimulationMethod.FDTD or not isinstance(material_cache, FDTDMaterialCache):
-                raise TypeError("material_cache requires an FDTDMaterialCache and an FDTD simulation")
-        self.material_cache = material_cache
+        self.frequencies = tuple(float(freq) for freq in frequencies)
+        self.frequency = self.frequencies[0] if self.frequencies else None
         self._validate_network_solver()
-        self._validate_method_scene_features()
+        self._validate_method_scene_features(config)
         self.modal_port_sweep = excitations if isinstance(excitations, ModalPortSweep) else None
         if self.modal_port_sweep is not None:
             excitations = None
@@ -609,16 +696,15 @@ class Simulation:
         ):
             raise ValueError("RF port excitation is supported by Simulation.fdtd(...) only.")
         if self.method != SimulationMethod.FDTD and trainable_rf_parameters:
-            raise NotImplementedError(
-                "Trainable RF port, source, and R/L/C parameters require Simulation.fdtd(...)."
+            raise UnsupportedFeatureError(
+                "Trainable RF port, source, and R/L/C parameters require Simulation.fdtd(...).",
+                feature="port", method=self.method.value
             )
         defer_lumped_sweep_validation = self.port_sweep is not None and all(
             not isinstance(port, WavePort) for port in resolved_scene.ports
         )
         if not defer_lumped_sweep_validation:
             self._validate_trainable_rf_support()
-        self.frequencies = tuple(float(freq) for freq in frequencies)
-        self.frequency = self.frequencies[0]
         self._validate_pcb_material_frequency()
         if self.method == SimulationMethod.FDFD:
             if any(not math.isfinite(f) or f <= 0 for f in self.frequencies) or len(set(self.frequencies)) != len(self.frequencies):
@@ -641,167 +727,102 @@ class Simulation:
             if layered and (any(not math.isfinite(f) or f <= 0 for f in self.frequencies)
                             or len(set(self.frequencies)) != len(self.frequencies)):
                 raise ValueError("Layered MoM frequencies must be finite, positive and distinct.")
+        elif self.method in _STATIC_CONFIGS:
+            config_type = _STATIC_CONFIGS[self.method]
+            config = config_type() if config is None else config
+            if not isinstance(config, config_type):
+                raise TypeError(f"{self.method.value} simulations take config={config_type.__name__}(...), "
+                                f"not {type(config).__name__}.")
         else:
             if config is None:
                 config = FDTDConfig()
             if not isinstance(config, FDTDConfig):
                 raise TypeError("FDTD simulations require an FDTDConfig.")
-            if reference_frequency is not None:
-                config = replace(config, reference_frequency=reference_frequency)
         self.config = config
         self.metadata = dict(metadata or {})
 
     @classmethod
-    def mom(cls, scene, *, frequency=None, frequencies=None, config: MoMConfig | None = None) -> "Simulation":
+    @experimental("mom")
+    def mom(cls, scene, *, frequencies=None, config: MoMConfig | None = None) -> "Simulation":
         """Prepare a surface-integral solve in SI units.
 
-        Homogeneous-body scenes take one ``frequency``. Planar PEC sheets in a
-        LayerStack background accept a ``frequencies`` sweep and return an N-port
-        ``Result.network`` from their LumpedPorts.
+        ``frequencies`` is one frequency or a sequence. Homogeneous-body scenes
+        solve one frequency. Planar PEC sheets in a LayerStack background accept a
+        sweep and return an N-port ``Result.network`` from their LumpedPorts; an
+        adaptive layered sweep (``LayeredSurfaceConfig.sweep``) defines its own
+        frequencies, so ``frequencies`` is omitted there.
         """
         if isinstance(config, MoMConfig) and config.layered is not None and config.layered.sweep is not None:
-            if frequency is not None or frequencies is not None:
-                raise ValueError("Adaptive layered sweep defines its own frequencies; omit frequency/frequencies")
+            if frequencies is not None:
+                raise ValueError("Adaptive layered sweep defines its own frequencies; omit frequencies")
             frequencies = config.layered.sweep.seed_frequencies()
         return cls(scene=scene, method=SimulationMethod.MOM,
-                   frequencies=_normalize_frequencies(frequency=frequency, frequencies=frequencies), config=config)
+                   frequencies=_normalize_frequencies(frequencies=frequencies), config=config)
 
     @classmethod
-    def fdfd(
-        cls,
-        scene,
-        *,
-        frequency=None,
-        frequencies=None,
-        solver: GMRES | None = None,
-        enable_plot: bool = False,
-        verbose: bool = False,
-        local_response: LocalResponseConfig | None = None,
-        observations: tuple = (),
-    ) -> "Simulation":
-        return cls(
-            scene=scene,
-            method=SimulationMethod.FDFD,
-            frequencies=_normalize_frequencies(frequency=frequency, frequencies=frequencies),
-            config=FDFDConfig(
-                solver=solver or GMRES(),
-                enable_plot=enable_plot,
-                verbose=verbose,
-                local_response=local_response,
-                observations=observations,
-            ),
-        )
+    @experimental("fdfd")
+    def fdfd(cls, scene, *, frequencies, config: FDFDConfig | None = None) -> "Simulation":
+        """Prepare a frequency-domain solve; ``frequencies`` is one frequency or a sequence (Hz)."""
+        return cls(scene=scene, method=SimulationMethod.FDFD,
+                   frequencies=_normalize_frequencies(frequencies=frequencies), config=config)
 
     @classmethod
-    def fdtd(
-        cls,
-        scene,
-        *,
-        frequencies=None,
-        frequency=None,
-        run_time: TimeConfig | None = None,
-        absorber: AbsorberKind | str = AbsorberKind.AUTO,
-        spectral_sampler: SpectralSampler | None = None,
-        reference_frequency: float | None = None,
-        cpml_config: dict[str, Any] | None = None,
-        enable_plot: bool = False,
-        full_field_dft: bool | None = None,
-        field_dtype: torch.dtype = torch.float32,
-        shutoff: float = 0.0,
-        shutoff_check_interval: int = 100,
-        cuda_graph: bool = True,
-        fdtd_core_path: bool | str = "auto",
-        accelerated_setup: bool | str = "auto",
-        excitations=None,
-        parallel: FDTDParallelConfig | None = None,
-        initial_condition=None,
-        material_cache=None,
-        backend: str = "native",
-    ) -> "Simulation":
-        return cls(
-            scene=scene,
-            method=SimulationMethod.FDTD,
-            frequencies=_normalize_frequencies(frequencies=frequencies, frequency=frequency),
-            config=FDTDConfig(
-                run_time=run_time or TimeConfig.auto(),
-                absorber=absorber,
-                spectral_sampler=spectral_sampler or SpectralSampler(),
-                reference_frequency=reference_frequency,
-                cpml_config={} if cpml_config is None else cpml_config,
-                enable_plot=enable_plot,
-                full_field_dft=full_field_dft,
-                field_dtype=field_dtype,
-                shutoff=shutoff,
-                shutoff_check_interval=shutoff_check_interval,
-                cuda_graph=cuda_graph,
-                fdtd_core_path=fdtd_core_path,
-                accelerated_setup=accelerated_setup,
-                parallel=parallel,
-                initial_condition=initial_condition,
-                backend=backend,
-            ),
-            excitations=excitations,
-            material_cache=material_cache,
-        )
+    def fdtd(cls, scene, *, frequencies, excitations=None, config: FDTDConfig | None = None) -> "Simulation":
+        """Prepare a time-domain solve; ``frequencies`` is one frequency or a sequence (Hz).
 
-    @staticmethod
-    def electrostatic(scene, *, boundary=None, solver=None):
-        """Build an electrostatic (Laplace/Poisson) solver run.
-
-        Returns an ``ElectrostaticSimulation`` runner whose ``run()`` yields a
-        standard ``Result(method="electrostatic")``. Boundary conditions are an
-        ``ElectrostaticBoundarySpec`` (independent of the full-wave
-        ``Scene.boundary``); ``solver`` is an ``ElectrostaticSolverConfig``.
+        Every run option lives in ``config`` (an ``FDTDConfig``); ``excitations`` selects
+        the driven ports (``PortExcitation`` entries, a ``PortSweep`` or a ``ModalPortSweep``).
         """
-        from .electrostatic.runtime import ElectrostaticSimulation
+        return cls(scene=scene, method=SimulationMethod.FDTD,
+                   frequencies=_normalize_frequencies(frequencies=frequencies), config=config,
+                   excitations=excitations)
 
-        return ElectrostaticSimulation(scene, boundary=boundary, solver=solver)
+    @classmethod
+    @experimental("electrostatics")
+    def electrostatic(cls, scene, *, config: ElectrostaticConfig | None = None) -> "Simulation":
+        """Prepare a static (Laplace/Poisson) solve; ``run()`` returns ``Result(method="electrostatic")``.
 
-    @staticmethod
-    def capacitance(
-        scene, *, terminals=None, reference=None, boundary=None, solver=None,
-        truncation_estimate=None,
-    ):
-        """Build an N-terminal Maxwell capacitance-matrix extraction run.
-
-        Returns a ``CapacitanceSimulation`` runner whose ``run()`` yields a
-        standard ``Result(method="capacitance")`` with a typed
-        ``result.capacitance`` accessor (``CapacitanceData``). ``terminals`` selects
-        and orders the electrostatic terminals (default: all); ``reference`` names
-        the grounded return conductor excluded from the matrix. Boundary conditions
-        and solver settings mirror ``Simulation.electrostatic(...)``.
-
-        ``truncation_estimate`` (a ``TruncationEstimate``, opt-in) requests one
-        additional enlarged grounded-box solve so ``result.capacitance.truncation_estimate``
-        reports the domain-truncation error of the finite enclosure. No second solve
-        runs unless it is passed.
+        Every run option lives in ``config`` (an ``ElectrostaticConfig``): the
+        ``ElectrostaticBoundarySpec`` of the six outer faces (independent of the
+        full-wave ``Scene.boundary``) and the ``ElectrostaticSolverConfig``.
         """
-        from .electrostatic.capacitance import CapacitanceSimulation
+        return cls(scene=scene, method=SimulationMethod.ELECTROSTATIC, frequencies=(), config=config)
 
-        return CapacitanceSimulation(
-            scene, terminals=terminals, reference=reference, boundary=boundary, solver=solver,
-            truncation_estimate=truncation_estimate,
-        )
+    @classmethod
+    @experimental("electrostatics")
+    def capacitance(cls, scene, *, config: CapacitanceConfig | None = None) -> "Simulation":
+        """Prepare an N-terminal Maxwell capacitance-matrix extraction.
+
+        ``run()`` returns ``Result(method="capacitance")`` with the typed
+        ``mw.electrostatic.capacitance(result)`` accessor (``CapacitanceData``). Every run option lives
+        in ``config`` (a ``CapacitanceConfig``): the terminal selection and order,
+        the grounded ``reference`` conductor, the boundary, the solver settings and
+        the opt-in ``truncation_estimate`` (one additional enlarged grounded-box solve).
+        """
+        return cls(scene=scene, method=SimulationMethod.CAPACITANCE, frequencies=(), config=config)
 
     @requires_grad_scope()
     def prepare(self, *, response_cache=None):
         if response_cache is not None and (self.method != SimulationMethod.FDFD or self.config.local_response is None):
             raise ValueError("response_cache requires a local-response FDFD simulation.")
         self._refresh_scene()
-        if getattr(self.config, "fdtd_core_path", False) is True:
-            from .fdtd.runtime.core_path import validate_core_path_request
-            validate_core_path_request(self)
+        if self.method in _STATIC_CONFIGS:
+            # The method table is the whole admission of a static solve.
+            self._validate_method_scene_features(self.config)
+            from .compiler.electrostatic import compile_electrostatics
+            return PreparedSimulation(self, compile_electrostatics(
+                self.scene, self.config.boundary, dtype=self.config.solver.dtype, device=self.config.device))
         self._validate_circuit_execution()
         self._validate_network_solver()
-        self._validate_method_scene_features()
+        self._validate_method_scene_features(self.config)
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         self._validate_breakdown_support()
         self._validate_initial_condition_support()
         waveport_excitation = self._waveport_excitation()
         if waveport_excitation is not None:
-            prepared_scene = prepare_scene(self.scene)
-            _require_cuda_scene(prepared_scene, method="fdtd")
+            prepared_scene = prepare_scene(self.scene, device=self.config.device)
+            _require_cuda_device(prepared_scene.device, method="fdtd")
             return PreparedWavePortExcitation(
                 self,
                 prepared_scene,
@@ -811,8 +832,8 @@ class Simulation:
                 ),
             )
         if self.port_sweep is not None:
-            prepared_scene = prepare_scene(self.scene)
-            _require_cuda_scene(prepared_scene, method="fdtd")
+            prepared_scene = prepare_scene(self.scene, device=self.config.device)
+            _require_cuda_device(prepared_scene.device, method="fdtd")
             return PreparedNetworkSweep(
                 self,
                 prepared_scene,
@@ -837,12 +858,15 @@ class Simulation:
             if len(self.frequencies) > 1:
                 from .fdfd.sweep import PreparedFDFDSweep
                 return PreparedFDFDSweep(self, response_cache=response_cache)
-            solver = self._build_fdfd_solver()
             if self.config.local_response is not None:
                 from .fdfd.response import PreparedLocalResponse
-                return PreparedLocalResponse(self, solver, response_cache=response_cache)
+                return PreparedLocalResponse(self, self._build_fdfd_solver(), response_cache=response_cache)
+            # Admit trainable inputs before any CUDA work; run() reuses this bridge.
+            bridge = self._fdfd_gradient_bridge()
+            return PreparedSimulation(self, self._build_fdfd_solver(), fdfd_gradient_bridge=bridge)
         elif self.method == SimulationMethod.FDTD:
             self._validate_trainable_parallel_fdtd()
+            self._validate_magnetic_volume_dft()
             if self.config.parallel is not None and self.has_trainable_parameters:
                 # Trainable multi-GPU FDTD runs through the distributed joint-solve
                 # adjoint bridge; build and init the distributed solver, then run the
@@ -874,14 +898,13 @@ class Simulation:
                 raise ValueError("Initial harmonic fields require an MoM harmonic-balance simulation")
             from .mom.harmonic_runtime import validate_initial_harmonic_electric
             initial_harmonic_electric = validate_initial_harmonic_electric(initial_harmonic_electric,self.config)
+        if self.method in _STATIC_CONFIGS:
+            return self.prepare().run()
         with requires_grad_scope():
             self._refresh_scene()
-            if getattr(self.config, "fdtd_core_path", False) is True:
-                from .fdtd.runtime.core_path import validate_core_path_request
-                validate_core_path_request(self)
             self._validate_circuit_execution()
             self._validate_network_solver()
-            self._validate_method_scene_features()
+            self._validate_method_scene_features(self.config)
             self._validate_port_excitations()
             self._validate_trainable_rf_support()
             self._validate_breakdown_support()
@@ -915,33 +938,37 @@ class Simulation:
             return
         if not isinstance(condition, ElectrostaticInitialCondition):
             raise TypeError(
-                "Simulation.fdtd(initial_condition=...) must be an "
+                "FDTDConfig(initial_condition=...) must be an "
                 "ElectrostaticInitialCondition (build it with "
                 "ElectrostaticInitialCondition.from_result(dc_result))."
             )
         if self.method != SimulationMethod.FDTD:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Electrostatic pre-bias initial conditions seed the time-domain FDTD "
-                "field buffers; the frequency-domain solver has no time-stepped state."
+                "field buffers; the frequency-domain solver has no time-stepped state.",
+                feature="guard:b45d40b5", method=self.method.value
             )
         if self.config.parallel is not None:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Distributed/multi-GPU FDTD does not support an electrostatic pre-bias "
                 "initial condition yet: seeding shard-local staggered E buffers with the "
-                "correct halo/ownership is a later phase. Run the pre-bias on a single GPU."
+                "correct halo/ownership is a later phase. Run the pre-bias on a single GPU.",
+                feature="guard:beee2d24", method="fdtd"
             )
         if self.has_trainable_parameters:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Trainable/adjoint FDTD does not support an electrostatic pre-bias initial "
                 "condition yet: the seeded DC field would enter the taped forward state "
                 "without a differentiated map back to the electrostatic solve. Detach the "
-                "scene parameters to run a forward pre-bias."
+                "scene parameters to run a forward pre-bias.",
+                feature="guard:8db918c9", method="fdtd"
             )
         if self.scene.boundary.uses_kind("bloch"):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Bloch-periodic FDTD carries complex phase-shifted fields; the real-valued "
                 "electrostatic pre-bias seed does not track the Bloch phase. Use a real-field "
-                "boundary (PEC/PMC/periodic) for a pre-charged run."
+                "boundary (PEC/PMC/periodic) for a pre-charged run.",
+                feature="boundary.bloch", method="fdtd"
             )
 
     def _validate_breakdown_support(self) -> None:
@@ -957,25 +984,29 @@ class Simulation:
         if not scene_has_breakdown(self.scene):
             return
         if self.method != SimulationMethod.FDTD:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "DielectricBreakdown is a time-domain (FDTD) feedback model; the "
                 "frequency-domain solver has no dynamic conductivity update. Run the "
-                "breakdown scene with the FDTD method."
+                "breakdown scene with the FDTD method.",
+                feature="material.breakdown", method=self.method.value
             )
         if self.has_trainable_parameters:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Trainable scenes cannot enable hard dielectric breakdown: the "
                 "field-duration/latching switch is non-differentiable at the trigger "
                 "time, so prepare() rejects backward rather than fabricating a gradient. "
                 "For optimization use the separate non-feedback SmoothBreakdownRisk "
-                "surrogate (mw.SmoothBreakdownRisk), which never drives the field solve."
+                "surrogate (mw.SmoothBreakdownRisk), which never drives the field solve.",
+                feature="material.breakdown", method="fdtd"
             )
 
     def _validate_network_solver(self) -> None:
-        if getattr(self.scene, "networks", ()) and self.method != SimulationMethod.FDTD:
-            raise NotImplementedError(
+        # Static methods refuse Scene.networks through their method tables.
+        if self.scene.networks and self.method in (SimulationMethod.FDFD, SimulationMethod.MOM):
+            raise UnsupportedFeatureError(
                 "Embedded network feedback is defined only for the time-domain FDTD "
-                "update; frequency-domain solvers cannot ignore Scene.networks."
+                "update; frequency-domain solvers cannot ignore Scene.networks.",
+                feature="network", method=self.method.value
             )
 
     def _reject_embedded_network_port_conflicts(self) -> None:
@@ -992,7 +1023,7 @@ class Simulation:
 
         network_by_port = {
             port_name: network.name
-            for network in getattr(self.scene, "networks", ())
+            for network in self.scene.networks
             for port_name in network.connected_port_names
         }
         if not network_by_port:
@@ -1028,16 +1059,18 @@ class Simulation:
         }
         if self.port_sweep is not None:
             if bound_port_names:
-                raise NotImplementedError(
-                    "Circuit-bound ports do not support PortSweep execution."
+                raise UnsupportedFeatureError(
+                    "Circuit-bound ports do not support PortSweep execution.",
+                    feature="circuit", method="fdtd"
                 )
             if any(isinstance(port, TerminalWavePort) for port in self.scene.ports):
                 return
             if any(isinstance(port, WavePort) for port in self.scene.ports):
                 if self.port_sweep.amplitude.requires_grad:
-                    raise NotImplementedError(
+                    raise UnsupportedFeatureError(
                         "PortSweep amplitude is trainable, but WavePort sweeps do not "
-                        "support RF-parameter gradients."
+                        "support RF-parameter gradients.",
+                        feature="port.WavePort", method="fdtd"
                     )
                 return
             from .network_sweep import resolve_network_run_manifest
@@ -1051,15 +1084,17 @@ class Simulation:
             isinstance(ports_by_name.get(excitation.port_name), WavePort)
             for excitation in self.excitations
         ):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "A direct multi-source FDTD run supports LumpedPort and TerminalPort only; "
-                "WavePort channels require calibrated per-frequency execution."
+                "WavePort channels require calibrated per-frequency execution.",
+                feature="port.WavePort", method="fdtd"
             )
         for excitation in self.excitations:
             if isinstance(ports_by_name.get(excitation.port_name), TerminalWavePort):
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "A TerminalWavePort is driven through PortSweep columns only; a direct "
-                    "PortExcitation of one terminal or mode is not yet available."
+                    "PortExcitation of one terminal or mode is not yet available.",
+                    feature="port.TerminalWavePort", method="fdtd"
                 )
             if excitation.port_name in bound_port_names:
                 raise ValueError(
@@ -1087,8 +1122,9 @@ class Simulation:
                         "source_time must be None."
                     )
                 if excitation.amplitude.requires_grad:
-                    raise NotImplementedError(
-                        "WavePort PortExcitation does not yet support trainable amplitude."
+                    raise UnsupportedFeatureError(
+                        "WavePort PortExcitation does not yet support trainable amplitude.",
+                        feature="port.WavePort", method="fdtd"
                     )
                 mode_names = tuple(mode.name for mode in port.modes)
                 qualified_names = tuple(port.mode_name(mode) for mode in port.modes)
@@ -1108,17 +1144,19 @@ class Simulation:
         if self.method != SimulationMethod.FDTD or not self.has_trainable_parameters:
             return
         if any(isinstance(port, TerminalWavePort) for port in self.scene.ports):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "TerminalWavePort sweeps are forward-only: the multi-conductor modal basis, "
-                "terminal integrals and calibrated CW columns have no FDTD adjoint."
+                "terminal integrals and calibrated CW columns have no FDTD adjoint.",
+                feature="port.TerminalWavePort", method="fdtd"
             )
         if any(isinstance(item, (CoaxialLumpedPort, CoaxialLumpedResistor))
                for item in (*self.scene.ports, *self.scene.lumped_elements)):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "CoaxialLumpedPort and CoaxialLumpedResistor are forward-only: the FDTD adjoint "
-                "does not replay their multi-component annular branch state."
+                "does not replay their multi-component annular branch state.",
+                feature="port.CoaxialLumpedPort", method="fdtd"
             )
-        for block in getattr(self.scene, "networks", ()):
+        for block in self.scene.networks:
             model = block.model
             if isinstance(model, RationalModel):
                 unsupported = tuple(
@@ -1127,16 +1165,18 @@ class Simulation:
                     if getattr(model, name).requires_grad
                 )
                 if unsupported:
-                    raise NotImplementedError(
+                    raise UnsupportedFeatureError(
                         "Differentiable embedded RationalModel supports residues and direct "
-                        f"terms only; trainable {unsupported!r} are not supported."
+                        f"terms only; trainable {unsupported!r} are not supported.",
+                        feature="network", method="fdtd"
                     )
             elif isinstance(model, StateSpaceNetwork) and any(
                 getattr(model, name).requires_grad for name in ("A", "B", "C", "D")
             ):
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Differentiable embedded networks accept trainable residues/direct on a "
-                    "pre-fitted RationalModel; direct trainable state-space matrices are not supported."
+                    "pre-fitted RationalModel; direct trainable state-space matrices are not supported.",
+                    feature="network", method="fdtd"
                 )
         rf_ports = tuple(
             port
@@ -1152,27 +1192,31 @@ class Simulation:
         )
         if uses_waveport_workflow:
             if len(wave_ports) != len(rf_ports) or self.scene.lumped_elements:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Differentiable WavePort runs cannot include lumped/terminal ports "
                     "or standalone R/L/C elements because their auxiliary state is not "
-                    "replayed by the FDTD adjoint."
+                    "replayed by the FDTD adjoint.",
+                    feature="port.WavePort", method="fdtd"
                 )
             multimode = tuple(port.name for port in wave_ports if len(port.modes) != 1)
             if multimode:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Differentiable WavePort runs currently require exactly one fixed mode "
-                    f"per aperture; multimode ports are {multimode}."
+                    f"per aperture; multimode ports are {multimode}.",
+                    feature="port.WavePort", method="fdtd"
                 )
             return
         if wave_ports:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Differentiable WavePort declarations require a fixed single-mode direct "
-                "excitation or WavePort sweep and cannot be mixed into a lumped workflow."
+                "excitation or WavePort sweep and cannot be mixed into a lumped workflow.",
+                feature="port.WavePort", method="fdtd"
             )
         if self.port_sweep is not None and lumped_ports:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Differentiable LumpedPort/TerminalPort PortSweep is not yet supported; "
-                "use direct port excitations."
+                "use direct port excitations.",
+                feature="port", method="fdtd"
             )
         # Exact circuit topology, field-medium, and RF-parameter guards are applied
         # after the single-device runtimes are compiled. Supported series lumped
@@ -1191,6 +1235,10 @@ class Simulation:
         self._validate_pcb_material_frequency()
 
     def _refresh_trainable_parameters(self, *, config=None, frequencies=None) -> None:
+        if (self.method == SimulationMethod.FDTD and torch.is_grad_enabled()
+                and self.scene.coordinates is None):
+            # Mapped scenes run their own path-level admission below.
+            _reject_uncensused_trainable_tensors(self.scene)
         self.has_trainable_parameters = bool(
             any(
                 parameter.requires_grad
@@ -1198,18 +1246,14 @@ class Simulation:
                     self.scene_module.parameters() if self.scene_module is not None else ()
                 )
             )
-            or _scene_trainable_density_parameters(self.scene)
-            or _scene_trainable_geometry_parameters(self.scene)
-            or _scene_trainable_material_parameters(self.scene)
-            or _scene_trainable_circuit_parameters(self.scene)
-            or _scene_trainable_wire_parameters(self.scene)
+            or _scene_trainable_census(self.scene)
             or _trainable_rf_parameters(
                 self.scene,
                 excitations=self.excitations,
                 port_sweep=self.port_sweep,
             )
         )
-        if getattr(self.scene, "coordinates", None) is not None:
+        if self.scene.coordinates is not None:
             from .fdtd.adjoint.mapped_admission import assess_mapped_materials
             dependency_scene = self.scene
             if self.scene_module is not None and not torch.is_grad_enabled():
@@ -1233,55 +1277,39 @@ class Simulation:
     def _validate_circuit_execution(self) -> None:
         if not self.scene.circuits:
             return
-        self.scene.compile_circuits()
+        compile_circuits(prepare_scene(self.scene, device=self.config.device))
         if self.method != SimulationMethod.FDTD:
             raise ValueError("Circuit-coupled scenes are supported by Simulation.fdtd(...) only.")
         if len(self.scene.circuits) != 1 or not self.scene.circuits[0].bindings:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Circuit-coupled FDTD requires one circuit with at least one bound port; "
-                "multi-circuit execution is not yet supported."
+                "multi-circuit execution is not yet supported.",
+                feature="circuit", method="fdtd"
             )
 
-    def _validate_method_scene_features(self) -> None:
-        from .sources import MaxwellPlaneModes
-        if getattr(self.scene,"coordinates",None) is not None:
+    def check(self) -> CapabilityReport:
+        """Classify every scene feature against this simulation's method table.
+
+        Never raises for a refusal; construction, ``prepare()`` and ``run()``
+        raise the refused items through ``CapabilityReport.raise_if_unsupported()``.
+        """
+        return self._capability_report(self.config)
+
+    def _capability_report(self, config) -> CapabilityReport:
+        from .layers import LayerStack
+        method = self.method.value
+        if self.method == SimulationMethod.MOM and isinstance(self.scene.background, LayerStack):
+            method = "mom.layered"
+        return check_scene(self.scene, method, frequencies=self.frequencies, config=config)
+
+    def _validate_method_scene_features(self, config) -> None:
+        self._capability_report(config).raise_if_unsupported()
+        if self.scene.coordinates is not None:
             from .compiler.coordinates import validate_coordinate_scene
             validate_coordinate_scene(self.scene,method=self.method.value)
-            if self.material_cache is not None:
-                raise NotImplementedError("Mapped material cache reuse needs coordinate-aware coefficient identity.")
-        from .layers import LayerStack
-        layered_mom = self.method == SimulationMethod.MOM and isinstance(self.scene.background, LayerStack)
-        if self.method != SimulationMethod.FDTD and not layered_mom and any(
-            getattr(structure, "enabled", True)
-            and getattr(structure.geometry, "kind", None) == "planar_pec"
-            for structure in self.scene.structures
-        ):
-            raise NotImplementedError("PlanarPEC requires the FDTD sheet runtime or MoM with a LayerStack background.")
-        if self.method != SimulationMethod.MOM and isinstance(self.scene.background, LayerStack):
-            raise NotImplementedError("A LayerStack background requires Simulation.mom(...) with MoMConfig.layered.")
-        if self.method != SimulationMethod.MOM and (self.scene.background is not None
-                or any(isinstance(source, MaxwellPlaneModes) for source in self.scene.sources)):
-            raise NotImplementedError('Homogeneous background declarations and physical Maxwell modes require the dedicated MoM dyadic runtime')
-        if self.method != SimulationMethod.FDTD and getattr(self.scene, "thin_wires", ()):
-            raise ValueError(
-                "ThinWire is an FDTD-only subgrid model; use Simulation.fdtd(...)."
-            )
-        if self.method == SimulationMethod.FDFD:
-            for monitor in self.scene.monitors:
-                if isinstance(monitor, (PermittivityMonitor, MediumMonitor)):
-                    continue
-                raise NotImplementedError(
-                    f"Monitor {monitor.name!r} ({type(monitor).__name__}) is "
-                    "not supported by FDFD; use Simulation.fdtd(...) or FDFDConfig.observations"
-                )
-        from .monitors import IN_SIMULATION_MONITOR_TYPES
-        if self.method != SimulationMethod.FDTD and any(
-            isinstance(monitor, IN_SIMULATION_MONITOR_TYPES) for monitor in self.scene.monitors
-        ):
-            raise NotImplementedError(
-                "Projection, Gaussian-overlap, surface field-time and auxiliary field-time "
-                "monitors are recorded by the FDTD runtime; use Simulation.fdtd(...)."
-            )
+            if getattr(config, "material_cache", None) is not None:
+                raise UnsupportedFeatureError("Mapped material cache reuse needs coordinate-aware coefficient identity.",
+                                              feature="coordinates", method="fdtd")
 
     def _validate_pcb_material_frequency(self):
         record = self.scene.metadata.get("pcb_import", {})
@@ -1294,22 +1322,37 @@ class Simulation:
                              "reimport for each frequency or declare a broadband dispersive material.")
 
     def _run_fdfd(self) -> Result:
-        if self.has_trainable_parameters:
-            return self._run_fdfd_with_gradient_bridge()
+        bridge = self._fdfd_gradient_bridge()
+        if bridge is not None:
+            from .fdfd.adjoint import run_fdfd_with_gradient_bridge
+
+            return run_fdfd_with_gradient_bridge(self, bridge=bridge)
         solver = self._build_fdfd_solver()
         solver_cfg = self.config.solver
         return self._build_fdfd_result(solver, solver_cfg)
 
-    def _run_fdfd_with_gradient_bridge(self) -> Result:
-        from .fdfd.adjoint import run_fdfd_with_gradient_bridge
+    def _fdfd_requires_gradient(self) -> bool:
+        """Whether this single-frequency FDFD solve must carry autograd history.
 
-        return run_fdfd_with_gradient_bridge(self)
+        FDFD solves in CuPy, so fields never inherit a graph: any grad-carrying
+        scene tensor, including ones no trainable census channel lists, must go
+        through the adjoint bridge (which differentiates or refuses it by name).
+        """
+        return torch.is_grad_enabled() and bool(self.has_trainable_parameters or requires_grad(self.scene))
+
+    def _fdfd_gradient_bridge(self):
+        """The admitted FDFD adjoint bridge, or None for a detached solve."""
+        if not self._fdfd_requires_gradient():
+            return None
+        from .fdfd.adjoint.bridge import _FDFDGradientBridge
+
+        return _FDFDGradientBridge(self)
 
     def _build_fdfd_solver(self):
-        if self.scene.subpixel.averaging == "polarized_tensor":
+        if self.scene.subpixel.averaging == SubpixelAveraging.POLARIZED_TENSOR:
             raise ValueError("polarized_tensor subpixel averaging is FDTD-only; use averaging='polarized' for FDFD")
-        prepared_scene = prepare_scene(self.scene)
-        _require_cuda_scene(prepared_scene, method="fdfd")
+        prepared_scene = prepare_scene(self.scene, device=self.config.device)
+        _require_cuda_device(prepared_scene.device, method="fdfd")
         fdfd_backend = _resolve_fdfd_backend()
         solver_cfg = self.config.solver
         return fdfd_backend(
@@ -1324,7 +1367,7 @@ class Simulation:
             verbose=self.config.verbose,
         )
 
-    def _build_fdfd_result(self, solver, solver_cfg: GMRES) -> Result:
+    def _build_fdfd_result(self, solver, solver_cfg: FDFDSolverConfig) -> Result:
         solver.solve(
             max_iter=solver_cfg.max_iter,
             tol=solver_cfg.tol,
@@ -1338,8 +1381,23 @@ class Simulation:
             "EY": solver.E_field[1],
             "EZ": solver.E_field[2],
         }
-        solver_stats = {
-            "pml_extrusions": getattr(solver.scene, "pml_extrusions", []),
+        return Result(
+            method="fdfd",
+            scene=self.scene,
+            prepared_scene=solver.scene,
+            frequency=self.frequency,
+            frequencies=self.frequencies,
+            solver=solver,
+            fields=fields,
+            monitors=self._fdfd_projection_monitors(solver, tuple(fields.values())),
+            metadata=self.metadata,
+            solver_stats=self._fdfd_solver_stats(solver, solver_cfg),
+        )
+
+    @staticmethod
+    def _fdfd_solver_stats(solver, solver_cfg: FDFDSolverConfig) -> dict:
+        return {
+            "pml_extrusions": solver.scene.pml_extrusions,
             "solver": {
                 "type": solver_cfg.solver_type,
                 "max_iter": solver_cfg.max_iter,
@@ -1352,29 +1410,17 @@ class Simulation:
             "solver_info": getattr(solver, "solver_info", None),
             "final_residual": getattr(solver, "final_residual", None),
         }
-        return Result(
-            method="fdfd",
-            scene=self.scene,
-            prepared_scene=solver.scene,
-            frequency=self.frequency,
-            frequencies=self.frequencies,
-            solver=solver,
-            fields=fields,
-            monitors=self._fdfd_projection_monitors(solver, tuple(fields.values())),
-            metadata=self.metadata,
-            solver_stats=solver_stats,
-        )
 
     def _fdfd_projection_monitors(self, solver, fields):
         if not self.config.observations:
             return {}
         from .fdfd.observations import compile_projection, validate_farfield_support
+        from .fdfd.results import observation_data
         validate_farfield_support(self.config.observations, solver)
         electric = torch.cat([field.flatten() for field in fields])
         projection = compile_projection(self.config.observations, solver.scene, electric.dtype, self.frequency)
         values = torch.sparse.mm(projection, electric[:, None])[:, 0]
-        return {spec.name: {'value': values[i], 'frequency': self.frequency, 'kind': 'linear_projection'}
-                for i, spec in enumerate(self.config.observations)}
+        return observation_data(self.config.observations, values, self.frequency)
 
     def _run_fdtd(self) -> Result:
         with requires_grad_scope():
@@ -1384,6 +1430,7 @@ class Simulation:
     def _prepare_fdtd_run(self):
         """Resolve the run path and initialize its solver before time stepping."""
         self._validate_trainable_parallel_fdtd()
+        self._validate_magnetic_volume_dft()
         if self.config.parallel is not None and self.has_trainable_parameters:
             return self._run_distributed_fdtd_with_gradient_bridge
         if self.port_sweep is not None:
@@ -1420,6 +1467,7 @@ class Simulation:
             requested_dt=self.config.run_time.dt,
             base_frequency=self.frequency,
             max_electric_field=self.config.run_time.max_electric_field,
+            device=self.config.device,
         )
 
     def _run_fdtd_waveport_excitation(self, excitation, *, scene=None, manifest=None):
@@ -1506,7 +1554,7 @@ class Simulation:
             if result._metadata.get("conductor_losses")}
         return Result(
             method="fdtd",
-            scene=run_scene,
+            scene=scene_declarations(run_scene),
             prepared_scene=last_solver.scene,
             frequency=self.frequency,
             frequencies=self.frequencies,
@@ -1539,8 +1587,6 @@ class Simulation:
         path from the per-column ``PortData`` gathered onto one result device.
         """
 
-        import copy
-
         from .execution.capacity import estimate_scene_footprint_bytes
         from .execution.ensemble import MultiGPUExecution
         from .execution.executor import execute_plan
@@ -1549,7 +1595,7 @@ class Simulation:
         from .waveport_sweep import WavePortRunManifest
 
         if not isinstance(execution, MultiGPUExecution):
-            raise TypeError("execution must be a maxwell.MultiGPUExecution.")
+            raise TypeError("execution must be a maxwell.execution.MultiGPUExecution.")
         if self.config.parallel is not None:
             raise ValueError(
                 "A network sweep cannot combine ensemble execution with an "
@@ -1584,20 +1630,20 @@ class Simulation:
             full_field_dft=_resolve_full_field_dft(
                 self.config.full_field_dft, self.frequencies, run_scene.ports
             ),
+            magnetic_volume_dft=self.config.records_magnetic_volume_dft,
         )
 
         def _make_run(active_name):
             def _run(device):
-                column_scene = copy.copy(run_scene)
-                column_scene.device = str(device)
                 excitations, overrides = build_network_column_run(
-                    column_scene,
+                    run_scene,
                     sweep,
                     manifest,
                     active_name,
                 )
                 solver = self._build_fdtd_solver_for_scene(
-                    column_scene,
+                    run_scene,
+                    device=str(device),
                     initialize=True,
                     port_excitations=excitations,
                     termination_overrides=overrides,
@@ -1676,7 +1722,8 @@ class Simulation:
         )
 
     def _resolve_port_sweep_manifest(self, scene):
-        if any(isinstance(port, TerminalWavePort) for port in scene.ports):
+        declared = scene_declarations(scene)
+        if any(isinstance(port, TerminalWavePort) for port in declared.ports):
             from .terminal_waveport import resolve_terminal_waveport_run_manifest
 
             return resolve_terminal_waveport_run_manifest(
@@ -1686,8 +1733,9 @@ class Simulation:
                 requested_dt=self.config.run_time.dt,
                 base_frequency=self.frequency,
                 max_electric_field=self.config.run_time.max_electric_field,
+                device=self.config.device,
             )
-        if any(isinstance(port, WavePort) for port in scene.ports):
+        if any(isinstance(port, WavePort) for port in declared.ports):
             from .waveport_sweep import resolve_waveport_run_manifest
 
             return resolve_waveport_run_manifest(
@@ -1697,11 +1745,12 @@ class Simulation:
                 requested_dt=self.config.run_time.dt,
                 base_frequency=self.frequency,
                 max_electric_field=self.config.run_time.max_electric_field,
+                device=self.config.device,
             )
         from .network_sweep import resolve_network_run_manifest
 
         return resolve_network_run_manifest(
-            scene,
+            declared,
             self.port_sweep,
             self.frequencies,
         )
@@ -1723,6 +1772,13 @@ class Simulation:
     def _build_fdtd_solver(self, *, initialize: bool):
         return self._build_fdtd_solver_for_scene(self.scene, initialize=initialize)
 
+    def _validate_magnetic_volume_dft(self) -> None:
+        """Refuse an H volume DFT on a differentiable run: the adjoint seeds only the E phasors."""
+        if self.config.records_magnetic_volume_dft and self.has_trainable_parameters:
+            raise UnsupportedFeatureError(
+                "The FDTD adjoint does not differentiate the magnetic volume DFT; record Hx/Hy/Hz "
+                "(volume_dft_components) in a forward-only run.", feature="guard:f6b6310e", method="fdtd")
+
     def _validate_trainable_parallel_fdtd(self) -> None:
         """Capability-scoped validation of a trainable multi-GPU FDTD run.
 
@@ -1738,7 +1794,7 @@ class Simulation:
 
         if self.config.parallel is None or not self.has_trainable_parameters:
             return
-        if getattr(self.scene, "thin_wires", ()):
+        if self.scene.thin_wires:
             raise ValueError(
                 "Multi-GPU FDTD adjoint does not cover thin-wire state; a trainable scene "
                 "carrying a ThinWire has no distributed wire reverse (the Phase 7 adjoint "
@@ -1767,6 +1823,7 @@ class Simulation:
                 "and RF/port parameters have no distributed reverse core yet. Use the "
                 "single-GPU adjoint path by omitting parallel."
             )
+        require_material_gradient_channels(self.scene)
         # Scene/config-static guards for the trainable distributed path, all raised
         # here before the distributed solver allocates any shard. The pure real
         # standard reverse is the only verified distributed adjoint core, so any
@@ -1839,7 +1896,7 @@ class Simulation:
         from .fdtd.runtime.initialization import maximum_declared_frequency
 
         return maximum_declared_frequency(
-            self.scene if scene is None else scene,
+            scene_declarations(self.scene if scene is None else scene),
             self.frequency,
             self.excitations if excitations is None else excitations,
         )
@@ -1850,100 +1907,62 @@ class Simulation:
         scene,
         *,
         initialize: bool,
+        device=None,
         port_excitations=None,
         termination_overrides=None,
+        batch_lane: bool = False,
     ):
-        from .fdtd.runtime.core_path import core_path_decision
-
-        options = dict(scene=scene, initialize=initialize, port_excitations=port_excitations,
+        options = dict(scene=scene, device=self.config.device if device is None else device,
+                       initialize=initialize, port_excitations=port_excitations,
                        termination_overrides=termination_overrides)
-        if self.config.fdtd_core_path is True:
-            if not initialize:
-                raise ValueError("fdtd_core_path=True does not support resume / non-initializing prepare (initialize=False).")
-            from .fdtd.runtime.core_path import validate_core_path_request
-            validate_core_path_request(self, scene)
-            path, reason = "core", None
-        else:
-            try:
-                path, reason = core_path_decision(self, scene, initialize=initialize)
-            except Exception as error:
-                if self.config.fdtd_core_path != "auto":
-                    raise
-                path, reason = "existing", self._fdtd_core_failure_reason(error)
+        # Every FDTD scene runs on the core path (W7 row 16): CPU scenes are refused by the
+        # CUDA requirement, every public source and monitor is admitted, and features no path
+        # supports refuse in their own compilers. A batch lane's NativeFieldSlot binds the core
+        # Yee launches to its lane storage and owns the lane's sources, observers and adjoint
+        # checkpoints, so its solver is prepared without core activation.
+        options["batch_lane"] = batch_lane
         if self.config.field_dtype == torch.float64:
             from .fdtd.runtime.precision import validate_fp64_forward
-            validate_fp64_forward(self, scene)
-        if self.material_cache is not None and (self.config.parallel is not None or self.has_trainable_parameters):
-            raise NotImplementedError("FDTDMaterialCache requires single-device detached forward execution")
+            validate_fp64_forward(self, scene_declarations(scene))
+        if self.config.material_cache is not None and (self.config.parallel is not None or self.has_trainable_parameters):
+            raise UnsupportedFeatureError("FDTDMaterialCache requires single-device detached forward execution",
+                                          feature="guard:5839b12d", method="fdtd")
         owner = self.scene_module if self.scene_module is not None else scene
         # These are the only preparation outputs written back to public inputs.
         # Restore them before rebuilding so failed mode compilation cannot seed the retry.
-        state = [(owner, "_mode_source_gauges", hasattr(owner, "_mode_source_gauges"),
-                  getattr(owner, "_mode_source_gauges", None)),
-                 (self, "_fdtd_optimization_dt", hasattr(self, "_fdtd_optimization_dt"),
-                  getattr(self, "_fdtd_optimization_dt", None))]
+        state = [(MODE_SOURCE_GAUGES, owner, owner in MODE_SOURCE_GAUGES, MODE_SOURCE_GAUGES.get(owner)),
+                 (vars(self), "_fdtd_optimization_dt", "_fdtd_optimization_dt" in vars(self),
+                  vars(self).get("_fdtd_optimization_dt"))]
         try:
-            solver = self._initialize_fdtd_solver_for_scene(
-                **options, core_enabled=path == "core", fallback_reason=reason)
-        except Exception as error:
-            setup_failed = getattr(error, "setup_failed", False)
-            if not setup_failed and (self.config.fdtd_core_path != "auto" or path != "core"):
-                raise
-            reason = self._fdtd_core_failure_reason(error)
-            solver = self._initialize_existing_fdtd_solver(
-                options, state, reason,
-                setup_auto_allowed=not setup_failed)
-        solver._fdtd_build_options = options
-        solver._fdtd_preparation_inputs = state
-        self._warn_fdtd_core_fallback(reason)
+            try:
+                solver = self._initialize_fdtd_solver_for_scene(**options)
+            except _AcceleratedSetupFailure as failure:
+                # A failed accelerated setup retries once with the torch setup on the same path
+                # (the material-cache numerics); a second failure, and every activation or
+                # core-load failure, raises.
+                self._restore_fdtd_preparation_inputs(state)
+                solver = self._initialize_fdtd_solver_for_scene(**options, setup_auto_allowed=False)
+                cause = failure.__cause__
+                warnings.warn(f"Accelerated CUDA setup failed ({type(cause).__name__}: {cause}); "
+                              "the FDTD solver was prepared with the torch setup.",
+                              category=MaxwellWarning, stacklevel=3)
+        except Exception:
+            # A failed preparation never seeds the next one.
+            self._restore_fdtd_preparation_inputs(state)
+            raise
         return solver
 
     @staticmethod
     def _restore_fdtd_preparation_inputs(state):
-        for owner, name, present, value in state:
+        for mapping, key, present, value in state:
             if present:
-                setattr(owner, name, value)
-            elif hasattr(owner, name):
-                delattr(owner, name)
-
-    @staticmethod
-    def _fdtd_core_failure_reason(error):
-        from .fdtd.runtime.core_path import _FDTDCoreFallback
-        return str(error) if isinstance(error, _FDTDCoreFallback) else f"{type(error).__name__}: {error}"
-
-    def _warn_fdtd_core_fallback(self, reason):
-        if (reason is not None and self.config.fdtd_core_path == "auto"
-                and not getattr(self, "_fdtd_core_fallback_warned", False)):
-            self._fdtd_core_fallback_warned = True
-            warnings.warn(f"FDTD core path fell back to existing execution: {reason}",
-                          category=FDTDCoreFallbackWarning, stacklevel=3)
-
-    def _initialize_existing_fdtd_solver(self, options, state, reason, *, setup_auto_allowed=True):
-        self._restore_fdtd_preparation_inputs(state)
-        try:
-            return self._initialize_fdtd_solver_for_scene(
-                **options, core_enabled=False, fallback_reason=reason,
-                setup_auto_allowed=setup_auto_allowed)
-        except Exception as error:
-            if not getattr(error, "setup_failed", False):
-                raise
-            self._restore_fdtd_preparation_inputs(state)
-            return self._initialize_fdtd_solver_for_scene(
-                **options, core_enabled=False, fallback_reason=reason, setup_auto_allowed=False)
-
-    @requires_grad_scope(reuse=True)
-    def _rebuild_existing_fdtd_solver(self, solver, reason, *, resume=False):
-        replacement = self._initialize_existing_fdtd_solver(
-            solver._fdtd_build_options, solver._fdtd_preparation_inputs, reason,
-            setup_auto_allowed=not resume)
-        replacement._fdtd_build_options = solver._fdtd_build_options
-        replacement._fdtd_preparation_inputs = solver._fdtd_preparation_inputs
-        self._warn_fdtd_core_fallback(reason)
-        return replacement
+                mapping[key] = value
+            else:
+                mapping.pop(key, None)
 
     def _initialize_fdtd_solver_for_scene(
-        self, scene, *, initialize, port_excitations, termination_overrides,
-        core_enabled, fallback_reason, setup_auto_allowed=True,
+        self, scene, *, device, initialize, port_excitations, termination_overrides,
+        batch_lane=False, setup_auto_allowed=True,
     ):
         resolved_excitations = (
             self.excitations if port_excitations is None else tuple(port_excitations)
@@ -1951,7 +1970,7 @@ class Simulation:
         if self.config.parallel is not None:
             if self.config.spectral_sampler.observer_dtype == torch.float64:
                 raise ValueError("Float64 spectral observers require single-device execution; distributed observation ownership is not qualified.")
-            _require_cuda_scene(scene, method="fdtd")
+            _require_cuda_device(device, method="fdtd")
             from .fdtd.distributed import DistributedFDTD
 
             solver = DistributedFDTD(
@@ -1959,10 +1978,9 @@ class Simulation:
                 frequency=self.frequency,
                 parallel=self.config.parallel,
                 absorber_type=self.config.absorber,
-                cpml_config=self.config.cpml_config,
+                cpml=self.config.cpml,
+                device=device,
             )
-            solver._fdtd_execution_path = "existing"
-            solver._fdtd_fallback_reason = fallback_reason
             # Mirror the single-device path so the owner shard enforces the
             # embedded-network fitted-band 'reject' contract on the full set of
             # requested output frequencies, not just the time-stepping frequency.
@@ -1975,33 +1993,27 @@ class Simulation:
                 self._resolve_fdtd_time_steps(solver, scene)
             return solver
 
-        prepared_scene = prepare_scene(scene, material_dtype=self.config.field_dtype)
-        if self.config.backend == "cpu_reference":
-            from .fdtd.cpu_profile import admit_cpu_reference_scene
-            admit_cpu_reference_scene(self, prepared_scene)
-        else:
-            _require_cuda_scene(prepared_scene, method="fdtd")
+        prepared_scene = prepare_scene(scene, device=device, material_dtype=self.config.field_dtype)
+        _require_cuda_device(prepared_scene.device, method="fdtd")
         material_cache_info = None
-        if self.material_cache is not None:
-            material_cache_info = self.material_cache._bind(prepared_scene, frequency=self.frequency)
+        if self.config.material_cache is not None:
+            material_cache_info = self.config.material_cache._bind(prepared_scene, frequency=self.frequency)
         fdtd_backend, _ = _resolve_fdtd_backend()
         solver = fdtd_backend(
             prepared_scene,
             frequency=self.frequency,
             absorber_type=self.config.absorber,
-            cpml_config=self.config.cpml_config,
+            cpml=self.config.cpml,
         )
-        solver._fdtd_execution_path = "core" if core_enabled else "existing"
-        solver._fdtd_fallback_reason = fallback_reason
-        solver._core_path_auto = core_enabled and self.config.fdtd_core_path == "auto"
+        solver.verbose = self.config.verbose
         gauge_owner = self.scene_module if self.scene_module is not None else scene
         solver._mode_source_vector_state = {
             name: {"gauge": gauge}
-            for name, gauge in getattr(gauge_owner, "_mode_source_gauges", {}).items()
+            for name, gauge in MODE_SOURCE_GAUGES.get(gauge_owner, {}).items()
         }
-        if self.config.field_dtype == torch.float64 or self.config.backend == "cpu_reference":
-            solver.cpml_config["memory_mode"] = "dense"
-            solver._cpml_memory_mode_requested = "dense"
+        if self.config.field_dtype == torch.float64:
+            solver.cpml = replace(solver.cpml, memory_mode=CPMLMemoryMode.DENSE)
+            solver._cpml_memory_mode_requested = CPMLMemoryMode.DENSE.value
         solver._observer_dtype = self.config.spectral_sampler.observer_dtype
         solver._requested_port_frequencies = self.frequencies
         solver._material_cache_info = material_cache_info
@@ -2010,25 +2022,20 @@ class Simulation:
         solver._port_termination_overrides = dict(termination_overrides or {})
         if initialize:
             from .compiler.accel.dispatch import setup_enabled
-            auto_setup = (self.config.accelerated_setup == "auto" and setup_auto_allowed
-                          and self.material_cache is None
-                          and self.config.backend == "native"
-                          and torch.device(prepared_scene.device).type == "cuda"
-                          and self.config.field_dtype == torch.float32)
-            solver._fdtd_auto_setup = auto_setup
-            setup_token = setup_enabled.set(
-                (self.config.accelerated_setup is True or auto_setup or core_enabled)
-                and self.material_cache is None)
+            # A bound material cache supplies the PyTorch-compiled material model, so its
+            # coefficients keep PyTorch setup; either stepping path reads the same tables.
+            accelerated = (setup_auto_allowed and self.config.material_cache is None
+                           and (not batch_lane or self.config.field_dtype == torch.float32))
+            setup_token = setup_enabled.set(accelerated)
             try:
                 solver.init_field()
             except Exception as error:
-                if auto_setup and self.config.fdtd_core_path is not True:
-                    from .fdtd.runtime.core_path import _FDTDCoreFallback
-                    raise _FDTDCoreFallback(self._fdtd_core_failure_reason(error), setup_failed=True) from error
+                if accelerated:
+                    raise _AcceleratedSetupFailure(f"{type(error).__name__}: {error}") from error
                 raise
             finally:
                 setup_enabled.reset(setup_token)
-            gauge_owner._mode_source_gauges = {
+            MODE_SOURCE_GAUGES[gauge_owner] = {
                 name: state["gauge"]
                 for name, state in solver._mode_source_vector_state.items()
                 if "gauge" in state
@@ -2036,9 +2043,9 @@ class Simulation:
             self._remember_fdtd_solver_time(solver)
             self._apply_initial_condition(solver)
             self._resolve_fdtd_time_steps(solver, scene)
-            if core_enabled:
+            if not batch_lane:
                 from .fdtd.runtime.core_path import activate_core_path
-                activate_core_path(solver, self)
+                activate_core_path(solver)
         if getattr(self, "_fixed_waveport_mode_sources", False):
             compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
             frozen_sources = []
@@ -2055,11 +2062,10 @@ class Simulation:
         return solver
 
     def _collect_fdtd_requested_frequencies(self, scene=None) -> tuple[float, ...]:
-        resolved_scene = self.scene if scene is None else scene
+        resolved_scene = scene_declarations(self.scene if scene is None else scene)
         ordered = list(self.frequencies)
         seen = set(ordered)
-        monitors = resolved_scene.resolved_monitors() if hasattr(resolved_scene, "resolved_monitors") else resolved_scene.monitors
-        for monitor in monitors:
+        for monitor in resolved_scene.resolved_monitors():
             if isinstance(monitor, (PermittivityMonitor, MediumMonitor)):
                 # Material monitors are evaluated analytically from compiled tensors and
                 # do not require the simulation to accumulate a DFT at their frequencies.
@@ -2078,7 +2084,7 @@ class Simulation:
     def _resolve_fdtd_time_steps(self, solver, scene=None) -> int:
         from .fdtd.runtime.timeplan import compile_fdtd_time_plan
 
-        resolved_scene = self.scene if scene is None else scene
+        resolved_scene = scene_declarations(self.scene if scene is None else scene)
         plan = compile_fdtd_time_plan(solver, resolved_scene, self.config.run_time,
             self._collect_fdtd_requested_frequencies(resolved_scene),
             default_source_frequency=self.frequency,
@@ -2107,6 +2113,9 @@ class Simulation:
         use_full_field_dft = _resolve_full_field_dft(
             self.config.full_field_dft, self.frequencies, resolved_scene.ports)
         dft_request = self.frequency if len(self.frequencies) == 1 else self.frequencies
+        # The default (E-only) request keeps the existing call; distributed solvers refuse H in FDTDConfig.
+        components = ({"dft_components": self.config.volume_dft_components}
+                      if self.config.records_magnetic_volume_dft else {})
         raw_output = solver.solve(
             time_steps=time_steps,
             dft_frequency=dft_request,
@@ -2119,35 +2128,9 @@ class Simulation:
             use_cuda_graph=self.config.cuda_graph,
             resume_from=resume_from,
             stop_step=stop_step,
+            **components,
         )
         return raw_output, time_steps, use_full_field_dft, dft_cfg
-
-    def _fdtd_solver_for_resume(self, solver):
-        if self.config.fdtd_core_path is True:
-            return solver
-        if getattr(solver, "_core_path_auto", False) or getattr(solver, "_fdtd_auto_setup", False):
-            reason = "resume_from" if self.config.fdtd_core_path == "auto" else None
-            return self._rebuild_existing_fdtd_solver(solver, reason, resume=True)
-        if self.config.fdtd_core_path == "auto":
-            solver._fdtd_fallback_reason = "resume_from"
-            self._warn_fdtd_core_fallback("resume_from")
-        return solver
-
-    def _solve_fdtd_with_fallback(self, solver, *, resume_from=None, stop_step=None):
-        if resume_from is not None:
-            solver = self._fdtd_solver_for_resume(solver)
-        try:
-            output = self._execute_fdtd_solve(solver, self.scene,
-                                            resume_from=resume_from, stop_step=stop_step)
-        except Exception as error:
-            if not getattr(solver, "_core_path_auto", False):
-                raise
-            # Never continue on a solver touched by activation, warmup, capture or replay.
-            # A fresh existing-path preparation owns all fields, ADE/CPML, observers and clocks.
-            solver = self._rebuild_existing_fdtd_solver(solver, self._fdtd_core_failure_reason(error))
-            output = self._execute_fdtd_solve(solver, self.scene,
-                                            resume_from=resume_from, stop_step=stop_step)
-        return solver, output
 
     def _fdtd_last_step_field_payload(self, solver) -> dict[str, torch.Tensor]:
         def _field(name: str):
@@ -2169,7 +2152,7 @@ class Simulation:
         }
 
     def _run_fdtd_from_solver(self, solver, *, resume_from=None) -> Result:
-        solver, output = self._solve_fdtd_with_fallback(solver, resume_from=resume_from)
+        output = self._execute_fdtd_solve(solver, self.scene, resume_from=resume_from)
         raw_output, time_steps, use_full_field_dft, dft_cfg = output
         if raw_output is None:
             if self.config.parallel is None or self.config.parallel.gather_fields:
@@ -2187,7 +2170,7 @@ class Simulation:
         field_payload = {
             key: value
             for key, value in (raw_output.items() if isinstance(raw_output, dict) else [])
-            if key in {"Ex", "Ey", "Ez"}
+            if key in {"Ex", "Ey", "Ez", "Hx", "Hy", "Hz"}
         }
         if self.config.parallel is not None and self.config.parallel.gather_fields and not field_payload:
             raise RuntimeError(
@@ -2197,7 +2180,7 @@ class Simulation:
             field_payload = self._fdtd_last_step_field_payload(solver)
 
         result_device = (
-            self.scene.device
+            self.config.device
             if self.config.parallel is None
             else self.config.parallel.result_device
         )
@@ -2253,6 +2236,10 @@ class Simulation:
         use_full_field_dft: bool,
         dft_cfg: SpectralSampler,
     ) -> dict[str, Any]:
+        from .fdtd.postprocess import last_step_field_ratio, tfsf_run_record
+
+        # A pulse (non-CW) time plan records every spectrum without a window, whatever was requested.
+        pulse_plan = (getattr(solver, "_time_plan", None) or {}).get("response", "cw_steady_state") != "cw_steady_state"
         elapsed_s = getattr(solver, "last_solve_elapsed_s", None)
         step_loop_elapsed_s = getattr(solver, "last_step_loop_elapsed_s", None)
         step_loop_steps = getattr(solver, "last_step_loop_steps", None)
@@ -2273,9 +2260,7 @@ class Simulation:
         field_dtype = getattr(getattr(solver, "Ex", None), "dtype", self.config.field_dtype)
         observer_dtype = getattr(solver, "_observer_dtype", field_dtype)
         stats = {
-            "execution_path": getattr(solver, "_fdtd_execution_path", "existing"),
-            "fallback_reason": getattr(solver, "_fdtd_fallback_reason", None),
-            "pml_extrusions": getattr(getattr(solver, "scene", None), "pml_extrusions", []),
+            "pml_extrusions": solver.scene.pml_extrusions,
             **({"field_dtype": str(field_dtype), "observer_dtype": str(observer_dtype)}
                if field_dtype == torch.float64 or observer_dtype == torch.float64 else {}),
             "time_steps": time_steps,
@@ -2330,7 +2315,15 @@ class Simulation:
             "thin_wire_time_step_adjusted": (
                 False if wire_runtime is None else bool(wire_runtime.dt_adjusted)
             ),
-            "dft_window": dft_cfg.window,
+            "dft_window": "none" if pulse_plan else dft_cfg.window,
+            "dft_window_requested": dft_cfg.window,
+            "last_step_field_ratio": last_step_field_ratio(solver),
+            "bloch_wavevector": (None if getattr(solver, "resolved_bloch_wavevector", None) is None
+                                 else tuple(float(k) for k in solver.resolved_bloch_wavevector)),
+            "bloch_phase": (None if getattr(solver, "boundary_phase_cos", None) is None
+                            else tuple(complex(c, s) for c, s in zip(solver.boundary_phase_cos,
+                                                                     solver.boundary_phase_sin))),
+            "tfsf": tfsf_run_record(solver),
             "normalize_source": dft_cfg.normalize_source,
             "reference_frequency": ("per-frequency" if solver._spectral_reference_frequency is None
                                     else solver._spectral_reference_frequency),
@@ -2415,9 +2408,10 @@ class PreparedWavePortExcitation:
 
 
 class PreparedSimulation:
-    def __init__(self, simulation: Simulation, solver):
+    def __init__(self, simulation: Simulation, solver, *, fdfd_gradient_bridge=None):
         self.simulation = simulation
         self.solver = solver
+        self._fdfd_gradient_bridge = fdfd_gradient_bridge
         self._consumed = False
 
     @property
@@ -2447,9 +2441,11 @@ class PreparedSimulation:
 
     def _validate_resume_support(self) -> None:
         if self.simulation.has_trainable_parameters:
-            raise NotImplementedError("FDTD resume requires a detached forward run.")
+            raise UnsupportedFeatureError("FDTD resume requires a detached forward run.",
+                                          feature="guard:0041be83", method="fdtd")
         if self.simulation.config.parallel is not None and getattr(self.solver,"_nccl",False):
-            raise NotImplementedError("Distributed FDTD resume currently requires cuda_p2p transport.")
+            raise UnsupportedFeatureError("Distributed FDTD resume currently requires cuda_p2p transport.",
+                                          feature="guard:477902bc", method="fdtd")
 
     def run(self, *, resume_from=None, initial_harmonic_electric=None) -> Result:
         if initial_harmonic_electric is not None:
@@ -2457,6 +2453,15 @@ class PreparedSimulation:
                 raise ValueError("Initial harmonic fields require an MoM harmonic-balance preparation")
             from .mom.harmonic_runtime import validate_initial_harmonic_electric
             initial_harmonic_electric = validate_initial_harmonic_electric(initial_harmonic_electric,self.simulation.config)
+        if self.simulation.method in _STATIC_CONFIGS:
+            if resume_from is not None:
+                raise TypeError("resume_from is available only for FDTD simulations.")
+            self._claim()
+            if self.simulation.method == SimulationMethod.ELECTROSTATIC:
+                from .electrostatic.runtime import electrostatic_result
+                return electrostatic_result(self.simulation.scene, self.solver, self.simulation.config)
+            from .electrostatic.capacitance import capacitance_result
+            return capacitance_result(self.simulation.scene, self.solver, self.simulation.config)
         if self.simulation.method == SimulationMethod.MOM:
             if resume_from is not None:
                 raise TypeError("resume_from is available only for FDTD simulations.")
@@ -2468,11 +2473,15 @@ class PreparedSimulation:
             if resume_from is not None:
                 raise TypeError("resume_from is available only for FDTD simulations.")
             self._claim()
+            bridge = self._fdfd_gradient_bridge or self.simulation._fdfd_gradient_bridge()
+            if bridge is not None:
+                from .fdfd.adjoint import run_fdfd_with_gradient_bridge
+
+                return run_fdfd_with_gradient_bridge(self.simulation, bridge=bridge, solver=self.solver)
             solver_cfg = self.simulation.config.solver
             return self.simulation._build_fdfd_result(self.solver, solver_cfg)
         if resume_from is not None:
             self._validate_resume_support()
-            self.solver = self.simulation._fdtd_solver_for_resume(self.solver)
             total_steps = self.simulation._resolve_fdtd_time_steps(
                 self.solver,
                 self.simulation.scene,
@@ -2515,7 +2524,7 @@ class PreparedSimulation:
                 f"step must satisfy 0 <= step < {total_steps} for this simulation."
             )
         self._claim()
-        self.solver, output = self.simulation._solve_fdtd_with_fallback(self.solver, stop_step=step)
+        output = self.simulation._execute_fdtd_solve(self.solver, self.simulation.scene, stop_step=step)
         raw_output, resolved_steps, _use_full_field_dft, _dft_cfg = output
         if raw_output is not None or resolved_steps != total_steps:
             raise RuntimeError("Partial FDTD execution did not stop at its checkpoint boundary.")
@@ -2560,9 +2569,3 @@ def _move_port_mapping_to_device(ports, device: torch.device) -> dict:
                 tensor_fields["z0"] = _move_value(current)
         moved[name] = dataclasses.replace(entry, **tensor_fields)
     return moved
-
-
-def run(simulation: Simulation) -> Result:
-    if not isinstance(simulation, Simulation):
-        raise TypeError("run() expects a maxwell.Simulation instance.")
-    return simulation.run()

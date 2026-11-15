@@ -18,17 +18,16 @@ def run(kind, steps):
     source_hashes = {name:hashlib.sha256(Path(mw.__file__).parent.joinpath(name).read_bytes()).hexdigest()
         for name in ("compiler/cut_surface.py","fdtd/cut_surface.py","geometry/surface_mesh.py","fdtd/runtime/stepping.py")}
     if kind == "bent":
-        geometry = mw.SurfaceMesh.bent_rectangle(width=.02, length=.016, radius=.03,
+        geometry = mw.geometry.SurfaceMesh.bent_rectangle(width=.02, length=.016, radius=.03,
                                                  segments=12, device="cuda")
     else:
         vertices = torch.tensor(((-.008,-.008,0.),(.008,-.008,0.),(.008,.008,0.),(-.008,.008,0.)),
                                 device="cuda", dtype=torch.float64)
         vertices[:,2] = .3*vertices[:,0]+.001
-        geometry = mw.SurfaceMesh(vertices, ((0,1,2),(0,2,3)))
+        geometry = mw.geometry.SurfaceMesh(vertices, ((0,1,2),(0,2,3)))
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.04,.04),)*3), grid=mw.GridSpec.uniform(.005),
-        boundary=mw.BoundarySpec.none(), device="cuda",
-        structures=(mw.Structure(geometry=geometry, material=mw.Material.pec()),))
-    solver = mw.Simulation.fdtd(scene, frequency=1.e9, run_time=mw.TimeConfig(time_steps=steps, dt=5.e-12)).prepare().solver
+        boundary=mw.BoundarySpec.none(), structures=(mw.Structure(geometry=geometry, material=mw.Material.pec()),))
+    solver = mw.Simulation.fdtd(scene, frequencies=1.e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps, dt=5.e-12))).prepare().solver
     generator = torch.Generator(device="cuda").manual_seed(33)
     electric_weight, magnetic_weight = {}, {}
     for axis, name in enumerate(("Ex","Ey","Ez")):

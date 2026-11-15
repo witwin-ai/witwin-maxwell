@@ -41,7 +41,7 @@ def prepare_spectral_outputs(solver, raw_output):
     raw_output["copper_spectral_outputs"] = tuple(descriptors)
     from ...monitors import PowerLossMonitor
     if descriptors or any(isinstance(monitor, PowerLossMonitor) and "conduction" in monitor.channels
-                          for monitor in solver.scene.monitors):
+                          for monitor in solver.scene.scene.monitors):
         raw_output["loss_materials"] = {name:getattr(solver, "sigma_e_"+name).clone()
                                        for name in ("Ex", "Ey", "Ez")}
 

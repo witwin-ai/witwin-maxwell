@@ -23,12 +23,11 @@ def _parallel(*, devices=("cuda:0", "cuda:1"), result_device="cuda:0"):
     )
 
 
-def _scene(*, device="cpu") -> mw.Scene:
+def _scene() -> mw.Scene:
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
-        device=device,
     )
 
 
@@ -38,13 +37,13 @@ def _scene(*, device="cpu") -> mw.Scene:
         (
             mw.Material(
                 eps_r=2.0,
-                nonlinearity=mw.NonlinearSusceptibility(chi3=1.0e-10),
+                nonlinearity=mw.media.NonlinearSusceptibility(chi3=1.0e-10),
             ),
             "nonlinear media",
         ),
         (
             mw.Material(
-                epsilon_tensor=mw.Tensor3x3(
+                epsilon_tensor=mw.media.Tensor3x3(
                     ((2.0, 0.2, 0.1), (0.2, 2.5, 0.3), (0.1, 0.3, 3.0))
                 )
             ),
@@ -59,18 +58,19 @@ def test_public_prepare_rejects_materials_without_complete_interface_halos(
     cuda_p2p_devices,
     cuda_memory_cleanup,
 ):
-    scene = _scene(device="cuda:0")
-    scene.add_structure(
+    scene = _scene()
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="cross_interface_material",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
             material=material,
-        )
-    )
+        ),
+    ))
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        parallel=_parallel(devices=cuda_p2p_devices),
+        config=mw.FDTDConfig(parallel=_parallel(devices=cuda_p2p_devices)),
     )
 
     with pytest.raises(ValueError, match=message):
@@ -87,23 +87,24 @@ def test_public_prepare_rejects_gyromagnetic_ferrite(
     layout has no rank-seam handling, so a joint solve would silently simulate a
     reciprocal medium (frozen contract boundary 8, rejected until Phase 4).
     """
-    scene = _scene(device="cuda:0")
-    scene.add_structure(
+    scene = _scene()
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="ferrite",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
-            material=mw.GyromagneticFerrite(
+            material=mw.media.GyromagneticFerrite(
                 eps_r=14.5,
                 saturation_magnetization=1.40e5,
                 bias_field=(0.0, 0.0, 1.75e5),
                 gilbert_damping=1.0e-2,
             ),
-        )
-    )
+        ),
+    ))
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        parallel=_parallel(devices=cuda_p2p_devices),
+        config=mw.FDTDConfig(parallel=_parallel(devices=cuda_p2p_devices)),
     )
 
     with pytest.raises(NotImplementedError, match="GyromagneticFerrite"):
@@ -112,19 +113,20 @@ def test_public_prepare_rejects_gyromagnetic_ferrite(
 
 def test_invalid_dipole_emission_source_is_rejected_before_hardware_prepare():
     scene = _scene()
-    scene.add_monitor(
-        mw.DipoleEmissionMonitor(
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.DipoleEmissionMonitor(
             "emission",
             source_name="missing_dipole",
             frequencies=(_FREQUENCY,),
-        )
-    )
+        ),
+    ))
 
     with pytest.raises(ValueError, match="missing_dipole"):
         DistributedFDTD(
             scene,
             frequency=_FREQUENCY,
-            parallel=_parallel(),
+            parallel=_parallel(), device="cpu",
         )
 
 
@@ -136,21 +138,21 @@ def _trainable_circuit_scene() -> mw.Scene:
     solver-level guard's earlier hand-rolled list did not enumerate.
     """
 
-    circuit = mw.Circuit("trainable_two_shard")
+    circuit = mw.circuits.Circuit("trainable_two_shard")
     left = circuit.node("left")
     right = circuit.node("right")
     circuit.add(
-        mw.CurrentSource(
+        mw.circuits.CurrentSource(
             "Iexcite",
             left,
             circuit.ground,
             0.0,
-            waveform=mw.SineWaveform(0.0, 1.0e-3, _FREQUENCY),
+            waveform=mw.circuits.SineWaveform(0.0, 1.0e-3, _FREQUENCY),
         )
     )
-    circuit.add(mw.Resistor("Rlink", left, right, 75.0))
+    circuit.add(mw.rf.Resistor("Rlink", left, right, 75.0))
     circuit.add(
-        mw.Resistor(
+        mw.rf.Resistor(
             "Rload", right, circuit.ground, torch.tensor(50.0, requires_grad=True)
         )
     )
@@ -173,26 +175,24 @@ def _trainable_circuit_scene() -> mw.Scene:
         boundary=mw.BoundarySpec.none(),
         ports=(_port("left_port", -0.008), _port("right_port", 0.008)),
         circuits=(circuit,),
-        device="cpu",
     )
 
 
 def _absorber_guard_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda:0",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
-            name="drive",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+                name="drive",
+            ),
+            ),
+            )
     return scene
 
 
@@ -215,7 +215,7 @@ def test_require_distributed_adjoint_support_accepts_cpml_family(
         _absorber_guard_scene(),
         frequency=_FREQUENCY,
         parallel=_parallel(devices=cuda_p2p_devices),
-        absorber_type=absorber,
+        absorber_type=absorber, device="cuda:0",
     )
     distributed.init_field()
 
@@ -243,7 +243,7 @@ def test_require_distributed_adjoint_support_rejects_graded_sigma_absorber(
         _absorber_guard_scene(),
         frequency=_FREQUENCY,
         parallel=_parallel(devices=cuda_p2p_devices),
-        absorber_type=absorber,
+        absorber_type=absorber, device="cuda:0",
     )
     distributed.init_field()
 
@@ -262,12 +262,11 @@ def _objective_guard_scene(monitor) -> mw.Scene:
     """
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.none(),
-        device="cpu",
-    )
-    scene.add_monitor(monitor)
+                domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.none(),
+                monitors=(monitor,),
+            )
     return scene
 
 
@@ -335,8 +334,8 @@ def test_solver_trainable_guard_covers_circuit_parameter_channel():
     # reject the parallel run in _reject_trainable_parallel_fdtd).
     simulation = mw.Simulation.fdtd(
         scene,
-        frequency=_FREQUENCY,
-        parallel=_parallel(),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(parallel=_parallel()),
     )
     assert simulation.has_trainable_parameters
 
@@ -346,11 +345,11 @@ def test_solver_trainable_guard_covers_circuit_parameter_channel():
         DistributedFDTD(
             scene,
             frequency=_FREQUENCY,
-            parallel=_parallel(),
+            parallel=_parallel(), device="cpu",
         )
 
 
-def _trainable_density_pml_scene(*, device="cpu") -> mw.Scene:
+def _trainable_density_pml_scene() -> mw.Scene:
     """Two-shard scene whose Box material-region density is a trainable tensor,
     on a graded-sigma PML boundary.
 
@@ -362,20 +361,19 @@ def _trainable_density_pml_scene(*, device="cpu") -> mw.Scene:
     """
 
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=2),
-        device=device,
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
-            density=torch.rand((4, 4, 4), dtype=torch.float64, requires_grad=True),
-            eps_bounds=(1.0, 6.0),
-        )
-    )
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.pml(num_layers=2),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+                density=torch.rand((4, 4, 4), dtype=torch.float64, requires_grad=True),
+                eps_bounds=(1.0, 6.0),
+            ),
+            ),
+            )
     return scene
 
 
@@ -400,9 +398,11 @@ def test_solver_trainable_density_with_graded_sigma_absorber_rejected_at_constru
     # absorber and rejects the parallel run before allocation.
     simulation = mw.Simulation.fdtd(
         scene,
-        frequency=_FREQUENCY,
-        parallel=_parallel(),
-        absorber=absorber,
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(
+            parallel=_parallel(),
+            absorber=absorber,
+        ),
     )
     with pytest.raises(ValueError, match="graded-sigma"):
         simulation.prepare()
@@ -414,7 +414,7 @@ def test_solver_trainable_density_with_graded_sigma_absorber_rejected_at_constru
             scene,
             frequency=_FREQUENCY,
             parallel=_parallel(),
-            absorber_type=absorber,
+            absorber_type=absorber, device="cpu",
         )
 
 
@@ -429,7 +429,7 @@ def test_solver_trainable_density_with_cpml_constructs(
     capability and must pass the constructor's static guard.
     """
 
-    scene = _trainable_density_pml_scene(device="cuda:0")
+    scene = _trainable_density_pml_scene()
     solver = DistributedFDTD(
         scene,
         frequency=_FREQUENCY,
@@ -440,14 +440,15 @@ def test_solver_trainable_density_with_cpml_constructs(
 
 
 def _wire(scene):
-    scene.add_thin_wire(
-        mw.ThinWire(
+    scene = scene.updated(thin_wires=(
+        *scene.thin_wires,
+        mw.rf.ThinWire(
             name="wire",
             points=((-0.2, 0.0, 0.0), (0.2, 0.0, 0.0)),
             radius=1.0e-3,
-            conductor=mw.WireConductor.pec(),
-        )
-    )
+            conductor=mw.rf.WireConductor.pec(),
+        ),
+    ))
     return scene
 
 
@@ -458,27 +459,27 @@ def test_supported_thin_wire_forward_passes_static_distributed_validation():
     solver = DistributedFDTD(
         _wire(_scene()),
         frequency=_FREQUENCY,
-        parallel=_parallel(),
+        parallel=_parallel(), device="cpu",
     )
     assert getattr(solver.logical_scene, "thin_wires", ())
 
 
 def test_thin_wire_with_distributed_cpml_is_rejected_before_hardware_prepare():
     scene = _wire(_scene())
-    scene = scene.clone(boundary=mw.BoundarySpec.pml(num_layers=4))
+    scene = scene.updated(boundary=mw.BoundarySpec.pml(num_layers=4))
     with pytest.raises(NotImplementedError, match="distributed CPML"):
-        DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_parallel())
+        DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_parallel(), device="cpu")
 
 
 @pytest.mark.parametrize(
     "monitor",
     (
-        mw.PermittivityMonitor(
+        mw.monitors.PermittivityMonitor(
             "permittivity",
             position=(0.0, 0.0, 0.0),
             size=(0.2, 0.2, 0.2),
         ),
-        mw.MediumMonitor(
+        mw.monitors.MediumMonitor(
             "medium",
             position=(0.0, 0.0, 0.0),
             size=(0.2, 0.2, 0.2),
@@ -488,13 +489,13 @@ def test_thin_wire_with_distributed_cpml_is_rejected_before_hardware_prepare():
 )
 def test_material_monitors_are_explicitly_rejected_before_hardware_prepare(monitor):
     scene = _scene()
-    scene.add_monitor(monitor)
+    scene = scene.updated(monitors=(*scene.monitors, monitor))
 
     with pytest.raises(ValueError, match="material monitors"):
         DistributedFDTD(
             scene,
             frequency=_FREQUENCY,
-            parallel=_parallel(),
+            parallel=_parallel(), device="cpu",
         )
 
 

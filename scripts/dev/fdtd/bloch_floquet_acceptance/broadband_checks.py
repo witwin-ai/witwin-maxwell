@@ -197,7 +197,7 @@ def reproducibility(resolution):
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "mid-pulse.pt"
                 checkpoint.save(path)
-                resumed = simulation(True).prepare().run(resume_from=mw.FDTDResumeCheckpoint.load(path))
+                resumed = simulation(True).prepare().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path))
             states = [capture_checkpoint_state(result.solver, step=total).tensors for result in (eager, graph, resumed)]
             for name, value in states[0].items():
                 assert torch.equal(value, states[1][name]), ("graph", name)
@@ -231,16 +231,17 @@ for mode in ("non_bloch_box", "non_bloch_slab", "zero_k_slab"):
     boundary = (mw.BoundarySpec.faces(x="bloch", y="bloch", z="pml", num_layers=4,
                                     bloch_wavevector=(0., 0., 0.)) if mode == "zero_k_slab" else
                 mw.BoundarySpec.pml(num_layers=4))
-    scene = mw.Scene(domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
-                     grid=mw.GridSpec.uniform(.06), boundary=boundary, device="cuda")
-    scene.add_structure(mw.Structure(geometry=mw.Box(position=(0., 0., 0.), size=(.36, .36, .12)),
-                                     material=mw.Material(eps_r=4.)))
     injection = (mw.TFSF(bounds=((-0.24, .24),) * 3) if mode == "non_bloch_box" else
                  mw.TFSF.slab(axis="z", bounds=(-.24, .24)))
-    scene.add_source(mw.PlaneWave(direction=(0., 0., 1.), polarization="Ex", injection=injection,
-                                 source_time=mw.GaussianPulse(frequency=1.e9, fwidth=.3e9)))
-    result = mw.Simulation.fdtd(scene, frequencies=(.9e9, 1.1e9), full_field_dft=True,
-                               run_time=mw.TimeConfig(time_steps=600), cuda_graph=False, shutoff=0.).run()
+    scene = mw.Scene(domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+                     grid=mw.GridSpec.uniform(.06), boundary=boundary,
+                     structures=(mw.Structure(geometry=mw.Box(position=(0., 0., 0.), size=(.36, .36, .12)),
+                                              material=mw.Material(eps_r=4.)),),
+                     sources=(mw.PlaneWave(direction=(0., 0., 1.), polarization="Ex", injection=injection,
+                                           source_time=mw.GaussianPulse(frequency=1.e9, fwidth=.3e9)),))
+    result = mw.Simulation.fdtd(scene, frequencies=(.9e9, 1.1e9), config=mw.FDTDConfig(
+        full_field_dft=True, run_time=mw.TimeConfig(time_steps=600), cuda_graph=False, shutoff=0.,
+        device="cuda")).run()
     values = capture_checkpoint_state(result.solver, 600).tensors
     values.update({"spectrum_" + name: result.field(name) for name in ("Ex", "Ey", "Ez")})
     payload[mode] = {name: value.detach().cpu() for name, value in values.items()}

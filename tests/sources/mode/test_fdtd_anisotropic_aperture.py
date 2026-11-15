@@ -108,33 +108,32 @@ def _slab_grid(*, dy_div=80.0, clad_lam=3.0):
 
 def _build_slab_scene(core_material, grid):
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (-1.5 * grid["dx"], 1.5 * grid["dx"]),
                 (grid["y0"], grid["y0"] + grid["ly"]),
                 (-0.5 * grid["lz"], 0.5 * grid["lz"]),
             )
-        ),
-        grid=mw.GridSpec.custom(grid["x_coords"], grid["y_coords"], grid["z_coords"]),
-        boundary=mw.BoundarySpec(kind="none", num_layers=8, strength=1e6, z="pml"),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(6.0 * grid['dx'], grid['d'], 2.0 * grid['lz'])),
-            material=core_material,
-            name='slab',
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(0.0, 0.0, 0.0),
-            size=(grid["ap_x"], grid["ly"] - 4.0 * grid["dy"], 0.0),
-            polarization="Ex",
-            source_time=mw.CW(frequency=grid["f"], amplitude=1.0),
-            name="mode0",
-        )
-    )
+            ),
+                grid=mw.GridSpec.custom(grid["x_coords"], grid["y_coords"], grid["z_coords"]),
+                boundary=mw.BoundarySpec(kind="none", num_layers=8, strength=1e6, z="pml"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(6.0 * grid['dx'], grid['d'], 2.0 * grid['lz'])),
+                material=core_material,
+                name='slab',
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(0.0, 0.0, 0.0),
+                size=(grid["ap_x"], grid["ly"] - 4.0 * grid["dy"], 0.0),
+                polarization="Ex",
+                source_time=mw.CW(frequency=grid["f"], amplitude=1.0),
+                name="mode0",
+            ),
+            ),
+            )
     return scene
 
 

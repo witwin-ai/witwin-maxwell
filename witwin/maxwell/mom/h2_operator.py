@@ -6,6 +6,7 @@ import torch
 from .h2 import NestedH2Actions, H2Config
 from .hmatrix import HierarchicalOperator
 from .operator_protocol import IterativeState
+from .ordered_reduction import ordered_index_add_
 
 
 class HierarchicalH2Operator:
@@ -94,7 +95,7 @@ class HierarchicalH2Operator:
                     values = blocks[start:stop]*column_scale[cols[start:stop]][:, None, :]
                     values = values.abs().square().sum(1 if columns else 2)
                     target = cols[start:stop] if columns else rows[start:stop]
-                    result.index_add_(0, target.flatten(), values.flatten())
+                    ordered_index_add_(result, 0, target.flatten(), values.flatten())
         if not bool(torch.isfinite(result).all()):
             raise ValueError('H2 equilibration norms overflowed native precision')
         return result.clamp_min(0)

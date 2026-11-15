@@ -65,15 +65,16 @@ def test_scene_background_sampling_clone_and_old_backend_rejection():
     from witwin.maxwell.mom.physics import validate_scene_system
     original = carrier(False)
     background = mw.Material(
-        epsilon_tensor=mw.ComplexTensor3x3(original.medium.epsilon_r.detach().cpu().tolist()),
-        mu_tensor=mw.ComplexTensor3x3(original.medium.mu_r.detach().cpu().tolist(), reciprocal=False))
+        epsilon_tensor=mw.media.ComplexTensor3x3(original.medium.epsilon_r.detach().cpu().tolist()),
+        mu_tensor=mw.media.ComplexTensor3x3(original.medium.mu_r.detach().cpu().tolist(), reciprocal=False))
     declaration = MaxwellPlaneModes(original.medium.frequency, original.wavevectors,
                                     original.electric, original.magnetic, original.origin)
     scene = mw.Scene(background=background, sources=[declaration],
         structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=2.))])
-    clone = scene.clone()
+    clone = scene
     assert clone.background is background
-    exterior, interiors = validate_scene_system(clone, original.medium.frequency, tensor_exterior=True)
+    exterior, interiors = validate_scene_system(clone, original.medium.frequency, tensor_exterior=True,
+                                               device=original.medium.epsilon_r.device)
     assert not exterior.reciprocal
     torch.testing.assert_close(exterior.epsilon_r, original.medium.epsilon_r, rtol=0, atol=0)
     torch.testing.assert_close(exterior.mu_r, original.medium.mu_r, rtol=0, atol=0)
@@ -81,7 +82,7 @@ def test_scene_background_sampling_clone_and_old_backend_rejection():
     compiled = compile_tensor_carrier(clone.sources, exterior)
     assert compiled.medium is exterior
     with pytest.raises(NotImplementedError, match='dyadic exterior runtime'):
-        validate_scene_system(clone, original.medium.frequency)
+        validate_scene_system(clone, original.medium.frequency, device='cuda')
     with pytest.raises(NotImplementedError, match='Grid preparation'):
         prepare_scene(clone)
 
@@ -118,12 +119,12 @@ def test_background_perturbation_cannot_be_silently_sampled_as_base_material(tra
     from witwin.maxwell.simulation import _scene_trainable_material_parameters
     from witwin.maxwell.mom.physics import validate_scene_system
     perturbation = torch.ones(1, 1, 1, device='cuda', requires_grad=trainable)
-    background = mw.PerturbationMedium(mw.Material(eps_r=2.), perturbation=perturbation)
+    background = mw.media.PerturbationMedium(mw.Material(eps_r=2.), perturbation=perturbation)
     scene = mw.Scene(background=background)
     tracked = _scene_trainable_material_parameters(scene)
     assert len(tracked) == int(trainable)
     if trainable:
         assert tracked[0] is perturbation
-        assert mw.Simulation.mom(scene, frequency=3e8).has_trainable_parameters
+        assert mw.Simulation.mom(scene, frequencies=3e8).has_trainable_parameters
     with pytest.raises(NotImplementedError, match='perturbation fields'):
-        validate_scene_system(scene, 3e8, tensor_exterior=True)
+        validate_scene_system(scene, 3e8, tensor_exterior=True, device='cuda')

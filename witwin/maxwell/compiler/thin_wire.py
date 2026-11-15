@@ -13,6 +13,8 @@ import torch
 
 from ..constants import EPSILON_0, MU_0
 from .structures import pec_structures
+from ..errors import UnsupportedFeatureError
+from .materials import compile_materials
 
 
 _AXES = "xyz"
@@ -329,7 +331,7 @@ def _grid_fingerprint(scene, nodes, primal, dual) -> str:
                 (f"d{axis}_dual", axis_dual),
             )
         )
-    boundary = getattr(scene, "boundary", None)
+    boundary = getattr(scene.scene, "boundary", None)
     if boundary is not None:
         face_kinds = tuple(
             _kind_name(boundary.face_kind(axis, side))
@@ -372,9 +374,9 @@ def _tensor_input_fingerprint(tensors):
 def _network_cache_inputs(scene, wires):
     tensors: list[torch.Tensor] = []
     signature = _input_fingerprint(
-        (wires, scene.domain, getattr(scene, "structures", ()),
-         getattr(scene, "material_regions", ()), getattr(scene, "ports", ()),
-         getattr(scene, "subpixel", None), getattr(scene, "_material_dtype", None)),
+        (wires, scene.scene.domain, getattr(scene.scene, "structures", ()),
+         getattr(scene.scene, "material_regions", ()), getattr(scene.scene, "ports", ()),
+         getattr(scene.scene, "subpixel", None), getattr(scene, "_material_dtype", None)),
         tensors,
     )
     enabled = not any(t.requires_grad for t in tensors)
@@ -382,7 +384,7 @@ def _network_cache_inputs(scene, wires):
 
 
 def _domain_error(scene, point: np.ndarray, *, wire_name: str) -> None:
-    bounds = tuple(tuple(float(value) for value in pair) for pair in scene.domain.bounds)
+    bounds = tuple(tuple(float(value) for value in pair) for pair in scene.scene.domain.bounds)
     tolerances = tuple(_grid_tolerance(np.asarray(getattr(scene, f"{axis}_nodes64"))) for axis in _AXES)
     if all(lo - tolerance <= value <= hi + tolerance for value, (lo, hi), tolerance in zip(point, bounds, tolerances)):
         return
@@ -791,7 +793,7 @@ def _endpoint_specs(
             )
         matches = [
             structure
-            for structure in scene.structures
+            for structure in scene.scene.structures
             if getattr(structure, "name", None) == structure_name
         ]
         if not matches:
@@ -836,18 +838,19 @@ def _endpoint_specs(
 
 
 def _validate_boundary_contacts(scene, wire, path, nodes) -> None:
-    boundary = getattr(scene, "boundary", None)
+    boundary = getattr(scene.scene, "boundary", None)
     if boundary is None:
         return
-    bounds = tuple(tuple(float(value) for value in pair) for pair in scene.domain.bounds)
+    bounds = tuple(tuple(float(value) for value in pair) for pair in scene.scene.domain.bounds)
     for axis_index, axis in enumerate(_AXES):
         tolerance = _grid_tolerance(nodes[axis_index])
         low_kind = _kind_name(boundary.face_kind(axis, "low"))
         high_kind = _kind_name(boundary.face_kind(axis, "high"))
         if "bloch" in {low_kind, high_kind}:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"ThinWire {wire.name!r} with a Bloch boundary requires phase-aware wire "
-                "topology, which is not yet supported."
+                "topology, which is not yet supported.",
+                feature="thin_wire", method="fdtd"
             )
         for side_index, side in enumerate(("low", "high")):
             kind = _kind_name(boundary.face_kind(axis, side))
@@ -1044,7 +1047,7 @@ def _validate_unique_physical_segments(
 def _validate_port_ownership(prepared_scene, target_device, shapes, targets) -> None:
     field_ports = tuple(
         port
-        for port in getattr(prepared_scene, "ports", ())
+        for port in getattr(prepared_scene.scene, "ports", ())
         if getattr(port, "wire_binding", None) is None
     )
     if not field_ports:
@@ -1080,7 +1083,7 @@ def _resolve_port_bindings(prepared_scene, wires) -> tuple[dict[str, Any], ...]:
     ports = sorted(
         (
             port
-            for port in getattr(prepared_scene, "ports", ())
+            for port in getattr(prepared_scene.scene, "ports", ())
             if getattr(port, "wire_binding", None) is not None
         ),
         key=lambda port: str(port.name),
@@ -1170,7 +1173,7 @@ def compile_thin_wires(
     target_device = torch.device(prepared_scene.device if device is None else device)
     if target_device.type == "cuda" and target_device.index is None:
         target_device = torch.device("cuda", torch.cuda.current_device())
-    wires = tuple(sorted(getattr(prepared_scene, "thin_wires", ()), key=lambda wire: str(wire.name)))
+    wires = tuple(sorted(getattr(prepared_scene.scene, "thin_wires", ()), key=lambda wire: str(wire.name)))
     grid_fingerprint = _grid_fingerprint(prepared_scene, nodes, primal, dual)
     input_fingerprint, cache_enabled = _network_cache_inputs(prepared_scene, wires)
     cache_key = (grid_fingerprint, input_fingerprint)
@@ -1201,7 +1204,7 @@ def compile_thin_wires(
     if coefficient_dtype is None:
         coefficient_dtype = torch.float64
 
-    material_model = prepared_scene.compile_materials() if wires else None
+    material_model = compile_materials(prepared_scene) if wires else None
     eps_components = None if material_model is None else material_model["eps_components"]
     mu_components = None if material_model is None else material_model["mu_components"]
     eps_fields = (
@@ -1606,8 +1609,9 @@ def compile_thin_wires(
             if not accepted:
                 # Keep this capability boundary explicit for the reviewed census.
                 if error is NotImplementedError:
-                    raise NotImplementedError(
-                        f"ThinWire {wire_name!r} requires a locally isotropic host material."
+                    raise UnsupportedFeatureError(
+                        f"ThinWire {wire_name!r} requires a locally isotropic host material.",
+                        feature="thin_wire", method="fdtd"
                     )
                 raise error(message)
 
@@ -1642,6 +1646,39 @@ def compile_thin_wires(
             source_point_node_ids_array[wire_source_point_offsets[wire_id] + point]
         )
 
+    # A node binding measures V = phi_neg - phi_pos + int_neg^pos E.dl like a feed gap: the
+    # node potentials q/C_node carry only the wire's quasi-static self term, so the Yee field
+    # along the straight chord between the terminals is part of the port coordinate.
+    records_by_wire = {str(record["wire"].name): record for record in wire_records}
+
+    def terminal_point(record, terminal):
+        wire_record = records_by_wire[record[f"{terminal}_wire"]]
+        index = wire_record["source_point_path_indices"][record[f"{terminal}_point"]]
+        return wire_record["path"][index], wire_record["path_tensors"][index]
+
+    def continuous_snap(record):
+        return all(
+            _kind_name(getattr(records_by_wire[record[f"{terminal}_wire"]]["wire"], "snap", "strict"))
+            == "continuous"
+            for terminal in ("negative", "positive")
+        )
+
+    chord_records = [record for record in port_binding_records if record["kind"] == "nodes"]
+    chord_starts = [terminal_point(record, "negative") for record in chord_records]
+    chord_ends = [terminal_point(record, "positive") for record in chord_records]
+    chord_fragments = _segment_coupling_fragments(
+        np.asarray([point for point, _ in chord_starts], dtype=np.float64).reshape(-1, 3),
+        np.asarray([point for point, _ in chord_ends], dtype=np.float64).reshape(-1, 3),
+        torch.stack([tensor for _, tensor in chord_starts]) if chord_records else None,
+        torch.stack([tensor for _, tensor in chord_ends]) if chord_records else None,
+        nodes, primal, shapes,
+        continuous=[continuous_snap(record) for record in chord_records],
+    )
+    chord_samples = {
+        record["port_name"]: [sample for fragment in fragments for sample in fragment[3]]
+        for record, fragments in zip(chord_records, chord_fragments)
+    }
+
     port_binding_names = []
     port_binding_kinds = []
     port_negative_node_ids = []
@@ -1667,30 +1704,34 @@ def compile_thin_wires(
         port_binding_kinds.append(record["kind"])
         port_negative_node_ids.append(negative_node)
         port_positive_node_ids.append(positive_node)
-        if record["kind"] == "gap":
-            key = (record["source_wire"], record["source_segment"])
-            combined: dict[tuple[int, int], torch.Tensor] = {}
-            for component, offset, weight in gap_samples.get(key, ()):
-                edge_key = (component, offset)
-                contribution = record["orientation"] * weight
-                combined[edge_key] = (
-                    contribution
-                    if edge_key not in combined
-                    else combined[edge_key] + contribution
-                )
-            entries = sorted(combined.items())
-            nonzero = ((torch.stack([weight for _, weight in entries]) != 0.0).detach().cpu().tolist()
-                       if entries else [])
-            for ((component, offset), weight), keep in zip(entries, nonzero):
-                if not keep:
-                    continue
-                port_gap_components.append(component)
-                port_gap_edge_offsets.append(offset)
-                port_gap_weights.append(weight)
-            if port_gap_offsets[-1] == len(port_gap_weights):
-                raise RuntimeError(
-                    f"Port {record['port_name']!r} feed gap produced an empty conservative row."
-                )
+        samples = (
+            gap_samples.get((record["source_wire"], record["source_segment"]), ())
+            if record["kind"] == "gap"
+            else chord_samples[record["port_name"]]
+        )
+        orientation = record["orientation"] if record["kind"] == "gap" else 1
+        combined: dict[tuple[int, int], torch.Tensor] = {}
+        for component, offset, weight in samples:
+            edge_key = (component, offset)
+            contribution = orientation * weight
+            combined[edge_key] = (
+                contribution
+                if edge_key not in combined
+                else combined[edge_key] + contribution
+            )
+        entries = sorted(combined.items())
+        nonzero = ((torch.stack([weight for _, weight in entries]) != 0.0).detach().cpu().tolist()
+                   if entries else [])
+        for ((component, offset), weight), keep in zip(entries, nonzero):
+            if not keep:
+                continue
+            port_gap_components.append(component)
+            port_gap_edge_offsets.append(offset)
+            port_gap_weights.append(weight)
+        if port_gap_offsets[-1] == len(port_gap_weights):
+            raise RuntimeError(
+                f"Port {record['port_name']!r} feed gap produced an empty conservative row."
+            )
         port_gap_offsets.append(len(port_gap_weights))
         port_binding_metadata.append(
             MappingProxyType(
@@ -1914,7 +1955,7 @@ def compile_thin_wires(
             local_permeability_t,
         )
     )
-    boundary = getattr(prepared_scene, "boundary", None)
+    boundary = getattr(prepared_scene.scene, "boundary", None)
     periodic_axes = tuple(
         axis
         for axis in _AXES
@@ -2123,7 +2164,7 @@ def compile_wire_monitors(
         network = compile_thin_wires(prepared_scene, device=device)
     elif device is not None and network.device != torch.device(device):
         raise ValueError("Wire monitor device must match the compiled wire network device.")
-    selected = tuple(getattr(prepared_scene, "monitors", ()) if monitors is None else monitors)
+    selected = tuple(getattr(prepared_scene.scene, "monitors", ()) if monitors is None else monitors)
     monitor_inputs: list[torch.Tensor] = []
     monitor_key = (_input_fingerprint(selected, monitor_inputs), _tensor_input_fingerprint(monitor_inputs))
     cache = getattr(prepared_scene, "_thin_wire_monitor_cache", {})

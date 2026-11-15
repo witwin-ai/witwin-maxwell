@@ -46,32 +46,30 @@ _LORENTZ = mw.LorentzPole(delta_eps=2.0, resonance_frequency=3.0e9, gamma=2.0e8)
 
 
 def _patterned_lorentz_metasurface(boundary, *, phase=0.0):
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(0.05),
-        boundary=boundary,
-        device="cuda",
-    )
     # A dispersive bar filling half the x-period breaks x-translation symmetry:
     # a genuine sub-wavelength Lorentz metasurface, not a uniform film.
-    scene.add_structure(
-        mw.Structure(
-            geometry=Box(position=(-0.15, 0.0, 0.0), size=(0.3, 0.6, 0.1)),
-            material=mw.Material(eps_r=2.25, lorentz_poles=(_LORENTZ,)),
-            name="lorentz_bar",
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, -0.1), polarization="Ex", width=0.05,
-            source_time=mw.CW(frequency=_FREQ, amplitude=20.0, phase=phase), name="src",
-        )
-    )
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=boundary,
+                structures=(
+            mw.Structure(
+                geometry=Box(position=(-0.15, 0.0, 0.0), size=(0.3, 0.6, 0.1)),
+                material=mw.Material(eps_r=2.25, lorentz_poles=(_LORENTZ,)),
+                name="lorentz_bar",
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, -0.1), polarization="Ex", width=0.05,
+                source_time=mw.CW(frequency=_FREQ, amplitude=20.0, phase=phase), name="src",
+            ),
+            ),
+            )
     result = mw.Simulation.fdtd(
-        scene, absorber="cpml", frequencies=[_FREQ],
-        run_time=mw.TimeConfig.auto(steady_cycles=3, transient_cycles=3),
-        full_field_dft=True, cpml_config={"alpha_max": 0.0}).run()
-    field = result.field("Ex")
+        scene, frequencies=[_FREQ], config=mw.FDTDConfig(absorber="cpml", run_time=mw.TimeConfig.auto(steady_cycles=3, transient_cycles=3),
+        full_field_dft=True, cpml=mw.fdtd.CPMLConfig(alpha_max=0.0))).run()
+    field = result.field("Ex").isel(f=0).values
     return (field["data"] if isinstance(field, dict) else field).detach().cpu().numpy()
 
 

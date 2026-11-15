@@ -6,8 +6,8 @@ import witwin.maxwell as mw
 
 def monitor(kind,**options):
     if kind=='finite':return mw.FinitePlaneMonitor('m',**({'position':(0.,0.,0.),'size':(.02,.02,0.)}|options))
-    if kind=='closed':return mw.ClosedSurfaceMonitor.box('m',**({'position':(0.,0.,0.),'size':(.02,.02,.02)}|options))
-    return mw.PowerLossMonitor('m',**({'position':(0.,0.,0.),'size':(.02,.02,.02)}|options))
+    if kind=='closed':return mw.monitors.ClosedSurfaceMonitor.box('m',**({'position':(0.,0.,0.),'size':(.02,.02,.02)}|options))
+    return mw.monitors.PowerLossMonitor('m',**({'position':(0.,0.,0.),'size':(.02,.02,.02)}|options))
 
 
 @pytest.mark.parametrize('kind',('finite','closed','bulk'))
@@ -31,7 +31,7 @@ def test_trainable_material_sampling_count_rejects_before_int(declaration):
     theta=torch.tensor(2.,requires_grad=True)
     with pytest.raises(NotImplementedError,match='fixed'):
         if declaration=='spec':mw.SubpixelSpec(samples=(theta,2,2), averaging="arithmetic")
-        else:mw.Scene(domain=mw.Domain(bounds=((- .02,.02),)*3),grid=mw.GridSpec.uniform(.005),device='cpu',subpixel_samples=(theta,2,2))
+        else:mw.Scene(domain=mw.Domain(bounds=((- .02,.02),)*3),grid=mw.GridSpec.uniform(.005),subpixel=(theta,2,2))
 
 
 @pytest.mark.parametrize('kind',('finite','closed','bulk'))
@@ -46,7 +46,7 @@ def test_fixed_tensor_sampling_and_supported_box_material_rf_gradients_unchanged
     geometry=mw.Box(position=(theta*.001,0.,0.),size=(.02,.02,.02))
     assert geometry.position.requires_grad
     assert mw.Material(eps_r=theta).eps_r is theta
-    excitation=mw.PortExcitation('feed',amplitude=theta)
+    excitation=mw.rf.PortExcitation('feed',amplitude=theta)
     assert excitation.amplitude.requires_grad
 
 

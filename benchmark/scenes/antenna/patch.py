@@ -63,8 +63,7 @@ def effective_permittivity(eps_r: float, height: float, width: float) -> float:
     return 0.5 * (eps_r + 1.0) + 0.5 * (eps_r - 1.0) / math.sqrt(1.0 + 12.0 * height / width)
 
 
-def cavity_resonance(
-    *, eps_r: float, height: float, length: float, width: float
+def cavity_resonance(*, eps_r: float, height: float, length: float, width: float
 ) -> float:
     """Dominant ``TM010`` resonance with the edge-fringing length extension."""
 
@@ -84,12 +83,10 @@ def default_frequencies(design_frequency: float) -> tuple[float, ...]:
     return tuple(base * scale for scale in (0.55, 0.68, 0.81, 0.94, 1.06, 1.19, 1.32, 1.45))
 
 
-def patch_antenna_scene(
-    *,
+def patch_antenna_scene(*,
     dx: float = 1.0e-3,
     eps_r: float = DEFAULT_PERMITTIVITY,
     frequencies: tuple[float, ...] | None = None,
-    device: str = "cuda",
 ) -> mw.Scene:
     """Build a probe-fed rectangular patch on a finite grounded dielectric slab."""
 
@@ -175,7 +172,7 @@ def patch_antenna_scene(
     box_half_y = (0.5 * PATCH_WIDTH_CELLS + GROUND_MARGIN_CELLS + 7) * dx
     box_z_lo = (DOMAIN_Z_LO_CELLS + 10) * dx
     box_z_hi = (DOMAIN_Z_HI_CELLS - 10) * dx
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "radiation",
         position=(0.0, 0.0, 0.5 * (box_z_lo + box_z_hi)),
         size=(2.0 * box_half_x, 2.0 * box_half_y, box_z_hi - box_z_lo),
@@ -186,10 +183,7 @@ def patch_antenna_scene(
         domain=domain,
         grid=grid,
         boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
-        device=device,
     )
-    for structure in (substrate, ground, patch, probe):
-        scene.add_structure(structure)
-    scene.add_port(feed)
-    scene.add_monitor(surface)
+    scene = scene.updated(structures=(*scene.structures, *(substrate, ground, patch, probe)))
+    scene = scene.updated(ports=(*scene.ports, feed), monitors=(*scene.monitors, surface))
     return scene

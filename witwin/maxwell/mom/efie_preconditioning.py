@@ -38,6 +38,10 @@ from .operator import IntegrationConfig
 from .preconditioning import _Bound
 from .quadrature import classify_pairs, triangle_rule
 from .single_layer import adaptive_near_single_layer, single_layer_pair_integrals
+from .options import MoMOption
+from ..errors import UnsupportedFeatureError
+from .._enums import parse_enum
+from .._stability import experimental
 
 CALDERON_VERSION = 'open_efie_calderon_bc_v1'
 
@@ -58,6 +62,13 @@ def barycentric_refinement(mesh):
 
 
 OPEN_EDGE_RULES = ('natural', 'zero_flux')
+
+
+@experimental("mom")
+class OpenEdgeRule(MoMOption):
+    """Open-edge charge rule of the Buffa-Christiansen duals, selected by ``CalderonPreconditioner.open_edge_rule``."""
+    NATURAL = 'natural'
+    ZERO_FLUX = 'zero_flux'
 
 
 def _bc_coefficients(primal, bary, rule):
@@ -291,9 +302,10 @@ def _require_open_efie(context):
     if tuple(context.components) != ('J',):
         raise ValueError('Open-surface EFIE preconditioners require the single-current EFIE layout')
     if len(context.system.bodies) != 1:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             f'CalderonPreconditioner supports exactly one sheet; this scene has {len(context.system.bodies)}. '
-            'Multi-sheet dual bases are not implemented; solve without it or with LeafBlockRightPreconditioner.')
+            'Multi-sheet dual bases are not implemented; solve without it or with LeafBlockRightPreconditioner.',
+            feature="guard:95e7efff", method="mom")
     return context.system.bodies[0].basis
 
 
@@ -303,6 +315,7 @@ DUAL_INTEGRATION = IntegrationConfig(order=3, singular_order=5, pair_batch=512, 
                                      near_tolerance=1e-3, near_max_order=13)
 
 
+@experimental("mom")
 class CalderonPreconditioner:
     """Right preconditioner P = G^-T Z_bc G^-1 on Buffa-Christiansen functions.
 
@@ -310,9 +323,8 @@ class CalderonPreconditioner:
     it changes only the preconditioner, never the EFIE operator or its admission.
     """
 
-    def __init__(self, *, open_edge_rule='natural', integration=DUAL_INTEGRATION, pair_budget=2_000_000):
-        if open_edge_rule not in OPEN_EDGE_RULES:
-            raise ValueError(f'open_edge_rule must be one of {OPEN_EDGE_RULES}')
+    def __init__(self, *, open_edge_rule=OpenEdgeRule.NATURAL, integration=DUAL_INTEGRATION, pair_budget=2_000_000):
+        open_edge_rule = parse_enum(OpenEdgeRule, open_edge_rule, name='CalderonPreconditioner.open_edge_rule')
         if type(pair_budget) is not int or pair_budget < 1:
             raise ValueError('pair_budget must be a positive integer')
         if not isinstance(integration, IntegrationConfig):
@@ -325,7 +337,7 @@ class CalderonPreconditioner:
         handle = context.handle
         torch.cuda.synchronize(context.device)
         started = time.perf_counter()
-        dual = DualBasis(basis, open_edge_rule=self.open_edge_rule)
+        dual = DualBasis(basis, open_edge_rule=self.open_edge_rule.value)
         dual_matrix = assemble_dual_efie(dual, handle.exterior.k, handle.exterior.frequency, self.integration,
                                          kernel=handle.kernel, pair_budget=self.pair_budget).to(context.dtype)
         torch.cuda.synchronize(context.device)
@@ -337,7 +349,7 @@ class CalderonPreconditioner:
         factor_t, pivots_t = torch.linalg.lu_factor(gram.mT.contiguous())
         singular = torch.linalg.svdvals(gram)
         torch.cuda.synchronize(context.device)
-        receipt = {'version': CALDERON_VERSION, 'formulation': 'efie_open_pec', 'open_edge_rule': self.open_edge_rule,
+        receipt = {'version': CALDERON_VERSION, 'formulation': 'efie_open_pec', 'open_edge_rule': self.open_edge_rule.value,
                    'dual_integration': vars(self.integration),
                    'barycentric_faces': len(dual.bary.mesh.faces), 'barycentric_functions': dual.bary.n_edges,
                    'bc_nonzeros': int(dual.coefficients.values().numel()),

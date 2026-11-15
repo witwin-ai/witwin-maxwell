@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -180,16 +180,18 @@ def _two_port_sweep(scene, freqs, *, steady=8, transient=16):
     return mw.Simulation.fdtd(
         scene,
         frequencies=tuple(freqs),
-        excitations=mw.PortSweep(),
-        run_time=mw.TimeConfig.auto(steady_cycles=steady, transient_cycles=transient),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortSweep(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=steady, transient_cycles=transient),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
 
 def _wave_port_names(scene) -> tuple[str, ...]:
     """Physical WavePort names in channel/drive order."""
-    return tuple(port.name for port in scene.ports if isinstance(port, mw.WavePort))
+    return tuple(port.name for port in scene.ports if isinstance(port, mw.rf.WavePort))
 
 
 def _a_passive_ratio(result, port_names, *, interior: slice | None = None):
@@ -237,7 +239,7 @@ def _reciprocity(s_matrix) -> float:
 # --------------------------------------------------------------------------- #
 def _modal_solve(scene, frequency: float):
     prepared = prepare_scene(scene)
-    manifest = resolve_waveport_run_manifest(prepared, mw.PortSweep(), (frequency,))
+    manifest = resolve_waveport_run_manifest(prepared, mw.rf.PortSweep(), (frequency,))
     port0 = manifest.prepared_ports[0]
     beta = float(port0.tracking.beta[0, 0].real)
     z0 = complex(port0.characteristic_impedance[0, 0])
@@ -255,8 +257,8 @@ def _waveguide_te10_sin_correlation(guide_a: float, *, dx: float, frequency: flo
     from benchmark.scenes.rf.rectangular_waveguide import rectangular_waveguide_scene
 
     try:
-        prepared = prepare_scene(rectangular_waveguide_scene(dx=dx, device=_device()))
-        manifest = resolve_waveport_run_manifest(prepared, mw.PortSweep(), (frequency,))
+        prepared = prepare_scene(rectangular_waveguide_scene(dx=dx))
+        manifest = resolve_waveport_run_manifest(prepared, mw.rf.PortSweep(), (frequency,))
         md = manifest.prepared_ports[0].mode_data[0][0]
         ez = md["component_profiles"]["Ez"].detach().cpu().numpy().real  # (y, z)
         y = md["coords_u"].detach().cpu().numpy()
@@ -394,7 +396,7 @@ def run_rectangular_waveguide() -> SceneReport:
     raw_records = {}
     for dx in tiers:
         try:
-            scene = rectangular_waveguide_scene(dx=dx, device=_device())
+            scene = rectangular_waveguide_scene(dx=dx)
             result = _two_port_sweep(scene, freqs)
             s_matrix = result.network.s.cpu().numpy()
             port_names = _wave_port_names(scene)
@@ -525,7 +527,7 @@ def run_rectangular_waveguide() -> SceneReport:
     try:
         f_mid = 1.8 * fc
         beta_modal, z_modal = _modal_solve(
-            rectangular_waveguide_scene(dx=0.02, device=_device()), f_mid
+            rectangular_waveguide_scene(dx=0.02), f_mid
         )
         k0_mid = 2.0 * math.pi * f_mid / C0
         beta_an_mid = math.sqrt(k0_mid**2 - (math.pi / GUIDE_A) ** 2)
@@ -718,11 +720,13 @@ def run_lossy_waveguide_attenuation() -> SceneReport:
     )
 
     def _s21(guide_len, frequency, *, pec=False):
-        scene = lossy_waveguide_scene(guide_len=guide_len, dx=dx, pec_walls=pec, device=_device())
+        scene = lossy_waveguide_scene(guide_len=guide_len, dx=dx, pec_walls=pec)
         result = mw.Simulation.fdtd(
-            scene, frequencies=(frequency,), excitations=mw.PortSweep(),
-            run_time=mw.TimeConfig.auto(steady_cycles=12, transient_cycles=20),
-            spectral_sampler=mw.SpectralSampler(window="hanning"), full_field_dft=False,
+            scene, frequencies=(frequency,), excitations=mw.rf.PortSweep(),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=12, transient_cycles=20),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"), full_field_dft=False,
+            ),
         ).run()
         s = result.network.s.cpu().numpy()
         cond = float(np.max(result.network.metadata["extraction_condition_number"].cpu().numpy()))
@@ -937,7 +941,7 @@ def run_coax_thru() -> SceneReport:
     raw_records = {}
     for dx in tiers:
         try:
-            scene = coax_thru_scene(dx=dx, device=_device())
+            scene = coax_thru_scene(dx=dx)
             result = _two_port_sweep(scene, freqs, steady=6, transient=16)
             s_matrix = result.network.s.cpu().numpy()
             port_names = _wave_port_names(scene)
@@ -1043,7 +1047,7 @@ def run_coax_thru() -> SceneReport:
 
     # Supporting (NOT gating): modal-eigensolve Z0 cross-check.
     try:
-        _beta_modal, z0 = _modal_solve(coax_thru_scene(dx=0.005, device=_device()), frequency)
+        _beta_modal, z0 = _modal_solve(coax_thru_scene(dx=0.005), frequency)
         report.supporting.append(
             {
                 "quantity": "Z0 (modal eigensolve)",
@@ -1160,7 +1164,7 @@ def run_microstrip() -> SceneReport:
     beta_an = k0 * np.sqrt(eps_eff_ref)
 
     try:
-        scene = microstrip_two_port_scene(dx=0.005, device=_device())
+        scene = microstrip_two_port_scene(dx=0.005)
         result = _two_port_sweep(scene, freqs, steady=6, transient=16)
         s_matrix = result.network.s.cpu().numpy()
         port_names = _wave_port_names(scene)
@@ -1271,7 +1275,7 @@ def run_differential_pair() -> SceneReport:
     )
     freqs = tuple(float(x) for x in np.linspace(0.6e9, 1.2e9, 4))
     try:
-        scene = differential_pair_scene(dx=0.005, device=_device())
+        scene = differential_pair_scene(dx=0.005)
         result = _two_port_sweep(scene, freqs, steady=5, transient=12)
         s_matrix = result.network.s.cpu().numpy()
         port_names = _wave_port_names(scene)
@@ -1398,12 +1402,14 @@ def run_series_rlc() -> SceneReport:
         out = {}
         for c in c_values:
             result = mw.Simulation.fdtd(
-                series_rlc_scene(l=DEFAULT_L, c=c, parallel=parallel, device=_device()),
+                series_rlc_scene(l=DEFAULT_L, c=c, parallel=parallel),
                 frequencies=freqs,
-                excitations=mw.PortExcitation("feed"),
-                run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=12),
-                spectral_sampler=mw.SpectralSampler(window="hanning"),
-                full_field_dft=False,
+                excitations=mw.rf.PortExcitation("feed"),
+                config=mw.FDTDConfig(
+                    run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=12),
+                    spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                    full_field_dft=False,
+                ),
             ).run()
             feed = result.port("feed")
             a = feed.a.cpu().numpy().reshape(len(freqs), -1)[:, 0]
@@ -1519,12 +1525,14 @@ def run_lumped_open_short_match() -> SceneReport:
     for standard in ("matched", "short", "open"):
         try:
             result = mw.Simulation.fdtd(
-                coax_sol_scene(standard, dx=0.01, device=_device()),
+                coax_sol_scene(standard, dx=0.01),
                 frequencies=freqs,
-                excitations=mw.PortExcitation("feed"),
-                run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=20),
-                spectral_sampler=mw.SpectralSampler(window="hanning"),
-                full_field_dft=False,
+                excitations=mw.rf.PortExcitation("feed"),
+                config=mw.FDTDConfig(
+                    run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=20),
+                    spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                    full_field_dft=False,
+                ),
             ).run()
             feed = result.port("feed")
             a = feed.a.cpu().numpy().reshape(len(freqs), -1)[:, 0]
@@ -1622,17 +1630,19 @@ def _run_antenna_fdtd(scene, frequencies, *, design_frequency, fwidth, physical_
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=list(frequencies),
-        excitations=mw.PortExcitation(
+        excitations=mw.rf.PortExcitation(
             "feed",
             source_time=mw.GaussianPulse(frequency=design_frequency, fwidth=fwidth),
         ),
-        run_time=mw.TimeConfig(time_steps=1),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
     prepared = simulation.prepare()
     steps = math.ceil(physical_ns * 1.0e-9 / float(prepared.solver.dt))
-    simulation.config.run_time = mw.TimeConfig(time_steps=steps)
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=steps))
     return prepared.run()
 
 
@@ -1674,16 +1684,14 @@ def run_half_wave_dipole() -> SceneReport:
     try:
         frequencies = default_frequencies(design_frequency)
         scene = half_wave_dipole_scene(
-            design_frequency=design_frequency, frequencies=frequencies, device=_device()
+            design_frequency=design_frequency, frequencies=frequencies
         )
         result = _run_antenna_fdtd(
             scene, frequencies, design_frequency=design_frequency, fwidth=1.5e9, physical_ns=12.0
         )
         design_index = frequencies.index(design_frequency)
         resistance = result.port("feed").z_in.real
-        data = result.antenna(
-            surface="radiation", driven_port="feed", theta_points=181, phi_points=8, radius=10.0
-        )
+        data = mw.antenna.antenna(result, surface="radiation", driven_port="feed", theta_points=181, phi_points=8, radius=10.0)
     except Exception as exc:  # noqa: BLE001 - record honestly
         report.status = "error"
         report.notes.append(f"{type(exc).__name__}: {exc}")
@@ -1733,8 +1741,7 @@ def run_half_wave_dipole() -> SceneReport:
         "Radiation physics is the binding evidence: broadside directivity in "
         "[1.9,2.4] dBi and within 0.3 dB of 2.15; E-plane pattern sin^2-correlation "
         ">= 0.99; radiated-vs-accepted power closure < 0.08; and R sweeps THROUGH the "
-        "thin-dipole 73 Ohm class. Input reactance carries a documented positive "
-        "delta-gap feed offset and is not gated."
+        "thin-dipole 73 Ohm class. Input reactance is not gated."
     )
     report.falsification = (
         "EXECUTED (tests/rf/antenna/test_antenna_benchmark_e2e.py): sin^2 corr REAL "
@@ -1790,13 +1797,11 @@ def run_patch() -> SceneReport:
         target="same-frequency broadside D>=5 dBi, |S11|<=-10 dB, power closure<=3%",
     )
     try:
-        scene = patch_antenna_scene(frequencies=frequencies, device=_device())
+        scene = patch_antenna_scene(frequencies=frequencies)
         result = _run_antenna_fdtd(
             scene, frequencies, design_frequency=3.2e9, fwidth=2.2e9, physical_ns=16.0
         )
-        data = result.antenna(
-            surface="radiation", driven_port="feed", theta_points=91, phi_points=73, radius=10.0
-        )
+        data = mw.antenna.antenna(result, surface="radiation", driven_port="feed", theta_points=91, phi_points=73, radius=10.0)
     except Exception as exc:  # noqa: BLE001 - record honestly
         report.status = "error"
         report.notes.append(f"{type(exc).__name__}: {exc}")

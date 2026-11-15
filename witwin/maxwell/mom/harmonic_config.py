@@ -1,10 +1,45 @@
 """Configuration for the experimental finite-dielectric SIE-VIE HB path."""
-from dataclasses import dataclass,asdict,fields
+from dataclasses import dataclass,fields
 import math
 from .volume_mesh import TetrahedralVolumeMesh
 from .linalg import StoppingRule
+from .options import MoMOption, option_asdict
+from .._enums import parse_enum
+from .._stability import experimental
 
 
+@experimental("mom")
+class CutoffFailure(MoMOption):
+    """What ``HarmonicCutoffConfig`` does when the cutoff budget is not met: raise or record."""
+    RAISE = 'raise'
+    RECORD = 'record'
+
+
+@experimental("mom")
+class HarmonicBalanceMethod(MoMOption):
+    """Nonlinear iteration selected by ``HarmonicBalanceConfig.method``."""
+    NEWTON = 'newton'
+    PICARD = 'picard'
+    NEWTON_KRYLOV = 'newton_krylov'
+
+
+@experimental("mom")
+class TensorFaceRule(MoMOption):
+    """Tensor-interior face quadrature selected by ``HarmonicBalanceConfig.tensor_face_rule``."""
+    TRIANGLE = 'triangle'
+    PROJECTED_DUFFY = 'projected_duffy'
+    DISTANCE_SCALED_DUFFY = 'distance_scaled_duffy'
+
+
+@experimental("mom")
+class HarmonicImplicitSolver(MoMOption):
+    """Final implicit check of Newton-Krylov, selected by ``HarmonicBalanceConfig.implicit_solver``."""
+    DENSE = 'dense'
+    STREAMED_KRYLOV = 'streamed_krylov'
+    STREAMED_INVERSE_KRYLOV = 'streamed_inverse_krylov'
+
+
+@experimental("mom")
 @dataclass(frozen=True)
 class HarmonicCutoffConfig:
     """Budgeted cell-field cutoff estimation; physical qualification is separate."""
@@ -13,9 +48,10 @@ class HarmonicCutoffConfig:
     absolute_tolerance: float = 1e-10
     tail_absolute_tolerance: float = 1e-8
     successive_passes: int = 2
-    failure: str = 'raise'
+    failure: CutoffFailure = CutoffFailure.RAISE
 
     def __post_init__(self):
+        object.__setattr__(self,'failure',parse_enum(CutoffFailure,self.failure,name='HarmonicCutoffConfig.failure'))
         for name in ('max_harmonics','successive_passes'):
             if type(getattr(self,name)) is not int or getattr(self,name) < 1:
                 raise ValueError(f'Cutoff {name} must be a positive integer')
@@ -25,10 +61,9 @@ class HarmonicCutoffConfig:
                 raise ValueError(f'Cutoff {name} must be finite and nonnegative')
         if self.relative_tolerance+self.absolute_tolerance == 0 or self.tail_absolute_tolerance == 0:
             raise ValueError('Cutoff retained and tail budgets must be nonzero')
-        if self.failure not in ('raise','record'):
-            raise ValueError('Cutoff failure must be raise or record')
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class HarmonicBalanceConfig:
     """Start at the given positive harmonic count with explicit volume meshes.
@@ -46,7 +81,7 @@ class HarmonicBalanceConfig:
     harmonics: int
     volumes: tuple[TetrahedralVolumeMesh, ...]
     branch_id: str
-    method: str = 'newton'
+    method: HarmonicBalanceMethod = HarmonicBalanceMethod.NEWTON
     pump_scales: tuple[float, ...] = (1.,)
     relative_tolerance: float = 1e-9
     absolute_tolerance: float = 1e-10
@@ -56,19 +91,22 @@ class HarmonicBalanceConfig:
     dc_testing_order: int = 4
     source_max_order: int = 32
     source_max_inner_order: int = 64
-    tensor_face_rule: str = 'triangle'
+    tensor_face_rule: TensorFaceRule = TensorFaceRule.TRIANGLE
     tensor_kernel_batch: int = 128
     cutoff: HarmonicCutoffConfig | None = None
     tangent_rule: StoppingRule | None = None
-    implicit_solver: str = 'dense'
+    implicit_solver: HarmonicImplicitSolver = HarmonicImplicitSolver.DENSE
     tangent_column_batch: int = 8
     dc_tangent_rule: StoppingRule | None = None
     dc_tangent_column_batch: int = 8
     dc_magnetic_volumes: tuple[TetrahedralVolumeMesh, ...] | None = None
 
     def __post_init__(self):
-        if self.tensor_face_rule not in ('triangle','projected_duffy','distance_scaled_duffy'):
-            raise ValueError('HB tensor face rule is not supported')
+        object.__setattr__(self,'method',parse_enum(HarmonicBalanceMethod,self.method,name='HarmonicBalanceConfig.method'))
+        object.__setattr__(self,'tensor_face_rule',
+                           parse_enum(TensorFaceRule,self.tensor_face_rule,name='HarmonicBalanceConfig.tensor_face_rule'))
+        object.__setattr__(self,'implicit_solver',parse_enum(
+            HarmonicImplicitSolver,self.implicit_solver,name='HarmonicBalanceConfig.implicit_solver'))
         if type(self.tensor_kernel_batch) is not int or self.tensor_kernel_batch<1:
             raise ValueError('HB tensor kernel batch must be a positive integer')
         if self.dc_magnetic_volumes is not None:
@@ -82,6 +120,7 @@ class HarmonicBalanceConfig:
             if (type(rule) is not StoppingRule or rule.method!='gmres' or rule.preconditioner!='none'
                     or rule.recycle_size or rule.fallback!='none'):
                 raise ValueError('DC tangent policy requires unpreconditioned unrecycled GMRES without fallback')
+            object.__setattr__(self,'dc_tangent_rule',rule.resolved())
         if type(self.dc_tangent_column_batch) is not int or self.dc_tangent_column_batch<1:
             raise ValueError('DC tangent column batch must be a positive integer')
         if self.dc_tangent_rule is None and self.dc_tangent_column_batch!=8:
@@ -100,8 +139,6 @@ class HarmonicBalanceConfig:
             raise ValueError('HB volume regions must be unique')
         if not isinstance(self.branch_id,str) or not self.branch_id.strip():
             raise ValueError('HB requires an explicit nonempty branch_id')
-        if self.method not in ('newton','picard','newton_krylov'):
-            raise ValueError('HB method must be newton, picard or newton_krylov')
         if self.method=='newton_krylov':
             if self.tangent_rule is None:
                 object.__setattr__(self,'tangent_rule',StoppingRule(preconditioner='none',rtol=1e-10,atol=1e-13))
@@ -109,10 +146,9 @@ class HarmonicBalanceConfig:
             if (type(rule) is not StoppingRule or rule.method!='gmres' or rule.preconditioner!='none'
                     or rule.recycle_size or rule.fallback!='none'):
                 raise ValueError('HB Newton-Krylov requires unpreconditioned unrecycled GMRES without fallback')
+            object.__setattr__(self,'tangent_rule',rule.resolved())
         elif self.tangent_rule is not None or self.implicit_solver!='dense' or self.tangent_column_batch!=8:
             raise ValueError('HB tangent settings require newton_krylov')
-        if self.implicit_solver not in ('dense','streamed_krylov','streamed_inverse_krylov'):
-            raise ValueError('HB implicit solver must be dense, streamed_krylov or streamed_inverse_krylov')
         if type(self.tangent_column_batch) is not int or self.tangent_column_batch<1:
             raise ValueError('HB tangent column batch must be a positive integer')
         if (not isinstance(self.pump_scales,tuple) or not self.pump_scales or
@@ -132,8 +168,9 @@ class HarmonicBalanceConfig:
     def solve_settings(self):
         result={name:getattr(self,name) for name in ('method','relative_tolerance','absolute_tolerance',
                 'max_iterations','damping','max_backtracks')}
+        result['method']=self.method.value
         if self.method=='newton_krylov':
-            result.update(tangent_rule=self.tangent_rule,implicit_solver=self.implicit_solver,
+            result.update(tangent_rule=self.tangent_rule,implicit_solver=self.implicit_solver.value,
                 tangent_column_batch=self.tangent_column_batch)
         return result
 
@@ -141,14 +178,15 @@ class HarmonicBalanceConfig:
         """Canonical policy fields; inactive tangent settings are not serialized."""
         tangent={'tangent_rule','implicit_solver','tangent_column_batch','dc_tangent_rule','dc_tangent_column_batch'}
         result={f.name:getattr(self,f.name) for f in fields(self) if f.name not in {'volumes','dc_magnetic_volumes','tensor_face_rule','tensor_kernel_batch',*tangent}}
-        result['cutoff']=None if self.cutoff is None else asdict(self.cutoff)
+        result['method']=self.method.value
+        result['cutoff']=None if self.cutoff is None else option_asdict(self.cutoff)
         if self.tensor_face_rule!='triangle' or self.tensor_kernel_batch!=128:
-            result.update(tensor_face_rule=self.tensor_face_rule,tensor_kernel_batch=self.tensor_kernel_batch)
+            result.update(tensor_face_rule=self.tensor_face_rule.value,tensor_kernel_batch=self.tensor_kernel_batch)
         if self.method=='newton_krylov':
-            result.update(tangent_rule=asdict(self.tangent_rule),implicit_solver=self.implicit_solver,
+            result.update(tangent_rule=option_asdict(self.tangent_rule),implicit_solver=self.implicit_solver.value,
                 tangent_column_batch=self.tangent_column_batch)
         if self.dc_tangent_rule is not None:
-            result.update(dc_tangent_rule=asdict(self.dc_tangent_rule),dc_tangent_column_batch=self.dc_tangent_column_batch)
+            result.update(dc_tangent_rule=option_asdict(self.dc_tangent_rule),dc_tangent_column_batch=self.dc_tangent_column_batch)
         return result
 
     def dc_policy(self):

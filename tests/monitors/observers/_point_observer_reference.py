@@ -273,7 +273,6 @@ def get_observer_results(solver):
                 result[component_name] = value
             if len(result["components"]) == 1:
                 result["component"] = normalize_component(primary_component)
-                result["data"] = result["components"][primary_component]
                 result["field_index"] = result["field_indices"][primary_component]
             continue
 

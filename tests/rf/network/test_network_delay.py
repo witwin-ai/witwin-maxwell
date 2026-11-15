@@ -20,13 +20,13 @@ def _matched_delayed_two_port(
     delay_seconds: tuple[float, float] = (1.25e-9, 1.25e-9),
     *,
     device: str = "cpu",
-) -> mw.NetworkData:
+) -> mw.rf.NetworkData:
     frequencies = torch.linspace(0.0, 1.0e9, 129, dtype=torch.float64, device=device)
     scattering = torch.zeros((129, 2, 2), dtype=torch.complex128, device=device)
     phase = delay_phase_matrix(frequencies, delay_seconds)
     scattering[:, 0, 1] = 0.8 * phase[:, 0, 1]
     scattering[:, 1, 0] = 0.8 * phase[:, 1, 0]
-    return mw.NetworkData(
+    return mw.rf.NetworkData(
         frequencies=frequencies,
         s=scattering,
         z0=50.0,
@@ -36,7 +36,7 @@ def _matched_delayed_two_port(
 
 def test_network_block_validates_explicit_and_automatic_delay_contract() -> None:
     network = _matched_delayed_two_port()
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="line",
         network=network,
         connections={"left": "p1", "right": "p2"},
@@ -44,7 +44,7 @@ def test_network_block_validates_explicit_and_automatic_delay_contract() -> None
         max_delay_steps=200,
     )
     assert block.delay_seconds == (1.0e-9, 2.0e-9)
-    auto = mw.NetworkBlock(
+    auto = mw.rf.NetworkBlock(
         name="auto_line",
         network=network,
         connections={1: "p1", 2: "p2"},
@@ -52,20 +52,20 @@ def test_network_block_validates_explicit_and_automatic_delay_contract() -> None
     )
     assert auto.delay_seconds == "auto"
     with pytest.raises(ValueError, match="one one-way delay"):
-        mw.NetworkBlock(
+        mw.rf.NetworkBlock(
             name="bad",
             network=network,
             connections={1: "p1", 2: "p2"},
             delay_seconds=(1.0e-9,),
         )
     with pytest.raises(ValueError, match="positive integer"):
-        mw.NetworkBlock(
+        mw.rf.NetworkBlock(
             name="bad_steps",
             network=network,
             connections={1: "p1", 2: "p2"},
             max_delay_steps=0,
         )
-    trainable = mw.NetworkData(
+    trainable = mw.rf.NetworkData(
         frequencies=network.frequencies,
         s=network.s.detach().clone().requires_grad_(),
         z0=network.z0,
@@ -79,7 +79,7 @@ def test_network_block_validates_explicit_and_automatic_delay_contract() -> None
         port_order=network.port_names,
     )
     with pytest.raises(RuntimeError, match="non-differentiable"):
-        mw.NetworkBlock(
+        mw.rf.NetworkBlock(
             name="trainable_auto",
             network=trainable,
             connections={1: "p1", 2: "p2"},
@@ -191,7 +191,7 @@ def test_fractional_phase_gate_applies_to_complete_reflection_path() -> None:
     frequencies = torch.linspace(0.0, 0.39, 65, dtype=torch.float64)
     delay = (1.01,)
     scattering = delay_phase_matrix(frequencies, delay)
-    network = mw.NetworkData(
+    network = mw.rf.NetworkData(
         frequencies=frequencies,
         s=scattering,
         z0=50.0,

@@ -12,6 +12,7 @@ import time
 import torch
 
 from .kernels import FREE_SPACE
+from .ordered_reduction import ordered_index_add_
 from .quadrature import (ANISOTROPIC_TOUCHING_ASPECT, COPLANAR_TOLERANCE, anisotropic_touching_pairs, classify_all_pairs,
                          distance_scaled_duffy_fan, duffy_fan, refine_toward_source_edges, static_potential_integrals,
                          touching_pair_rule, touching_remainder_nodes, touching_remainder_rule, triangle_rule)
@@ -275,8 +276,8 @@ def _fan_near_integrals(basis, rows, cols, medium, outer_order, inner_order, rat
         scalar = (total*wo).sum(1)[:, None, None]*(2*slopes[r, :, None].to(dtype))*(2*ss[:, None, :])
         curl = curl_moment[:, :, None]-torch.linalg.cross(gradient[:, :, None].expand(-1, -1, 3, -1), sf[:, None].expand(-1, q, -1, -1), dim=-1)
         local_k = torch.einsum('bqlc,bqmc,bq->blm', f, curl, wo)*ss[:, None, :]
-        d.index_add_(0, pair, vector-scalar/(medium.k**2))
-        magnetic.index_add_(0, pair, local_k)
+        ordered_index_add_(d, 0, pair, vector-scalar/(medium.k**2))
+        ordered_index_add_(magnetic, 0, pair, local_k)
     return d, magnetic, {'leaves': len(leaves), 'depth': depth}
 
 
@@ -315,8 +316,8 @@ def _subtracted_touching_integrals(basis, rows, cols, medium, outer_order, inner
         # int grad_x(1/R) x (y - q_m) dy = grad x (x - q_m).
         cross = torch.linalg.cross(gradient[:, :, None].expand(-1, -1, 3, -1), obs[:, :, None]-source[:, None], dim=-1)
         local_k = torch.einsum('bqlc,bqmc,bq->blm', f, cross, weight)*slopes[c, None, :]
-        d.index_add_(0, pair, (vector-scalar/k**2).to(dtype))
-        magnetic.index_add_(0, pair, local_k.to(dtype))
+        ordered_index_add_(d, 0, pair, (vector-scalar/k**2).to(dtype))
+        ordered_index_add_(magnetic, 0, pair, local_k.to(dtype))
     # Dynamic remainder G - 1/(4 pi R) = ik/(4 pi) - k^2 R/(8 pi) + ...: bounded but
     # with a cone at R = 0, so it keeps the joint touching rule, whose
     # anisotropy error on this weak remainder is far below that on 1/R.

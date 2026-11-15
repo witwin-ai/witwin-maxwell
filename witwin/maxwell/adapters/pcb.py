@@ -12,6 +12,7 @@ import torch
 from ..media import Material
 from ..ports import AxisPath, LumpedPort
 from ..scene import BoundarySpec, Domain, GridSpec, Scene, SubpixelSpec
+from ..errors import UnsupportedFeatureError
 from witwin.core import Box, Structure
 
 
@@ -50,7 +51,7 @@ def _contour(axes, positive, negative, aperture, normal):
     return Box(position=torch.tensor(center), size=torch.tensor(size))
 
 
-def import_pcb_scene(definition, *, frequency, device="cuda", losses=True, selected_conductors=None):
+def import_pcb_scene(definition, *, frequency, losses=True, selected_conductors=None):
     """Import physical bounds and a finite aperture without hidden excitation.
 
     Supported interchange schema is ``metaclaw.antenna-scene/1``. Tangent loss
@@ -85,7 +86,8 @@ def import_pcb_scene(definition, *, frequency, device="cuda", losses=True, selec
         eps, mu = float(record["epsilon_r"]), float(record.get("mu_r", 1))
         loss = record.get("loss", {})
         if loss and loss.get("kind") != "loss_tangent":
-            raise NotImplementedError("PCB import supports explicit reference-frequency tangent loss only.")
+            raise UnsupportedFeatureError("PCB import supports explicit reference-frequency tangent loss only.",
+                                          feature="guard:d28c583b", method=None)
         tangent = float(loss.get("tan_delta", 0))
         if not all(math.isfinite(v) for v in (eps, mu, tangent)) or min(eps, mu) <= 0 or tangent < 0:
             raise ValueError("PCB materials require positive finite epsilon/mu and nonnegative loss.")
@@ -154,7 +156,8 @@ def import_pcb_scene(definition, *, frequency, device="cuda", losses=True, selec
     ports = []
     for record in definition["ports"]:
         if record.get("type") != "lumped" or record.get("deembed_m", 0) != 0:
-            raise NotImplementedError("PCB import currently requires an explicit zero-deembedded lumped port.")
+            raise UnsupportedFeatureError("PCB import currently requires an explicit zero-deembedded lumped port.",
+                                          feature="port.LumpedPort", method=None)
         if not set(record["positive_conductor_ids"] + record["negative_conductor_ids"]) <= set(active):
             raise ValueError("Port terminal references must identify active conductors.")
         endpoints = np.asarray(record["integration_line_m"], dtype=np.float64)
@@ -177,8 +180,8 @@ def import_pcb_scene(definition, *, frequency, device="cuda", losses=True, selec
         raise ValueError("PCB port names must be unique.")
     identity = hashlib.sha256(json.dumps(definition, sort_keys=True, allow_nan=False).encode()).hexdigest()
     return Scene(domain=Domain(bounds=[(a[0], a[-1]) for a in axes]), grid=GridSpec.custom(*axes),
-        boundary=BoundarySpec.pml(num_layers=definition["mesh"]["pml_cells"]), device=device,
-        structures=structures, ports=ports, subpixel_samples=subpixel,
+        boundary=BoundarySpec.pml(num_layers=definition["mesh"]["pml_cells"]),
+        structures=structures, ports=ports, subpixel=subpixel,
         metadata={"pcb_import": {"schema": "pcb-import/1", "definition_sha256": identity,
             "active_conductor_ids": active, "selected_conductor_ids": selected,
             "conductor_models": json.loads(json.dumps(conductor_models)),

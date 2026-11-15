@@ -9,6 +9,7 @@ import witwin.maxwell as mw
 from scripts.dev.fdtd.pcb_copper_performance import (
     EPS0, ETA0, MU0, SIGMA, film_reference, film_scene, normal_grid, skin_depth, pcb_volume_scene,
 )
+from witwin.maxwell.compiler import compile_ports
 
 
 @pytest.mark.parametrize("thickness", (18e-6, 35e-6))
@@ -44,8 +45,8 @@ def test_normal_grid_resolves_both_faces_without_a_spurious_tiny_transition_cell
 
 def test_surface_and_volume_launch_have_identical_distance_from_physical_faces():
     thickness = 18e-6
-    surface = film_scene("surface", thickness, 2.45e9, 4, device="cpu")
-    volume = film_scene("volume", thickness, 2.45e9, 4, device="cpu")
+    surface = film_scene("surface", thickness, 2.45e9, 4)
+    volume = film_scene("volume", thickness, 2.45e9, 4)
     assert surface.ports[0].positive[0] == pytest.approx(volume.ports[0].positive[0]+thickness/2)
     assert volume.structures[0].material.sigma_e == SIGMA
     assert volume.structures[0].geometry.size[0] == pytest.approx(thickness)
@@ -55,7 +56,7 @@ def test_surface_and_volume_launch_have_identical_distance_from_physical_faces()
 
 @pytest.mark.parametrize("family,thickness,bottom", (("flexible",18e-6,50e-6),("rigid",35e-6,400e-6)))
 def test_pcb_volume_control_restores_real_thickness_conductivity_and_feed_plane(family, thickness, bottom):
-    scene = pcb_volume_scene(family,2.45e9,4,device="cpu")
+    scene = pcb_volume_scene(family,2.45e9,4)
     copper = [s for s in scene.structures if s.name in ("positive-pad","negative-pad")]
     assert len(copper) == 2
     for structure in copper:
@@ -75,7 +76,7 @@ def test_pcb_volume_control_restores_real_thickness_conductivity_and_feed_plane(
 @pytest.mark.parametrize("kind",("surface","volume"))
 def test_pcb_campaign_declares_the_same_physical_frequency_and_complete_power_outputs(family,kind):
     from scripts.dev.fdtd.pcb_copper_campaign import scene_control
-    scene,definition = scene_control(family,kind,2.45e9,4,device="cpu")
+    scene,definition = scene_control(family,kind,2.45e9,4)
     assert {monitor.name for monitor in scene.monitors} == {"radiation","bulk_loss"}
     assert len(scene.ports) == 1
     assert len([s for s in scene.structures if s.name in ("positive-pad","negative-pad")]) == 2
@@ -89,15 +90,15 @@ def test_pcb_campaign_declares_the_same_physical_frequency_and_complete_power_ou
 def test_edge_refinement_preserves_physical_ports_and_compiles_strict_native_contours(family):
     from scripts.dev.fdtd.pcb_copper_grid import refine_pcb_edges
     from witwin.maxwell.scene import prepare_scene
-    scene = pcb_volume_scene(family,2.45e9,4,device="cpu")
+    scene = pcb_volume_scene(family,2.45e9,4)
     refined = refine_pcb_edges(scene,2.45e9,4)
     assert refined.ports == scene.ports
     for axis in "xy":
         coordinates = getattr(refined.grid,axis+"_coords")
         assert np.diff(coordinates).min() > skin_depth(2.45e9)/4*.45
         assert len(coordinates) > len(getattr(scene.grid,axis+"_coords"))
-    prepared = prepare_scene(refined,lazy_meshgrid=True)
-    port, = prepared.compile_ports(device="cpu")
+    prepared = prepare_scene(refined,lazy_meshgrid=True, device="cpu")
+    port, = compile_ports(prepared, device="cpu")
     assert port.voltage_indices.numel() > 0
     assert all(value.numel() > 0 for value in port.current_indices)
 
@@ -120,14 +121,13 @@ def test_isolated_material_heat_projections_use_identical_native_fields_and_volu
     from witwin.maxwell.scene import prepare_scene
     # This is a postprocessing algebra control, not a CPU field solve.
     scene = mw.Scene(domain=mw.Domain(bounds=((- .015,.015),)*3),grid=mw.GridSpec.uniform(.005),
-        boundary=mw.BoundarySpec.none(),device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=4,averaging="arithmetic"),
+        boundary=mw.BoundarySpec.none(),subpixel=mw.SubpixelSpec(samples=4,averaging="arithmetic"),
         structures=(mw.Structure(name="positive-pad",geometry=mw.Box(position=(0.,0.,.05),
             size=(1.,1.,.1)),material=mw.Material(eps_r=1.,sigma_e=SIGMA)),
             mw.Structure(name="board",geometry=mw.Box(position=(0.,0.,-.05),size=(1.,1.,.1)),
                 material=mw.Material(eps_r=2.,sigma_e=.1))),
-        monitors=(mw.PowerLossMonitor("bulk_loss",position=(0.,0.,0.),size=(.04,.04,.04)),))
-    prepared = prepare_scene(scene,lazy_meshgrid=True)
+        monitors=(mw.monitors.PowerLossMonitor("bulk_loss",position=(0.,0.,0.),size=(.04,.04,.04)),))
+    prepared = prepare_scene(scene,lazy_meshgrid=True, device="cpu")
     shape = (prepared.Nx,prepared.Ny,prepared.Nz)
     fields = {name:torch.full(tuple(n-(dim == axis) for axis,n in enumerate(shape)),value,
         dtype=torch.complex128) for dim,(name,value) in enumerate((("EX",2.),("EY",3.),("EZ",5.)))}
@@ -150,7 +150,7 @@ def test_isolated_material_heat_projections_use_identical_native_fields_and_volu
 def test_throughput_snapshot_keeps_actual_material_grid_and_rf_excitation(kind):
     from scripts.dev.fdtd.pcb_copper_campaign import scene_control
     from scripts.dev.fdtd.pcb_copper_throughput import physical_snapshot
-    scene,_ = scene_control("flexible",kind,2.45e9,4,device="cpu")
+    scene,_ = scene_control("flexible",kind,2.45e9,4)
     snapshot = physical_snapshot(scene,2.45e9)
     np.testing.assert_array_equal(snapshot["grid_nodes_m"]["z"],scene.grid.z_coords)
     copper = [s for s in snapshot["structures"] if s["name"] in ("positive-pad","negative-pad")]

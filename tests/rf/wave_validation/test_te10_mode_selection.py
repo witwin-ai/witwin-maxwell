@@ -43,7 +43,7 @@ C0 = 299792458.0
 def _te10_ez_correlation(scene, frequency: float) -> float:
     """sin(pi y/a) correlation of the selected TE10 Ez profile (full transverse grid)."""
     prepared = prepare_scene(scene)
-    manifest = resolve_waveport_run_manifest(prepared, mw.PortSweep(), (frequency,))
+    manifest = resolve_waveport_run_manifest(prepared, mw.rf.PortSweep(), (frequency,))
     md = manifest.prepared_ports[0].mode_data[0][0]
     ez = md["component_profiles"]["Ez"].detach().cpu().numpy().real  # (y, z)
     y = md["coords_u"].detach().cpu().numpy()
@@ -59,7 +59,7 @@ def _te10_ez_correlation(scene, frequency: float) -> float:
 def _te10_beta(scene, frequency: float) -> float:
     """Propagation constant of the selected TE10 mode from the WavePort manifest."""
     prepared = prepare_scene(scene)
-    manifest = resolve_waveport_run_manifest(prepared, mw.PortSweep(), (frequency,))
+    manifest = resolve_waveport_run_manifest(prepared, mw.rf.PortSweep(), (frequency,))
     md = manifest.prepared_ports[0].mode_data[0][0]
     return float(np.real(md["beta"]))
 
@@ -77,7 +77,7 @@ def test_waveguide_te10_beta_matches_analytic(dx: float, tol_pct: float) -> None
     frequency = 1.8 * fc
     k0 = 2.0 * math.pi * frequency / C0
     analytic = math.sqrt(k0 * k0 - (math.pi / GUIDE_A) ** 2)
-    beta = _te10_beta(rectangular_waveguide_scene(dx=dx, device="cuda"), frequency)
+    beta = _te10_beta(rectangular_waveguide_scene(dx=dx), frequency)
     error_pct = abs(beta - analytic) / analytic * 100.0
     assert error_pct <= tol_pct, f"dx={dx}: TE10 beta error {error_pct:.4f}% > {tol_pct}%"
 
@@ -91,14 +91,14 @@ def test_waveguide_te10_eigenvector_is_sin(dx: float) -> None:
     decoupling defect, whose full-grid sin-correlation capped at 0.51-0.59.
     """
     fc = C0 / (2.0 * GUIDE_A)
-    corr = _te10_ez_correlation(rectangular_waveguide_scene(dx=dx, device="cuda"), 1.8 * fc)
+    corr = _te10_ez_correlation(rectangular_waveguide_scene(dx=dx), 1.8 * fc)
     assert corr >= 0.99, f"dx={dx}: TE10 Ez sin-correlation {corr:.4f} < 0.99"
 
 
 def test_waveguide_te10_high_frequency_returns_genuine_te10() -> None:
     """At dx=0.005, f=6 fc the genuine TE10 (not TE20) must be returned."""
     fc = C0 / (2.0 * GUIDE_A)
-    corr = _te10_ez_correlation(rectangular_waveguide_scene(dx=0.005, device="cuda"), 6.0 * fc)
+    corr = _te10_ez_correlation(rectangular_waveguide_scene(dx=0.005), 6.0 * fc)
     assert corr >= 0.99, f"high-f TE10 Ez sin-correlation {corr:.4f} < 0.99"
 
 
@@ -112,7 +112,7 @@ def test_waveguide_te10_operator_returns_clean_sin() -> None:
     rejection limit).
     """
     fc = C0 / (2.0 * GUIDE_A)
-    corr = _te10_ez_correlation(rectangular_waveguide_scene(dx=0.02, device="cuda"), 1.8 * fc)
+    corr = _te10_ez_correlation(rectangular_waveguide_scene(dx=0.02), 1.8 * fc)
     assert corr >= 0.99, f"TE10 Ez sin-correlation {corr:.4f} < 0.99 (operator regressed)"
 
 
@@ -121,9 +121,9 @@ def test_coax_tem_beta_is_k0_unchanged() -> None:
     frequency = 1.0e9
     k0 = 2.0 * math.pi * frequency / C0
 
-    scene = coax_thru_scene(dx=0.005, device="cuda")
+    scene = coax_thru_scene(dx=0.005)
     prepared = prepare_scene(scene)
-    manifest = resolve_waveport_run_manifest(prepared, mw.PortSweep(), (frequency,))
+    manifest = resolve_waveport_run_manifest(prepared, mw.rf.PortSweep(), (frequency,))
     port0 = manifest.prepared_ports[0]
     beta = float(port0.tracking.beta[0, 0].real)
     z0 = complex(port0.characteristic_impedance[0, 0]).real

@@ -8,18 +8,18 @@ from witwin.maxwell.compiler.materials import (
     _static_periodic_shift_options,
 )
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_components, compile_material_tensors, compile_materials, compile_relative_materials
 
 
 def _build_scene():
     return mw.Scene(
         domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
         grid=mw.GridSpec.uniform(0.1),
-        device="cpu",
     )
 
 
 def _prepared_scene(scene):
-    return prepare_scene(scene)
+    return prepare_scene(scene, device="cpu")
 
 
 def _cube_mesh(*, size=0.6, requires_grad=False):
@@ -76,8 +76,7 @@ def test_mesh_subsample_reuses_exact_node_and_edge_points(monkeypatch):
     mesh = mw.Mesh(vertices.numpy(), faces.to(torch.int32), recenter=False, fill_mode="solid",
                    topology_diagnostics=False)
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.73, 0.81),) * 3),
-                     grid=mw.GridSpec.uniform(0.19), device="cpu",
-                     subpixel_samples=mw.SubpixelSpec(samples=4, averaging="polarized"),
+                     grid=mw.GridSpec.uniform(0.19), subpixel=mw.SubpixelSpec(samples=4, averaging="polarized"),
                      structures=[mw.Structure(mesh, mw.Material(eps_r=4, sigma_e=.03))])
     prepared = _prepared_scene(scene)
     queries = []
@@ -114,18 +113,19 @@ def test_mesh_subsample_reuses_exact_node_and_edge_points(monkeypatch):
 
 def test_shared_material_compiler_matches_rotated_box_scene_grid():
     scene = _build_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="box",
             geometry=mw.Box(position=(0, 0, 0), size=(0.8, 0.4, 0.4), rotation=(0.0, 0.0, 0.6)),
             material=mw.Material(eps_r=3.5),
-        )
-    )
+        ),
+    ))
 
     prepared_scene = _prepared_scene(scene)
     eps_before = prepared_scene.permittivity.clone()
     mu_before = prepared_scene.permeability.clone()
-    eps_compiled, mu_compiled = prepared_scene.compile_material_tensors()
+    eps_compiled, mu_compiled = compile_material_tensors(prepared_scene)
 
     assert torch.equal(eps_compiled, eps_before)
     assert torch.equal(mu_compiled, mu_before)
@@ -133,20 +133,17 @@ def test_shared_material_compiler_matches_rotated_box_scene_grid():
 
 def test_shared_material_compiler_matches_extended_geometries():
     scene = _build_scene()
-    scene.add_structure(
-        mw.Structure(name="ellipsoid", geometry=mw.Ellipsoid(position=(-0.2, 0.0, 0.0), radii=(0.35, 0.2, 0.25)), material=mw.Material(eps_r=4.0))
-    )
-    scene.add_structure(
-        mw.Structure(name="torus", geometry=mw.Torus(position=(0.35, 0.0, 0.0), major_radius=0.2, minor_radius=0.08), material=mw.Material(eps_r=5.0))
-    )
-    scene.add_structure(
-        mw.Structure(name="hollow_box", geometry=mw.HollowBox(position=(0.0, 0.35, 0.0), outer_size=(0.5, 0.5, 0.5), inner_size=(0.2, 0.2, 0.2)), material=mw.Material(eps_r=6.0))
-    )
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(name="ellipsoid", geometry=mw.geometry.Ellipsoid(position=(-0.2, 0.0, 0.0), radii=(0.35, 0.2, 0.25)), material=mw.Material(eps_r=4.0)),
+        mw.Structure(name="torus", geometry=mw.geometry.Torus(position=(0.35, 0.0, 0.0), major_radius=0.2, minor_radius=0.08), material=mw.Material(eps_r=5.0)),
+        mw.Structure(name="hollow_box", geometry=mw.geometry.HollowBox(position=(0.0, 0.35, 0.0), outer_size=(0.5, 0.5, 0.5), inner_size=(0.2, 0.2, 0.2)), material=mw.Material(eps_r=6.0)),
+    ))
 
     prepared_scene = _prepared_scene(scene)
     eps_before = prepared_scene.permittivity.clone()
     mu_before = prepared_scene.permeability.clone()
-    eps_compiled, mu_compiled = prepared_scene.compile_material_tensors()
+    eps_compiled, mu_compiled = compile_material_tensors(prepared_scene)
 
     assert torch.equal(eps_compiled, eps_before)
     assert torch.equal(mu_compiled, mu_before)
@@ -154,12 +151,11 @@ def test_shared_material_compiler_matches_extended_geometries():
 
 def test_refresh_material_grids_rebuilds_scene_from_geometry_records():
     scene = _build_scene()
-    scene.add_structure(
-        mw.Structure(name="cone", geometry=mw.Cone(position=(0.0, 0.0, -0.2), radius=0.25, height=0.5), material=mw.Material(eps_r=4.5))
-    )
-    scene.add_structure(
-        mw.Structure(name="prism", geometry=mw.Prism(position=(0.0, -0.25, 0.0), radius=0.2, height=0.4, num_sides=5), material=mw.Material(eps_r=3.0))
-    )
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(name="cone", geometry=mw.geometry.Cone(position=(0.0, 0.0, -0.2), radius=0.25, height=0.5), material=mw.Material(eps_r=4.5)),
+        mw.Structure(name="prism", geometry=mw.geometry.Prism(position=(0.0, -0.25, 0.0), radius=0.2, height=0.4, num_sides=5), material=mw.Material(eps_r=3.0)),
+    ))
 
     prepared_scene = _prepared_scene(scene)
     expected_eps = prepared_scene.permittivity.clone()
@@ -177,14 +173,13 @@ def test_soft_occupancy_returns_fractional_interface_fill_without_subpixel_sampl
     domain = mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)))
     grid = mw.GridSpec.uniform(0.25)
 
-    scene = mw.Scene(domain=domain, grid=grid, device="cpu", subpixel_samples=1)
 
     structure = mw.Structure(
         name="edge_box",
         geometry=mw.Box(position=(0.125, 0.5, 0.5), size=(0.25, 1.0, 1.0)),
         material=mw.Material(eps_r=5.0),
     )
-    scene.add_structure(structure)
+    scene = mw.Scene(domain=domain, grid=grid, subpixel=1, structures=(structure,))
 
     interface_value = _prepared_scene(scene).permittivity[0, 1, 1].item()
     assert 1.0 < interface_value < 5.0
@@ -203,28 +198,26 @@ def test_single_sample_polarized_averaging_is_rejected():
         mw.Scene(
             domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
             grid=mw.GridSpec.uniform(0.25),
-            device="cpu",
-            subpixel_samples=mw.SubpixelSpec(averaging="polarized", samples=1),
+            subpixel=mw.SubpixelSpec(averaging="polarized", samples=1),
         )
 
 
 @pytest.mark.parametrize("samples", [2, 3, 4, 5])
 def test_multisample_polarized_interface_preserves_normal_harmonic_mean(samples):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=samples, averaging="polarized"),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="slab",
-            geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 1.0, 1.0)),
-            material=mw.Material(eps_r=5.0),
-        )
-    )
+                domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
+                grid=mw.GridSpec.uniform(0.25),
+                subpixel=mw.SubpixelSpec(samples=samples, averaging="polarized"),
+                structures=(
+            mw.Structure(
+                name="slab",
+                geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 1.0, 1.0)),
+                material=mw.Material(eps_r=5.0),
+            ),
+            ),
+            )
 
-    eps, _ = _prepared_scene(scene).compile_material_components()
+    eps, _ = compile_material_components(_prepared_scene(scene))
     node = (1, 2, 2)
     harmonic = 1.0 / (0.5 / 1.0 + 0.5 / 5.0)
     assert float(eps["x"][node]) == pytest.approx(harmonic, abs=1e-4)
@@ -234,27 +227,24 @@ def test_multisample_polarized_interface_preserves_normal_harmonic_mean(samples)
 
 def test_multisample_polarized_equal_trace_tensors_preserve_interface_normal():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="underlay",
-            geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(2.0, 2.0, 2.0)),
-            material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
-        )
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="slab",
-            geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 1.0, 1.0)),
-            material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(4.0, 3.0, 2.0)),
-        )
-    )
+                domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
+                grid=mw.GridSpec.uniform(0.25),
+                subpixel=mw.SubpixelSpec(samples=3, averaging="polarized"),
+                structures=(
+            mw.Structure(
+                name="underlay",
+                geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(2.0, 2.0, 2.0)),
+                material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
+            ),
+            mw.Structure(
+                name="slab",
+                geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 1.0, 1.0)),
+                material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(4.0, 3.0, 2.0)),
+            ),
+            ),
+            )
 
-    eps, _ = _prepared_scene(scene).compile_material_components()
+    eps, _ = compile_material_components(_prepared_scene(scene))
     node = (1, 2, 2)
     assert float(eps["x"][node]) == pytest.approx(1.0 / (0.5 / 2.0 + 0.5 / 4.0))
     assert float(eps["y"][node]) == pytest.approx(3.0)
@@ -274,17 +264,18 @@ def test_scene_frequency_specific_material_tensors_match_dispersive_medium_respo
             ),
         ),
     )
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="fill",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.8, 1.8, 1.8)),
             material=material,
-        )
-    )
+        ),
+    ))
 
     frequency = 2.5e9
     prepared_scene = _prepared_scene(scene)
-    eps_r, mu_r = prepared_scene.compile_relative_materials(frequency=frequency)
+    eps_r, mu_r = compile_relative_materials(prepared_scene, frequency=frequency)
     center_index = (prepared_scene.Nx // 2, prepared_scene.Ny // 2, prepared_scene.Nz // 2)
     expected = torch.tensor(material.relative_permittivity(frequency), dtype=torch.complex64)
 
@@ -298,22 +289,21 @@ def test_compiled_material_model_tracks_partial_dispersive_fill_weight():
     domain = mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)))
     grid = mw.GridSpec.uniform(0.25)
     material = mw.Material.debye(eps_inf=2.0, delta_eps=4.0, tau=1.0e-9)
-    scene = mw.Scene(domain=domain, grid=grid, device="cpu", subpixel_samples=4)
-    scene.add_structure(
-        mw.Structure(
+    scene = mw.Scene(domain=domain, grid=grid, subpixel=4, structures=(
+                mw.Structure(
             name="edge_box",
             geometry=mw.Box(position=(0.125, 0.5, 0.5), size=(0.25, 1.0, 1.0)),
             material=material,
-        )
-    )
+            ),
+            ))
 
     prepared_scene = _prepared_scene(scene)
-    model = prepared_scene.compile_materials()
+    model = compile_materials(prepared_scene)
     weight = model["debye_poles"][0]["weight"][0, 1, 1].item()
     assert 0.0 < weight < 1.0
 
     frequency = 1.0e9
-    eps_r, _ = prepared_scene.compile_relative_materials(frequency=frequency)
+    eps_r, _ = compile_relative_materials(prepared_scene, frequency=frequency)
     expected = prepared_scene.permittivity[0, 1, 1].item() + weight * (
         material.relative_permittivity(frequency) - material.eps_r
     )
@@ -333,16 +323,15 @@ def test_subpixel_sphere_average_is_closer_to_analytic_volume_fraction():
     analytic_fraction = (4.0 / 3.0) * np.pi * radius**3
     analytic_eps = 1.0 + (eps_r - 1.0) * analytic_fraction
 
-    single_sample_scene = mw.Scene(domain=domain, grid=grid, device="cpu", subpixel_samples=1)
-    smooth_scene = mw.Scene(domain=domain, grid=grid, device="cpu", subpixel_samples=12)
+    smooth_scene = mw.Scene(domain=domain, grid=grid, subpixel=12)
 
     structure = mw.Structure(
         name="small_sphere",
         geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=radius),
         material=mw.Material(eps_r=eps_r),
     )
-    single_sample_scene.add_structure(structure)
-    smooth_scene.add_structure(structure)
+    single_sample_scene = mw.Scene(domain=domain, grid=grid, subpixel=1, structures=(structure,))
+    smooth_scene = smooth_scene.updated(structures=(*smooth_scene.structures, structure))
 
     single_sample_value = _prepared_scene(single_sample_scene).permittivity[1, 1, 1].item()
     smoothed_value = _prepared_scene(smooth_scene).permittivity[1, 1, 1].item()
@@ -352,24 +341,23 @@ def test_subpixel_sphere_average_is_closer_to_analytic_volume_fraction():
 
 
 def test_compile_material_tensors_propagate_gradients_through_box_parameters():
-    scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.2),
-        device="cpu",
-    )
     position = torch.nn.Parameter(torch.tensor([0.05, -0.03, 0.02], dtype=torch.float32))
     size = torch.nn.Parameter(torch.tensor([0.45, 0.35, 0.40], dtype=torch.float32))
     rotation = torch.nn.Parameter(torch.tensor([0.15, -0.10, 0.20], dtype=torch.float32))
-    scene.add_structure(
-        mw.Structure(
-            name="trainable_box",
-            geometry=mw.Box(position=position, size=size, rotation=rotation),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
+    scene = mw.Scene(
+                subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.2),
+                structures=(
+            mw.Structure(
+                name="trainable_box",
+                geometry=mw.Box(position=position, size=size, rotation=rotation),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+            )
 
-    eps_r, mu_r = _prepared_scene(scene).compile_material_tensors()
+    eps_r, mu_r = compile_material_tensors(_prepared_scene(scene))
     loss = eps_r.sum() + mu_r.sum()
     loss.backward()
 
@@ -380,22 +368,21 @@ def test_compile_material_tensors_propagate_gradients_through_box_parameters():
 
 
 def test_compile_material_tensors_propagate_gradients_through_mesh_vertices():
-    scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.2),
-        device="cpu",
-    )
     vertices, faces = _cube_mesh(size=0.7, requires_grad=True)
-    scene.add_structure(
-        mw.Structure(
-            name="trainable_mesh",
-            geometry=mw.Mesh(vertices, faces, recenter=False, fill_mode="solid"),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
+    scene = mw.Scene(
+                subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"),
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                grid=mw.GridSpec.uniform(0.2),
+                structures=(
+            mw.Structure(
+                name="trainable_mesh",
+                geometry=mw.Mesh(vertices, faces, recenter=False, fill_mode="solid"),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+            )
 
-    eps_r, mu_r = _prepared_scene(scene).compile_material_tensors()
+    eps_r, mu_r = compile_material_tensors(_prepared_scene(scene))
     loss = eps_r.sum() + mu_r.sum()
     loss.backward()
 
@@ -405,26 +392,25 @@ def test_compile_material_tensors_propagate_gradients_through_mesh_vertices():
 
 
 def test_compile_materials_recomputes_for_trainable_geometry_without_manual_cache_invalidation():
-    scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
     position = torch.nn.Parameter(torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32))
-    scene.add_structure(
-        mw.Structure(
-            name="moving_box",
-            geometry=mw.Box(position=position, size=(0.4, 0.4, 0.4)),
-            material=mw.Material(eps_r=3.0),
-        )
-    )
+    scene = mw.Scene(
+                subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                name="moving_box",
+                geometry=mw.Box(position=position, size=(0.4, 0.4, 0.4)),
+                material=mw.Material(eps_r=3.0),
+            ),
+            ),
+            )
 
     prepared_scene = _prepared_scene(scene)
-    before = prepared_scene.compile_materials()["eps_r"].clone()
+    before = compile_materials(prepared_scene)["eps_r"].clone()
     with torch.no_grad():
         position.copy_(torch.tensor([0.25, 0.0, 0.0], dtype=torch.float32))
-    after = prepared_scene.compile_materials()["eps_r"]
+    after = compile_materials(prepared_scene)["eps_r"]
 
     assert not torch.allclose(before, after)
 
@@ -440,18 +426,19 @@ def test_material_region_density_overlay_updates_compiled_materials_without_chan
         ],
         dtype=torch.float32,
     )
-    scene.add_material_region(
+    scene = scene.updated(material_regions=(
+        *scene.material_regions,
         mw.MaterialRegion(
             name="design_box",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.6, 0.6)),
             density=density,
             eps_bounds=(2.0, 6.0),
             mu_bounds=(1.0, 1.0),
-        )
-    )
+        ),
+    ))
 
     prepared_scene = _prepared_scene(scene)
-    model = prepared_scene.compile_materials()
+    model = compile_materials(prepared_scene)
     assert "eps_r_base" in model
     assert "eps_r_design" in model
     assert "design_mask" in model
@@ -462,41 +449,42 @@ def test_material_region_density_overlay_updates_compiled_materials_without_chan
 
 def _uniform_material_region_scene(*, use_region: bool, samples: int, averaging: str):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.1),
-        subpixel_samples=mw.SubpixelSpec(samples=samples, averaging=averaging),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="anisotropic_underlay",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.4, 1.4, 1.4)),
-            material=mw.Material(
-                epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0),
-                mu_tensor=mw.DiagonalTensor3(1.1, 1.2, 1.3),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.1),
+                subpixel=mw.SubpixelSpec(samples=samples, averaging=averaging),
+                structures=(
+            mw.Structure(
+                name="anisotropic_underlay",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.4, 1.4, 1.4)),
+                material=mw.Material(
+                    epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0),
+                    mu_tensor=mw.DiagonalTensor3(1.1, 1.2, 1.3),
+                ),
             ),
-        )
-    )
+            ),
+            )
     geometry = mw.Box(position=(0.03, -0.02, 0.01), size=(0.43, 0.37, 0.31))
     if use_region:
-        scene.add_material_region(
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
             mw.MaterialRegion(
                 name="uniform_design",
                 geometry=geometry,
                 density=torch.full((2, 3, 2), 0.5),
                 eps_bounds=(1.0, 5.0),
                 mu_bounds=(1.0, 1.8),
-            )
-        )
+            ),
+        ))
     else:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 name="equivalent_scalar_structure",
                 geometry=geometry,
                 material=mw.Material(eps_r=3.0, mu_r=1.4),
-            )
-        )
-    return _prepared_scene(scene).compile_materials()
+            ),
+        ))
+    return compile_materials(_prepared_scene(scene))
 
 
 @pytest.mark.parametrize("samples", [1, 3])
@@ -540,25 +528,24 @@ def test_uniform_material_region_matches_equivalent_subpixel_structure(samples, 
 
 
 def test_material_region_preserves_tensor_device_dtype_and_gradients():
-    scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
     density = torch.nn.Parameter(torch.full((2, 2, 2), 0.5, dtype=torch.float32))
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design_box",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
-            density=density,
-            eps_bounds=(1.0, 5.0),
-            filter_radius=0.05,
-            projection_beta=4.0,
-        )
-    )
+    scene = mw.Scene(
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design_box",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+                density=density,
+                eps_bounds=(1.0, 5.0),
+                filter_radius=0.05,
+                projection_beta=4.0,
+            ),
+            ),
+            )
 
-    eps_r, mu_r = _prepared_scene(scene).compile_material_tensors()
+    eps_r, mu_r = compile_material_tensors(_prepared_scene(scene))
     loss = eps_r.sum() + mu_r.sum()
     loss.backward()
 
@@ -573,22 +560,21 @@ def test_material_region_preserves_tensor_device_dtype_and_gradients():
 
 def test_structure_priority_overrides_append_order():
     scene = _build_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="late_low_priority",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.6, 0.6)),
             material=mw.Material(eps_r=5.0),
             priority=0,
-        )
-    )
-    scene.add_structure(
+        ),
         mw.Structure(
             name="early_high_priority",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.6, 0.6)),
             material=mw.Material(eps_r=2.0),
             priority=10,
-        )
-    )
+        ),
+    ))
 
     prepared_scene = _prepared_scene(scene)
     center_index = (prepared_scene.Nx // 2, prepared_scene.Ny // 2, prepared_scene.Nz // 2)
@@ -597,7 +583,8 @@ def test_structure_priority_overrides_append_order():
 
 def test_anisotropic_medium_compiles_component_fields_and_scalar_summary():
     scene = _build_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="aniso_box",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
@@ -607,12 +594,12 @@ def test_anisotropic_medium_compiles_component_fields_and_scalar_summary():
                 epsilon_tensor=mw.DiagonalTensor3(2.0, 4.0, 8.0),
                 mu_tensor=mw.DiagonalTensor3(1.5, 2.5, 3.5),
             ),
-        )
-    )
+        ),
+    ))
 
     prepared_scene = _prepared_scene(scene)
-    eps_components, mu_components = prepared_scene.compile_material_components()
-    eps_r, mu_r = prepared_scene.compile_material_tensors()
+    eps_components, mu_components = compile_material_components(prepared_scene)
+    eps_r, mu_r = compile_material_tensors(prepared_scene)
     center_index = (prepared_scene.Nx // 2, prepared_scene.Ny // 2, prepared_scene.Nz // 2)
 
     assert eps_components["x"][center_index].item() == pytest.approx(2.0)
@@ -629,20 +616,21 @@ def test_anisotropic_medium_compiles_component_fields_and_scalar_summary():
 
 def test_full_anisotropic_medium_compiles_off_diagonal_permittivity_fields():
     scene = _build_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="full_aniso_box",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
             material=mw.Material(
-                epsilon_tensor=mw.Tensor3x3(
+                epsilon_tensor=mw.media.Tensor3x3(
                     ((2.0, 0.2, 0.1), (0.2, 3.0, 0.3), (0.1, 0.3, 4.0))
                 )
             ),
-        )
-    )
+        ),
+    ))
 
     prepared_scene = _prepared_scene(scene)
-    model = prepared_scene.compile_materials()
+    model = compile_materials(prepared_scene)
     center_index = (prepared_scene.Nx // 2, prepared_scene.Ny // 2, prepared_scene.Nz // 2)
 
     assert model["eps_components"]["x"][center_index].item() == pytest.approx(2.0)
@@ -655,7 +643,8 @@ def test_full_anisotropic_medium_compiles_off_diagonal_permittivity_fields():
 
 def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivity():
     scene = _build_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="conductive_box",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
@@ -663,13 +652,13 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
                 eps_r=2.0,
                 sigma_e_tensor=mw.DiagonalTensor3(0.0, 1.0, 5.0),
             ),
-        )
-    )
+        ),
+    ))
 
     frequency = 2.0e9
     prepared_scene = _prepared_scene(scene)
-    eps_components, _ = prepared_scene.compile_material_components(frequency=frequency)
-    eps_r, _ = prepared_scene.compile_relative_materials(frequency=frequency)
+    eps_components, _ = compile_material_components(prepared_scene, frequency=frequency)
+    eps_r, _ = compile_relative_materials(prepared_scene, frequency=frequency)
     center_index = (prepared_scene.Nx // 2, prepared_scene.Ny // 2, prepared_scene.Nz // 2)
     expected_summary = (
         eps_components["x"][center_index]
@@ -711,7 +700,7 @@ def test_full_tensor_composes_with_electric_dispersion():
     coupled tensor ADE is lifted.
     """
     material = mw.Material(
-        epsilon_tensor=mw.Tensor3x3(((2.0, 0.1, 0.0), (0.1, 2.5, 0.0), (0.0, 0.0, 3.0))),
+        epsilon_tensor=mw.media.Tensor3x3(((2.0, 0.1, 0.0), (0.1, 2.5, 0.0), (0.0, 0.0, 3.0))),
         debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-9),),
     )
     assert material.is_anisotropic
@@ -737,7 +726,7 @@ def test_nonlinear_material_composes_with_electric_dispersion():
     chi2_material = mw.Material(
         eps_r=2.25,
         lorentz_poles=(mw.LorentzPole(delta_eps=1.5, resonance_frequency=1.2e9, gamma=1.0e7),),
-        nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6),
+        nonlinearity=mw.media.NonlinearSusceptibility(chi2=1.0e-6),
     )
     assert chi2_material.is_nonlinear
     assert chi2_material.is_electric_dispersive
@@ -759,17 +748,18 @@ def test_diagonal_anisotropic_electric_dispersion_composes_per_axis():
     assert material.is_electric_dispersive
 
     scene = _build_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="aniso_dispersive_box",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
             material=material,
-        )
-    )
+        ),
+    ))
 
     frequency = 1.0e9
     prepared_scene = _prepared_scene(scene)
-    eps_components, _ = prepared_scene.compile_material_components(frequency=frequency)
+    eps_components, _ = compile_material_components(prepared_scene, frequency=frequency)
     center_index = (prepared_scene.Nx // 2, prepared_scene.Ny // 2, prepared_scene.Nz // 2)
 
     chi = pole.susceptibility_at_freq(frequency)
@@ -822,17 +812,18 @@ def test_diagonal_anisotropic_magnetic_dispersion_composes_per_axis():
     assert material.is_magnetic_dispersive
 
     scene = _build_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="mu_aniso_dispersive_box",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
             material=material,
-        )
-    )
+        ),
+    ))
 
     frequency = 1.0e9
     prepared_scene = _prepared_scene(scene)
-    _, mu_components = prepared_scene.compile_material_components(frequency=frequency)
+    _, mu_components = compile_material_components(prepared_scene, frequency=frequency)
     center_index = (prepared_scene.Nx // 2, prepared_scene.Ny // 2, prepared_scene.Nz // 2)
 
     chi = pole.susceptibility_at_freq(frequency)
@@ -870,29 +861,26 @@ def test_diagonal_anisotropic_magnetic_dispersive_material_evaluate_at_frequency
 
 def test_scene_allows_kerr_combined_with_other_dispersive_or_anisotropic_materials():
     scene = _build_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="kerr_box",
             geometry=mw.Box(position=(-0.2, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
             material=mw.Material(eps_r=2.0, kerr_chi3=1.0e-10),
-        )
-    )
-    scene.add_structure(
+        ),
         mw.Structure(
             name="debye_box",
             geometry=mw.Box(position=(0.2, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
             material=mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=1.0e-9),
-        )
-    )
-    scene.add_structure(
+        ),
         mw.Structure(
             name="aniso_box",
             geometry=mw.Box(position=(0.2, 0.0, 0.25), size=(0.3, 0.3, 0.1)),
             material=mw.Material(eps_r=2.0, epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
-        )
-    )
+        ),
+    ))
 
-    model = _prepared_scene(scene).compile_materials()
+    model = compile_materials(_prepared_scene(scene))
 
     assert bool(torch.any(model["kerr_chi3"] != 0))
     assert model["debye_poles"] and bool(torch.any(model["debye_poles"][0]["weight"] != 0))
@@ -905,25 +893,24 @@ def test_full_span_structure_wraps_uniformly_on_periodic_axes():
     """
     span = 1.0
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-span / 2, span / 2), (-span / 2, span / 2), (-span / 2, span / 2))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
+                domain=mw.Domain(bounds=((-span / 2, span / 2), (-span / 2, span / 2), (-span / 2, span / 2))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
             x_low="periodic", x_high="periodic", y_low="periodic", y_high="periodic"
-        ),
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="arithmetic"),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="slab",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(span, span, 0.2)),
-            material=mw.Material(
-                eps_r=4.0,
-                modulation=mw.ModulationSpec(frequency=1.0e8, amplitude=0.1, phase=0.0),
             ),
-        )
-    )
-    model = _prepared_scene(scene).compile_materials()
+                subpixel=mw.SubpixelSpec(samples=3, averaging="arithmetic"),
+                structures=(
+            mw.Structure(
+                name="slab",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(span, span, 0.2)),
+                material=mw.Material(
+                    eps_r=4.0,
+                    modulation=mw.media.ModulationSpec(frequency=1.0e8, amplitude=0.1, phase=0.0),
+                ),
+            ),
+            ),
+            )
+    model = compile_materials(_prepared_scene(scene))
 
     eps_x = model["eps_components"]["x"]
     mod_cos = model["modulation_cos"]
@@ -942,22 +929,21 @@ def test_structure_short_of_periodic_boundary_keeps_partial_edge_nodes():
     """
     span = 1.0
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-span / 2, span / 2), (-span / 2, span / 2), (-span / 2, span / 2))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
+                domain=mw.Domain(bounds=((-span / 2, span / 2), (-span / 2, span / 2), (-span / 2, span / 2))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
             x_low="periodic", x_high="periodic", y_low="periodic", y_high="periodic"
-        ),
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="arithmetic"),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="pillar",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.35, 0.35, 0.2)),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
-    model = _prepared_scene(scene).compile_materials()
+            ),
+                subpixel=mw.SubpixelSpec(samples=3, averaging="arithmetic"),
+                structures=(
+            mw.Structure(
+                name="pillar",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.35, 0.35, 0.2)),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+            )
+    model = compile_materials(_prepared_scene(scene))
     eps_x = model["eps_components"]["x"]
     z_mid = eps_x.shape[2] // 2
     eps_slice = eps_x[:, :, z_mid]
@@ -971,29 +957,28 @@ def test_grid_aligned_interface_is_not_biased_by_odd_subpixel_counts():
     interface_values = {}
     for samples in (2, 3, 4, 5):
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-            grid=mw.GridSpec.uniform(0.1),
-            boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
+                    domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                    grid=mw.GridSpec.uniform(0.1),
+                    boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
                 x_low="periodic",
                 x_high="periodic",
                 y_low="periodic",
                 y_high="periodic",
-            ),
-            subpixel_samples=mw.SubpixelSpec(samples=samples, averaging="polarized"),
-            device="cpu",
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="aligned_slab",
-                # Deliberately exceed one x/y period. Periodic wrap composition
-                # must affect only the duplicate endpoint planes, not add an
-                # overlapping translated image through this entire volume.
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2.0, 2.0, 0.2)),
-                material=mw.Material(eps_r=3.0),
-            )
-        )
+                ),
+                    subpixel=mw.SubpixelSpec(samples=samples, averaging="polarized"),
+                    structures=(
+                mw.Structure(
+                    name="aligned_slab",
+                    # Deliberately exceed one x/y period. Periodic wrap composition
+                    # must affect only the duplicate endpoint planes, not add an
+                    # overlapping translated image through this entire volume.
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2.0, 2.0, 0.2)),
+                    material=mw.Material(eps_r=3.0),
+                ),
+                ),
+                )
         prepared = _prepared_scene(scene)
-        model = prepared.compile_materials()
+        model = compile_materials(prepared)
         x_index = int(np.argmin(np.abs(prepared.x_nodes64)))
         y_index = int(np.argmin(np.abs(prepared.y_nodes64)))
         z_index = int(np.argmin(np.abs(prepared.z_nodes64 - 0.1)))
@@ -1012,24 +997,23 @@ def test_grid_aligned_interface_is_not_biased_by_odd_subpixel_counts():
 
 def test_structure_crossing_periodic_seam_wraps_into_opposite_interior():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
             x_low="periodic",
             x_high="periodic",
-        ),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="seam_crossing_box",
-            geometry=mw.Box(position=(0.45, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
+            ),
+                structures=(
+            mw.Structure(
+                name="seam_crossing_box",
+                geometry=mw.Box(position=(0.45, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+            )
 
     prepared = _prepared_scene(scene)
-    eps_x = prepared.compile_materials()["eps_components"]["x"]
+    eps_x = compile_materials(prepared)["eps_components"]["x"]
     negative_wrap = int(np.argmin(np.abs(prepared.x_nodes64 + 0.4)))
     positive_body = int(np.argmin(np.abs(prepared.x_nodes64 - 0.4)))
     center_x = int(np.argmin(np.abs(prepared.x_nodes64)))
@@ -1047,7 +1031,6 @@ def test_static_interior_geometry_skips_unneeded_periodic_images():
             domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
             grid=mw.GridSpec.uniform(0.1),
             boundary=mw.BoundarySpec.periodic(),
-            device="cpu",
         )
     )
     geometry = mw.Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2))
@@ -1062,30 +1045,29 @@ def test_static_interior_geometry_skips_unneeded_periodic_images():
 def test_two_node_periodic_axis_uses_cell_midpoint_for_seam_continuation():
     transverse_nodes = np.linspace(-0.5, 0.5, 11)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.custom(
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.custom(
             np.array((-0.5, 0.5)),
             transverse_nodes,
             transverse_nodes,
-        ),
-        boundary=mw.BoundarySpec.pml(num_layers=2).with_faces(
+            ),
+                boundary=mw.BoundarySpec.pml(num_layers=2).with_faces(
             x_low="periodic",
             x_high="periodic",
-        ),
-        subpixel_samples=3,
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="full_period_box",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.0, 2.0, 2.0)),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
+            ),
+                subpixel=3,
+                structures=(
+            mw.Structure(
+                name="full_period_box",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.0, 2.0, 2.0)),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+            )
 
     prepared = _prepared_scene(scene)
     assert prepared.Nx == 2
-    eps_x = prepared.compile_materials()["eps_components"]["x"]
+    eps_x = compile_materials(prepared)["eps_components"]["x"]
     center_y = int(np.argmin(np.abs(prepared.y_nodes64)))
     center_z = int(np.argmin(np.abs(prepared.z_nodes64)))
     np.testing.assert_allclose(
@@ -1100,7 +1082,6 @@ def test_exact_interface_half_weight_preserves_geometry_gradient():
         mw.Scene(
             domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
             grid=mw.GridSpec.uniform(0.1),
-            device="cpu",
         )
     )
     size = torch.nn.Parameter(torch.tensor((0.2, 0.4, 0.4), dtype=torch.float32))

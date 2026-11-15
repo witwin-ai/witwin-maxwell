@@ -44,7 +44,9 @@ Optional `--test-path` (repeatable) or `--nodes-file` enables targeted CPU/tool
 probes and targeted qualification; default discovery remains every maintained
 test. Every selection is frozen after actual collection. `--gpu` is forwarded to
 the repository conftest, not emulated by the controller. `--pytest-arg=VALUE` adds
-an explicit bound argument. Destructive pytest options (maxfail, xdist, lastfailed,
+an explicit bound argument; a complete maintained run of a tree with the slow tier
+(`tests/slow_tests.txt`) needs `--pytest-arg=--run-slow`, because directory-level
+collection deselects slow tests by default. Destructive pytest options (maxfail, xdist, lastfailed,
 selection filtering) should not be used for a complete maintained run; actual
 selection is checked again in every child before execution.
 

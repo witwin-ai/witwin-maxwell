@@ -5,6 +5,10 @@ from dataclasses import dataclass
 import math
 import torch
 
+from ._enums import FieldComponent, parse_enum
+
+_ELECTRIC = (FieldComponent.EX, FieldComponent.EY, FieldComponent.EZ)
+
 
 @dataclass(frozen=True)
 class LocalDesignRegion:
@@ -16,7 +20,7 @@ class LocalDesignRegion:
     """
     bounds: tuple | None = None
     indices: torch.Tensor | None = None
-    components: tuple[str, ...] = ("Ex", "Ey", "Ez")
+    components: tuple[FieldComponent, ...] = _ELECTRIC
 
     def __post_init__(self):
         if (self.bounds is None) == (self.indices is None):
@@ -25,8 +29,10 @@ class LocalDesignRegion:
             if len(self.bounds) != 3 or any(len(pair) != 2 or not all(math.isfinite(v) for v in pair)
                                              or pair[0] > pair[1] for pair in self.bounds):
                 raise ValueError("Design bounds require three finite ordered pairs.")
-        if not self.components or any(c not in ("Ex", "Ey", "Ez") for c in self.components):
+        components = tuple(parse_enum(FieldComponent, c, name="LocalDesignRegion component") for c in self.components)
+        if not components or any(c not in _ELECTRIC for c in components):
             raise ValueError("Design components must be Ex, Ey or Ez.")
+        object.__setattr__(self, "components", components)
 
 
 @dataclass(frozen=True)
@@ -38,7 +44,7 @@ class FieldProjection:
     a modal overlap, or another explicitly normalized linear measurement.
     """
     name: str
-    component: str = "Ez"
+    component: FieldComponent = FieldComponent.EZ
     position: tuple[float, float, float] | None = None
     indices: torch.Tensor | None = None
     weights: torch.Tensor | None = None
@@ -49,9 +55,8 @@ class FieldProjection:
             raise ValueError("Projection name must be nonempty.")
         if sum(v is not None for v in (self.position, self.indices, self.path)) != 1:
             raise ValueError("Specify a point, weighted indices, or a voltage path.")
+        object.__setattr__(self, "component", parse_enum(FieldComponent, self.component, name="FieldProjection.component"))
         if self.position is not None:
-            if self.component not in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-                raise ValueError("Projection component must be an electric or magnetic field.")
             if len(self.position) != 3 or not all(math.isfinite(v) for v in self.position):
                 raise ValueError("Projection position must be a finite 3-vector.")
         elif self.path is not None:

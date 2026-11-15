@@ -15,13 +15,13 @@ def compile(material):return compile_static_tensor_material(material,device='cud
 
 def test_tensor_bases_poles_and_scalar_nonlinear_background():
     rows=((2.,.3,.1),(.3,3.,.2),(.1,.2,1.5))
-    material=mw.Material(eps_r=9.,mu_r=7.,epsilon_tensor=mw.Tensor3x3(rows),
+    material=mw.Material(eps_r=9.,mu_r=7.,epsilon_tensor=mw.media.Tensor3x3(rows),
         mu_tensor=mw.DiagonalTensor3(2.,3.,4.),debye_poles=(mw.DebyePole(.4,1e-10),),
         lorentz_poles=(mw.LorentzPole(.5,1e9,1e7),),mu_debye_poles=(mw.DebyePole(.3,1e-10),))
     sample=compile(material);eye=torch.eye(3,device='cuda',dtype=torch.float64)
     torch.testing.assert_close(sample.electric_dc.dielectric_sample(),EPSILON_0*(eye.new_tensor(rows)+.9*eye),rtol=1e-15,atol=0)
     torch.testing.assert_close(sample.magnetic_dc.dielectric_sample(),MU_0*torch.diag(eye.new_tensor([2.3,3.3,4.3])),rtol=1e-15,atol=0)
-    nonlinear=mw.Material(eps_r=3.,nonlinearity=mw.NonlinearSusceptibility(chi2=.2))
+    nonlinear=mw.Material(eps_r=3.,nonlinearity=mw.media.NonlinearSusceptibility(chi2=.2))
     dc=compile(nonlinear).electric_dc.dielectric_sample()
     expected=compile_harmonic_material(nonlinear,3e8,1).electric_dc.dielectric_sample(EPSILON_0)
     torch.testing.assert_close(dc,expected*eye,rtol=0,atol=0)
@@ -40,14 +40,14 @@ def test_singular_channels_and_complex_dc_are_never_projected_to_spd():
     assert sample.magnetic_dc.kind=='lossless_plasma_limit'
     for channel in (sample.electric_dc,sample.magnetic_dc):
         with pytest.raises(NotImplementedError):channel.dielectric_sample()
-    complex_material=mw.Material(epsilon_tensor=mw.ComplexTensor3x3(((2.,.2j,0.),(-.2j,2.,0.),(0.,0.,2.)),reciprocal=False))
+    complex_material=mw.Material(epsilon_tensor=mw.media.ComplexTensor3x3(((2.,.2j,0.),(-.2j,2.,0.),(0.,0.,2.)),reciprocal=False))
     channel=compile(complex_material).electric_dc
     assert channel.kind=='unresolved_complex_dc'
     with pytest.raises(NotImplementedError,match='unresolved_complex_dc'):channel.dielectric_sample()
 
 
 def test_ferrite_analytic_dc_and_small_frequency_limit():
-    material=mw.GyromagneticFerrite(saturation_magnetization=1e5,bias_field=(3e4,4e4,0.),gilbert_damping=.03,mu_infinity=1.2)
+    material=mw.media.GyromagneticFerrite(saturation_magnetization=1e5,bias_field=(3e4,4e4,0.),gilbert_damping=.03,mu_infinity=1.2)
     sample=compile(material);mu=sample.magnetic_dc.dielectric_sample()/MU_0
     bias=mu.new_tensor([.6,.8,0.]);eye=torch.eye(3,device='cuda',dtype=mu.dtype)
     expected=1.2*eye+2*(eye-bias[:,None]*bias[None,:])

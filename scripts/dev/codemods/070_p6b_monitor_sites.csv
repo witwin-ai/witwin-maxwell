@@ -1,0 +1,432 @@
+path,function,call,kind,nfreq,fields
+benchmark/runner.py,_extract_maxwell_monitors,result.monitor(monitor.name),mixed,mixed,
+scripts/dev/fdtd/printed_line_loss_execution.py,CoherentObservations.monitor.<locals>.<listcomp>,"result.monitor(name,frequency=frequency)",mixed,sel,
+tests/api/public/test_public_api.py,test_result_reassembles_closed_surface_monitor_payloads_from_resolved_faces,".0e9,",plane,1,Ex Ey Hx Hy
+tests/api/public/test_public_api.py,test_result_reassembles_closed_surface_monitor_payloads_from_resolved_faces,"allclose(face_payload[""y""",closed,1,
+tests/api/public/test_public_api.py,test_simulation_fdtd_multi_frequency_wraps_solver,result.E.x.data_ptr()==result.solver.ex.da,point,sel,Ez
+tests/api/public/test_public_api.py,test_simulation_fdtd_multi_frequency_wraps_solver,"result.E.x.shape==(2,3,4,",point,sel,Ez
+tests/api/public/test_public_api.py,test_simulation_fdtd_wraps_solver,,plane,sel,
+tests/api/public/test_result_from_fields.py,test_from_fields_matches_native_payloads_and_snapshot,,fields_phasor,1,
+tests/api/public/test_result_from_fields.py,test_from_fields_matches_native_payloads_and_snapshot,cies=native.f,fields_phasor,1,
+tests/api/public/test_result_from_fields.py,test_from_fields_matches_native_payloads_and_snapshot,m_monitor(nat,fields_phasor,1,
+tests/api/public/test_result_from_fields.py,test_from_fields_matches_native_payloads_and_snapshot,"s=port.frequencies,s=(port.",unchanged,,
+tests/api/public/test_result_from_fields.py,test_from_fields_matches_native_payloads_and_snapshot,"uencies,kernel=""tes",mixed,mixed,
+tests/api/public/test_simulation_smoke.py,test_fdtd_smoke_scene_simulation_result,"result.E.x.shape==(3,4,4)",plane,sel,
+tests/api/public/test_thin_wire_api.py,test_result_snapshot_recurses_through_nested_mapping_metadata,"mw.Result.load(path,scene=scene).monitor(""state"")",unchanged,,
+tests/api/public/test_thin_wire_api.py,test_result_snapshot_restores_detached_wire_data,"restored.monitor(""state"")",unchanged,,
+tests/api/public/test_thin_wire_api.py,test_wire_data_is_frequency_first_device_resident_and_typed_in_result,"result.monitor(""state"")",unchanged,,
+tests/boundaries/absorbers/test_one_way_absorbers.py,_face_traces.<locals>.<dictcomp>,result.monitor(name),time,,Ez
+tests/boundaries/boundary_physics/test_bloch_generalized_layouts.py,_spectra.<locals>.<listcomp>,"result.monitor(name,frequency=frequency)",point,sel,Ez
+tests/boundaries/boundary_physics/test_fdtd_boundary_physics.py,_run_fdtd_boundary_case,ainresult.f,fields_phasor,1,
+tests/boundaries/boundary_physics/test_fdtd_boundary_physics.py,test_fdtd_mixed_bloch_xy_pml_z_runs_with_complex_fields,"result.monitor(""center"",",point,1,Ez
+tests/boundaries/boundary_physics/test_fdtd_pec_material.py,_run_pec_slab,result.fields,fields_phasor,1,
+tests/breakdown/test_breakdown_fdtd.py,test_breakdown_monitor_does_not_perturb_fields,baseline.fields,fields_phasor,1,
+tests/breakdown/test_breakdown_fdtd.py,test_breakdown_monitor_does_not_perturb_fields,monitored.fields,fields_phasor,1,
+tests/breakdown/test_breakdown_fdtd.py,test_component_stress_reduction_matches_float64_reference_on_run,"result.monitor(""iprobe"")",time,,Ez
+tests/breakdown/test_breakdown_fdtd.py,test_component_stress_reduction_matches_float64_reference_on_run,"result.monitor(""vprobe"")",time,,Ez
+tests/core/grid/test_nonuniform_uniform_equivalence.py,_adjoint_gradient,"result.monitor(""probe"",",point,1,Ez
+tests/esd/test_esd_injection.py,test_esd_terminal_injection_drives_causal_transient_and_records_provenance,"result.monitor(""vprobe"")",time,,Ez
+tests/fdtd/core_path/test_default_auto.py,_gpu_payload,ensors(result,fields_phasor,mixed,
+tests/fdtd/core_path/test_default_auto.py,test_failure_rebuilds_clean_existing_solver,"result.raw_monitor(""probe"")[",plane,sel,
+tests/fdtd/core_path/test_default_auto.py,test_failure_rebuilds_clean_existing_solver,"s""][""Ez""],baseline.raw_monito",plane,sel,
+tests/fdtd/core_path/test_tfsf_aux_fusion.py,_run,ensors(result,fields_phasor,1,
+tests/fdtd/core_path/test_w3_live_coefficients.py,test_modulated_phase_checkpoint_resume_bitwise,api_dialect.f,fields_phasor,n,
+tests/fdtd/core_path/test_w3_live_coefficients.py,test_modulated_phase_checkpoint_resume_bitwise,api_dialect.fi,fields_phasor,n,
+tests/fdtd/multi_gpu/test_parallel_public_api.py,test_gather_fields_false_does_not_fallback_to_shard_fields,result.fields,fields_snapshot,1,
+tests/fdtd/multi_gpu/test_parallel_public_api.py,test_gathered_fields_are_normalized_on_explicit_result_device,result.fields,fields_snapshot,1,
+tests/fdtd/multi_gpu/test_sharded_persistence.py,test_lazy_load_does_not_deserialize_existing_corrupt_rank_until_gather,,fields_phasor,n,
+tests/fdtd/multi_gpu/test_sharded_persistence.py,test_sharded_round_trip_sorts_ranks_and_gathers_uneven_multifrequency_fields,Result.load,fields_phasor,n,
+tests/fdtd/multi_gpu/test_sharded_persistence.py,test_sharded_round_trip_sorts_ranks_and_gathers_uneven_multifrequency_fields,"ion=""cpu"",",fields_phasor,n,
+tests/fdtd/multi_gpu/test_sharded_persistence.py,test_sharded_round_trip_sorts_ranks_and_gathers_uneven_multifrequency_fields,itraryarraysh,fields_phasor,n,
+tests/fdtd/test_accelerated_setup_resume_contract.py,test_accelerated_setup_resume_contract,"e),direct.raw_monit",mixed,mixed,Ex Ey Ez Hx Hy Hz
+tests/fdtd/test_accelerated_setup_resume_contract.py,test_accelerated_setup_resume_contract,resumed.raw_monitor(n,mixed,mixed,Ex Ey Ez Hx Hy Hz
+tests/fdtd/test_fdtd_autoshutoff.py,test_broadband_early_stop_matches_full_run.<locals>.<listcomp>,result_full.fields,fields_phasor,1,
+tests/fdtd/test_fdtd_autoshutoff.py,test_broadband_early_stop_matches_full_run.<locals>.<listcomp>,result_shutoff.fields,fields_phasor,1,
+tests/fdtd/test_fdtd_autoshutoff.py,test_cw_parity_between_shutoff_and_disabled,result_default.fields,fields_phasor,1,
+tests/fdtd/test_fdtd_autoshutoff.py,test_cw_parity_between_shutoff_and_disabled,result_disabled.fields,fields_phasor,1,
+tests/fdtd/test_full_dft_clock_precision.py,test_actual_full_field_and_native_point_spectra_share_long_cw_clock,result.raw_monitor('nati,point,1,Ex
+tests/fdtd/test_full_field_dft_request.py,_flux_gradient,"result.monitor(""flux_probe"")",flux,n,Ex Ey Hx Hy
+tests/fdtd/test_full_field_dft_request.py,test_default_multifrequency_records_volume_fields,result.fields,fields_phasor,n,
+tests/fdtd/test_pcb_execution_state.py,compare,actual.fields,fields_phasor,1,
+tests/fdtd/test_pcb_execution_state.py,compare,"alues,expected",fields_phasor,1,
+tests/fdtd/test_pcb_execution_state.py,compare,expected.fields,fields_phasor,1,
+tests/fdtd/test_pcb_execution_state.py,test_planar_pec_graph_and_disk_resume_preserve_actual_fields,"cpu(),resumed",fields_phasor,1,
+tests/fdtd/test_pcb_execution_state.py,test_planar_pec_graph_and_disk_resume_preserve_actual_fields,reopened.fields,fields_phasor,1,
+tests/fdtd/test_pcb_execution_state.py,test_planar_pec_graph_and_disk_resume_preserve_actual_fields,resumed.fields,fields_phasor,1,
+tests/fdtd/test_pcb_execution_state.py,test_resume_can_change_observer_execution_mode,"""),expected.raw_monitor(",plane_native,1,Ez Hy
+tests/fdtd/test_pcb_execution_state.py,test_resume_can_change_observer_execution_mode,"resumed.raw_monitor(""pla",plane_native,1,Ez Hy
+tests/fdtd/test_pcb_execution_state.py,test_spectral_and_time_observations_survive_disk_resume,"e),reference.raw_monit",mixed,mixed,
+tests/fdtd/test_pcb_execution_state.py,test_spectral_and_time_observations_survive_disk_resume,resumed.raw_monitor(n,mixed,mixed,
+tests/fdtd/test_pulse_dft_normalisation.py,test_mixed_sources_reject_absolute_spectra_but_keep_ratios,"result.monitor(""trace"")",time,,Ez
+tests/fdtd/test_pulse_dft_normalisation.py,test_reference_frequency_scales_amplitudes_and_round_trips,default.fields,fields_phasor,n,
+tests/fdtd/test_pulse_dft_normalisation.py,test_reference_frequency_scales_amplitudes_and_round_trips,"default.monitor(""point"")",point,n,Ez
+tests/fdtd/test_pulse_dft_normalisation.py,test_reference_frequency_scales_amplitudes_and_round_trips,explicit.fields,fields_phasor,n,
+tests/fdtd/test_pulse_dft_normalisation.py,test_reference_frequency_scales_amplitudes_and_round_trips,"explicit.monitor(""point"")",point,n,Ez
+tests/fdtd/test_pulse_dft_normalisation.py,test_reference_frequency_scales_amplitudes_and_round_trips,one]*default,fields_phasor,n,
+tests/fdtd/test_pulse_dft_normalisation.py,test_source_normalization_scales_ports_fields_powers_and_port_gradients,"runs[0][0].monitor(""point"",",point,1,Ez
+tests/fdtd/test_pulse_dft_normalisation.py,test_source_normalization_scales_ports_fields_powers_and_port_gradients,"runs[0][0].monitor(""wire_state"")",unchanged,,
+tests/fdtd/test_pulse_dft_normalisation.py,test_source_normalization_scales_ports_fields_powers_and_port_gradients,"runs[1][0].monitor(""point"",",point,1,Ez
+tests/fdtd/test_pulse_dft_normalisation.py,test_source_normalization_scales_ports_fields_powers_and_port_gradients,"runs[1][0].monitor(""wire_state"")",unchanged,,
+tests/fdtd/test_resume_dft_counter_execution.py,_assert_final_parity,"actual.raw_monitor(name,frequency=freque",mixed,sel,Ey
+tests/fdtd/test_resume_dft_counter_execution.py,_assert_final_parity,"expected.raw_monitor(name,frequency=freque",mixed,sel,Ey
+tests/fdtd/test_short_spectral_tail_execution.py,_run_control,"loaded.monitor(""published_Ey"")",plane,n,Ey
+tests/fdtd/test_short_spectral_tail_execution.py,_run_control,"loaded.monitor(""same_owned_Ey"")",point,n,Ey
+tests/fdtd/test_short_spectral_tail_execution.py,_run_control,"result.monitor(""published_Ey"")",plane,n,Ey
+tests/fdtd/test_short_spectral_tail_execution.py,_run_control,"result.monitor(""same_owned_Ey"")",point,n,Ey
+tests/fdtd/test_state_composition_regressions.py,test_breakdown_disk_resume_preserves_timer_ramp_events_and_energy,"actual.monitor(""breakdown_field"")",point,n,Ez
+tests/fdtd/test_state_composition_regressions.py,test_breakdown_disk_resume_preserves_timer_ramp_events_and_energy,"expected.monitor(""breakdown_field"")",point,n,Ez
+tests/fdtd/test_state_composition_regressions.py,test_mur_network_material_gradient_matches_central_difference.<locals>.evaluate,"result.monitor(""probe"",",point,1,Ez
+tests/fdtd/test_time_consumer_consistency.py,test_complex_field_time_record_retains_both_bloch_quadratures,"result.monitor(""trace"")",time,,Ez Hy
+tests/fdtd/test_time_consumer_consistency.py,test_normalized_port_amplitude_gradient_preserves_physical_drive_scale,"result.monitor(""point"",",point,1,Ez
+tests/fdtd/test_time_consumer_consistency.py,test_port_only_normalization_matches_independent_unit_pulse_spectrum,"results[1].monitor(""point"",",point,1,Ez
+tests/fdtd/test_time_consumer_consistency.py,test_port_only_normalization_matches_independent_unit_pulse_spectrum,"x=0).sel(component=""Ez"").va",point,1,Ez
+tests/fdtd/test_time_planning.py,test_adjoint_records_point_plane_and_flux_time_monitors,"result.monitor(""spectrum"",",point,1,Ez Hy
+tests/fdtd/test_time_planning.py,test_adjoint_records_point_plane_and_flux_time_monitors.<locals>.<genexpr>,result.raw_monitor(n,time,,Ez Hy
+tests/fdtd/test_time_planning.py,test_configured_transient_matches_independent_time_dft,"result.monitor(""point"")",time,,Ez Hy
+tests/fdtd/test_time_planning.py,test_configured_transient_matches_independent_time_dft,"result.monitor(""spectrum"",",point,1,Ez Hy
+tests/fdtd/test_time_planning.py,test_multisource_forward_is_invariant_under_source_permutation.<locals>.<genexpr>,"output.monitor(""point"")",time,,Ez Hy
+tests/fdtd/thin_wire/test_thin_wire_forward.py,_half_wave_dipole_profile,"result.monitor(""dipole_state"")",unchanged,,
+tests/fdtd/thin_wire/test_thin_wire_forward.py,_run_forward,"result.monitor(""wire_state"")",unchanged,,
+tests/fdtd/thin_wire/test_thin_wire_lossy_forward.py,test_lossy_current_differs_from_pec,"lossy.monitor(""wire_state"")",unchanged,,
+tests/fdtd/thin_wire/test_thin_wire_lossy_forward.py,test_lossy_current_differs_from_pec,"pec.monitor(""wire_state"")",unchanged,,
+tests/fdtd/thin_wire/test_thin_wire_lossy_forward.py,test_lossy_wire_runs_and_emits_ohmic_loss,"result.monitor(""wire_state"")",unchanged,,
+tests/fdtd/thin_wire/test_thin_wire_lossy_forward.py,test_pec_ohmic_loss_is_zero,"result.monitor(""wire_state"")",unchanged,,
+tests/fdtd/thin_wire/test_thin_wire_lossy_forward.py,test_pec_ohmic_loss_only_monitor_returns_zeros,"result.monitor(""wire_state"")",unchanged,,
+tests/fdtd/thin_wire/test_thin_wire_lossy_forward.py,test_pec_parity_falsification,"lossy.monitor(""wire_state"")",unchanged,,
+tests/fdtd/thin_wire/test_thin_wire_lossy_forward.py,test_pec_parity_falsification,"pec.monitor(""wire_state"")",unchanged,,
+tests/fdtd/thin_wire/test_thin_wire_lossy_forward.py,test_pec_wire_bitwise_parity,"first.monitor(""wire_state"")",unchanged,,
+tests/fdtd/thin_wire/test_thin_wire_lossy_forward.py,test_pec_wire_bitwise_parity,"second.monitor(""wire_state"")",unchanged,,
+tests/fdtd/thin_wire/test_thin_wire_port_binding_gpu.py,test_pec_wire_port_accepted_power_closes_against_radiated_surface_flux,"result.raw_monitor(""radiati",closed,1,
+tests/gradients/test_adjoint_determinism.py,test_adjoint_gradients_are_bitwise_repeatable,"result.monitor(""coincident"",",point,1,Ez
+tests/gradients/test_adjoint_determinism.py,test_adjoint_gradients_are_bitwise_repeatable,"result.monitor(""flux"",",flux,1,Ex Ey Hx Hy
+tests/gradients/test_adjoint_determinism.py,test_adjoint_gradients_are_bitwise_repeatable,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_complex_cw_spectral_adjoint.py,IncidentDielectric.objective,"simulation.run().monitor('probe',",point,1,Ez
+tests/gradients/test_complex_cw_spectral_adjoint.py,test_analytic_cw_foil_graph_disk_resume_preserves_window_and_absolute_spectra,reference.raw_monitor('pro,point,1,Ez Hy
+tests/gradients/test_complex_cw_spectral_adjoint.py,test_analytic_cw_foil_graph_disk_resume_preserves_window_and_absolute_spectra,result.raw_monitor('pro,point,1,Ez Hy
+tests/gradients/test_fdtd_adjoint_bridge.py,_loss_from_bloch_probe,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_bridge.py,_loss_from_bloch_y_pml_probe,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_bridge.py,_loss_from_dispersive_probe,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_bridge.py,_loss_from_grating_tfsf_probe,"result.monitor(""probe"",",point,1,
+tests/gradients/test_fdtd_adjoint_bridge.py,_loss_from_point_probe,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_bridge.py,_loss_from_surface_probe,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_bridge.py,_loss_from_tfsf_probe,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_bridge.py,test_fdtd_gradient_bridge_backpropagates_to_scene_module_density_parameters,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_anisotropic_geometry_gradient_is_axis_distinct,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_bloch_magnetic_dispersive_adjoint_runs_native,"_build_sim(model,time_steps=16).run().monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_full_aniso_bridge_forward_matches_reference_physics,"_build_sim(model,time_steps=200).run().monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_full_aniso_bridge_forward_matches_reference_physics,"monitor(""probe"")",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_bloch_dispersive_medium_gradient_matches_fd,"monitor(""probe"")",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_bloch_dispersive_medium_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_chi2_medium_gradient_matches_fd,"monitor(""probe"")",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_chi2_medium_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_conductive_medium_gradient_matches_fd,"monitor(""probe"")",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_conductive_medium_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_diagonal_aniso_dispersive_medium_gradient_matches_fd,"monitor(""probe"")",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_diagonal_aniso_dispersive_medium_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_diagonal_anisotropic_medium_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_full_aniso_medium_gradient_matches_fd,"monitor(""probe"")",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_full_aniso_medium_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_kerr_medium_gradient_matches_fd,"monitor(""probe"")",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_kerr_medium_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_magnetic_dispersive_medium_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_tpa_medium_gradient_matches_fd,"monitor(""probe"")",point,1,Ez
+tests/gradients/test_fdtd_adjoint_materials.py,test_scene_with_tpa_medium_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_bloch_gradient_per_element_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_cpml_gradient_per_element_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_fd_convergence_order_confirms_adjoint_accuracy,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_fd_convergence_order_confirms_adjoint_accuracy.<locals>._fd_grad_element0,"r_minus.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_fd_convergence_order_confirms_adjoint_accuracy.<locals>._fd_grad_element0,"r_plus.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_filtered_density_gradient_matches_fd,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_filtered_density_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_filtered_projected_density_gradient_matches_fd,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_filtered_projected_density_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_gradient_is_deterministic.<locals>.compute_grad,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_grating_tfsf_gradient_per_element_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ex
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_multi_component_loss_gradient_matches_fd,"result.raw_monitor(""pro",point,1,Ex Ey Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_multi_component_loss_gradient_matches_fd.<locals>.loss_fn,"result.raw_monitor(""pro",point,1,Ex Ey Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_multi_frequency_gradient_matches_fd,"result.monitor(""probe"",freq_index=0)",point,sel,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_multi_frequency_gradient_matches_fd,"result.monitor(""probe"",freq_index=1)",point,sel,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_multi_frequency_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",freq_index=0)",point,sel,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_multi_frequency_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",freq_index=1)",point,sel,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_optimizer_converges_over_multiple_steps,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_pec_boundary_design_gradient_matches_fd.<locals>.loss_fn,"_build_sim(model,time_steps=120).run().monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_phase_loss_gradient_matches_fd,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_phase_loss_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_plane_flux_gradient_matches_fd,"_build_sim(model.to_scene(),time_steps=32).run().raw_monitor(""flux_pro",flux,1,Ex Ey Hx Hy
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_plane_flux_gradient_matches_fd,"result.raw_monitor(""flux_pro",flux,1,Ex Ey Hx Hy
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_plane_flux_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""flux_probe"",",flux,1,Ex Ey Hx Hy
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_projected_density_gradient_matches_fd,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_projected_density_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_real_part_loss_gradient_matches_fd,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_real_part_loss_gradient_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_spatial_gradient_at_asymmetric_init,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_spatial_gradient_at_asymmetric_init.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_spatial_gradient_nonzero,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_spatial_gradient_per_element_matches_fd_strong_signal,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_spatial_gradient_per_element_matches_fd_strong_signal.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_spatial_gradient_varies_across_voxels,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_adjoint_rigorous.py,test_tfsf_gradient_per_element_matches_fd.<locals>.loss_fn,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_anisotropic_material_pullback.py,test_anisotropic_density_gradient_matches_fixed_step_finite_difference.<locals>.loss,"simulation.run().monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_copper_foil_adjoint.py,_objective,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_copper_foil_adjoint.py,test_periodic_foil_graph_and_checkpoint_partition_gradient_agree,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_custom_source_adjoint.py,test_callable_custom_source_time_gradient_matches_fd.<locals>.loss_fn,"_build_sim(model).run().monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_custom_source_adjoint.py,test_custom_current_magnetic_channel_drives_field,"_build_sim(model).run().monitor(""probe"",",point,1,Ex
+tests/gradients/test_fdtd_custom_source_adjoint.py,test_custom_current_source_gradient_matches_fd.<locals>.loss_fn,"_build_sim(model).run().monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_custom_source_adjoint.py,test_custom_field_source_gradient_matches_fd.<locals>.loss_fn,"_build_sim(model).run().monitor(""probe"",",point,1,Ex
+tests/gradients/test_fdtd_custom_source_adjoint.py,test_sampled_table_surface_source_gradient_matches_gaussian_pulse_gradient,"_build_sim(model).run().monitor(""probe"",",point,1,Ex
+tests/gradients/test_fdtd_custom_source_adjoint.py,test_uniform_current_source_gradient_matches_fd.<locals>.loss_fn,"_build_sim(model).run().monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_gradient_admission.py,_probe_power,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_gradient_admission.py,test_field_time_trace_of_a_differentiable_run_refuses_backward,"_region_simulation(x).run().monitor(""trace"")",time,,Ez
+tests/gradients/test_fdtd_mixed_boundary_consistency.py,_run,"result.monitor(""probe"",",point,1,
+tests/gradients/test_fdtd_mode_source_adjoint.py,_mode_probe_loss,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_mode_source_adjoint.py,test_fdtd_gradient_bridge_mode_source_backpropagates_to_material_density,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_mode_source_adjoint.py,test_fdtd_gradient_bridge_mode_source_supports_sparse_implicit_mode_solver,"sparse_result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_multisource_adjoint.py,_mode_loss,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_multisource_adjoint.py,_two_dipole_multifreq_loss,"result.monitor(""probe"",freq_index=index)",point,sel,Ez
+tests/gradients/test_fdtd_multisource_adjoint.py,test_normalize_source_shared_spectrum_runs_multi_source,"result.monitor(""probe"",",point,1,Ez
+tests/gradients/test_fdtd_multisource_adjoint.py,test_second_point_source_shifts_solution_and_gradient.<locals>.transmitted_at_f1,"result.monitor(""probe"",freq_index=1)",point,sel,Ez
+tests/gradients/test_fdtd_mur_adjoint.py,_run,"result.monitor(""probe"",",point,1,
+tests/gradients/test_fdtd_one_way_absorber_adjoint.py,_objective,"result.monitor(""probe"",",point,1,Ey
+tests/gradients/test_fdtd_tensor_current_adjoint.py,_loss,"simulation.run().raw_monitor(""pro",point,1,Ex Ey Ez
+tests/gradients/test_fdtd_thin_wire_adjoint.py,_wire_material_objective,"result.monitor(""wire_state"")",unchanged,,
+tests/gradients/test_fdtd_thin_wire_adjoint.py,_wire_objective,"result.monitor(""wire_state"")",unchanged,,
+tests/gradients/test_fdtd_thin_wire_adjoint.py,test_wire_adjoint_checkpoint_stride_replay_is_invariant,"result.monitor(""wire_state"")",unchanged,,
+tests/gradients/test_fdtd_thin_wire_adjoint.py,test_wire_monitor_backpropagates_radius_through_native_cpml_reverse,"result.monitor(""wire_state"")",unchanged,,
+tests/gradients/test_mode_source_replay_guard.py,_objective,"result.monitor(""fwd"",",flux,1,Ey Ez Hy Hz
+tests/gradients/test_mode_source_replay_guard.py,_objective,"result.monitor(""probe"",",point,1,Ey
+tests/gradients/test_mode_source_replay_guard.py,test_second_backward_reuses_plane_verdict,"result.monitor(""probe"",",point,1,Ey
+tests/gradients/test_mode_source_vector_replay.py,test_bend_material_region_crosses_launch_plane,"result.monitor('output',",flux,1,Ex Ez Hx Hz
+tests/gradients/test_prepared_scene_graph.py,test_bridge_result_materials_are_numerical_but_launch_replay_has_gradients,result.raw_monitor(n,raw,1,
+tests/materials/anisotropic/test_fdtd_full_anisotropy.py,test_full_tensor_eigenpolarization_ring_resonance_matches_analytic_eigenvalues,"result.monitor(""probe"")",time,,Ex Ey
+tests/materials/combinations/test_diagonal_aniso_dispersive.py,_plane_wave_transmission,"result.raw_monitor(""po",plane,1,
+tests/materials/combinations/test_modulated_dispersive_nonlinear.py,_run,"result.monitor(""probe"")",time,,Ez
+tests/materials/combinations/test_modulated_dispersive_nonlinear.py,test_modulated_kerr_scene_enables_both_channels_and_runs_finite,"result.monitor(""probe"")",time,,Ez
+tests/materials/combinations/test_modulated_slab_cpml.py,_run,"result.monitor(""probe"")",time,,Ez
+tests/materials/combinations/test_mu_tensor_dispersion.py,_plane_wave_transmission,"result.raw_monitor(""po",plane,1,
+tests/materials/combinations/test_multi_frequency_modulation.py,_run,"result.monitor(""probe"")",time,,Ez
+tests/materials/combinations/test_shg_dispersive_phase_matching.py,_second_harmonic_amplitude,"result.raw_monitor(""post"",freq_inde",plane,sel,Ez
+tests/materials/compiler/test_copper_foil_material_cache.py,test_cached_foil_and_static_poles_have_private_histories_and_exact_forward_parity,expected.fields,fields_phasor,1,
+tests/materials/compiler/test_fdtd_material_cache.py,test_cached_public_solves_match_and_materials_are_owned,actual.fields,fields_phasor,1,
+tests/materials/compiler/test_fdtd_material_cache.py,test_cached_public_solves_match_and_materials_are_owned,"alues,actual",fields_phasor,1,
+tests/materials/compiler/test_fdtd_material_cache.py,test_cached_public_solves_match_and_materials_are_owned,reference.fields,fields_phasor,1,
+tests/materials/compiler/test_pml_extrusion.py,test_extruded_density_edge_texel_fdtd_finite_difference_cuda.<locals>.loss,"result.monitor(""probe"",",point,1,Ex
+tests/materials/compiler/test_pml_extrusion.py,test_fdtd_trainable_slab_two_horizon_gradients_and_finite_difference_cuda.<locals>.loss,"result.monitor(""probe"",",point,1,Ex
+tests/materials/conductive/test_fdtd_conductive.py,test_fdtd_adjoint_accepts_conductive_media,"result.monitor(""probe"",",point,1,Ez
+tests/materials/conductive/test_fdtd_magnetic_conductive.py,_reflection_coefficient,"result.monitor(""probe"")",time,,Ey
+tests/materials/conductive/test_fdtd_magnetic_conductive.py,test_fdtd_adjoint_accepts_magnetic_conductive_media,"result.monitor(""probe"",",point,1,Ez
+tests/materials/dispersive/test_custom_dispersive.py,test_fdtd_graded_custom_lorentz_matches_piecewise_uniform_run.<locals>.run,"result.monitor(""probe"",",point,1,Ez
+tests/materials/dispersive/test_custom_dispersive.py,test_fdtd_uniform_custom_drude_matches_scalar_drude_run.<locals>.run,"result.monitor(""probe"",",point,1,Ez
+tests/materials/dispersive/test_custom_sellmeier.py,test_fdtd_uniform_custom_sellmeier_matches_sellmeier_run.<locals>.run,"result.monitor(""probe"",",point,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,_normalized_lorentz_transmission,"lorentz_result.monitor(""post"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,_normalized_lorentz_transmission,"vacuum_result.monitor(""post"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_anisotropic_slab_is_polarization_selective,"ey_result.monitor(""post"",",flux,1,Ey Ez Hy Hz
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_anisotropic_slab_is_polarization_selective,"ez_result.monitor(""post"",",flux,1,Ey Ez Hy Hz
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_drude_slab_reflects_below_plasma_frequency,"metal_result.monitor(""post"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_drude_slab_reflects_below_plasma_frequency,"metal_result.monitor(""pre"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_drude_slab_reflects_below_plasma_frequency,"vacuum_result.monitor(""post"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_drude_slab_reflects_below_plasma_frequency,"vacuum_result.monitor(""pre"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_kerr_slab_phase_depends_on_source_amplitude.<locals>._run,"result.raw_monitor(""po",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_magnetic_lorentz_slab_reflects_near_resonance,"magnetic_result.monitor(""post"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_magnetic_lorentz_slab_reflects_near_resonance,"magnetic_result.monitor(""pre"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_magnetic_lorentz_slab_reflects_near_resonance,magnetic_result.raw_monitor(n,plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_magnetic_lorentz_slab_reflects_near_resonance,"vacuum_result.monitor(""post"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_magnetic_lorentz_slab_reflects_near_resonance,"vacuum_result.monitor(""pre"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_magnetic_lorentz_slab_reflects_near_resonance,"vacuum_result.raw_monitor(""p",plane,1,Ez
+tests/materials/dispersive/test_fdtd_dispersive.py,test_fdtd_magnetic_lorentz_slab_reflects_near_resonance,"vacuum_result.raw_monitor(""po",plane,1,Ez
+tests/materials/dispersive/test_fdtd_gain.py,test_fdtd_linear_gain_slab_amplifies_vs_analytic_single_pass,"gain_result.monitor(""post"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_gain.py,test_fdtd_linear_gain_slab_amplifies_vs_analytic_single_pass,"vacuum_result.monitor(""post"",",plane,1,Ez
+tests/materials/dispersive/test_fdtd_sellmeier.py,test_fdtd_sellmeier_slab_imparts_index_phase_delay.<locals>.complex_mean,"result.monitor(""post"",",plane,1,Ez
+tests/materials/modulation/test_fdtd_modulation.py,test_fdtd_modulated_run_with_mur_boundaries_stays_finite,"result.monitor(""probe"")",time,,Ez
+tests/materials/modulation/test_fdtd_modulation.py,test_fdtd_modulated_slab_generates_sidebands.<locals>.run,"result.monitor(""probe"")",time,,Ez
+tests/materials/modulation/test_partial_cell_modulation.py,run_weak_slab.<locals>.<dictcomp>,result.raw_monitor(n,time,,Ex
+tests/materials/nonlinear/test_fdtd_nonlinear.py,_native_transmitted_pulse_energy,"result.monitor(""post_energy"")",flux_time,,
+tests/materials/nonlinear/test_fdtd_nonlinear.py,_second_harmonic_amplitude,"result.monitor(""post"",freq_index=1)",plane,sel,Ez
+tests/materials/nonlinear/test_fdtd_nonlinear.py,test_chi3_descriptor_matches_kerr_material_run.<locals>._run,"result.monitor(""post"")",plane,1,Ez
+tests/materials/nonlinear/test_tpa_capture_resume.py,test_tpa_real_disk_checkpoint_matches_direct_physics_and_spectrum,direct.monitor('probe'),point,1,Ez
+tests/materials/nonlinear/test_tpa_capture_resume.py,test_tpa_real_disk_checkpoint_matches_direct_physics_and_spectrum,public.monitor('probe'),point,1,Ez
+tests/materials/nonlinear/test_tpa_capture_resume.py,test_tpa_real_disk_checkpoint_matches_direct_physics_and_spectrum,resumed.monitor('probe'),point,1,Ez
+tests/materials/perturbation/test_perturbation_medium.py,test_fdtd_perturbation_gradient_matches_finite_difference.<locals>.loss_of,"result.monitor(""probe"")",point,1,Ez
+tests/materials/perturbation/test_perturbation_medium.py,test_fdtd_zero_perturbation_run_matches_base_material_run.<locals>.run,"result.monitor(""probe"")",point,1,Ez
+tests/materials/perturbation/test_perturbation_poles.py,test_fdtd_zero_pole_perturbation_run_matches_base_run.<locals>.run,"result.monitor(""probe"")",point,1,Ez
+tests/materials/pmc/test_pmc_medium.py,_plane_wave_run.<locals>.value,"result.raw_monitor(f""p{inde",point,1,Ez Hy
+tests/materials/surface_impedance/test_complex_cw_copper_normalization.py,test_two_polarization_copper_phasors_and_absolute_work_match_real_periodic,actual.raw_monitor('pro,point,1,Ey Ez Hy Hz
+tests/materials/surface_impedance/test_complex_cw_copper_normalization.py,test_two_polarization_copper_phasors_and_absolute_work_match_real_periodic,periodic.raw_monitor('pro,point,1,Ey Ez Hy Hz
+tests/materials/thin_sheet/test_thin_sheet_feed_antennas.py,measure_power.<locals>.<listcomp>,"result.monitor(""radiation"",frequency=f)",closed,sel,
+tests/materials/thin_sheet/test_thin_sheet_feeds.py,test_f3_exact_field_side_power_with_variance_correction.<locals>.<listcomp>,"result.monitor(""radiation"",frequency=f)",closed,sel,
+tests/monitors/diffraction/test_diffraction_monitor.py,_diffraction_metrics,hesametwoplanes.,flux,1,Ex Ey Hx Hy
+tests/monitors/diffraction/test_diffraction_monitor.py,_diffraction_metrics,"r(result.monitor(""transmission_fl",flux,1,Ex Ey Hx Hy
+tests/monitors/diffraction/test_diffraction_monitor.py,_diffraction_metrics,"result.monitor(""reflection_orders"",",diffraction,,
+tests/monitors/diffraction/test_diffraction_monitor.py,_diffraction_metrics,"result.monitor(""transmission_orders"",",diffraction,,
+tests/monitors/emission/test_dipole_emission_monitor.py,_power,,dipole,1,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,_objectives,"result.monitor(""overlap"")",gaussian,1,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,_objectives,"result.monitor(""proj"")",unchanged,,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_astigmatic_gaussian_overlap_matches_an_astigmatic_beam,"result.monitor(""match"")",gaussian,1,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_astigmatic_gaussian_overlap_matches_an_astigmatic_beam,"result.monitor(""round"")",gaussian,1,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_aux_field_time_records_native_ade_state,"""),result.raw_monito",time,,Pz Jpz My
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_aux_field_time_records_native_ade_state,"result.raw_monitor(""fiel",time,,Ez Hy
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_gaussian_overlap_decomposes_an_injected_gaussian_beam,"result.monitor(""match"")",gaussian,1,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_gaussian_overlap_decomposes_an_injected_gaussian_beam,"result.monitor(""orthogonal"")",gaussian,1,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_gaussian_overlap_decomposes_an_injected_gaussian_beam,"result.monitor(""reverse"")",gaussian,1,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_gaussian_overlap_decomposes_an_injected_gaussian_beam,"result.monitor(""round_astigmatic"")",gaussian,1,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_gaussian_overlap_decomposes_an_injected_gaussian_beam,"result.monitor(""shifted"")",gaussian,1,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_gaussian_overlap_decomposes_an_injected_gaussian_beam,"result.monitor(""wide"")",gaussian,1,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_projection_and_overlap_objectives_are_differentiable_and_time_traces_reject_gradients,"result.raw_monitor(""a",time,,Pz
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_projection_and_overlap_objectives_are_differentiable_and_time_traces_reject_gradients,"result.raw_monitor(""tra",raw,,Ez
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_projection_monitors_reproduce_field_projector_on_the_same_run,"result.monitor(""angle"")",unchanged,,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_projection_monitors_reproduce_field_projector_on_the_same_run,"result.monitor(""angle"",freq_index=1)",unchanged,sel,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_projection_monitors_reproduce_field_projector_on_the_same_run,"result.monitor(""cart"")",unchanged,,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_projection_monitors_reproduce_field_projector_on_the_same_run,"result.monitor(""ks"")",unchanged,,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_projection_monitors_reproduce_field_projector_on_the_same_run,"result.monitor(""planar"")",unchanged,,
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_projection_monitors_reproduce_field_projector_on_the_same_run,"result.raw_monitor(""aux_vacu",time,,Pz
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_surface_field_time_faces_equal_full_plane_field_time_traces,"result.monitor(""point"")",time,,Ez
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_surface_field_time_faces_equal_full_plane_field_time_traces,"result.monitor(""zplane"")",time,,Ez Hx
+tests/monitors/in_simulation/test_in_simulation_monitors_gpu.py,test_surface_field_time_faces_equal_full_plane_field_time_traces,"result.raw_monitor(""surfa",raw,,Ez Hx
+tests/monitors/in_simulation/test_in_simulation_monitors_unit.py,test_projection_monitors_match_field_projector_on_identical_surface_data,"result.monitor(""angle"")",unchanged,,
+tests/monitors/in_simulation/test_in_simulation_monitors_unit.py,test_projection_monitors_match_field_projector_on_identical_surface_data,"result.monitor(""angle"",frequency=1.5e9)",unchanged,sel,
+tests/monitors/in_simulation/test_in_simulation_monitors_unit.py,test_projection_monitors_match_field_projector_on_identical_surface_data,"result.monitor(""cart"")",unchanged,,
+tests/monitors/in_simulation/test_in_simulation_monitors_unit.py,test_projection_monitors_match_field_projector_on_identical_surface_data,"result.monitor(""ks"")",unchanged,,
+tests/monitors/material/test_permittivity_monitor.py,test_material_monitor_is_metadata_only,"result.raw_monitor(""fl",flux,1,Ex Ey Hx Hy
+tests/monitors/material/test_permittivity_monitor.py,test_material_monitor_is_metadata_only,"result.raw_monitor(""pe",raw,1,
+tests/monitors/material/test_permittivity_monitor.py,test_medium_monitor_multi_frequency_volume,"result.raw_monitor(""m",raw,n,
+tests/monitors/material/test_permittivity_monitor.py,test_medium_monitor_reports_mu_and_conductivity,"result.raw_monitor(""m",raw,1,
+tests/monitors/material/test_permittivity_monitor.py,test_permittivity_monitor_multi_frequency_dispersive,"result.raw_monitor(""pe",raw,n,
+tests/monitors/material/test_permittivity_monitor.py,test_permittivity_monitor_reports_box_and_vacuum,"result.raw_monitor(""pe",raw,1,
+tests/monitors/observers/test_closed_surface_closure.py,_fluxes.<locals>.<listcomp>,"result.monitor(f""{prefix}{index}"",",closed,1,
+tests/monitors/observers/test_closed_surface_closure.py,test_vacuum_closed_surface_is_watertight_for_off_node_boxes,"result.raw_monitor(f""native{inde",closed,1,
+tests/monitors/observers/test_fdtd_observers.py,test_fdtd_multi_frequency_flux_monitor_matches_single_frequency_runs,"multi_result.monitor(""port_flux"")",flux,n,Ex Ey Hx Hy
+tests/monitors/observers/test_fdtd_observers.py,test_fdtd_multi_frequency_flux_monitor_matches_single_frequency_runs,"multi_result.monitor(""port_flux"",frequency=frequency)",flux,sel,Ex Ey Hx Hy
+tests/monitors/observers/test_fdtd_observers.py,test_fdtd_multi_frequency_flux_monitor_matches_single_frequency_runs,"multi_result.monitor(""port_plane"")",flux,n,Ex Ey Hx Hy
+tests/monitors/observers/test_fdtd_observers.py,test_fdtd_multi_frequency_flux_monitor_matches_single_frequency_runs,"multi_result.raw_monitor(""port_plane"",frequency=freque",flux,sel,Ex Ey Hx Hy
+tests/monitors/observers/test_fdtd_observers.py,test_fdtd_multi_frequency_flux_monitor_matches_single_frequency_runs,"single_result.monitor(""port_flux"",",flux,1,Ex Ey Hx Hy
+tests/monitors/observers/test_fdtd_observers.py,test_fdtd_observers_match_full_field_dft_slices,"observer_result.monitor(""midplane_ez"",",plane,1,Ez
+tests/monitors/observers/test_fdtd_observers.py,test_fdtd_observers_match_full_field_dft_slices,"observer_result.raw_monitor(""center_",point,1,Ez
+tests/monitors/observers/test_fdtd_observers.py,test_fdtd_plane_monitor_aligns_normal_electric_component_to_in_plane_centers,"observer_result.monitor(""field_xy"",",plane,1,Ex Ey Ez
+tests/monitors/observers/test_fdtd_observers.py,test_fdtd_plane_monitor_supports_multi_component_eh_and_postprocess_bridge,"observer_result.raw_monitor(""nf_b",plane,1,Ex Ey Hx Hy
+tests/monitors/observers/test_grouped_ordinary_spectra.py,test_grouped_multifrequency_point_and_plane_match_host_schedule,actual.raw_monitor(n,mixed,n,Ez Hy
+tests/monitors/observers/test_grouped_ordinary_spectra.py,test_grouped_multifrequency_point_and_plane_match_host_schedule,"e),expected.raw_monit",mixed,n,Ez Hy
+tests/monitors/observers/test_grouped_ordinary_spectra.py,test_small_native_point_spectra_avoid_grouping_overhead,"'),expected.raw_monitor(",point,mixed,Ez
+tests/monitors/observers/test_grouped_ordinary_spectra.py,test_small_native_point_spectra_avoid_grouping_overhead,actual.fields,fields_phasor,mixed,
+tests/monitors/observers/test_grouped_ordinary_spectra.py,test_small_native_point_spectra_avoid_grouping_overhead,actual.raw_monitor('pro,point,mixed,Ez
+tests/monitors/observers/test_grouped_ordinary_spectra.py,test_small_native_point_spectra_avoid_grouping_overhead,expected.fields,fields_phasor,mixed,
+tests/monitors/observers/test_sampled_finite_planes.py,material_objective,"config.run().monitor('probe',",plane,1,Ez
+tests/monitors/observers/test_sampled_finite_planes.py,test_sampled_planes_graph_resume_and_result_roundtrip,reference.raw_monitor(n,plane,n,
+tests/monitors/observers/test_sampled_finite_planes.py,test_sampled_planes_graph_resume_and_result_roundtrip,result.raw_monitor(n,plane,n,
+tests/monitors/observers/test_sampled_finite_planes.py,test_sampled_surface_native_batch_reuses_graphs_and_matches_independent,"ld],reference.raw_monit",plane,n,
+tests/monitors/observers/test_sampled_finite_planes.py,test_sampled_surface_native_batch_reuses_graphs_and_matches_independent,reference.raw_monitor(n,plane,n,
+tests/monitors/observers/test_sampled_finite_planes.py,test_sampled_surface_native_batch_reuses_graphs_and_matches_independent,result.raw_monitor(n,plane,n,
+tests/monitors/test_plane_payload.py,test_plane_payload_matches_native_observers,,fields_phasor,n,
+tests/monitors/test_plane_payload.py,test_plane_payload_matches_native_observers,",""flux""):",mixed,n,
+tests/monitors/test_plane_payload.py,test_plane_payload_matches_native_observers,e:data.value,fields_phasor,n,
+tests/monitors/time/test_fdtd_time_monitors.py,test_field_time_monitor_matches_running_dft_point,"result.monitor(""pt_dft"",",point,1,Ez
+tests/monitors/time/test_fdtd_time_monitors.py,test_field_time_monitor_matches_running_dft_point,"result.raw_monitor(""pt_ti",time,,Ez
+tests/monitors/time/test_fdtd_time_monitors.py,test_field_time_monitor_plane_and_multicomponent,"result.raw_monitor(""plane_ti",time,,Ex Ez
+tests/monitors/time/test_fdtd_time_monitors.py,test_flux_time_monitor_time_average_matches_dft_flux,"result.monitor(""port_flux"",",flux,1,Ex Ey Hx Hy
+tests/monitors/time/test_fdtd_time_monitors.py,test_flux_time_monitor_time_average_matches_dft_flux,"result.raw_monitor(""port_flux_ti",flux_time,,
+tests/monitors/time/test_fdtd_time_monitors.py,test_time_monitor_result_plumbing_with_normal_flux_monitor,"result.raw_monitor(""field_ti",time,,Ez
+tests/monitors/time/test_fdtd_time_monitors.py,test_time_monitor_result_plumbing_with_normal_flux_monitor,"result.raw_monitor(""flux_d",flux,1,Ex Ey Hx Hy
+tests/monitors/time/test_fdtd_time_monitors.py,test_time_monitor_result_plumbing_with_normal_flux_monitor,"result.raw_monitor(""flux_ti",flux_time,,
+tests/monitors/time/test_fdtd_time_monitors.py,test_time_monitor_sampling_controls,"result.raw_monitor(""sampl",time,,Ez
+tests/monitors/time/test_fdtd_time_monitors.py,test_time_monitor_truncated_on_early_shutoff,"result.monitor(""trace"")",time,,Ez
+tests/monitors/time/test_native_time_flux_product.py,_run_public_time_fixture,"mw.Result.load(file,scene=scene,map_location='cpu').monitor('time')",flux_time,,
+tests/monitors/time/test_native_time_flux_product.py,_run_public_time_fixture,result.raw_monitor('ti,flux_time,,
+tests/postprocess/fields/test_selected_copper_query_execution.py,exercise,esult.monitor('probe').,point,mixed,
+tests/postprocess/fields/test_selected_copper_query_execution.py,exercise,old.monitor('probe'),point,mixed,
+tests/postprocess/fields/test_selected_copper_query_execution.py,exercise,result.raw_monitor('native_exa,point,mixed,
+tests/postprocess/rcs/test_bend_huygens.py,test_world_huygens_dipole_phase_polarization_flux_and_quadrature_converge,result.raw_monitor('huyge,closed,1,
+tests/postprocess/resonance/test_resonance_fdtd_cavity.py,test_pec_cavity_te101_ringdown_matches_analytic_frequency,"result.raw_monitor(""pro",time,,Ey
+tests/postprocess/scattering/test_mode_overlap.py,test_mode_port_materializes_first_class_source_and_monitor_results,,mode,1,Ey Ez Hy Hz
+tests/postprocess/scattering/test_mode_overlap.py,test_result_mode_monitor_returns_modal_payload_and_raw_plane,"result.monitor(""port"",",mode,1,Ez Hy
+tests/postprocess/scattering/test_scattering_parameters.py,_stack_flux_results,results[0].raw_monitor(monitor_n,flux,1,Ey Ez Hy Hz
+tests/postprocess/scattering/test_scattering_parameters.py,_stack_flux_results.<locals>.<listcomp>,"result.monitor(monitor_name,",flux,1,Ey Ez Hy Hz
+tests/postprocess/scattering/test_scattering_parameters.py,_stack_flux_results.<locals>.<listcomp>,result.raw_monitor(monitor_n,flux,1,Ey Ez Hy Hz
+tests/postprocess/scattering/test_scattering_parameters.py,test_compute_s_parameters_broadband_auto_matches_measured_incident_flux,"result.monitor(""port1"")",flux,n,Ey Ez Hy Hz
+tests/rf/antenna/test_compressed_result_artifact.py,test_real_result_preserves_dtype_shape_values_and_original_serialized_bytes,original.fields,fields_phasor,1,
+tests/rf/antenna/test_compressed_result_artifact.py,test_real_result_preserves_dtype_shape_values_and_original_serialized_bytes,restored.fields,fields_phasor,1,
+tests/rf/lumped/test_coaxial_lumped_physics.py,_plane_phase_velocity,"result.raw_monitor(f""plane{inde",plane,n,Ex
+tests/rf/lumped/test_dispersive_field_port_coupling.py,test_uncoupled_conductive_ade_material_adjoint_matches_finite_difference.<locals>.objective,"monitor(""probe"")",point,1,Ez
+tests/rf/lumped/test_fdtd_port_end_to_end.py,test_one_port_fdtd_run_returns_finite_device_resident_port_data,result.fields,fields_phasor,n,
+tests/rf/network/test_embedded_network_persistence.py,test_sharded_result_round_trip_preserves_embedded_network_data,loaded.fields,fields_phasor,n,
+tests/rf/network/test_network_sweep.py,test_two_port_single_device_sweep_returns_network_data,result.fields,fields_phasor,1,
+tests/rf/power_loss/test_power_loss_data.py,test_result_power_loss_is_typed_and_loss_monitor_adds_no_runtime_observer,"result.monitor(""loss"")",unchanged,,
+tests/rf/wave_validation/test_graded_tem_metrics.py,test_graded_native_launch_rotation_and_graph_fields,"result.monitor('graded_observer',",mode,1,
+tests/rf/wave_validation/test_native_product_public_execution.py,test_actual_copper_product_flux_graph_disk_resume_and_load,"actual.monitor('cross_cu',",flux,1,Ex Ez Hx Hz
+tests/rf/wave_validation/test_native_product_public_execution.py,test_actual_copper_product_flux_graph_disk_resume_and_load,expected.raw_monitor('cross_,flux,1,Ex Ez Hx Hz
+tests/rf/wave_validation/test_native_product_public_execution.py,test_actual_copper_product_flux_graph_disk_resume_and_load,"loaded.monitor('cross_cu',",flux,1,Ex Ez Hx Hz
+tests/rf/wave_validation/test_native_product_public_execution.py,test_actual_copper_product_flux_graph_disk_resume_and_load,"other.simulation().run().monitor('cross_cu',",flux,1,Ex Ez Hx Hz
+tests/rf/wave_validation/test_native_product_public_execution.py,test_actual_copper_product_flux_parameter_adjoint_matches_fd.<locals>.objective,result.raw_monitor('cross_,flux,1,Ex Ez Hx Hz
+tests/rf/wave_validation/test_native_product_public_execution.py,test_actual_off_sheet_normal_E_endpoint_adjoint_matches_fd.<locals>.objective,result.raw_monitor('normal_endpoi,plane,1,Ey Ez Hy Hz
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_coherent_native_components_and_two_sided_heads_keep_phase_cross_terms,);b=second.raw_monitor('s,flux,1,Ey Hz Ez Hy
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_coherent_native_components_and_two_sided_heads_keep_phase_cross_terms,"expected.monitor('surface',",flux,1,Ey Hz Ez Hy
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_coherent_native_components_and_two_sided_heads_keep_phase_cross_terms,first.raw_monitor('surfa,flux,1,Ey Hz Ez Hy
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_normal_interpolated_copper_jump_matches_independent_per_plane_oracle,result.raw_monitor('surfa,flux,1,Ey Hz Ez Hy
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_normal_interpolation_both_actual_cu_jump_cotangents_are_retained.<locals>.functional,"result.monitor('surface',",flux,1,Ey Hz Ez Hy
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_normal_sheet_actual_jump_cotangents_survive_late_presentation_projection.<locals>.functional,"result.monitor('normal_sheet',",flux,1,Ex Ey Hx Hy
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_normalized_legacy_copper_requires_actual_denominator_and_new_metadata_works,"_synthetic_copper_result().monitor('surface',",flux,1,Ey Hz Ez Hy
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_normalized_legacy_copper_requires_actual_denominator_and_new_metadata_works,"result.monitor('surface',",flux,1,Ey Hz Ez Hy
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_public_copper_side_output_cotangents_pass_complex_gradcheck.<locals>.functional,"result.monitor('surface',",flux,1,Ey Hz Ez Hy
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_public_normal_copper_plane_chooses_actual_side_and_matches_correlated_oracle,result.raw_monitor('normal_she,flux,1,Ex Ey Hx Hy
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_public_result_late_copper_uses_real_compiler_without_volume_fields,"restored.monitor('surface',",flux,1,Ey Hz Ez Hy
+tests/rf/wave_validation/test_native_product_public_prototype.py,test_public_result_late_copper_uses_real_compiler_without_volume_fields,result.raw_monitor('surfa,flux,1,Ey Hz Ez Hy
+tests/rf/wave_validation/test_planemonitor_waveport_passthrough.py,test_planemonitor_field_is_physical_coax_tem,waveport_result.raw_monitor(_MONI,plane,1,Ey
+tests/rf/wave_validation/test_planemonitor_waveport_passthrough.py,test_planemonitor_matches_plain_modesource_run,"plain_result.monitor(_MONITOR,",plane,1,Ey
+tests/rf/wave_validation/test_planemonitor_waveport_passthrough.py,test_planemonitor_matches_plain_modesource_run,waveport_result.raw_monitor(_MONI,plane,1,Ey
+tests/rf/wave_validation/test_planemonitor_waveport_passthrough.py,test_planemonitor_present_on_waveport_excitation,waveport_result.raw_monitor(_MONI,plane,1,Ey
+tests/rf/wave_validation/test_planemonitor_waveport_passthrough.py,test_planemonitor_rides_through_portsweep,"result.monitor(_MONITOR,",plane,1,Ey
+tests/rf/wave_validation/test_printed_line_loss_execution_contract.py,test_coherent_actual_result_view_recomputes_flux_and_native_data_without_stale_single_drive_power,result.raw_monitor('surfa,closed,1,
+tests/sar/test_phantom_convergence.py,_conservation,"result.monitor(""flux_in"",",flux,1,Ex Ey Hx Hy
+tests/sar/test_phantom_convergence.py,_conservation,"result.monitor(""flux_out"",",flux,1,Ex Ey Hx Hy
+tests/sar/test_point_sar.py,test_point_sar_preserves_field_autograd,"(result.E.x,",fields_phasor,1,
+tests/sar/test_sar_combine.py,test_coherent_preserves_field_autograd,a.fields,fields_phasor,1,
+tests/sar/test_soft_peak.py,test_soft_peak_is_differentiable,result.E.x.gr,fields_phasor,1,
+tests/sources/definitions/test_astigmatic_gaussian_beam.py,test_fdtd_astigmatic_beam_reproduces_per_axis_waists_at_focus,"result.monitor(""focus_ez"",",plane,1,Ez
+tests/sources/definitions/test_astigmatic_gaussian_beam.py,test_isotropic_astigmatic_beam_matches_gaussian_beam.<locals>.run,"result.monitor(""plane_ez"",",plane,1,Ez
+tests/sources/definitions/test_custom_source_time.py,test_custom_source_time_matches_native_gaussian_pulse_in_fdtd,"custom_result.monitor(""trace"")",time,,Ez
+tests/sources/definitions/test_custom_source_time.py,test_custom_source_time_matches_native_gaussian_pulse_in_fdtd,"native_result.monitor(""trace"")",time,,Ez
+tests/sources/definitions/test_custom_uniform_sources.py,test_custom_current_radiated_power_scales_as_amplitude_squared.<locals>._flux,"result.monitor(""fz"",",flux,1,Ex Ey Hx Hy
+tests/sources/definitions/test_custom_uniform_sources.py,test_uniform_current_radiated_power_scales_as_amplitude_squared.<locals>._flux,"result.monitor(""fz"",",flux,1,Ex Ey Hx Hy
+tests/sources/incident/test_soft_planewave_absolute_power.py,_measure_incident_power_ratio,"result.raw_monitor(""pro",plane_native,1,Ex Hy
+tests/sources/incident/test_soft_sheet_field_sign.py,test_soft_gaussian_beam_on_axis_absolute_sign,"result.raw_monitor(""c",plane,1,Ex
+tests/sources/incident/test_soft_sheet_field_sign.py,test_soft_plane_wave_absolute_e_and_h_sign,"result.raw_monitor(""c",plane_native,1,
+tests/sources/incident/test_surface_custom_waveforms.py,_run,result.raw_monitor(n,time,,
+tests/sources/incident/test_surface_custom_waveforms.py,test_broadband_pulse_plane_wave_flux_is_flat_over_the_band.<locals>.run,"result.monitor(""flux"")",flux,n,Ex Ey Hx Hy
+tests/sources/incident/test_surface_custom_waveforms.py,test_table_mode_source_matches_gaussian_pulse_mode_source.<locals>.run.<locals>.<dictcomp>,result.raw_monitor(n,time,,
+tests/sources/mode/test_fdtd_broadband_mode_source.py,_plane,"result.monitor(""plane"",frequency=frequency)",plane,sel,Ez
+tests/sources/point/test_fdtd_sources.py,test_fdtd_gaussian_beam_focuses_energy_near_axis,"result.monitor(""focus_ez"",",plane,1,Ez
+tests/sources/point/test_fdtd_sources.py,test_fdtd_plane_wave_produces_uniform_cross_section,"result.monitor(""mid_x_ez"",",plane,1,Ez
+tests/sources/point/test_fdtd_sources.py,test_fdtd_soft_plane_wave_flux_scales_with_amplitude_squared.<locals>.run_flux,"result.monitor(""flux_x"",",flux,1,Ey Ez Hy Hz
+tests/sources/point/test_fixed_k_broadband_point_source.py,_phasor,"result.raw_monitor(""probe"",frequency=freque",point,sel,Ex Ez
+tests/sources/point/test_periodic_point_dipole_wrap.py,_sheet_or_dipole_plane,"result.monitor(""far"",",plane,1,Ex
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_analytic_plane_declared_phase_rotates_fields_without_changing_power,"baseline.monitor('power',",flux,1,Ey Ez Hy Hz
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_analytic_plane_declared_phase_rotates_fields_without_changing_power,baseline.raw_monitor('pro,point,1,Ez Hy
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_analytic_plane_declared_phase_rotates_fields_without_changing_power,"shifted.monitor('power',",flux,1,Ey Ez Hy Hz
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_analytic_plane_declared_phase_rotates_fields_without_changing_power,shifted.raw_monitor('pro,point,1,Ez Hy
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_cw_injection_center_phase_is_independent_of_padded_seed_location,"actual.monitor('power',",flux,1,
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_cw_injection_center_phase_is_independent_of_padded_seed_location,actual.raw_monitor('pro,point,1,
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_cw_injection_center_phase_is_independent_of_padded_seed_location,"reference.monitor('power',",flux,1,
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_cw_injection_center_phase_is_independent_of_padded_seed_location,reference.raw_monitor('pro,point,1,
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_zero_bloch_cw_matches_real_periodic_amplitude_and_power,"complex_result.monitor('power',",flux,1,Ey Ez Hy Hz
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_zero_bloch_cw_matches_real_periodic_amplitude_and_power,"complex_result.monitor('probe',",point,1,Ez Hy
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_zero_bloch_cw_matches_real_periodic_amplitude_and_power,complex_result.raw_monitor('pro,point,1,Ez Hy
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_zero_bloch_cw_matches_real_periodic_amplitude_and_power,"periodic.monitor('power',",flux,1,Ey Ez Hy Hz
+tests/sources/tfsf/test_complex_cw_amplitude_contract.py,test_zero_bloch_cw_matches_real_periodic_amplitude_and_power,periodic.raw_monitor('pro,point,1,Ez Hy
+tests/sources/tfsf/test_fdtd_grating_tfsf.py,_grating_flux_metrics,"result.monitor(""reflection"",",flux,1,Ex Ey Hx Hy
+tests/sources/tfsf/test_fdtd_grating_tfsf.py,_grating_flux_metrics,"result.monitor(""transmission"",",flux,1,Ex Ey Hx Hy
+tests/sources/tfsf/test_fdtd_grating_tfsf.py,test_grating_tfsf_auto_bloch_phase_runs_forward,"result.monitor(""center"",",point,1,Ex Ez
+tests/sources/tfsf/test_fdtd_grating_tfsf.py,test_grating_tfsf_general_axis_broadband_runs_finite,"result.monitor(""center"",frequency=frequency)",point,sel,Ex Ez
+tests/sources/tfsf/test_full_span_source_ownership.py,test_complete_periodic_faces_confine_incident_wave,"result.raw_monitor(""insi",point,1,
+tests/sources/tfsf/test_full_span_source_ownership.py,test_complete_periodic_faces_confine_incident_wave.<locals>.<genexpr>,result.raw_monitor(n,point,1,
+tests/validation/physics/test_autogrid_physics.py,_run_fluxes.<locals>.<dictcomp>,"result.monitor(name,",flux,1,Ex Ey Hx Hy
+tests/validation/physics/test_bloch_broadband_vs_cw.py,_downstream_phasor,"result.monitor(""down"",frequency=frequency)",point,sel,Ex
+tests/validation/physics/test_fdtd_boundary_tfsf_validation.py,_cpml_summary,"result.monitor(name,",point,1,Ez
+tests/validation/physics/test_fdtd_boundary_tfsf_validation.py,_tfsf_oblique_summary,"result.raw_monitor(f""probe_{labe",point,1,Ex Ey Ez
+tests/validation/physics/test_fdtd_physics_correctness.py,_run_scene_summary,result.raw_monitor(monitor_n,mixed,1,
+tests/validation/physics/test_nonuniform_grid_physics.py,_run_fluxes.<locals>.<dictcomp>,"result.monitor(name,",flux,1,Ex Ey Hx Hy
+tests/validation/physics/test_pec_conformal.py,_cavity_resonance,"result.monitor(""probe"")",time,,Ez
+tests/validation/physics/test_pec_conformal.py,_slab_probe,"result.monitor(""probe"")",time,,Ex
+tests/validation/physics/test_pec_curved_coax_tem.py,_phase_velocity,"result.raw_monitor(f""p{index}{componen",plane,n,
+tests/validation/physics/test_postprocess_end_to_end_validation.py,_run_tfsf_rayleigh_rcs_validation,"reference_result.monitor(""incident_probe"",",point,1,Ex
+tests/validation/physics/test_postprocess_end_to_end_validation.py,_run_tfsf_rayleigh_rcs_validation,"result.raw_monitor(""huyge",closed,1,
+tests/validation/physics/test_postprocess_end_to_end_validation.py,dipole_closed_surface_validation,"result.raw_monitor(""targ",plane,1,Ex Ey Ez Hx Hy
+tests/validation/physics/test_postprocess_end_to_end_validation.py,dipole_closed_surface_validation,result.raw_monitor(surface_monitor.n,closed,1,
+tests/validation/physics/test_postprocess_end_to_end_validation.py,dipole_nonrect_closed_surface_validation,result.raw_monitor(surface_monitor.n,closed,1,
+tests/validation/physics/test_sibc_cylinder_convergence.py,_absorbed_power,"result.monitor(""box"",",closed,1,

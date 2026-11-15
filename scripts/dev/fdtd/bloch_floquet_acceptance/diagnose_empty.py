@@ -48,9 +48,11 @@ def main():
         source_time = make_pulse(kpar, min(FREQUENCIES), max(FREQUENCIES))
     simulation = mw.Simulation.fdtd(
         make_scene(20, kpar, "TE", 1., source_time), frequencies=FREQUENCIES,
-        run_time=mw.TimeConfig.auto(transient_cycles=0, steady_cycles=80),
-        spectral_sampler=mw.SpectralSampler(window="none"), absorber="cpml",
-        shutoff=1.e-30, shutoff_check_interval=100,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(transient_cycles=0, steady_cycles=80),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"), absorber="cpml",
+            shutoff=1.e-30, shutoff_check_interval=100,
+        ),
     )
     prepared = simulation.prepare()
     history = []

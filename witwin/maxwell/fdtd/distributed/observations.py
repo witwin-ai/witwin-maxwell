@@ -35,10 +35,11 @@ def sampled_monitor_for_shard(monitor, layout, prepared_scene):
 class DistributedObservationHalos:
     """Refresh all component ghosts after sources/circuits, before quadrature.
 
-    The physical Yee update exchanges only its required curl operands. In
-    particular Ex low ghosts and Hx high ghosts are not physical-update receives,
-    and tangential E high ghosts still carry the previous electric time. Sampled
-    observers must see all six fields at their current staggered times.
+    The physical Yee update exchanges only its required curl operands. Ex low
+    ghosts and Hx high ghosts are not physical-update receives (the whole-shard
+    fused core launch updates them from the received curl halos), and tangential
+    E high ghosts still carry the previous electric time. Sampled observers must
+    see all six fields at their current staggered times.
     """
 
     def __init__(self, shards):

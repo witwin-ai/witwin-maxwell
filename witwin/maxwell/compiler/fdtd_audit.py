@@ -6,6 +6,8 @@ import math
 
 import numpy as np
 
+from ..errors import UnsupportedFeatureError
+
 
 def compile_fdtd_audit(solver):
     """Return JSON-safe coordinates, constraints and cost estimates, without stepping."""
@@ -13,7 +15,8 @@ def compile_fdtd_audit(solver):
 
     scene = solver.scene
     if not all(hasattr(scene, f"{axis}_nodes64") for axis in "xyz"):
-        raise NotImplementedError("Preparation diagnostics require a single-device FDTD grid.")
+        raise UnsupportedFeatureError("Preparation diagnostics require a single-device FDTD grid.",
+                                      feature="guard:62455940", method="fdtd")
     grids = {}
     for axis in "xyz":
         nodes = np.asarray(getattr(scene, f"{axis}_nodes64"), dtype=np.float64)
@@ -30,7 +33,7 @@ def compile_fdtd_audit(solver):
         grids[axis]["vacuum_cfl_inverse_square_fraction"] = inverse_square[axis] / total
     layers = []
     from witwin.core import Box
-    for structure in scene.structures:
+    for structure in scene.scene.structures:
         geometry = structure.geometry
         if not isinstance(geometry, Box) or bool(getattr(structure.material, "is_pec", False)) or bool(getattr(structure.material, "is_pmc", False)):
             continue

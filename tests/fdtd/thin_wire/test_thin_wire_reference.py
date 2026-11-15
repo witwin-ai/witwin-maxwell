@@ -3,7 +3,7 @@ import math
 import pytest
 import torch
 
-from witwin.maxwell.fdtd.thin_wire_reference import (
+from tests.oracles.thin_wire_reference import (
     ACCEPTANCE_BUDGET,
     EPSILON_0,
     MU_0,

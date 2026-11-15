@@ -1,7 +1,4 @@
 #include "checks.h"
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 
 // Reduce.cuh: contiguous sample means split across x, with four per-thread
@@ -49,19 +46,19 @@ __global__ void window_kernel(const float* sample, const float* offsets, float* 
   }
 }
 
-at::Tensor window_setup(at::Tensor sample, at::Tensor offsets, int64_t axis) {
-  check_tensor(sample, sample, at::kFloat, "window", "sample");
-  check_tensor(offsets, sample, at::kFloat, "window", "offsets");
-  c10::cuda::CUDAGuard guard(sample.device());
-  auto out=at::empty({sample.size(0)},sample.options());
+torch::stable::Tensor window_setup(torch::stable::Tensor sample, torch::stable::Tensor offsets, int64_t axis) {
+  check_tensor(sample, sample, torch::headeronly::ScalarType::Float, "window", "sample");
+  check_tensor(offsets, sample, torch::headeronly::ScalarType::Float, "window", "offsets");
+  torch::stable::accelerator::DeviceGuard guard(sample.get_device_index());
+  auto out=torch::stable::new_empty(sample, {sample.size(0)});
   int n=sample.size(1), rows=sample.size(0), width=1, height=1;
   while(width*2<=n && width<512) width*=2;
   while(height*2<=rows && height<512) height*=2;
   int bx=std::min(width,32), by=std::min(height,512/bx);
   bx=std::min(width,512/by);
-  window_kernel<<<(rows+3)/4,dim3(bx,4),0,c10::cuda::getCurrentCUDAStream()>>>(
-      sample.data_ptr<float>(),offsets.data_ptr<float>(),out.data_ptr<float>(),rows,n,axis);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  window_kernel<<<(rows+3)/4,dim3(bx,4),0,current_cuda_stream()>>>(
+      sample.const_data_ptr<float>(),offsets.const_data_ptr<float>(),out.mutable_data_ptr<float>(),rows,n,axis);
+  STD_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
 
@@ -78,16 +75,16 @@ __global__ void reconstruct_kernel(const float* a, const float* inv, const float
   out[i]=a[i]/(1.f+w*contrast);
 }
 
-at::Tensor reconstruct_setup(at::Tensor arithmetic, at::Tensor inverse,
-                             std::vector<at::Tensor> gradients, int64_t axis, bool node) {
-  check_tensor(arithmetic, arithmetic, at::kFloat, "reconstruct", "arithmetic");
-  check_tensor(inverse, arithmetic, at::kFloat, "reconstruct", "inverse");
-  check_tensors(gradients, arithmetic, at::kFloat, "reconstruct", "gradients");
-  c10::cuda::CUDAGuard guard(arithmetic.device());
-  auto out=at::empty_like(arithmetic);
-  reconstruct_kernel<<<(out.numel()+255)/256,256,0,c10::cuda::getCurrentCUDAStream()>>>(
-      arithmetic.data_ptr<float>(),inverse.data_ptr<float>(),gradients[0].data_ptr<float>(),
-      gradients[1].data_ptr<float>(),gradients[2].data_ptr<float>(),out.data_ptr<float>(),out.numel(),axis,node);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+torch::stable::Tensor reconstruct_setup(torch::stable::Tensor arithmetic, torch::stable::Tensor inverse,
+                             std::vector<torch::stable::Tensor> gradients, int64_t axis, bool node) {
+  check_tensor(arithmetic, arithmetic, torch::headeronly::ScalarType::Float, "reconstruct", "arithmetic");
+  check_tensor(inverse, arithmetic, torch::headeronly::ScalarType::Float, "reconstruct", "inverse");
+  check_tensors(gradients, arithmetic, torch::headeronly::ScalarType::Float, "reconstruct", "gradients");
+  torch::stable::accelerator::DeviceGuard guard(arithmetic.get_device_index());
+  auto out=torch::stable::empty_like(arithmetic);
+  reconstruct_kernel<<<(out.numel()+255)/256,256,0,current_cuda_stream()>>>(
+      arithmetic.const_data_ptr<float>(),inverse.const_data_ptr<float>(),gradients[0].const_data_ptr<float>(),
+      gradients[1].const_data_ptr<float>(),gradients[2].const_data_ptr<float>(),out.mutable_data_ptr<float>(),out.numel(),axis,node);
+  STD_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }

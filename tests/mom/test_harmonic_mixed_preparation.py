@@ -9,7 +9,7 @@ from witwin.maxwell.mom.runtime import SystemOperator
 from witwin.maxwell.mom.harmonic_material import compile_harmonic_material
 from witwin.maxwell.mom.harmonic_preparation import prepare_harmonic_balance
 from witwin.maxwell.mom.harmonic_current import surface_face_potentials
-from witwin.maxwell.mom.harmonic_state import preparation_signature,recover_harmonic_state
+from witwin.maxwell.mom.harmonic_recovery import preparation_signature,recover_harmonic_state
 from witwin.maxwell.mom.static_mixed import MixedStaticOperator
 
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
@@ -18,11 +18,11 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 def test_actual_mixed_material_harmonic_preparation_and_dc_coupling(monkeypatch,tmp_path):
     _,config,_=runpy.run_path('tests/mom/test_harmonic_public.py')['setup']()
     first=config.harmonic_balance.volumes[0]
-    second=mw.TetrahedralVolumeMesh(first.vertices+first.vertices.new_tensor([.18,.02,.01]),first.cells,region_id=2)
+    second=mw.mom.TetrahedralVolumeMesh(first.vertices+first.vertices.new_tensor([.18,.02,.01]),first.cells,region_id=2)
     volumes=(second,first)
     physical=(mw.Material(eps_r=2.,sigma_e=.001,nonlinearity=(
-        mw.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.TwoPhotonAbsorption(beta=5.))),
-        mw.Material(eps_r=3.,mu_r=2.,nonlinearity=mw.NonlinearSusceptibility(chi2=.004,chi3=.001)))
+        mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.media.TwoPhotonAbsorption(beta=5.))),
+        mw.Material(eps_r=3.,mu_r=2.,nonlinearity=mw.media.NonlinearSusceptibility(chi2=.004,chi3=.001)))
     materials=tuple(compile_harmonic_material(value,3e8,2) for value in physical)
     exterior=compile_harmonic_material(mw.Material(),3e8,2)
     bases=tuple(RWGBasis(v.boundary) for v in (first,second))
@@ -124,7 +124,7 @@ def test_actual_mixed_material_harmonic_preparation_and_dc_coupling(monkeypatch,
         for name in ('solve','lu_factor','lu_solve'):
             patch.setattr(torch.linalg,name,forbidden)
         patch.setattr(MixedStaticOperator,'__init__',forbidden)
-        restored=restore(torch.load(path,weights_only=False),scene)
+        restored=restore(torch.load(path,weights_only=False),scene,'cuda')
         for actual,expected in zip((*restored.query_dc(outside,0),*restored.query_dc_magnetic(outside,0),
                                    *restored.query_fields(outside,0,'total',harmonic=2)),
                                   (*expected_dc,*expected_h,*expected_ac)):
@@ -159,7 +159,7 @@ def test_actual_mixed_material_harmonic_preparation_and_dc_coupling(monkeypatch,
                 bad['prepared']['static']['mixed_closure']['maps']['electric_response'][0]+=direction
             with pytest.raises(ValueError,match='current region order|layer or offset|volume geometry|threshold|tolerance|operator or mapping'):
 
-                restore(bad,scene)
+                restore(bad,scene,'cuda')
     receipt={'residual':solved.receipt['final_residual'],'dc_norm':float(solved.electric[0].norm()),
              'second_harmonic_norm':float(solved.electric[2].norm()),'physical_qualification':False}
     torch.save({'electric':solved.electric.detach(),'receipt':receipt},tmp_path/'mixed-algebra.pt')

@@ -17,10 +17,10 @@ def test_actual_dielectric_hb_generates_dc_and_second_harmonic(monkeypatch):
     vertices = torch.tensor([[0.,0.,0.],[.07,0.,0.],[0.,.07,0.],[0.,0.,.07]],device='cuda',dtype=torch.float64)
     volume = TetrahedralVolumeMesh(vertices,torch.tensor([[0,1,2,3]],device='cuda'),region_id=1)
     basis = RWGBasis(SurfaceMesh(volume.boundary.vertices.clone(),volume.boundary.faces.clone()))
-    material = compile_harmonic_material(mw.Material(eps_r=2.,nonlinearity=mw.NonlinearSusceptibility(
+    material = compile_harmonic_material(mw.Material(eps_r=2.,nonlinearity=mw.media.NonlinearSusceptibility(
         chi2=.002,chi3=.001)),3e8,2)
     exterior = compile_harmonic_material(mw.Material(),3e8,2)
-    config = mw.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),riesz_storage='compact_rwg_v1')
+    config = mw.mom.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),riesz_storage='compact_rwg_v1')
     operators = tuple(SystemOperator(SurfaceSystem.create([(0,'dielectric',basis,material.linear_samples[n])]),
         exterior.linear_samples[n],[mw.PlaneWave()] if n == 0 else [],config) for n in range(2))
     model,prepared = prepare_harmonic_balance(operators,[volume],[material],exterior,
@@ -33,7 +33,7 @@ def test_actual_dielectric_hb_generates_dc_and_second_harmonic(monkeypatch):
     assert torch.count_nonzero(result.electric[0].imag) == 0
     assert not prepared['receipt']['physical_qualification']
     assert not result.receipt['harmonic_truncation_converged']
-    from witwin.maxwell.mom.harmonic_state import recover_harmonic_state
+    from witwin.maxwell.mom.harmonic_recovery import recover_harmonic_state
     ramped = model.solve(pump_scale=.5)
     state = recover_harmonic_state(model,prepared,ramped)
     torch.testing.assert_close(state.frequencies,vertices.new_tensor([0.,3e8,6e8]),rtol=0,atol=0)
@@ -95,7 +95,7 @@ def test_actual_dielectric_hb_generates_dc_and_second_harmonic(monkeypatch):
             setattr(owner,name,original)
     # Extend only the new frequency, preserving every existing physical map.
     import witwin.maxwell.mom.harmonic_preparation as preparation
-    extended_material = compile_harmonic_material(mw.Material(eps_r=2.,nonlinearity=mw.NonlinearSusceptibility(
+    extended_material = compile_harmonic_material(mw.Material(eps_r=2.,nonlinearity=mw.media.NonlinearSusceptibility(
         chi2=.002,chi3=.001)),3e8,3)
     extended_exterior = compile_harmonic_material(mw.Material(),3e8,3)
     third = SystemOperator(SurfaceSystem.create([(0,'dielectric',basis,extended_material.linear_samples[2])]),

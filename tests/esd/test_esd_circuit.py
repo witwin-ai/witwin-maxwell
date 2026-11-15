@@ -94,25 +94,24 @@ def _port() -> mw.LumpedPort:
     )
 
 
-def _scene(circuit: mw.Circuit) -> mw.Scene:
+def _scene(circuit: mw.circuits.Circuit) -> mw.Scene:
     return mw.Scene(
         domain=mw.Domain(bounds=_BOUNDS),
         grid=mw.GridSpec.uniform(_DX),
         boundary=mw.BoundarySpec.pml(num_layers=8),
         ports=(_port(),),
         circuits=(circuit,),
-        device="cuda",
     )
 
 
-def _waveform() -> mw.ESDWaveform:
-    return mw.ESDWaveform.iec_61000_4_2(_LEVEL_VOLTAGE)
+def _waveform() -> mw.esd.ESDWaveform:
+    return mw.esd.ESDWaveform.iec_61000_4_2(_LEVEL_VOLTAGE)
 
 
 def _prepared_dt() -> float:
-    generator = mw.ESDVoltageSource("gun", port="feed", waveform=_waveform())
+    generator = mw.esd.ESDVoltageSource("gun", port="feed", waveform=_waveform())
     solver = mw.Simulation.fdtd(
-        _scene(generator.build_circuit(t_end=1.0e-9)), frequency=1.0e9
+        _scene(generator.build_circuit(t_end=1.0e-9)), frequencies=1.0e9
     ).prepare().solver
     return float(solver.dt)
 
@@ -128,18 +127,18 @@ def _modulated_gaussian(times, *, t0, tau, fc, amp):
 def _char_waveform():
     times = np.linspace(0.0, 3.0e-9, 4000)
     values = _modulated_gaussian(times, **_CHAR_DRIVE)
-    return mw.PiecewiseLinearWaveform(
+    return mw.circuits.PiecewiseLinearWaveform(
         torch.tensor(times, dtype=torch.float64),
         torch.tensor(values, dtype=torch.float64),
     )
 
 
 def _char_circuit():
-    circuit = mw.Circuit("loop")
+    circuit = mw.circuits.Circuit("loop")
     drive = circuit.node("drive")
     pnode = circuit.node("pnode")
-    circuit.add(mw.VoltageSource("V1", drive, circuit.ground, 0.0, waveform=_char_waveform()))
-    circuit.add(mw.Resistor("R1", drive, pnode, _R_CHAR))
+    circuit.add(mw.circuits.VoltageSource("V1", drive, circuit.ground, 0.0, waveform=_char_waveform()))
+    circuit.add(mw.rf.Resistor("R1", drive, pnode, _R_CHAR))
     circuit.bind_port("feed", positive=pnode, negative=circuit.ground)
     return circuit
 
@@ -148,9 +147,11 @@ def _run(circuit, *, steps):
     return mw.Simulation.fdtd(
         _scene(circuit),
         frequencies=tuple(float(f) for f in _BAND),
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).run()
 
 
@@ -162,10 +163,10 @@ def _measure_admittance(result):
 
 
 def _fit_admittance(admittance):
-    config = mw.RationalFitConfig(
+    config = mw.rf.rational.RationalFitConfig(
         order=_FIT_ORDER, iterations=10, proportional=True, enforce_stability=True
     )
-    return mw.fit_rational(
+    return mw.rf.rational.fit_rational(
         torch.tensor(_BAND, dtype=torch.float64),
         torch.tensor(admittance, dtype=torch.complex128),
         config,
@@ -234,17 +235,17 @@ class _PortTrace:
 
 
 def _generator():
-    return mw.ESDVoltageSource("gun", port="feed", waveform=_waveform())
+    return mw.esd.ESDVoltageSource("gun", port="feed", waveform=_waveform())
 
 
 def _test_circuit(*, storage_capacitance=_CS, rload=_RLOAD):
-    generator = mw.ESDVoltageSource(
+    generator = mw.esd.ESDVoltageSource(
         "gun", port="feed", waveform=_waveform(),
         discharge_resistance=_RD, storage_capacitance=storage_capacitance,
     )
     t_end = _TEST_STEPS * _prepared_dt()
     circuit = generator.build_circuit(t_end=t_end)
-    circuit.add(mw.Resistor("Rload", circuit.node("tip"), circuit.ground, rload))
+    circuit.add(mw.rf.Resistor("Rload", circuit.node("tip"), circuit.ground, rload))
     return circuit
 
 
@@ -310,7 +311,7 @@ def _predict(model, times, *, zero_em=False, storage_capacitance=_CS, rload=_RLO
 
 
 def _coupled_trace(result, circuit_name) -> _PortTrace:
-    data = result.circuit(circuit_name)
+    data = mw.circuits.circuit(result, circuit_name)
     times = data.times.detach().cpu().numpy()
     v = data.node_voltage("tip").detach().cpu().numpy()
     # Source-branch current == -(current the generator pushes into R_d/the port).
@@ -485,11 +486,11 @@ def test_standard_network_topology_and_binding():
 
 def test_esd_voltage_source_validates_inputs():
     with pytest.raises(TypeError):
-        mw.ESDVoltageSource("gun", port="feed", waveform=object())
+        mw.esd.ESDVoltageSource("gun", port="feed", waveform=object())
     with pytest.raises(ValueError):
-        mw.ESDVoltageSource("gun", port="feed", waveform=_waveform(), discharge_resistance=0.0)
+        mw.esd.ESDVoltageSource("gun", port="feed", waveform=_waveform(), discharge_resistance=0.0)
     with pytest.raises(ValueError):
-        mw.ESDVoltageSource("gun", port="feed", waveform=_waveform(), storage_capacitance=-1.0)
+        mw.esd.ESDVoltageSource("gun", port="feed", waveform=_waveform(), storage_capacitance=-1.0)
 
 
 def test_generator_provenance_rides_through_to_result(coupled):
@@ -498,8 +499,8 @@ def test_generator_provenance_rides_through_to_result(coupled):
     circuit_name, _ = coupled
     circuit = _test_circuit()
     result = _run(circuit, steps=64)
-    assert circuit.name in result.esd_generator_names()
-    provenance = result.esd_generator(circuit.name)
+    assert circuit.name in mw.esd.esd_generator_names(result)
+    provenance = mw.esd.esd_generator(result, circuit.name)
     assert provenance["capability_level"] == "stress-only"
     assert provenance["injection"] == "source_impedance_network"
     assert provenance["discharge_resistance"] == pytest.approx(_RD)
@@ -509,4 +510,4 @@ def test_generator_provenance_rides_through_to_result(coupled):
     assert waveform["standard_revision"] == "ed2-contact"
     assert waveform["level_voltage"] == pytest.approx(_LEVEL_VOLTAGE)
     with pytest.raises(KeyError):
-        result.esd_generator("does-not-exist")
+        mw.esd.esd_generator(result, "does-not-exist")

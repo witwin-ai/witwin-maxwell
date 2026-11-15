@@ -289,8 +289,8 @@ def test_result_is_typed_and_tagged_non_physical():
     assert data.provenance["non_regulatory"] is True
     assert data.provenance["model_version"] == "smooth-breakdown-risk-1"
     # Public API surface.
-    assert mw.SmoothBreakdownRisk is SmoothBreakdownRisk
-    assert mw.SmoothBreakdownRiskData is SmoothBreakdownRiskData
+    assert mw.breakdown.SmoothBreakdownRisk is SmoothBreakdownRisk
+    assert mw.breakdown.SmoothBreakdownRiskData is SmoothBreakdownRiskData
 
 
 # --------------------------------------------------------------------------- #

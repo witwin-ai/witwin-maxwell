@@ -88,10 +88,12 @@ def _run_fdfd_with_peak(size, solver_type, max_iter, tol, restart, preconditione
         scene = build_scene(size)
         solver = mw.Simulation.fdfd(
             scene,
-            frequency=FREQUENCY,
-            solver=mw.GMRES(max_iter=max_iter, tol=tol, restart=restart,
-                            solver_type=solver_type, preconditioner=preconditioner,
-                            precision=precision),
+            frequencies=FREQUENCY,
+            config=mw.FDFDConfig(
+                solver=mw.fdfd.FDFDSolverConfig(max_iter=max_iter, tol=tol, restart=restart,
+                                solver_type=solver_type, preconditioner=preconditioner,
+                                precision=precision),
+            ),
         ).prepare().solver
 
         t0 = time.perf_counter()
@@ -142,10 +144,12 @@ def _run_fdtd_with_peak(size, steady_cycles, transient_cycles):
         )
         result = mw.Simulation.fdtd(
             scene,
-            frequency=FREQUENCY,
-            run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles,
-                                        transient_cycles=transient_cycles),
-            full_field_dft=True,
+            frequencies=FREQUENCY,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles,
+                                            transient_cycles=transient_cycles),
+                full_field_dft=True,
+            ),
         ).run()
         torch.cuda.synchronize()
         stats = result.stats()

@@ -1,5 +1,6 @@
 """Independent broadband native-VI physics, separate from modal-port S tests."""
 from __future__ import annotations
+from dataclasses import replace
 import argparse
 import hashlib
 import importlib.util
@@ -99,10 +100,10 @@ def load_helper(kind):
     return helper,path
 
 
-def configuration(args,device):
+def configuration(args):
     return printed_line_scene(args.kind,dx=args.dx,longitudinal_dl=args.longitudinal_dl,
         transverse_padding=args.padding,port_separation=args.separation,axial_half_length=args.axial_half_length,
-        transverse_refinement_radius=args.transverse_refinement_radius,sigma_e=args.sigma,metal=args.metal,device=device,
+        transverse_refinement_radius=args.transverse_refinement_radius,sigma_e=args.sigma,metal=args.metal,
         copper_frequency_range=(.1e9,4e9) if args.metal=="copper" else None)
 
 
@@ -130,14 +131,14 @@ def main():
     regional_helper=Path(inspect.getfile(regional_power));regional_sha=digest(regional_helper)
     base=configuration(args,'cpu' if args.prepare_only else 'cuda')
     ports,groups=physical_sources(base,args.kind,args.longitudinal_dl)
-    base=base.clone(ports=ports)
+    base=base.updated(ports=ports)
     prepared=prepare_scene(base)
-    compiled=[compile_port_geometry(prepared,p,device='cpu') for p in prepared.ports]
+    compiled=[compile_port_geometry(prepared,p,device='cpu') for p in prepared.scene.ports]
     source_geometry=[{'name':p.name,'positive':p.positive,'negative':p.negative,
         'voltage_aperture':{'position':p.voltage_aperture.position,'size':p.voltage_aperture.size},
         'current_surface':{'position':p.current_surface.position,'size':p.current_surface.size},
         'voltage_dof_count':len(c.voltage_weights),'voltage_weight_sum':float(c.voltage_weights.sum())}
-        for p,c in zip(prepared.ports,compiled)]
+        for p,c in zip(prepared.scene.ports,compiled)]
     common={'schema':'printed-line-broadband-native-physics/1','configuration':vars(args),
         'source_geometry':source_geometry,'coherent_drive_groups':groups,'source':identity,
         'scope':'Independent native line transfer; these S data are finite physical feed S, not WavePort modal-port S. Fixed apertures; paired symmetric stripline/CPW physical drives, four independent pair drives.',
@@ -146,9 +147,9 @@ def main():
     roi_monitors=[];roi_schema=None;roi_cpu_scene=None;roi_bounds=None
     if args.power_roi is not None:
         roi_bounds=tuple(tuple(args.power_roi[i:i+2]) for i in (0,2,4))
-        roi_cpu_base=configuration(args,'cpu')
+        roi_cpu_base=configuration(args)
         roi_monitors,roi_schema=regional_monitors(roi_cpu_base,roi_bounds,frequencies,observation=args.power_observation)
-        roi_cpu_scene=roi_cpu_base.clone(monitors=roi_monitors)
+        roi_cpu_scene=roi_cpu_base.updated(monitors=roi_monitors)
         common.update(regional_power_helper_sha256=regional_sha,power_roi_bounds_m=roi_bounds,
             regional_observation_schema=roi_schema)
     if args.prepare_only:
@@ -162,22 +163,22 @@ def main():
     monitor_by_name={m.name:m for m in monitors};tails=[]
     for station,modes in enumerate(integrals):
         for mode,(voltage,_) in enumerate(modes):
-            name,field,_=voltage[len(voltage)//2];tails.append(mw.FieldTimeMonitor(f'tail_{station}_{mode}',
+            name,field,_=voltage[len(voltage)//2];tails.append(mw.monitors.FieldTimeMonitor(f'tail_{station}_{mode}',
                 components=(field,),position=monitor_by_name[name].position,interval=32))
     common['integration_rows']=integrals
     common['integration_arithmetic']='complex128 SI sums and transfer algebra; native recorded samples retain their original field precision'
     pulse=mw.GaussianPulse(1e9,fwidth=.8e9)
     values=[];runs=[];spectra={name:[] for name in expected}
     for column,active in enumerate(groups):
-        scene=base.clone(ports=[port_copy(p,None if p.name in active else mw.SeriesRLC(r=50.)) for p in ports],monitors=[*monitors,*tails,*roi_monitors])
+        scene=base.updated(ports=[port_copy(p,None if p.name in active else mw.rf.SeriesRLC(r=50.)) for p in ports], monitors=[*monitors,*tails,*roi_monitors])
         simulation=mw.Simulation.fdtd(scene,frequencies=frequencies,
-            excitations=[mw.PortExcitation(name,source_time=pulse) for name in active],
-            run_time=mw.TimeConfig(time_steps=1),spectral_sampler=mw.SpectralSampler(window='none',normalize_source=False),full_field_dft=False)
+            excitations=[mw.rf.PortExcitation(name,source_time=pulse) for name in active],
+            config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1),spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=False),full_field_dft=False))
         execution=simulation.prepare();dt=execution.solver.dt;steps=math.ceil(args.duration/dt)
-        simulation.config.run_time=mw.TimeConfig(time_steps=steps);result=execution.run()
-        native={name:result.monitor(name)['components'][field].detach().cpu().numpy().astype(np.complex128).reshape(5) for name,(field,_) in expected.items()}
+        simulation.config=replace(simulation.config,run_time=mw.TimeConfig(time_steps=steps));result=execution.run()
+        native={name:result.raw_monitor(name)['components'][field].detach().cpu().numpy().astype(np.complex128).reshape(5) for name,(field,_) in expected.items()}
         for name,(field,index) in expected.items():
-            if tuple(result.monitor(name)['field_indices'][field])!=index:raise ValueError('Native physical probe index changed.')
+            if tuple(result.raw_monitor(name)['field_indices'][field])!=index:raise ValueError('Native physical probe index changed.')
             spectra[name].append(native[name])
         def integral(rows):return sum(native[name]*weight for name,_,weight in rows)
         stations=[]
@@ -189,8 +190,8 @@ def main():
         values.append(stations)
         trace_records={}
         for monitor in tails:
-            payload=result.monitor(monitor.name)
-            field=np.asarray(encode(payload['field']));time_axis=np.asarray(encode(payload['t']))
+            trace=result.monitor(monitor.name)
+            field=np.asarray(encode(trace.isel(component=0).values));time_axis=np.asarray(encode(trace.coords['t']))
             peak=float(abs(field).max());last=time_axis>=args.duration-2e-9
             trace_records[monitor.name]={'time_s':time_axis,'native_field':field,
                 'last2ns_peak_relative':float(abs(field[last]).max()/peak) if peak else None}

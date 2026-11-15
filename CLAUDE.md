@@ -21,8 +21,8 @@ This document defines the working rules for coding agents in this repository. Ke
 - The stable public architecture is `Scene + Simulation + Result`. New user-facing code must follow this model.
 - `Scene` must support both direct declarative construction (`mw.Scene(...)`) and a PyTorch-native module-style scene definition that ultimately materializes into the same public `Scene` object model.
 - Do not reintroduce old public convenience paths such as `Scene.set_*`, `Scene.with_*`, `mw.FDFD`, or `mw.FDTD`.
-- Preserve the compile-layer naming convention: scene-facing helpers use `compile_*` names such as `Scene.compile_materials(...)`, `Scene.compile_relative_materials(...)`, and `Scene.compile_material_tensors(...)`.
-- Shared core geometry constructors default to `device=None`; `Scene(...)` owns device placement and defaults to CUDA.
+- Compile helpers live in the internal `witwin.maxwell.compiler` package as `compile_*(prepared_scene, ...)` functions (for example `compile_materials(prepared)`, `compile_ports(prepared)`), not as `Scene` methods. `PreparedScene` (from `prepare_scene(scene, device=...)`) is a composition, not a `Scene`: its declarations are `prepared.scene`.
+- Shared core geometry constructors default to `device=None`; the solver config owns device placement (`FDTDConfig(device=...)` and the other configs, default CUDA).
 
 ## Project Overview
 
@@ -67,15 +67,16 @@ The current codebase is organized as a Python package under `witwin/maxwell/`, w
 
 ## Repository Layout
 
-- `witwin/maxwell/__init__.py`: public package exports.
-- `witwin/maxwell/scene.py`: declarative scene model, domain/grid/boundary handling, `MaterialRegion`, and `SceneModule`.
+- `witwin/maxwell/__init__.py`: the top-level public API (the `Scene -> Simulation -> Result` core) and the lazy loader of the domain namespaces.
+- Public namespaces (one home per public object; a namespace's `__all__` is its contract, loaded on first access through `witwin/maxwell/_lazy.py` where an import cycle requires it): `rf/` (`mw.rf`, `mw.rf.rational`), `media.py` (`mw.media`, with `mw.media.fit` = `dispersion_fit.py` and `mw.media.library` = `material_library.py`), `geometry/`, `grid.py`, `sources.py`, `monitors.py`, `fdtd/`, `fdfd/`, `circuits.py`, `antenna.py`, `esd.py`, `breakdown.py`, `sar.py`, `electrostatic/`, `coordinates.py`, `execution/`, `capability/`, `postprocess/`, `invdes/` and `mom/` (`mw.mom`). Other modules are implementation details: re-export a new public object from its namespace instead of the top level, and move no implementation module to match a namespace.
+- `witwin/maxwell/scene.py`: declarative scene model, domain/grid/boundary handling, `MaterialRegion`, `SceneModule`, and the internal `PreparedScene` grid preparation.
 - `witwin/maxwell/media.py`: public Maxwell material models, dispersion poles, and diagonal anisotropy descriptors.
 - `witwin/maxwell/sources.py`: public source definitions and source-time waveforms.
 - `witwin/maxwell/monitors.py`: point, plane, flux, and modal monitors.
-- `witwin/maxwell/ports.py`: first-class modal port definitions.
+- `witwin/maxwell/ports.py`: first-class modal, lumped, terminal and wave port definitions (public through the top level and `mw.rf`).
 - `witwin/maxwell/simulation.py`: public simulation entrypoint, runtime preparation, and backend dispatch.
 - `witwin/maxwell/result.py`: unified simulation result container.
-- `witwin/maxwell/compiler/`: scene compilers for materials, sources, ports, and monitors.
+- `witwin/maxwell/compiler/`: internal scene compilers for materials, sources, ports, and monitors; the `compile_*(prepared_scene, ...)` entry points.
 - `witwin/maxwell/fdfd/`: internal FDFD runtime and postprocessing helpers.
 - `witwin/maxwell/mom/`: surface discretization, weak PMCHWT, CUDA algebra, field queries and native result payloads.
 - `witwin/maxwell/fdtd/`: internal FDTD runtime, CPML logic, source injection, observers, and adjoint support.
@@ -91,11 +92,12 @@ The current codebase is organized as a Python package under `witwin/maxwell/`, w
 
 ## Working Expectations
 
-- Prefer package-style imports from `witwin.maxwell`, typically `import witwin.maxwell as mw`.
+- Every public object is stable unless marked experimental. Mark a new experimental class, function or solver entry point with `@experimental("<feature>")` from `witwin/maxwell/_stability.py` (constructors and entry points only, never kernels), and after adding, moving, removing or re-marking a public object run `python scripts/dev/public_api.py --write` to regenerate `docs/reference/public-api.csv` and the FEATURE_LIST stability table.
+- Prefer package-style imports from `witwin.maxwell`, typically `import witwin.maxwell as mw`, and reach non-core objects through their namespace (`mw.rf.PortData`, `mw.fdtd.CPMLConfig`), not through implementation modules.
 - New public examples, tests, and scripts should look like `Scene -> Simulation -> Result`, not direct backend construction.
 - Build scenes with `Domain`, `GridSpec`, `BoundarySpec`, `Structure`, `Material`, source objects, monitor objects, `ModePort`, and `MaterialRegion` as appropriate.
 - Use the declarative `BoundaryKind` / `BoundarySpec` vocabulary consistently; do not introduce new raw boundary-mode strings outside validated APIs.
-- Use `Scene.add_structure(...)`, `Scene.add_source(...)`, `Scene.add_monitor(...)`, `Scene.add_port(...)`, and `Scene.add_material_region(...)` for scene assembly.
+- Build scenes with the constructor (`mw.Scene(structures=(...), sources=(...), ...)`) and derive variants with `Scene.updated(...)`; `Scene` is immutable.
 - For PyTorch-native scene definitions, prefer `SceneModule` subclasses that expose `to_scene()` and return a standard `Scene`; do not create a second incompatible simulation entrypoint.
 - When behavior changes in a way a user would notice, update `FEATURE_LIST.md` to keep the documented feature inventory current.
 - If backend internals must be inspected, prefer `Simulation.prepare()` and then inspect `prepared.solver` rather than importing or constructing backend classes through the public path.

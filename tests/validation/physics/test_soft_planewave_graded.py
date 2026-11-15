@@ -86,9 +86,8 @@ def _cpu_scene(x_nodes, y_nodes, z_nodes, *, num_layers=6):
                                  (float(z_nodes[0]), float(z_nodes[-1])))),
         grid=mw.GridSpec.custom(x_nodes, y_nodes, z_nodes),
         boundary=mw.BoundarySpec.pml(num_layers=num_layers),
-        device="cpu",
     )
-    return prepare_scene(scene)
+    return prepare_scene(scene, device="cpu")
 
 
 def _global_min_deltas(scene):
@@ -109,9 +108,10 @@ def test_soft_plane_uniform_spacing_is_global_min_bit_for_bit():
     # on uniform grids and no regression is introduced.
     nodes = np.linspace(-1.0, 1.0, 41)
     scene = _cpu_scene(nodes, nodes, nodes)
-    plane_index = soft_plane_wave_index(scene, "z", 1.0)
+    plane_index = soft_plane_wave_index(scene, "z", 1.0, device=scene.device)
     deltas = soft_plane_wave_region_spacing(
-        scene, injection_axis="z", plane_index=plane_index, direction_sign=1
+        scene, injection_axis="z", plane_index=plane_index, direction_sign=1,
+        device=scene.device,
     )
     old = _global_min_deltas(scene)
     assert deltas["x"] == old["x"]
@@ -137,13 +137,14 @@ def test_soft_plane_graded_injection_axis_uses_launch_cell_spacing():
     zn = _geom_graded_nodes(lo, hi, 60, total_ratio=1.0 / 3.0)  # coarse near low edge
     xn = np.linspace(lo, hi, 45)
     scene = _cpu_scene(xn, xn, zn)
-    plane_index = soft_plane_wave_index(scene, "z", 1.0)
+    plane_index = soft_plane_wave_index(scene, "z", 1.0, device=scene.device)
     dz = np.asarray(scene.dz_primal64)
     launch_cell = float(dz[plane_index])
     global_min = float(dz.min())
 
     deltas = soft_plane_wave_region_spacing(
-        scene, injection_axis="z", plane_index=plane_index, direction_sign=1
+        scene, injection_axis="z", plane_index=plane_index, direction_sign=1,
+        device=scene.device,
     )
     # The launch plane genuinely sits in a coarse region, well away from the finest
     # cell, so the local spacing differs substantially from the global minimum.
@@ -159,10 +160,11 @@ def test_soft_plane_graded_reverse_direction_uses_launch_side_cell():
     zn = _geom_graded_nodes(lo, hi, 60, total_ratio=3.0)  # coarse near high edge
     xn = np.linspace(lo, hi, 45)
     scene = _cpu_scene(xn, xn, zn)
-    plane_index = soft_plane_wave_index(scene, "z", -1.0)
+    plane_index = soft_plane_wave_index(scene, "z", -1.0, device=scene.device)
     dz = np.asarray(scene.dz_primal64)
     deltas = soft_plane_wave_region_spacing(
-        scene, injection_axis="z", plane_index=plane_index, direction_sign=-1
+        scene, injection_axis="z", plane_index=plane_index, direction_sign=-1,
+        device=scene.device,
     )
     assert deltas["z"] == float(dz[plane_index - 1])
 
@@ -178,12 +180,13 @@ def test_soft_plane_graded_reduces_injected_phase_velocity_error():
     scene = _cpu_scene(xn, xn, zn)
     frequency = 1.0e9
 
-    plane_index = soft_plane_wave_index(scene, "z", 1.0)
+    plane_index = soft_plane_wave_index(scene, "z", 1.0, device=scene.device)
     dz = np.asarray(scene.dz_primal64)
     launch_cell = float(dz[plane_index])
     old = _global_min_deltas(scene)
     new = soft_plane_wave_region_spacing(
-        scene, injection_axis="z", plane_index=plane_index, direction_sign=1
+        scene, injection_axis="z", plane_index=plane_index, direction_sign=1,
+        device=scene.device,
     )
     dt = _auto_dt(old["x"], old["y"], old["z"], frequency)
     solver = _FakeSolver(scene, frequency, dt)
@@ -227,13 +230,14 @@ def test_soft_plane_graded_tangential_axis_uses_aperture_mean():
     xn = _geom_graded_nodes(lo, hi, 60, total_ratio=3.0)  # graded tangential aperture
     yn = np.linspace(lo, hi, 41)
     scene = _cpu_scene(xn, yn, zn)
-    plane_index = soft_plane_wave_index(scene, "z", 1.0)
+    plane_index = soft_plane_wave_index(scene, "z", 1.0, device=scene.device)
     deltas = soft_plane_wave_region_spacing(
-        scene, injection_axis="z", plane_index=plane_index, direction_sign=1
+        scene, injection_axis="z", plane_index=plane_index, direction_sign=1,
+        device=scene.device,
     )
 
     dx = np.asarray(scene.dx_primal64)
-    lo_idx, hi_idx = physical_interior_indices(scene, "x")
+    lo_idx, hi_idx = physical_interior_indices(scene, "x", device=scene.device)
     aperture_mean = float(dx[lo_idx:hi_idx].mean())
 
     # Uniform injection axis stays exact; graded tangential aperture uses its mean,
@@ -253,37 +257,38 @@ def test_soft_plane_graded_grid_launches_forward_wave():
     zn = _geom_graded_nodes(lo, hi, 60, total_ratio=1.0 / 2.5)  # coarse near source
     xn = np.linspace(lo, hi, 45)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((lo, hi), (lo, hi), (lo, hi))),
-        grid=mw.GridSpec.custom(xn, xn, zn),
-        boundary=mw.BoundarySpec.pml(num_layers=6),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
-            name="soft",
-        )
-    )
+                domain=mw.Domain(bounds=((lo, hi), (lo, hi), (lo, hi))),
+                grid=mw.GridSpec.custom(xn, xn, zn),
+                boundary=mw.BoundarySpec.pml(num_layers=6),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization=(1.0, 0.0, 0.0),
+                source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
+                name="soft",
+            ),
+            ),
+            )
     # The propagation axis is genuinely graded across the injection region.
-    prepared = mw.Simulation.fdtd(scene, frequency=1.0e9).prepare()
+    prepared = mw.Simulation.fdtd(scene, frequencies=1.0e9).prepare()
     dz = np.asarray(prepared.solver.scene.dz_primal64)
     assert float(dz.max()) - float(dz.min()) > 1e-6
 
     result = mw.Simulation.fdtd(
         scene,
-        frequency=1.0e9,
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        frequencies=1.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).run()
 
     solver = result.solver
-    field = torch.abs(result.raw_output["Ex"]).detach().cpu().numpy()
+    field = torch.abs(result._raw_output["Ex"]).detach().cpu().numpy()
     assert np.isfinite(field).all()
 
-    plane_index = soft_plane_wave_index(solver.scene, "z", 1.0)
+    plane_index = soft_plane_wave_index(solver.scene, "z", 1.0, device=solver.scene.device)
     z_plane = float(solver.scene.z[plane_index].item())
     z_nodes = np.asarray(solver.scene.z_nodes64)
     z_axis = z_nodes if field.shape[2] == len(z_nodes) else np.asarray(solver.scene.z_half64)

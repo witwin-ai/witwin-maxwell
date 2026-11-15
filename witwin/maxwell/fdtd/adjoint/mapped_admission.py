@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import torch
 import numpy as np
 
+from ...errors import UnsupportedFeatureError
+
 
 def tensor_leaves(tensor):
     """Find leaf ancestry structurally, including dependencies with zero VJP."""
@@ -28,7 +30,8 @@ def tensor_leaves(tensor):
             found[id(leaf)] = leaf
         pending.extend(other for other, _ in node.next_functions if other is not None)
     if not found:
-        raise NotImplementedError('Differentiable material value has unresolved leaf ancestry.')
+        raise UnsupportedFeatureError('Differentiable material value has unresolved leaf ancestry.',
+                                      feature="coordinates", method="fdtd")
     return found
 
 
@@ -84,50 +87,69 @@ def assess_mapped_materials(scene, *, module, config, excitations, port_sweep, f
     if not active and not any(value.requires_grad for _, value in (*parameters, *buffers)):
         return None
     if not isinstance(scene.coordinates, BendCoordinates):
-        raise NotImplementedError('Electrical mapped adjoints require fixed BendCoordinates.')
+        raise UnsupportedFeatureError('Electrical mapped adjoints require fixed BendCoordinates.',
+                                      feature="coordinates", method="fdtd")
     if config is None or config.run_time is None or config.run_time.dt is None or config.run_time.time_steps is None:
-        raise NotImplementedError('Electrical mapped adjoints require explicit fixed dt and time_steps.')
+        raise UnsupportedFeatureError('Electrical mapped adjoints require explicit fixed dt and time_steps.',
+                                      feature="coordinates", method="fdtd")
     if frequencies is None or len(frequencies) != 1:
-        raise NotImplementedError('Electrical mapped adjoints currently require one fixed frequency.')
+        raise UnsupportedFeatureError('Electrical mapped adjoints currently require one fixed frequency.',
+                                      feature="coordinates", method="fdtd")
     if config.field_dtype != torch.float32:
-        raise NotImplementedError('Electrical mapped adjoints currently require FP32 primary fields.')
+        raise UnsupportedFeatureError('Electrical mapped adjoints currently require FP32 primary fields.',
+                                      feature="coordinates", method="fdtd")
     if config.parallel is not None or config.shutoff or config.initial_condition is not None:
-        raise NotImplementedError('Electrical mapped adjoints require fixed-duration single-device execution without initial conditions.')
+        raise UnsupportedFeatureError('Electrical mapped adjoints require fixed-duration single-device execution without initial conditions.',
+                                      feature="coordinates", method="fdtd")
     if any(str(kind) != 'pml' for pair in scene.boundary.face_kinds for kind in pair):
-        raise NotImplementedError('Electrical mapped adjoints currently require all six PML faces.')
+        raise UnsupportedFeatureError('Electrical mapped adjoints currently require all six PML faces.',
+                                      feature="coordinates", method="fdtd")
     if scene.grid.is_auto:
-        raise NotImplementedError('Electrical mapped adjoints require a fixed grid; auto-grid derivatives are unqualified.')
+        raise UnsupportedFeatureError('Electrical mapped adjoints require a fixed grid; auto-grid derivatives are unqualified.',
+                                      feature="coordinates", method="fdtd")
     if scene.sources or scene.material_regions or scene.thin_wires or scene.circuits or scene.networks or scene.lumped_elements or port_sweep is not None:
-        raise NotImplementedError('Electrical mapped adjoints currently require direct fixed Norton feeds without other source/device runtimes.')
+        raise UnsupportedFeatureError('Electrical mapped adjoints currently require direct fixed Norton feeds without other source/device runtimes.',
+                                      feature="coordinates", method="fdtd")
     if any(type(port) is not LumpedPort or port.termination is not None for port in scene.ports):
-        raise NotImplementedError('Electrical mapped adjoints currently require fixed LumpedPort Norton geometry.')
+        raise UnsupportedFeatureError('Electrical mapped adjoints currently require fixed LumpedPort Norton geometry.',
+                                      feature="coordinates", method="fdtd")
     if any(type(monitor) not in (PointMonitor, ClosedSurfaceMonitor, PowerLossMonitor) for monitor in scene.monitors):
-        raise NotImplementedError('Electrical mapped adjoints currently support fixed point, closed-surface and bulk-loss observations.')
+        raise UnsupportedFeatureError('Electrical mapped adjoints currently support fixed point, closed-surface and bulk-loss observations.',
+                                      feature="coordinates", method="fdtd")
     from ...sources import CW, GaussianPulse, RickerWavelet, CustomSourceTime
     for excitation in excitations:
         waveform = excitation.source_time
         if waveform is not None and (type(waveform) not in (CW, GaussianPulse, RickerWavelet, CustomSourceTime)
                                      or getattr(waveform, '_fn', None) is not None):
-            raise NotImplementedError('Electrical mapped adjoints require declarative fixed temporal waveforms; custom callable dependencies are unqualified.')
+            raise UnsupportedFeatureError('Electrical mapped adjoints require declarative fixed temporal waveforms; custom callable dependencies are unqualified.',
+                                          feature="coordinates", method="fdtd")
     allowed = {}
     for index, structure in enumerate(scene.structures):
         material = structure.material
         if structure.phase_screen is not None or structure.uv is not None:
-            raise NotImplementedError('Electrical mapped adjoints do not qualify optical phase-screen or UV assignments.')
+            raise UnsupportedFeatureError('Electrical mapped adjoints do not qualify optical phase-screen or UV assignments.',
+                                          feature="coordinates", method="fdtd")
         if type(structure.geometry) is not Box:
-            raise NotImplementedError('Electrical mapped adjoints currently require fixed Box geometry.')
+            raise UnsupportedFeatureError('Electrical mapped adjoints currently require fixed Box geometry.',
+                                          feature="coordinates", method="fdtd")
         if getattr(material, 'is_pec', False):
-            raise NotImplementedError('Electrical mapped adjoints do not yet qualify PEC material combinations.')
+            raise UnsupportedFeatureError('Electrical mapped adjoints do not yet qualify PEC material combinations.',
+                                          feature="coordinates", method="fdtd")
         if getattr(material, 'is_pmc', False):
-            raise NotImplementedError('Electrical mapped adjoints do not yet qualify PMC material combinations.')
+            raise UnsupportedFeatureError('Electrical mapped adjoints do not yet qualify PMC material combinations.',
+                                          feature="coordinates", method="fdtd")
         if type(material) not in (Material, CopperFoil):
-            raise NotImplementedError('Electrical mapped adjoints require scalar Material or CopperFoil declarations; ADE and other constitutive classes are unqualified.')
+            raise UnsupportedFeatureError('Electrical mapped adjoints require scalar Material or CopperFoil declarations; ADE and other constitutive classes are unqualified.',
+                                          feature="coordinates", method="fdtd")
         if any(getattr(material, name, False) for name in ('is_anisotropic', 'is_dispersive', 'is_nonlinear', 'is_gyromagnetic', 'is_medium2d', 'is_lossy_metal', 'is_surface_impedance')):
-            raise NotImplementedError('Electrical mapped adjoints require scalar nondispersive constitutive laws.')
+            raise UnsupportedFeatureError('Electrical mapped adjoints require scalar nondispersive constitutive laws.',
+                                          feature="coordinates", method="fdtd")
         if getattr(material, 'modulation', None) is not None or getattr(material, 'breakdown', None) is not None:
-            raise NotImplementedError('Electrical mapped adjoints require static constitutive declarations.')
+            raise UnsupportedFeatureError('Electrical mapped adjoints require static constitutive declarations.',
+                                          feature="coordinates", method="fdtd")
         if isinstance(material, CopperFoil) and material.mode_count is None:
-            raise NotImplementedError('Electrical mapped copper adjoints require fixed mode_count.')
+            raise UnsupportedFeatureError('Electrical mapped copper adjoints require fixed mode_count.',
+                                          feature="coordinates", method="fdtd")
         if not structure.enabled:
             continue
         fields = ('thickness', 'conductivity') if isinstance(material, CopperFoil) else ('eps_r', 'sigma_e')
@@ -138,29 +160,36 @@ def assess_mapped_materials(scene, *, module, config, excitations, port_sweep, f
     for path, tensor, owner, name in active:
         slot = allowed.get((id(owner), name))
         if slot is None:
-            raise NotImplementedError('Unregistered differentiable mapped input: ' + path)
+            raise UnsupportedFeatureError('Unregistered differentiable mapped input: ' + path,
+                                          feature="coordinates", method="fdtd")
         if tensor.ndim != 0 or not tensor.is_floating_point():
-            raise NotImplementedError('Registered electrical material values must be real floating scalars.')
+            raise UnsupportedFeatureError('Registered electrical material values must be real floating scalars.',
+                                          feature="coordinates", method="fdtd")
         covered.update(tensor_leaves(tensor))
         slots.append(slot)
     if module is not None:
         frontier = {id(value) for _, value in parameters if value.requires_grad}
         if not covered.keys() <= frontier:
-            raise NotImplementedError('Electrical mapped module dependencies must originate from registered SceneModule parameters; independent buffer or plain-Tensor leaves are unqualified.')
+            raise UnsupportedFeatureError('Electrical mapped module dependencies must originate from registered SceneModule parameters; independent buffer or plain-Tensor leaves are unqualified.',
+                                          feature="coordinates", method="fdtd")
     storage = {}
     for identifier, leaf in covered.items():
         if not leaf.is_floating_point():
-            raise NotImplementedError('Complex material parameter leaves are unqualified.')
+            raise UnsupportedFeatureError('Complex material parameter leaves are unqualified.',
+                                          feature="coordinates", method="fdtd")
         key = str(leaf.device), leaf.untyped_storage().data_ptr()
         if key in storage and storage[key] != identifier:
-            raise NotImplementedError('Distinct trainable material leaves share storage; input deduplication is unsafe.')
+            raise UnsupportedFeatureError('Distinct trainable material leaves share storage; input deduplication is unsafe.',
+                                          feature="coordinates", method="fdtd")
         storage[key] = identifier
     for name, parameter in parameters:
         if parameter.requires_grad and id(parameter) not in covered:
-            raise NotImplementedError('Unaccounted trainable module parameter: ' + name)
+            raise UnsupportedFeatureError('Unaccounted trainable module parameter: ' + name,
+                                          feature="coordinates", method="fdtd")
     for name, buffer in buffers:
         if buffer.requires_grad and not set(tensor_leaves(buffer)) <= covered.keys():
-            raise NotImplementedError('Unaccounted trainable module buffer: ' + name)
+            raise UnsupportedFeatureError('Unaccounted trainable module buffer: ' + name,
+                                          feature="coordinates", method="fdtd")
     return MappedMaterialAdmission(tuple(slots), frozenset(covered))
 
 
@@ -223,7 +252,8 @@ def validate_grad_mode_scene(numerical_scene, dependency_scene, *, snapshot):
     """
     pending = {}
     def mismatch(path):
-        raise NotImplementedError('Mapped SceneModule changes physical declarations with grad mode: ' + path)
+        raise UnsupportedFeatureError('Mapped SceneModule changes physical declarations with grad mode: ' + path,
+                                      feature="coordinates", method="fdtd")
     def compare(left, right, path):
         if left[0] != right[0]:
             mismatch(path)

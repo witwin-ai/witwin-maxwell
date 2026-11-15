@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -14,6 +14,8 @@ from .delay import (
     read_bidirectional_delay,
     write_bidirectional_delay,
 )
+from ..errors import UnsupportedFeatureError
+from ..compiler.networks import compile_networks
 
 
 @dataclass
@@ -266,7 +268,7 @@ def prepare_network_runtimes(
     """
 
     if compiled_networks is None:
-        compiled_networks = solver.scene.compile_networks(dt=solver.dt, device=solver.device)
+        compiled_networks = compile_networks(solver.scene, dt=solver.dt, device=solver.device)
     else:
         compiled_networks = tuple(compiled_networks)
     port_runtimes = {
@@ -572,7 +574,7 @@ def replay_network_runtimes(
         getattr(solver, "_network_runtimes", ())
     ):
         if runtime.delay_runtime is not None:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Differentiable embedded-network replay does not support explicit "
                 "delay state: the bidirectional reference-plane ring couples a "
                 "step to samples written up to max_delay_steps earlier (a "
@@ -583,7 +585,8 @@ def replay_network_runtimes(
                 "requires a delay-aware reverse ring carried across segments. The "
                 "delay forward state is captured in the checkpoint schema for "
                 "forward resume; the reverse pass is intentionally fail-closed "
-                "rather than approximate."
+                "rather than approximate.",
+                feature="network", method="fdtd"
             )
         name = network_state_name(network_index)
         carried_name = network_carried_voltage_name(network_index)
@@ -1254,6 +1257,35 @@ def finalize_embedded_networks(solver, ports) -> dict[str, EmbeddedNetworkData]:
     return output
 
 
+def rebind_embedded_networks(
+    networks: dict[str, EmbeddedNetworkData], ports
+) -> dict[str, EmbeddedNetworkData]:
+    """Recompute embedded-network terminal data from (differentiable) port data.
+
+    ``networks`` are the finalized records of one forward; ``ports`` are the
+    port records rebuilt from the adjoint outputs, so the returned voltage,
+    current and power tensors carry the autograd graph of the run.
+    """
+
+    output: dict[str, EmbeddedNetworkData] = {}
+    for name, template in networks.items():
+        connected = tuple(ports[port_name] for port_name in template.metadata["connections"])
+        voltage = torch.stack(tuple(data.voltage for data in connected), dim=0)
+        current = torch.stack(tuple(-data.current for data in connected), dim=0)
+        port_power = 0.5 * torch.real(voltage * torch.conj(current))
+        net_power = torch.sum(port_power, dim=0)
+        output[name] = replace(
+            template,
+            frequencies=connected[0].frequencies,
+            voltage=voltage,
+            current=current,
+            port_power=port_power,
+            absorbed_power=torch.clamp(net_power, min=0.0),
+            generated_power=torch.clamp(-net_power, min=0.0),
+        )
+    return output
+
+
 __all__ = [
     "NetworkStepTrace",
     "PreparedNetworkRuntime",
@@ -1262,6 +1294,7 @@ __all__ = [
     "apply_network_runtime",
     "apply_network_runtimes",
     "finalize_embedded_networks",
+    "rebind_embedded_networks",
     "make_network_runner",
     "prepare_network_runtimes",
     "pullback_network_runtimes",

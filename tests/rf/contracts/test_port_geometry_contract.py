@@ -13,9 +13,8 @@ def _prepared_scene():
         domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
-        device="cpu",
     )
-    return prepare_scene(scene)
+    return prepare_scene(scene, device="cpu")
 
 
 def _port(**overrides):
@@ -77,6 +76,18 @@ def test_compiled_geometry_is_sparse_and_resident_on_the_requested_device():
     assert compiled.current_components == ("Hx", "Hy", "Hx", "Hy")
     assert all(indices.ndim == 2 and indices.shape[1] == 3 for indices in compiled.current_indices)
     assert all(weights.device.type == "cpu" for weights in compiled.current_weights)
+
+
+def test_fdtd_field_port_requires_current_surface_at_compilation():
+    # current_surface is optional at construction only for layered MoM ports.
+    port = _port(current_surface=None)
+    assert port.current_surface is None
+    message = (r"^LumpedPort 'feed': LumpedPort.current_surface is required for FDTD; "
+               r"it is optional only for layered MoM$")
+    with pytest.raises(TypeError, match=message):
+        compile_port_geometry(_prepared_scene(), port)
+    with pytest.raises(TypeError, match=r"^current_surface must be a witwin.core.Box or None\.$"):
+        _port(current_surface=(0.5, 0.5, 0.45))
 
 
 def test_compiler_rejects_current_surfaces_that_do_not_follow_the_yee_contract():

@@ -14,6 +14,12 @@ from witwin.maxwell.fdtd.distributed.wire import (
 from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd_parallel import FDTDParallelConfig, FDTDPartitionPlan
 from witwin.maxwell.scene import prepare_scene
+from tests.support.core_solver import bind_core
+
+
+def _snapshot(result):
+    """Last-step real fields by Yee component (Result.time_snapshot, as plain tensors)."""
+    return {name: data.values for name, data in result.time_snapshot.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -197,26 +203,25 @@ def test_decode_edge_round_trips_flat_offsets():
 _FREQUENCY = 2.0e9
 
 
-def _wire_scene(*, boundary=None, trainable_radius=False, circuit=None, device="cuda:0"):
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
-        grid=mw.GridSpec.uniform(0.04),
-        boundary=mw.BoundarySpec.none() if boundary is None else boundary,
-        device=device,
-        circuits=() if circuit is None else (circuit,),
-    )
+def _wire_scene(*, boundary=None, trainable_radius=False, circuit=None):
     radius = (
         torch.tensor(2.0e-3, requires_grad=True) if trainable_radius else 2.0e-3
     )
-    scene.add_thin_wire(
-        mw.ThinWire(
-            name="wire",
-            points=((-0.08, 0.0, 0.0), (0.08, 0.0, 0.0)),
-            radius=radius,
-            conductor=mw.WireConductor.pec(),
-            snap="strict",
-        )
-    )
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
+                grid=mw.GridSpec.uniform(0.04),
+                boundary=mw.BoundarySpec.none() if boundary is None else boundary,
+                circuits=() if circuit is None else (circuit,),
+                thin_wires=(
+            mw.rf.ThinWire(
+                name="wire",
+                points=((-0.08, 0.0, 0.0), (0.08, 0.0, 0.0)),
+                radius=radius,
+                conductor=mw.rf.WireConductor.pec(),
+                snap="strict",
+            ),
+            ),
+            )
     return scene
 
 
@@ -224,12 +229,14 @@ def _parallel(devices=("cuda:0", "cuda:1")):
     return FDTDParallelConfig(devices=devices, transport="cuda_p2p", result_device=devices[0])
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="The distributed solver prepares the scene on its CUDA devices.")
 def test_distributed_wire_with_pml_boundary_is_rejected():
     scene = _wire_scene(boundary=mw.BoundarySpec.pml(num_layers=4))
     with pytest.raises(NotImplementedError, match="distributed CPML"):
         DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_parallel())
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="The distributed solver prepares the scene on its CUDA devices.")
 def test_distributed_wire_with_mur_boundary_is_rejected():
     # Fail-closed: wire+Mur edge coupling across the x split is undocumented and
     # unverified, so it must be rejected rather than silently running a partial
@@ -239,39 +246,41 @@ def test_distributed_wire_with_mur_boundary_is_rejected():
         DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_parallel())
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="The distributed solver prepares the scene on its CUDA devices.")
 def test_distributed_lossy_wire_is_rejected():
     # Multi-GPU disposition (B3/B4): a finite-conductivity wire fails closed on the
     # distributed forward. The owner runtime builds only the lossless PEC update, so
     # a lossy wire would silently run as PEC across shards.
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
-        grid=mw.GridSpec.uniform(0.04),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
-    )
-    scene.add_thin_wire(
-        mw.ThinWire(
-            name="wire",
-            points=((-0.08, 0.0, 0.0), (0.08, 0.0, 0.0)),
-            radius=2.0e-3,
-            conductor=mw.WireConductor.finite(5.8e7),
-            snap="strict",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
+                grid=mw.GridSpec.uniform(0.04),
+                boundary=mw.BoundarySpec.none(),
+                thin_wires=(
+            mw.rf.ThinWire(
+                name="wire",
+                points=((-0.08, 0.0, 0.0), (0.08, 0.0, 0.0)),
+                radius=2.0e-3,
+                conductor=mw.rf.WireConductor.finite(5.8e7),
+                snap="strict",
+            ),
+            ),
+            )
     with pytest.raises(NotImplementedError, match="finite-conductivity"):
         DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_parallel())
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="The distributed solver prepares the scene on its CUDA devices.")
 def test_distributed_wire_with_circuit_is_rejected():
-    circuit = mw.Circuit("c")
+    circuit = mw.circuits.Circuit("c")
     node = circuit.node("n")
-    circuit.add(mw.Resistor("R", node, circuit.ground, 50.0))
+    circuit.add(mw.rf.Resistor("R", node, circuit.ground, 50.0))
     circuit.bind_port("p", positive=node, negative=circuit.ground)
     scene = _wire_scene(circuit=circuit)
     with pytest.raises(NotImplementedError, match="embedded network or lumped circuit"):
         DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_parallel())
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="The distributed solver prepares the scene on its CUDA devices.")
 def test_trainable_wire_plus_parallel_is_rejected_at_construction():
     scene = _wire_scene(trainable_radius=True)
     with pytest.raises(ValueError, match="forward solve only"):
@@ -283,8 +292,10 @@ def test_public_prepare_rejects_trainable_wire_parallel():
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=4),
-        parallel=_parallel(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=4),
+            parallel=_parallel(),
+        ),
     )
     with pytest.raises(ValueError, match="thin-wire state"):
         simulation.prepare()
@@ -311,32 +322,29 @@ def _straight_crossing_scene():
     """An x-directed PEC wire that crosses the x=0 partition split, plus monitor."""
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
-        grid=mw.GridSpec.uniform(0.04),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
-    )
-    scene.add_thin_wire(
-        mw.ThinWire(
-            name="wire",
-            points=((-0.08, 0.0, 0.0), (0.08, 0.0, 0.0)),
-            radius=2.0e-3,
-            conductor=mw.WireConductor.pec(),
-            snap="strict",
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            name="drive",
-            position=(-0.04, 0.0, 0.0),
-            polarization="Ex",
-            profile="ideal",
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=10.0),
-        )
-    )
-    scene.add_monitor(
-        mw.WireMonitor(name="wire_state", wire="wire", frequencies=(_FREQUENCY,))
-    )
+                domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
+                grid=mw.GridSpec.uniform(0.04),
+                boundary=mw.BoundarySpec.none(),
+                thin_wires=(
+            mw.rf.ThinWire(
+                name="wire",
+                points=((-0.08, 0.0, 0.0), (0.08, 0.0, 0.0)),
+                radius=2.0e-3,
+                conductor=mw.rf.WireConductor.pec(),
+                snap="strict",
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                name="drive",
+                position=(-0.04, 0.0, 0.0),
+                polarization="Ex",
+                profile="ideal",
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=10.0),
+            ),
+            ),
+                monitors=(mw.rf.WireMonitor(name="wire_state", wire="wire", frequencies=(_FREQUENCY,)),),
+            )
     return scene
 
 
@@ -344,43 +352,41 @@ def _closed_loop_crossing_scene():
     """A closed lossless PEC loop in the z=0 plane crossing the x=0 split."""
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
-        grid=mw.GridSpec.uniform(0.04),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
-    )
-    scene.add_thin_wire(
-        mw.ThinWire(
-            name="loop",
-            points=(
-                (-0.08, -0.08, 0.0),
-                (0.08, -0.08, 0.0),
-                (0.08, 0.08, 0.0),
-                (-0.08, 0.08, 0.0),
-                (-0.08, -0.08, 0.0),
+                domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
+                grid=mw.GridSpec.uniform(0.04),
+                boundary=mw.BoundarySpec.none(),
+                thin_wires=(
+            mw.rf.ThinWire(
+                name="loop",
+                points=(
+                    (-0.08, -0.08, 0.0),
+                    (0.08, -0.08, 0.0),
+                    (0.08, 0.08, 0.0),
+                    (-0.08, 0.08, 0.0),
+                    (-0.08, -0.08, 0.0),
+                ),
+                radius=2.0e-3,
+                conductor=mw.rf.WireConductor.pec(),
             ),
-            radius=2.0e-3,
-            conductor=mw.WireConductor.pec(),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            name="drive",
-            position=(-0.04, -0.08, 0.0),
-            polarization="Ex",
-            profile="ideal",
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=10.0),
-        )
-    )
-    scene.add_monitor(
-        mw.WireMonitor(name="loop_state", wire="loop", frequencies=(_FREQUENCY,))
-    )
+            ),
+                sources=(
+            mw.PointDipole(
+                name="drive",
+                position=(-0.04, -0.08, 0.0),
+                polarization="Ex",
+                profile="ideal",
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=10.0),
+            ),
+            ),
+                monitors=(mw.rf.WireMonitor(name="loop_state", wire="loop", frequencies=(_FREQUENCY,)),),
+            )
     return scene
 
 
 def _run_single(scene, *, time_steps=_TIME_STEPS):
     solver = FDTD(prepare_scene(scene), frequency=_FREQUENCY)
     solver.init_field()
+    bind_core(solver)
     output = solver.solve(
         time_steps=time_steps,
         dft_frequency=_FREQUENCY,
@@ -499,9 +505,11 @@ def _public_run(scene, *, parallel, devices, time_steps=_TIME_STEPS):
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        parallel=parallel_config,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            parallel=parallel_config,
+        ),
     )
     prepared = simulation.prepare()
     return prepared.run()
@@ -539,11 +547,12 @@ def test_public_prepare_run_parallel_wire_matches_single_gpu(
     )
 
     # Gathered last-step fields must also match the single-GPU public run bitwise.
-    assert single_result.fields and parallel_result.fields
-    for name, single_field in single_result.fields.items():
-        assert name in parallel_result.fields
+    single_fields, parallel_fields = _snapshot(single_result), _snapshot(parallel_result)
+    assert single_fields and parallel_fields
+    for name, single_field in single_fields.items():
+        assert name in parallel_fields
         torch.testing.assert_close(
-            parallel_result.fields[name].cpu(),
+            parallel_fields[name].cpu(),
             single_field.cpu(),
             rtol=0.0,
             atol=0.0,

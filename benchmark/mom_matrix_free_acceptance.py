@@ -36,7 +36,7 @@ def run_case(subdivision, order, *, solve):
     scene=mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1),mw.Material(eps_r=2.25,sigma_e=.004))],
         sources=[mw.PlaneWave(direction=(0,0,1),polarization=(1,0,0),source_time=mw.CW(frequency=3e8,phase=.23))])
     integration=IntegrationConfig(order=order,singular_order=order)
-    config=mw.MoMConfig(subdivisions=subdivision,integration=integration)
+    config=mw.mom.MoMConfig(subdivisions=subdivision,integration=integration)
     basis,exterior,interior=compile_surface(scene,3e8,config)
     (matrix,metadata),dense_setup=measured(lambda:assemble_weak(basis,exterior,interior,integration))
     operator,setup=measured(lambda:StreamedWeakOperator(basis,exterior,interior,integration,pair_chunk=1024))

@@ -13,21 +13,21 @@ def _build_scene(source, *, structures=None):
         domain=mw.Domain(bounds=((-0.96, 0.96), (-0.96, 0.96), (-0.96, 0.96))),
         grid=mw.GridSpec.uniform(0.08),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
     )
-    for structure in structures or []:
-        scene.add_structure(structure)
-    scene.add_source(source)
+    scene = scene.updated(structures=(*scene.structures, *(structures or [])))
+    scene = scene.updated(sources=(*scene.sources, source))
     return scene
 
 
 def _run_tfsf(scene, *, frequency=1.0e9, steady_cycles=6, transient_cycles=15):
     return mw.Simulation.fdtd(
         scene,
-        frequency=frequency,
-        run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        frequencies=frequency,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).run()
 
 
@@ -37,7 +37,7 @@ def _get_raw_ez(result):
 
 def _get_raw_component(result, component):
     solver = result.solver
-    raw_field = result.raw_output[component]
+    raw_field = result._raw_output[component]
     if isinstance(raw_field, torch.Tensor):
         field = torch.abs(raw_field).detach().cpu().numpy()
     else:

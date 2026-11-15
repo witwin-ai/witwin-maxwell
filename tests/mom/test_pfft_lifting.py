@@ -25,8 +25,8 @@ def _scene(frequency_mesh, bodies):
     return mw.Scene(structures=structures, sources=[mw.PlaneWave()])
 
 
-def _config(pfft=mw.PFFTConfig()):
-    return mw.MoMConfig(operator_backend='pfft', riesz_storage='local_rwg_v1', integration=INTEGRATION,
+def _config(pfft=mw.mom.PFFTConfig()):
+    return mw.mom.MoMConfig(operator_backend='pfft', riesz_storage='local_rwg_v1', integration=INTEGRATION,
                         pfft=pfft, stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal'))
 
 
@@ -39,9 +39,9 @@ def _relative(actual, reference):
 def test_shared_grid_rhs_dense_agreement_and_order(frequency_mesh, epsilon):
     scene = _scene(frequency_mesh, [((0., 0., 0.), epsilon)])
     errors = []
-    config = mw.PFFTConfig()
+    config = mw.mom.PFFTConfig()
     for pfft in (config, replace(config, order=config.stencil_order+1)):
-        prepared = mw.Simulation.mom(scene, frequency=FREQUENCY, config=_config(pfft)).prepare()
+        prepared = mw.Simulation.mom(scene, frequencies=FREQUENCY, config=_config(pfft)).prepare()
         handle = prepared.solver.handle
         dense, _ = build_lifted_rhs(handle.body_handles[0])
         error = _relative(prepared.solver.rhs, dense)
@@ -65,8 +65,8 @@ def test_shared_grid_rhs_dense_agreement_and_order(frequency_mesh, epsilon):
 def test_shared_grid_rhs_body_local_and_multiple_carriers(grids):
     # The weak-contrast body's rows must not receive the stronger body's carrier.
     scene = _scene(3, [((-1.25, 0., 0.), 4.), ((1.25, 0., 0.), 1.+1e-6)])
-    prepared = mw.Simulation.mom(scene, frequency=FREQUENCY,
-                                config=_config(mw.PFFTConfig(exterior_grids=grids))).prepare()
+    prepared = mw.Simulation.mom(scene, frequencies=FREQUENCY,
+                                config=_config(mw.mom.PFFTConfig(exterior_grids=grids))).prepare()
     handle = prepared.solver.handle
     second = (mw.PlaneWave(direction=(1., 0., 0.), polarization=(0., 0., 1.),
                            source_time=mw.CW(frequency=FREQUENCY, phase=.37)),)
@@ -82,13 +82,13 @@ def test_shared_grid_rhs_body_local_and_multiple_carriers(grids):
             errors.append(_relative(local, dense))
         assert decoder.metadata['rhs_bodies'][0]['rhs_source_batch'] == 3
     print(json.dumps({'exterior_grids': grids, 'body_carrier_rhs_relative_errors': errors}), flush=True)
-    assert max(errors) <= 3*mw.PFFTConfig().target_accuracy, errors
+    assert max(errors) <= 3*mw.mom.PFFTConfig().target_accuracy, errors
 
 
 @pytest.mark.parametrize('epsilon', [.25, 1.])
 def test_shared_grid_rhs_finer_background_and_matched_medium(epsilon):
     scene = _scene(3, [((0., 0., 0.), epsilon)])
-    prepared = mw.Simulation.mom(scene, frequency=FREQUENCY, config=_config()).prepare()
+    prepared = mw.Simulation.mom(scene, frequencies=FREQUENCY, config=_config()).prepare()
     handle = prepared.solver.handle
     grid = handle.metadata['rhs_bodies'][0]['rhs_lifting_grid']
     if epsilon == 1.:
@@ -97,4 +97,4 @@ def test_shared_grid_rhs_finer_background_and_matched_medium(epsilon):
         assert grid['grid_region'] == 'exterior_finer_spacing'
         assert grid['spacing_m'] == handle.actions.exterior.region.config.spacing
         dense, _ = build_lifted_rhs(handle.body_handles[0])
-        assert _relative(prepared.solver.rhs, dense) <= 3*mw.PFFTConfig().target_accuracy
+        assert _relative(prepared.solver.rhs, dense) <= 3*mw.mom.PFFTConfig().target_accuracy

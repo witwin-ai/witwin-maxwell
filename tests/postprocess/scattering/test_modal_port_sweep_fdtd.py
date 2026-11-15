@@ -28,22 +28,20 @@ def _base_scene():
         domain=mw.Domain(bounds=((-1.4, 1.4), (-0.9, 0.9), (-0.9, 0.9))),
         grid=mw.GridSpec.uniform(0.05),
         # Keep the grid-aligned arithmetic interface used to qualify this coarse modal phase gate.
-        subpixel_samples=mw.SubpixelSpec(samples=1, averaging="arithmetic"),
+        subpixel=mw.SubpixelSpec(samples=1, averaging="arithmetic"),
         boundary=mw.BoundarySpec.pml(num_layers=10),
-        device="cuda",
     )
 
 
 def _add_ports(scene):
     half = 0.5 * _PORT_SPACING
-    scene.add_port(
+    scene = scene.updated(ports=(
+        *scene.ports,
         mw.ModePort("left", position=(-half, 0.0, 0.0), size=(0.0, 1.2, 1.0), direction="+",
-                    polarization="Ey", monitor_offset=0.1)
-    )
-    scene.add_port(
+                    polarization="Ey", monitor_offset=0.1),
         mw.ModePort("right", position=(half, 0.0, 0.0), size=(0.0, 1.2, 1.0), direction="-",
-                    polarization="Ey", monitor_offset=-0.1)
-    )
+                    polarization="Ey", monitor_offset=-0.1),
+    ))
     return scene
 
 
@@ -51,25 +49,28 @@ def _simulation(scene):
     return mw.Simulation.fdtd(
         scene,
         frequencies=_FREQUENCIES,
-        run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=30),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=30),
+            full_field_dft=False,
+        ),
     )
 
 
 def _straight_guide():
     scene = _base_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(4.0, 0.5, 0.35)),
             material=mw.Material(eps_r=4.0),
             name="core",
-        )
-    )
+        ),
+    ))
     return _add_ports(scene)
 
 
 def test_straight_waveguide_two_port_transmits_with_beta_length_phase():
-    result = mw.run_modal_port_sweep(_simulation(_straight_guide()), mw.ModalPortSweep())
+    result = mw.rf.run_modal_port_sweep(_simulation(_straight_guide()), mw.rf.ModalPortSweep())
     network = result.network
 
     assert network.port_names == ("left::Ey0", "right::Ey0")
@@ -92,8 +93,8 @@ def test_straight_waveguide_two_port_transmits_with_beta_length_phase():
 
 
 def test_straight_waveguide_polarization_channels_do_not_cross_couple():
-    sweep = mw.ModalPortSweep(modes={"left": (0, ("Ez", 0)), "right": (0, ("Ez", 0))})
-    network = mw.run_modal_port_sweep(_simulation(_straight_guide()), sweep).network
+    sweep = mw.rf.ModalPortSweep(modes={"left": (0, ("Ez", 0)), "right": (0, ("Ez", 0))})
+    network = mw.rf.run_modal_port_sweep(_simulation(_straight_guide()), sweep).network
 
     assert network.port_names == ("left::Ey0", "left::Ez0", "right::Ey0", "right::Ez0")
     magnitude = torch.abs(network.s.detach().cpu())
@@ -108,19 +109,16 @@ def test_straight_waveguide_polarization_channels_do_not_cross_couple():
 
 def test_asymmetric_junction_is_reciprocal():
     scene = _base_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(geometry=mw.Box(position=(-1.0, 0.0, 0.0), size=(2.0, 0.5, 0.35)),
-                     material=mw.Material(eps_r=4.0), name="narrow")
-    )
-    scene.add_structure(
+                     material=mw.Material(eps_r=4.0), name="narrow"),
         mw.Structure(geometry=mw.Box(position=(1.0, 0.1, 0.0), size=(2.0, 0.7, 0.35)),
-                     material=mw.Material(eps_r=4.0), name="wide")
-    )
-    scene.add_structure(
+                     material=mw.Material(eps_r=4.0), name="wide"),
         mw.Structure(geometry=mw.Box(position=(0.15, -0.15, 0.0), size=(0.2, 0.2, 0.35)),
-                     material=mw.Material(eps_r=6.0), name="bump")
-    )
-    network = mw.run_modal_port_sweep(_simulation(_add_ports(scene)), mw.ModalPortSweep()).network
+                     material=mw.Material(eps_r=6.0), name="bump"),
+    ))
+    network = mw.rf.run_modal_port_sweep(_simulation(_add_ports(scene)), mw.rf.ModalPortSweep()).network
     s = network.s.detach().cpu()
 
     s21 = s[:, 1, 0]

@@ -25,8 +25,10 @@ import torch
 
 from .filters import _normalize_spacing
 from .projection import _gradient_norm
+from .._stability import experimental
 
 
+@experimental("invdes")
 def gray_level_penalty(x: torch.Tensor) -> torch.Tensor:
     """Measure of non-discreteness ``mean(4 x (1 - x))`` in ``[0, 1]``.
 
@@ -35,6 +37,7 @@ def gray_level_penalty(x: torch.Tensor) -> torch.Tensor:
     return (4.0 * x * (1.0 - x)).mean()
 
 
+@experimental("invdes")
 def length_scale_coefficient(radius: float, spacing) -> float:
     """Default indicator decay ``c`` (m^2) for a filter of physical ``radius``.
 
@@ -61,16 +64,19 @@ def _indicator_decay(filtered: torch.Tensor, spacing, radius, c) -> torch.Tensor
     return torch.exp(-float(c) * _gradient_norm(filtered, spacing))
 
 
+@experimental("invdes")
 def solid_indicator(filtered, projected, *, spacing, radius=None, c=None) -> torch.Tensor:
     """Solid-skeleton indicator ``projected * exp(-c |grad filtered|^2)``."""
     return projected * _indicator_decay(filtered, spacing, radius, c)
 
 
+@experimental("invdes")
 def void_indicator(filtered, projected, *, spacing, radius=None, c=None) -> torch.Tensor:
     """Void-skeleton indicator ``(1 - projected) * exp(-c |grad filtered|^2)``."""
     return (1.0 - projected) * _indicator_decay(filtered, spacing, radius, c)
 
 
+@experimental("invdes")
 def minimum_linewidth_constraint(
     filtered: torch.Tensor,
     projected: torch.Tensor,
@@ -90,6 +96,7 @@ def minimum_linewidth_constraint(
     return (indicator * torch.clamp(filtered - eta_e, max=0.0) ** 2).mean()
 
 
+@experimental("invdes")
 def minimum_gap_constraint(
     filtered: torch.Tensor,
     projected: torch.Tensor,

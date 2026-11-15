@@ -12,6 +12,7 @@ import witwin.maxwell.fdtd.excitation.modes as mode_solver
 from witwin.maxwell.compiler.sources import _compile_mode_source
 from witwin.maxwell.fdtd.excitation.modes import solve_mode_source_profile
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 _FREQUENCY = 2.0e9
@@ -29,39 +30,38 @@ def _rectangular_scene(
     aperture_size: tuple[float, float] = _APERTURE_SIZE,
 ) -> mw.Scene:
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.64, 0.64),) * 3),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.pml(num_layers=8),
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2.56, core_size[0], core_size[1])),
-            material=mw.Material(eps_r=4.0),
-            name="guide",
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(-0.30, 0.0, 0.0),
-            size=(0.0, aperture_size[0], aperture_size[1]),
-            mode_index=mode_index,
-            polarization=polarization,
-            source_time=mw.CW(frequency=_FREQUENCY),
-            name="mode",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.64, 0.64),) * 3),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.pml(num_layers=8),
+                subpixel=mw.SubpixelSpec(samples=3, averaging="polarized"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2.56, core_size[0], core_size[1])),
+                material=mw.Material(eps_r=4.0),
+                name="guide",
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(-0.30, 0.0, 0.0),
+                size=(0.0, aperture_size[0], aperture_size[1]),
+                mode_index=mode_index,
+                polarization=polarization,
+                source_time=mw.CW(frequency=_FREQUENCY),
+                name="mode",
+            ),
+            ),
+            )
     return scene
 
 
 def _solve(scene: mw.Scene):
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     context = SimpleNamespace(
         scene=prepared,
         Ex=torch.empty((1,), device=prepared.device, dtype=torch.float32),
         c=_C0,
-        _compiled_material_model=prepared.compile_materials(),
+        _compiled_material_model=compile_materials(prepared),
     )
     compiled = _compile_mode_source(scene.sources[0], default_frequency=_FREQUENCY)
     return solve_mode_source_profile(context, compiled)

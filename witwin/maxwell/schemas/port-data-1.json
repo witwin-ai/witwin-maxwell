@@ -1,0 +1,70 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "description": "witwin.maxwell.network.PortData",
+ "properties": {
+  "available_power": {
+   "description": "torch.Tensor | None"
+  },
+  "beta": {
+   "description": "torch.Tensor | None"
+  },
+  "characteristic_impedance": {
+   "description": "torch.Tensor | None"
+  },
+  "current": {
+   "description": "torch.Tensor"
+  },
+  "direction": {
+   "description": "str"
+  },
+  "frequencies": {
+   "description": "torch.Tensor"
+  },
+  "metadata": {
+   "description": "Mapping[str, Any]"
+  },
+  "mode_names": {
+   "description": "tuple[str, ...] | None"
+  },
+  "phasor_convention": {
+   "description": "str"
+  },
+  "port_name": {
+   "description": "str"
+  },
+  "power_wave_convention": {
+   "description": "str"
+  },
+  "reference_plane": {
+   "description": "float | None"
+  },
+  "tracking_confidence": {
+   "description": "torch.Tensor | None"
+  },
+  "voltage": {
+   "description": "torch.Tensor"
+  },
+  "z0": {
+   "description": "Any"
+  }
+ },
+ "required": [
+  "port_name",
+  "frequencies",
+  "voltage",
+  "current",
+  "z0",
+  "direction",
+  "reference_plane",
+  "available_power",
+  "mode_names",
+  "beta",
+  "characteristic_impedance",
+  "tracking_confidence",
+  "metadata",
+  "phasor_convention",
+  "power_wave_convention"
+ ],
+ "title": "PortData",
+ "type": "object"
+}

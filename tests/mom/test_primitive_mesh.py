@@ -170,9 +170,9 @@ def test_revolved_and_extruded_core_primitives_follow_core_conventions(kind, axi
     if kind == 'cylinder':
         geometry = mw.Cylinder(position=(.1, .2, -.3), radius=.15, height=.4, axis=axis, rotation=rotation)
     elif kind == 'cone':
-        geometry = mw.Cone(position=(.1, .2, -.3), radius=.15, height=.4, axis=axis, rotation=rotation)
+        geometry = mw.geometry.Cone(position=(.1, .2, -.3), radius=.15, height=.4, axis=axis, rotation=rotation)
     else:
-        geometry = mw.Prism(position=(.1, .2, -.3), radius=.15, height=.4, num_sides=3, axis=axis, rotation=rotation)
+        geometry = mw.geometry.Prism(position=(.1, .2, -.3), radius=.15, height=.4, num_sides=3, axis=axis, rotation=rotation)
     config = pm.SurfaceMeshConfig(elements_per_wavelength=None, max_edge_length=.04)
     vertices, faces = pm.primitive_arrays(geometry, config, **CPU)
     assert_closed_surface(vertices, faces)
@@ -245,8 +245,8 @@ def test_wavelength_sizing_uses_the_largest_medium_wavenumber():
 
 def test_default_numerical_identity_is_unchanged():
     from witwin.maxwell.mom.runtime import _numerical_identity
-    assert 'surface_mesh' not in _numerical_identity(mw.MoMConfig())
-    config = mw.MoMConfig(surface_mesh=mw.SurfaceMeshConfig(edge_grading=mw.EdgeGrading(.01)))
+    assert 'surface_mesh' not in _numerical_identity(mw.mom.MoMConfig())
+    config = mw.mom.MoMConfig(surface_mesh=mw.mom.SurfaceMeshConfig(edge_grading=mw.mom.EdgeGrading(.01)))
     assert _numerical_identity(config)['surface_mesh']['edge_grading'] == {'min_size': .01, 'ratio': 1.5}
     from witwin.maxwell.mom.runtime import _restore_surface_mesh
     assert _restore_surface_mesh(config.surface_mesh.payload()) == config.surface_mesh
@@ -274,7 +274,7 @@ def test_invalid_geometry_and_grading_fail_closed():
     with pytest.raises(TypeError):
         pm.SurfaceMeshConfig(edge_grading=(.01, 1.5))
     with pytest.raises(TypeError):
-        mw.MoMConfig(surface_mesh={'elements_per_wavelength': 10})
+        mw.mom.MoMConfig(surface_mesh={'elements_per_wavelength': 10})
     with pytest.raises(ValueError, match='positive and finite'):
         pm.box_arrays((1., 0., 1.), .1, **CPU)
     with pytest.raises(ValueError, match='positive and finite'):
@@ -293,13 +293,12 @@ def test_invalid_geometry_and_grading_fail_closed():
         pm.slab_mesh(1., 1., 2., edge_length=.1, device='cpu')
 
 
-@pytest.mark.parametrize('geometry', [mw.Torus(major_radius=.2, minor_radius=.05), mw.Pyramid(base_size=.2, height=.2),
-                                      mw.HollowBox(outer_size=(.2, .2, .2), inner_size=(.1, .1, .1))])
+@pytest.mark.parametrize('geometry', [mw.geometry.Torus(major_radius=.2, minor_radius=.05), mw.geometry.Pyramid(base_size=.2, height=.2),
+                                      mw.geometry.HollowBox(outer_size=(.2, .2, .2), inner_size=(.1, .1, .1))])
 def test_unsupported_core_geometry_fails_closed(geometry):
     from witwin.maxwell.mom.runtime import _compile_basis
-    scene = SimpleNamespace(device='cuda')
     with pytest.raises(ValueError, match=f'{type(geometry).__name__} is not supported'):
-        _compile_basis(scene, geometry, mw.MoMConfig())
+        _compile_basis(geometry, mw.mom.MoMConfig())
 
 
 def test_builders_require_cuda_for_surface_mesh():
@@ -329,7 +328,7 @@ def test_public_path_compiles_rotated_box_and_cylinder_bodies():
         mw.Structure(mw.Box(position=(-.15, 0., 0.), size=(.1, .08, .06), rotation=(.2, .3, .4)), mw.Material(eps_r=4.)),
         mw.Structure(mw.Cylinder(position=(.15, 0., 0.), radius=.04, height=.1, axis='x'), mw.Material(eps_r=2.))],
         sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(surface_mesh=mw.SurfaceMeshConfig(elements_per_wavelength=10))
+    config = mw.mom.MoMConfig(surface_mesh=mw.mom.SurfaceMeshConfig(elements_per_wavelength=10))
     system, exterior = compile_surfaces(scene, 1e9, config)
     k = 2*math.pi*1e9/C_0*2
     for body in system.bodies:
@@ -342,21 +341,21 @@ def test_public_path_compiles_rotated_box_and_cylinder_bodies():
 def test_public_box_solve_round_trips_with_surface_mesh_identity():
     scene = mw.Scene(structures=[mw.Structure(mw.Box(size=(.06, .05, .04), rotation=(.1, .2, .3)),
                                               mw.Material(eps_r=3.))], sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(surface_mesh=mw.SurfaceMeshConfig(elements_per_wavelength=None, max_edge_length=.02))
-    result = mw.Simulation.mom(scene, frequency=1e9, config=config).run()
-    payload = result.surface_currents.snapshot()
+    config = mw.mom.MoMConfig(surface_mesh=mw.mom.SurfaceMeshConfig(elements_per_wavelength=None, max_edge_length=.02))
+    result = mw.Simulation.mom(scene, frequencies=1e9, config=config).run()
+    payload = mw.mom.surface_currents(result).snapshot()
     assert payload['surface_mesh'] == config.surface_mesh.payload()
-    restored = SurfaceData.restore(payload, scene, 1e9)
-    assert torch.equal(restored.scattered_coefficients, result.surface_currents.scattered_coefficients)
+    restored = SurfaceData.restore(payload, scene, 1e9, 'cuda')
+    assert torch.equal(restored.scattered_coefficients, mw.mom.surface_currents(result).scattered_coefficients)
     payload.pop('surface_mesh')
     with pytest.raises(ValueError):
-        SurfaceData.restore(payload, scene, 1e9)
+        SurfaceData.restore(payload, scene, 1e9, 'cuda')
 
 
 @cuda
 def test_point_dipole_clearance_applies_to_faceted_primitive_panels():
     from witwin.maxwell.mom.runtime import compile_surfaces
-    config = mw.MoMConfig(surface_mesh=mw.SurfaceMeshConfig(elements_per_wavelength=None, max_edge_length=.02))
+    config = mw.mom.MoMConfig(surface_mesh=mw.mom.SurfaceMeshConfig(elements_per_wavelength=None, max_edge_length=.02))
     box = mw.Box(size=(.06, .05, .04), rotation=(.1, .2, .3))
 
     def scene(position):

@@ -86,9 +86,9 @@ def test_strict_planner_matches_frozen_scalar_reference(rwg):
     stats = torch.arange(tree.node_count*3, device="cuda", dtype=torch.float64).reshape(-1,3)*.03-10.
     kwargs = dict(min_order=2, max_order=10, table_storage="compact", separation_ratio=.25)
     if rwg: kwargs.update(rwg_statistics=(stats, stats), rwg_absolute_budget=1e100, balancing_impedance=abs(medium.eta))
-    for budget, cap in [(mw.KernelErrorBudget(1e-6,1e-5), 1024**3),
-                         (mw.KernelErrorBudget(1e-30,1e-30),1024**3),
-                         (mw.KernelErrorBudget(1e-6,1e-5),1)]:
+    for budget, cap in [(mw.mom.KernelErrorBudget(1e-6,1e-5), 1024**3),
+                         (mw.mom.KernelErrorBudget(1e-30,1e-30),1024**3),
+                         (mw.mom.KernelErrorBudget(1e-6,1e-5),1)]:
         actual = run_plan(plan_multipole_order, regions, budget, table_budget_bytes=cap, **kwargs)
         expected = run_plan(reference, regions, budget, table_budget_bytes=cap, **kwargs)
         assert actual[0] == expected[0]
@@ -105,7 +105,7 @@ def test_strict_planner_matches_frozen_scalar_reference(rwg):
     # Unavailable contours still force rejection for every attempted order.
     wide = build_support_octree(lower[:2],lower[:2]+(.45/(3**.5)),leaf_size=1)
     for planner in [plan_multipole_order, reference]:
-        accepted, receipt = run_plan(planner, ((wide,medium),), mw.KernelErrorBudget(1.,1.),max_order=2)
+        accepted, receipt = run_plan(planner, ((wide,medium),), mw.mom.KernelErrorBudget(1.,1.),max_order=2)
         assert not accepted
         assert all(x["unavailable_bounds"] == 2 and not x["kernel_pass"] for x in receipt["attempts"])
     print(dict(rwg=rwg, strict_scalar_reference_matched=True, physical_qualification=False),flush=True)
@@ -121,7 +121,7 @@ def test_bundled_scalar_oracle_without_environment_and_corruption_guard(monkeypa
     assert reference.__globals__["multipole_truncation_bound"] is multipole_truncation_bound
     assert "multipole_truncation_bounds" not in reference.__globals__
     with pytest.raises(ValueError, match="regional trees"):
-        reference((), mw.KernelErrorBudget(1., 1.))
+        reference((), mw.mom.KernelErrorBudget(1., 1.))
     read_bytes = Path.read_bytes
     def corrupted(path):
         value = read_bytes(path)

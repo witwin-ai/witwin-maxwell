@@ -14,17 +14,20 @@ from ...compiler.materials import (
     material_model_has_nonlinearity,
 )
 from ..boundary import BOUNDARY_PERIODIC, has_complex_fields
+from ...errors import UnsupportedFeatureError
+from ...compiler.materials import compile_materials
 
 
 def validate_nonlinear_tensor_materials(scene):
     """Reject unsupported FDTD combinations before loading native kernels."""
-    for structure in scene.structures:
+    for structure in scene.scene.structures:
         material = structure.material
         if (bool(getattr(material, "is_nonlinear", False))
                 and bool(getattr(material, "is_anisotropic", False))):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "FDTD nonlinear anisotropic materials require a coupled field-dependent "
-                "tensor update; the current scalar nonlinear update does not implement it."
+                "tensor update; the current scalar nonlinear update does not implement it.",
+                feature="material.nonlinear", method="fdtd"
             )
 
 
@@ -38,25 +41,28 @@ def build_materials(solver, scene):
     # a complex field (|E|^2 is not analytic, and the real additive/scaling
     # corrections would break the Bloch phase). Each needs a complex-field kernel
     # variant before it can compose with Bloch periodicity.
-    if scene.boundary.uses_kind("bloch") and material_model_has_nonlinearity(material_model):
-        raise NotImplementedError(
+    if scene.scene.boundary.uses_kind("bloch") and material_model_has_nonlinearity(material_model):
+        raise UnsupportedFeatureError(
             "FDTD nonlinear media require the real-valued update kernels: a Bloch-periodic run carries "
             "complex phase-shifted fields, for which the instantaneous |E|^2 Kerr/chi2/TPA coefficient is "
-            "not defined. Use a real-field boundary (PML/PEC/PMC/periodic) with the nonlinearity."
+            "not defined. Use a real-field boundary (PML/PEC/PMC/periodic) with the nonlinearity.",
+            feature="material.nonlinear", method="fdtd"
         )
-    if scene.boundary.uses_kind("bloch") and material_model_has_full_anisotropy(material_model):
-        raise NotImplementedError(
+    if scene.scene.boundary.uses_kind("bloch") and material_model_has_full_anisotropy(material_model):
+        raise UnsupportedFeatureError(
             "FDTD full (off-diagonal) anisotropic media use a real additive curl(H) correction: a "
             "Bloch-periodic run carries complex phase-shifted fields, and applying the real off-diagonal "
             "correction to a complex field would break the Bloch phase relation. Use a real-field boundary "
-            "(PML/PEC/PMC/periodic) or an axis-aligned DiagonalTensor3."
+            "(PML/PEC/PMC/periodic) or an axis-aligned DiagonalTensor3.",
+            feature="material.full_tensor", method="fdtd"
         )
-    if scene.boundary.uses_kind("bloch") and material_model_has_modulation(material_model):
-        raise NotImplementedError(
+    if scene.scene.boundary.uses_kind("bloch") and material_model_has_modulation(material_model):
+        raise UnsupportedFeatureError(
             "FDTD time-modulated media scale the real-valued update coefficients by a per-step modulation "
             "factor: a Bloch-periodic run carries complex phase-shifted fields, and the real scaling does "
             "not track the complex Bloch phase. Use a real-field boundary (PML/PEC/PMC/periodic) with the "
-            "modulation."
+            "modulation.",
+            feature="material.modulation", method="fdtd"
         )
 
     solver._compiled_material_model = material_model
@@ -155,12 +161,12 @@ def compile_forward_materials(scene, sources):
     """Retain the forward material graph for spatial mode-plane trainability."""
     from ...adjoint_inputs import scene_trainable_material_tensors
 
-    if any(source["kind"] == "mode_source" for source in sources) and scene_trainable_material_tensors(scene):
+    if any(source["kind"] == "mode_source" for source in sources) and scene_trainable_material_tensors(scene.scene):
         # Native stepping runs under no_grad; only its single material compile
         # needs a graph for the mode-plane probe. No cross-forward cache is used.
         with torch.enable_grad():
-            return scene.compile_materials()
-    return scene.compile_materials()
+            return compile_materials(scene)
+    return compile_materials(scene)
 
 
 def build_material_update_coefficients(solver):
@@ -196,11 +202,12 @@ def build_material_update_coefficients(solver):
     # which the current diagonalized effective-eps + additive off-diagonal split
     # cannot express.
     if solver.modulation_enabled and solver.full_aniso_enabled:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "FDTD time-modulated media cannot be combined with full (off-diagonal) anisotropic "
             "media: modulating the crystal-frame permittivity tensor needs a per-step re-inversion "
             "of the coupled 3x3 tensor, which the diagonalized effective-permittivity update path "
-            "does not provide. Use a diagonal (axis-aligned) tensor or drop the modulation."
+            "does not provide. Use a diagonal (axis-aligned) tensor or drop the modulation.",
+            feature="material.modulation", method="fdtd"
         )
 
 
@@ -393,8 +400,9 @@ def build_full_anisotropy(solver, material_model):
         return
 
     if solver.nonlinear_enabled:
-        raise NotImplementedError(
-            "FDTD full (off-diagonal) anisotropic media cannot be combined with nonlinear media."
+        raise UnsupportedFeatureError(
+            "FDTD full (off-diagonal) anisotropic media cannot be combined with nonlinear media.",
+            feature="material.nonlinear", method="fdtd"
         )
 
     pole_nodes = material_model.get("pole_tensor_nodes", {})
@@ -477,7 +485,7 @@ def _aniso_node_gather_weights(scene, source_axis, reference):
     axis = "xyz"[source_axis]
     primal = torch.as_tensor(getattr(scene, f"d{axis}_primal64"), device=reference.device, dtype=reference.dtype)
     dual = torch.as_tensor(getattr(scene, f"d{axis}_dual64"), device=reference.device, dtype=reference.dtype)
-    periodic = scene.boundary.axis_kind(axis) == "periodic"
+    periodic = scene.scene.boundary.axis_kind(axis) == "periodic"
     previous = torch.cat((primal[-1:] if periodic else primal[:1], primal)) / (2 * dual)
     following = torch.cat((primal, primal[:1] if periodic else primal[-1:])) / (2 * dual)
     return previous, following
@@ -1732,12 +1740,13 @@ def _handle_full_aniso_absorber_overlap(solver):
         solver._full_aniso_cpml_overlap = _full_aniso_offdiag_overlaps_absorber(solver)
         return
     if _full_aniso_offdiag_overlaps_absorber(solver):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "FDTD full (off-diagonal) anisotropic media overlapping a split-field "
             "PML/absorber layer are not supported: the graded-sigma absorber carries no "
             "per-direction auxiliary memory to coordinate-stretch the off-diagonal tensor "
             "coupling. Use the default CPML absorber for anisotropic structures that reach "
-            "the boundary region."
+            "the boundary region.",
+            feature="material.full_tensor", method="fdtd"
         )
 
 

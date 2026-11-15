@@ -28,6 +28,7 @@ import torch
 from scipy.optimize import least_squares
 
 import witwin.maxwell as mw
+from witwin.maxwell.scene import place_scene
 
 A = 0.1
 C0 = 299_792_458.0
@@ -43,21 +44,22 @@ def _scene(grid, z_nodes=None):
         name="block",
     )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-A, A), (-A, A), (0.0, HZ))),
-        grid=grid,
-        boundary=mw.BoundarySpec.pec(),
-        device="cuda",
-        structures=[block],
-        sources=[
+                domain=mw.Domain(bounds=((-A, A), (-A, A), (0.0, HZ))),
+                grid=grid,
+                boundary=mw.BoundarySpec.pec(),
+                structures=[block],
+                sources=[
             mw.PointDipole(
                 position=(-0.53 * A, 0.37 * A, 0.5 * HZ),
                 polarization="Ez",
                 source_time=mw.GaussianPulse(frequency=F1, fwidth=0.25 * F1),
                 name="src",
             )
-        ],
-    )
-    scene.add_monitor(mw.FieldTimeMonitor("probe", components=("Ez",), position=(-0.31 * A, 0.62 * A, 0.5 * HZ)))
+            ],
+                monitors=(
+            mw.monitors.FieldTimeMonitor("probe", components=("Ez",), position=(-0.31 * A, 0.62 * A, 0.5 * HZ)),
+            ),
+            )
     return scene
 
 
@@ -72,12 +74,12 @@ def corner_grid(n_base, dl, num_cells, max_ratio=1.4):
         wavelength=A,
         min_steps_per_wavelength=n_base,
         max_ratio=max_ratio,
-        layer_refinement=mw.LayerRefinementSpec(
+        layer_refinement=mw.grid.LayerRefinementSpec(
             min_cells=None,
             axis="z",
             bounds=(0.0, HZ),
-            corner_finder=mw.CornerFinderSpec(medium="metal"),
-            corner_refinement=mw.GridRefinement(dl=dl, num_cells=num_cells),
+            corner_finder=mw.grid.CornerFinderSpec(medium="metal"),
+            corner_refinement=mw.grid.GridRefinement(dl=dl, num_cells=num_cells),
         ),
     )
 
@@ -98,17 +100,17 @@ def _fit_frequencies(t, signal, guesses):
 
 def measure(grid, *, periods=300):
     scene = _scene(grid)
-    prepared = mw.Simulation.fdtd(scene, frequencies=[F1], full_field_dft=False,
-                                  run_time=mw.TimeConfig(time_steps=10)).prepare()
+    prepared = mw.Simulation.fdtd(scene, frequencies=[F1], config=mw.FDTDConfig(full_field_dft=False,
+                                  run_time=mw.TimeConfig(time_steps=10))).prepare()
     dt = float(prepared.solver.dt)
     steps = int(math.ceil(periods / F1 / dt))
     start = time.perf_counter()
-    result = mw.Simulation.fdtd(scene, frequencies=[F1], full_field_dft=False,
-                                run_time=mw.TimeConfig(time_steps=steps)).run()
+    result = mw.Simulation.fdtd(scene, frequencies=[F1], config=mw.FDTDConfig(full_field_dft=False,
+                                run_time=mw.TimeConfig(time_steps=steps))).run()
     elapsed = time.perf_counter() - start
     payload = result.monitor("probe")
-    t = np.asarray(payload["t"].detach().cpu().numpy() if torch.is_tensor(payload["t"]) else payload["t"], dtype=np.float64)
-    ez = payload["data"]
+    t = np.asarray(payload.coords["t"].detach().cpu().numpy() if torch.is_tensor(payload.coords["t"]) else payload.coords["t"], dtype=np.float64)
+    ez = payload.sel(component="Ez").values
     ez = np.asarray(ez.detach().cpu().numpy() if torch.is_tensor(ez) else ez, dtype=np.float64).reshape(t.size, -1)[:, 0]
     keep = t > 12.0 / (0.25 * F1)  # after the source pulse
     t, ez = t[keep], ez[keep]
@@ -133,7 +135,7 @@ def measure(grid, *, periods=300):
 def grid_stats(grid):
     from witwin.maxwell.fdtd.meshing import resolve_auto_grid
 
-    scene = _scene(grid).clone(device="cpu")
+    scene = place_scene(_scene(grid), "cpu")
     if grid.is_auto:
         x, y, _ = resolve_auto_grid(scene)
     else:

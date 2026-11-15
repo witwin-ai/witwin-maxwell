@@ -1,4 +1,5 @@
 """Genuine bounded public component queries; no mode/tail/attenuation claims."""
+from dataclasses import replace
 from pathlib import Path
 import gc,json,os,hashlib
 import numpy as np
@@ -34,31 +35,31 @@ def scene_and_points(normal,*,dielectric=False,model=None):
         model=FoilDesign(normal_axis=normal);model.requires_grad_(False)
     base=model.to_scene()
     if dielectric:
-        base=base.clone(structures=(*base.structures,mw.Structure(mw.Box(size=(.05,)*3),mw.Material(eps_r=4.,sigma_e=.01),name='dielectric')))
+        base=base.updated(structures=(*base.structures,mw.Structure(mw.Box(size=(.05,)*3),mw.Material(eps_r=4.,sigma_e=.01),name='dielectric')))
     prepared=prepare_scene(base);component='E'+'xyz'[(normal+2)%3]
     face=next(f for f in compile_copper_faces(prepared,device='cpu') if f.name=='foil' and f.component==(normal+2)%3)
-    axes=[np.asarray(x) for x in component_coords(prepared,component)]
+    axes=[np.asarray(x) for x in component_coords(prepared,component, device=prepared.device)]
     score=sum(np.square(axes[a][face.indices[:,a].cpu().numpy()]) for a in range(3));index=face.indices[int(np.argmin(score))].cpu()
     position=tuple(float(axes[a][index[a]]) for a in range(3));offgrid=list(position)
     for axis in range(3):
         if axis!=normal:offgrid[axis]+=.25*(float(axes[axis][index[axis]+1])-position[axis])
     points=torch.tensor((position,tuple(offgrid)),device='cuda',dtype=torch.float64)
-    observed=base.clone(monitors=(*base.monitors,mw.PointMonitor('native_exact',position,fields=(component,)),
+    observed=base.updated(monitors=(*base.monitors,mw.PointMonitor('native_exact',position,fields=(component,)),
         mw.PlaneMonitor('native_plane',axis='xyz'[normal],position=position[normal],fields=(component,))))
     return base,observed,points,component,index,('interior' if dielectric else 'exterior')
 
 
 def simulation(scene,graph,*,steps=96,frequencies=FREQUENCIES):
-    return mw.Simulation.fdtd(scene,frequencies=frequencies,cuda_graph=graph,full_field_dft=False,
+    return mw.Simulation.fdtd(scene,frequencies=frequencies,config=mw.FDTDConfig(cuda_graph=graph,full_field_dft=False,
         run_time=mw.TimeConfig(time_steps=steps,transient_cycles=0,steady_cycles=1),
-        spectral_sampler=mw.SpectralSampler(window='none',normalize_source=False),
-        excitations=mw.PortExcitation('feed',source_time=mw.CW(3e9,phase=.37)))
+        spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=False)),
+        excitations=mw.rf.PortExcitation('feed',source_time=mw.CW(3e9,phase=.37)))
 
 
 def owned_head_oracle(result,points,component,side,frequencies):
     """Independent 2D four-corner gather of actual raw heads, no query stencil."""
-    trace=next(t for t in result.conductor_losses['foil']['bulk_electric_traces'] if t['component']==component)
-    sampling=trace['sampling'];normal='xyz'.index(sampling['normal_axis']);axes=component_coords(result.prepared_scene,component)
+    trace=next(t for t in mw.rf.conductor_losses(result)['foil']['bulk_electric_traces'] if t['component']==component)
+    sampling=trace['sampling'];normal='xyz'.index(sampling['normal_axis']);axes=component_coords(result.prepared_scene,component, device=result.prepared_scene.device)
     support={tuple(int(x) for x in row):i for i,row in enumerate(trace['indices'].cpu())};fields=trace['electric_fields'];tangents=[a for a in range(3) if a!=normal]
     result_values=[];absolute=[]
     for frequency in frequencies:
@@ -106,9 +107,9 @@ def exercise(normal,graph,folder,*,dielectric,frequencies):
     exact_physics(before,after);assert operators(result.solver)==operator
     assert result.stats()['cuda_graph_active'] is graph
     assert result.stats()['observer_cuda_graph_active'] is graph
-    torch.testing.assert_close(old.monitor('probe')['data'],result.monitor('probe')['data'],rtol=0,atol=0)
-    for owner in old.conductor_losses:
-        for a,b in zip(old.conductor_losses[owner]['bulk_electric_traces'],result.conductor_losses[owner]['bulk_electric_traces']):
+    torch.testing.assert_close(old.monitor('probe').values,result.monitor('probe').values,rtol=0,atol=0)
+    for owner in mw.rf.conductor_losses(old):
+        for a,b in zip(mw.rf.conductor_losses(old)[owner]['bulk_electric_traces'],mw.rf.conductor_losses(result)[owner]['bulk_electric_traces']):
             torch.testing.assert_close(a['electric_fields'],b['electric_fields'],rtol=0,atol=0)
     chosen=(frequencies[-1],) if len(frequencies)==1 else (frequencies[-1],frequencies[0])
     public={};contrasts=[]
@@ -120,7 +121,7 @@ def exercise(normal,graph,folder,*,dielectric,frequencies):
         torch.testing.assert_close(values[:,0],oracle[:,0],rtol=0,atol=0);public[side]=values.detach().cpu()
     contrasts.append(float((public['positive']-public['negative']).abs().max()))
     published=result.query_fields(points[:1],region_id=region,field_kind='total',components=(component,),frequencies=chosen,trace_side='negative',owner='foil',representation='published_native')[component]
-    point=result.monitor('native_exact')['components'][component].reshape(-1);selected=[list(frequencies).index(f) for f in chosen]
+    point=result.raw_monitor('native_exact')['components'][component].reshape(-1);selected=[list(frequencies).index(f) for f in chosen]
     assert point.dtype==torch.complex64;torch.testing.assert_close(published[:,0],point[selected].to(torch.complex128),rtol=0,atol=0)
     if len(frequencies)==1:
         assert result._fields and not result._fields[component.upper()].is_complex()
@@ -140,13 +141,13 @@ def exercise(normal,graph,folder,*,dielectric,frequencies):
     with pytest.raises(ValueError,match='count/norm'):
         restored.query_fields(points,region_id=region,field_kind='total',components=(component,),owner='foil',trace_side='negative')
     checkpoint=simulation(scene,graph,frequencies=frequencies).prepare().run_until(48);checkpoint.save(folder/'checkpoint48.pt')
-    resumed=simulation(scene,graph,frequencies=frequencies).prepare().run(resume_from=mw.FDTDResumeCheckpoint.load(folder/'checkpoint48.pt',map_location='cpu'))
+    resumed=simulation(scene,graph,frequencies=frequencies).prepare().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(folder/'checkpoint48.pt',map_location='cpu'))
     exact_physics(after,capture_checkpoint_state(resumed.solver,step=96));assert operators(resumed.solver)==operator
     for side in public:
         actual=resumed.query_fields(points,region_id=region,field_kind='total',components=(component,),frequencies=chosen,trace_side=side,owner='foil')[component]
         torch.testing.assert_close(actual.cpu(),public[side],rtol=0,atol=0)
     torch.save(dict(original=before,observed=after,resumed=capture_checkpoint_state(resumed.solver,step=96),public=public,published=published.cpu(),Point=point.cpu(),operator=operator,normal=normal,graph=graph,dielectric=dielectric,frequencies=frequencies,contrast=contrasts),folder/'actual-state-and-query.pt')
-    (folder/'actual-query.json').write_text(json.dumps(dict(normal=normal,graph=graph,dielectric=dielectric,region=region,frequencies=frequencies,source_operator_unchanged=True,all_physics_and_original_probe_bitwise=True,actual_constitutive_positive_negative_difference_max=contrasts[0],actual_field_steps=288,actual_checkpoint_step=48,actual_schedule=result.conductor_losses['foil']['bulk_electric_traces'][0]['sampling']['schema'],no_mode_tail_or_attenuation_claim=True),indent=2)+'\n')
+    (folder/'actual-query.json').write_text(json.dumps(dict(normal=normal,graph=graph,dielectric=dielectric,region=region,frequencies=frequencies,source_operator_unchanged=True,all_physics_and_original_probe_bitwise=True,actual_constitutive_positive_negative_difference_max=contrasts[0],actual_field_steps=288,actual_checkpoint_step=48,actual_schedule=mw.rf.conductor_losses(result)['foil']['bulk_electric_traces'][0]['sampling']['schema'],no_mode_tail_or_attenuation_claim=True),indent=2)+'\n')
 
 
 def test_actual_native_Cu_clock_uses_positive_DFT_exponent(tmp_path):
@@ -191,15 +192,15 @@ def test_actual_selected_side_parameter_VJPs_match_independent_ordinary_FD(tmp_p
         def to_scene(self):
             base=super().to_scene();prepared=prepare_scene(base);normal=self.normal_axis;component='E'+'xyz'[(normal+2)%3]
             face=next(f for f in compile_copper_faces(prepared,device='cpu') if f.component==(normal+2)%3)
-            axes=component_coords(prepared,component);index=face.indices[len(face.indices)//2];position=tuple(float(axes[a][index[a]]) for a in range(3))
+            axes=component_coords(prepared,component, device=prepared.device);index=face.indices[len(face.indices)//2];position=tuple(float(axes[a][index[a]]) for a in range(3))
             self.query_point=position;self.query_component=component
-            return base.clone(monitors=(*base.monitors,mw.PlaneMonitor('native_plane',axis='xyz'[normal],position=position[normal],fields=(component,))))
+            return base.updated(monitors=(*base.monitors,mw.PlaneMonitor('native_plane',axis='xyz'[normal],position=position[normal],fields=(component,))))
     model=Design(normal_axis=0,graph=True,stride=7)
     def objective():
-        config=mw.Simulation.fdtd(model,frequencies=FREQUENCIES,cuda_graph=True,full_field_dft=False,
-            run_time=mw.TimeConfig(time_steps=96,transient_cycles=0,steady_cycles=1),spectral_sampler=mw.SpectralSampler(window='none',normalize_source=False),
-            excitations=mw.PortExcitation('feed',source_time=mw.CW(3e9,phase=.37)))
-        config.config.adjoint_checkpoint_stride=7;result=config.run();points=torch.tensor((model.query_point,),device='cuda',dtype=torch.float64)
+        config=mw.Simulation.fdtd(model,frequencies=FREQUENCIES,config=mw.FDTDConfig(cuda_graph=True,full_field_dft=False,
+            run_time=mw.TimeConfig(time_steps=96,transient_cycles=0,steady_cycles=1),spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=False)),
+            excitations=mw.rf.PortExcitation('feed',source_time=mw.CW(3e9,phase=.37)))
+        config.config=replace(config.config,adjoint_checkpoint_stride=7);result=config.run();points=torch.tensor((model.query_point,),device='cuda',dtype=torch.float64)
         negative=result.query_fields(points,region_id='exterior',field_kind='total',components=(model.query_component,),owner='foil',trace_side='negative')[model.query_component]
         positive=result.query_fields(points,region_id='exterior',field_kind='total',components=(model.query_component,),owner='foil',trace_side='positive')[model.query_component]
         assert bool((negative.abs()>0).any()) and bool((positive.abs()>0).any())

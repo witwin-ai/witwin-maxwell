@@ -8,7 +8,7 @@ from witwin.maxwell.compiler.ports import compile_port_geometry
 
 
 def test_declared_si_probe_faces_and_feed_quadrature_keep_float64_precision():
-    scene = printed_patch_scene(device="cpu")
+    scene = printed_patch_scene()
     probe = next(item.geometry for item in scene.structures if item.name == "probe")
     assert probe.position.dtype == probe.size.dtype == torch.float64
     assert torch.equal(probe.position-probe.size/2,
@@ -17,14 +17,14 @@ def test_declared_si_probe_faces_and_feed_quadrature_keep_float64_precision():
                        torch.tensor((-.004, .001, .003), dtype=torch.float64))
     feed = scene.ports[0]
     assert feed.voltage_aperture.position.dtype == torch.float64
-    compiled = compile_port_geometry(prepare_scene(scene), feed, device="cpu")
+    compiled = compile_port_geometry(prepare_scene(scene, device="cpu"), feed, device="cpu")
     assert abs(float(compiled.voltage_weights.sum())-.001) < 1e-17
 
 
 @pytest.mark.parametrize("lateral,cells", [(.001, 3), (.001, 6), (.001, 12), (.0005, 12), (.00025, 12)])
 def test_refining_printed_patch_preserves_physical_geometry_aperture_and_reference(lateral, cells):
-    reference = printed_patch_scene(device="cpu")
-    scene = printed_patch_scene(lateral_dl=lateral, substrate_cells=cells, device="cpu")
+    reference = printed_patch_scene()
+    scene = printed_patch_scene(lateral_dl=lateral, substrate_cells=cells)
     assert scene.domain.bounds == reference.domain.bounds
     for actual, fixed in zip(scene.structures, reference.structures):
         assert actual.name == fixed.name
@@ -39,28 +39,28 @@ def test_refining_printed_patch_preserves_physical_geometry_aperture_and_referen
     for box in ("current_surface", "voltage_aperture"):
         assert torch.equal(getattr(a, box).position, getattr(b, box).position)
         assert torch.equal(getattr(a, box).size, getattr(b, box).size)
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     port = compile_port_geometry(prepared, a, device="cpu")
     assert len(port.voltage_indices) >= 9
     assert np.isclose(float(port.voltage_weights.sum()), .001, rtol=1e-6)
 
 
 def test_edge_focused_grid_preserves_geometry_and_uses_fewer_air_interior_cells():
-    uniform=printed_patch_scene(lateral_dl=.000125,substrate_cells=12,device="cpu")
-    local=printed_patch_scene(lateral_dl=.0005,substrate_cells=12,edge_dl=.000125,device="cpu")
+    uniform=printed_patch_scene(lateral_dl=.000125,substrate_cells=12)
+    local=printed_patch_scene(lateral_dl=.0005,substrate_cells=12,edge_dl=.000125)
     for a,b in zip(local.structures,uniform.structures):
         for name in ("position","size","vertices"):
             if hasattr(a.geometry,name):
                 assert torch.equal(getattr(a.geometry,name),getattr(b.geometry,name))
-    u,l=prepare_scene(uniform),prepare_scene(local)
+    u,l=prepare_scene(uniform, device="cpu"),prepare_scene(local, device="cpu")
     assert l.Nx*l.Ny < .6*u.Nx*u.Ny
     assert np.isclose(min(np.diff(l.x_nodes64)),.000125,rtol=1e-10)
     compile_port_geometry(l,local.ports[0],device="cpu")
 
 
 def test_finite_copper_control_preserves_physical_support_and_ideal_probe_contact():
-    reference=printed_patch_scene(device="cpu")
-    copper=printed_patch_scene(device="cpu",metal="copper",dielectric_sigma=.001)
+    reference=printed_patch_scene()
+    copper=printed_patch_scene(metal="copper",dielectric_sigma=.001)
     assert copper.domain.bounds==reference.domain.bounds
     assert copper.ports[0].positive==reference.ports[0].positive
     for name in ("ground","patch"):

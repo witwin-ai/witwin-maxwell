@@ -11,12 +11,12 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA requi
 
 def setup():
     vertices = torch.tensor([[0.,0.,0.],[.07,0.,0.],[0.,.07,0.],[0.,0.,.07]],device='cuda',dtype=torch.float64)
-    volume = mw.TetrahedralVolumeMesh(vertices,torch.tensor([[0,1,2,3]],device='cuda'),region_id=1)
+    volume = mw.mom.TetrahedralVolumeMesh(vertices,torch.tensor([[0,1,2,3]],device='cuda'),region_id=1)
     geometry = mw.Mesh(volume.boundary.vertices,volume.boundary.faces,recenter=False,fill_mode='solid')
     scene = mw.Scene(structures=[mw.Structure(geometry=geometry,material=mw.Material(eps_r=2.,
-        nonlinearity=mw.NonlinearSusceptibility(chi2=.002,chi3=.001)))],sources=[mw.PlaneWave()])
-    hb = mw.HarmonicBalanceConfig(harmonics=2,volumes=(volume,),branch_id='linear_start',pump_scales=(.5,1.))
-    config = mw.MoMConfig(harmonic_balance=hb,integration=IntegrationConfig(order=3,singular_order=3),
+        nonlinearity=mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001)))],sources=[mw.PlaneWave()])
+    hb = mw.mom.HarmonicBalanceConfig(harmonics=2,volumes=(volume,),branch_id='linear_start',pump_scales=(.5,1.))
+    config = mw.mom.MoMConfig(harmonic_balance=hb,integration=IntegrationConfig(order=3,singular_order=3),
         riesz_storage='compact_rwg_v1',query_config=FieldQueryConfig(
             relative_tolerance=1e-5,absolute_tolerance=1e-10,max_order=48))
     return scene,config,vertices.mean(0,keepdim=True)
@@ -24,12 +24,15 @@ def setup():
 
 def test_public_harmonic_result_frequency_unknowns_queries_and_continuation(tmp_path,monkeypatch):
     scene,config,points = setup()
-    scene.add_monitor(mw.PointMonitor('inside',tuple(points[0].tolist()),fields=('Ex','Ey','Ez','Hx','Hy','Hz')))
-    scene.add_monitor(mw.PointMonitor('magnetic_copy',tuple(points[0].tolist()),fields=('Hx',)))
-    result = mw.Simulation.mom(scene,frequency=3e8,config=config).run()
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PointMonitor('inside',tuple(points[0].tolist()),fields=('Ex','Ey','Ez','Hx','Hy','Hz')),
+        mw.PointMonitor('magnetic_copy',tuple(points[0].tolist()),fields=('Hx',)),
+    ))
+    result = mw.Simulation.mom(scene,frequencies=3e8,config=config).run()
     assert isinstance(result,mw.Result)
     assert result.frequencies == (0.,3e8,6e8)
-    state = result.harmonic_state
+    state = mw.mom.harmonic_state(result)
     assert state.receipt['solver']['branch_id'] == 'linear_start'
     assert state.receipt['pump_scale'] == 1.
     assert not state.receipt['physical_qualification']
@@ -42,16 +45,16 @@ def test_public_harmonic_result_frequency_unknowns_queries_and_continuation(tmp_
         assert torch.isfinite(magnetic).all()
         monitor = result.monitor('inside',frequency=harmonic*3e8)
         for name,value in zip(('Ex','Ey','Ez','Hx','Hy','Hz'),torch.cat((electric[0],magnetic[0]))):
-            torch.testing.assert_close(monitor['components'][name],value,rtol=0,atol=0)
-    potential,electric = result.query_dc(points,region_id=1)
+            torch.testing.assert_close(monitor.sel(component=name).values,value,rtol=0,atol=0)
+    potential,electric = mw.mom.query_dc(result, points,region_id=1)
     torch.testing.assert_close(electric,state.cell_electric[0].real,rtol=1e-8,atol=1e-10)
     assert not potential.is_complex()
     monitor = result.monitor('inside')
-    assert monitor['frequencies'] == (3e8,6e8)
+    assert monitor.dims == ('component','f') and monitor.coords['f'].tolist() == [3e8,6e8]
     for name,value in zip(('Ex','Ey','Ez'),electric[0]):
-        torch.testing.assert_close(monitor['dc']['components'][name],value,rtol=0,atol=0)
-    assert result.monitor('magnetic_copy')['dc']['components'] == {}
-    assert result.solver_stats['monitor_queries']['unique_monitor_positions'] == 1
+        torch.testing.assert_close(monitor.attrs['dc']['components'][name],value,rtol=0,atol=0)
+    assert result.monitor('magnetic_copy').attrs['dc']['components'] == {}
+    assert result.stats()['monitor_queries']['unique_monitor_positions'] == 1
     with pytest.raises(ValueError,match='positive harmonic'):
         result.query_fields(points,region_id=1,field_kind='total')
     path = tmp_path/'hb.pt'
@@ -64,17 +67,17 @@ def test_public_harmonic_result_frequency_unknowns_queries_and_continuation(tmp_
         patch.setattr(runtime,'assemble_system',forbidden)
         restored = mw.Result.load(path,scene=scene)
         for name in ('Ex','Ey','Ez','Hx','Hy','Hz'):
-            torch.testing.assert_close(restored.monitor('inside')['components'][name],
-                                       result.monitor('inside')['components'][name].cpu(),rtol=0,atol=0)
+            torch.testing.assert_close(restored.monitor('inside').sel(component=name).values,
+                                       result.monitor('inside').sel(component=name).values.cpu(),rtol=0,atol=0)
         for name in ('frequencies','cell_electric','polarization','dissipative_current',
                      'total_volume_current','dc_surface_charge'):
-            torch.testing.assert_close(getattr(restored.harmonic_state,name),getattr(state,name),rtol=0,atol=0)
+            torch.testing.assert_close(getattr(mw.mom.harmonic_state(restored),name),getattr(state,name),rtol=0,atol=0)
         for harmonic in (1,2):
             actual = restored.query_fields(points,region_id=1,field_kind='total',harmonic=harmonic)
             expected = result.query_fields(points,region_id=1,field_kind='total',harmonic=harmonic)
             for a,b in zip(actual,expected):
                 torch.testing.assert_close(a,b,rtol=0,atol=0)
-        for a,b in zip(restored.query_dc(points,region_id=1),result.query_dc(points,region_id=1)):
+        for a,b in zip(mw.mom.query_dc(restored, points,region_id=1),mw.mom.query_dc(result, points,region_id=1)):
             torch.testing.assert_close(a,b,rtol=0,atol=0)
     restored.save(tmp_path/'second.pt')
     original = torch.load(path,weights_only=False)
@@ -102,14 +105,14 @@ def test_harmonic_public_configuration_and_overlapping_bodies_reject():
                    {'damping':0.},{'relative_tolerance':0.,'absolute_tolerance':0.}):
         with pytest.raises(ValueError):
             replace(config.harmonic_balance,**values)
-    scene.structures.append(scene.structures[0])
+    scene = scene.updated(structures=(*scene.structures, scene.structures[0]))
     with pytest.raises(ValueError,match='touch|intersect|overlap|disjoint'):
-        mw.Simulation.mom(scene,frequency=3e8,config=config).prepare()
+        mw.Simulation.mom(scene,frequencies=3e8,config=config).prepare()
 
 
 def test_public_harmonic_full_field_power_uses_closed_flux_and_volume_queries():
     scene,config,_ = setup()
-    result = mw.Simulation.mom(scene,frequency=3e8,config=config).run()
+    result = mw.Simulation.mom(scene,frequencies=3e8,config=config).run()
     volume = config.harmonic_balance.volumes[0]
     from witwin.maxwell.mom.mesh import SurfaceMesh
     from witwin.maxwell.mom.quadrature import triangle_rule
@@ -117,7 +120,7 @@ def test_public_harmonic_full_field_power_uses_closed_flux_and_volume_queries():
     center = boundary.vertices.mean(0)
     control = SurfaceMesh(center+5*(boundary.vertices-center),boundary.faces.clone())
     fixed = FieldQueryConfig(adaptive=False)
-    power = result.harmonic_power_balance(control,surface_order=2,volume_order=2,query_config=fixed)
+    power = mw.mom.harmonic_power_balance(result, control,surface_order=2,volume_order=2,query_config=fixed)
     assert power['harmonics'] == (0,1,2)
     assert not power['global_power_balance_verified']
     assert not power['quadrature_convergence_verified']
@@ -131,7 +134,7 @@ def test_public_harmonic_full_field_power_uses_closed_flux_and_volume_queries():
         direct_flux = ((vector*control.normals[:,None]).sum(-1)*weights).sum()
         torch.testing.assert_close(power['outward_flux_W'][harmonic],direct_flux,rtol=1e-10,atol=1e-18)
     with pytest.raises(ValueError,match='strictly enclose'):
-        result.harmonic_power_balance(boundary,surface_order=2,volume_order=2,query_config=fixed)
+        mw.mom.harmonic_power_balance(result, boundary,surface_order=2,volume_order=2,query_config=fixed)
     print({'outward_flux_W':power['outward_flux_W'].tolist(),
            'polarization_work_W':power['polarization_work_W'].tolist(),
            'balance_residual_W':power['balance_residual_W'].tolist(),
@@ -146,10 +149,10 @@ def test_harmonic_unsupported_linear_method_and_zero_pump_fail_before_assembly(m
         raise AssertionError('Unsupported settings must fail before AC preparation')
     monkeypatch.setattr(harmonic_runtime,'SystemOperator',forbidden)
     with pytest.raises(NotImplementedError,match='direct linear solves'):
-        mw.Simulation.mom(scene,frequency=3e8,config=replace(config,
+        mw.Simulation.mom(scene,frequencies=3e8,config=replace(config,
             stopping=StoppingRule(method='gmres'))).prepare()
-    scene.structures[0]=replace(scene.structures[0],material=mw.Material(eps_r=2.,
-        nonlinearity=mw.TwoPhotonAbsorption(beta=5.)))
+    scene = scene.updated(structures=(replace(scene.structures[0],material=mw.Material(eps_r=2.,
+        nonlinearity=mw.media.TwoPhotonAbsorption(beta=5.))), *scene.structures[1:]))
     config=replace(config,harmonic_balance=replace(config.harmonic_balance,pump_scales=(0.,1.)))
     with pytest.raises(NotImplementedError,match='zero-pump continuation'):
-        mw.Simulation.mom(scene,frequency=3e8,config=config).prepare()
+        mw.Simulation.mom(scene,frequencies=3e8,config=config).prepare()

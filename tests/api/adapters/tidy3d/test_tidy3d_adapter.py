@@ -282,10 +282,9 @@ class TestGridConversion:
             mw.Scene(
                 domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
                 grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.5),
-                device="cpu",
-            )
-            .add_structure(
-                mw.Structure(mw.Box(position=(0, 0, 0), size=(0.4, 0.4, 0.4)), mw.Material(eps_r=12.0))
+                structures=(
+                    mw.Structure(mw.Box(position=(0, 0, 0), size=(0.4, 0.4, 0.4)), mw.Material(eps_r=12.0)),
+                ),
             )
         )
         expected = resolve_auto_grid(scene)
@@ -312,17 +311,16 @@ class TestGridConversion:
                     domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
                     grid=mw.GridSpec.custom(graded, graded, graded),
                     boundary=mw.BoundarySpec.pml(num_layers=6),
-                    device="cpu",
-                )
-                .add_source(
-                    mw.PointDipole(
-                        position=(0.5, 0.5, 0.5),
-                        polarization="Ez",
-                        source_time=mw.GaussianPulse(frequency=1e14, fwidth=1e13),
-                    )
+                    sources=(
+                        mw.PointDipole(
+                            position=(0.5, 0.5, 0.5),
+                            polarization="Ez",
+                            source_time=mw.GaussianPulse(frequency=1e14, fwidth=1e13),
+                        ),
+                    ),
                 )
             )
-            sim = scene.to_tidy3d()
+            sim = scene_to_tidy3d(scene)
             s = 1.0e6
             for axis in ("x", "y", "z"):
                 boundaries = np.asarray(getattr(sim.grid.boundaries, axis))
@@ -346,21 +344,20 @@ class TestGridConversion:
                     domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
                     grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.5),
                     boundary=mw.BoundarySpec.pml(num_layers=6),
-                    device="cpu",
-                )
-                .add_structure(
-                    mw.Structure(mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)), mw.Material(eps_r=9.0))
-                )
-                .add_source(
-                    mw.PointDipole(
-                        position=(0, 0, 0),
-                        polarization="Ez",
-                        source_time=mw.GaussianPulse(frequency=6e14, fwidth=6e13),
-                    )
+                    structures=(
+                        mw.Structure(mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)), mw.Material(eps_r=9.0)),
+                    ),
+                    sources=(
+                        mw.PointDipole(
+                            position=(0, 0, 0),
+                            polarization="Ez",
+                            source_time=mw.GaussianPulse(frequency=6e14, fwidth=6e13),
+                        ),
+                    ),
                 )
             )
             expected = resolve_auto_grid(scene)
-            sim = scene.to_tidy3d()
+            sim = scene_to_tidy3d(scene)
             s = 1.0e6
             for axis, nodes in zip(("x", "y", "z"), expected):
                 nodes = np.asarray(nodes)
@@ -383,34 +380,33 @@ class TestGridConversion:
         from witwin.maxwell.fdtd.meshing import resolve_auto_grid
         l_shape = np.array([[0, 0], [2, 0], [2, 1], [1, 1], [1, 2], [0, 2]], dtype=float) * 0.1
         with _real_tidy3d():
-            layer = mw.LayerRefinementSpec(
+            layer = mw.grid.LayerRefinementSpec(
                 min_cells=None, axis="z", bounds=(0.0, 0.02),
-                corner_finder=mw.CornerFinderSpec(medium="all"),
-                corner_refinement=mw.GridRefinement(dl=0.005, num_cells=4),
-                bounds_refinement=mw.GridRefinement(dl=0.005),
+                corner_finder=mw.grid.CornerFinderSpec(medium="all"),
+                corner_refinement=mw.grid.GridRefinement(dl=0.005, num_cells=4),
+                bounds_refinement=mw.grid.GridRefinement(dl=0.005),
             )
             scene = (
                 mw.Scene(
                     domain=mw.Domain(bounds=((-0.3, 0.5), (-0.3, 0.5), (-0.3, 0.3))),
                     grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.5, layer_refinement=layer),
                     boundary=mw.BoundarySpec.pml(num_layers=6),
-                    device="cpu",
-                )
-                .add_structure(
-                    mw.Structure(mw.PolySlab(vertices=l_shape, bounds=(0.0, 0.02), axis="z"), mw.Material(eps_r=4.0))
-                )
-                .add_source(
-                    mw.PointDipole(
-                        position=(0, 0, 0.1),
-                        polarization="Ez",
-                        source_time=mw.GaussianPulse(frequency=6e8, fwidth=6e7),
-                    )
+                    structures=(
+                        mw.Structure(mw.PolySlab(vertices=l_shape, bounds=(0.0, 0.02), axis="z"), mw.Material(eps_r=4.0)),
+                    ),
+                    sources=(
+                        mw.PointDipole(
+                            position=(0, 0, 0.1),
+                            polarization="Ez",
+                            source_time=mw.GaussianPulse(frequency=6e8, fwidth=6e7),
+                        ),
+                    ),
                 )
             )
             expected = resolve_auto_grid(scene)
-            plain = resolve_auto_grid(scene.clone(grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.5)))
+            plain = resolve_auto_grid(scene.updated(grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.5)))
             assert expected[0].size > plain[0].size and expected[2].size > plain[2].size
-            sim = scene.to_tidy3d()
+            sim = scene_to_tidy3d(scene)
             s = 1.0e6
             for axis, nodes in zip(("x", "y", "z"), expected):
                 nodes = np.asarray(nodes)
@@ -619,7 +615,7 @@ class TestMediumConversion:
         td = inject_mock_tidy3d
         beta_si = 1.0e-11
         length_scale = 1.0e6
-        medium = mw.Material(eps_r=9.0, nonlinearity=(mw.TwoPhotonAbsorption(beta=beta_si),))
+        medium = mw.Material(eps_r=9.0, nonlinearity=(mw.media.TwoPhotonAbsorption(beta=beta_si),))
         result = _convert_material(medium, td, length_scale)
         spec = result.nonlinear_spec
         assert len(spec.models) == 1
@@ -630,7 +626,7 @@ class TestMediumConversion:
 
     def test_tpa_explicit_n0_is_forwarded(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        medium = mw.Material(eps_r=9.0, nonlinearity=(mw.TwoPhotonAbsorption(beta=1.0e-11, n0=3.4),))
+        medium = mw.Material(eps_r=9.0, nonlinearity=(mw.media.TwoPhotonAbsorption(beta=1.0e-11, n0=3.4),))
         result = _convert_material(medium, td, 1.0e6)
         assert result.nonlinear_spec.models[0].n0 == pytest.approx(3.4)
 
@@ -639,8 +635,8 @@ class TestMediumConversion:
         medium = mw.Material(
             eps_r=4.0,
             nonlinearity=(
-                mw.NonlinearSusceptibility(chi3=1.0e-20),
-                mw.TwoPhotonAbsorption(beta=2.0e-11, n0=2.0),
+                mw.media.NonlinearSusceptibility(chi3=1.0e-20),
+                mw.media.TwoPhotonAbsorption(beta=2.0e-11, n0=2.0),
             ),
         )
         result = _convert_material(medium, td, 1.0e6)
@@ -652,7 +648,7 @@ class TestMediumConversion:
         # second-order (chi2 / SHG) susceptibility has no equivalent and must be
         # rejected with a physics-worded message (not a Kerr blanket rejection).
         td = inject_mock_tidy3d
-        medium = mw.Material(eps_r=4.0, nonlinearity=(mw.NonlinearSusceptibility(chi2=5.0e-12),))
+        medium = mw.Material(eps_r=4.0, nonlinearity=(mw.media.NonlinearSusceptibility(chi2=5.0e-12),))
         with pytest.raises(NotImplementedError, match="second-order"):
             _convert_material(medium, td)
 
@@ -707,7 +703,7 @@ class TestMediumConversion:
         beta_si = 1.0e-11
         length_scale = 1.0e6
         with _real_tidy3d() as real_td:
-            medium = mw.Material(eps_r=9.0, nonlinearity=(mw.TwoPhotonAbsorption(beta=beta_si),))
+            medium = mw.Material(eps_r=9.0, nonlinearity=(mw.media.TwoPhotonAbsorption(beta=beta_si),))
             exported = _convert_material(medium, real_td, length_scale)
             assert isinstance(exported, real_td.Medium)
             (tpa,) = exported.nonlinear_spec.models
@@ -760,14 +756,15 @@ class TestMediumConversion:
                 domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
                 grid=mw.GridSpec.uniform(0.05),
                 boundary=mw.BoundarySpec.pml(num_layers=10),
-                device="cpu",
+                structures=(
+                    mw.Structure(mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)), mw.Material.pec()),
+                ),
+                sources=(
+                    mw.PointDipole(position=(0.4, 0, 0), polarization="Ez", source_time=mw.CW(frequency=1e9)),
+                ),
             )
-            .add_structure(
-                mw.Structure(mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)), mw.Material.pec())
-            )
-            .add_source(mw.PointDipole(position=(0.4, 0, 0), polarization="Ez", source_time=mw.CW(frequency=1e9)))
         )
-        sim = scene.to_tidy3d(frequencies=1e9)
+        sim = scene_to_tidy3d(scene, frequencies=1e9)
         assert len(sim.structures) == 1
         assert isinstance(sim.structures[0].medium, td.PECMedium)
 
@@ -821,7 +818,7 @@ class TestMediumConversion:
         td = inject_mock_tidy3d
         length_scale = 1.0e6
         rows = ((2.0, 0.3, 0.0), (0.3, 3.0, 0.0), (0.0, 0.0, 4.0))
-        medium = mw.Material(epsilon_tensor=mw.Tensor3x3(rows), sigma_e=0.5)
+        medium = mw.Material(epsilon_tensor=mw.media.Tensor3x3(rows), sigma_e=0.5)
         result = _convert_material(medium, td, length_scale)
         assert isinstance(result, td.FullyAnisotropicMedium)
         assert result.permittivity == [[2.0, 0.3, 0.0], [0.3, 3.0, 0.0], [0.0, 0.0, 4.0]]
@@ -842,7 +839,7 @@ class TestMediumConversion:
         # combined with poles has no Tidy3D equivalent and must raise, not drop the poles.
         td = inject_mock_tidy3d
         medium = mw.Material(
-            epsilon_tensor=mw.Tensor3x3(((2.0, 0.3, 0.0), (0.3, 3.0, 0.0), (0.0, 0.0, 4.0))),
+            epsilon_tensor=mw.media.Tensor3x3(((2.0, 0.3, 0.0), (0.3, 3.0, 0.0), (0.0, 0.0, 4.0))),
             lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=3e14, gamma=1e13),),
         )
         with pytest.raises(NotImplementedError, match="non-dispersive"):
@@ -1025,7 +1022,7 @@ class TestModulationConversion:
         # A time-modulated non-dispersive Material exports as a Medium carrying a
         # ModulationSpec on its permittivity (eps_inf); the base permittivity stays eps_r.
         td = inject_mock_tidy3d
-        medium = mw.Material(eps_r=4.0, modulation=mw.ModulationSpec(frequency=2e13, amplitude=0.3, phase=0.7))
+        medium = mw.Material(eps_r=4.0, modulation=mw.media.ModulationSpec(frequency=2e13, amplitude=0.3, phase=0.7))
         result = _convert_material(medium, td)
         assert isinstance(result, td.Medium)
         assert result.permittivity == pytest.approx(4.0)
@@ -1043,7 +1040,7 @@ class TestModulationConversion:
         # dimensionless maxwell depth must be multiplied by eps_static (= eps_r here):
         # depth 0.2 on eps_r 9 -> absolute amplitude 1.8.
         td = inject_mock_tidy3d
-        medium = mw.Material(eps_r=9.0, modulation=mw.ModulationSpec(frequency=1e13, amplitude=0.2, phase=0.0))
+        medium = mw.Material(eps_r=9.0, modulation=mw.media.ModulationSpec(frequency=1e13, amplitude=0.2, phase=0.0))
         space = _convert_material(medium, td).modulation_spec.permittivity.space_modulation
         assert isinstance(space, td.SpaceModulation)
         assert space.amplitude == pytest.approx(9.0 * 0.2)
@@ -1053,7 +1050,7 @@ class TestModulationConversion:
         # convention, so the exported space phase must be -phase to reproduce
         # cos(2*pi*f*t + phase).
         td = inject_mock_tidy3d
-        medium = mw.Material(eps_r=2.0, modulation=mw.ModulationSpec(frequency=1e13, amplitude=0.3, phase=0.9))
+        medium = mw.Material(eps_r=2.0, modulation=mw.media.ModulationSpec(frequency=1e13, amplitude=0.3, phase=0.9))
         space = _convert_material(medium, td).modulation_spec.permittivity.space_modulation
         assert space.phase == pytest.approx(-0.9)
 
@@ -1066,7 +1063,7 @@ class TestModulationConversion:
         medium = mw.Material(
             eps_r=2.0,
             lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=5e14, gamma=1e13),),
-            modulation=mw.ModulationSpec(frequency=1e13, amplitude=0.2),
+            modulation=mw.media.ModulationSpec(frequency=1e13, amplitude=0.2),
         )
         with pytest.raises(NotImplementedError, match="ModulationSpec modulates only"):
             _convert_material(medium, td)
@@ -1076,7 +1073,7 @@ class TestModulationConversion:
         # modulation factor through the instantaneous Kerr coefficient, so the two
         # models disagree and a modulated + Kerr material must raise.
         td = inject_mock_tidy3d
-        medium = mw.Material(eps_r=4.0, kerr_chi3=1.0e-20, modulation=mw.ModulationSpec(frequency=1e13, amplitude=0.2))
+        medium = mw.Material(eps_r=4.0, kerr_chi3=1.0e-20, modulation=mw.media.ModulationSpec(frequency=1e13, amplitude=0.2))
         with pytest.raises(NotImplementedError, match="ModulationSpec modulates only"):
             _convert_material(medium, td)
 
@@ -1088,7 +1085,7 @@ class TestModulationConversion:
 
         td = inject_mock_tidy3d
         amp = torch.full((4, 4, 4), 0.3)
-        medium = mw.Material(eps_r=3.0, modulation=mw.ModulationSpec(frequency=1e13, amplitude=amp))
+        medium = mw.Material(eps_r=3.0, modulation=mw.media.ModulationSpec(frequency=1e13, amplitude=amp))
         with pytest.raises(NotImplementedError, match="spatially-varying modulation"):
             _convert_material(medium, td)
 
@@ -1099,17 +1096,18 @@ class TestModulationConversion:
                 domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
                 grid=mw.GridSpec.uniform(0.05),
                 boundary=mw.BoundarySpec.pml(num_layers=10),
-                device="cpu",
+                structures=(
+                    mw.Structure(
+                        mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
+                        mw.Material(eps_r=4.0, modulation=mw.media.ModulationSpec(frequency=2e13, amplitude=0.3)),
+                    ),
+                ),
+                sources=(
+                    mw.PointDipole(position=(0, 0, 0.4), polarization="Ex", source_time=mw.CW(frequency=1e13)),
+                ),
             )
-            .add_structure(
-                mw.Structure(
-                    mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
-                    mw.Material(eps_r=4.0, modulation=mw.ModulationSpec(frequency=2e13, amplitude=0.3)),
-                )
-            )
-            .add_source(mw.PointDipole(position=(0, 0, 0.4), polarization="Ex", source_time=mw.CW(frequency=1e13)))
         )
-        sim = scene.to_tidy3d(frequencies=1e13)
+        sim = scene_to_tidy3d(scene, frequencies=1e13)
         assert len(sim.structures) == 1
         medium = sim.structures[0].medium
         assert isinstance(medium, td.Medium)
@@ -1132,7 +1130,7 @@ class TestModulationConversion:
         with _real_tidy3d() as real_td:
             material = mw.Material(
                 eps_r=eps_static,
-                modulation=mw.ModulationSpec(frequency=freq, amplitude=depth, phase=phase),
+                modulation=mw.media.ModulationSpec(frequency=freq, amplitude=depth, phase=phase),
             )
             exported = _convert_material(material, real_td)
             assert isinstance(exported, real_td.Medium)
@@ -1165,7 +1163,7 @@ class TestModulationConversion:
         with _real_tidy3d() as real_td:
             material = mw.Material(
                 eps_r=eps_static,
-                modulation=mw.ModulationSpec(frequency=freq, amplitude=depth, phase=phase),
+                modulation=mw.media.ModulationSpec(frequency=freq, amplitude=depth, phase=phase),
             )
             stm = _convert_material(material, real_td).modulation_spec.permittivity
             amp_space = complex(stm.space_modulation.amplitude) * cmath.exp(
@@ -1189,7 +1187,7 @@ class TestSheetAndMetalConversion:
         # A static Medium2D sheet exports as a Tidy3D Medium2D whose two tangential
         # surface media are the same isotropic Medium carrying the sheet conductance.
         td = inject_mock_tidy3d
-        medium = mw.Medium2D(sigma_s=0.002)
+        medium = mw.media.Medium2D(sigma_s=0.002)
         result = _convert_material(medium, td)
         assert isinstance(result, td.Medium2D)
         assert isinstance(result.ss, td.Medium)
@@ -1201,13 +1199,13 @@ class TestSheetAndMetalConversion:
         # Sheet conductivity is a surface conductance [S] (unit-system independent),
         # so unlike the volumetric sigma_e path it must NOT be divided by length_scale.
         td = inject_mock_tidy3d
-        medium = mw.Medium2D(sigma_s=0.002)
+        medium = mw.media.Medium2D(sigma_s=0.002)
         result = _convert_material(medium, td, 1.0e6)
         assert result.ss.conductivity == pytest.approx(0.002)
 
     def test_zero_conductivity_medium2d_carries_no_conductivity_kwarg(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        medium = mw.Medium2D(sigma_s=0.0)
+        medium = mw.media.Medium2D(sigma_s=0.0)
         result = _convert_material(medium, td)
         assert isinstance(result, td.Medium2D)
         assert not hasattr(result.ss, "conductivity")
@@ -1216,7 +1214,7 @@ class TestSheetAndMetalConversion:
         # Graphene's intraband Kubo channel is a single Drude sheet term, so the
         # tangential surface medium is a Tidy3D Drude with one pole.
         td = inject_mock_tidy3d
-        medium = mw.Graphene(chemical_potential=0.4, scattering_time=1.0e-13, include_interband=False)
+        medium = mw.media.Graphene(chemical_potential=0.4, scattering_time=1.0e-13, include_interband=False)
         result = _convert_material(medium, td)
         assert isinstance(result, td.Medium2D)
         assert isinstance(result.ss, td.Drude)
@@ -1230,7 +1228,7 @@ class TestSheetAndMetalConversion:
         # volumetric sigma_e path.
         td = inject_mock_tidy3d
         length_scale = 1.0e6
-        medium = mw.LossyMetalMedium(conductivity=1.0e7)
+        medium = mw.media.LossyMetalMedium(conductivity=1.0e7)
         result = _convert_material(medium, td, length_scale, frequencies=(1.0e10,))
         assert isinstance(result, td.LossyMetalMedium)
         assert result.conductivity == pytest.approx(1.0e7 / length_scale)
@@ -1241,13 +1239,13 @@ class TestSheetAndMetalConversion:
 
     def test_lossy_metal_frequency_range_spans_export_frequencies(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        medium = mw.LossyMetalMedium(conductivity=1.0e7)
+        medium = mw.media.LossyMetalMedium(conductivity=1.0e7)
         result = _convert_material(medium, td, 1.0e6, frequencies=(8.0e9, 1.2e10))
         assert result.frequency_range == pytest.approx((8.0e9, 1.2e10))
 
     def test_lossy_metal_without_frequencies_raises(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        medium = mw.LossyMetalMedium(conductivity=1.0e7)
+        medium = mw.media.LossyMetalMedium(conductivity=1.0e7)
         with pytest.raises(ValueError, match="frequenc"):
             _convert_material(medium, td)
 
@@ -1257,13 +1255,13 @@ class TestSheetAndMetalConversion:
         # lives entirely in the tangential surface response, not in any bulk permittivity.
         omega0 = 2.0 * math.pi * 2.0e9
         inductance = math.sqrt(omega0 * 1.25663706212e-6 / (2.0 * 50.0)) / omega0
-        model = mw.RationalSurfaceImpedance(
+        model = mw.media.RationalSurfaceImpedance(
             poles=torch.tensor([-omega0], dtype=torch.complex128),
             residues=torch.tensor([[[1.0 / inductance]]], dtype=torch.complex128),
             frequency_range=(1.0e8, 1.0e10),
             representation="Y",
         )
-        return mw.SurfaceImpedanceMedium(impedance=model, name="coating")
+        return mw.media.SurfaceImpedanceMedium(impedance=model, name="coating")
 
     def test_generic_surface_impedance_medium_is_rejected(self, inject_mock_tidy3d):
         # A generic SurfaceImpedanceMedium carries no finite bulk permittivity (eps_r
@@ -1297,15 +1295,14 @@ class TestSheetAndMetalConversion:
                 domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
                 grid=mw.GridSpec.uniform(0.05),
                 boundary=mw.BoundarySpec.pml(num_layers=10),
-                device="cpu",
+                structures=(mw.Structure(mw.Box(position=(0, 0, -0.9), size=(2.0, 2.0, 0.2)), medium),),
+                sources=(
+                    mw.PointDipole(position=(0, 0, 0.3), polarization="Ex", source_time=mw.CW(frequency=2e9)),
+                ),
             )
-            .add_structure(
-                mw.Structure(mw.Box(position=(0, 0, -0.9), size=(2.0, 2.0, 0.2)), medium)
-            )
-            .add_source(mw.PointDipole(position=(0, 0, 0.3), polarization="Ex", source_time=mw.CW(frequency=2e9)))
         )
         with pytest.raises(NotImplementedError, match="[Ss]urface"):
-            scene.to_tidy3d(frequencies=2e9)
+            scene_to_tidy3d(scene, frequencies=2e9)
 
     def test_medium2d_structure_scene_exports_medium2d(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
@@ -1314,14 +1311,15 @@ class TestSheetAndMetalConversion:
                 domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
                 grid=mw.GridSpec.uniform(0.05),
                 boundary=mw.BoundarySpec.pml(num_layers=10),
-                device="cpu",
+                structures=(
+                    mw.Structure(mw.Box(position=(0, 0, 0), size=(1.0, 1.0, 0.0)), mw.media.Medium2D(sigma_s=0.002)),
+                ),
+                sources=(
+                    mw.PointDipole(position=(0, 0, 0.3), polarization="Ex", source_time=mw.CW(frequency=1e13)),
+                ),
             )
-            .add_structure(
-                mw.Structure(mw.Box(position=(0, 0, 0), size=(1.0, 1.0, 0.0)), mw.Medium2D(sigma_s=0.002))
-            )
-            .add_source(mw.PointDipole(position=(0, 0, 0.3), polarization="Ex", source_time=mw.CW(frequency=1e13)))
         )
-        sim = scene.to_tidy3d(frequencies=1e13)
+        sim = scene_to_tidy3d(scene, frequencies=1e13)
         assert len(sim.structures) == 1
         assert isinstance(sim.structures[0].medium, td.Medium2D)
 
@@ -1334,14 +1332,15 @@ class TestSheetAndMetalConversion:
                 domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
                 grid=mw.GridSpec.uniform(0.05),
                 boundary=mw.BoundarySpec.pml(num_layers=10),
-                device="cpu",
+                structures=(
+                    mw.Structure(mw.Box(position=(0, 0, -0.9), size=(2.0, 2.0, 0.2)), mw.media.LossyMetalMedium(conductivity=1.0e7)),
+                ),
+                sources=(
+                    mw.PointDipole(position=(0, 0, 0.3), polarization="Ex", source_time=mw.CW(frequency=1e10)),
+                ),
             )
-            .add_structure(
-                mw.Structure(mw.Box(position=(0, 0, -0.9), size=(2.0, 2.0, 0.2)), mw.LossyMetalMedium(conductivity=1.0e7))
-            )
-            .add_source(mw.PointDipole(position=(0, 0, 0.3), polarization="Ex", source_time=mw.CW(frequency=1e10)))
         )
-        sim = scene.to_tidy3d(frequencies=1e10)
+        sim = scene_to_tidy3d(scene, frequencies=1e10)
         assert len(sim.structures) == 1
         assert isinstance(sim.structures[0].medium, td.LossyMetalMedium)
 
@@ -1354,7 +1353,7 @@ class TestSheetAndMetalConversion:
         # conductivity sigma_model(omega) must equal maxwell's own sheet_conductivity
         # at every frequency (a surface conductance in siemens, no length scaling).
         with _real_tidy3d() as real_td:
-            medium = mw.Medium2D(sigma_s=0.002)
+            medium = mw.media.Medium2D(sigma_s=0.002)
             result = _convert_material(medium, real_td)
             assert isinstance(result, real_td.Medium2D)
             for freq in (1.0e12, 5.0e12):
@@ -1371,7 +1370,7 @@ class TestSheetAndMetalConversion:
         # The intraband Drude sheet term must reproduce maxwell's frequency-dependent
         # sheet conductivity (magnitude AND the inductive Im(sigma) > 0 reactance).
         with _real_tidy3d() as real_td:
-            medium = mw.Graphene(chemical_potential=0.4, scattering_time=1.0e-13, include_interband=False)
+            medium = mw.media.Graphene(chemical_potential=0.4, scattering_time=1.0e-13, include_interband=False)
             result = _convert_material(medium, real_td)
             for freq in (1.0e12, 5.0e12, 2.0e13):
                 got = complex(result.sigma_model(freq))
@@ -1393,7 +1392,7 @@ class TestSheetAndMetalConversion:
         import math as _math
 
         with _real_tidy3d() as real_td:
-            medium = mw.Graphene(
+            medium = mw.media.Graphene(
                 chemical_potential=0.4,
                 scattering_time=1.0e-13,
                 temperature=300.0,
@@ -1424,7 +1423,7 @@ class TestSheetAndMetalConversion:
 
         freq = 1.0e10
         with _real_tidy3d() as real_td:
-            medium = mw.LossyMetalMedium(conductivity=1.0e7)
+            medium = mw.media.LossyMetalMedium(conductivity=1.0e7)
             result = _convert_material(medium, real_td, frequencies=(freq,))
             assert isinstance(result, real_td.LossyMetalMedium)
             z_td = complex(result.surface_impedance(_np.array([freq]))[0])
@@ -1444,7 +1443,7 @@ class TestCustomPoleAndPerturbationConversion:
         delta = torch.full((3, 3, 3), 2.0)
         medium = mw.Material(
             eps_r=1.5,
-            lorentz_poles=(mw.CustomLorentzPole(delta_eps=delta, resonance_frequency=5e14, gamma=1e13),),
+            lorentz_poles=(mw.media.CustomLorentzPole(delta_eps=delta, resonance_frequency=5e14, gamma=1e13),),
         )
         result = _convert_material(medium, td)
         assert isinstance(result, td.Lorentz)
@@ -1456,7 +1455,7 @@ class TestCustomPoleAndPerturbationConversion:
 
         td = inject_mock_tidy3d
         plasma = torch.full((4, 4, 4), 2e15)
-        medium = mw.Material(drude_poles=(mw.CustomDrudePole(plasma_frequency=plasma, gamma=1e13),))
+        medium = mw.Material(drude_poles=(mw.media.CustomDrudePole(plasma_frequency=plasma, gamma=1e13),))
         result = _convert_material(medium, td)
         assert isinstance(result, td.Drude)
         assert result.coeffs[0] == pytest.approx((2e15, 1e13))
@@ -1466,7 +1465,7 @@ class TestCustomPoleAndPerturbationConversion:
 
         td = inject_mock_tidy3d
         delta = torch.full((2, 2, 2), 1.0)
-        medium = mw.Material(eps_r=2.0, debye_poles=(mw.CustomDebyePole(delta_eps=delta, tau=1e-12),))
+        medium = mw.Material(eps_r=2.0, debye_poles=(mw.media.CustomDebyePole(delta_eps=delta, tau=1e-12),))
         result = _convert_material(medium, td)
         assert isinstance(result, td.Debye)
         assert result.coeffs[0] == pytest.approx((1.0, 2.0 * math.pi * 1e-12))
@@ -1480,7 +1479,7 @@ class TestCustomPoleAndPerturbationConversion:
         td = inject_mock_tidy3d
         delta = torch.linspace(1.0, 2.0, 8).reshape(2, 2, 2)
         medium = mw.Material(
-            lorentz_poles=(mw.CustomLorentzPole(delta_eps=delta, resonance_frequency=5e14, gamma=1e13),),
+            lorentz_poles=(mw.media.CustomLorentzPole(delta_eps=delta, resonance_frequency=5e14, gamma=1e13),),
         )
         with pytest.raises(NotImplementedError, match="spatially-varying custom dispersive pole"):
             _convert_material(medium, td)
@@ -1492,7 +1491,7 @@ class TestCustomPoleAndPerturbationConversion:
 
         td = inject_mock_tidy3d
         pert = torch.full((3, 3, 3), 0.5)
-        medium = mw.PerturbationMedium(mw.Material(eps_r=2.0), perturbation=pert, eps_sensitivity=2.0)
+        medium = mw.media.PerturbationMedium(mw.Material(eps_r=2.0), perturbation=pert, eps_sensitivity=2.0)
         result = _convert_material(medium, td)
         assert isinstance(result, td.Medium)
         assert result.permittivity == pytest.approx(3.0)
@@ -1504,7 +1503,7 @@ class TestCustomPoleAndPerturbationConversion:
         td = inject_mock_tidy3d
         pert = torch.full((3, 3, 3), 1.0)
         base = mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0))
-        medium = mw.PerturbationMedium(base, perturbation=pert, eps_sensitivity=0.5)
+        medium = mw.media.PerturbationMedium(base, perturbation=pert, eps_sensitivity=0.5)
         result = _convert_material(medium, td)
         assert isinstance(result, td.AnisotropicMedium)
         assert result.xx.permittivity == pytest.approx(2.5)
@@ -1518,7 +1517,7 @@ class TestCustomPoleAndPerturbationConversion:
         td = inject_mock_tidy3d
         pert = torch.full((2, 2, 2), 1.0)
         base = mw.Material.lorentz(eps_inf=2.0, delta_eps=1.5, resonance_frequency=5e14, gamma=1e13)
-        medium = mw.PerturbationMedium(base, perturbation=pert, eps_sensitivity=0.5)
+        medium = mw.media.PerturbationMedium(base, perturbation=pert, eps_sensitivity=0.5)
         result = _convert_material(medium, td)
         assert isinstance(result, td.Lorentz)
         assert result.eps_inf == pytest.approx(2.5)
@@ -1529,7 +1528,7 @@ class TestCustomPoleAndPerturbationConversion:
 
         td = inject_mock_tidy3d
         pert = torch.linspace(0.1, 1.0, 8).reshape(2, 2, 2)
-        medium = mw.PerturbationMedium(mw.Material(eps_r=2.0), perturbation=pert)
+        medium = mw.media.PerturbationMedium(mw.Material(eps_r=2.0), perturbation=pert)
         with pytest.raises(NotImplementedError, match="spatially-varying PerturbationMedium"):
             _convert_material(medium, td)
 
@@ -1543,17 +1542,18 @@ class TestCustomPoleAndPerturbationConversion:
                 domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
                 grid=mw.GridSpec.uniform(0.05),
                 boundary=mw.BoundarySpec.pml(num_layers=10),
-                device="cpu",
+                structures=(
+                    mw.Structure(
+                        mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
+                        mw.media.PerturbationMedium(mw.Material(eps_r=2.0), perturbation=pert, eps_sensitivity=2.0),
+                    ),
+                ),
+                sources=(
+                    mw.PointDipole(position=(0, 0, 0.4), polarization="Ex", source_time=mw.CW(frequency=1e13)),
+                ),
             )
-            .add_structure(
-                mw.Structure(
-                    mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
-                    mw.PerturbationMedium(mw.Material(eps_r=2.0), perturbation=pert, eps_sensitivity=2.0),
-                )
-            )
-            .add_source(mw.PointDipole(position=(0, 0, 0.4), polarization="Ex", source_time=mw.CW(frequency=1e13)))
         )
-        sim = scene.to_tidy3d(frequencies=1e13)
+        sim = scene_to_tidy3d(scene, frequencies=1e13)
         assert len(sim.structures) == 1
         medium = sim.structures[0].medium
         assert isinstance(medium, td.Medium)
@@ -1574,7 +1574,7 @@ class TestCustomPoleAndPerturbationConversion:
         freq = 2.0e14
         with _real_tidy3d() as real_td:
             plasma = torch.full((3, 3, 3), 2e15)
-            custom = mw.Material(eps_r=1.0, drude_poles=(mw.CustomDrudePole(plasma_frequency=plasma, gamma=1e13),))
+            custom = mw.Material(eps_r=1.0, drude_poles=(mw.media.CustomDrudePole(plasma_frequency=plasma, gamma=1e13),))
             scalar = mw.Material.drude(eps_inf=1.0, plasma_frequency=2e15, gamma=1e13)
             medium = _convert_material(custom, real_td)
             assert isinstance(medium, real_td.Drude)
@@ -1599,7 +1599,7 @@ class TestCustomPoleAndPerturbationConversion:
         shifted = base_eps + sensitivity * value
         with _real_tidy3d() as real_td:
             pert = torch.full((3, 3, 3), value)
-            medium = mw.PerturbationMedium(mw.Material(eps_r=base_eps), perturbation=pert, eps_sensitivity=sensitivity)
+            medium = mw.media.PerturbationMedium(mw.Material(eps_r=base_eps), perturbation=pert, eps_sensitivity=sensitivity)
             exported = _convert_material(medium, real_td)
             assert isinstance(exported, real_td.Medium)
             eps = complex(exported.eps_model(freq))
@@ -1644,7 +1644,7 @@ class TestGeometryConversion:
     )
     def test_cone_preserves_apex_and_axis(self, inject_mock_tidy3d, axis, axis_idx, expected_center):
         td = inject_mock_tidy3d
-        geom = mw.Cone(position=(1.0, 2.0, 3.0), radius=0.5, height=10.0, axis=axis)
+        geom = mw.geometry.Cone(position=(1.0, 2.0, 3.0), radius=0.5, height=10.0, axis=axis)
 
         result = _convert_geometry(geom, td, 2.0)
 
@@ -1658,7 +1658,7 @@ class TestGeometryConversion:
 
     def test_rotated_cone_exports_as_triangle_mesh(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        geom = mw.Cone(
+        geom = mw.geometry.Cone(
             position=(0.0, 0.0, 0.0),
             radius=0.5,
             height=1.0,
@@ -1674,7 +1674,7 @@ class TestGeometryConversion:
         # A torus has no analytic Tidy3D primitive, so it tessellates to a TriangleMesh
         # built from the primitive's own surface mesh (vertices scaled to Tidy3D units).
         td = inject_mock_tidy3d
-        geom = mw.Torus(position=(0, 0, 0), major_radius=1.0, minor_radius=0.3)
+        geom = mw.geometry.Torus(position=(0, 0, 0), major_radius=1.0, minor_radius=0.3)
         result = _convert_geometry(geom, td, 2.0)
         assert isinstance(result, td.TriangleMesh)
         # Faces are an integer connectivity table (never length-scaled); vertices are
@@ -1687,10 +1687,10 @@ class TestGeometryConversion:
     @pytest.mark.parametrize(
         "geom",
         [
-            mw.Pyramid(position=(0, 0, 0), base_size=0.6, height=0.5),
-            mw.HollowBox(position=(0, 0, 0), outer_size=(0.6, 0.6, 0.6), inner_size=(0.4, 0.4, 0.4)),
-            mw.Prism(position=(0, 0, 0), radius=0.3, height=0.4, num_sides=6),
-            mw.Ellipsoid(position=(0, 0, 0), radii=(0.3, 0.2, 0.15)),
+            mw.geometry.Pyramid(position=(0, 0, 0), base_size=0.6, height=0.5),
+            mw.geometry.HollowBox(position=(0, 0, 0), outer_size=(0.6, 0.6, 0.6), inner_size=(0.4, 0.4, 0.4)),
+            mw.geometry.Prism(position=(0, 0, 0), radius=0.3, height=0.4, num_sides=6),
+            mw.geometry.Ellipsoid(position=(0, 0, 0), radii=(0.3, 0.2, 0.15)),
         ],
     )
     def test_mesh_only_primitives_export_as_triangle_mesh(self, inject_mock_tidy3d, geom):
@@ -1701,7 +1701,7 @@ class TestGeometryConversion:
     def test_isotropic_ellipsoid_stays_analytic_sphere(self, inject_mock_tidy3d):
         # Radii equal on all axes: prefer Tidy3D's exact analytic Sphere over a mesh.
         td = inject_mock_tidy3d
-        geom = mw.Ellipsoid(position=(1, 0, 0), radii=(0.5, 0.5, 0.5))
+        geom = mw.geometry.Ellipsoid(position=(1, 0, 0), radii=(0.5, 0.5, 0.5))
         result = _convert_geometry(geom, td, 1.0)
         assert isinstance(result, td.Sphere)
         assert result.radius == pytest.approx(0.5)
@@ -1739,7 +1739,7 @@ class TestGeometryConversion:
 class TestSourceConversion:
     def test_point_dipole(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        scene = mw.Scene(domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))), device="cpu")
+        scene = mw.Scene(domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))))
         src = mw.PointDipole(
             position=(0, 0, 0),
             polarization="Ez",
@@ -1753,7 +1753,7 @@ class TestSourceConversion:
 
     def test_plane_wave(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        scene = mw.Scene(domain=mw.Domain(bounds=((-5, 5), (-5, 5), (-5, 5))), device="cpu")
+        scene = mw.Scene(domain=mw.Domain(bounds=((-5, 5), (-5, 5), (-5, 5))))
         src = mw.PlaneWave(
             direction=(0, 0, 1),
             polarization=(1, 0, 0),
@@ -1768,7 +1768,7 @@ class TestSourceConversion:
 
     def test_plane_wave_exports_requested_polarization_angle(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        scene = mw.Scene(domain=mw.Domain(bounds=((-5, 5), (-5, 5), (-5, 5))), device="cpu")
+        scene = mw.Scene(domain=mw.Domain(bounds=((-5, 5), (-5, 5), (-5, 5))))
         polarization = (0.9436283192, 0.3310069414, 0.0)
         src = mw.PlaneWave(
             direction=(0, 0, 1),
@@ -1798,7 +1798,6 @@ class TestSourceConversion:
         with _real_tidy3d() as real_td:
             scene = mw.Scene(
                 domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))),
-                device="cpu",
             )
             source = mw.PlaneWave(
                 direction=direction,
@@ -1817,7 +1816,7 @@ class TestSourceConversion:
         # A ModeSource exports as a Tidy3D ModeSource carrying both polarization
         # candidates through the requested order; the plane is zero-thickness normally.
         td = inject_mock_tidy3d
-        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))))
         src = mw.ModeSource(
             position=(0, 0, 0.5), size=(1.0, 1.0, 0.0), mode_index=1, direction="-",
             source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13), name="p0",
@@ -1851,8 +1850,8 @@ class TestSourceConversion:
         # AstigmaticGaussianBeam maps to Tidy3D's AstigmaticGaussianBeam with per-axis
         # waist sizes and per-axis waist distances, all length-scaled.
         td = inject_mock_tidy3d
-        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
-        src = mw.AstigmaticGaussianBeam(
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))))
+        src = mw.sources.AstigmaticGaussianBeam(
             direction=(0, 0, 1), polarization=(1, 0, 0), beam_waist=(0.5, 0.6),
             focus=(0, 0, 0.2), focus_u=0.1, focus_v=0.15,
             source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
@@ -1870,7 +1869,7 @@ class TestSourceConversion:
 
     def test_uniform_current_source(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))))
         src = mw.UniformCurrentSource(
             size=(0.4, 0.4, 0.4), polarization="Ez", center=(0.1, 0.0, 0.0),
             source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
@@ -1886,7 +1885,7 @@ class TestSourceConversion:
         # A plane wave injected as a TFSF box exports a Tidy3D TFSF volume source whose box
         # is the total-field region and whose injection axis is the propagation axis.
         td = inject_mock_tidy3d
-        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))))
         src = mw.PlaneWave(
             direction=(0, 0, 1), polarization=(1, 0, 0),
             source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
@@ -1906,7 +1905,7 @@ class TestSourceConversion:
     def test_tfsf_slab_injection_is_infinite_in_transverse(self, inject_mock_tidy3d):
         # A slab-mode TFSF bounds only the propagation axis; the transverse extent is td.inf.
         td = inject_mock_tidy3d
-        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))))
         src = mw.PlaneWave(
             direction=(0, 0, -1), polarization=(1, 0, 0),
             source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
@@ -1929,10 +1928,10 @@ class TestSourceConversion:
         import numpy as _np
 
         td = inject_mock_tidy3d
-        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))))
         x = _np.array([-0.5, 0.0, 0.5]); y = _np.array([-0.5, 0.5]); z = _np.array([0.2])
-        ds = mw.FieldDataset((x, y, z), {"Ex": _np.ones((3, 2, 1)), "Hy": _np.full((3, 2, 1), 0.3)})
-        src = mw.CustomFieldSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13))
+        ds = mw.sources.FieldDataset((x, y, z), {"Ex": _np.ones((3, 2, 1)), "Hy": _np.full((3, 2, 1), 0.3)})
+        src = mw.sources.CustomFieldSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13))
         result = _convert_source(src, scene, td, 2.0)
         assert isinstance(result, td.CustomFieldSource)
         # Center is the midpoint of each coordinate span, scaled to Tidy3D units.
@@ -1952,10 +1951,10 @@ class TestSourceConversion:
         import numpy as _np
 
         td = inject_mock_tidy3d
-        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))))
         x = _np.array([-0.5, 0.5]); y = _np.array([-0.5, 0.5]); z = _np.array([-0.1, 0.1])
-        ds = mw.CurrentDataset((x, y, z), {"Jz": _np.ones((2, 2, 2)), "Mx": _np.full((2, 2, 2), 0.3)})
-        src = mw.CustomCurrentSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13))
+        ds = mw.sources.CurrentDataset((x, y, z), {"Jz": _np.ones((2, 2, 2)), "Mx": _np.full((2, 2, 2), 0.3)})
+        src = mw.sources.CustomCurrentSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13))
         result = _convert_source(src, scene, td, 2.0)
         assert isinstance(result, td.CustomCurrentSource)
         assert set(result.current_dataset._kwargs) == {"Ez", "Hx"}
@@ -2023,7 +2022,7 @@ class TestSourceTimeConversion:
 
     def test_broadband_pulse_exports_declarative_contract(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        st = mw.BroadbandPulse(freq_range=(1.0e9, 6.0e9), minimum_amplitude=0.2, amplitude=1.5,
+        st = mw.sources.BroadbandPulse(freq_range=(1.0e9, 6.0e9), minimum_amplitude=0.2, amplitude=1.5,
                                phase=0.3, offset=2.0)
         result = _convert_source_time(st, td, amplitude_scale=2.0)
         assert isinstance(result, td.BroadbandPulse)
@@ -2038,7 +2037,7 @@ class TestSourceTimeConversion:
         reason="tidy3d is not installed",
     )
     def test_broadband_pulse_export_validates_with_real_tidy3d(self):
-        st = mw.BroadbandPulse(freq_range=(2.0e14, 3.0e14), minimum_amplitude=0.3, phase=0.1)
+        st = mw.sources.BroadbandPulse(freq_range=(2.0e14, 3.0e14), minimum_amplitude=0.3, phase=0.1)
         with _real_tidy3d() as real_td:
             exported = _convert_source_time(st, real_td)
             assert isinstance(exported, real_td.BroadbandPulse)
@@ -2122,7 +2121,7 @@ class TestMonitorConversion:
         # Tidy3D decomposes orders over the whole periodic cell, so the transverse size
         # must be td.inf; the normal axis stays zero-thickness at the plane position.
         td = inject_mock_tidy3d
-        mon = mw.DiffractionMonitor(
+        mon = mw.monitors.DiffractionMonitor(
             name="orders", position=(0.0, 0.0, 0.5), size=(1.0, 1.0, 0.0), frequencies=(1e9,), normal_direction="+"
         )
         bounds = ((-2, 2), (-2, 2), (-2, 2))
@@ -2134,7 +2133,7 @@ class TestMonitorConversion:
 
     def test_permittivity_monitor_exports(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        mon = mw.PermittivityMonitor(name="eps", position=(0.1, 0.2, 0.3), size=(1.0, 2.0, 3.0), frequencies=(1e9,))
+        mon = mw.monitors.PermittivityMonitor(name="eps", position=(0.1, 0.2, 0.3), size=(1.0, 2.0, 3.0), frequencies=(1e9,))
         bounds = ((-2, 2), (-2, 2), (-2, 2))
         result = _convert_monitor(mon, bounds, None, td, 2.0)
         assert isinstance(result, td.PermittivityMonitor)
@@ -2145,7 +2144,7 @@ class TestMonitorConversion:
         # A time-domain monitor samples the running field, so it must convert even when no
         # frequencies are supplied (unlike frequency-domain monitors).
         td = inject_mock_tidy3d
-        mon = mw.FieldTimeMonitor(
+        mon = mw.monitors.FieldTimeMonitor(
             name="probe_t", components=("Ex", "Hz"), position=(0.0, 0.0, 0.0), size=(0.0, 0.0, 0.0),
             start=10, stop=100, interval=2,
         )
@@ -2159,7 +2158,7 @@ class TestMonitorConversion:
 
     def test_flux_time_monitor_exports_as_plane(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        mon = mw.FluxTimeMonitor(name="flux_t", axis="z", position=1.0, start=0, interval=1, normal_direction="-")
+        mon = mw.monitors.FluxTimeMonitor(name="flux_t", axis="z", position=1.0, start=0, interval=1, normal_direction="-")
         bounds = ((-2, 2), (-2, 2), (-2, 2))
         result = _convert_monitor(mon, bounds, None, td, 1.0)
         assert isinstance(result, td.FluxTimeMonitor)
@@ -2183,13 +2182,16 @@ class TestFullSceneConversion:
                 domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
                 grid=mw.GridSpec.uniform(0.05),
                 boundary=mw.BoundarySpec.pml(num_layers=10),
-                device="cpu",
+                structures=(
+                    mw.Structure(mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)), mw.Material(eps_r=4.0)),
+                ),
+                sources=(
+                    mw.PointDipole(position=(0, 0, 0), polarization="Ez", source_time=mw.CW(frequency=1e9)),
+                ),
+                monitors=(mw.PlaneMonitor(name="field_xy", axis="z", position=0.0),),
             )
-            .add_structure(mw.Structure(mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)), mw.Material(eps_r=4.0)))
-            .add_source(mw.PointDipole(position=(0, 0, 0), polarization="Ez", source_time=mw.CW(frequency=1e9)))
-            .add_monitor(mw.PlaneMonitor(name="field_xy", axis="z", position=0.0))
         )
-        sim = scene.to_tidy3d(frequencies=1e9)
+        sim = scene_to_tidy3d(scene, frequencies=1e9)
         assert isinstance(sim, td.Simulation)
         assert sim.center == pytest.approx((0.0, 0.0, 0.0))
         assert sim.size == pytest.approx((2.0e6, 2.0e6, 2.0e6))
@@ -2203,35 +2205,35 @@ class TestFullSceneConversion:
             domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
             grid=mw.GridSpec.uniform(0.1),
             boundary=mw.BoundarySpec.pml(),
-            device="cpu",
-        ).add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
-                density=torch.full((2, 2, 2), 0.25),
-                eps_bounds=(2.0, 6.0),
-            )
+            material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
+                    density=torch.full((2, 2, 2), 0.25),
+                    eps_bounds=(2.0, 6.0),
+                ),
+            ),
         )
 
-        sim = scene.to_tidy3d(frequencies=1e9)
+        sim = scene_to_tidy3d(scene, frequencies=1e9)
 
         assert len(sim.structures) == 1
         assert isinstance(sim.structures[0].medium, td.Medium)
         assert sim.structures[0].medium.permittivity == pytest.approx(3.0)
 
     def test_spatial_material_region_export_fails_loudly(self):
-        scene = mw.Scene(device="cpu").add_material_region(
+        scene = mw.Scene(material_regions=(
             mw.MaterialRegion(
                 name="design",
                 geometry=mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
                 density=torch.arange(8, dtype=torch.float64).reshape(2, 2, 2),
                 bounds=(0.0, 7.0),
                 eps_bounds=(1.0, 4.0),
-            )
-        )
+            ),
+        ))
 
         with pytest.raises(NotImplementedError, match="spatially uniform"):
-            scene.to_tidy3d(frequencies=1e9)
+            scene_to_tidy3d(scene, frequencies=1e9)
 
     def test_closed_surface_monitor_exports_as_resolved_finite_faces(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
@@ -2240,19 +2242,20 @@ class TestFullSceneConversion:
                 domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
                 grid=mw.GridSpec.uniform(0.05),
                 boundary=mw.BoundarySpec.pml(num_layers=10),
-                device="cpu",
-            )
-            .add_source(mw.PointDipole(position=(0, 0, 0), polarization="Ez", source_time=mw.CW(frequency=1e9)))
-            .add_monitor(
-                mw.ClosedSurfaceMonitor.box(
-                    "huygens",
-                    position=(0.0, 0.0, 0.0),
-                    size=(0.8, 0.6, 0.4),
-                    frequencies=(1e9,),
-                )
+                sources=(
+                    mw.PointDipole(position=(0, 0, 0), polarization="Ez", source_time=mw.CW(frequency=1e9)),
+                ),
+                monitors=(
+                    mw.monitors.ClosedSurfaceMonitor.box(
+                        "huygens",
+                        position=(0.0, 0.0, 0.0),
+                        size=(0.8, 0.6, 0.4),
+                        frequencies=(1e9,),
+                    ),
+                ),
             )
         )
-        sim = scene.to_tidy3d(frequencies=1e9)
+        sim = scene_to_tidy3d(scene, frequencies=1e9)
         assert isinstance(sim, td.Simulation)
         assert len(sim.monitors) == 6
         names = {monitor.name for monitor in sim.monitors}
@@ -2279,10 +2282,46 @@ class TestFullSceneConversion:
                 )
             ],
             symmetry=("PEC", "PMC", None),
-            device="cpu",
         )
-        sim = scene.to_tidy3d(frequencies=1e9)
+        sim = scene_to_tidy3d(scene, frequencies=1e9)
         assert sim.symmetry == (-1, 1, 0)
+
+    @staticmethod
+    def _kept_half_scene(slab_size, *, structure=None, regions=()):
+        # Kept part x in [0, 1] (low-face PEC) and y in [-1, 0] (high-face PMC) of the domain [-1, 1]^3.
+        slab = mw.Structure(geometry=mw.Box(position=(0.0, 0.0, 0.0), size=slab_size), material=mw.Material(eps_r=3.0))
+        return mw.Scene(
+            domain=mw.Domain(bounds=((0, 1), (-1, 0), (-1, 1))),
+            grid=mw.GridSpec.uniform(0.1),
+            boundary=mw.BoundarySpec.pml(),
+            sources=[mw.PlaneWave(direction=(0, 0, 1), polarization="Ex", source_time=mw.CW(frequency=1e9))],
+            structures=[slab if structure is None else structure],
+            material_regions=list(regions),
+            symmetry=(("PEC", "low"), ("PMC", "high"), None),
+        )
+
+    def test_face_symmetry_exports_the_mirrored_domain_with_center_planes(self, inject_mock_tidy3d):
+        sim = scene_to_tidy3d(self._kept_half_scene((4.0, 4.0, 0.2)), frequencies=1e9, length_scale=1.0)
+        assert sim.symmetry == (-1, 1, 0)
+        assert sim.center == pytest.approx((0.0, 0.0, 0.0))
+        assert sim.size == pytest.approx((2.0, 2.0, 2.0))
+
+    def test_face_symmetry_export_refuses_a_structure_that_is_not_its_own_mirror_image(self):
+        # The box covers only the kept x half: its mirrored domain holds it once, not mirrored.
+        scene = self._kept_half_scene((4.0, 4.0, 0.2), structure=mw.Structure(
+            geometry=mw.Box(position=(0.5, 0.0, 0.0), size=(1.0, 4.0, 0.2)), material=mw.Material(eps_r=3.0)))
+        with pytest.raises(NotImplementedError, match="symmetric about the symmetry plane"):
+            scene_to_tidy3d(scene, frequencies=1e9)
+
+    def test_face_symmetry_export_refuses_a_region_that_is_not_its_own_mirror_image(self):
+        scene = self._kept_half_scene((4.0, 4.0, 0.2), regions=(mw.MaterialRegion(
+            name="design",
+            geometry=mw.Box(position=(0.25, -0.5, 0.0), size=(0.5, 1.0, 0.5)),
+            density=torch.full((2, 2, 2), 0.25),
+            eps_bounds=(2.0, 6.0),
+        ),))
+        with pytest.raises(NotImplementedError, match="MaterialRegion must be a box symmetric"):
+            scene_to_tidy3d(scene, frequencies=1e9)
 
     def test_localized_face_symmetry_is_rejected_as_not_center_equivalent(self):
         scene = mw.Scene(
@@ -2293,20 +2332,18 @@ class TestFullSceneConversion:
                 )
             ],
             symmetry=("PEC", None, None),
-            device="cpu",
         )
 
         with pytest.raises(NotImplementedError, match="center-based"):
-            scene.to_tidy3d(frequencies=1e9)
+            scene_to_tidy3d(scene, frequencies=1e9)
 
     def test_custom_run_time(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
         scene = mw.Scene(
             domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
             sources=[mw.PointDipole(position=(0, 0, 0), source_time=mw.CW(frequency=1e9))],
-            device="cpu",
         )
-        sim = scene.to_tidy3d(frequencies=1e9, run_time=1e-9)
+        sim = scene_to_tidy3d(scene, frequencies=1e9, run_time=1e-9)
         assert sim.run_time == 1e-9
 
     @pytest.mark.parametrize("name", (
@@ -2319,8 +2356,8 @@ class TestFullSceneConversion:
         scene = build_scene(name)
         scenario = SCENARIOS[name]
         requested = scenario.run_time_factor * max(hi - lo for lo, hi in scene.domain.bounds) / 299_792_458.0
-        short = scene.to_tidy3d(frequencies=scenario.frequencies, run_time=requested)
-        settled = scene.to_tidy3d(
+        short = scene_to_tidy3d(scene, frequencies=scenario.frequencies, run_time=requested)
+        settled = scene_to_tidy3d(scene,
             frequencies=scenario.frequencies, run_time=requested, cw_steady_state=True,
         )
         assert short.run_time == requested
@@ -2329,7 +2366,7 @@ class TestFullSceneConversion:
         else:
             assert settled.run_time > 50 * requested
             # An explicitly longer observation horizon must never be shortened.
-            longer = scene.to_tidy3d(
+            longer = scene_to_tidy3d(scene,
                 frequencies=scenario.frequencies, run_time=2 * settled.run_time, cw_steady_state=True,
             )
             assert longer.run_time == 2 * settled.run_time
@@ -2342,7 +2379,7 @@ class TestFullSceneConversion:
 
         scene = build_scene("planewave_cw")
         scenario = SCENARIOS["planewave_cw"]
-        sim = scene.to_tidy3d(
+        sim = scene_to_tidy3d(scene,
             frequencies=scenario.frequencies,
             run_time=scenario.run_time_factor * 1.28 / 299_792_458.0,
             cw_steady_state=True,
@@ -2372,7 +2409,7 @@ class TestFullSceneConversion:
                 )
             ],
             monitors=[
-                mw.FieldTimeMonitor(
+                mw.monitors.FieldTimeMonitor(
                     "trace",
                     components=("Ez",),
                     start=2,
@@ -2380,10 +2417,9 @@ class TestFullSceneConversion:
                     interval=2,
                 )
             ],
-            device="cpu",
         )
 
-        sim = scene.to_tidy3d(frequencies=1e9, courant=0.5)
+        sim = scene_to_tidy3d(scene, frequencies=1e9, courant=0.5)
 
         dt = 0.5 / (299_792_458.0 * math.sqrt(3.0 / 0.1**2))
         assert sim.monitors[0].start == pytest.approx(2 * dt)
@@ -2395,17 +2431,17 @@ class TestFullSceneConversion:
         scene = mw.Scene(
             domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
             grid=mw.GridSpec.uniform(0.05),
-            device="cpu",
-        ).add_port(
-            mw.ModePort(
-                "port0",
-                position=(0.0, 0.0, 0.0),
-                size=(0.0, 1.0, 1.0),
-                polarization="Ez",
-                frequencies=(1e9,),
-            )
+            ports=(
+                mw.ModePort(
+                    "port0",
+                    position=(0.0, 0.0, 0.0),
+                    size=(0.0, 1.0, 1.0),
+                    polarization="Ez",
+                    frequencies=(1e9,),
+                ),
+            ),
         )
-        sim = scene.to_tidy3d(frequencies=1e9)
+        sim = scene_to_tidy3d(scene, frequencies=1e9)
         assert isinstance(sim, td.Simulation)
         assert len(sim.sources) == 0
         assert len(sim.monitors) == 1
@@ -2430,7 +2466,7 @@ class TestGeometrySourceMonitorRealTidy3d:
         position = (0.1, -0.2, -0.3)
         radius = 0.4
         height = 0.8
-        geom = mw.Cone(position=position, radius=radius, height=height, axis="z")
+        geom = mw.geometry.Cone(position=position, radius=radius, height=height, axis="z")
         points = np.asarray(
             [
                 (0.1, -0.2, 0.3),
@@ -2472,7 +2508,7 @@ class TestGeometrySourceMonitorRealTidy3d:
         length_scale = 1.0e6
         major, minor = 0.5, 0.15
         with _real_tidy3d() as real_td:
-            geom = mw.Torus(position=(0, 0, 0), major_radius=major, minor_radius=minor, axis="z")
+            geom = mw.geometry.Torus(position=(0, 0, 0), major_radius=major, minor_radius=minor, axis="z")
             mesh = _convert_geometry(geom, real_td, length_scale)
             assert isinstance(mesh, real_td.TriangleMesh)
             (xmin, ymin, zmin), (xmax, ymax, zmax) = mesh.bounds
@@ -2516,7 +2552,7 @@ class TestGeometrySourceMonitorRealTidy3d:
         from witwin.maxwell.adapters.tidy3d import _convert_monitor, _convert_source
 
         with _real_tidy3d() as real_td:
-            scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+            scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))))
             src = _convert_source(
                 mw.ModeSource(
                     position=(0, 0, 0.5), size=(1.0, 1.0, 0.0), mode_index=2, direction="+",
@@ -2548,7 +2584,7 @@ class TestGeometrySourceMonitorRealTidy3d:
 
         with _real_tidy3d() as real_td:
             mon = _convert_monitor(
-                mw.DiffractionMonitor(name="d", position=(0, 0, 0.5), size=(1.0, 1.0, 0.0), frequencies=(3e14,)),
+                mw.monitors.DiffractionMonitor(name="d", position=(0, 0, 0.5), size=(1.0, 1.0, 0.0), frequencies=(3e14,)),
                 ((-2, 2), (-2, 2), (-2, 2)), None, real_td, 1.0e6,
             )
             assert isinstance(mon, real_td.DiffractionMonitor)
@@ -2570,11 +2606,11 @@ class TestGeometrySourceMonitorRealTidy3d:
 
         length_scale = 1.0e6
         with _real_tidy3d() as real_td:
-            scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+            scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))))
             x = _np.array([-0.5, 0.0, 0.5]); y = _np.array([-0.5, 0.5]); z = _np.array([0.2])
-            ds = mw.FieldDataset((x, y, z), {"Ex": _np.ones((3, 2, 1)), "Hy": _np.full((3, 2, 1), 0.3)})
+            ds = mw.sources.FieldDataset((x, y, z), {"Ex": _np.ones((3, 2, 1)), "Hy": _np.full((3, 2, 1), 0.3)})
             src = _convert_source(
-                mw.CustomFieldSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13)),
+                mw.sources.CustomFieldSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13)),
                 scene, real_td, length_scale,
             )
             assert isinstance(src, real_td.CustomFieldSource)
@@ -2599,11 +2635,11 @@ class TestGeometrySourceMonitorRealTidy3d:
         from witwin.maxwell.adapters.tidy3d import _convert_source
 
         with _real_tidy3d() as real_td:
-            scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+            scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))))
             x = _np.array([-0.5, 0.5]); y = _np.array([-0.5, 0.5]); z = _np.array([-0.1, 0.1])
-            ds = mw.CurrentDataset((x, y, z), {"Jz": _np.ones((2, 2, 2)), "Mx": _np.full((2, 2, 2), 0.3)})
+            ds = mw.sources.CurrentDataset((x, y, z), {"Jz": _np.ones((2, 2, 2)), "Mx": _np.full((2, 2, 2), 0.3)})
             src = _convert_source(
-                mw.CustomCurrentSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13)),
+                mw.sources.CustomCurrentSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13)),
                 scene, real_td, 1.0e6,
             )
             assert isinstance(src, real_td.CustomCurrentSource)
@@ -2636,7 +2672,7 @@ def test_oblique_tfsf_physical_power_amplitude(inject_mock_tidy3d, angle, polari
         electric[transverse] = math.cos(theta)
     amplitude = 2.75
     scale = 1e6
-    scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2),) * 3), device="cpu")
+    scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2),) * 3))
     source = mw.PlaneWave(
         direction=direction, polarization=electric, injection_axis=axis,
         source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e8, amplitude=amplitude),
@@ -2670,9 +2706,9 @@ def test_export_plane_matches_compiled_monitor(inject_mock_tidy3d, axis, on_grid
     axis_idx = "xyz".index(axis)
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.64, 0.64),) * 3),
-        grid=mw.GridSpec.uniform(0.025), boundary=mw.BoundarySpec.pml(num_layers=8), device="cpu",
+        grid=mw.GridSpec.uniform(0.025), boundary=mw.BoundarySpec.pml(num_layers=8),
     )
-    prepared = prepare_scene(scene, lazy_meshgrid=True)
+    prepared = prepare_scene(scene, lazy_meshgrid=True, device="cpu")
     requested = float(getattr(prepared, axis + "_nodes64")[46]) if on_grid else 0.3
     center = [0.0] * 3
     center[axis_idx] = requested
@@ -2689,23 +2725,23 @@ def test_export_plane_matches_compiled_monitor(inject_mock_tidy3d, axis, on_grid
     elif kind == "mode":
         monitor = mw.ModeMonitor(position=center, size=size, polarization="E" + "xyz"[(axis_idx + 1) % 3], **kwargs)
     elif kind == "diffraction":
-        monitor = mw.DiffractionMonitor(position=center, size=size, **kwargs)
+        monitor = mw.monitors.DiffractionMonitor(position=center, size=size, **kwargs)
     else:
-        monitor = mw.FluxTimeMonitor(name="probe", axis=axis, position=requested)
-    scene.add_monitor(monitor)
-    prepared = prepare_scene(scene, lazy_meshgrid=True)
+        monitor = mw.monitors.FluxTimeMonitor(name="probe", axis=axis, position=requested)
+    scene = scene.updated(monitors=(*scene.monitors, monitor))
+    prepared = prepare_scene(scene, lazy_meshgrid=True, device="cpu")
     if kind == "flux_time":
         record = compile_fdtd_time_observers(scene)[0]
         solver = types.SimpleNamespace(scene=prepared, device=torch.device("cpu"), dtype=torch.float32)
         for component in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-            setattr(solver, component, torch.zeros(tuple(len(coords) for coords in component_coords(prepared, component))))
+            setattr(solver, component, torch.zeros(tuple(len(coords) for coords in component_coords(prepared, component, device=prepared.device))))
         prepare_time_flux(solver, record, 1)
         compiled_position = record["yee_plane_position"]
     else:
         record = compile_fdtd_observers(scene)[0]
         _prepare_plane_observer(prepared, record, device="cpu", dtype=torch.float32)
         compiled_position = record.get("yee_plane_position", requested)
-    exported = scene.to_tidy3d(frequencies=(1e9,), length_scale=1.0).monitors[0]
+    exported = scene_to_tidy3d(scene, frequencies=(1e9,), length_scale=1.0).monitors[0]
     assert exported.center[axis_idx] == pytest.approx(compiled_position, abs=1e-15)
     snaps = kind in ("flux", "plane_flux", "finite_flux", "mode", "diffraction", "flux_time", "closed_field")
     if snaps:

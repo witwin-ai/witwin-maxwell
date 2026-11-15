@@ -8,24 +8,28 @@ import witwin.maxwell as mw
 
 def simulation(*, frequency=1e9, boundary=None, grid=None, dt=1e-11):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
-        grid=grid or mw.GridSpec.uniform(0.02),
-        boundary=boundary or mw.BoundarySpec.none(), device="cpu",
-    )
-    scene.add_source(mw.PointDipole(
-        name="drive", position=(0.0, 0.0, 0.0), polarization="Ez",
-        source_time=mw.CW(frequency=1e9),
-    ))
-    scene.add_monitor(mw.PointMonitor(name="probe", position=(0.1, 0.0, 0.0), fields=("Ez",)))
-    scene.add_material_region(mw.MaterialRegion(
-        name="design", geometry=mw.Box(size=(0.1, 0.1, 0.1), device="cpu"),
-        density=torch.zeros(2, 3, 1), eps_bounds=(1.0, 4.0),
-    ))
-    return mw.Simulation.fdtd(scene, frequency=frequency, run_time=mw.TimeConfig(time_steps=10, dt=dt))
+                domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
+                grid=grid or mw.GridSpec.uniform(0.02),
+                boundary=boundary or mw.BoundarySpec.none(),
+                sources=(
+            mw.PointDipole(
+                name="drive", position=(0.0, 0.0, 0.0), polarization="Ez",
+                source_time=mw.CW(frequency=1e9),
+            ),
+            ),
+                monitors=(mw.PointMonitor(name="probe", position=(0.1, 0.0, 0.0), fields=("Ez",)),),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design", geometry=mw.Box(size=(0.1, 0.1, 0.1), device="cpu"),
+                density=torch.zeros(2, 3, 1), eps_bounds=(1.0, 4.0),
+            ),
+            ),
+            )
+    return mw.Simulation.fdtd(scene, frequencies=frequency, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=10, dt=dt), device="cpu"))
 
 
 def execution(**kwargs):
-    return mw.BatchExecution(devices=("cuda:0",), **kwargs)
+    return mw.execution.BatchExecution(devices=("cuda:0",), **kwargs)
 
 
 @pytest.mark.parametrize("kwargs,match", [
@@ -54,7 +58,7 @@ def test_execution_validation(kwargs, match):
 @pytest.mark.parametrize("devices", [("cpu",), ("cuda",), ("cuda:0", "cuda:0"), ()])
 def test_explicit_unique_cuda_devices(devices):
     with pytest.raises(ValueError):
-        mw.BatchExecution(devices=devices)
+        mw.execution.BatchExecution(devices=devices)
 
 
 def test_execution_owns_immutable_device_limits():
@@ -78,13 +82,13 @@ def test_execution_owns_immutable_device_limits():
 ])
 def test_parameter_schema_rejects_ambiguous_batch_inputs(kwargs):
     with pytest.raises((ValueError, TypeError)):
-        mw.BatchParameters(**kwargs)
+        mw.execution.BatchParameters(**kwargs)
 
 
 def test_template_views_keep_gradients_and_own_scene_containers():
     sim = simulation()
     rho = torch.rand(4, 2, 3, 1, requires_grad=True)
-    parameters = mw.BatchParameters(region_densities={"design": rho})
+    parameters = mw.execution.BatchParameters(region_densities={"design": rho})
     batch = mw.Simulation.batch(sim, parameters=parameters, execution=execution())
     scene = batch.scene(2)
     assert isinstance(scene, mw.Scene)
@@ -94,13 +98,13 @@ def test_template_views_keep_gradients_and_own_scene_containers():
     assert torch.equal(rho.grad[2], 2 * rho.detach()[2])
     assert torch.count_nonzero(rho.grad[[0, 1, 3]]) == 0
     assert not sim.scene.material_regions[0].density.requires_grad
-    scene.monitors.clear()
+    assert scene.updated(monitors=()).monitors == ()
     assert len(sim.scene.monitors) == 1
 
 
 def test_noncontiguous_and_broadcast_parameter_views_are_not_copied():
     rho = torch.ones(1, 2, 3, 1, requires_grad=True).expand(4, -1, -1, -1)
-    parameters = mw.BatchParameters(region_densities={"design": rho})
+    parameters = mw.execution.BatchParameters(region_densities={"design": rho})
     assert parameters.region_densities["design"] is rho
     assert parameters.variant_count == 4
 
@@ -108,7 +112,7 @@ def test_noncontiguous_and_broadcast_parameter_views_are_not_copied():
 def test_source_scale_materialization_is_independent_for_trainable_scales():
     sim = simulation()
     scales = torch.tensor([1.0, 2.0])
-    batch = mw.Simulation.batch(sim, parameters=mw.BatchParameters(source_scales={"drive": scales}), execution=execution())
+    batch = mw.Simulation.batch(sim, parameters=mw.execution.BatchParameters(source_scales={"drive": scales}), execution=execution())
     assert batch.scene(1).sources[0].source_time.amplitude == 2.0
     assert sim.scene.sources[0].source_time.amplitude == 1.0
     scales.requires_grad_()
@@ -117,7 +121,7 @@ def test_source_scale_materialization_is_independent_for_trainable_scales():
 
 def test_list_and_template_input_guards():
     sim = simulation()
-    parameters = mw.BatchParameters(source_scales={"drive": torch.ones(2)})
+    parameters = mw.execution.BatchParameters(source_scales={"drive": torch.ones(2)})
     cases = [([], {}), ([sim], {"parameters": parameters}), (sim, {}),
              ([object()], {}), ([sim], {"variant_ids": ["a", "b"]}),
              ([sim, sim], {"variant_ids": ["a", "a"]})]
@@ -129,26 +133,26 @@ def test_list_and_template_input_guards():
 def test_target_and_shape_validation():
     sim = simulation()
     with pytest.raises(ValueError, match="missing"):
-        mw.Simulation.batch(sim, parameters=mw.BatchParameters(source_scales={"missing": torch.ones(2)}), execution=execution())
+        mw.Simulation.batch(sim, parameters=mw.execution.BatchParameters(source_scales={"missing": torch.ones(2)}), execution=execution())
     with pytest.raises(ValueError, match="spatial shape"):
-        mw.Simulation.batch(sim, parameters=mw.BatchParameters(region_densities={"design": torch.ones(2, 3, 2, 1)}), execution=execution())
+        mw.Simulation.batch(sim, parameters=mw.execution.BatchParameters(region_densities={"design": torch.ones(2, 3, 2, 1)}), execution=execution())
     with pytest.raises(ValueError, match="outputs.monitors"):
-        mw.Simulation.batch([sim], execution=execution(), outputs=mw.BatchOutput(monitors=("missing",)))
+        mw.Simulation.batch([sim], execution=execution(), outputs=mw.execution.BatchOutput(monitors=("missing",)))
     with pytest.raises(ValueError, match="material_regions"):
-        mw.Simulation.batch([sim], execution=execution(), variation=mw.BatchVariation(material_regions=("missing",)))
+        mw.Simulation.batch([sim], execution=execution(), variation=mw.execution.BatchVariation(material_regions=("missing",)))
 
 
 def test_output_conflict_and_gradient_export():
     sim = simulation()
-    sim.config.full_field_dft = True
+    sim.config = replace(sim.config, full_field_dft=True)
     with pytest.raises(ValueError, match="conflicts"):
         mw.Simulation.batch([sim], execution=execution())
-    mw.Simulation.batch([sim], execution=execution(), outputs=mw.BatchOutput(fields=("Ez",)))
-    sim.config.full_field_dft = False
+    mw.Simulation.batch([sim], execution=execution(), outputs=mw.execution.BatchOutput(fields=("Ez",)))
+    sim.config = replace(sim.config, full_field_dft=False)
     with pytest.raises(ValueError, match="CPU result export"):
         mw.Simulation.batch(sim, execution=execution(),
-            parameters=mw.BatchParameters(region_densities={"design": torch.ones(2, 2, 3, 1, requires_grad=True)}),
-            outputs=mw.BatchOutput(result_device="cpu"))
+            parameters=mw.execution.BatchParameters(region_densities={"design": torch.ones(2, 2, 3, 1, requires_grad=True)}),
+            outputs=mw.execution.BatchOutput(result_device="cpu"))
 
 
 @pytest.mark.parametrize("change,match", [
@@ -202,11 +206,12 @@ def test_plan_never_prepares_or_queries_gpu_and_does_not_infer_full_field_dft(mo
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_trainable_batch_forward_is_not_silently_detached():
-    sim = simulation()
+    base = simulation()
     # Density gradients use one-sample arithmetic averaging; kottke_edge is forward-only.
-    sim.scene.subpixel = mw.SubpixelSpec(samples=1, averaging="arithmetic")
-    sim.config.spectral_sampler = mw.SpectralSampler(window="none")
-    parameters = mw.BatchParameters(region_densities={"design": torch.ones(2, 2, 3, 1, requires_grad=True)})
+    sim = mw.Simulation.fdtd(base.scene.updated(subpixel=mw.SubpixelSpec(samples=1, averaging="arithmetic")),
+                             frequencies=base.frequencies,
+                             config=replace(base.config, spectral_sampler=mw.fdtd.SpectralSampler(window="none")))
+    parameters = mw.execution.BatchParameters(region_densities={"design": torch.ones(2, 2, 3, 1, requires_grad=True)})
     batch = mw.Simulation.batch(sim, parameters=parameters, execution=execution())
     results = batch.run()
     results.results()
@@ -217,7 +222,7 @@ def test_scene_module_still_materializes_to_the_standard_scene():
     class Module(mw.SceneModule):
         def to_scene(self):
             return simulation().scene
-    sim = mw.Simulation.fdtd(Module(), frequency=1e9, run_time=mw.TimeConfig(time_steps=10))
+    sim = mw.Simulation.fdtd(Module(), frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=10)))
     batch = mw.Simulation.batch([sim], execution=execution())
     assert isinstance(batch.scene(0), mw.Scene)
     assert batch.plan().variant_count == 1

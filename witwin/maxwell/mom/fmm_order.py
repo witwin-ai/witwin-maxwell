@@ -7,9 +7,10 @@ from .fmm_storage import m2l_storage_bytes, shared_displacement_catalog, signed_
 from .fmm_error import multipole_truncation_bounds, multipole_truncation_bounds_many, validate_kernel_bound_rule
 from .fmm_rwg_error import multipole_block_error_log, multipole_error_receipt
 from .interpolation_error import KernelErrorBudget
+from ..errors import SetupError
 
 
-class MultipoleOrderError(ValueError):
+class MultipoleOrderError(SetupError):
     def __init__(self, receipt):
         super().__init__('No Cartesian FMM order satisfies the declared kernel/table budgets')
         self.receipt = receipt
@@ -213,7 +214,7 @@ _DIRECTIONAL_PLAN_TENSORS = ('displacements', 'test_radii', 'source_radii', 'dir
     'green_log_bounds', 'gradient_log_bounds')
 
 
-class DirectionalConeOrderError(ValueError):
+class DirectionalConeOrderError(SetupError):
     """No executable plan is published when even one declared pair fails."""
     def __init__(self, receipt):
         super().__init__('No directional cone/order satisfies every declared pair')

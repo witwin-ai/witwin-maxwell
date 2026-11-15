@@ -10,7 +10,11 @@ from witwin.core import Box
 from witwin.maxwell.compiler.thin_sheet import CHORD_MASS_FACTOR, compile_thin_sheet
 from witwin.maxwell.scene import prepare_scene
 
+from tests.oracles import thin_sheet_torch
+
 from . import harness as h
+
+cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 CELL = 0.005
 
@@ -37,18 +41,17 @@ def _plate(*, offset=0.001, width=0.02, tilted=False):
 
 
 def _scene(mesh, port, material="copper", others=()):
-    material = h.pec_material() if material == "pec" else mw.CopperFoil(
+    material = h.pec_material() if material == "pec" else mw.media.CopperFoil(
         thickness=35e-6, frequency_range=(0.5e9, 4e9))
     return prepare_scene(mw.Scene(
         domain=mw.Domain(bounds=((-0.05, 0.05),) * 3), grid=mw.GridSpec.uniform(CELL),
-        boundary=mw.BoundarySpec.faces(default="pec"), device="cpu",
-        structures=[mw.Structure(geometry=mesh, material=material), *others],
-        ports=[] if port is None else [port]))
+        boundary=mw.BoundarySpec.faces(default="pec"), structures=[mw.Structure(geometry=mesh, material=material), *others],
+        ports=[] if port is None else [port]), device="cpu")
 
 
 def _compile(mesh, port, **kwargs):
     scene = _scene(mesh, port, **kwargs)
-    return compile_thin_sheet(scene, scene.structures[0])
+    return compile_thin_sheet(scene, scene.scene.structures[0])
 
 
 def _cylinder():
@@ -168,7 +171,7 @@ def _notched_plate(x0, x1):
             continue
         a, b, c, d = 3*i+j, 3*(i+1)+j, 3*(i+1)+j+1, 3*i+j+1
         triangles.extend(((a, b, c), (a, c, d)))
-    return mw.SurfaceMesh(np.array(vertices), triangles, sheet_model="conformal_two_sided")
+    return mw.geometry.SurfaceMesh(np.array(vertices), triangles, sheet_model="conformal_two_sided")
 
 
 @pytest.mark.parametrize("notch", [(-0.003, 0.003), (-0.008, -0.006)])
@@ -246,9 +249,9 @@ def test_sheet_roundoff_classification(multiple, admitted):
 
 
 # Runtime gates use the same full-width gap and voltage aperture on both paths.
-def _runtime_scene(material="copper", *, reference=False, device="cpu", tilted=False, cell=CELL, width=.02):
+def _runtime_scene(material="copper", *, reference=False, tilted=False, cell=CELL, width=.02):
     foil = (h.pec_material() if material == "pec" else
-            mw.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9)))
+            mw.media.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9)))
     z = 0.001 if tilted else 0.0
     narrow = width == cell
     terminal_y = -cell/2 if narrow else 0
@@ -260,7 +263,7 @@ def _runtime_scene(material="copper", *, reference=False, device="cpu", tilted=F
     if reference:
         structures = []
         for x in (-0.0175, 0.0175):
-            geometry = (mw.PlanarPEC([(x-.0125, -width/2), (x+.0125, -width/2),
+            geometry = (mw.geometry.PlanarPEC([(x-.0125, -width/2), (x+.0125, -width/2),
                                       (x+.0125, width/2), (x-.0125, width/2)], normal_axis="z", coordinate=0)
                         if material == "pec" else Box(position=(x, 0, 0), size=(.025, width, 0)))
             structures.append(mw.Structure(geometry=geometry, material=foil))
@@ -268,20 +271,26 @@ def _runtime_scene(material="copper", *, reference=False, device="cpu", tilted=F
         structures = [mw.Structure(geometry=_plate(offset=z, tilted=tilted, width=width), material=foil)]
     bounds = ((-.05, .05), (-.05-cell/2, .05+cell/2) if narrow else (-.05, .05), (-.05, .05))
     return mw.Scene(domain=mw.Domain(bounds=bounds), grid=mw.GridSpec.uniform(cell),
-                    boundary=mw.BoundarySpec.faces(default="pec"), device=device,
-                    structures=structures, ports=[port])
+                    boundary=mw.BoundarySpec.faces(default="pec"), structures=structures, ports=[port])
 
 
-def _simulation(material="copper", *, reference=False, device="cpu", tilted=False,
-                steps=400, driven=True, graph=False, cell=CELL, width=.02, core_path="auto"):
+def _with_scene(simulation, **fields):
+    """The same FDTD run on ``simulation.scene.updated(**fields)``."""
+    return mw.Simulation.fdtd(simulation.scene.updated(**fields), frequencies=simulation.frequencies,
+                              excitations=simulation.excitations, config=simulation.config)
+
+
+def _simulation(material="copper", *, reference=False, device="cuda", tilted=False,
+                steps=400, driven=True, graph=False, cell=CELL, width=.02, **options):
     return mw.Simulation.fdtd(
-        _runtime_scene(material, reference=reference, device=device, tilted=tilted, cell=cell, width=width),
-        frequencies=[0.8e9, 1e9, 1.2e9], run_time=mw.TimeConfig(time_steps=steps, dt=2e-12 * cell/CELL),
-        backend="cpu_reference" if device == "cpu" else "native", cuda_graph=graph, fdtd_core_path=core_path,
-        excitations=[mw.PortExcitation("feed", source_time=mw.GaussianPulse(
+        _runtime_scene(material, reference=reference, tilted=tilted, cell=cell, width=width),
+        frequencies=[0.8e9, 1e9, 1.2e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps, dt=2e-12 * cell/CELL),
+        cuda_graph=graph, device=device, **options),
+        excitations=[mw.rf.PortExcitation("feed", source_time=mw.GaussianPulse(
             frequency=1e9, fwidth=0.5e9))] if driven else [])
 
 
+@cuda
 @pytest.mark.parametrize("kind, exception, message", [
     ("circuit", NotImplementedError, "circuits or embedded networks"),
     ("reactive", NotImplementedError, "purely resistive termination"),
@@ -291,33 +300,33 @@ def test_sheet_feed_runtime_load_admission(kind, exception, message):
     scene = _runtime_scene(tilted=True)
     port, = scene.ports
     if kind == "circuit":
-        circuit = mw.Circuit("load")
+        circuit = mw.circuits.Circuit("load")
         node = circuit.node("input")
-        circuit.add(mw.Resistor("R", node, circuit.ground, 50.))
+        circuit.add(mw.rf.Resistor("R", node, circuit.ground, 50.))
         circuit.bind_port("feed", positive=node, negative=circuit.ground)
-        scene.circuits = (circuit,)
+        scene = scene.updated(circuits=(circuit,))
     elif kind == "reactive":
-        object.__setattr__(port, "termination", mw.SeriesRLC(r=50., l=1e-9))
+        object.__setattr__(port, "termination", mw.rf.SeriesRLC(r=50., l=1e-9))
     else:
         # Exercise the runtime check independently of constructor validation.
         object.__setattr__(port, "reference_impedance", 0.)
     with pytest.raises(exception, match=message):
-        mw.Simulation.fdtd(scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=1),
-                           backend="cpu_reference").prepare()
+        mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare()
 
 
+@cuda
 def test_off_sheet_port_is_rejected_in_a_sheet_scene():
     scene = _runtime_scene()
-    scene.structures = [mw.Structure(geometry=_plate(offset=.011), material=scene.structures[0].material)]
+    scene = scene.updated(structures=[mw.Structure(geometry=_plate(offset=.011), material=scene.structures[0].material)])
     with pytest.raises(NotImplementedError, match="only sheet gap feeds as ports"):
-        mw.Simulation.fdtd(scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=1),
-                           backend="cpu_reference").prepare()
+        mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare()
 
 
 def _rel_l2(a, b):
     return float(torch.linalg.vector_norm(a-b) / torch.linalg.vector_norm(b))
 
 
+@cuda
 @pytest.mark.parametrize("material", ["pec", "copper"])
 @pytest.mark.parametrize("width_cells", [pytest.param(1, id="narrow"), 2, 4])
 def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):
@@ -378,7 +387,8 @@ def test_f1_axis_aligned_feed_equivalence(material, width_cells, monkeypatch):
 
 
 
-@pytest.mark.parametrize("kind", ["aligned", "tilted", "one_cell", "rim", "single_column"])
+@pytest.mark.parametrize("kind", ["aligned", "tilted", "one_cell", "rim",
+                                  pytest.param("single_column", marks=cuda)])
 def test_feed_quadrature_partitions_the_physical_gap(kind):
     from witwin.maxwell.fdtd.thin_sheet import _feed_quadrature
     ends = ((-.0025, 0, .001), (.0025, 0, .001)) if kind == "one_cell" else (
@@ -395,12 +405,11 @@ def test_feed_quadrature_partitions_the_physical_gap(kind):
         np.testing.assert_allclose(length[~feed.open_chords], CELL, rtol=1e-14)
         np.testing.assert_allclose(np.sort(np.unique(np.round(width[~feed.open_chords], 12))), [.0025, .005])
     if kind == "single_column":
-        simulation = _simulation(steps=32, width=CELL)
-        simulation.scene.domain = mw.Domain(bounds=((-0.05, 0.05),)*3)
+        simulation = _with_scene(_simulation(steps=32, width=CELL), domain=mw.Domain(bounds=((-0.05, 0.05),)*3))
         result = simulation.run()
         diagnostic = result.ports["feed"].metadata["sheet_gap"]
         assert len(diagnostic["column_conductance"]) == 1
-        assert torch.equal(diagnostic["variance_power"], torch.zeros(3, dtype=torch.float64))
+        assert torch.equal(diagnostic["variance_power"].cpu(), torch.zeros(3, dtype=torch.float64))
 
 
 
@@ -416,74 +425,56 @@ def _state(solver):
 def test_f5_float64_patch_and_graph_replay(material, monkeypatch):
     from witwin.maxwell.fdtd.ports import prepare_port_spectral_accumulators, prepare_port_drive_tables
     from witwin.maxwell.fdtd.runtime.stepping import _port_step_block
-    # The existing runner's float64 port patch and port-graph replay are under test;
-    # eligible sheet feeds would otherwise take the core path under the default.
-    solvers = {device: _simulation(material, device=device, tilted=True, steps=200, core_path=False).prepare().solver
-               for device in ("cpu", "cuda")}
+    # The Torch thin-sheet oracle (tests/oracles/thin_sheet_torch.py) is the reference arm.
+    solvers = {arm: _simulation(material, tilted=True, steps=200).prepare().solver for arm in ("torch", "fused")}
     generator = torch.Generator().manual_seed(43)
     for name in _FIELDS:
-        value = torch.randn(getattr(solvers["cpu"], name).shape, dtype=torch.float64, generator=generator)
-        for device, solver in solvers.items():
-            setattr(solver, name, value.to(device).clone())
+        value = torch.randn(getattr(solvers["torch"], name).shape, dtype=torch.float64, generator=generator)
+        for solver in solvers.values():
+            setattr(solver, name, value.to(solver.device).clone())
     for solver in solvers.values():
         prepare_port_spectral_accumulators(solver, 200, "none")
         prepare_port_drive_tables(solver, 200)
-    solvers["cuda"]._port_runtimes[0]._drive_table.copy_(solvers["cpu"]._port_runtimes[0]._drive_table)
+    solvers["fused"]._port_runtimes[0]._drive_table.copy_(solvers["torch"]._port_runtimes[0]._drive_table)
     errors = {}
     for n in range(200):
-        for solver in solvers.values():
-            sheet = solver._thin_sheets[0]
-            sheet.begin(solver)
-            sheet.magnetic(solver)
-            step = solver._port_observer_step
-            _port_step_block(solver, step, post_source=lambda: None)
-            step.add_(1)
+        for arm, solver in solvers.items():
+            with monkeypatch.context() as patch:
+                if arm == "torch":
+                    thin_sheet_torch.install(patch)
+                sheet = solver._thin_sheets[0]
+                sheet.begin(solver)
+                sheet.magnetic(solver)
+                step = solver._port_observer_step
+                _port_step_block(solver, step, post_source=lambda: None)
+                step.add_(1)
         if n in (0, 199):
-            errors[n+1] = max(float((a-b.cpu()).abs().max()) / max(float(a.abs().max()), 1e-30)
-                              for a, b in zip(_state(solvers["cpu"]), _state(solvers["cuda"])) if a.numel())
+            errors[n+1] = max(float((a-b).abs().max()) / max(float(a.abs().max()), 1e-30)
+                              for a, b in zip(_state(solvers["torch"]), _state(solvers["fused"])) if a.numel())
     print(dict(F5=material, float64_patch_relative_error=errors), flush=True)
     assert errors[1] <= 1e-12
-    graph = _simulation(material, device="cuda", tilted=True, steps=200, graph=True, core_path=False).run()
-    eager = _simulation(material, device="cuda", tilted=True, steps=200, graph=False, core_path=False).run()
-    assert graph.solver._cuda_graph_active and graph.solver._port_cuda_graph_active, getattr(
-        graph.solver, "_port_graph_capture_error", "capture was not attempted")
-    for a, b in zip(_state(graph.solver), _state(eager.solver)):
-        assert torch.equal(a, b)
-    for key in ("voltage", "current"):
-        assert torch.equal(getattr(graph.ports["feed"], key), getattr(eager.ports["feed"], key))
-    for key in ("column_voltage", "variance_power"):
-        assert torch.equal(graph.ports["feed"].metadata["sheet_gap"][key],
-                           eager.ports["feed"].metadata["sheet_gap"][key])
-    print(dict(F5=material, graph_eager_max_difference=0, steps=200), flush=True)
 
-    # Compare nonzero no-feed fields and private state against the merged baseline.
-    import subprocess
-    from witwin.maxwell.fdtd import thin_sheet
-    from witwin.maxwell.fdtd.runtime import stepping
-    namespace = {"__name__": "witwin.maxwell.fdtd._merged_sheet", "__package__": "witwin.maxwell.fdtd"}
-    source = subprocess.check_output(["git", "show", "7eaea197:witwin/maxwell/fdtd/thin_sheet.py"], text=True)
-    exec(compile(source, "<merged-thin-sheet>", "exec"), namespace)
-
-    def no_feed_run():
-        simulation = _simulation(material, device="cuda", tilted=True, steps=200, graph=True, driven=False,
-                                 core_path=False)
-        simulation.scene.ports = ()
-        simulation.scene.add_source(mw.PointDipole(position=(-.04, .03, .035), polarization=(.3, .5, .8),
-            profile="ideal", source_time=mw.GaussianPulse(1e9, fwidth=.5e9)))
-        return simulation.run()
-
-    # This stored-output pin preserves the tensor reference's operation order.
-    # The CPU/CUDA parity and graph/eager gates above retain the fused default.
+    # Compare nonzero no-feed fields and private state against the merged 7eaea197 baseline. That
+    # runtime predates sheet feeds and stepped on the existing runner; its run is frozen in addendum
+    # w7-row16e (W7 row 16e deleted the runner).
+    from tests.support import frozen_oracles
+    merged = frozen_oracles.load(f"tests/materials/thin_sheet/test_thin_sheet_feeds.py::merged_no_feed_{material}")
+    simulation = _with_scene(_simulation(material, tilted=True, steps=200, graph=True, driven=False), ports=())
+    simulation = _with_scene(simulation, sources=(
+        *simulation.scene.sources,
+        mw.PointDipole(position=(-.04, .03, .035), polarization=(.3, .5, .8),
+            profile="ideal", source_time=mw.GaussianPulse(1e9, fwidth=.5e9)),
+    ))
+    # This stored-output pin preserves the tensor reference's operation order: the current arm runs
+    # the Torch sheet oracle. The oracle/fused gate above retains the fused default.
     with monkeypatch.context() as patch:
-        patch.setenv("WITWIN_MAXWELL_THIN_SHEET_KERNEL", "torch")
-        current = no_feed_run()
-    with monkeypatch.context() as patch:
-        patch.setattr(thin_sheet, "_SheetRuntime", namespace["_SheetRuntime"])
-        patch.setattr(stepping, "advance_thin_sheet_electric", namespace["advance_thin_sheet_electric"])
-        merged = no_feed_run()
+        thin_sheet_torch.install(patch)
+        current = simulation.run()
     assert any(bool(getattr(current.solver, name).any()) for name in _FIELDS)
-    for a, b in zip(_state(current.solver), _state(merged.solver)):
-        assert torch.equal(a, b)
+    state = _state(current.solver)
+    assert len(state) == len(merged)
+    for index, value in enumerate(state):
+        assert torch.equal(value.detach().cpu(), merged[f"state/{index}"]), index
     print(dict(F6=material, merged_baseline="7eaea197", no_feed_max_difference=0, steps=200), flush=True)
 
 
@@ -494,7 +485,7 @@ def test_f7_checkpoint_resume_includes_feed_and_column_spectra(tmp_path):
     path = tmp_path / "sheet-feed.pt"
     checkpoint.save(path)
     resumed = _simulation(device="cuda", tilted=True, steps=400, graph=True).prepare().run(
-        resume_from=mw.FDTDResumeCheckpoint.load(path))
+        resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path))
     for a, b in zip(_state(reference.solver), _state(resumed.solver)):
         assert torch.equal(a, b)
     for key in ("voltage", "current"):
@@ -503,13 +494,14 @@ def test_f7_checkpoint_resume_includes_feed_and_column_spectra(tmp_path):
         assert torch.equal(reference.ports["feed"].metadata["sheet_gap"][key],
                            resumed.ports["feed"].metadata["sheet_gap"][key])
     changed = _simulation(device="cuda", tilted=True, steps=400, graph=True)
-    changed.excitations = (mw.PortExcitation("feed", source_impedance=100,
+    changed.excitations = (mw.rf.PortExcitation("feed", source_impedance=100,
         source_time=mw.GaussianPulse(1e9, fwidth=.5e9)),)
     with pytest.raises(ValueError, match="configuration does not match"):
         changed.prepare().run(resume_from=checkpoint)
     print(dict(F7_steps=400, checkpoint_step=173, max_difference=0, changed_resistance_rejected=True), flush=True)
 
 
+@cuda
 def test_f4_loaded_unexcited_feed_for_twenty_thousand_steps():
     from witwin.maxwell.fdtd.runtime.stepping import _field_update_block, _port_step_block
     from witwin.maxwell.fdtd.ports import prepare_port_spectral_accumulators
@@ -538,13 +530,16 @@ def test_f4_loaded_unexcited_feed_for_twenty_thousand_steps():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("material", ["pec", "copper"])
 def test_f3_exact_field_side_power_with_variance_correction(material, monkeypatch):
-    scene = _runtime_scene(material, device="cuda", tilted=True)
-    scene.domain = mw.Domain(bounds=((-0.08, 0.08),)*3)
-    scene.boundary = mw.BoundarySpec.faces(default="pml", num_layers=8)
-    scene.add_monitor(mw.ClosedSurfaceMonitor.box("radiation", size=(.08, .08, .08)))
+    scene = _runtime_scene(material, tilted=True)
+    scene = scene.updated(domain=mw.Domain(bounds=((-0.08, 0.08),)*3))
+    scene = scene.updated(boundary=mw.BoundarySpec.faces(default="pml", num_layers=8))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.ClosedSurfaceMonitor.box("radiation", size=(.08, .08, .08)),
+    ))
     simulation = mw.Simulation.fdtd(scene, frequencies=[.8e9, 1e9, 1.2e9],
-        run_time=mw.TimeConfig(time_steps=5000, dt=2e-12), cuda_graph=material == "pec",
-        excitations=mw.PortExcitation("feed", source_time=mw.GaussianPulse(1e9, fwidth=.5e9)))
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=5000, dt=2e-12), cuda_graph=material == "pec"),
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.GaussianPulse(1e9, fwidth=.5e9)))
     prepared = simulation.prepare()
     solver = prepared.solver
     sheet = solver._thin_sheets[0]
@@ -576,7 +571,7 @@ def test_f3_exact_field_side_power_with_variance_correction(material, monkeypatc
         loss = (cu["rates"][None, :, None]*z_hat.abs().square()).sum(1)
         loss += (e_hat.conj()*torch.einsum("ij,fjn->fin", cu["D"].to(e_hat.dtype), e_hat)).real.sum(1)
         copper_loss = .5*(loss*cu["area"]).sum(1)
-    radiation = torch.stack([torch.as_tensor(result.monitor("radiation", frequency=f)["flux"])
+    radiation = torch.stack([torch.as_tensor(result.monitor("radiation", frequency=f).values)
                              for f in (.8e9, 1e9, 1.2e9)]).reshape(-1)
     exact = diagnostic["field_accepted_power"]
     closure = (radiation+copper_loss-exact).abs()/exact.abs()

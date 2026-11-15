@@ -10,7 +10,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires 
 
 def test_repeated_full_spectra_preserve_all_captured_addresses(monkeypatch):
     batch = mw.Simulation.batch([simulation(steps=31, frequencies=(.8e9, 1e9))],
-        outputs=mw.BatchOutput(fields=("Ez",)), execution=mw.BatchExecution(
+        outputs=mw.execution.BatchOutput(fields=("Ez",)), execution=mw.execution.BatchExecution(
             devices=("cuda:0",), batch_size=1, graph="required", graph_steps=7))
     with batch.prepare() as prepared:
         first = prepared.run()[0]
@@ -29,7 +29,7 @@ def test_repeated_full_spectra_preserve_all_captured_addresses(monkeypatch):
         banks = [v for b in solver._dft_batched_fields.values() for v in b.values() if v is not None]
         assert pointers == [v.data_ptr() for v in banks] + [getattr(solver, n).data_ptr() for n in names]
         assert tuple(prepared._graphs.values()) == graphs
-        torch.testing.assert_close(second.tensor("Ez"), first.tensor("Ez"), rtol=0, atol=0)
+        torch.testing.assert_close(second.field("Ez").values, first.field("Ez").values, rtol=0, atol=0)
 
 
 def test_schedule_cache_rebuilds_changed_frequency_window_and_horizon():
@@ -65,13 +65,13 @@ def test_full_spectrum_tapes_share_only_owned_frequency_banks(monkeypatch):
     monkeypatch.setattr(adjoint, "freeze_solver", record)
     density = torch.full((2, 2, 2, 2), .4, device="cuda:0", requires_grad=True)
     batch = density_batch(density)
-    batch.outputs = mw.BatchOutput(fields=("Ez",))
+    batch.outputs = mw.execution.BatchOutput(fields=("Ez",))
     with batch.prepare() as prepared:
         first, second = prepared.run(), prepared.run()
     def objective(results):
-        return sum(r.tensor("Ez").abs().square().sum() for r in results)
+        return sum(r.field("Ez").values.abs().square().sum() for r in results)
     for a, b in zip(first, second):
-        torch.testing.assert_close(a.tensor("Ez"), b.tensor("Ez"), rtol=0, atol=0)
+        torch.testing.assert_close(a.field("Ez").values, b.field("Ez").values, rtol=0, atol=0)
     first_gradient, = torch.autograd.grad(objective(first), density)
     second_gradient, = torch.autograd.grad(objective(second), density)
     # Material interpolation's GPU pullback uses floating-point reductions;

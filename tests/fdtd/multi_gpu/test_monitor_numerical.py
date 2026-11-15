@@ -12,6 +12,7 @@ from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd_parallel import FDTDParallelConfig
 from witwin.maxwell.result import Result
 from witwin.maxwell.scene import prepare_scene
+from tests.support.core_solver import bind_core
 
 
 _FREQUENCY = 1.0e9
@@ -26,66 +27,57 @@ def _monitor_scene() -> mw.Scene:
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=((float(x[0]), float(x[-1])), (float(y[0]), float(y[-1])), (float(z[0]), float(z[-1])))
-        ),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.2, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
-            name="source",
-        )
-    )
-    scene.add_monitor(
-        mw.PlaneMonitor(
-            "y_plane",
-            axis="y",
-            position=0.05,
-            fields=("Ez",),
-            frequencies=(_FREQUENCY,),
-        )
-    )
-    scene.add_monitor(
-        mw.FluxMonitor(
-            "z_flux",
-            axis="z",
-            position=0.1,
-            frequencies=(_FREQUENCY,),
-        )
-    )
-    scene.add_monitor(
-        mw.PlaneMonitor(
-            "x_plane",
-            axis="x",
-            position=0.1,
-            fields=("Ez",),
-            frequencies=(_FREQUENCY,),
-        )
-    )
-    scene.add_monitor(
-        mw.FluxMonitor(
-            "x_flux",
-            axis="x",
-            position=0.0,
-            frequencies=(_FREQUENCY,),
-        )
-    )
-    scene.add_monitor(
-        mw.ModeMonitor(
-            "z_mode",
-            position=(0.0, 0.0, 0.1),
-            size=(0.8, 0.3, 0.0),
-            mode_index=0,
-            polarization="Ex",
-            frequencies=(_FREQUENCY,),
-        )
-    )
+            ),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.none(),
+                sources=(
+            mw.PointDipole(
+                position=(-0.2, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
+                name="source",
+            ),
+            ),
+                monitors=(
+            mw.PlaneMonitor(
+                "y_plane",
+                axis="y",
+                position=0.05,
+                fields=("Ez",),
+                frequencies=(_FREQUENCY,),
+            ),
+            mw.FluxMonitor(
+                "z_flux",
+                axis="z",
+                position=0.1,
+                frequencies=(_FREQUENCY,),
+            ),
+            mw.PlaneMonitor(
+                "x_plane",
+                axis="x",
+                position=0.1,
+                fields=("Ez",),
+                frequencies=(_FREQUENCY,),
+            ),
+            mw.FluxMonitor(
+                "x_flux",
+                axis="x",
+                position=0.0,
+                frequencies=(_FREQUENCY,),
+            ),
+            mw.ModeMonitor(
+                "z_mode",
+                position=(0.0, 0.0, 0.1),
+                size=(0.8, 0.3, 0.0),
+                mode_index=0,
+                polarization="Ex",
+                frequencies=(_FREQUENCY,),
+            ),
+            ),
+            )
     return scene
 
 
@@ -109,6 +101,7 @@ def monitor_pair(cuda_p2p_devices):
     scene = _monitor_scene()
     single_solver = FDTD(prepare_scene(scene), frequency=_FREQUENCY, absorber_type="cpml")
     single_solver.init_field()
+    bind_core(single_solver)
     single_output = _solve(single_solver)
 
     distributed_solver = DistributedFDTD(
@@ -232,14 +225,9 @@ def test_mode_monitor_matches_raw_power_flux_and_resolved_mode(monitor_pair):
 
     expected = monitor_pair.single_result.monitor("z_mode")
     actual = monitor_pair.distributed_result.monitor("z_mode")
-    assert actual["effective_index"] == pytest.approx(expected["effective_index"], rel=1.0e-9)
-    assert actual["beta"] == pytest.approx(expected["beta"], rel=1.0e-9)
-    for key in (
-        "mode_power",
-        "total_power",
-        "amplitude_forward",
-        "amplitude_backward",
-        "power_forward",
-        "power_backward",
-    ):
-        _assert_tensor_close(actual[key], expected[key])
+    assert actual.attrs["effective_index"] == pytest.approx(expected.attrs["effective_index"], rel=1.0e-9)
+    assert actual.attrs["beta"] == pytest.approx(expected.attrs["beta"], rel=1.0e-9)
+    # Forward/backward amplitudes are the values; their powers follow them in attrs["power"].
+    for name in ("mode_power", "total_power", "power"):
+        _assert_tensor_close(actual.attrs[name], expected.attrs[name])
+    _assert_tensor_close(actual.values, expected.values)

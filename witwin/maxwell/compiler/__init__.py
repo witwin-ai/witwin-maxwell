@@ -14,7 +14,14 @@ from .mna import (
     compile_coupled_mna_system,
     compile_mna_system,
 )
-from .materials import compile_material_tensors
+from .gyromagnetic import compile_gyromagnetic_materials
+from .mass_density import compile_mass_density
+from .materials import (
+    compile_material_components,
+    compile_material_tensors,
+    compile_materials,
+    compile_relative_materials,
+)
 from .monitors import (
     compile_fdtd_breakdown_observers,
     compile_fdtd_observers,
@@ -97,7 +104,12 @@ __all__ = [
     "compile_waveport_cross_section",
     "compile_waveports",
     "compile_fdtd_sources",
+    "compile_gyromagnetic_materials",
+    "compile_mass_density",
+    "compile_material_components",
     "compile_material_tensors",
+    "compile_materials",
+    "compile_relative_materials",
     "compile_thin_wires",
     "compile_wire_monitors",
     "validate_array_superposition",

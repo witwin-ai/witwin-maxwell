@@ -8,6 +8,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.adapters.pcb import import_pcb_scene
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_ports
 
 
 FIXTURES = Path(__file__).resolve().parents[3] / "docs/assessments/thin-copper-2026-10-22/site-scenes"
@@ -23,11 +24,11 @@ def definition(name):
 @pytest.mark.parametrize('change', [{'type': 'wave'}, {'deembed_m': 1e-3}])
 def test_import_rejects_unimplemented_port_contract_without_rewriting_it(change):
     data = definition('pcb-flexible')
-    assert import_pcb_scene(data, frequency=2.45e9, device='cpu').ports
+    assert import_pcb_scene(data, frequency=2.45e9).ports
     data['ports'][0].update(change)
     original = copy.deepcopy(data)
     with pytest.raises(NotImplementedError, match='zero-deembedded lumped port'):
-        import_pcb_scene(data, frequency=2.45e9, device='cpu')
+        import_pcb_scene(data, frequency=2.45e9)
     assert data == original
 
 
@@ -35,20 +36,20 @@ def test_import_rejects_unimplemented_port_contract_without_rewriting_it(change)
 def test_import_keeps_exact_geometry_selection_loss_and_finite_aperture(name):
     data = definition(name)
     snapshot = copy.deepcopy(data)
-    scene = import_pcb_scene(data, frequency=2.45e9, device="cpu")
+    scene = import_pcb_scene(data, frequency=2.45e9)
     assert data == snapshot
     imported = scene.metadata["pcb_import"]
     expected = [c["id"] for c in data["conductors"] if c["role"] == "fixed" or c["id"] in data["initial_conductor_ids"]]
     assert imported["active_conductor_ids"] == expected
-    assert scene.sources == []
+    assert scene.sources == ()
     assert all(p.voltage_aperture is not None for p in scene.ports)
-    compiled = prepare_scene(scene).compile_ports()
+    compiled = compile_ports(prepare_scene(scene, device="cpu"), device="cpu")
     assert all(p.voltage_weights.numel() > 1 for p in compiled)
     assert any(float(s.material.sigma_e) > 0 for s in scene.structures)
     assert len(imported["definition_sha256"]) == 64
     # An approximate tangent-loss material must not silently become broadband.
     with pytest.raises(ValueError, match="reference frequency"):
-        mw.Simulation.fdtd(scene, frequencies=(2.45e9, 2.5e9))
+        mw.Simulation.fdtd(scene, frequencies=(2.45e9, 2.5e9), config=mw.FDTDConfig(device="cpu"))
 
 
 def test_import_rejects_fake_copper_selection_invalid_material_and_missing_terminals():
@@ -66,14 +67,14 @@ def test_import_rejects_fake_copper_selection_invalid_material_and_missing_termi
 
 def test_import_preserves_explicit_material_quadrature_without_changing_geometry():
     data = definition('pcb-flexible')
-    ordinary = import_pcb_scene(data, frequency=2.45e9, device='cpu')
+    ordinary = import_pcb_scene(data, frequency=2.45e9)
     data['mesh']['subpixel_samples'] = {'samples': [1, 1, 256], 'averaging': 'polarized'}
-    scene = import_pcb_scene(data, frequency=2.45e9, device='cpu')
+    scene = import_pcb_scene(data, frequency=2.45e9)
     default = mw.SubpixelSpec()
     assert ordinary.subpixel == default
     assert ordinary.metadata['pcb_import']['material_quadrature'] == {
         'samples': list(default.samples), 'averaging': default.averaging, 'pec': default.pec}
-    assert scene.subpixel_samples == (1, 1, 256)
+    assert scene.subpixel.samples == (1, 1, 256)
     assert scene.subpixel.averaging == 'polarized'
     assert scene.metadata['pcb_import']['material_quadrature']['samples'] == [1, 1, 256]
     for actual, expected in zip(scene.structures, ordinary.structures):
@@ -82,7 +83,7 @@ def test_import_preserves_explicit_material_quadrature_without_changing_geometry
     for invalid in ({'samples': [1, 0, 4]}, {'unknown': True}, [1, 1, 4]):
         data['mesh']['subpixel_samples'] = invalid
         with pytest.raises((TypeError, ValueError)):
-            import_pcb_scene(data, frequency=2.45e9, device='cpu')
+            import_pcb_scene(data, frequency=2.45e9)
 
 
 def foil_definition():
@@ -98,7 +99,7 @@ def foil_definition():
 
 def test_explicit_current_loop_preserves_its_physical_plane_under_refinement():
     data = foil_definition()
-    original = import_pcb_scene(data, frequency=2.45e9, device="cpu")
+    original = import_pcb_scene(data, frequency=2.45e9)
     surface = original.ports[0].current_surface
     bounds = torch.stack((surface.position - surface.size/2, surface.position + surface.size/2), dim=-1)
     data["ports"][0]["current_contour_bounds_m"] = bounds.reshape(-1).tolist()
@@ -107,20 +108,20 @@ def test_explicit_current_loop_preserves_its_physical_plane_under_refinement():
     for low, high in zip(old, old[1:]):
         refined.extend((low+(high-low)/3, low+2*(high-low)/3, high))
     data["mesh"]["axes_m"]["y"] = refined
-    imported = import_pcb_scene(data, frequency=2.45e9, device="cpu")
+    imported = import_pcb_scene(data, frequency=2.45e9)
     # Bounds -> center/size introduces at most a few float64 arithmetic ULPs.
     torch.testing.assert_close(imported.ports[0].current_surface.position, surface.position, rtol=8e-16, atol=0)
     torch.testing.assert_close(imported.ports[0].current_surface.size, surface.size, rtol=8e-16, atol=0)
-    assert any(index.numel() > 0 for index in prepare_scene(imported).compile_ports()[0].current_indices)
+    assert any(index.numel() > 0 for index in compile_ports(prepare_scene(imported, device="cpu"), device="cpu")[0].current_indices)
     data["ports"][0]["current_contour_bounds_m"][2] = float("nan")
     with pytest.raises(ValueError, match="finite SI bounds"):
-        import_pcb_scene(data, frequency=2.45e9, device="cpu")
+        import_pcb_scene(data, frequency=2.45e9)
 
 
 def test_explicit_foil_import_preserves_physical_constitutive_contract():
     data = foil_definition()
-    scene = import_pcb_scene(data, frequency=2.45e9, device="cpu")
-    foils = [s for s in scene.structures if isinstance(s.material, mw.CopperFoil)]
+    scene = import_pcb_scene(data, frequency=2.45e9)
+    foils = [s for s in scene.structures if isinstance(s.material, mw.media.CopperFoil)]
     assert len(foils) == 2
     assert all(float(s.geometry.size[2]) == 0 and s.material.thickness == 18e-6 for s in foils)
     assert scene.metadata["pcb_import"]["conductor_models"]["positive-pad"] == data["conductors"][1]["constitutive_model"]
@@ -140,13 +141,15 @@ def test_explicit_imported_foil_executes_native_lossy_aperture_feed(quadrature):
     if quadrature:
         data["mesh"]["subpixel_samples"] = {"samples": [1, 1, 8], "averaging": "polarized"}
     scene = import_pcb_scene(data, frequency=2.45e9)
-    result = mw.Simulation.fdtd(scene, frequency=2.45e9,
-        excitations=mw.PortExcitation("P1", source_time=mw.CW(frequency=2.45e9)),
-        run_time=mw.TimeConfig(time_steps=256, transient_cycles=0, steady_cycles=1),
-        spectral_sampler=mw.SpectralSampler(window="none")).run()
+    result = mw.Simulation.fdtd(scene, frequencies=2.45e9,
+        excitations=mw.rf.PortExcitation("P1", source_time=mw.CW(frequency=2.45e9)),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=256, transient_cycles=0, steady_cycles=1),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        )).run()
     assert float(result.port("P1").voltage.abs().max()) > 0
-    assert set(result.conductor_losses) == {"positive-pad", "negative-pad"}
-    assert all(float(row["dissipated_energy"]) > 0 for row in result.conductor_losses.values())
+    assert set(mw.rf.conductor_losses(result)) == {"positive-pad", "negative-pad"}
+    assert all(float(row["dissipated_energy"]) > 0 for row in mw.rf.conductor_losses(result).values())
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")
@@ -154,10 +157,12 @@ def test_explicit_imported_foil_executes_native_lossy_aperture_feed(quadrature):
 def test_every_imported_scene_runs_with_declared_loss_and_real_aperture(name):
     scene = import_pcb_scene(definition(name), frequency=2.45e9)
     prepared = mw.Simulation.fdtd(
-        scene, frequency=2.45e9,
-        excitations=mw.PortExcitation(scene.ports[0].name, source_time=mw.CW(frequency=2.45e9)),
-        run_time=mw.TimeConfig(time_steps=256, transient_cycles=0, steady_cycles=1),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        scene, frequencies=2.45e9,
+        excitations=mw.rf.PortExcitation(scene.ports[0].name, source_time=mw.CW(frequency=2.45e9)),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=256, transient_cycles=0, steady_cycles=1),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).prepare()
     assert prepared.diagnostics["conductive"]
     result = prepared.run()

@@ -25,39 +25,39 @@ def test_all_old_payload_and_construction_bytes_and_strict_scalar_dk_versions():
         for rule in rules:
             for shift in ('dense', 'separable_v1'):
                 kwargs = dict(table_storage=storage, kernel_bound_rule=rule, shift_storage=shift)
-                current, original = mw.FMMConfig(**kwargs, near_storage='full_matrix'), module.FMMConfig(**kwargs)
+                current, original = mw.mom.FMMConfig(**kwargs, near_storage='full_matrix'), module.FMMConfig(**kwargs)
                 expected = original.payload()
                 expected['parameters'].update(near_storage='full_matrix', shift_storage=shift,
                     near_coefficient_workspace_budget_bytes=128*1024**2,
                     near_coefficient_cache_budget_bytes=128*1024**2)
                 assert current.payload() == expected
                 assert current.construction() == original.construction()
-                assert mw.FMMConfig.restore(current.payload()) == current
+                assert mw.mom.FMMConfig.restore(current.payload()) == current
                 if storage == 'fft_ewald_v1':continue
-                changed = mw.FMMConfig(**kwargs, near_storage='scalar_dk_v1')
+                changed = mw.mom.FMMConfig(**kwargs, near_storage='scalar_dk_v1')
                 payload = changed.payload();assert payload['version'] == 'cartesian_fmm_scalar_dk_config_v1'
                 assert changed.construction()['near_storage'] == 'scalar_dk_v1'
-                assert mw.FMMConfig.restore(payload) == changed
+                assert mw.mom.FMMConfig.restore(payload) == changed
                 for field in payload['parameters']:
                     bad = copy.deepcopy(payload);del bad['parameters'][field]
-                    with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+                    with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
                 bad = copy.deepcopy(payload);bad['parameters']['near_storage'] = 'full_matrix'
-                with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+                with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
                 bad = current.payload();bad['parameters']['near_storage'] = 'scalar_dk_v1'
-                with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+                with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
                 bad = copy.deepcopy(payload);bad['version'] = current.payload()['version']
-                with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+                with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
 
 
 def test_scalar_dk_native_and_periodic_contract_rejects_before_public_setup():
     for value in (True, None, 'scalar', 'full'):
-        with pytest.raises(ValueError):mw.FMMConfig(near_storage=value)
+        with pytest.raises(ValueError):mw.mom.FMMConfig(near_storage=value)
     with pytest.raises(NotImplementedError, match='free space'):
-        mw.FMMConfig(near_storage='scalar_dk_v1', table_storage='fft_ewald_v1')
-    config = mw.FMMConfig(near_storage='scalar_dk_v1')
+        mw.mom.FMMConfig(near_storage='scalar_dk_v1', table_storage='fft_ewald_v1')
+    config = mw.mom.FMMConfig(near_storage='scalar_dk_v1')
     stopping = StoppingRule(preconditioner='rwg_diagonal')
     with pytest.raises(ValueError, match='complex128'):
-        mw.MoMConfig(operator_backend='fmm', fmm=config, dtype=torch.complex64, riesz_storage='local_rwg_v1', stopping=stopping)
+        mw.mom.MoMConfig(operator_backend='fmm', fmm=config, dtype=torch.complex64, riesz_storage='local_rwg_v1', stopping=stopping)
     with pytest.raises(NotImplementedError, match='free space'):
-        mw.MoMConfig(operator_backend='fmm', fmm=config, periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)),
+        mw.mom.MoMConfig(operator_backend='fmm', fmm=config, periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)),
                      riesz_storage='local_rwg_v1', stopping=stopping)

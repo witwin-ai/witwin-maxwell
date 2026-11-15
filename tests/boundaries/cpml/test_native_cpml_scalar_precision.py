@@ -1,11 +1,10 @@
-"""Native dense CPML must preserve its declared scalar arithmetic precision."""
+"""Native dense CPML (the fused core Yee launch) must preserve its declared scalar arithmetic precision."""
 from fractions import Fraction
 
 import numpy as np
 import pytest
 import torch
 
-from witwin.maxwell.fdtd.cuda import backend
 
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 
@@ -108,29 +107,79 @@ def _normalized_errors(actual, expected, scales):
     return errors
 
 
-def _kernel_arguments(fixture, tensors):
-    component = fixture["component"]
-    a, b = ["xyz"[axis] for axis in fixture["axes"]]
-    prefix_b, prefix_c = ("B", "C") if fixture["electric"] else ("By", "Cy")
-    kwargs = {
-        component: tensors[14], fixture["first"]: tensors[0], fixture["second"]: tensors[1],
-        component + "Decay": tensors[2], component + "Curl": tensors[3],
-        "InvKappa" + component + a.upper(): tensors[4],
-        prefix_b + component + a.upper(): tensors[5], prefix_c + component + a.upper(): tensors[6],
-        "InvKappa" + component + b.upper(): tensors[7],
-        prefix_b + component + b.upper(): tensors[8], prefix_c + component + b.upper(): tensors[9],
-        "invD" + a: tensors[10], "invD" + b: tensors[11],
-        "Psi" + component + a.upper(): tensors[12], "Psi" + component + b.upper(): tensors[13],
-        "uniformDecay": None, "uniformCurl": None,
-    }
-    if fixture["electric"]:
-        kwargs.update({a + "LowBoundaryMode": 2, a + "HighBoundaryMode": 2,
-                       b + "LowBoundaryMode": 2, b + "HighBoundaryMode": 2})
-    name = (
-        "updateElectricField" + component + "Cpml3D"
-        if fixture["electric"] else "updateMagneticField" + component + "3D"
+def _core_fixture(component, active):
+    """The fixture of ``_local_fixture`` written into a prepared float64 dense-CPML core solver.
+
+    The per-component CPML kernels were deleted in W7 row 16e; the fused core Yee launch
+    now carries the dense CPML update. Fields, inverse spacings, CPML profiles and memories
+    are bound by storage, so they are filled in place; the decay/curl coefficients are
+    compressed when the core binds, so they are set first and the core is rebound.
+    """
+    from benchmark.core_path.gates import make_simulation
+    from benchmark.core_path.scenes import build_core_case
+    from tests.support.core_solver import bind_core
+
+    solver = make_simulation(build_core_case("fp64_vacuum_port"), steps=1, full_field_dft=False).prepare().solver
+    assert solver.Ex.dtype == torch.float64 and solver.uses_cpml and solver._cpml_memory_mode == "dense"
+    electric = component.startswith("E")
+    family = "e" if electric else "h"
+    own = "xyz".index(component[1])
+    first, second = (
+        (("Hy", "Hz"), ("Hx", "Hz"), ("Hx", "Hy"))
+        if electric
+        else (("Ey", "Ez"), ("Ex", "Ez"), ("Ex", "Ey"))
+    )[own]
+    a, b = (1 if own == 0 else 0), (1 if own == 2 else 2)
+    rng = np.random.default_rng(50721 + own + 10 * electric)
+    fill = lambda tensor, values: tensor.copy_(torch.as_tensor(values, dtype=tensor.dtype, device=tensor.device))
+    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
+        fill(getattr(solver, name), rng.normal(size=tuple(getattr(solver, name).shape)))
+    for axis in "xyz":
+        for kind, value in (("decay", .875), ("curl", .125)):
+            name = f"c{family}{axis}_{kind}"
+            getattr(solver, name).fill_(value)
+            solver._coefficient_uniformity[name] = None  # indexed coefficient tables, as dense per-cell arrays
+    vector = lambda axis, value: np.asarray(
+        [value * (1 + .03125 * index) for index in range(getattr(solver, f"cpml_b_{family}_{'xyz'[axis]}").numel())],
+        dtype=np.float64,
     )
-    return name, kwargs
+    spacing = {a: 198.765432109, b: 201.234567891, own: 200.0}
+    for axis, value in spacing.items():
+        inv = getattr(solver, f"inv_d{'xyz'[axis]}_{family}")
+        fill(inv, [value * (1 + .03125 * index) for index in range(inv.numel())])
+    for axis in range(3):
+        name = "xyz"[axis]
+        if active and axis == a:
+            values = (vector(a, .65432198765), vector(a, .76543219876), vector(a, -.04321098765))
+        elif active and axis == b:
+            values = (vector(b, .6987654321), vector(b, .7432198765), vector(b, -.03219876543))
+        else:
+            count = getattr(solver, f"cpml_b_{family}_{name}").numel()
+            values = (np.ones(count), np.zeros(count), np.zeros(count))
+        for profile, value in zip(("inv_kappa", "b", "c"), values):
+            fill(getattr(solver, f"cpml_{profile}_{family}_{name}"), value)
+    for target, axes in (("x", "yz"), ("y", "xz"), ("z", "xy")):
+        for axis in axes:
+            psi = getattr(solver, f"psi_{family}{target}_{axis}")
+            assert tuple(psi.shape) == tuple(getattr(solver, family.upper() + target).shape)  # dense memory
+            fill(psi, rng.normal(size=tuple(psi.shape)) if active else np.zeros(tuple(psi.shape)))
+    bind_core(solver)
+    own_name, axis_a, axis_b = component[1].lower(), "xyz"[a], "xyz"[b]
+    tensors = [
+        getattr(solver, first), getattr(solver, second),
+        getattr(solver, f"c{family}{own_name}_decay"), getattr(solver, f"c{family}{own_name}_curl"),
+        *(getattr(solver, f"cpml_{profile}_{family}_{axis_a}") for profile in ("inv_kappa", "b", "c")),
+        *(getattr(solver, f"cpml_{profile}_{family}_{axis_b}") for profile in ("inv_kappa", "b", "c")),
+        getattr(solver, f"inv_d{axis_a}_{family}"), getattr(solver, f"inv_d{axis_b}_{family}"),
+        getattr(solver, f"psi_{family}{own_name}_{axis_a}"), getattr(solver, f"psi_{family}{own_name}_{axis_b}"),
+        getattr(solver, component),
+    ]
+    shape = tuple(tensors[14].shape)
+    point = tuple(size // 2 for size in shape)
+    fixture = {"component": component, "electric": electric, "own": own,
+               "first": first, "second": second, "shape": shape, "axes": (a, b), "point": point,
+               "arrays": [tensor.detach().cpu().numpy().copy() for tensor in tensors]}
+    return solver, fixture, tensors
 
 
 @pytest.mark.parametrize("component", _COMPONENTS)
@@ -157,12 +206,12 @@ def test_fraction_reference_matches_analytic_linear_curl(component):
 @pytest.mark.parametrize("component", _COMPONENTS)
 @pytest.mark.parametrize("active", (False, True), ids=("inactive", "active"))
 def test_native_dense_cpml_keeps_scalar_precision(component, active, record_property):
-    fixture = _local_fixture(component, active)
+    solver, fixture, tensors = _core_fixture(component, active)
     expected, scales = _physical_curl_reference(fixture)
-    tensors = [torch.as_tensor(x, device="cuda", dtype=torch.float64).contiguous() for x in fixture["arrays"]]
-    module = backend.get_native_fdtd_module()
-    name, kwargs = _kernel_arguments(fixture, tensors)
-    getattr(module, name)(**kwargs).launchRaw()
+    if fixture["electric"]:
+        solver._core_runtime.electric()
+    else:
+        solver._core_runtime.magnetic()
     actual = [tensors[index][fixture["point"]].detach().cpu().item() for index in (14, 12, 13)]
     errors = _normalized_errors(actual, expected, scales)
     record_property("maximum_normalized_update_error", max(errors))

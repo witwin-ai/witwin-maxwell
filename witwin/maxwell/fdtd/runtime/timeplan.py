@@ -5,6 +5,7 @@ import math
 
 from ...sources import compile_source_time
 from ..excitation.temporal import injection_time
+from ...errors import UnsupportedFeatureError
 
 
 def _step_at_or_after(duration, dt):
@@ -116,7 +117,8 @@ def compile_fdtd_time_plan(solver, scene, config, frequencies, *, default_source
     times.extend(compile_source_time(excitation.source_time, default_frequency=default_source_frequency)
                  for excitation in excitations)
     if normalize_source and not times:
-        raise NotImplementedError("normalize_source requires an incident source spectrum.")
+        raise UnsupportedFeatureError("normalize_source requires an incident source spectrum.",
+                                      feature="guard:46a717e5", method="fdtd")
     if normalize_source and len({source_spectrum_key(value) for value in times}) > 1:
         raise ValueError("normalize_source requires a single incident source spectrum; "
                          "source_time waveforms may differ only in amplitude.")
@@ -137,7 +139,8 @@ def compile_fdtd_time_plan(solver, scene, config, frequencies, *, default_source
     solver._normalization_label_offset = beta
     circuit_times = _circuit_times(scene)
     if normalize_source and circuit_times:
-        raise NotImplementedError("normalize_source has no unique incident spectrum for circuit-driven fields.")
+        raise UnsupportedFeatureError("normalize_source has no unique incident spectrum for circuit-driven fields.",
+                                      feature="circuit", method="fdtd")
     times.extend(circuit_times)
     unknown_support = any(value.get("fn") is not None for value in times)
     if unknown_support and config.time_steps is None:
@@ -151,8 +154,9 @@ def compile_fdtd_time_plan(solver, scene, config, frequencies, *, default_source
     from ..boundary import has_complex_fields
     complex_fields = has_complex_fields(solver)
     if complex_fields and not pure_cw and any(value.get("kind") == "cw" for value in times):
-        raise NotImplementedError("Complex FDTD cannot mix analytic CW and real-pulse source times; "
-                                  "use a pure CW or a pure non-CW run.")
+        raise UnsupportedFeatureError("Complex FDTD cannot mix analytic CW and real-pulse source times; "
+                                  "use a pure CW or a pure non-CW run.",
+                                      feature="guard:ee5c7f55", method="fdtd")
     ongoing = any(value.get("kind") == "cw" or value.get("ongoing", False) for value in times)
     slow_frequency = min(tuple(float(f) for f in frequencies) + tuple(
         float(value["frequency"]) for value in times if float(value.get("frequency", 0)) > 0))

@@ -192,7 +192,7 @@ def save_field_comparison(fdfd_fields, fdtd_fields, name, scene, show=False):
 
 def make_scene_pair(domain_half, resolution, pml_thickness, pml_strength,
                     source_pos, source_width, source_amp, source_pol,
-                    geometry_fn=None, device='cuda', source_frequency=1e9,
+                    geometry_fn=None, source_frequency=1e9,
                     subpixel_samples=1):
     """Build matched FDFD / FDTD scenes with identical grid and geometry."""
     def _build(add_source_fn):
@@ -206,35 +206,36 @@ def make_scene_pair(domain_half, resolution, pml_thickness, pml_strength,
             ),
             grid=mw.GridSpec.uniform(resolution),
             boundary=mw.BoundarySpec.pml(num_layers=pml_thickness, strength=pml_strength),
-            subpixel_samples=subpixel_samples,
-            device=device,
+            subpixel=subpixel_samples,
         )
         if geometry_fn is not None:
-            geometry_fn(scene)
-        add_source_fn(scene)
+            scene = geometry_fn(scene)
+        scene = add_source_fn(scene)
         return scene
 
     scene_fdfd = _build(
-        lambda s: s.add_source(
+        lambda s: s.updated(sources=(
+            *s.sources,
             mw.PointDipole(
                 position=tuple(source_pos),
                 width=source_width,
                 polarization=tuple(source_pol),
                 source_time=mw.CW(frequency=source_frequency, amplitude=source_amp),
                 name="src",
-            )
-        )
+            ),
+        ))
     )
     scene_fdtd = _build(
-        lambda s: s.add_source(
+        lambda s: s.updated(sources=(
+            *s.sources,
             mw.PointDipole(
                 position=tuple(source_pos),
                 width=source_width,
                 polarization=tuple(source_pol),
                 source_time=mw.CW(frequency=source_frequency, amplitude=source_amp),
                 name="src",
-            )
-        )
+            ),
+        ))
     )
 
     return scene_fdfd, scene_fdtd
@@ -248,15 +249,17 @@ def run_fdfd(scene, frequency, max_iter=5000, tol=1e-6, restart=200):
     """Run FDFD (GMRES) and return raw Yee-grid complex fields {Ex, Ey, Ez}."""
     result = mw.Simulation.fdfd(
         scene,
-        frequency=frequency,
-        solver=mw.GMRES(max_iter=max_iter, tol=tol, restart=restart, precision="double"),
-        enable_plot=False,
-        verbose=True,
+        frequencies=frequency,
+        config=mw.FDFDConfig(
+            solver=mw.fdfd.FDFDSolverConfig(max_iter=max_iter, tol=tol, restart=restart, precision="double"),
+            enable_plot=False,
+            verbose=True,
+        ),
     ).run()
     fdfd = result.solver
     assert fdfd.converged, f"FDFD reference did not converge: residual={fdfd.final_residual}"
     assert fdfd.final_residual <= tol, fdfd.final_residual
-    fields = {name.title(): tensor.detach().cpu().numpy() for name, tensor in result.fields.items()}
+    fields = {name.title(): data.isel(f=0).values.detach().cpu().numpy() for name, data in result.fields.items()}
     return fields, fdfd
 
 
@@ -265,13 +268,15 @@ def run_fdtd(scene, frequency, num_cycles=25, transient_cycles=20, dft_window='h
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=num_cycles, transient_cycles=transient_cycles),
-        spectral_sampler=mw.SpectralSampler(window=dft_window),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=num_cycles, transient_cycles=transient_cycles),
+            spectral_sampler=mw.fdtd.SpectralSampler(window=dft_window),
+            full_field_dft=True,
+        ),
     ).run()
     fdtd = result.solver
     print(f"FDTD: {result.stats()['time_steps']} steps, dt={fdtd.dt:.4e}")
-    fields = {name.title(): tensor.detach().cpu().numpy() for name, tensor in result.fields.items()}
+    fields = {name.title(): data.isel(f=0).values.detach().cpu().numpy() for name, data in result.fields.items()}
     return fields, fdtd
 
 
@@ -320,29 +325,32 @@ def test_cw_dipole_amplitude_agreement():
     """One physical current moment gives the same CW field in both runtimes."""
     frequency = 1.0e9
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.24, 0.24),) * 3),
-        grid=mw.GridSpec.uniform(0.03),
-        boundary=mw.BoundarySpec.pml(num_layers=6),
-        device="cuda",
-    )
-    scene.add_source(mw.PointDipole(
-        position=(0.0, 0.0, -0.09), polarization="Ex", width=0.03,
-        source_time=mw.CW(frequency=frequency, amplitude=2.3, phase=0.4),
-    ))
+                domain=mw.Domain(bounds=((-0.24, 0.24),) * 3),
+                grid=mw.GridSpec.uniform(0.03),
+                boundary=mw.BoundarySpec.pml(num_layers=6),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, -0.09), polarization="Ex", width=0.03,
+                source_time=mw.CW(frequency=frequency, amplitude=2.3, phase=0.4),
+            ),
+            ),
+            )
     fdfd = mw.Simulation.fdfd(
-        scene, frequency=frequency,
-        solver=mw.GMRES(precision="double", max_iter=5000, tol=1e-7, restart=200),
+        scene, frequencies=frequency,
+        config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(precision="double", max_iter=5000, tol=1e-7, restart=200)),
     ).run()
     assert fdfd.stats()["converged"]
     fdtd = mw.Simulation.fdtd(
         scene, frequencies=(frequency,),
-        run_time=mw.TimeConfig.auto(steady_cycles=40, transient_cycles=30),
-        spectral_sampler=mw.SpectralSampler(normalize_source=True),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=40, transient_cycles=30),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True),
+            full_field_dft=True,
+        ),
     ).run()
     plane_index = int(torch.argmin((fdfd.prepared_scene.z - 0.12).abs()))
-    actual = fdfd.tensor("Ex")[:, :, plane_index].abs()
-    reference = fdtd.tensor("Ex")[:, :, plane_index].abs()
+    actual = fdfd.field("Ex", freq_index=0).values[:, :, plane_index].abs()
+    reference = fdtd.field("Ex", freq_index=0).values[:, :, plane_index].abs()
     relative_error = torch.linalg.vector_norm(actual - reference) / torch.linalg.vector_norm(reference)
     assert relative_error < 0.05, relative_error.item()
 
@@ -392,13 +400,15 @@ class TestFDFDvsFDTD:
         freq = 1e9
 
         def add_cube(scene):
-            scene.add_structure(
+            scene = scene.updated(structures=(
+                *scene.structures,
                 mw.Structure(
                     name="cube",
                     geometry=mw.Box(position=(0, 0.3, 0), size=(0.3, 0.3, 0.3)),
                     material=mw.Material(eps_r=4.0),
-                )
-            )
+                ),
+            ))
+            return scene
 
         scene_fdfd, scene_fdtd = make_scene_pair(
             domain_half=0.64, resolution=0.04,
@@ -431,13 +441,15 @@ class TestFDFDvsFDTD:
         freq = 1e9
 
         def add_cube(scene):
-            scene.add_structure(
+            scene = scene.updated(structures=(
+                *scene.structures,
                 mw.Structure(
                     name="cube",
                     geometry=mw.Box(position=(0, 0.3, 0), size=(0.3, 0.3, 0.3)),
                     material=mw.Material(eps_r=4.0),
-                )
-            )
+                ),
+            ))
+            return scene
 
         scene_fdfd, scene_fdtd = make_scene_pair(
             domain_half=0.64, resolution=0.04,

@@ -14,6 +14,7 @@ import torch
 from ..constants import EPSILON_0, MU_0
 from .carrier import IncidentCarrier
 from .kernels import cartesian_distance
+from .ordered_reduction import ordered_index_add_
 from .operator import NEAR_FALLBACK_BATCH as NEAR_BATCH, _pair_budget, _real_complex_matmul, _touching_batch, local_geometry
 from .quadrature import (ANISOTROPIC_TOUCHING_ASPECT, COPLANAR_TOLERANCE, anisotropic_touching_pairs, classify_all_pairs,
                          distance_scaled_duffy_fan, refine_toward_source_edges, static_potential_integrals,
@@ -310,7 +311,7 @@ def _subtracted_touching_rhs(handle, rows, cols, outer_order, inner_order, ratio
             weight_k = (wo).to(dtype)
             first = first+torch.einsum('bqlc,bqc,bq->bl', f, torch.linalg.cross(moment, values[0]), weight_k)
             second = second+torch.einsum('bqlc,bqc,bq->bl', f, torch.linalg.cross(moment, values[1]), weight_k)
-        value.index_add_(0, pair, -torch.stack((first, second), dim=1))
+        ordered_index_add_(value, 0, pair, -torch.stack((first, second), dim=1))
     # The remainder (cone at R = 0) keeps the joint touching rule.
     mesh = basis.mesh
     step = max(1, TOUCHING_REMAINDER_NODES//touching_remainder_nodes(category, inner_order))
@@ -340,7 +341,7 @@ def _fan_near_rhs(handle, rows, cols, outer_order, inner_order, ratio, category=
         paired_obs = obs[:, :, None].expand(-1, -1, inner, -1).flatten(1, 2)
         local = _paired_rhs(handle, rows[pair], cols[pair], category, paired_obs, src.reshape(len(leaf), q*inner, 3),
                             (wo[:, :, None]*ws.reshape(len(leaf), q, inner)).flatten(1, 2))
-        value.index_add_(0, pair, local)
+        ordered_index_add_(value, 0, pair, local)
     return value, {'leaves': len(leaves), 'depth': depth}
 
 
@@ -587,7 +588,7 @@ def build_lifted_rhs_batch(handles):
     budget = _pair_budget(config)
 
     def scatter(rows, local):
-        rhs.index_add_(2, basis.face_edges[rows].flatten(), local.permute(0, 2, 1, 3).flatten(2))
+        ordered_index_add_(rhs, 2, basis.face_edges[rows].flatten(), local.permute(0, 2, 1, 3).flatten(2))
 
     counts = []
     for category in range(5):
@@ -695,7 +696,7 @@ def build_selected_lifted_rhs_batch(handles, test_edges):
         else:
             local = _product_values(handles, r, c, config.order, budget)
         indices, keep = _local_indices(basis.face_edges[r], edges, positions)
-        rhs.index_add_(2, indices[keep], local.permute(0, 2, 1, 3)[:, :, keep])
+        ordered_index_add_(rhs, 2, indices[keep], local.permute(0, 2, 1, 3)[:, :, keep])
 
     queued = [0]*5
     batch = max(config.pair_batch, config.far_pair_batch)

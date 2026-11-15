@@ -139,7 +139,7 @@ def compile_coaxial_geometry(scene, item, *, device=None, with_current: bool = T
     """Compile a CoaxialLumpedPort or CoaxialLumpedResistor annulus into sparse Yee weights."""
     from ..scene import prepare_scene
 
-    resolved = prepare_scene(scene)
+    resolved = prepare_scene(scene, device=device)
     target = torch.device(resolved.device if device is None else device)
     label = f"{type(item).__name__} {item.name!r}"
     normal_axis = item.normal_axis

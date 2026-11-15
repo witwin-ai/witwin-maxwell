@@ -7,6 +7,7 @@ from .physics import Medium
 from .periodic import EwaldHelmholtzKernel
 from .periodic_operator import validate_periodic_cell, _RegularKernel
 from .operator import _pair_integrals
+from .ordered_reduction import ordered_index_add_
 from ..constants import EPSILON_0, MU_0
 
 
@@ -112,8 +113,7 @@ class _EwaldBlockMixin:
                     h = h+1j*omega*EPSILON_0*self.exterior.epsilon_r*torch.einsum('plk,...pk->...pl', d, m)
                     e = torch.einsum('plk,...pk->...pl', magnetic, m)
                     e = e-1j*omega*MU_0*self.exterior.mu_r*torch.einsum('plk,...pk->...pl', d, j)
-                    result = result.index_add(-1, rr, h[..., valid])
-                    result = result.index_add(-1, rr+nr, e[..., valid])
+                    result = ordered_index_add_(result.clone(), -1, torch.cat((rr, rr+nr)), torch.cat((h[..., valid], e[..., valid]), -1))
         self.assert_current()
         return result
 

@@ -200,7 +200,7 @@ def attribute(kernels, trace):
 def run_profile(name, output):
     before = gpu_sample()
     prepared = mw.Simulation.fdtd(v15._scene(v15.SCENARIOS[name], True), frequencies=[2.4e9],
-                                 run_time=mw.TimeConfig(time_steps=1)).prepare()
+                                 config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare()
     result = prepared.run()
     solver = result.solver
     sheet = solver._thin_sheets[0]

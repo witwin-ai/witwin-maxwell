@@ -8,9 +8,11 @@ from ..constants import EPSILON_0,MU_0
 from .periodic import LatticeSpec
 from .tensor_medium import TensorMedium
 from .dyadic_green import maxwell_symbol,current_green_spectrum,compile_plane_modes,SpectralModeCache
+from ..errors import ConvergenceError
+from ..errors import UnsupportedFeatureError
 
 
-class PeriodicDyadicConvergenceError(RuntimeError):
+class PeriodicDyadicConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         self.receipt=receipt
         super().__init__('Periodic dyadic cutoff estimate failed')
@@ -130,7 +132,8 @@ class QuasiperiodicDyadicGreenKernel:
                 or not 128*torch.finfo(sample.dtype).eps <= rank_relative_tolerance < 1):
             raise ValueError('Rank tolerance must be finite, at least 128 eps and below one')
         if self.medium.epsilon_r.requires_grad or self.medium.mu_r.requires_grad:
-            raise NotImplementedError('Projected rank-changing material derivatives are not defined')
+            raise UnsupportedFeatureError('Projected rank-changing material derivatives are not defined',
+                                          feature="guard:4daea619", method="mom")
         if (not isinstance(orders, torch.Tensor) or orders.ndim != 2 or orders.shape[1] != 3
                 or orders.dtype != torch.int64 or orders.device != sample.device
                 or len(torch.unique(orders, dim=0)) != len(orders)):
@@ -908,7 +911,8 @@ class QuasiperiodicDyadicRegularKernel:
         if not isinstance(config, DyadicIntegrationConfig):
             raise TypeError('Regular spectral primary integration requires DyadicIntegrationConfig')
         if config.spatial_rule in ('factored_spd_tail_v1', 'factored_spd_pair_tail_v1'):
-            raise NotImplementedError('Factored SPD tails do not support periodic primary composition')
+            raise UnsupportedFeatureError('Factored SPD tails do not support periodic primary composition',
+                                          feature="boundary.periodic", method="mom")
         object.__setattr__(self, 'integration', replace(config, relative_tolerance=0.,
             absolute_tolerance=self.absolute_tolerance/8))
         sample = self.lattice.vectors

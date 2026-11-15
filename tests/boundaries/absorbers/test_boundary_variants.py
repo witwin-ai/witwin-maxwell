@@ -6,7 +6,8 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd.boundary.common import BOUNDARY_NONE, BOUNDARY_KIND_TO_CODE
 from witwin.maxwell.fdtd.boundary.runtime import _configure_face_boundary_codes
-from witwin.maxwell.simulation import AbsorberKind, _normalize_absorber_kind
+from witwin.maxwell.errors import SetupError
+from witwin.maxwell.fdtd import AbsorberKind
 
 
 # --------------------------------------------------------------------------- #
@@ -29,10 +30,7 @@ def test_mur_faces_map_to_inert_boundary_code():
     assert BOUNDARY_KIND_TO_CODE["mur"] == BOUNDARY_NONE
 
     solver = types.SimpleNamespace(
-        scene=types.SimpleNamespace(
-            boundary=mw.BoundarySpec.mur(),
-            symmetry=(None, None, None),
-        )
+        scene=types.SimpleNamespace(scene=types.SimpleNamespace(boundary=mw.BoundarySpec.mur(), symmetry=(None, None, None)))
     )
     _configure_face_boundary_codes(solver)
 
@@ -48,13 +46,13 @@ def test_mur_faces_map_to_inert_boundary_code():
     assert solver.has_pml_faces is False
 
 
-def test_absorber_kind_normalizes_new_variants():
-    assert _normalize_absorber_kind("absorber") is AbsorberKind.ABSORBER
-    assert _normalize_absorber_kind("stablepml") is AbsorberKind.STABLE_PML
-    assert _normalize_absorber_kind("STABLEPML") is AbsorberKind.STABLE_PML
-    assert _normalize_absorber_kind(AbsorberKind.ABSORBER) is AbsorberKind.ABSORBER
-    with pytest.raises(ValueError):
-        _normalize_absorber_kind("not-a-real-absorber")
+def test_absorber_kind_parses_new_variants():
+    assert mw.FDTDConfig(absorber="absorber").absorber is AbsorberKind.ABSORBER
+    assert mw.FDTDConfig(absorber="stablepml").absorber is AbsorberKind.STABLE_PML
+    assert mw.FDTDConfig(absorber=AbsorberKind.ABSORBER).absorber is AbsorberKind.ABSORBER
+    for spelling in ("STABLEPML", "not-a-real-absorber"):
+        with pytest.raises(SetupError):
+            mw.FDTDConfig(absorber=spelling)
 
 
 # --------------------------------------------------------------------------- #
@@ -66,24 +64,23 @@ _FWIDTH = 1.5e8
 
 
 def _build_scene(boundary):
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.9, 0.9), (-0.9, 0.9), (-0.9, 0.9))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=boundary,
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.1,
-            source_time=mw.GaussianPulse(frequency=_FREQ, fwidth=_FWIDTH, amplitude=1.0),
-            name="pulse",
-        )
-    )
     # A monitor keeps the solve output non-empty; residual energy is read from
     # the raw solver field tensors, not from this monitor.
-    scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ez",)))
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-0.9, 0.9), (-0.9, 0.9), (-0.9, 0.9))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=boundary,
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.1,
+                source_time=mw.GaussianPulse(frequency=_FREQ, fwidth=_FWIDTH, amplitude=1.0),
+                name="pulse",
+            ),
+            ),
+                monitors=(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ez",)),),
+            )
     return scene
 
 
@@ -92,10 +89,12 @@ def _run_solver(boundary, absorber, steps):
     sim = mw.Simulation.fdtd(
         scene,
         frequencies=[_FREQ],
-        absorber=absorber,
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            absorber=absorber,
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
     prepared = sim.prepare()
     prepared.run()

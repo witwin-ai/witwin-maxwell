@@ -2,7 +2,6 @@
 #include <torch/csrc/stable/tensor.h>
 
 #include <optional>
-#include <tuple>
 #include <vector>
 
 void synchronize_noop_cuda();
@@ -67,6 +66,19 @@ void thin_sheet_scatter_cuda(torch::stable::Tensor x, torch::stable::Tensor y,
     torch::stable::Tensor z, torch::stable::Tensor extra,
     const torch::stable::Tensor& components, const torch::stable::Tensor& offsets,
     const torch::stable::Tensor& values);
+void gyromagnetic_snapshot_cuda(
+    torch::stable::Tensor hx, torch::stable::Tensor hy, torch::stable::Tensor hz,
+    const torch::stable::Tensor& cells, const std::optional<torch::stable::Tensor>& frame,
+    torch::stable::Tensor pre_u, torch::stable::Tensor pre_v,
+    int64_t u_axis, int64_t v_axis, double sign_u, double sign_v);
+void gyromagnetic_step_cuda(
+    torch::stable::Tensor hx, torch::stable::Tensor hy, torch::stable::Tensor hz,
+    const torch::stable::Tensor& cells, const std::optional<torch::stable::Tensor>& frame,
+    const torch::stable::Tensor& coupled, const torch::stable::Tensor& inv_mu,
+    const torch::stable::Tensor& pre_u, const torch::stable::Tensor& pre_v,
+    torch::stable::Tensor m_u, torch::stable::Tensor m_v,
+    torch::stable::Tensor dm_u, torch::stable::Tensor dm_v,
+    int64_t u_axis, int64_t v_axis, double sign_u, double sign_v);
 void begin_copper_step_cuda(const torch::stable::Tensor& electric,
     const torch::stable::Tensor& right_e, torch::stable::Tensor old_e,
     const torch::stable::Tensor& offsets);
@@ -107,550 +119,6 @@ void batch_observer_weights_cuda(torch::stable::Tensor state, const torch::stabl
 void batch_observer_gather_cuda(const torch::stable::Tensor& field, const torch::stable::Tensor& offsets,
     const torch::stable::Tensor& frequency_map, const torch::stable::Tensor& weights,
     const torch::stable::Tensor& active, torch::stable::Tensor real, torch::stable::Tensor imag, bool magnetic);
-void update_magnetic_cpml_batch_cuda(torch::stable::Tensor field, const torch::stable::Tensor& first,
-    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
-    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active, int64_t component,
-    torch::stable::Tensor psi_a, torch::stable::Tensor psi_b,
-    const torch::stable::Tensor& kappa_a, const torch::stable::Tensor& b_a,
-    const torch::stable::Tensor& c_a, const torch::stable::Tensor& kappa_b,
-    const torch::stable::Tensor& b_b, const torch::stable::Tensor& c_b,
-    int64_t a_low_length, int64_t a_high_start, int64_t a_high_length,
-    int64_t b_low_length, int64_t b_high_start, int64_t b_high_length, bool dense);
-
-void update_electric_cpml_batch_cuda(torch::stable::Tensor field, const torch::stable::Tensor& first,
-    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
-    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active, int64_t component,
-    torch::stable::Tensor psi_a, torch::stable::Tensor psi_b,
-    const torch::stable::Tensor& kappa_a, const torch::stable::Tensor& b_a,
-    const torch::stable::Tensor& c_a, const torch::stable::Tensor& kappa_b,
-    const torch::stable::Tensor& b_b, const torch::stable::Tensor& c_b,
-    int64_t a_low_length, int64_t a_high_start, int64_t a_high_length,
-    int64_t b_low_length, int64_t b_high_start, int64_t b_high_length,
-    int64_t a_low, int64_t a_high, int64_t b_low, int64_t b_high, bool dense);
-
-void update_magnetic_batch_cuda(
-    torch::stable::Tensor field, const torch::stable::Tensor& first,
-    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
-    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active, int64_t component);
-void update_electric_batch_cuda(
-    torch::stable::Tensor field, const torch::stable::Tensor& first,
-    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
-    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active, int64_t component,
-    int64_t a_low, int64_t a_high, int64_t b_low, int64_t b_high);
-std::tuple<
-    torch::stable::Tensor,
-    torch::stable::Tensor,
-    torch::stable::Tensor,
-    torch::stable::Tensor>
-debug_linear_indices_cuda(int64_t size_x, int64_t size_y, int64_t size_z);
-void update_magnetic_hx_standard_cuda(
-    torch::stable::Tensor hx,
-    const torch::stable::Tensor& ey,
-    const torch::stable::Tensor& ez,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_magnetic_hy_standard_cuda(
-    torch::stable::Tensor hy,
-    const torch::stable::Tensor& ex,
-    const torch::stable::Tensor& ez,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_magnetic_hz_standard_cuda(
-    torch::stable::Tensor hz,
-    const torch::stable::Tensor& ex,
-    const torch::stable::Tensor& ey,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_magnetic_hx_standard_bounded_cuda(
-    torch::stable::Tensor hx,
-    const torch::stable::Tensor& ey,
-    const torch::stable::Tensor& ez,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz,
-    int64_t local_x_begin,
-    int64_t local_x_end,
-    int64_t global_x_offset,
-    int64_t global_x_extent,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_magnetic_hy_standard_bounded_cuda(
-    torch::stable::Tensor hy,
-    const torch::stable::Tensor& ex,
-    const torch::stable::Tensor& ez,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz,
-    int64_t local_x_begin,
-    int64_t local_x_end,
-    int64_t global_x_offset,
-    int64_t global_x_extent,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_magnetic_hz_standard_bounded_cuda(
-    torch::stable::Tensor hz,
-    const torch::stable::Tensor& ex,
-    const torch::stable::Tensor& ey,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy,
-    int64_t local_x_begin,
-    int64_t local_x_end,
-    int64_t global_x_offset,
-    int64_t global_x_extent,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_magnetic_hx_cpml_cuda(
-    torch::stable::Tensor hx,
-    const torch::stable::Tensor& ey,
-    const torch::stable::Tensor& ez,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_y,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_magnetic_hy_cpml_cuda(
-    torch::stable::Tensor hy,
-    const torch::stable::Tensor& ex,
-    const torch::stable::Tensor& ez,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_magnetic_hz_cpml_cuda(
-    torch::stable::Tensor hz,
-    const torch::stable::Tensor& ex,
-    const torch::stable::Tensor& ey,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_y,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_magnetic_hx_cpml_compressed_cuda(
-    torch::stable::Tensor hx,
-    const torch::stable::Tensor& ey,
-    const torch::stable::Tensor& ez,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_y,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz,
-    int64_t y_low_length,
-    int64_t y_high_start,
-    int64_t y_high_length,
-    int64_t z_low_length,
-    int64_t z_high_start,
-    int64_t z_high_length,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_magnetic_hy_cpml_compressed_cuda(
-    torch::stable::Tensor hy,
-    const torch::stable::Tensor& ex,
-    const torch::stable::Tensor& ez,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz,
-    int64_t x_low_length,
-    int64_t x_high_start,
-    int64_t x_high_length,
-    int64_t z_low_length,
-    int64_t z_high_start,
-    int64_t z_high_length,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_magnetic_hz_cpml_compressed_cuda(
-    torch::stable::Tensor hz,
-    const torch::stable::Tensor& ex,
-    const torch::stable::Tensor& ey,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_y,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy,
-    int64_t x_low_length,
-    int64_t x_high_start,
-    int64_t x_high_length,
-    int64_t y_low_length,
-    int64_t y_high_start,
-    int64_t y_high_length,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ex_standard_cuda(
-    torch::stable::Tensor ex,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ey_standard_cuda(
-    torch::stable::Tensor ey,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ez_standard_cuda(
-    torch::stable::Tensor ez,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ex_standard_bounded_cuda(
-    torch::stable::Tensor ex,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode,
-    int64_t local_x_begin,
-    int64_t local_x_end,
-    int64_t global_x_offset,
-    int64_t global_x_extent,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ey_standard_bounded_cuda(
-    torch::stable::Tensor ey,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode,
-    int64_t local_x_begin,
-    int64_t local_x_end,
-    int64_t global_x_offset,
-    int64_t global_x_extent,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ez_standard_bounded_cuda(
-    torch::stable::Tensor ez,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    int64_t local_x_begin,
-    int64_t local_x_end,
-    int64_t global_x_offset,
-    int64_t global_x_extent,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ex_modulated_cuda(
-    torch::stable::Tensor ex,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& mod_cos,
-    const torch::stable::Tensor& mod_sin,
-    const torch::stable::Tensor& mod_omega,
-    const torch::stable::Tensor& modulation_time,
-    const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode);
-void update_electric_ey_modulated_cuda(
-    torch::stable::Tensor ey,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& mod_cos,
-    const torch::stable::Tensor& mod_sin,
-    const torch::stable::Tensor& mod_omega,
-    const torch::stable::Tensor& modulation_time,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode);
-void update_electric_ez_modulated_cuda(
-    torch::stable::Tensor ez,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& mod_cos,
-    const torch::stable::Tensor& mod_sin,
-    const torch::stable::Tensor& mod_omega,
-    const torch::stable::Tensor& modulation_time,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t y_low_mode,
-    int64_t y_high_mode);
-void update_electric_ex_cpml_modulated_cuda(
-    torch::stable::Tensor ex,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& mod_cos,
-    const torch::stable::Tensor& mod_sin,
-    const torch::stable::Tensor& mod_omega,
-    const torch::stable::Tensor& modulation_time,
-    torch::stable::Tensor psi_y,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode);
-void update_electric_ey_cpml_modulated_cuda(
-    torch::stable::Tensor ey,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& mod_cos,
-    const torch::stable::Tensor& mod_sin,
-    const torch::stable::Tensor& mod_omega,
-    const torch::stable::Tensor& modulation_time,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode);
-void update_electric_ez_cpml_modulated_cuda(
-    torch::stable::Tensor ez,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& mod_cos,
-    const torch::stable::Tensor& mod_sin,
-    const torch::stable::Tensor& mod_omega,
-    const torch::stable::Tensor& modulation_time,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_y,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t y_low_mode,
-    int64_t y_high_mode);
-void update_electric_ex_cpml_modulated_compressed_cuda(
-    torch::stable::Tensor ex,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& mod_cos,
-    const torch::stable::Tensor& mod_sin,
-    const torch::stable::Tensor& mod_omega,
-    const torch::stable::Tensor& modulation_time,
-    torch::stable::Tensor psi_y,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode,
-    int64_t y_low_length,
-    int64_t y_high_start,
-    int64_t y_high_length,
-    int64_t z_low_length,
-    int64_t z_high_start,
-    int64_t z_high_length);
-void update_electric_ey_cpml_modulated_compressed_cuda(
-    torch::stable::Tensor ey,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& mod_cos,
-    const torch::stable::Tensor& mod_sin,
-    const torch::stable::Tensor& mod_omega,
-    const torch::stable::Tensor& modulation_time,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode,
-    int64_t x_low_length,
-    int64_t x_high_start,
-    int64_t x_high_length,
-    int64_t z_low_length,
-    int64_t z_high_start,
-    int64_t z_high_length);
-void update_electric_ez_cpml_modulated_compressed_cuda(
-    torch::stable::Tensor ez,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    const torch::stable::Tensor& mod_cos,
-    const torch::stable::Tensor& mod_sin,
-    const torch::stable::Tensor& mod_omega,
-    const torch::stable::Tensor& modulation_time,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_y,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    int64_t x_low_length,
-    int64_t x_high_start,
-    int64_t x_high_length,
-    int64_t y_low_length,
-    int64_t y_high_start,
-    int64_t y_high_length);
 void update_electric_ex_bloch_cuda(
     torch::stable::Tensor ex_real,
     torch::stable::Tensor ex_imag,
@@ -696,156 +164,6 @@ void update_electric_ez_bloch_cuda(
     double phase_sin_y,
     const torch::stable::Tensor& inv_dx,
     const torch::stable::Tensor& inv_dy);
-void update_electric_ex_cpml_cuda(
-    torch::stable::Tensor ex,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_y,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ey_cpml_cuda(
-    torch::stable::Tensor ey,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ez_cpml_cuda(
-    torch::stable::Tensor ez,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_y,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ex_cpml_compressed_cuda(
-    torch::stable::Tensor ex,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_y,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode,
-    int64_t y_low_length,
-    int64_t y_high_start,
-    int64_t y_high_length,
-    int64_t z_low_length,
-    int64_t z_high_start,
-    int64_t z_high_length,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ey_cpml_compressed_cuda(
-    torch::stable::Tensor ey,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hz,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_z,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_z,
-    const torch::stable::Tensor& b_z,
-    const torch::stable::Tensor& c_z,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t z_low_mode,
-    int64_t z_high_mode,
-    int64_t x_low_length,
-    int64_t x_high_start,
-    int64_t x_high_length,
-    int64_t z_low_length,
-    int64_t z_high_start,
-    int64_t z_high_length,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
-void update_electric_ez_cpml_compressed_cuda(
-    torch::stable::Tensor ez,
-    const torch::stable::Tensor& hx,
-    const torch::stable::Tensor& hy,
-    const torch::stable::Tensor& decay,
-    const torch::stable::Tensor& curl,
-    torch::stable::Tensor psi_x,
-    torch::stable::Tensor psi_y,
-    const torch::stable::Tensor& inv_kappa_x,
-    const torch::stable::Tensor& b_x,
-    const torch::stable::Tensor& c_x,
-    const torch::stable::Tensor& inv_kappa_y,
-    const torch::stable::Tensor& b_y,
-    const torch::stable::Tensor& c_y,
-    const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy,
-    int64_t x_low_mode,
-    int64_t x_high_mode,
-    int64_t y_low_mode,
-    int64_t y_high_mode,
-    int64_t x_low_length,
-    int64_t x_high_start,
-    int64_t x_high_length,
-    int64_t y_low_length,
-    int64_t y_high_start,
-    int64_t y_high_length,
-    std::optional<double> uniform_decay,
-    std::optional<double> uniform_curl);
 void accumulate_dft_batched_cuda(
     const torch::stable::Tensor& ex,
     const torch::stable::Tensor& ey,
@@ -2038,13 +1356,6 @@ void deposit_wire_current_cuda(
     const torch::stable::Tensor& contribution_segments,
     const torch::stable::Tensor& contribution_scales,
     const torch::stable::Tensor& current);
-void project_periodic_boundary_cuda(torch::stable::Tensor field, int64_t axis);
-void project_bloch_boundary_cuda(
-    torch::stable::Tensor field_real,
-    torch::stable::Tensor field_imag,
-    int64_t axis,
-    double phase_cos,
-    double phase_sin);
 void update_electric_ex_bloch_y_standard_z_cuda(
     torch::stable::Tensor ex_real,
     torch::stable::Tensor ex_imag,
@@ -2231,54 +1542,19 @@ void add_source_patch_ez_periodic_cuda(
   _(thin_sheet_copper_state, "thin_sheet_copper_state(Tensor(a!) state, Tensor decay, Tensor drive, Tensor rates, Tensor D, Tensor area, Tensor feed_mask, Tensor(b!) current, Tensor(c!) previous, Tensor updated, Tensor pair_old, Tensor pair_new, Tensor old, Tensor(d!) next, Tensor(e!) x_previous, Tensor promoted, Tensor(f!) midpoint, Tensor(g!) loss, Tensor(h!) partials, Tensor(i!) counter, float dt) -> ()", thin_sheet_copper_state_cuda) \
   _(thin_sheet_gather, "thin_sheet_gather(Tensor x, Tensor y, Tensor z, Tensor extra, Tensor components, Tensor offsets, Tensor(a!) values) -> ()", thin_sheet_gather_cuda) \
   _(thin_sheet_scatter, "thin_sheet_scatter(Tensor(a!) x, Tensor(b!) y, Tensor(c!) z, Tensor(d!) extra, Tensor components, Tensor offsets, Tensor values) -> ()", thin_sheet_scatter_cuda) \
+  _(gyromagnetic_snapshot, "gyromagnetic_snapshot(Tensor hx, Tensor hy, Tensor hz, Tensor cells, Tensor? frame, Tensor(a!) pre_u, Tensor(b!) pre_v, int u_axis, int v_axis, float sign_u, float sign_v) -> ()", gyromagnetic_snapshot_cuda) \
+  _(gyromagnetic_step, "gyromagnetic_step(Tensor(a!) hx, Tensor(b!) hy, Tensor(c!) hz, Tensor cells, Tensor? frame, Tensor coupled, Tensor inv_mu, Tensor pre_u, Tensor pre_v, Tensor(d!) m_u, Tensor(e!) m_v, Tensor(f!) dm_u, Tensor(g!) dm_v, int u_axis, int v_axis, float sign_u, float sign_v) -> ()", gyromagnetic_step_cuda) \
   _(begin_copper_step, "begin_copper_step(Tensor electric, Tensor right_e, Tensor(a!) old_e, Tensor offsets) -> ()", begin_copper_step_cuda) \
   _(correct_copper_magnetic, "correct_copper_magnetic(Tensor(a!) magnetic, Tensor(b!) normal, Tensor old_e, Tensor offsets, Tensor high_gain, Tensor targets, Tensor sources, Tensor gains, Tensor? active, float activity, float left, float right) -> ()", correct_copper_magnetic_cuda) \
   _(accumulate_copper_spectra, "accumulate_copper_spectra(Tensor electric, Tensor right_e, Tensor offsets, Tensor(a!) step, Tensor(b!) norm, Tensor(c!) real, Tensor(d!) imag, Tensor frequencies, Tensor starts, Tensor(e!) counter, Tensor? active, float activity, float dt, int end, int window) -> ()", accumulate_copper_spectra_cuda) \
   _(advance_copper_electric, "advance_copper_electric(Tensor(a!) electric, Tensor magnetic, Tensor normal, Tensor(b!) right_e, Tensor(c!) state, Tensor(d!) loss, Tensor(e!) partials, Tensor(f!) counter, Tensor offsets, Tensor valid, Tensor old_e, Tensor B, Tensor decay, Tensor drive, Tensor rates, Tensor D, Tensor rhs, Tensor inverse, Tensor scale, Tensor inv_dual, Tensor area, Tensor? active, float activity, float dt, float sign, float left, float right) -> ()", advance_copper_electric_cuda) \
-  _(update_magnetic_cpml_batch, "update_magnetic_cpml_batch(Tensor(a!) field, Tensor first, Tensor second, Tensor decay, Tensor curl, Tensor inv_a, Tensor inv_b, Tensor active, int component, Tensor(b!) psi_a, Tensor(c!) psi_b, Tensor kappa_a, Tensor b_a, Tensor c_a, Tensor kappa_b, Tensor b_b, Tensor c_b, int a_low_length, int a_high_start, int a_high_length, int b_low_length, int b_high_start, int b_high_length, bool dense) -> ()", update_magnetic_cpml_batch_cuda) \
-  _(update_electric_cpml_batch, "update_electric_cpml_batch(Tensor(a!) field, Tensor first, Tensor second, Tensor decay, Tensor curl, Tensor inv_a, Tensor inv_b, Tensor active, int component, Tensor(b!) psi_a, Tensor(c!) psi_b, Tensor kappa_a, Tensor b_a, Tensor c_a, Tensor kappa_b, Tensor b_b, Tensor c_b, int a_low_length, int a_high_start, int a_high_length, int b_low_length, int b_high_start, int b_high_length, int a_low, int a_high, int b_low, int b_high, bool dense) -> ()", update_electric_cpml_batch_cuda) \
-  _(update_magnetic_batch, "update_magnetic_batch(Tensor(a!) field, Tensor first, Tensor second, Tensor decay, Tensor curl, Tensor inv_a, Tensor inv_b, Tensor active, int component) -> ()", update_magnetic_batch_cuda) \
-  _(update_electric_batch, "update_electric_batch(Tensor(a!) field, Tensor first, Tensor second, Tensor decay, Tensor curl, Tensor inv_a, Tensor inv_b, Tensor active, int component, int a_low, int a_high, int b_low, int b_high) -> ()", update_electric_batch_cuda) \
   _(sample_wire_emf, "sample_wire_emf(Tensor ex, Tensor ey, Tensor ez, Tensor segment_offsets, Tensor edge_components, Tensor edge_offsets, Tensor weights, Tensor(a!) emf) -> ()", sample_wire_emf_cuda) \
   _(update_wire_state, "update_wire_state(Tensor emf, Tensor tail, Tensor head, Tensor inductance, Tensor node_capacitance, Tensor grounded, Tensor node_offsets, Tensor node_segments, Tensor node_signs, float dt, Tensor(a!) current, Tensor(b!) charge) -> ()", update_wire_state_cuda) \
   _(deposit_wire_current, "deposit_wire_current(Tensor(a!) ex, Tensor(b!) ey, Tensor(c!) ez, Tensor edge_group_offsets, Tensor target_components, Tensor target_offsets, Tensor contribution_segments, Tensor contribution_scales, Tensor current) -> ()", deposit_wire_current_cuda) \
-  _(update_magnetic_hx_standard, "update_magnetic_hx_standard(Tensor(a!) hx, Tensor ey, Tensor ez, Tensor decay, Tensor curl, Tensor inv_dy, Tensor inv_dz, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hx_standard_cuda) \
-  _(update_magnetic_hy_standard, "update_magnetic_hy_standard(Tensor(a!) hy, Tensor ex, Tensor ez, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dz, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hy_standard_cuda) \
-  _(update_magnetic_hz_standard, "update_magnetic_hz_standard(Tensor(a!) hz, Tensor ex, Tensor ey, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dy, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hz_standard_cuda) \
-  _(update_magnetic_hx_standard_bounded, "update_magnetic_hx_standard_bounded(Tensor(a!) hx, Tensor ey, Tensor ez, Tensor decay, Tensor curl, Tensor inv_dy, Tensor inv_dz, int local_x_begin, int local_x_end, int global_x_offset, int global_x_extent, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hx_standard_bounded_cuda) \
-  _(update_magnetic_hy_standard_bounded, "update_magnetic_hy_standard_bounded(Tensor(a!) hy, Tensor ex, Tensor ez, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dz, int local_x_begin, int local_x_end, int global_x_offset, int global_x_extent, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hy_standard_bounded_cuda) \
-  _(update_magnetic_hz_standard_bounded, "update_magnetic_hz_standard_bounded(Tensor(a!) hz, Tensor ex, Tensor ey, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dy, int local_x_begin, int local_x_end, int global_x_offset, int global_x_extent, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hz_standard_bounded_cuda) \
-  _(update_magnetic_hx_cpml, "update_magnetic_hx_cpml(Tensor(a!) hx, Tensor ey, Tensor ez, Tensor decay, Tensor curl, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hx_cpml_cuda) \
-  _(update_magnetic_hy_cpml, "update_magnetic_hy_cpml(Tensor(a!) hy, Tensor ex, Tensor ez, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hy_cpml_cuda) \
-  _(update_magnetic_hz_cpml, "update_magnetic_hz_cpml(Tensor(a!) hz, Tensor ex, Tensor ey, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hz_cpml_cuda) \
-  _(update_magnetic_hx_cpml_compressed, "update_magnetic_hx_cpml_compressed(Tensor(a!) hx, Tensor ey, Tensor ez, Tensor decay, Tensor curl, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_length, int y_high_start, int y_high_length, int z_low_length, int z_high_start, int z_high_length, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hx_cpml_compressed_cuda) \
-  _(update_magnetic_hy_cpml_compressed, "update_magnetic_hy_cpml_compressed(Tensor(a!) hy, Tensor ex, Tensor ez, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_length, int x_high_start, int x_high_length, int z_low_length, int z_high_start, int z_high_length, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hy_cpml_compressed_cuda) \
-  _(update_magnetic_hz_cpml_compressed, "update_magnetic_hz_cpml_compressed(Tensor(a!) hz, Tensor ex, Tensor ey, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_length, int x_high_start, int x_high_length, int y_low_length, int y_high_start, int y_high_length, float? uniform_decay, float? uniform_curl) -> ()", update_magnetic_hz_cpml_compressed_cuda) \
-  _(update_electric_ex_standard, "update_electric_ex_standard(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ex_standard_cuda) \
-  _(update_electric_ey_standard, "update_electric_ey_standard(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ey_standard_cuda) \
-  _(update_electric_ez_standard, "update_electric_ez_standard(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ez_standard_cuda) \
-  _(update_electric_ex_standard_bounded, "update_electric_ex_standard_bounded(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode, int local_x_begin, int local_x_end, int global_x_offset, int global_x_extent, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ex_standard_bounded_cuda) \
-  _(update_electric_ey_standard_bounded, "update_electric_ey_standard_bounded(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode, int local_x_begin, int local_x_end, int global_x_offset, int global_x_extent, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ey_standard_bounded_cuda) \
-  _(update_electric_ez_standard_bounded, "update_electric_ez_standard_bounded(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode, int local_x_begin, int local_x_end, int global_x_offset, int global_x_extent, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ez_standard_bounded_cuda) \
   _(advance_modulation_time, "advance_modulation_time(Tensor(a!) modulation_time, Tensor(b!) modulation_step, float dt) -> ()", advance_modulation_time_cuda) \
-  _(update_electric_ex_modulated, "update_electric_ex_modulated(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, Tensor modulation_time, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode) -> ()", update_electric_ex_modulated_cuda) \
-  _(update_electric_ey_modulated, "update_electric_ey_modulated(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, Tensor modulation_time, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode) -> ()", update_electric_ey_modulated_cuda) \
-  _(update_electric_ez_modulated, "update_electric_ez_modulated(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, Tensor modulation_time, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode) -> ()", update_electric_ez_modulated_cuda) \
-  _(update_electric_ex_cpml_modulated, "update_electric_ex_cpml_modulated(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, Tensor modulation_time, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode) -> ()", update_electric_ex_cpml_modulated_cuda) \
-  _(update_electric_ey_cpml_modulated, "update_electric_ey_cpml_modulated(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, Tensor modulation_time, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode) -> ()", update_electric_ey_cpml_modulated_cuda) \
-  _(update_electric_ez_cpml_modulated, "update_electric_ez_cpml_modulated(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, Tensor modulation_time, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode) -> ()", update_electric_ez_cpml_modulated_cuda) \
   _(update_electric_ex_bloch, "update_electric_ex_bloch(Tensor(a!) ex_real, Tensor(b!) ex_imag, Tensor hy_real, Tensor hy_imag, Tensor hz_real, Tensor hz_imag, Tensor decay, Tensor curl, float phase_cos_y, float phase_sin_y, float phase_cos_z, float phase_sin_z, Tensor inv_dy, Tensor inv_dz) -> ()", update_electric_ex_bloch_cuda) \
   _(update_electric_ey_bloch, "update_electric_ey_bloch(Tensor(a!) ey_real, Tensor(b!) ey_imag, Tensor hx_real, Tensor hx_imag, Tensor hz_real, Tensor hz_imag, Tensor decay, Tensor curl, float phase_cos_x, float phase_sin_x, float phase_cos_z, float phase_sin_z, Tensor inv_dx, Tensor inv_dz) -> ()", update_electric_ey_bloch_cuda) \
   _(update_electric_ez_bloch, "update_electric_ez_bloch(Tensor(a!) ez_real, Tensor(b!) ez_imag, Tensor hx_real, Tensor hx_imag, Tensor hy_real, Tensor hy_imag, Tensor decay, Tensor curl, float phase_cos_x, float phase_sin_x, float phase_cos_y, float phase_sin_y, Tensor inv_dx, Tensor inv_dy) -> ()", update_electric_ez_bloch_cuda) \
-  _(update_electric_ex_cpml, "update_electric_ex_cpml(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ex_cpml_cuda) \
-  _(update_electric_ey_cpml, "update_electric_ey_cpml(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ey_cpml_cuda) \
-  _(update_electric_ez_cpml, "update_electric_ez_cpml(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ez_cpml_cuda) \
-  _(update_electric_ex_cpml_compressed, "update_electric_ex_cpml_compressed(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode, int y_low_length, int y_high_start, int y_high_length, int z_low_length, int z_high_start, int z_high_length, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ex_cpml_compressed_cuda) \
-  _(update_electric_ey_cpml_compressed, "update_electric_ey_cpml_compressed(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode, int x_low_length, int x_high_start, int x_high_length, int z_low_length, int z_high_start, int z_high_length, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ey_cpml_compressed_cuda) \
-  _(update_electric_ez_cpml_compressed, "update_electric_ez_cpml_compressed(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode, int x_low_length, int x_high_start, int x_high_length, int y_low_length, int y_high_start, int y_high_length, float? uniform_decay, float? uniform_curl) -> ()", update_electric_ez_cpml_compressed_cuda) \
-  _(update_electric_ex_cpml_modulated_compressed, "update_electric_ex_cpml_modulated_compressed(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, Tensor modulation_time, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode, int y_low_length, int y_high_start, int y_high_length, int z_low_length, int z_high_start, int z_high_length) -> ()", update_electric_ex_cpml_modulated_compressed_cuda) \
-  _(update_electric_ey_cpml_modulated_compressed, "update_electric_ey_cpml_modulated_compressed(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, Tensor modulation_time, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode, int x_low_length, int x_high_start, int x_high_length, int z_low_length, int z_high_start, int z_high_length) -> ()", update_electric_ey_cpml_modulated_compressed_cuda) \
-  _(update_electric_ez_cpml_modulated_compressed, "update_electric_ez_cpml_modulated_compressed(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, Tensor modulation_time, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode, int x_low_length, int x_high_start, int x_high_length, int y_low_length, int y_high_start, int y_high_length) -> ()", update_electric_ez_cpml_modulated_compressed_cuda) \
   _(accumulate_dft_batched, "accumulate_dft_batched(Tensor ex, Tensor ey, Tensor ez, Tensor(a!) ex_real, Tensor(b!) ex_imag, Tensor(c!) ey_real, Tensor(d!) ey_imag, Tensor(e!) ez_real, Tensor(f!) ez_imag, Tensor weighted_cos, Tensor weighted_sin) -> ()", accumulate_dft_batched_cuda) \
   _(batch_source_patch, "batch_source_patch(Tensor(a!) field, Tensor offsets, Tensor lanes, Tensor first, Tensor second, Tensor signals, Tensor active, Tensor step, bool cw, int wrap, Tensor gather_rows, Tensor gather_targets, Tensor gather_entries) -> ()", batch_source_patch_cuda) \
   _(batch_observer_weights, "batch_observer_weights(Tensor(a!) state, Tensor schedule, Tensor signals, Tensor active, Tensor step, Tensor(b!) weights) -> ()", batch_observer_weights_cuda) \
@@ -2365,8 +1641,6 @@ void add_source_patch_ez_periodic_cuda(
   _(clamp_pec_boundary, "clamp_pec_boundary(Tensor(a!) field, int axis_a, int axis_b) -> ()", clamp_pec_boundary_cuda) \
   _(mur_abc_face, "mur_abc_face(Tensor(a!) field, int axis, int boundary_index, int adjacent_index, float coef, Tensor(b!) prev_boundary, Tensor(c!) prev_adjacent) -> ()", mur_abc_face_cuda) \
   _(apply_sibc_surface, "apply_sibc_surface(Tensor(a!) electric, Tensor magnetic, int axis, int electric_index, int magnetic_index, float sign, float surface_r) -> ()", apply_sibc_surface_cuda) \
-  _(project_periodic_boundary, "project_periodic_boundary(Tensor(a!) field, int axis) -> ()", project_periodic_boundary_cuda) \
-  _(project_bloch_boundary, "project_bloch_boundary(Tensor(a!) field_real, Tensor(b!) field_imag, int axis, float phase_cos, float phase_sin) -> ()", project_bloch_boundary_cuda) \
   _(update_electric_ex_bloch_y_standard_z, "update_electric_ex_bloch_y_standard_z(Tensor(a!) ex_real, Tensor(b!) ex_imag, Tensor hy_real, Tensor hy_imag, Tensor hz_real, Tensor hz_imag, Tensor decay, Tensor curl, float phase_cos_y, float phase_sin_y, Tensor inv_dy, Tensor inv_dz, int z_low_mode, int z_high_mode) -> ()", update_electric_ex_bloch_y_standard_z_cuda) \
   _(update_electric_ey_bloch_x_standard_z, "update_electric_ey_bloch_x_standard_z(Tensor(a!) ey_real, Tensor(b!) ey_imag, Tensor hx_real, Tensor hx_imag, Tensor hz_real, Tensor hz_imag, Tensor decay, Tensor curl, float phase_cos_x, float phase_sin_x, Tensor inv_dx, Tensor inv_dz, int z_low_mode, int z_high_mode) -> ()", update_electric_ey_bloch_x_standard_z_cuda) \
   _(apply_electric_ex_cpml_z_correction, "apply_electric_ex_cpml_z_correction(Tensor(a!) ex, Tensor hy, Tensor curl, Tensor(b!) psi_z, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dz, int offset_i, int offset_j, int offset_k, int y_low_mode, int y_high_mode, int full_size_y, int full_size_z) -> ()", apply_electric_ex_cpml_z_correction_cuda) \
@@ -2381,7 +1655,6 @@ void add_source_patch_ez_periodic_cuda(
 
 STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("synchronize_noop() -> ()");
-  m.def("debug_linear_indices(int size_x, int size_y, int size_z) -> (Tensor, Tensor, Tensor, Tensor)");
 #define WITWIN_DEFINE_CUDA_OP(name, schema, impl) m.def(schema);
   WITWIN_CUDA_OPS(WITWIN_DEFINE_CUDA_OP)
 #undef WITWIN_DEFINE_CUDA_OP
@@ -2393,5 +1666,4 @@ STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CUDA, m) {
 }
 STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CompositeExplicitAutograd, m) {
   m.impl("synchronize_noop", TORCH_BOX(&synchronize_noop_cuda));
-  m.impl("debug_linear_indices", TORCH_BOX(&debug_linear_indices_cuda));
 }

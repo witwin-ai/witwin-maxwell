@@ -17,13 +17,15 @@ def _make_scene():
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.1),
-        device="cpu",
     )
 
 
 def test_point_dipole_compiles_default_cw_from_simulation_frequency():
     scene = _make_scene()
-    scene.add_source(mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez", width=0.05))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez", width=0.05),
+    ))
 
     compiled = compile_fdtd_sources(scene, default_frequency=2.5e9)
 
@@ -36,9 +38,9 @@ def test_point_dipole_compiles_default_cw_from_simulation_frequency():
 
 
 def test_point_dipole_supports_ideal_profile_switch():
-    source = mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez", profile="IDEAL")
+    source = mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez", profile="ideal")
 
-    assert source.profile == "ideal"
+    assert source.profile is mw.sources.DipoleProfile.IDEAL
 
 
 def test_point_dipole_rejects_unknown_profile():
@@ -55,7 +57,7 @@ def test_gaussian_pulse_is_delayed_and_broadband():
 
 
 def test_ricker_wavelet_has_zero_phase_and_positive_band_limit():
-    wavelet = mw.RickerWavelet(frequency=1.0e9, amplitude=3.0)
+    wavelet = mw.sources.RickerWavelet(frequency=1.0e9, amplitude=3.0)
 
     assert wavelet.phase == 0.0
     assert wavelet.characteristic_frequency > wavelet.frequency
@@ -87,14 +89,15 @@ def test_gaussian_beam_normalizes_direction_and_polarization():
 
 def test_tfsf_injection_compiles_with_bounds():
     scene = _make_scene()
-    scene.add_source(
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(1.0, 0.0, 0.0),
             polarization=(0.0, 0.0, 1.0),
             source_time=mw.CW(frequency=1.0e9),
             injection=mw.TFSF(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
-        )
-    )
+        ),
+    ))
 
     compiled = compile_fdtd_sources(scene, default_frequency=1.0e9)
 
@@ -123,14 +126,15 @@ def test_tfsf_slab_rejects_invalid_axis_and_bounds():
 
 def test_tfsf_slab_injection_compiles_axis_metadata():
     scene = _make_scene()
-    scene.add_source(
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(0.0, 0.0, 1.0),
             polarization=(1.0, 0.0, 0.0),
             source_time=mw.CW(frequency=1.0e9),
             injection=mw.TFSF.slab(axis="z", bounds=(-0.2, 0.3)),
-        )
-    )
+        ),
+    ))
 
     compiled = compile_fdtd_sources(scene, default_frequency=1.0e9)
 
@@ -144,14 +148,15 @@ def test_tfsf_slab_injection_compiles_axis_metadata():
 
 def test_fdtd_sources_compile_to_list_in_scene_order():
     scene = _make_scene()
-    scene.add_source(mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez"))
-    scene.add_source(
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez"),
         mw.PlaneWave(
             direction=(1.0, 0.0, 0.0),
             polarization=(0.0, 1.0, 0.0),
             source_time=mw.CW(frequency=1.0e9),
-        )
-    )
+        ),
+    ))
 
     compiled = compile_fdtd_sources(scene, default_frequency=1.0e9)
 
@@ -174,13 +179,14 @@ def test_mode_source_resolves_source_plane_and_tangential_polarization():
 
 def test_mode_source_compiles_default_cw_from_simulation_frequency():
     scene = _make_scene()
-    scene.add_source(
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.ModeSource(
             position=(0.0, 0.0, 0.0),
             size=(0.0, 0.6, 0.6),
             polarization="Ez",
-        )
-    )
+        ),
+    ))
 
     compiled = compile_fdtd_sources(scene, default_frequency=2.5e9)
 

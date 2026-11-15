@@ -23,8 +23,8 @@ def test_reference_current_edges_match_native_weighted_voltage_volume_and_work(a
         voltage_aperture=box(center,size),current_surface=box(contour,contour_size))
     scene=mw.Scene(domain=mw.Domain(bounds=((-0.02,.02),)*3),grid=mw.GridSpec.uniform(.005),
         ports=(port,),structures=(mw.Structure(geometry=mw.Box(size=(.1,.1,.1)),
-        material=mw.Material(eps_r=2.4,sigma_e=.02)),),device='cpu')
-    prepared=prepare_scene(scene);native=compile_port_geometry(prepared,port,device='cpu')
+        material=mw.Material(eps_r=2.4,sigma_e=.02)),))
+    prepared=prepare_scene(scene, device='cpu');native=compile_port_geometry(prepared,port,device='cpu')
     axes=tuple(getattr(prepared,name+'_nodes64') for name in 'xyz')
     epsilon=2.4*mw.constants.EPSILON_0;dt=1e-12
     edges=compile_known_current_edges(axes,axis=axis,path=(start[axis],stop[axis]),

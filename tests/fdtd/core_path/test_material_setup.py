@@ -51,22 +51,23 @@ def assert_model_equal(actual, expected, path="model"):
 def small_scene(geometry=None, material=None):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5),)*3), grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pec(), device="cuda",
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
+        boundary=mw.BoundarySpec.pec(), subpixel=mw.SubpixelSpec(samples=3, averaging="polarized"),
     )
     if geometry is not None:
-        scene.add_structure(mw.Structure(geometry=geometry, material=material or mw.Material(eps_r=3.7)))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=geometry, material=material or mw.Material(eps_r=3.7)),
+        ))
     return scene
 
 
-@pytest.mark.parametrize("fdtd_core_path", [False, True])
-def test_modulated_setup_keeps_torch(fdtd_core_path):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_modulated_setup_keeps_torch(enabled):
     scene = small_scene(mw.Sphere(radius=0.23), mw.Material(
-        eps_r=3., modulation=mw.ModulationSpec(amplitude=0.1, frequency=1e8)))
-    simulation = mw.Simulation.fdtd(scene, frequency=2e9, fdtd_core_path=fdtd_core_path)
+        eps_r=3., modulation=mw.media.ModulationSpec(amplitude=0.1, frequency=1e8)))
     prepared = prepare_scene(scene)
-    with setup_scope(simulation.config.fdtd_core_path):
-        assert try_compile_material_model(prepared, 1., 1., prepared.subpixel, True) is UNCHANGED
+    with setup_scope(enabled):
+        assert try_compile_material_model(prepared, 1., 1., prepared.scene.subpixel, True) is UNCHANGED
         actual = materials.compile_material_model(prepared)
     with setup_scope(False):
         expected = materials.compile_material_model(prepared)
@@ -75,11 +76,11 @@ def test_modulated_setup_keeps_torch(fdtd_core_path):
 
 def test_trainable_geometry_keeps_torch_autograd():
     radius = torch.tensor(.23, device="cuda", requires_grad=True)
-    geometry = mw.Union(mw.Sphere(radius=radius, device="cuda"),
+    geometry = mw.geometry.Union(mw.Sphere(radius=radius, device="cuda"),
                         mw.Box(position=(.15, 0, 0), size=.2, device="cuda"), device="cuda")
     prepared = prepare_scene(small_scene(geometry))
     with setup_scope(True):
-        assert try_compile_material_model(prepared, 1., 1., prepared.subpixel, True) is UNCHANGED
+        assert try_compile_material_model(prepared, 1., 1., prepared.scene.subpixel, True) is UNCHANGED
         model = materials.compile_material_model(prepared, include_edges=False)
     gradient, = torch.autograd.grad(model["eps_r"].sum(), radius)
     assert torch.isfinite(gradient) and gradient.abs() > 0
@@ -90,8 +91,8 @@ def test_modulated_coefficients_keep_torch():
     from witwin.maxwell.fdtd.runtime.materials import build_update_coefficients
 
     scene = small_scene(mw.Sphere(radius=.23), mw.Material(
-        eps_r=3., modulation=mw.ModulationSpec(amplitude=.1, frequency=1e8)))
-    solver = mw.Simulation.fdtd(scene, frequency=2e9).prepare().solver
+        eps_r=3., modulation=mw.media.ModulationSpec(amplitude=.1, frequency=1e8)))
+    solver = mw.Simulation.fdtd(scene, frequencies=2e9).prepare().solver
     names = [f'c{family}{axis}_{kind}' for family in 'eh' for axis in 'xyz'
              for kind in ('decay', 'curl')]
     expected = {name: getattr(solver, name).clone() for name in names}
@@ -108,10 +109,13 @@ def test_modulated_coefficients_keep_torch():
 def test_small_setup_equal(kind):
     scene = small_scene()
     if kind == "sphere_box":
-        scene.add_structure(mw.Structure(geometry=mw.Sphere(radius=.23), material=mw.Material(eps_r=3.7)))
-        scene.add_structure(mw.Structure(
-            geometry=mw.Box(position=(.1, 0, 0), size=(.3, .4, .2), rotation=(.1, .2, .3)),
-            material=mw.Material(eps_r=2.1), priority=2))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=mw.Sphere(radius=.23), material=mw.Material(eps_r=3.7)),
+            mw.Structure(
+                geometry=mw.Box(position=(.1, 0, 0), size=(.3, .4, .2), rotation=(.1, .2, .3)),
+                material=mw.Material(eps_r=2.1), priority=2),
+        ))
     prepared = prepare_scene(scene)
     if kind == "sphere_box":
         from witwin.maxwell.compiler.accel.build import build_extension
@@ -120,7 +124,7 @@ def test_small_setup_equal(kind):
         # Off-lattice queries expose the box norm's reduction order.
         generator = torch.Generator(device="cuda").manual_seed(13)
         points = torch.rand((1003, 3), device="cuda", generator=generator) * 1.4 - .7
-        box = prepared.structures[1]
+        box = prepared.scene.structures[1]
         packed = descriptors([box], device="cuda", native_coverage=True)
         distance = build_extension().distance(packed, points)[0]
         expected_distance = box.geometry.signed_distance(*(points[:, i:i+1, None] for i in range(3))).flatten()
@@ -128,7 +132,7 @@ def test_small_setup_equal(kind):
     with setup_scope(False):
         expected = materials.compile_material_model(prepared)
     with setup_scope(True):
-        actual = try_compile_material_model(prepared, 1., 1., prepared.subpixel, True)
+        actual = try_compile_material_model(prepared, 1., 1., prepared.scene.subpixel, True)
         public = materials.compile_material_model(prepared)
     assert actual is not UNCHANGED
     assert_model_equal(actual, expected)
@@ -140,13 +144,9 @@ def test_setup_only_features_prepare_with_accelerated_materials(kind):
     from benchmark.core_path.setup_gates import record_setup, scene_for, setup_simulation
 
     scene = scene_for(kind)
-    simulation = setup_simulation(scene, accelerated=True)
-    assert simulation.config.accelerated_setup and not simulation.config.fdtd_core_path
     with record_setup() as calls:
-        prepared = simulation.prepare()
+        prepared = setup_simulation(scene).prepare()
     assert any(calls) and calls.pieces.get("sample")
-    assert not hasattr(prepared.solver, "_core_runtime")
+    # Setup-only features run on the default core path.
+    assert hasattr(prepared.solver, "_core_runtime")
     assert not setup_enabled.get()
-    core_prepared = mw.Simulation.fdtd(
-        scene, frequency=1.e9, accelerated_setup=True, fdtd_core_path=True).prepare()
-    assert hasattr(core_prepared.solver, "_core_runtime")

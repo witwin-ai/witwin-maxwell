@@ -19,14 +19,14 @@ def _scene():
 
 
 def _config(preconditioner=None, *, scaling='none', rtol=1e-10, **kwargs):
-    return mw.MoMConfig(subdivisions=1, integration=INTEGRATION, riesz_storage='compact_rwg_v1',
+    return mw.mom.MoMConfig(subdivisions=1, integration=INTEGRATION, riesz_storage='compact_rwg_v1',
                         stopping=StoppingRule(method='gmres', preconditioner=scaling, rtol=rtol, atol=0.,
                                               maxiter=600, restart=600, stagnation_window=200),
                         right_preconditioner=preconditioner, **kwargs)
 
 
 def _run(config):
-    prepared = mw.Simulation.mom(_scene(), frequency=FREQUENCY, config=config).prepare()
+    prepared = mw.Simulation.mom(_scene(), frequencies=FREQUENCY, config=config).prepare()
     return prepared, prepared.run()
 
 
@@ -53,10 +53,10 @@ def plain():
 
 @pytest.fixture(scope='module')
 def reference():
-    config = mw.MoMConfig(subdivisions=1, integration=INTEGRATION, riesz_storage='compact_rwg_v1',
+    config = mw.mom.MoMConfig(subdivisions=1, integration=INTEGRATION, riesz_storage='compact_rwg_v1',
                           stopping=StoppingRule(method='direct', rtol=1e-10, atol=0.))
     prepared, result = _run(config)
-    return prepared, result.surface_currents.scattered_coefficients
+    return prepared, mw.mom.surface_currents(result).scattered_coefficients
 
 
 def _relative(a, b):
@@ -69,27 +69,27 @@ def test_default_path_is_the_unchanged_gmres(plain):
     assert 'krylov_method' not in stats and 'right_preconditioner' not in stats
     handle = prepared.solver.handle
     direct, _ = solve_reference(handle, prepared.solver.rhs, prepared.simulation.config.stopping)
-    assert torch.equal(direct, result.surface_currents.scattered_coefficients)
+    assert torch.equal(direct, mw.mom.surface_currents(result).scattered_coefficients)
 
 
 def test_identity_reproduces_unpreconditioned_gmres(reference, plain):
     _, plain = plain
-    _, identity = _run(_config(mw.IdentityRightPreconditioner()))
+    _, identity = _run(_config(mw.mom.IdentityRightPreconditioner()))
     a, b = plain.stats(), identity.stats()
     assert a['converged'] and b['converged']
     assert b['krylov_method'] == 'flexible_right_gmres'
     assert b['right_preconditioner']['version'] == 'identity_right_preconditioner_v1'
     assert abs(a['iterations']-b['iterations']) <= 1
     assert b['preconditioner_applications'] == b['iterations']
-    x_plain = plain.surface_currents.scattered_coefficients
-    x_identity = identity.surface_currents.scattered_coefficients
+    x_plain = mw.mom.surface_currents(plain).scattered_coefficients
+    x_identity = mw.mom.surface_currents(identity).scattered_coefficients
     assert _relative(x_identity, x_plain) < 1e-8
     assert _relative(x_identity, reference[1]) < 1e-7
 
 
 @pytest.mark.parametrize('factory', [
-    mw.FunctionRightPreconditioner(_block_jacobi, name='test_block_jacobi'),
-    mw.LeafBlockRightPreconditioner(16)])
+    mw.mom.FunctionRightPreconditioner(_block_jacobi, name='test_block_jacobi'),
+    mw.mom.LeafBlockRightPreconditioner(16)])
 def test_block_jacobi_reduces_iterations_with_true_residual_admission(reference, plain, factory):
     _, plain = plain
     prepared, result = _run(_config(factory))
@@ -97,7 +97,7 @@ def test_block_jacobi_reduces_iterations_with_true_residual_admission(reference,
     assert stats['converged'] and stats['relative_residual'] <= 1e-10
     assert stats['iterations'] < plain.stats()['iterations']
     assert stats['right_preconditioner']['principal_block_requests'] > 0
-    x = result.surface_currents.scattered_coefficients
+    x = mw.mom.surface_currents(result).scattered_coefficients
     handle = prepared.solver.handle
     true = torch.linalg.vector_norm(prepared.solver.rhs-handle.apply(x))/torch.linalg.vector_norm(prepared.solver.rhs)
     assert float(true) <= 1e-10
@@ -118,10 +118,10 @@ def test_variable_preconditioner_still_converges(reference):
             z = scale*inner(residual)
             return z/(1+1e-3*torch.tanh(z.abs()))
         return apply
-    _, result = _run(_config(mw.FunctionRightPreconditioner(factory, name='variable')))
+    _, result = _run(_config(mw.mom.FunctionRightPreconditioner(factory, name='variable')))
     stats = result.stats()
     assert stats['converged'] and stats['relative_residual'] <= 1e-10
-    assert _relative(result.surface_currents.scattered_coefficients, reference[1]) < 1e-7
+    assert _relative(mw.mom.surface_currents(result).scattered_coefficients, reference[1]) < 1e-7
 
 
 def test_fast_backend_keeps_its_residual_admission():
@@ -129,13 +129,13 @@ def test_fast_backend_keeps_its_residual_admission():
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.01, position=(x, 0., 0.)),
                                               mw.Material(eps_r=eps, mu_r=mu))
                                  for x, eps, mu in ((-.2, 2., 1.2), (.2, 3., 1.3))], sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=4, singular_order=3),
+    config = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=4, singular_order=3),
                           operator_backend='fmm', riesz_storage='local_rwg_v1',
-                          fmm=mw.FMMConfig(order=6, leaf_size=8, separation_ratio=.25),
+                          fmm=mw.mom.FMMConfig(order=6, leaf_size=8, separation_ratio=.25),
                           stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal', rtol=1e-10, atol=0.,
                                                 maxiter=400, restart=400, stagnation_window=200),
-                          right_preconditioner=mw.LeafBlockRightPreconditioner(8))
-    result = mw.Simulation.mom(scene, frequency=9e7, config=config).run()
+                          right_preconditioner=mw.mom.LeafBlockRightPreconditioner(8))
+    result = mw.Simulation.mom(scene, frequencies=9e7, config=config).run()
     stats = result.stats()
     assert stats['converged'] and stats['error_budget']['checked']
     assert stats['error_budget']['compressed_dual_pass'] and stats['error_budget']['original_sampled_pass']
@@ -144,17 +144,17 @@ def test_fast_backend_keeps_its_residual_admission():
 
 
 def test_configuration_admission():
-    identity = mw.IdentityRightPreconditioner()
+    identity = mw.mom.IdentityRightPreconditioner()
     with pytest.raises(TypeError):
-        mw.MoMConfig(stopping=StoppingRule(method='gmres'), right_preconditioner=object())
+        mw.mom.MoMConfig(stopping=StoppingRule(method='gmres'), right_preconditioner=object())
     for rule in (StoppingRule(method='direct'), StoppingRule(method='block_gmres'),
                  StoppingRule(method='gmres', recycle_size=2), StoppingRule(method='gmres', fallback='direct')):
         with pytest.raises(ValueError):
-            mw.MoMConfig(stopping=rule, right_preconditioner=identity)
+            mw.mom.MoMConfig(stopping=rule, right_preconditioner=identity)
     with pytest.raises(ValueError):
-        mw.MoMConfig(operator_backend='fmm', riesz_storage='local_rwg_v1',
-                     fmm=mw.FMMConfig(leaf_factor_kernel='primary'),
+        mw.mom.MoMConfig(operator_backend='fmm', riesz_storage='local_rwg_v1',
+                     fmm=mw.mom.FMMConfig(leaf_factor_kernel='primary'),
                      stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal'),
                      right_preconditioner=identity)
     with pytest.raises(ValueError):
-        _run(_config(mw.FunctionRightPreconditioner(lambda context: (lambda r: r[:-1]), name='bad_shape')))
+        _run(_config(mw.mom.FunctionRightPreconditioner(lambda context: (lambda r: r[:-1]), name='bad_shape')))

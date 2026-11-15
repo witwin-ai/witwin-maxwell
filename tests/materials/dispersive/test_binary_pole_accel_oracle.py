@@ -1,6 +1,7 @@
 """Bitwise CUDA oracle for accelerated binary pole ownership and ADE drives."""
 from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,6 +10,8 @@ from torch.utils._pytree import tree_flatten
 import witwin.maxwell as mw
 from witwin.maxwell.compiler.accel.dispatch import setup_enabled
 from witwin.maxwell.scene import prepare_scene
+from tests.support.torch_setup_oracle import torch_setup_solver
+from witwin.maxwell.compiler import compile_materials
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Pole oracle requires CUDA.")
@@ -69,7 +72,7 @@ def _geometry(shape, *, device="cuda"):
     if shape == "cylinder":
         return mw.Cylinder(radius=.23, height=.5, axis="z", device=device)
     if shape == "union":
-        return mw.Union(
+        return mw.geometry.Union(
             mw.Sphere(position=(-.125, 0., 0.), radius=.19, device=device),
             mw.Box(position=(.125, 0., 0.), size=(.375, .25, .375), device=device),
             device=device)
@@ -89,7 +92,7 @@ def _pole_material(kind="lorentz", magnetic=False, *, scale=1.):
 def _custom_material(strength, magnetic=False):
     key = ("mu_" if magnetic else "") + "lorentz_poles"
     return mw.Material(eps_r=2., mu_r=1.5,
-                       **{key: (mw.CustomLorentzPole(strength, 1.8e9, 1e8),)})
+                       **{key: (mw.media.CustomLorentzPole(strength, 1.8e9, 1e8),)})
 
 
 def _scene(material, shape="sphere", *, dielectric=False, subpixel=None,
@@ -97,13 +100,18 @@ def _scene(material, shape="sphere", *, dielectric=False, subpixel=None,
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
         grid=mw.GridSpec.uniform(.0625),
-        boundary=boundary or mw.BoundarySpec.pec(), device=device,
-        **({} if subpixel is None else {"subpixel_samples": subpixel}),
+        boundary=boundary or mw.BoundarySpec.pec(), **({} if subpixel is None else {"subpixel": subpixel}),
     )
     if dielectric:
-        scene.add_structure(mw.Structure(
-            geometry=mw.Box(size=(2., 2., 2.), device=device), material=mw.Material(eps_r=3.)))
-    scene.add_structure(mw.Structure(geometry=_geometry(shape, device=device), material=material))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(
+                geometry=mw.Box(size=(2., 2., 2.), device=device), material=mw.Material(eps_r=3.)),
+        ))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(geometry=_geometry(shape, device=device), material=material),
+    ))
     return scene
 
 
@@ -136,12 +144,16 @@ def _assert_oracle(scene, record_property, *, accelerated, frequency=1.5e9, dt=3
     models, solver_values = [], []
     for enabled in (False, True):
         with _setup_scope(enabled):
-            model = prepare_scene(scene).compile_materials()
-        prepared = mw.Simulation.fdtd(
-            scene, frequencies=(frequency,), accelerated_setup=enabled, fdtd_core_path=False,
-            run_time=mw.TimeConfig(time_steps=2, dt=dt), cuda_graph=False,
-            spectral_sampler=mw.SpectralSampler(normalize_source=False),
-        ).prepare()
+            model = compile_materials(prepare_scene(scene))
+        simulation = mw.Simulation.fdtd(
+            scene, frequencies=(frequency,),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=2, dt=dt), cuda_graph=False,
+                spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=False),
+            ),
+        )
+        # The torch arm is the tests-side torch-setup oracle; the accelerated arm is the default.
+        prepared = simulation.prepare() if enabled else SimpleNamespace(solver=torch_setup_solver(simulation))
         _assert_tensor_tree_equal(prepared.solver._compiled_material_model, model, "solver/model")
         _check_pieces(prepared, enabled, accelerated, record_property)
         models.append(model)
@@ -171,12 +183,15 @@ def test_binary_pole_geometry_oracle(kind, magnetic, shape, dielectric, record_p
 def test_later_object_priority_oracle(kind, magnetic, dielectric, record_property):
     scene = _scene(_pole_material(kind, magnetic), dielectric=dielectric)
     # Equal priority makes declaration order decide the overlapping constituent.
-    scene.add_structure(mw.Structure(
-        geometry=mw.Box(position=(.125, 0., 0.), size=(.375, .5, .5), device="cuda"),
-        material=_pole_material(kind, magnetic, scale=.5)))
-    scene.add_structure(mw.Structure(
-        geometry=mw.Box(position=(0., .125, 0.), size=(.125, .375, .5), device="cuda"),
-        material=mw.Material(eps_r=4., mu_r=2.)))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(
+            geometry=mw.Box(position=(.125, 0., 0.), size=(.375, .5, .5), device="cuda"),
+            material=_pole_material(kind, magnetic, scale=.5)),
+        mw.Structure(
+            geometry=mw.Box(position=(0., .125, 0.), size=(.125, .375, .5), device="cuda"),
+            material=mw.Material(eps_r=4., mu_r=2.)),
+    ))
     models = _assert_oracle(scene, record_property, accelerated=True)
     key = ("mu_" if magnetic else "") + kind + "_poles"
     for model in models:
@@ -204,7 +219,10 @@ def test_subpixel_spec_oracle(subpixel, record_property):
     scene = _scene(_pole_material(), subpixel=subpixel)
     models = _assert_oracle(scene, record_property, accelerated=subpixel is None)
     if subpixel is not None:
-        assert all("edge_weights" not in model["lorentz_poles"][0] for model in models)
+        # Arithmetic keeps the node volume weights; the polarized family carries
+        # window-rule edge weights (_compile_polarized_pole_edges) on both setups.
+        windowed = subpixel.averaging in ("polarized", "polarized_tensor", "kottke_smooth")
+        assert all(("edge_weights" in model["lorentz_poles"][0]) is windowed for model in models)
 
 
 def _excluded_scene(case, *, device="cuda"):
@@ -216,9 +234,9 @@ def _excluded_scene(case, *, device="cuda"):
         return _scene(_custom_material(strength), "box_face", device=device)
     if case == "modulated":
         material = mw.Material(eps_r=2., lorentz_poles=material.lorentz_poles,
-                               modulation=mw.ModulationSpec(frequency=1e8, amplitude=.2))
+                               modulation=mw.media.ModulationSpec(frequency=1e8, amplitude=.2))
     if case == "perturbation":
-        material = mw.PerturbationMedium(
+        material = mw.media.PerturbationMedium(
             material, perturbation=torch.full((3, 3, 3), .25, device=device), eps_sensitivity=.7)
         return _scene(material, "box_face", device=device)
     if case in ("periodic", "bloch"):
@@ -226,21 +244,27 @@ def _excluded_scene(case, *, device="cuda"):
                     mw.BoundarySpec.bloch((.7, -.3, .2)))
         scene = _scene(material, boundary=boundary, device=device)
         # Cross the domain face so periodic images participate in ownership.
-        scene.structures = [mw.Structure(
+        scene = scene.updated(structures=[mw.Structure(
             geometry=mw.Sphere(position=(.4375, 0., 0.), radius=.23, device=device),
-            material=material)]
+            material=material)])
         return scene
     scene = _scene(material, device=device,
                    subpixel=mw.SubpixelSpec(samples=1, averaging="arithmetic") if case == "density" else None)
     if case == "density":
-        scene.add_material_region(mw.MaterialRegion(
-            name="design", geometry=mw.Box(position=(.125, 0., 0.), size=(.25, .5, .5), device=device),
-            density=torch.full((3, 3, 3), .5, device=device, requires_grad=True), eps_bounds=(1., 3.)))
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
+            mw.MaterialRegion(
+                name="design", geometry=mw.Box(position=(.125, 0., 0.), size=(.25, .5, .5), device=device),
+                density=torch.full((3, 3, 3), .5, device=device, requires_grad=True), eps_bounds=(1., 3.)),
+        ))
     if case == "tensor_background":
-        scene.add_structure(mw.Structure(
-            geometry=mw.Box(position=(.3125, 0., 0.), size=(.125, .25, .25), device=device),
-            material=mw.Material(epsilon_tensor=mw.Tensor3x3(
-                ((3., .2, 0.), (.2, 3., 0.), (0., 0., 3.))))))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(
+                geometry=mw.Box(position=(.3125, 0., 0.), size=(.125, .25, .25), device=device),
+                material=mw.Material(epsilon_tensor=mw.media.Tensor3x3(
+                ((3., .2, 0.), (.2, 3., 0.), (0., 0., 3.))))),
+        ))
     return scene
 
 
@@ -254,7 +278,7 @@ def test_out_of_scope_oracle(case, record_property):
 
 def test_node_to_edge_pole_background_and_masks_oracle(record_property):
     scene = _excluded_scene("tensor_background")
-    scene.subpixel = mw.SubpixelSpec(samples=1, averaging="kottke_edge")
+    scene = scene.updated(subpixel=mw.SubpixelSpec(samples=1, averaging="kottke_edge"))
     models = _assert_oracle(scene, record_property, accelerated=False)
     for model in models:
         assert model["edge_components"] is None
@@ -271,13 +295,12 @@ def test_node_to_edge_pole_background_and_masks_oracle(record_property):
 def test_micrometre_scale_oracle(kind, magnetic, shape, record_property):
     # Binary ownership must not depend on an absolute smoothing-width floor at µm scale.
     um = 1e-6
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.4 * um, 0.4 * um),) * 3), grid=mw.GridSpec.uniform(0.02 * um),
-        boundary=mw.BoundarySpec.pec(), device="cuda",
-        subpixel_samples=mw.SubpixelSpec(samples=4, averaging="kottke_edge"))
     geometry = (mw.Sphere(radius=0.3 * um, device="cuda") if shape == "sphere"
                 else mw.Box(size=(0.37 * um, 0.29 * um, 0.43 * um), device="cuda"))
-    scene.add_structure(mw.Structure(geometry=geometry, material=_pole_material(kind, magnetic)))
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-0.4 * um, 0.4 * um),) * 3), grid=mw.GridSpec.uniform(0.02 * um),
+                boundary=mw.BoundarySpec.pec(), subpixel=mw.SubpixelSpec(samples=4, averaging="kottke_edge"),
+                structures=(mw.Structure(geometry=geometry, material=_pole_material(kind, magnetic)),))
     models = _assert_oracle(scene, record_property, accelerated=True, frequency=1.5e14, dt=2e-17)
     key = ("mu_" if magnetic else "") + kind + "_poles"
     weights = models[1][key][0]["edge_weights"]

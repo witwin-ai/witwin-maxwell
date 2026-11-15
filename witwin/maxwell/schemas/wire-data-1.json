@@ -1,0 +1,38 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "description": "witwin.maxwell.thin_wire.WireData",
+ "properties": {
+  "charge": {
+   "description": "torch.Tensor | None"
+  },
+  "current": {
+   "description": "torch.Tensor | None"
+  },
+  "frequencies": {
+   "description": "torch.Tensor"
+  },
+  "metadata": {
+   "description": "Mapping[str, Any]"
+  },
+  "monitor_name": {
+   "description": "str"
+  },
+  "ohmic_loss": {
+   "description": "torch.Tensor | None"
+  },
+  "wire_name": {
+   "description": "str"
+  }
+ },
+ "required": [
+  "monitor_name",
+  "wire_name",
+  "frequencies",
+  "current",
+  "charge",
+  "ohmic_loss",
+  "metadata"
+ ],
+ "title": "WireData",
+ "type": "object"
+}

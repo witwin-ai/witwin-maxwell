@@ -7,6 +7,8 @@ from typing import Mapping
 import torch
 
 from ..monitors import PowerLossMonitor
+from ..errors import UnsupportedFeatureError
+from .materials import compile_materials
 
 
 _ELECTRIC_COMPONENTS = ("Ex", "Ey", "Ez")
@@ -114,7 +116,7 @@ def _node_to_electric_component(
 def _scene_has_sheet_material(scene) -> bool:
     return any(
         bool(getattr(getattr(structure, "material", None), "is_medium2d", False))
-        for structure in scene.structures
+        for structure in scene.scene.structures
         if getattr(structure, "enabled", True)
     )
 
@@ -137,12 +139,14 @@ def compile_power_loss_monitor(
         from ..scene import prepare_scene
 
         scene = prepare_scene(scene)
-    if monitor.quadrature == "physical_intersection" and getattr(scene, "coordinates", None) is not None:
-        raise NotImplementedError("PowerLossMonitor physical_intersection currently requires Cartesian control volumes; mapped partial-volume metrics are not implemented.")
+    if monitor.quadrature == "physical_intersection" and getattr(scene.scene, "coordinates", None) is not None:
+        raise UnsupportedFeatureError("PowerLossMonitor physical_intersection currently requires Cartesian control volumes; mapped partial-volume metrics are not implemented.",
+                                      feature="coordinates", method="fdtd")
     if monitor.quadrature == "physical_intersection" and any(
-        scene.boundary.axis_kind(axis) in ("periodic", "bloch") for axis in "xyz"
+        scene.scene.boundary.axis_kind(axis) in ("periodic", "bloch") for axis in "xyz"
     ):
-        raise NotImplementedError("PowerLossMonitor physical_intersection requires nonperiodic axes; wrapped control-volume fragments are not implemented.")
+        raise UnsupportedFeatureError("PowerLossMonitor physical_intersection requires nonperiodic axes; wrapped control-volume fragments are not implemented.",
+                                      feature="monitor.PowerLossMonitor", method="fdtd")
 
     masks = {}
     component_volumes = {}
@@ -177,19 +181,21 @@ def compile_power_loss_monitor(
     conductivity = None
     if "conduction" in monitor.channels:
         if _scene_has_sheet_material(scene):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Automatic conduction loss does not accept 2D sheet materials: the current material "
                 "compiler lowers sheet conductance into volume conductivity and no longer retains the "
-                "surface identity required for a surface-loss channel."
+                "surface identity required for a surface-loss channel.",
+                feature="monitor.PowerLossMonitor", method="fdtd"
             )
-        material_model = scene.compile_materials()
+        material_model = compile_materials(scene)
         sigma_m_components = material_model["sigma_m_components"]
         if any(
             bool(torch.any(sigma_m_components[axis] != 0.0)) for axis in ("x", "y", "z")
         ):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Automatic conduction loss currently supports static electric conductivity only; "
-                "magnetic conductivity requires full-frequency H fields and a separate channel."
+                "magnetic conductivity requires full-frequency H fields and a separate channel.",
+                feature="monitor.PowerLossMonitor", method="fdtd"
             )
         sigma_e_components = material_model["sigma_e_components"]
         edge_components = material_model.get("edge_components")

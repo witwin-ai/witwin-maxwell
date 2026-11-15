@@ -16,6 +16,7 @@ from witwin.maxwell.fdtd.excitation.modes.yee import (
     _build_yee_transverse_operator_sparse, _build_yee_transverse_operator_torch,
     _yee_stagger_eps_from_nodes,
 )
+from witwin.maxwell.simulation import MODE_SOURCE_GAUGES
 
 FIELDS = ('Ey', 'Ez', 'Hy', 'Hz')
 CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs CUDA native FDTD replay')
@@ -180,8 +181,8 @@ def test_conductive_trainable_launch_plane_refuses(trainable):
     model = _Guide('source')
     scene = model.to_scene()
     sigma = torch.nn.Parameter(torch.tensor(.01)) if trainable == 'sigma' else .01
-    scene.structures[1] = replace(scene.structures[1], material=mw.Material(
-        eps_r=model.eps if trainable == 'epsilon' else 12., sigma_e=sigma))
+    scene = scene.updated(structures=(*scene.structures[:1], replace(scene.structures[1], material=mw.Material(
+        eps_r=model.eps if trainable == 'epsilon' else 12., sigma_e=sigma)), *scene.structures[2:]))
     with pytest.raises(NotImplementedError, match='launch.*lossless.*conductivity'):
         _forward_context(scene)
 
@@ -189,7 +190,6 @@ def test_conductive_trainable_launch_plane_refuses(trainable):
 def test_two_forwards_reuse_own_material_compile(monkeypatch):
     import witwin.maxwell as mw
     from tests.gradients.test_mode_source_replay_guard import _Guide
-    from witwin.maxwell import scene as scene_module
     from witwin.maxwell.compiler import materials
     from witwin.maxwell.compiler.sources import _compile_mode_source
     from witwin.maxwell.fdtd.runtime.materials import build_materials
@@ -203,15 +203,14 @@ def test_two_forwards_reuse_own_material_compile(monkeypatch):
         return compile_material_model(*args, **kwargs)
 
     monkeypatch.setattr(materials, 'compile_material_model', counted)
-    monkeypatch.setattr(scene_module, 'compile_material_model', counted)
     # Exercise production material initialization without native field allocation.
     monkeypatch.setattr(timestep, 'compile_fdtd_time_step', lambda *args: None)
     model = _Guide('source')
     scene = model.to_scene()
-    scene.grid = mw.GridSpec.uniform(.04)
-    scene.boundary = mw.BoundarySpec.none()
+    scene = scene.updated(grid=mw.GridSpec.uniform(.04))
+    scene = scene.updated(boundary=mw.BoundarySpec.none())
     for forward_number in (1, 2):
-        prepared = prepare_scene(scene)
+        prepared = prepare_scene(scene, device="cpu")
         source = _compile_mode_source(scene.sources[0], default_frequency=1e9)
         context = SimpleNamespace(scene=prepared, _compiled_sources=(source,), source_frequency=1e9,
                                   eps0=8.8541878128e-12, mu0=1.25663706212e-6, c=299792458.,
@@ -226,31 +225,32 @@ def test_two_forwards_reuse_own_material_compile(monkeypatch):
         assert len(calls) == forward_number
 
 
+@CUDA
 @pytest.mark.parametrize('launch', ['source', 'port'])
 @pytest.mark.parametrize('scale', [1., 1e-6])
-def test_preparation_replay_receives_forward_materials_before_guard(monkeypatch, launch, scale):
+def test_preparation_replay_receives_forward_materials_before_guard(launch, scale):
     import witwin.maxwell as mw
     from tests.gradients.test_mode_source_replay_guard import _Guide
     from witwin.maxwell.fdtd.adjoint.core import _build_source_replay_solver
     from witwin.maxwell.fdtd.excitation.injection import initialize_source_terms
-    from witwin.maxwell.fdtd import cpu_profile
 
-    # Exercise initialization only; native differentiable stepping remains CUDA-only.
-    monkeypatch.setattr(cpu_profile, 'admit_cpu_reference_scene',
-                        lambda simulation, prepared: setattr(prepared, '_fdtd_cpu_reference', True))
-    model = _Guide('source', launch=launch, scale=scale, samples=2)
+    # Exercise initialization only; no time stepping.
+    model = _Guide('source', device='cuda', launch=launch, scale=scale, samples=2)
     material_graphs = []
     for _ in range(2):
         scene = model.to_scene()
-        scene.grid = mw.GridSpec.uniform(.04*scale)
-        scene.boundary = mw.BoundarySpec.none()
+        scene = scene.updated(grid=mw.GridSpec.uniform(.04*scale))
+        scene = scene.updated(boundary=mw.BoundarySpec.none())
         if scale == 1.:
-            scene.add_source(mw.ModeSource(
-                position=(.2, 0, 0), size=(0, .4, .4),
-                polarization='Ey', source_time=mw.CW(1e9), name='fixed'))
+            scene = scene.updated(sources=(
+                *scene.sources,
+                mw.ModeSource(
+                    position=(.2, 0, 0), size=(0, .4, .4),
+                    polarization='Ey', source_time=mw.CW(1e9), name='fixed'),
+            ))
         with torch.no_grad():
-            simulation = mw.Simulation.fdtd(scene, frequency=1e9/scale, backend='cpu_reference',
-                                            run_time=mw.TimeConfig(time_steps=2))
+            simulation = mw.Simulation.fdtd(scene, frequencies=1e9/scale,
+                                            config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2)))
             solver = simulation._build_fdtd_solver(initialize=True)
         source_name = 'launch' if launch == 'source' else 'launch::source'
         source_index = next(index for index, source in enumerate(solver._compiled_sources)
@@ -286,19 +286,20 @@ def test_preparation_replay_receives_forward_materials_before_guard(monkeypatch,
     assert material_graphs[0] is not material_graphs[1]
 
 
+@CUDA
 def test_fixed_mode_source_resume_fingerprint_excludes_vector_runtime_state():
     import copy
     import witwin.maxwell as mw
     from tests.gradients.test_mode_source_replay_guard import _Guide
     from witwin.maxwell.fdtd.resume import _configuration_fingerprint
 
-    model = _Guide('source')
+    model = _Guide('source', device='cuda')
     model.eps.requires_grad_(False)
     scene = model.to_scene()
-    scene.grid = mw.GridSpec.uniform(.04)
-    scene.boundary = mw.BoundarySpec.none()
-    solver = mw.Simulation.fdtd(scene, frequency=1e9, backend='cpu_reference',
-                                run_time=mw.TimeConfig(time_steps=2)).prepare().solver
+    scene = scene.updated(grid=mw.GridSpec.uniform(.04))
+    scene = scene.updated(boundary=mw.BoundarySpec.none())
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9,
+                                config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2))).prepare().solver
     current = _configuration_fingerprint(solver)
     # d3b11a6b source records contain neither routing flags nor sticky gauges.
     baseline = copy.copy(solver)
@@ -313,28 +314,29 @@ def test_fixed_mode_source_resume_fingerprint_excludes_vector_runtime_state():
     assert _configuration_fingerprint(solver) == current
 
 
+@CUDA
 @pytest.mark.parametrize('owner', ['scene', 'module'])
 def test_scene_retains_source_gauge_across_solver_and_simulation_rebuilds(monkeypatch, owner):
     import witwin.maxwell as mw
     from tests.gradients.test_mode_source_replay_guard import _Guide
-    model = _Guide('source')
+    model = _Guide('source', device='cuda')
     model.eps.requires_grad_(False)
     to_scene = model.to_scene
 
     def host_scene():
         scene = to_scene()
-        scene.grid = mw.GridSpec.uniform(.04)
-        scene.boundary = mw.BoundarySpec.none()
+        scene = scene.updated(grid=mw.GridSpec.uniform(.04))
+        scene = scene.updated(boundary=mw.BoundarySpec.none())
         return scene
 
     model.to_scene = host_scene
     scene = model.to_scene()
     simulation_input = scene if owner == 'scene' else model
-    # Select the vector implementation on the host forward-only profile; this
-    # tests Simulation's gauge ownership without a native adjoint or CUDA fields.
+    # Select the vector implementation without a trainable plane; this
+    # tests Simulation's gauge ownership without a native adjoint.
     monkeypatch.setattr(modes, '_mode_source_trainable_plane', lambda *args, **kwargs: True)
-    simulation = mw.Simulation.fdtd(simulation_input, frequency=1e9, backend='cpu_reference',
-                                   run_time=mw.TimeConfig(time_steps=2))
+    simulation = mw.Simulation.fdtd(simulation_input, frequencies=1e9,
+                                   config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2)))
     seen = []
     gauge = modes._gauge_vector_profiles
 
@@ -348,9 +350,9 @@ def test_scene_retains_source_gauge_across_solver_and_simulation_rebuilds(monkey
     record = first._mode_source_vector_state['launch']['gauge']
     candidates = torch.where(seen[0] >= .5 * seen[0].max())[0].tolist()
     alternative = next(index for index in candidates if index != record[2])
-    simulation_input._mode_source_gauges['launch'] = (*record[:2], alternative)
+    MODE_SOURCE_GAUGES[simulation_input]['launch'] = (*record[:2], alternative)
     for rebuilt in (simulation, mw.Simulation.fdtd(
-            simulation_input, frequency=1e9, backend='cpu_reference', run_time=mw.TimeConfig(time_steps=2))):
+            simulation_input, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2)))):
         with torch.no_grad():
             second = rebuilt.prepare().solver
         assert second is not first
@@ -362,8 +364,11 @@ def test_retained_material_graph_preserves_fixed_pec_launch_admission(monkeypatc
     from tests.gradients.test_mode_source_replay_guard import _Guide, _forward_context
     model = _Guide('control')
     scene = model.to_scene()
-    scene.add_structure(mw.Structure(
-        mw.Box(position=(0., 0., 0.), size=(1.2, .08, .08)), mw.Material(pec=True)))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(
+            mw.Box(position=(0., 0., 0.), size=(1.2, .08, .08)), mw.Material(pec=True)),
+    ))
     admitted = []
 
     def assemble(solver, source, **kwargs):
@@ -521,19 +526,20 @@ def test_vector_finalization_shares_scale_relative_power_guard(length, amplitude
             assert torch.equal(results[0]['component_profiles'][name], results[1]['component_profiles'][name])
 
 
+@CUDA
 @pytest.mark.parametrize('length', [1., 1e-6])
 @pytest.mark.parametrize('ratio, count', [(1e-16, 1), (1e-6, 2)])
 def test_vector_injection_prunes_only_float64_relative_roundoff(monkeypatch, length, ratio, count):
     import witwin.maxwell as mw
     from tests.gradients.test_mode_source_replay_guard import _Guide
     from witwin.maxwell.fdtd.excitation import injection
-    model = _Guide('source', scale=length)
+    model = _Guide('source', device='cuda', scale=length)
     model.eps.requires_grad_(False)
     scene = model.to_scene()
-    scene.grid = mw.GridSpec.uniform(.04*length)
-    scene.boundary = mw.BoundarySpec.none()
-    solver = mw.Simulation.fdtd(scene, frequency=1e9/length, backend='cpu_reference',
-                                run_time=mw.TimeConfig(time_steps=2)).prepare().solver
+    scene = scene.updated(grid=mw.GridSpec.uniform(.04*length))
+    scene = scene.updated(boundary=mw.BoundarySpec.none())
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9/length,
+                                config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2))).prepare().solver
     source = solver._compiled_sources[0]
     mode = modes.solve_mode_source_profile(solver, source)
     # Both E and H families sit below the former absolute threshold, with a
@@ -628,8 +634,8 @@ def test_bend_material_region_crosses_launch_plane(monkeypatch):
     monkeypatch.setattr(example, 'FILTER_RADIUS', .1*example.UM)
     model = example.BendDesign(device='cuda')
     result = mw.Simulation.fdtd(model, frequencies=[example.FREQUENCY],
-        run_time=mw.TimeConfig.auto(steady_cycles=3, transient_cycles=5), full_field_dft=False).run()
-    loss = result.monitor('output')['flux'].real.sum()
+        config=mw.FDTDConfig(run_time=mw.TimeConfig.auto(steady_cycles=3, transient_cycles=5), full_field_dft=False)).run()
+    loss = result.monitor('output', freq_index=0).values.real.sum()
     loss.backward()
     gradient = model.design.params.grad
     assert torch.isfinite(gradient).all()
@@ -660,28 +666,26 @@ def test_source_profile_pullback_reaches_material_input_frontier():
     assert expected.abs() > 0
 
 
+@CUDA
 @pytest.mark.parametrize('scale', [1., 1e-6])
 @pytest.mark.parametrize('launch', ['source', 'port'])
 @pytest.mark.parametrize('samples', [1, 2])
-def test_no_grad_replay_retains_injection_coefficient_derivative(monkeypatch, scale, launch, samples):
+def test_no_grad_replay_retains_injection_coefficient_derivative(scale, launch, samples):
     import witwin.maxwell as mw
     from tests.gradients.test_mode_source_replay_guard import _Guide
-    from witwin.maxwell.fdtd import cpu_profile
     from witwin.maxwell.fdtd.adjoint import core
     from witwin.maxwell.fdtd.material_pullback import pullback_material_input_gradients
 
-    # Initialize the production launch/replay graphs on the host; no time stepping.
-    monkeypatch.setattr(cpu_profile, 'admit_cpu_reference_scene',
-                        lambda simulation, prepared: setattr(prepared, '_fdtd_cpu_reference', True))
+    # Initialize the production launch/replay graphs; no time stepping.
 
     def prepare(value):
-        model = _Guide('source', value, launch=launch, scale=scale, samples=samples)
+        model = _Guide('source', value, device='cuda', launch=launch, scale=scale, samples=samples)
         scene = model.to_scene()
-        scene.grid = mw.GridSpec.uniform(.04*scale)
-        scene.boundary = mw.BoundarySpec.none()
+        scene = scene.updated(grid=mw.GridSpec.uniform(.04*scale))
+        scene = scene.updated(boundary=mw.BoundarySpec.none())
         with torch.no_grad():
-            solver = mw.Simulation.fdtd(scene, frequency=1e9/scale, backend='cpu_reference',
-                run_time=mw.TimeConfig(time_steps=2))._build_fdtd_solver(initialize=True)
+            solver = mw.Simulation.fdtd(scene, frequencies=1e9/scale,
+                config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2)))._build_fdtd_solver(initialize=True)
         assert solver._compiled_sources[0]['mode_solver_kind'] == 'vector_dense_torch'
         return model, solver
 
@@ -769,9 +773,9 @@ def test_above_cap_source_refuses_before_stepping():
     from tests.gradients.test_mode_source_replay_guard import _Guide
     model = _Guide('source', device='cuda')
     scene = model.to_scene()
-    scene.grid = mw.GridSpec.uniform(.01)
+    scene = scene.updated(grid=mw.GridSpec.uniform(.01))
     with pytest.raises(NotImplementedError, match='launch.*plane material is trainable.*cap n <= 4096'):
-        mw.Simulation.fdtd(scene, frequencies=[1e9], run_time=mw.TimeConfig(time_steps=1), full_field_dft=False).run()
+        mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1), full_field_dft=False)).run()
 
 
 def test_pulse_delay_cotangent_is_included_in_source_pullback():

@@ -171,9 +171,9 @@ def compile_network_block(
 
     if not isinstance(block, NetworkBlock):
         raise TypeError("compile_network_block expects a NetworkBlock.")
-    resolved_scene = prepare_scene(scene)
+    resolved_scene = prepare_scene(scene, device=device)
     target_device = torch.device(resolved_scene.device if device is None else device)
-    ports_by_name = {port.name: port for port in resolved_scene.ports}
+    ports_by_name = {port.name: port for port in resolved_scene.scene.ports}
     compiled_ports: list[CompiledPortGeometry] = []
     for connection_name in block.connected_port_names:
         try:
@@ -308,7 +308,7 @@ def compile_networks(
 ) -> tuple[CompiledNetworkBlock, ...]:
     """Compile Scene network declarations in stable scene order."""
 
-    selected = tuple(scene.networks if networks is None else networks)
+    selected = tuple(scene.scene.networks if networks is None else networks)
     return tuple(
         compile_network_block(scene, block, dt=dt, device=device)
         for block in selected

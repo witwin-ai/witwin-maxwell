@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
+from .options import option_asdict
 import copy
 import hashlib
 import torch
@@ -31,34 +32,57 @@ from .lifting import FORMULATION_ID, CURRENT_KIND, KERNEL_DIFFERENCE_VERSION, bu
 from .efie_open import OpenPECRuntime, OpenSurfaceConfig, OpenSurfaceData
 from .layered.config import LayeredSurfaceConfig
 from .layered.runtime import LayeredSurfaceData
+from .results import point_monitor_data
 from .topology import EFIE_OPEN_PEC, scene_formulation
+from ..errors import UnsupportedFeatureError
+from .._stability import experimental
+from .._enums import StrEnum, parse_enum
+
+
+@experimental("mom")
+class MoMOperatorBackend(StrEnum):
+    """MoM operator backend selected by ``MoMConfig.operator_backend``."""
+    DENSE = 'dense'
+    HMATRIX = 'hmatrix'
+    H2 = 'h2'
+    DIRECT_H2 = 'direct_h2'
+    FMM = 'fmm'
+    PFFT = 'pfft'
+
+
+@experimental("mom")
+class RieszStorage(StrEnum):
+    """Riesz (dual-norm) Gram storage selected by ``MoMConfig.riesz_storage``."""
+    DENSE = 'dense'
+    COMPACT_RWG_V1 = 'compact_rwg_v1'
+    LOCAL_RWG_V1 = 'local_rwg_v1'
 
 
 def _representation_identity(config=None):
     if config is not None and isinstance(config.periodic, MoMDyadicPeriodicConfig):
         return {'formulation_id': 'anisotropic_dgf_sie', 'current_kind': CURRENT_KIND,
                 'kernel_id': 'checked_quasiperiodic_dyadic_regular_v1',
-                'operator_backend': config.operator_backend,
+                'operator_backend': config.operator_backend.value,
                 'rhs_version': 'periodic_tensor_analytic_lifted_rhs_v1',
                 'decoder_version': 'periodic_dyadic_analytic_lifted_fields_v1'}
     if config is not None and config.dyadic_integration is not None:
         if config.periodic is not None:
             return {'formulation_id': 'anisotropic_dgf_sie', 'current_kind': CURRENT_KIND,
                     'kernel_id': f'quasiperiodic_ewald_{len(config.periodic.vectors_m)}d_tensor_interiors_v1',
-                    'operator_backend': config.operator_backend,
+                    'operator_backend': config.operator_backend.value,
                     'rhs_version': 'tensor_factored_spatial_contrast_candidate_v2',
                     'decoder_version': 'periodic_tensor_analytic_lifted_fields_v1'}
         return {'formulation_id': 'anisotropic_dgf_sie', 'current_kind': CURRENT_KIND,
-                'kernel_id': 'scalar_exterior_tensor_interiors_v1', 'operator_backend': config.operator_backend,
+                'kernel_id': 'scalar_exterior_tensor_interiors_v1', 'operator_backend': config.operator_backend.value,
                 'rhs_version': 'tensor_factored_spatial_contrast_candidate_v2',
                 'decoder_version': 'tensor_analytic_lift_principal_value_candidate_v2'}
     if config is not None and config.periodic is not None:
         return {'formulation_id': FORMULATION_ID, 'current_kind': CURRENT_KIND,
-                'kernel_id': f'quasiperiodic_ewald_{len(config.periodic.vectors_m)}d', 'operator_backend': config.operator_backend,
+                'kernel_id': f'quasiperiodic_ewald_{len(config.periodic.vectors_m)}d', 'operator_backend': config.operator_backend.value,
                 'rhs_version': KERNEL_DIFFERENCE_VERSION,
                 'decoder_version': 'periodic_analytic_lifted_fields_v1'}
     return {'formulation_id': FORMULATION_ID, 'current_kind': CURRENT_KIND,
-            'kernel_id': 'free_space_helmholtz', 'operator_backend': 'dense' if config is None else config.operator_backend,
+            'kernel_id': 'free_space_helmholtz', 'operator_backend': 'dense' if config is None else config.operator_backend.value,
             'rhs_version': KERNEL_DIFFERENCE_VERSION,
             'decoder_version': 'analytic_incident_lift_multibody_complete_field_v2'}
 
@@ -76,14 +100,14 @@ def _same_metadata(actual, expected):
 
 def _numerical_identity(config):
     result = {'subdivisions': config.subdivisions, 'dtype': str(config.dtype),
-            'riesz_storage': config.riesz_storage, 'integration': asdict(config.integration),
-            'stopping': asdict(config.stopping), 'query_config': asdict(config.query_config)}
+            'riesz_storage': config.riesz_storage.value, 'integration': asdict(config.integration),
+            'stopping': option_asdict(config.stopping), 'query_config': asdict(config.query_config)}
     if config.dyadic_integration is not None:
         result.update(dyadic_integration=config.dyadic_integration.payload(), dyadic_cache_max_bytes=config.dyadic_cache_max_bytes)
     if config.periodic is not None:
         result['periodic'] = config.periodic.payload()
     if config.operator_backend in ('hmatrix', 'h2'):
-        result.update(operator_backend=config.operator_backend, hierarchical=config.hierarchical.payload())
+        result.update(operator_backend=config.operator_backend.value, hierarchical=config.hierarchical.payload())
     if config.operator_backend == 'h2':
         result['h2'] = config.h2.payload()
     if config.operator_backend == 'direct_h2':
@@ -97,6 +121,7 @@ def _numerical_identity(config):
     return result
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class MoMConfig:
     subdivisions: int = 1
@@ -104,10 +129,10 @@ class MoMConfig:
     stopping: StoppingRule = field(default_factory=lambda: StoppingRule(method='direct'))
     dtype: torch.dtype = torch.complex128
     query_config: FieldQueryConfig = field(default_factory=FieldQueryConfig)
-    riesz_storage: str = 'dense'
+    riesz_storage: RieszStorage = RieszStorage.DENSE
     harmonic_balance: HarmonicBalanceConfig | None = None
     periodic: MoMPeriodicConfig | MoMDyadicPeriodicConfig | None = None
-    operator_backend: str = 'dense'
+    operator_backend: MoMOperatorBackend = MoMOperatorBackend.DENSE
     hierarchical: HMatrixConfig | None = None
     h2: H2Config | None = None
     direct_h2: DirectH2Config | None = None
@@ -126,8 +151,14 @@ class MoMConfig:
     surface_mesh: SurfaceMeshConfig | None = None
     # Planar PEC sheets in a LayerStack background (layered MPIE network solver).
     layered: LayeredSurfaceConfig | None = None
+    # Placement only: it never enters the formulation identity or equality.
+    device: str = field(default="cuda", compare=False)
 
     def __post_init__(self):
+        object.__setattr__(self, 'device', str(torch.device(self.device)))
+        object.__setattr__(self, 'operator_backend',
+                           parse_enum(MoMOperatorBackend, self.operator_backend, name='MoMConfig.operator_backend'))
+        object.__setattr__(self, 'riesz_storage', parse_enum(RieszStorage, self.riesz_storage, name='MoMConfig.riesz_storage'))
         if self.layered is not None and type(self.layered) is not LayeredSurfaceConfig:
             raise TypeError('layered must be LayeredSurfaceConfig or None')
         if self.open_surface is not None and not isinstance(self.open_surface, OpenSurfaceConfig):
@@ -143,26 +174,29 @@ class MoMConfig:
             if self.dyadic_integration is None:
                 raise ValueError('Periodic dyadic exterior requires explicit primary dyadic integration')
             if self.operator_backend not in ('dense','hmatrix','h2') or self.harmonic_balance is not None:
-                raise NotImplementedError('Periodic dyadic exterior requires linear dense/hmatrix/h2 execution')
+                raise UnsupportedFeatureError('Periodic dyadic exterior requires linear dense/hmatrix/h2 execution',
+                                              feature="boundary.periodic", method="mom")
         if self.dyadic_integration is not None:
             if not isinstance(self.dyadic_integration, DyadicIntegrationConfig):
                 raise TypeError('dyadic_integration must be DyadicIntegrationConfig')
             if self.dyadic_integration.spatial_rule in ('factored_spd_tail_v1', 'factored_spd_pair_tail_v1') and self.periodic is not None:
-                raise NotImplementedError('Factored SPD spatial tails require free-space execution')
+                raise UnsupportedFeatureError('Factored SPD spatial tails require free-space execution',
+                                              feature="guard:37b52e81", method="mom")
             if self.operator_backend not in ('dense', 'hmatrix', 'h2'):
-                raise NotImplementedError('Tensor interiors require dense/hmatrix/h2')
+                raise UnsupportedFeatureError('Tensor interiors require dense/hmatrix/h2',
+                                              feature="guard:1a64722f", method="mom")
             if self.harmonic_balance is not None and self.periodic is not None:
-                raise NotImplementedError('Mixed tensor harmonic balance requires free-space execution')
+                raise UnsupportedFeatureError('Mixed tensor harmonic balance requires free-space execution',
+                                              feature="guard:a1d29f70", method="mom")
         if type(self.dyadic_cache_max_bytes) is not int or self.dyadic_cache_max_bytes < 2:
             raise ValueError('dyadic_cache_max_bytes must allow separate regional and RHS caches')
         if self.dyadic_integration is None and self.dyadic_cache_max_bytes != 256*1024**2:
             raise ValueError('Custom dyadic cache requires explicit dyadic_integration')
-        if self.operator_backend not in ('dense', 'hmatrix', 'h2', 'direct_h2', 'fmm', 'pfft'):
-            raise NotImplementedError('This MoM runtime supports dense or experimental scalar hmatrix/h2/direct_h2/fmm/pfft only')
         if self.operator_backend in ('hmatrix', 'h2', 'direct_h2', 'fmm', 'pfft'):
             if ((self.periodic is not None and self.operator_backend not in ('hmatrix', 'h2', 'fmm'))
                     or (self.harmonic_balance is not None and self.operator_backend not in ('hmatrix','h2'))):
-                raise NotImplementedError('Hierarchical periodic and harmonic-balance compositions require dedicated integration')
+                raise UnsupportedFeatureError('Hierarchical periodic and harmonic-balance compositions require dedicated integration',
+                                              feature="boundary.periodic", method="mom")
             if self.harmonic_balance is not None and (not isinstance(self.stopping,StoppingRule)
                     or self.stopping.method not in ('gmres','block_gmres')
                     or self.stopping.recycle_size or self.stopping.preconditioner not in ('none','row_column_norm')):
@@ -197,7 +231,8 @@ class MoMConfig:
                 raise TypeError('fmm must be FMMConfig or DirectionalFMMConfig')
             if isinstance(self.fmm, DirectionalFMMConfig):
                 if self.periodic is not None:
-                    raise NotImplementedError('Automatic directional FMM currently requires free space')
+                    raise UnsupportedFeatureError('Automatic directional FMM currently requires free space',
+                                                  feature="guard:72b94760", method="mom")
                 if self.dtype != torch.complex128:
                     raise ValueError('Automatic directional FMM requires complex128 currents and float64 coordinates')
                 if self.stopping.preconditioner not in ('none', 'rwg_diagonal'):
@@ -205,22 +240,26 @@ class MoMConfig:
             else:
                 if self.fmm.expansion_center_policy in ('dyadic_cell_v1','binary_lattice_v1'):
                     if self.periodic is not None:
-                        raise NotImplementedError('Dyadic cell FMM centers currently require free space')
+                        raise UnsupportedFeatureError('Dyadic cell FMM centers currently require free space',
+                                                      feature="guard:d5556cb8", method="mom")
                     if self.dtype != torch.complex128:
                         raise ValueError('Dyadic cell FMM centers require complex128 currents')
                 if self.fmm.far_action_batch > 1:
                     if self.periodic is not None:
-                        raise NotImplementedError('Batched compact FAR currently requires free space')
+                        raise UnsupportedFeatureError('Batched compact FAR currently requires free space',
+                                                      feature="guard:26c983cc", method="mom")
                     if self.dtype != torch.complex128:
                         raise ValueError('Batched compact FAR requires complex128 currents')
                 if self.fmm.table_storage in ('compact_shared_displacement_v1','compact_shared_signed_axis_v1','radial_series_shared_radius_v1'):
                     if self.periodic is not None:
-                        raise NotImplementedError('Shared compact FMM currently requires free space')
+                        raise UnsupportedFeatureError('Shared compact FMM currently requires free space',
+                                                      feature="guard:e17ad29a", method="mom")
                     if self.dtype!=torch.complex128:
                         raise ValueError('Shared compact FMM requires complex128 currents and float64 coordinates')
                 if self.fmm.near_storage in ('scalar_dk_v1', 'scalar_reciprocal_dk_v1', 'scalar_reciprocal_streamed_dk_v1', 'scalar_reciprocal_cached_dk_v1'):
                     if self.periodic is not None:
-                        raise NotImplementedError('Scalar D/K FMM near storage currently requires free space')
+                        raise UnsupportedFeatureError('Scalar D/K FMM near storage currently requires free space',
+                                                      feature="guard:c567726c", method="mom")
                     if self.dtype != torch.complex128:
                         raise ValueError('Scalar D/K FMM requires complex128 currents and float64 coordinates')
                 if self.stopping.preconditioner not in ('none', 'rwg_diagonal'):
@@ -231,12 +270,15 @@ class MoMConfig:
                     if self.dtype != torch.complex128:
                         raise ValueError('Ewald FFT FMM requires complex128 currents and float64 coordinates')
                 if self.periodic is not None and self.fmm.table_storage == 'fft_v1':
-                    raise NotImplementedError('FFT FMM currently requires free space; screened Ewald FFT is not admitted')
+                    raise UnsupportedFeatureError('FFT FMM currently requires free space; screened Ewald FFT is not admitted',
+                                                  feature="guard:abbfe0dd", method="mom")
                 if self.periodic is not None and self.fmm.kernel_bound_rule != 'bivariate_cauchy_v1':
-                    raise NotImplementedError('Real-support FMM kernel bounds require free space')
+                    raise UnsupportedFeatureError('Real-support FMM kernel bounds require free space',
+                                                  feature="guard:8e1bd876", method="mom")
                 if self.periodic is not None and any(value is not None for value in
                         (self.fmm.max_order, self.fmm.rwg_absolute_budget, self.fmm.kernel_error_budget)):
-                    raise NotImplementedError('Periodic Ewald FMM currently requires fixed order without error-budget admission')
+                    raise UnsupportedFeatureError('Periodic Ewald FMM currently requires fixed order without error-budget admission',
+                                                  feature="boundary.periodic", method="mom")
         elif self.fmm is not None:
             raise ValueError('FMM configuration requires operator_backend=fmm')
         if self.operator_backend == 'pfft':
@@ -256,27 +298,29 @@ class MoMConfig:
             raise ValueError('H2 configuration requires operator_backend=h2')
         if self.operator_backend in ('hmatrix', 'h2', 'direct_h2', 'fmm'):
             solver_config = getattr(self, 'hierarchical' if self.operator_backend == 'hmatrix' else self.operator_backend)
+            object.__setattr__(self, 'stopping', self.stopping.resolved(0.1 * solver_config.solve_dual_tolerance))
             if self.stopping.rtol > 0.1 * solver_config.solve_dual_tolerance:
                 raise ValueError('Hierarchical/FMM stopping.rtol must be <= 0.1 * solve_dual_tolerance: inner GMRES uses the Euclidean norm while admission uses the Riesz dual norm')
         if self.periodic is not None and not isinstance(self.periodic, (MoMPeriodicConfig, MoMDyadicPeriodicConfig)):
             raise TypeError('MoM periodic must be a supported scalar or dyadic periodic configuration')
         if self.periodic is not None and self.harmonic_balance is not None:
-            raise NotImplementedError('Periodic harmonic balance requires coupled runtime integration')
+            raise UnsupportedFeatureError('Periodic harmonic balance requires coupled runtime integration',
+                                          feature="boundary.periodic", method="mom")
         if self.harmonic_balance is not None and not isinstance(self.harmonic_balance,HarmonicBalanceConfig):
             raise TypeError('MoM harmonic_balance must be a HarmonicBalanceConfig')
         if (self.harmonic_balance is not None and self.operator_backend not in ('dense','hmatrix','h2')
                 and (self.harmonic_balance.tensor_face_rule!='triangle' or self.harmonic_balance.tensor_kernel_batch!=128)):
-            raise NotImplementedError('Explicit tensor volume quadrature policy requires dense or H/H2 HB preparation')
+            raise UnsupportedFeatureError('Explicit tensor volume quadrature policy requires dense or H/H2 HB preparation',
+                                          feature="guard:dc436fa6", method="mom")
         if isinstance(self.subdivisions, bool) or not isinstance(self.subdivisions, int) or self.subdivisions < 0:
             raise ValueError('subdivisions must be a nonnegative integer')
         if not isinstance(self.integration, IntegrationConfig) or not isinstance(self.stopping, StoppingRule):
             raise TypeError('MoM integration and stopping must use IntegrationConfig and StoppingRule')
+        object.__setattr__(self, 'stopping', self.stopping.resolved())
         if not isinstance(self.query_config, FieldQueryConfig):
             raise TypeError('MoM query_config must be a FieldQueryConfig')
         if self.dtype not in (torch.complex64, torch.complex128):
             raise ValueError('MoM dtype must be complex64 or complex128')
-        if not isinstance(self.riesz_storage, str) or self.riesz_storage not in ('dense', 'compact_rwg_v1', 'local_rwg_v1'):
-            raise ValueError('MoM riesz_storage must be dense, compact_rwg_v1 or local_rwg_v1')
         if self.right_preconditioner is not None:
             if not callable(getattr(self.right_preconditioner, 'bind', None)):
                 raise TypeError('right_preconditioner must provide bind(context)')
@@ -285,7 +329,8 @@ class MoMConfig:
                 raise ValueError('A right preconditioner requires method=gmres without recycling or fallback')
             if any(value is not None for value in (self.periodic, self.harmonic_balance,
                                                     self.linear_coupled, self.dyadic_integration)):
-                raise NotImplementedError('Right preconditioners currently require the free-space scalar linear runtime')
+                raise UnsupportedFeatureError('Right preconditioners currently require the free-space scalar linear runtime',
+                                              feature="guard:a1355793", method="mom")
             if self.fmm is not None and self.fmm.leaf_factor_kernel != 'none':
                 raise ValueError('Use either FMM leaf factors or a right preconditioner')
 
@@ -343,15 +388,15 @@ def _restore_surface_mesh(record):
 
 
 def compile_surface(scene, frequency, config):
-    exterior, interior = validate_scene(scene, frequency)
-    _validate_surface_queries(scene)
+    exterior, interior = validate_scene(scene, frequency, device=config.device)
+    _validate_surface_queries(scene, config.device)
     geometry = next(s.geometry for s in scene.structures if s.enabled)
-    return _compile_basis(scene, geometry, config, (exterior, interior)), exterior, interior
+    return _compile_basis(geometry, config, (exterior, interior)), exterior, interior
 
 
-def _validate_surface_queries(scene):
-    if torch.device(scene.device).type != 'cuda':
-        raise ValueError('MoM preparation requires a CUDA Scene')
+def _validate_surface_queries(scene, device):
+    if torch.device(device).type != 'cuda':
+        raise ValueError('MoM preparation requires a CUDA device (MoMConfig.device)')
     if any(not isinstance(monitor, PointMonitor) for monitor in scene.monitors):
         raise ValueError('MoM supports PointMonitor E/H only; other monitors require explicit query APIs')
     names = [monitor.name for monitor in scene.monitors]
@@ -362,7 +407,7 @@ def _validate_surface_queries(scene):
             raise ValueError('MoM PointMonitor supports E/H vector components only')
 
 
-def _compile_basis(scene, geometry, config, media=None):
+def _compile_basis(geometry, config, media=None):
     """Compile one body. ``media`` (exterior, interior) sizes faceted primitives by wavelength."""
     if type(geometry) not in (Sphere, Ellipsoid, Mesh, *FACETED_PRIMITIVES):
         raise ValueError('MoM surface compilation supports Sphere, Ellipsoid, Box, Cylinder, Cone, Prism or '
@@ -370,16 +415,16 @@ def _compile_basis(scene, geometry, config, media=None):
     dtype = torch.float64 if config.dtype == torch.complex128 else torch.float32
     if type(geometry) in FACETED_PRIMITIVES:
         surface_mesh = SurfaceMeshConfig() if config.surface_mesh is None else config.surface_mesh
-        return RWGBasis(primitive_surface(geometry, surface_mesh, media, device=scene.device, dtype=dtype))
+        return RWGBasis(primitive_surface(geometry, surface_mesh, media, device=config.device, dtype=dtype))
     if isinstance(geometry, Mesh):
         if geometry.fill_mode != 'solid' or geometry.recenter or geometry.surface_thickness is not None:
             raise ValueError("MoM Mesh requires fill_mode='solid', recenter=False, and no surface thickness")
-        vertices = geometry._transform_mesh_verts(geometry.vertices.to(device=scene.device, dtype=dtype) * geometry.scale.to(device=scene.device, dtype=dtype))
-        faces = geometry.faces.to(device=scene.device)
+        vertices = geometry._transform_mesh_verts(geometry.vertices.to(device=config.device, dtype=dtype) * geometry.scale.to(device=config.device, dtype=dtype))
+        faces = geometry.faces.to(device=config.device)
         return RWGBasis(SurfaceMesh(vertices, faces))
-    unit = sphere_mesh(subdivisions=config.subdivisions, device=scene.device, dtype=dtype)
+    unit = sphere_mesh(subdivisions=config.subdivisions, device=config.device, dtype=dtype)
     size = geometry.radius if isinstance(geometry, Sphere) else geometry.radii
-    size = size.to(device=scene.device, dtype=dtype)
+    size = size.to(device=config.device, dtype=dtype)
     if not bool(torch.isfinite(size).all() & (size > 0).all()):
         raise ValueError('MoM geometry dimensions must be positive and finite in metres')
     vertices = geometry._transform_mesh_verts(unit.vertices * size)
@@ -416,10 +461,10 @@ def compile_surfaces(scene, frequency, config):
     exterior, interiors = validate_scene_system(scene, frequency,
         tensor_materials=config.dyadic_integration is not None,
         tensor_exterior=isinstance(config.periodic, MoMDyadicPeriodicConfig), dtype=config.dtype,
-        point_dipoles=_point_dipole_scope(config))
-    _validate_surface_queries(scene)
+        point_dipoles=_point_dipole_scope(config), device=config.device)
+    _validate_surface_queries(scene, config.device)
     enabled = [(index, structure) for index, structure in enumerate(scene.structures) if structure.enabled]
-    entries = [(index, structure.name, _compile_basis(scene, structure.geometry, config, (exterior, interior)), interior)
+    entries = [(index, structure.name, _compile_basis(structure.geometry, config, (exterior, interior)), interior)
                for (index, structure), interior in zip(enabled, interiors)]
     system = SurfaceSystem.create(entries)
     _validate_point_dipoles(scene, system, config)
@@ -502,7 +547,7 @@ class SurfaceOperator(DenseOperator):
                          'trace_norm_certified': False, 'coordinate_units': 'm',
                          'memory_preflight': capacity})
         if config.riesz_storage != 'dense':
-            metadata['riesz_storage'] = config.riesz_storage
+            metadata['riesz_storage'] = config.riesz_storage.value
         super().__init__(matrix, riesz, metadata)
         self.basis, self.exterior, self.interior = basis, exterior, interior
         self.sources, self.integration = tuple(sources), config.integration
@@ -586,8 +631,9 @@ class SystemDecodeHandle:
         self.validate_tensor_state()
         config = self._public_config
         if config.periodic is not None:
-            raise NotImplementedError('Batched lifted RHS is not implemented for periodic lattices; '
-                                      'use one prepared Simulation per source')
+            raise UnsupportedFeatureError('Batched lifted RHS is not implemented for periodic lattices; '
+                                      'use one prepared Simulation per source',
+                                          feature="boundary.periodic", method="mom")
         source_groups = tuple(tuple(group) for group in source_groups)
         for group in source_groups:
             if any(isinstance(source, PointDipole) for source in group):
@@ -846,7 +892,8 @@ class SurfaceData:
     def _periodic_observable_kernel(self):
         self._validate_carrier_binding()
         if isinstance(self.config.periodic, MoMDyadicPeriodicConfig):
-            raise NotImplementedError('Periodic tensor modal observables require their own Maxwell-mode normalization')
+            raise UnsupportedFeatureError('Periodic tensor modal observables require their own Maxwell-mode normalization',
+                                          feature="boundary.periodic", method="mom")
         if self.config.periodic is None:
             raise ValueError('Periodic observables require a periodic MoM Result')
         return self.handle.periodic_kernel
@@ -907,9 +954,10 @@ class SurfaceData:
 
     def snapshot(self):
         if self.config.operator_backend == 'pfft':
-            raise NotImplementedError('pFFT results have no executable snapshot: the archive restores dense or '
+            raise UnsupportedFeatureError('pFFT results have no executable snapshot: the archive restores dense or '
                                       'hierarchical operator tensors, and a pFFT operator is rebuilt from the '
-                                      'mesh; query or export fields before saving')
+                                      'mesh; query or export fields before saving',
+                                          feature="guard:2b28d369", method="mom")
         self._validate_carrier_binding()
         bodies = []
         for view in self.bodies:
@@ -926,8 +974,8 @@ class SurfaceData:
                 'incident_carrier': self.incident_carrier.payload(), 'incident_carrier_identity': self.incident_carrier.identity,
                 'body_table': bodies, 'exterior': sampled_medium_payload(self.handle.exterior),
                 'integration': asdict(self.config.integration), 'query_config': asdict(self.config.query_config),
-                'stopping': asdict(self.config.stopping), 'subdivisions': self.config.subdivisions,
-                'riesz_storage': self.config.riesz_storage, 'dtype': str(self.config.dtype),
+                'stopping': option_asdict(self.config.stopping), 'subdivisions': self.config.subdivisions,
+                'riesz_storage': self.config.riesz_storage.value, 'dtype': str(self.config.dtype),
                 'scene_signature': copy.deepcopy(self.scene_signature), 'operator_metadata': copy.deepcopy(self.handle.metadata)}
         if self.config.periodic is not None:
             payload.update(schema_version=7, periodic_config=self.config.periodic.payload())
@@ -953,11 +1001,11 @@ class SurfaceData:
         return payload
 
     @classmethod
-    def restore(cls, payload, scene, frequency):
+    def restore(cls, payload, scene, frequency, device):
         if not isinstance(payload, dict): raise ValueError('MoM surface payload must be a dictionary')
         if payload.get('schema_version') == 20:
             from .linear_runtime import LinearSurfaceData
-            return LinearSurfaceData.restore(payload, scene, frequency)
+            return LinearSurfaceData.restore(payload, scene, frequency, device)
         periodic = MoMPeriodicConfig.restore(payload.get('periodic_config')) if payload.get('schema_version') in (7, 12, 16, 17) else None
         dyadic = payload.get('schema_version') in (18,19)
         if dyadic:
@@ -1008,7 +1056,8 @@ class SurfaceData:
             operator_backend='fmm' if fmm is not None else 'direct_h2' if direct_h2 is not None else 'h2' if h2 is not None else 'hmatrix' if hierarchical is not None else 'dense',
             hierarchical=hierarchical, h2=h2, direct_h2=direct_h2, fmm=fmm,
             dyadic_integration=DyadicIntegrationConfig(**payload['dyadic_integration']) if payload['schema_version'] in (13, 16, 18, 19) else None,
-            dyadic_cache_max_bytes=payload.get('dyadic_cache_max_bytes', 256*1024**2), surface_mesh=surface_mesh)
+            dyadic_cache_max_bytes=payload.get('dyadic_cache_max_bytes', 256*1024**2), surface_mesh=surface_mesh,
+            device=device)
         identity = _representation_identity(config)
         if any(payload.get(key) != value for key, value in identity.items()):
             raise ValueError('Unsupported MoM formulation, current kind, kernel, backend or decoder identity')
@@ -1051,7 +1100,7 @@ class SurfaceData:
             raise ValueError('MoM snapshot sampled exterior does not match')
         if dyadic:
             from .tensor_carrier import TensorIncidentCarrier, compile_tensor_carrier
-            carrier = TensorIncidentCarrier.from_payload(payload['incident_carrier'], device=scene.device, medium=exterior)
+            carrier = TensorIncidentCarrier.from_payload(payload['incident_carrier'], device=device, medium=exterior)
             if (carrier.identity != payload['incident_carrier_identity']
                     or carrier.identity != compile_tensor_carrier(scene.sources, exterior).identity):
                 raise ValueError('Saved tensor carrier differs from the supplied Scene modes')
@@ -1075,7 +1124,7 @@ class SurfaceData:
             for key, reference in (('vertices', body.mesh.vertices), ('faces', body.mesh.faces)):
                 value = record[key]
                 if (not isinstance(value, torch.Tensor) or value.dtype != reference.dtype
-                        or not torch.equal(value.to(scene.device), reference)):
+                        or not torch.equal(value.to(device), reference)):
                     raise ValueError('MoM snapshot surface mesh does not match the supplied Scene')
         coefficients = payload['scattered_coefficients']
         if (not isinstance(coefficients, torch.Tensor) or coefficients.shape != (2*system.total_edges,)
@@ -1121,14 +1170,15 @@ class SurfaceData:
                     or metadata.get('operator_identity') != operator_id or metadata.get('rhs_identity') != rhs_id
                     or not _same_metadata(metadata.get('operator_identity_payload'), operator_payload)):
                 raise ValueError('Hierarchical snapshot operator or RHS identity does not match')
-        return cls(coefficients.to(scene.device), handle, config, signature)
+        return cls(coefficients.to(device), handle, config, signature)
 
 
 class MoMRuntime:
     def __init__(self, simulation):
         self.simulation = simulation
         if simulation.has_trainable_parameters:
-            raise NotImplementedError('MoM geometry/material derivatives are not supported; fixed-q residual_loss supports coefficient gradients')
+            raise UnsupportedFeatureError('MoM geometry/material derivatives are not supported; fixed-q residual_loss supports coefficient gradients',
+                                          feature="guard:36463ed0", method="mom")
         system, exterior = compile_surfaces(simulation.scene, simulation.frequency, simulation.config)
         if isinstance(simulation.config.periodic, MoMDyadicPeriodicConfig):
             from .periodic_runtime import (PeriodicDyadicSystemOperator,PeriodicDyadicHierarchicalOperator,
@@ -1178,7 +1228,7 @@ class MoMRuntime:
             from .block_preconditioner import LeafBlockInverse
             fmm = simulation.config.fmm
             self.leaf_inverse = LeafBlockInverse(self.handle.provider, self.handle.tree,
-                factor_kernel=fmm.leaf_factor_kernel, max_block_edges=fmm.leaf_factor_max_edges,
+                factor_kernel=fmm.leaf_factor_kernel.value, max_block_edges=fmm.leaf_factor_max_edges,
                 retained_budget_bytes=fmm.leaf_factor_budget_bytes)
         self._leaf_inverse_binding = self.leaf_inverse
         self.right_preconditioner = self.right_preconditioner_receipt = None
@@ -1197,7 +1247,7 @@ class MoMRuntime:
         exterior, interiors = validate_scene_system(sim.scene, sim.frequency,
             tensor_materials=sim.config.dyadic_integration is not None,
             tensor_exterior=isinstance(sim.config.periodic, MoMDyadicPeriodicConfig), dtype=sim.config.dtype,
-            point_dipoles=_point_dipole_scope(sim.config))
+            point_dipoles=_point_dipole_scope(sim.config), device=sim.config.device)
         if (sim.config != self.prepared_config or sim.frequency != self.prepared_frequency
                 or _signature(sim.scene, exterior, interiors) != self.scene_signature):
             raise ValueError('Scene or numerical configuration changed after MoM preparation')
@@ -1248,21 +1298,15 @@ class MoMRuntime:
                 monitor_query_logs[region] = dict(self.handle.last_field_query_log)
             log['monitor_query_logs'] = monitor_query_logs
             log['unique_monitor_positions'] = len(positions)
+            samples = torch.cat((electric, magnetic), -1)
             for monitor in sim.scene.monitors:
                 index = point_index[monitor.position]
                 region = int(regions[index])
-                values = dict(zip(('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz'),
-                                  torch.cat((electric[index], magnetic[index]))))
-                components = {name.capitalize(): values[name.capitalize()] for name in monitor.fields}
-                monitors[monitor.name] = {'kind': 'point', 'fields': tuple(components),
-                    'components': components, **components, 'position': monitor.position,
-                    'frequency': sim.frequency, 'frequencies': (sim.frequency,),
-                    'region_id': region,
-                    'structure_index': None if region == 0 else self.handle.system.bodies[region-1].structure_index,
-                    'structure_name': None if region == 0 else self.handle.system.bodies[region-1].name,
-                    'field_kind': 'total', 'coordinate_units': 'm',
-                    'phasor_convention': 'exp(-i omega t)', 'sampling': 'physical_position',
-                    'distance_to_surface_m': float(distances[index])}
+                monitors[monitor.name] = point_monitor_data(monitor, samples[index][None], (sim.frequency,),
+                    region_id=region,
+                    structure_index=None if region == 0 else self.handle.system.bodies[region-1].structure_index,
+                    structure_name=None if region == 0 else self.handle.system.bodies[region-1].name,
+                    distance_to_surface_m=float(distances[index]))
         return Result(method='mom', scene=sim.scene, frequency=sim.frequency, solver=self,
                       surface_data=data, solver_stats=log, monitors=monitors,
                       metadata={**sim.metadata, **self.handle.metadata,

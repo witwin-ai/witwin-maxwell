@@ -36,26 +36,25 @@ def _scene(circuit):
         boundary=mw.BoundarySpec.none(),
         ports=(_port(),),
         circuits=(circuit,),
-        device="cuda",
     )
 
 
 def _driven_circuit(*, scheduled_switch):
-    circuit = mw.Circuit("graph_load")
+    circuit = mw.circuits.Circuit("graph_load")
     node = circuit.node("node")
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 75.0))
-    circuit.add(mw.Capacitor("C1", node, circuit.ground, 0.8e-12))
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 75.0))
+    circuit.add(mw.rf.Capacitor("C1", node, circuit.ground, 0.8e-12))
     circuit.add(
-        mw.CurrentSource(
+        mw.circuits.CurrentSource(
             "I1",
             circuit.ground,
             node,
-            waveform=mw.SineWaveform(0.0, 0.01, 3.0e9),
+            waveform=mw.circuits.SineWaveform(0.0, 0.01, 3.0e9),
         )
     )
     if scheduled_switch:
         circuit.add(
-            mw.TimedSwitch(
+            mw.circuits.TimedSwitch(
                 "S1",
                 node,
                 circuit.ground,
@@ -71,11 +70,13 @@ def _driven_circuit(*, scheduled_switch):
 def _run(*, cuda_graph, scheduled_switch):
     return mw.Simulation.fdtd(
         _scene(_driven_circuit(scheduled_switch=scheduled_switch)),
-        frequency=3.0e9,
-        run_time=mw.TimeConfig(time_steps=16),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
-        cuda_graph=cuda_graph,
+        frequencies=3.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=16),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+            cuda_graph=cuda_graph,
+        ),
     ).run()
 
 
@@ -87,16 +88,17 @@ def test_no_rf_runtime_avoids_circuit_loop_timing_instrumentation():
         monitors=(
             mw.PointMonitor(name="probe", position=(0.0, 0.0, 0.0), fields=("Ez",)),
         ),
-        device="cuda",
     )
 
     result = mw.Simulation.fdtd(
         scene,
-        frequency=3.0e9,
-        run_time=mw.TimeConfig(time_steps=4),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
-        cuda_graph=False,
+        frequencies=3.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=4),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+            cuda_graph=False,
+        ),
     ).run()
 
     assert result.stats()["steady_step_elapsed_s"] is None
@@ -117,8 +119,8 @@ def test_fixed_builtin_schedules_use_circuit_graph_and_match_eager(scheduled_swi
         "_circuit_graph_error",
         None,
     )
-    eager_data = eager.circuit("graph_load")
-    graph_data = graphed.circuit("graph_load")
+    eager_data = mw.circuits.circuit(eager, "graph_load")
+    graph_data = mw.circuits.circuit(graphed, "graph_load")
     torch.testing.assert_close(graph_data.times, eager_data.times, rtol=0.0, atol=0.0)
     torch.testing.assert_close(
         graph_data.node_voltages,
@@ -166,12 +168,12 @@ def test_fixed_builtin_schedules_use_circuit_graph_and_match_eager(scheduled_swi
 
 
 def test_purely_reactive_bound_circuit_has_a_zero_nonreactive_reduction():
-    circuit = mw.Circuit("reactive")
+    circuit = mw.circuits.Circuit("reactive")
     node = circuit.node("node")
-    circuit.add(mw.Capacitor("C1", node, circuit.ground, 1.0e-12))
+    circuit.add(mw.rf.Capacitor("C1", node, circuit.ground, 1.0e-12))
     circuit.bind_port("feed", positive=node, negative=circuit.ground)
 
-    solver = mw.Simulation.fdtd(_scene(circuit), frequency=3.0e9).prepare().solver
+    solver = mw.Simulation.fdtd(_scene(circuit), frequencies=3.0e9).prepare().solver
     prepare_circuit_time_series(solver, 4)
     prepare_circuit_graph_runners(solver, True)
     for _ in range(4):
@@ -182,11 +184,11 @@ def test_purely_reactive_bound_circuit_has_a_zero_nonreactive_reduction():
 
 
 def test_external_free_voltage_hook_skips_only_the_yee_scatter():
-    circuit = mw.Circuit("owner")
+    circuit = mw.circuits.Circuit("owner")
     node = circuit.node("node")
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 50.0))
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 50.0))
     circuit.bind_port("feed", positive=node, negative=circuit.ground)
-    solver = mw.Simulation.fdtd(_scene(circuit), frequency=3.0e9).prepare().solver
+    solver = mw.Simulation.fdtd(_scene(circuit), frequencies=3.0e9).prepare().solver
     prepare_circuit_time_series(solver, 1)
     runtime = solver._circuit_runtimes[0]
     before = solver.Ez.clone()
@@ -206,16 +208,16 @@ def test_external_free_voltage_hook_skips_only_the_yee_scatter():
 
 
 def test_vectorized_rc_lowering_matches_the_generic_device_path():
-    circuit = mw.Circuit("rc_fast")
+    circuit = mw.circuits.Circuit("rc_fast")
     first = circuit.node("first")
     second = circuit.node("second")
-    circuit.add(mw.Resistor("R1", first, second, 40.0))
-    circuit.add(mw.Capacitor("C1", first, circuit.ground, 0.7e-12))
-    circuit.add(mw.Resistor("R2", second, circuit.ground, 65.0))
-    circuit.add(mw.Capacitor("C2", second, circuit.ground, 1.1e-12))
+    circuit.add(mw.rf.Resistor("R1", first, second, 40.0))
+    circuit.add(mw.rf.Capacitor("C1", first, circuit.ground, 0.7e-12))
+    circuit.add(mw.rf.Resistor("R2", second, circuit.ground, 65.0))
+    circuit.add(mw.rf.Capacitor("C2", second, circuit.ground, 1.1e-12))
     circuit.bind_port("feed", positive=first, negative=circuit.ground)
-    fast_solver = mw.Simulation.fdtd(_scene(circuit), frequency=3.0e9).prepare().solver
-    generic_solver = mw.Simulation.fdtd(_scene(circuit), frequency=3.0e9).prepare().solver
+    fast_solver = mw.Simulation.fdtd(_scene(circuit), frequencies=3.0e9).prepare().solver
+    generic_solver = mw.Simulation.fdtd(_scene(circuit), frequencies=3.0e9).prepare().solver
     prepare_circuit_time_series(fast_solver, 6)
     prepare_circuit_time_series(generic_solver, 6)
     fast = fast_solver._circuit_runtimes[0]

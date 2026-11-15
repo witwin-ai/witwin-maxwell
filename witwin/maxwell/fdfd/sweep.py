@@ -1,24 +1,24 @@
 """Multi-frequency FDFD preparation and transactional local design updates."""
 from __future__ import annotations
-from dataclasses import replace
 import torch
 from ..result import Result
+from .results import concat_frequencies
 
 
 def combine_results(results):
-    frequencies = tuple(r.frequency for r in results)
-    names = tuple(results[0].monitors)
-    fields = {key: torch.stack([r.fields[key] for r in results]) for key in results[0].fields}
-    monitors = {name: {'value': torch.stack([r.monitor(name)['value'] for r in results]),
-                       'frequencies': frequencies, 'kind': 'linear_projection'} for name in names}
+    """Join single-frequency Results into one sweep Result that keeps the Simulation metadata."""
+    frequencies = tuple(r.frequencies[0] for r in results)
+    fields = {key: torch.stack([r._fields[key] for r in results]) for key in results[0]._fields}
+    monitors = {name: concat_frequencies([r._monitors[name] for r in results], frequencies)
+                for name in results[0]._monitors}
     raw = {}
-    if isinstance(results[0].raw_output, dict):
-        raw = {key: torch.stack([r.raw_output[key] for r in results])
-               for key in results[0].raw_output if isinstance(results[0].raw_output[key], torch.Tensor)}
+    if isinstance(results[0]._raw_output, dict):
+        raw = {key: torch.stack([r._raw_output[key] for r in results])
+               for key in results[0]._raw_output if isinstance(results[0]._raw_output[key], torch.Tensor)}
     return Result(method='fdfd',scene=results[0].scene,prepared_scene=results[0]._prepared_scene,frequencies=frequencies,
-                  fields=fields,monitors=monitors,raw_output=raw,
-                  solver_stats={'converged': all(r.solver_stats.get('converged',False) for r in results),
-                                'frequency_runs': tuple(r.solver_stats for r in results)})
+                  fields=fields,monitors=monitors,raw_output=raw,metadata=results[0].metadata,
+                  solver_stats={'converged': all(r._solver_stats.get('converged',False) for r in results),
+                                'frequency_runs': tuple(dict(r._solver_stats) for r in results)})
 
 
 class PreparedFDFDSweep:
@@ -29,7 +29,7 @@ class PreparedFDFDSweep:
         try:
             for frequency in simulation.frequencies:
                 child = Simulation(scene=simulation.scene_input, method=simulation.method,
-                                   frequencies=(frequency,),config=replace(simulation.config),metadata=simulation.metadata)
+                                   frequencies=(frequency,),config=simulation.config,metadata=simulation.metadata)
                 from .response_cache import frequency_cache_path
                 cache = None if response_cache is None else frequency_cache_path(response_cache,frequency)
                 self.responses.append(child.prepare(response_cache=cache))

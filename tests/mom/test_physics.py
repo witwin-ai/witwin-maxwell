@@ -86,12 +86,10 @@ def test_plane_wave_complex_amplitude_translation_and_maxwell_relation(dtype):
 def test_scene_scope_allows_pml_but_rejects_periodicity_and_internal_source():
     structure = mw.Structure(mw.Sphere(radius=0.1), mw.Material(eps_r=2))
     scene = mw.Scene(structures=[structure], sources=[mw.PlaneWave()], boundary=mw.BoundarySpec.pml())
-    exterior, interior = validate_scene(scene, 1e9)
+    exterior, interior = validate_scene(scene, 1e9, device='cuda')
     assert exterior.epsilon_r == 1 and interior.epsilon_r == 2
-    scene.boundary = mw.BoundarySpec.periodic()
     with pytest.raises(ValueError, match="unbounded"):
-        validate_scene(scene, 1e9)
-    scene.boundary = mw.BoundarySpec.none()
-    scene.sources = [mw.PointDipole(position=(0, 0, 0))]
+        validate_scene(scene.updated(boundary=mw.BoundarySpec.periodic()), 1e9, device='cuda')
+    scene = scene.updated(boundary=mw.BoundarySpec.none(), sources=(mw.PointDipole(position=(0, 0, 0)),))
     with pytest.raises(ValueError, match="PlaneWave"):
-        validate_scene(scene, 1e9)
+        validate_scene(scene, 1e9, device='cuda')

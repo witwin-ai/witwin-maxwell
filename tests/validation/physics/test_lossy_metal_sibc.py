@@ -64,12 +64,11 @@ def _run(frequency, *, kind, dx, x_lo=-0.5, x_hi=0.5, surface=0.1, source_x=-0.3
         else mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles)
     )
     trans = 4.0 * dx
-    material = mw.LossyMetalMedium(conductivity=_SIGMA) if kind == "sibc" else mw.Material.pec()
+    material = mw.media.LossyMetalMedium(conductivity=_SIGMA) if kind == "sibc" else mw.Material.pec()
     scene = mw.Scene(
         domain=mw.Domain(bounds=((x_lo, x_hi), (-trans / 2.0, trans / 2.0), (-trans / 2.0, trans / 2.0))),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.faces(default="periodic", num_layers=10, strength=1.0, x=("pml", "pml")),
-        device="cuda",
         sources=[mw.PointDipole(position=(source_x, 0.0, 0.0), polarization=(0.0, 0.0, 1.0),
                                 width=2.0 * dx, source_time=mw.CW(frequency=frequency, amplitude=40.0), name="pw")],
         structures=[mw.Structure(
@@ -77,12 +76,11 @@ def _run(frequency, *, kind, dx, x_lo=-0.5, x_hi=0.5, surface=0.1, source_x=-0.3
             material=material)],
     )
     result = mw.Simulation.fdtd(
-        scene, absorber="cpml",
-        frequencies=[frequency],
+        scene, frequencies=[frequency], config=mw.FDTDConfig(absorber="cpml",
         run_time=run_time,
-        full_field_dft=True,
+        full_field_dft=True),
     ).run()
-    ez = result.field("Ez")
+    ez = result.field("Ez").isel(f=0).values
     ez = (ez["data"] if isinstance(ez, dict) else ez).detach().cpu().numpy()
     assert np.isfinite(ez).all(), "SIBC field diverged (non-finite)"
     line = np.abs(ez).reshape(ez.shape[0], -1).mean(axis=1)

@@ -49,7 +49,7 @@ def main():
                                   for _ in range(args.repeats)]
     if args.backward:
         result = simulate(model)
-        loss = -result.monitor("output")["flux"].real.sum()
+        loss = -result.raw_monitor("output")["flux"].real.sum()
         timings["backward_ms"] = measure(lambda: torch.autograd.grad(loss, inputs))
     print(json.dumps(timings, indent=2))
 

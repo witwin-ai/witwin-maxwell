@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from ..sources import (
+    CW,
     AstigmaticGaussianBeam,
     CustomCurrentSource,
     CustomFieldSource,
@@ -15,6 +18,7 @@ from ..sources import (
     compile_source_time,
 )
 from ..waveforms import CALLABLE_TIME_SHIFT_MESSAGE
+from ..errors import UnsupportedFeatureError
 
 
 def _compile_injection(injection) -> dict[str, object]:
@@ -34,7 +38,30 @@ def _compile_injection(injection) -> dict[str, object]:
     return {"kind": str(injection).lower()}
 
 
+def fdfd_cw_frequency_mismatch(source, frequency: float) -> bool:
+    """Whether a CW source declares a frequency other than the FDFD solve frequency.
+
+    FDFD uses only the CW amplitude and phase, so a mismatched CW frequency would be
+    silently replaced by the solve frequency. ``source_time=None`` follows the solve
+    frequency and never mismatches.
+    """
+    source_time = getattr(source, "source_time", None)
+    return isinstance(source_time, CW) and not math.isclose(
+        float(source_time.frequency), float(frequency), rel_tol=1e-12, abs_tol=0.0
+    )
+
+
+def _require_fdfd_solve_frequency(source, frequency: float) -> None:
+    if fdfd_cw_frequency_mismatch(source, frequency):
+        raise ValueError(
+            f"FDFD source {source.name!r} declares CW(frequency={source.source_time.frequency:.12g}) "
+            f"but is solved at {frequency:.12g} Hz; set CW.frequency to the solve frequency or "
+            "use source_time=None."
+        )
+
+
 def _compile_fdfd_point_dipole(source: PointDipole, *, default_frequency: float) -> dict:
+    _require_fdfd_solve_frequency(source, default_frequency)
     source_time = compile_source_time(source.source_time, default_frequency=default_frequency)
     if source_time["kind"] != "cw":
         raise ValueError("FDFD sources currently support CW source_time only.")
@@ -60,6 +87,7 @@ def compile_fdfd_sources(scene, *, default_frequency: float):
                              'end': source.end, 'current': complex(source.current)})
             continue
         if isinstance(source, UniformCurrentSource):
+            _require_fdfd_solve_frequency(source, default_frequency)
             waveform = compile_source_time(source.source_time, default_frequency=default_frequency)
             if waveform['kind'] != 'cw':
                 raise ValueError("FDFD current sources require CW waveforms.")
@@ -225,16 +253,17 @@ def _fixed_k_exact_broadband(source):
 
 def validate_fdtd_source_times(solver):
     if solver.complex_fields_enabled and any(
-        k != 0.0 and solver.scene.boundary.axis_kind(axis) == "bloch"
+        k != 0.0 and solver.scene.scene.boundary.axis_kind(axis) == "bloch"
         for axis, k in zip("xyz", solver.resolved_bloch_wavevector)
     ) and any(source["kind"] in _DIRECTIONAL_SOURCE_KINDS and source["source_time"]["kind"] != "cw"
               and not _fixed_k_exact_broadband(source)
               for source in getattr(solver, "_compiled_sources", ())):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Broadband fixed-k injection of beams, mode and field sources and of non-slab plane "
             "waves is not yet exact off the carrier; use a CW source per frequency. TFSF-slab plane "
             "waves, point and current sources are admitted. See "
-            "docs/memory/bloch-broadband-tfsf-injection-2026-10-31.md."
+            "docs/memory/bloch-broadband-tfsf-injection-2026-10-31.md.",
+            feature="guard:84b8fe15", method="fdtd"
         )
 
 

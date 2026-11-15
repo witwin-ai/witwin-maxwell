@@ -69,61 +69,59 @@ class BendDesign(mw.SceneModule):
             init=init,
             device=device,
         )
-
-    def to_scene(self) -> mw.Scene:
+        # Recommended SceneModule pattern: build the static part once and let to_scene()
+        # replace only the design region. Every forward then shares the same guides,
+        # source and monitor objects, so preparation reuses their compiled material
+        # prefix instead of rasterizing them again.
         half = DESIGN_SIZE / 2.0
-        scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+        core = mw.Material(eps_r=CORE_EPS)
+        guide_length = 2.0 * UM - half + 0.4 * UM  # reaches through the PML
+        self._base = mw.Scene(
+            subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
             domain=mw.Domain(bounds=((-2.0 * UM, 1.2 * UM), (-2.0 * UM, 1.2 * UM), (-0.6 * UM, 0.6 * UM))),
             grid=mw.GridSpec.uniform(CELL),
             boundary=mw.BoundarySpec.pml(num_layers=10),
-            device=self.device_name,
+            structures=(
+                mw.Structure(
+                    name="input_guide",
+                    geometry=mw.Box(position=(-half - guide_length / 2.0, 0.0, 0.0), size=(guide_length, WG_WIDTH, WG_THICKNESS)),
+                    material=core,
+                ),
+                mw.Structure(
+                    name="output_guide",
+                    geometry=mw.Box(position=(0.0, -half - guide_length / 2.0, 0.0), size=(WG_WIDTH, guide_length, WG_THICKNESS)),
+                    material=core,
+                ),
+            ),
+            sources=(
+                mw.ModeSource(
+                    position=(-1.4 * UM, 0.0, 0.0),
+                    size=(0.0, 1.2 * UM, 0.8 * UM),
+                    polarization="Ey",
+                    direction="+",
+                    source_time=mw.CW(frequency=FREQUENCY, amplitude=1.0),
+                    name="input",
+                ),
+            ),
+            monitors=(mw.FluxMonitor("output", axis="y", position=-1.4 * UM, normal_direction="-"),),
         )
-        core = mw.Material(eps_r=CORE_EPS)
-        guide_length = 2.0 * UM - half + 0.4 * UM  # reaches through the PML
-        scene.add_structure(
-            mw.Structure(
-                name="input_guide",
-                geometry=mw.Box(position=(-half - guide_length / 2.0, 0.0, 0.0), size=(guide_length, WG_WIDTH, WG_THICKNESS)),
-                material=core,
-            )
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="output_guide",
-                geometry=mw.Box(position=(0.0, -half - guide_length / 2.0, 0.0), size=(WG_WIDTH, guide_length, WG_THICKNESS)),
-                material=core,
-            )
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="bend",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(DESIGN_SIZE, DESIGN_SIZE, WG_THICKNESS)),
-                density=self.design(),
-                eps_bounds=(1.0, CORE_EPS),
-            )
-        )
-        scene.add_source(
-            mw.ModeSource(
-                position=(-1.4 * UM, 0.0, 0.0),
-                size=(0.0, 1.2 * UM, 0.8 * UM),
-                polarization="Ey",
-                direction="+",
-                source_time=mw.CW(frequency=FREQUENCY, amplitude=1.0),
-                name="input",
-            )
-        )
-        scene.add_monitor(mw.FluxMonitor("output", axis="y", position=-1.4 * UM, normal_direction="-"))
-        return scene
+        self._design_box = mw.Box(position=(0.0, 0.0, 0.0), size=(DESIGN_SIZE, DESIGN_SIZE, WG_THICKNESS))
+
+    def to_scene(self) -> mw.Scene:
+        return self._base.updated(material_regions=(
+            mw.MaterialRegion(name="bend", geometry=self._design_box, density=self.design(), eps_bounds=(1.0, CORE_EPS)),
+        ))
 
 
 def simulate(model: BendDesign):
     return mw.Simulation.fdtd(
         model,
         frequencies=[FREQUENCY],
-        run_time=mw.TimeConfig.auto(steady_cycles=20, transient_cycles=25),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=20, transient_cycles=25),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).run()
 
 
@@ -154,7 +152,7 @@ def main():
     for _ in range(args.iterations):
         model.design.beta = loop.beta
         loop.zero_grad()
-        flux = simulate(model).monitor("output")["flux"].real.sum()
+        flux = simulate(model).monitor("output").values.real.sum()
         if reference is None:
             reference = flux.detach().abs()
         transmission = flux / reference

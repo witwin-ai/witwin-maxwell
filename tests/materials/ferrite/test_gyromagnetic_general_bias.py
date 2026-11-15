@@ -12,8 +12,8 @@ Gates (track G3a):
   * The general path builds and runs (the former general-bias fail-closed guard is
     lifted); mixed-bias and Bloch still fail closed (covered in the sibling suite).
 
-The mock-solver gates test the exact runtime code path at float64 without the CUDA
-field update; the CUDA gates build the real FDTD solver.
+The mock-solver gates step the Torch oracle of the runtime hooks at float64 without
+the CUDA field update; the CUDA gates build the real FDTD solver (kernel hooks).
 """
 
 from __future__ import annotations
@@ -25,15 +25,16 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.core import Box
-from witwin.maxwell.fdtd import ferrite_reference as oracle
-from witwin.maxwell.fdtd.runtime.gyromagnetic import (
+from tests.oracles import ferrite_reference as oracle
+from tests.support.core_solver import bind_core
+from tests.oracles.gyromagnetic_recurrence import (
     advance_gyromagnetic_state,
-    build_gyromagnetic,
-    initialize_gyromagnetic_state,
     snapshot_gyromagnetic_drive,
     step_gyromagnetic_coupled,
 )
+from witwin.maxwell.fdtd.runtime.gyromagnetic import build_gyromagnetic, initialize_gyromagnetic_state
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_gyromagnetic_materials
 
 MU_0 = 4.0e-7 * math.pi
 OBLIQUE = (1.0, 1.0, 1.0)  # b_hat = (1,1,1)/sqrt(3)
@@ -42,18 +43,17 @@ OBLIQUE = (1.0, 1.0, 1.0)  # b_hat = (1,1,1)/sqrt(3)
 def _ferrite(bias=(0.0, 0.0, 1.75e5), **kwargs):
     base = dict(eps_r=14.5, saturation_magnetization=1.40e5, bias_field=bias, gilbert_damping=2.0e-3)
     base.update(kwargs)
-    return mw.GyromagneticFerrite(**base)
+    return mw.media.GyromagneticFerrite(**base)
 
 
 def _uniform_ferrite_scene(material, *, spacing=0.02, half=0.06):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.none(),
-        device="cpu",
-    )
-    scene.add_structure(mw.Structure(geometry=Box(size=(10.0, 10.0, 10.0)), material=material))
-    return prepare_scene(scene)
+                domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.none(),
+                structures=(mw.Structure(geometry=Box(size=(10.0, 10.0, 10.0)), material=material),),
+            )
+    return prepare_scene(scene, device="cpu")
 
 
 class _MockSolver:
@@ -362,7 +362,7 @@ def test_compiled_polder_tensor_gyrotropy_flips_under_reversal():
     omega = 2.0 * math.pi * freq
     mat = _ferrite(bias=OBLIQUE, gilbert_damping=1e-2)
     scene = _uniform_ferrite_scene(mat)
-    layout = scene.compile_gyromagnetic_materials(dt=1e-12, device="cpu")
+    layout = compile_gyromagnetic_materials(scene, dt=1e-12, device="cpu")
     tensor = layout.permeability_tensor(freq)[0]  # (3,3) complex, first active cell
 
     ref = gyromagnetic_polder_tensor(
@@ -390,18 +390,15 @@ def test_compiled_polder_tensor_gyrotropy_flips_under_reversal():
 def _two_region_scene(mat_low, mat_high, *, spacing=0.02, half=0.06):
     """Ferrite ``mat_low`` in z<0 and ``mat_high`` in z>0 (a two-material scene)."""
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.none(),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.0, 0.0, -half / 2.0), size=(10.0, 10.0, half)), material=mat_low)
-    )
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.0, 0.0, half / 2.0), size=(10.0, 10.0, half)), material=mat_high)
-    )
-    return prepare_scene(scene)
+                domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
+            mw.Structure(geometry=Box(position=(0.0, 0.0, -half / 2.0), size=(10.0, 10.0, half)), material=mat_low),
+            mw.Structure(geometry=Box(position=(0.0, 0.0, half / 2.0), size=(10.0, 10.0, half)), material=mat_high),
+            ),
+            )
+    return prepare_scene(scene, device="cpu")
 
 
 def _drive_ade(solver, pre, tmp, steps):
@@ -458,13 +455,12 @@ def test_no_ferrite_zero_impact_bitwise():
     an arbitrary field state (zero-impact). Falsification: the hooks early-return on
     ``gyromagnetic_enabled is False``; removing that gate would raise (no state)."""
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.06, 0.06), (-0.06, 0.06), (-0.06, 0.06))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.none(),
-        device="cpu",
-    )
-    scene.add_structure(mw.Structure(geometry=Box(size=(0.05, 0.05, 0.05)), material=mw.Material(eps_r=4.0)))
-    solver = _MockSolver(prepare_scene(scene), 1e-12)
+                domain=mw.Domain(bounds=((-0.06, 0.06), (-0.06, 0.06), (-0.06, 0.06))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.none(),
+                structures=(mw.Structure(geometry=Box(size=(0.05, 0.05, 0.05)), material=mw.Material(eps_r=4.0)),),
+            )
+    solver = _MockSolver(prepare_scene(scene, device="cpu"), 1e-12)
     build_gyromagnetic(solver, solver.scene)
     assert solver.gyromagnetic_enabled is False
     assert not hasattr(solver, "_gyromagnetic_state")
@@ -488,13 +484,12 @@ def test_pec_only_scene_zero_impact():
     the runtime stays disabled and the ferrite path adds no operation (zero-impact):
     a PEC scene must be bitwise unchanged by the presence of the gyromagnetic code."""
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.06, 0.06), (-0.06, 0.06), (-0.06, 0.06))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.none(),
-        device="cpu",
-    )
-    scene.add_structure(mw.Structure(geometry=Box(size=(0.05, 0.05, 0.05)), material=mw.Material(pec=True)))
-    solver = _MockSolver(prepare_scene(scene), 1e-12)
+                domain=mw.Domain(bounds=((-0.06, 0.06), (-0.06, 0.06), (-0.06, 0.06))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.none(),
+                structures=(mw.Structure(geometry=Box(size=(0.05, 0.05, 0.05)), material=mw.Material(pec=True)),),
+            )
+    solver = _MockSolver(prepare_scene(scene, device="cpu"), 1e-12)
     build_gyromagnetic(solver, solver.scene)
     assert solver.gyromagnetic_enabled is False
     assert not hasattr(solver, "_gyromagnetic_state")
@@ -507,14 +502,13 @@ cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 def _cuda_scene(material, *, boundary=None, half_z=0.12):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.06, 0.06), (-0.06, 0.06), (-half_z, half_z))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=boundary or mw.BoundarySpec.pml(num_layers=6),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 0.08)), material=material)
-    )
+                domain=mw.Domain(bounds=((-0.06, 0.06), (-0.06, 0.06), (-half_z, half_z))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=boundary or mw.BoundarySpec.pml(num_layers=6),
+                structures=(
+            mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 0.08)), material=material),
+            ),
+            )
     return scene
 
 
@@ -532,6 +526,7 @@ def test_cuda_general_matches_fast_bitwise():
     def _run(force_general):
         solver = FDTD(_cuda_scene(_ferrite(gilbert_damping=1e-2)), frequency=8e9)
         solver.init_field()
+        bind_core(solver)
         if force_general:
             build_gyromagnetic(solver, solver.scene, force_general=True)
         state = solver._gyromagnetic_state
@@ -556,6 +551,7 @@ def test_cuda_oblique_forward_stable_and_precesses():
 
     solver = FDTD(_cuda_scene(_ferrite(bias=OBLIQUE, gilbert_damping=1e-2)), frequency=8e9)
     solver.init_field()
+    bind_core(solver)
     state = solver._gyromagnetic_state
     assert state["general"] is True
     solver.Hx[state["hx_slice"]] = 1.0
@@ -569,12 +565,11 @@ def test_cuda_oblique_forward_stable_and_precesses():
 def _oblique_cavity_scene(material, *, spacing=0.02, half=0.06):
     """PEC-walled lossless cavity fully filled by an oblique-bias ferrite (closed system)."""
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.pec(),
-        device="cuda",
-    )
-    scene.add_structure(mw.Structure(geometry=Box(size=(10.0, 10.0, 10.0)), material=material))
+                domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.pec(),
+                structures=(mw.Structure(geometry=Box(size=(10.0, 10.0, 10.0)), material=material),),
+            )
     return scene
 
 
@@ -605,6 +600,7 @@ def test_cuda_oblique_driven_cavity_energy_non_growth_lossless():
 
     solver = FDTD(_oblique_cavity_scene(_ferrite(bias=OBLIQUE, gilbert_damping=0.0)), frequency=8e9)
     solver.init_field()
+    bind_core(solver)
     state = solver._gyromagnetic_state
     assert state["general"] is True
     solver.Hx[state["hx_slice"]] = 0.5  # smooth uniform transverse seed

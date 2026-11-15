@@ -20,8 +20,6 @@ from .materials import (
     update_nonlinear_electric_coefficients,
 )
 from .gyromagnetic import (
-    advance_gyromagnetic_state,
-    apply_gyromagnetic_correction,
     build_gyromagnetic,
     initialize_gyromagnetic_state,
     snapshot_gyromagnetic_drive,
@@ -57,15 +55,7 @@ from .stepping import (
     solve,
     update_electric_fields,
     update_electric_fields_bloch,
-    update_electric_fields_cpml,
-    update_electric_fields_cpml_compressed,
-    update_electric_fields_cpml_dense,
-    update_electric_fields_standard,
     update_magnetic_fields,
-    update_magnetic_fields_cpml,
-    update_magnetic_fields_cpml_compressed,
-    update_magnetic_fields_cpml_dense,
-    update_magnetic_fields_standard,
 )
 
 __all__ = [
@@ -97,8 +87,6 @@ __all__ = [
     "init_field",
     "initialize_dispersive_state",
     "initialize_magnetic_dispersive_state",
-    "advance_gyromagnetic_state",
-    "apply_gyromagnetic_correction",
     "build_gyromagnetic",
     "initialize_gyromagnetic_state",
     "snapshot_gyromagnetic_drive",
@@ -121,13 +109,5 @@ __all__ = [
     "update_nonlinear_electric_coefficients",
     "update_electric_fields",
     "update_electric_fields_bloch",
-    "update_electric_fields_cpml",
-    "update_electric_fields_cpml_compressed",
-    "update_electric_fields_cpml_dense",
-    "update_electric_fields_standard",
     "update_magnetic_fields",
-    "update_magnetic_fields_cpml",
-    "update_magnetic_fields_cpml_compressed",
-    "update_magnetic_fields_cpml_dense",
-    "update_magnetic_fields_standard",
 ]

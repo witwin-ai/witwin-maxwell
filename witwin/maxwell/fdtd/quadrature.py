@@ -24,6 +24,56 @@ def _plane_coord_names(axis):
     return _PLANE_COORD_NAMES[normalize_axis(axis)]
 
 
+def symmetry_image_planes(scene, axis):
+    """Face symmetry planes on the tangential axes of a plane normal to ``axis``.
+
+    Returns ``{coordinate name: (plane coordinate, face, far physical bound)}``. ``Scene.symmetry``
+    stands for the explicit mirrored domain, and the normal Poynting component of
+    a plane normal to ``axis`` is even under PEC and PMC reflection about every
+    plane tangential to it, so a domain-spanning plane carries its kept flux once
+    more for every image plane listed here.
+    """
+    planes = {}
+    normal = _AXIS_CODES[normalize_axis(axis)]
+    for index, entry in enumerate(scene.symmetry):
+        if entry is None or index == normal:
+            continue
+        face = entry[1]
+        lower, upper = (float(value) for value in scene.domain.bounds[index])
+        planes["xyz"[index]] = (lower, face, upper) if face == "low" else (upper, face, lower)
+    return planes
+
+
+def finite_plane_image_planes(images, bounds):
+    """Split the image planes of a finite rectangle by how its mirrored-domain flux relates to the kept one.
+
+    ``bounds`` maps tangential coordinate names to the declared ``(lower, upper)``.
+    After clipping to the mirrored physical domain, a rectangle symmetric about an
+    image plane is its own mirror image and counts its kept part twice; one that
+    stays on the kept side has no image there. Returns ``(symmetric, straddled)``:
+    the image planes of the first kind, and the names of the axes whose image plane
+    the rectangle crosses asymmetrically (no mirrored-domain flux from the kept part).
+    """
+    symmetric, straddled = {}, []
+    for name, (plane, face, far) in images.items():
+        lower, upper = (float(value) for value in bounds[name])
+        mirrored_far = 2.0 * plane - far
+        lower, upper = max(lower, min(far, mirrored_far)), min(upper, max(far, mirrored_far))
+        tolerance = 1.0e-9 * abs(far - plane)
+        if (lower >= plane - tolerance) if face == "low" else (upper <= plane + tolerance):
+            continue
+        if abs(lower + upper - 2.0 * plane) <= tolerance:
+            symmetric[name] = images[name]
+        else:
+            straddled.append(name)
+    return symmetric, straddled
+
+
+def symmetry_plane_multiplicity(payload):
+    """Copies of the kept plane in the mirrored domain: ``2`` per recorded image-plane axis."""
+    return float(2 ** len(payload.get("symmetry_image_planes") or ()))
+
+
 def _contains_torch_tensor(value):
     if isinstance(value, torch.Tensor):
         return True
@@ -119,8 +169,20 @@ def plane_normal_poynting(result):
     tensors when the payload holds tensors, else NumPy arrays. This is the single
     source of truth shared by plane-flux integration and incident power density so
     both stay exactly consistent (``flux == sum(poynting * weights)``).
+
+    Under ``Scene.symmetry`` a domain-spanning plane payload records the axes of
+    its image planes (``symmetry_image_planes``); every weight then counts the
+    cell and its mirror images, so the integral is the mirrored-domain power.
     """
 
+    multiplicity = symmetry_plane_multiplicity(result)
+    poynting, weights = _kept_plane_normal_poynting(result)
+    if multiplicity != 1.0:
+        weights = weights * multiplicity
+    return poynting, weights
+
+
+def _kept_plane_normal_poynting(result):
     from .plane_product import native_plane_poynting
     native = native_plane_poynting(result)
     if native is not None:

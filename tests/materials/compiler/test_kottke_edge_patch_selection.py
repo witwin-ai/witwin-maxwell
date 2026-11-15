@@ -11,10 +11,12 @@ _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 
 def _scene(grid):
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))), grid=grid,
-                     boundary=mw.BoundarySpec.pec(), device="cpu")
-    scene.add_structure(mw.Structure(mw.Box(position=(0.13, 0.11, 0.17), size=(0.31, 0.27, 0.23)),
-                                     mw.Material(eps_r=4.0)))
-    return prepare_scene(scene)
+                     boundary=mw.BoundarySpec.pec(),
+                     structures=(
+                         mw.Structure(mw.Box(position=(0.13, 0.11, 0.17), size=(0.31, 0.27, 0.23)),
+                                      mw.Material(eps_r=4.0)),
+                     ))
+    return prepare_scene(scene, device="cpu")
 
 
 @pytest.mark.parametrize("grid", [
@@ -25,10 +27,10 @@ def _scene(grid):
 def test_patch_touching_the_last_plane_equals_the_full_compile(grid):
     scene = _scene(grid)
     # Same periodic-shift table the batch patch path builds.
-    shifts = {id(s.geometry): _static_periodic_shift_options(scene, s.geometry) for s in _bulk_structures(scene)}
-    kwargs = dict(eps_background=1.0, mu_background=1.0, averaging=scene.subpixel.averaging,
-                  samples=scene.subpixel.samples, region_densities=(), geometry_periodic_shifts=shifts)
-    assert scene.subpixel.averaging == "kottke_edge"
+    shifts = {id(s.geometry): _static_periodic_shift_options(scene, s.geometry) for s in _bulk_structures(scene.scene)}
+    kwargs = dict(eps_background=1.0, mu_background=1.0, averaging=scene.scene.subpixel.averaging,
+                  samples=scene.scene.subpixel.samples, region_densities=(), geometry_periodic_shifts=shifts)
+    assert scene.scene.subpixel.averaging == "kottke_edge"
     for component in _COMPONENTS:
         full, full_sigma = _compile_edge_component(scene, component, **kwargs)
         selection = tuple(slice(max(0, n - 3), n) for n in full.shape)

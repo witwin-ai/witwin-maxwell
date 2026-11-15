@@ -17,7 +17,7 @@ ASSET_DIR = TESTS_ROOT / "assets"
 
 
 def _prepared_scene(scene):
-    return prepare_scene(scene)
+    return prepare_scene(scene, device="cpu")
 
 
 def _cube_vertices_faces():
@@ -80,30 +80,28 @@ def test_teapot_asset_loads_and_reports_mesh_stats():
 
 def test_mesh_material_compilation_matches_box_for_closed_cube():
     mesh_scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    mesh_scene.add_structure(
-        mw.Structure(
-            name="mesh_cube",
-            geometry=mw.Mesh.from_obj(ASSET_DIR / "cube.obj", fill_mode="solid"),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
+                     domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
+                     grid=mw.GridSpec.uniform(0.25),
+                     structures=(
+                     mw.Structure(
+                     name="mesh_cube",
+                     geometry=mw.Mesh.from_obj(ASSET_DIR / "cube.obj", fill_mode="solid"),
+                     material=mw.Material(eps_r=4.0),
+                 ),
+                 ),
+                 )
 
     box_scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    box_scene.add_structure(
-        mw.Structure(
-            name="analytic_cube",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 1.0)),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
+                    domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
+                    grid=mw.GridSpec.uniform(0.25),
+                    structures=(
+                    mw.Structure(
+                name="analytic_cube",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 1.0)),
+                material=mw.Material(eps_r=4.0),
+                ),
+                ),
+                )
 
     mesh_prepared = _prepared_scene(mesh_scene)
     box_prepared = _prepared_scene(box_scene)
@@ -117,32 +115,29 @@ def test_teapot_auto_matches_solid_and_surface_is_thinner():
     grid = mw.GridSpec.uniform(0.12)
     material = mw.Material(eps_r=4.0)
 
-    solid_scene = mw.Scene(domain=domain, grid=grid, device="cpu")
-    solid_scene.add_structure(
-        mw.Structure(
-            name="teapot_solid",
-            geometry=mw.Mesh.from_obj(ASSET_DIR / "teapot.obj", fill_mode="solid"),
-            material=material,
-        )
-    )
+    solid_scene = mw.Scene(domain=domain, grid=grid, structures=(
+                      mw.Structure(
+                      name="teapot_solid",
+                      geometry=mw.Mesh.from_obj(ASSET_DIR / "teapot.obj", fill_mode="solid"),
+                      material=material,
+                  ),
+                  ))
 
-    auto_scene = mw.Scene(domain=domain, grid=grid, device="cpu")
-    auto_scene.add_structure(
-        mw.Structure(
-            name="teapot_auto",
-            geometry=mw.Mesh.from_obj(ASSET_DIR / "teapot.obj", fill_mode="auto"),
-            material=material,
-        )
-    )
+    auto_scene = mw.Scene(domain=domain, grid=grid, structures=(
+                     mw.Structure(
+                     name="teapot_auto",
+                     geometry=mw.Mesh.from_obj(ASSET_DIR / "teapot.obj", fill_mode="auto"),
+                     material=material,
+                 ),
+                 ))
 
-    surface_scene = mw.Scene(domain=domain, grid=grid, device="cpu")
-    surface_scene.add_structure(
-        mw.Structure(
-            name="teapot_surface",
-            geometry=mw.Mesh.from_obj(ASSET_DIR / "teapot.obj", fill_mode="surface"),
-            material=material,
-        )
-    )
+    surface_scene = mw.Scene(domain=domain, grid=grid, structures=(
+                        mw.Structure(
+                        name="teapot_surface",
+                        geometry=mw.Mesh.from_obj(ASSET_DIR / "teapot.obj", fill_mode="surface"),
+                        material=material,
+                    ),
+                    ))
 
     solid_prepared = _prepared_scene(solid_scene)
     auto_prepared = _prepared_scene(auto_scene)
@@ -173,14 +168,17 @@ def test_non_watertight_auto_mesh_matches_surface_mode():
     grid = mw.GridSpec.uniform(0.25)
     material = mw.Material(eps_r=4.0)
 
-    auto_scene = mw.Scene(domain=domain, grid=grid, device="cpu")
-    auto_scene.add_structure(mw.Structure(name="auto", geometry=auto_mesh, material=material))
+    auto_scene = mw.Scene(domain=domain, grid=grid, structures=(
+                     mw.Structure(name="auto", geometry=auto_mesh, material=material),
+                 ))
 
-    surface_scene = mw.Scene(domain=domain, grid=grid, device="cpu")
-    surface_scene.add_structure(mw.Structure(name="surface", geometry=surface_mesh, material=material))
+    surface_scene = mw.Scene(domain=domain, grid=grid, structures=(
+                        mw.Structure(name="surface", geometry=surface_mesh, material=material),
+                    ))
 
-    solid_scene = mw.Scene(domain=domain, grid=grid, device="cpu")
-    solid_scene.add_structure(mw.Structure(name="solid", geometry=solid_mesh, material=material))
+    solid_scene = mw.Scene(domain=domain, grid=grid, structures=(
+                      mw.Structure(name="solid", geometry=solid_mesh, material=material),
+                  ))
 
     auto_prepared = _prepared_scene(auto_scene)
     surface_prepared = _prepared_scene(surface_scene)

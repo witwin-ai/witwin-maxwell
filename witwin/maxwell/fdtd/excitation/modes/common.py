@@ -9,6 +9,7 @@ from witwin.core.material import VACUUM_PERMITTIVITY
 from ....compiler.materials import evaluate_material_components
 from ..spatial import physical_interior_indices
 from ..tfsf_common import nearest_index
+from ....errors import UnsupportedFeatureError
 
 
 _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
@@ -114,7 +115,7 @@ def _mode_source_field_name(source) -> str:
 def _validate_mode_source_position(scene, source, *, plane_index: int) -> None:
     normal_axis = str(source["normal_axis"])
     direction_sign = int(source["direction_sign"])
-    physical_lo, physical_hi = physical_interior_indices(scene, normal_axis)
+    physical_lo, physical_hi = physical_interior_indices(scene, normal_axis, device=scene.device)
     if direction_sign > 0:
         if plane_index <= physical_lo or plane_index >= physical_hi:
             raise ValueError(
@@ -142,7 +143,7 @@ def _resolve_tangential_bounds(scene, source, axis_coords_by_axis=None) -> tuple
         upper_index = nearest_index(axis_coords, upper_coord)
         if upper_index < lower_index:
             lower_index, upper_index = upper_index, lower_index
-        physical_lo, physical_hi = physical_interior_indices(scene, axis)
+        physical_lo, physical_hi = physical_interior_indices(scene, axis, device=scene.device)
         lower_limit = float(getattr(scene, axis)[physical_lo].item())
         upper_limit = float(getattr(scene, axis)[physical_hi].item())
         if lower_coord < lower_limit - 1e-12 or upper_coord > upper_limit + 1e-12:
@@ -286,9 +287,10 @@ def _mode_source_pec_slice(
         torch.any(_mode_slice(pmc_occupancy, axis=normal_axis, plane_index=plane_index,
                               tangential_bounds=tangential_bounds) >= _PEC_OCCUPANCY_THRESHOLD)
     ):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Mode solving across a PMC structure is not supported: the transverse mode "
-            "solver has no perfect-magnetic-conductor wall. Keep mode planes clear of PMC."
+            "solver has no perfect-magnetic-conductor wall. Keep mode planes clear of PMC.",
+            feature="material.pmc", method="fdtd"
         )
     occupancy = compiled_material_model.get("pec_occupancy")
     if occupancy is None:
@@ -326,9 +328,10 @@ def _require_lossless_vector_planes(eps_planes, mu_planes, *, source_name):
     # These are relative constitutive values, including sigma/(omega*eps0).
     for name, planes in (("epsilon (including conductivity)", eps_planes), ("mu", mu_planes)):
         if any(value.is_complex() and float(value.detach().imag.abs().max()) > 1e-7 for value in planes):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"ModeSource/ModePort {source_name!r} trainable vector plane requires lossless "
-                f"{name}: relative imaginary magnitude > 1e-7 requires a complex mode-shape adjoint.")
+                f"{name}: relative imaginary magnitude > 1e-7 requires a complex mode-shape adjoint.",
+                feature="source.ModeSource", method="fdtd")
 
 
 def _min_component_real(components: dict) -> float:
@@ -672,7 +675,7 @@ def _mode_source_trainable_plane(solver, source, *, materials):
     """Probe the graph retained by the forward's own material compilation."""
     from ....adjoint_inputs import scene_trainable_material_tensors
 
-    inputs = scene_trainable_material_tensors(solver.scene)
+    inputs = scene_trainable_material_tensors(solver.scene.scene)
     if not inputs:
         return False
     with torch.enable_grad():

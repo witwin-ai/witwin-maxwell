@@ -202,7 +202,7 @@ def test_conjugate_residue_gradient_preserves_real_model_constraint() -> None:
         dtype=torch.complex128,
         requires_grad=True,
     )
-    model = mw.RationalModel(
+    model = mw.rf.rational.RationalModel(
         poles=torch.tensor((-4.0 + 5.0j, -4.0 - 5.0j), dtype=torch.complex128),
         residues=residues,
         direct=0.1,
@@ -240,7 +240,7 @@ def _rational_network(
         dtype=torch.complex128,
         requires_grad=trainable,
     )
-    model = mw.RationalModel(
+    model = mw.rf.rational.RationalModel(
         poles=poles,
         residues=residues,
         direct=direct,
@@ -253,13 +253,13 @@ def _rational_network(
         device=device,
         dtype=torch.float64,
     )
-    network = mw.NetworkData.from_y(
+    network = mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=model.evaluate(frequencies).detach(),
         z0=50.0,
         port_names=("load",),
     )
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="differentiable_load",
         network=network,
         connections={"load": "feed"},
@@ -277,11 +277,13 @@ def _network_objective(*, residue_value: float, direct_value: float, trainable: 
     )
     result = mw.Simulation.fdtd(
         _fdtd_scene(network=block),
-        frequency=2.75e9,
-        run_time=mw.TimeConfig(time_steps=48),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        frequencies=2.75e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=48),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
-    voltage = result.embedded_network("differentiable_load").voltage
+    voltage = mw.rf.embedded_network(result, "differentiable_load").voltage
     torch.testing.assert_close(voltage[0], result.port("feed").voltage)
     objective = voltage.abs().square().sum()
     return objective, residues, direct
@@ -300,21 +302,24 @@ def _network_material_objective(*, logit_value: float, trainable: bool):
         requires_grad=trainable,
     )
     scene = _fdtd_scene(network=block)
-    scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
-    scene.add_material_region(
+    scene = scene.updated(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
+    scene = scene.updated(material_regions=(
+        *scene.material_regions,
         mw.MaterialRegion(
             name="near_terminal",
             geometry=mw.Box(position=(0.005, 0.0, 0.005), size=(0.005, 0.005, 0.005)),
             density=torch.sigmoid(logit).reshape(1, 1, 1),
             eps_bounds=(1.0, 4.0),
             mu_bounds=(1.0, 1.0),
-        )
-    )
+        ),
+    ))
     result = mw.Simulation.fdtd(
         scene,
-        frequency=2.75e9,
-        run_time=mw.TimeConfig(time_steps=48),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        frequencies=2.75e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=48),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     objective = result.port("feed").voltage.abs().square().sum()
     return objective, logit
@@ -401,9 +406,11 @@ def test_network_checkpoint_replay_restores_terminal_state_without_per_step_stor
     )
     simulation = mw.Simulation.fdtd(
         _fdtd_scene(network=block),
-        frequency=2.75e9,
-        run_time=mw.TimeConfig(time_steps=36),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        frequencies=2.75e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=36),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     )
     bridge = _FDTDGradientBridge(simulation)
     bridge.forward(bridge.trainable_inputs)
@@ -430,9 +437,7 @@ def test_network_checkpoint_replay_restores_terminal_state_without_per_step_stor
 def test_network_adjoint_rejects_explicit_delay_state() -> None:
     bridge = object.__new__(_FDTDGradientBridge)
     solver = SimpleNamespace(
-        scene=SimpleNamespace(
-            networks=(SimpleNamespace(delay_seconds=(1.0e-9,), model=None),)
-        )
+        scene=SimpleNamespace(scene=SimpleNamespace(networks=(SimpleNamespace(delay_seconds=(1.0e-9,), model=None),)))
     )
     with pytest.raises(NotImplementedError, match="explicit delay state"):
         bridge._validate_supported_configuration(solver)
@@ -443,7 +448,7 @@ def test_network_adjoint_rejects_unsupported_trainable_model_parameters(
     model_kind: str,
 ) -> None:
     if model_kind == "proportional":
-        model = mw.RationalModel(
+        model = mw.rf.rational.RationalModel(
             poles=torch.tensor((-2.0 + 0.0j,), dtype=torch.complex128),
             residues=torch.tensor((((1.0 + 0.0j,),),), dtype=torch.complex128),
             direct=0.1,
@@ -456,7 +461,7 @@ def test_network_adjoint_rejects_unsupported_trainable_model_parameters(
         )
         message = "residues and direct terms only"
     else:
-        model = mw.StateSpaceNetwork(
+        model = mw.rf.rational.StateSpaceNetwork(
             A=torch.tensor(((-2.0,),), dtype=torch.float64, requires_grad=True),
             B=torch.ones((1, 1), dtype=torch.float64),
             C=torch.ones((1, 1), dtype=torch.float64),
@@ -467,9 +472,7 @@ def test_network_adjoint_rejects_unsupported_trainable_model_parameters(
         message = "direct trainable state-space matrices"
     bridge = object.__new__(_FDTDGradientBridge)
     solver = SimpleNamespace(
-        scene=SimpleNamespace(
-            networks=(SimpleNamespace(delay_seconds=None, model=model),)
-        )
+        scene=SimpleNamespace(scene=SimpleNamespace(networks=(SimpleNamespace(delay_seconds=None, model=model),)))
     )
     with pytest.raises(NotImplementedError, match=message):
         bridge._validate_supported_configuration(solver)
@@ -482,13 +485,13 @@ def test_network_adjoint_rejects_trainable_poles() -> None:
         direct_value=1.0e-2,
         trainable=False,
     )
-    model = mw.RationalModel(
+    model = mw.rf.rational.RationalModel(
         poles=block.model.poles.detach().clone().requires_grad_(True),
         residues=block.model.residues,
         direct=block.model.direct,
         representation="Y",
     )
-    unsupported = mw.NetworkBlock(
+    unsupported = mw.rf.NetworkBlock(
         name=block.name,
         network=block.network,
         connections=block.connections,
@@ -498,6 +501,6 @@ def test_network_adjoint_rejects_trainable_poles() -> None:
     with pytest.raises(NotImplementedError, match="residues and direct terms only"):
         mw.Simulation.fdtd(
             _fdtd_scene(network=unsupported),
-            frequency=2.75e9,
-            run_time=mw.TimeConfig(time_steps=8),
+            frequencies=2.75e9,
+            config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
         )

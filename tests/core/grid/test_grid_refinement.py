@@ -96,7 +96,7 @@ def test_cross_sections_of_supported_geometries():
     assert _as_set(loops[0]) == _as_set(np.asarray(L_SHAPE, float) + [10.0, -4.0])
     assert cg.cross_section_loops(slab, 1, 4.0, 1e-9) == []
 
-    pec = mw.PlanarPEC(L_SHAPE, holes=[[(0.2, 0.2), (0.6, 0.2), (0.6, 0.6), (0.2, 0.6)]], coordinate=0.5)
+    pec = mw.geometry.PlanarPEC(L_SHAPE, holes=[[(0.2, 0.2), (0.6, 0.2), (0.6, 0.6), (0.2, 0.6)]], coordinate=0.5)
     assert len(cg.cross_section_loops(pec, 2, 0.5, 1e-9)) == 2
     assert cg.cross_section_loops(pec, 2, 0.6, 1e-9) == []
 
@@ -108,7 +108,7 @@ def test_cross_sections_of_supported_geometries():
 
 
 def _scene(structures, grid, bounds=((-0.03, 0.05), (-0.03, 0.05), (-0.02, 0.02))):
-    return mw.Scene(domain=mw.Domain(bounds=bounds), grid=grid, device="cpu", structures=structures)
+    return mw.Scene(domain=mw.Domain(bounds=bounds), grid=grid, structures=structures)
 
 
 def _ratio(nodes):
@@ -126,11 +126,11 @@ def _l_trace():
 def _corner_layer(**kwargs):
     defaults = dict(
         min_cells=None, axis="z", bounds=(0.0, 0.001),
-        corner_finder=mw.CornerFinderSpec(),
-        corner_refinement=mw.GridRefinement(dl=0.001, num_cells=4),
+        corner_finder=mw.grid.CornerFinderSpec(),
+        corner_refinement=mw.grid.GridRefinement(dl=0.001, num_cells=4),
     )
     defaults.update(kwargs)
-    return mw.LayerRefinementSpec(**defaults)
+    return mw.grid.LayerRefinementSpec(**defaults)
 
 
 def test_corner_refinement_snaps_and_refines_with_bounded_grading():
@@ -153,16 +153,16 @@ def test_corner_refinement_snaps_and_refines_with_bounded_grading():
 
 
 def test_layer_spec_without_features_leaves_the_grid_unchanged():
-    base = mw.GridSpec.auto(wavelength=0.1, layer_refinement=mw.LayerRefinementSpec(min_cells=2))
+    base = mw.GridSpec.auto(wavelength=0.1, layer_refinement=mw.grid.LayerRefinementSpec(min_cells=2))
     located = mw.GridSpec.auto(
-        wavelength=0.1, layer_refinement=mw.LayerRefinementSpec(min_cells=2, axis="z", bounds=(0.0, 0.001))
+        wavelength=0.1, layer_refinement=mw.grid.LayerRefinementSpec(min_cells=2, axis="z", bounds=(0.0, 0.001))
     )
     for a, b in zip(resolve_auto_grid(_scene([_l_trace()], base)), resolve_auto_grid(_scene([_l_trace()], located))):
         assert np.array_equal(a, b)
 
 
 def test_corner_refinement_coexists_with_mesh_override_and_explicit_nodes():
-    override = mw.MeshOverrideStructure(geometry=mw.Box(position=(0.03, 0.03, 0.0), size=(0.01, 0.01, 0.01)), dl=0.0005)
+    override = mw.grid.MeshOverrideStructure(geometry=mw.Box(position=(0.03, 0.03, 0.0), size=(0.01, 0.01, 0.01)), dl=0.0005)
     grid = mw.GridSpec.auto(wavelength=0.1, override_structures=(override,), layer_refinement=_corner_layer())
     scene = _scene([_l_trace()], grid)
     x, y, z = resolve_auto_grid(scene)
@@ -172,7 +172,7 @@ def test_corner_refinement_coexists_with_mesh_override_and_explicit_nodes():
         assert np.min(np.abs(nodes - 0.02)) < _NODE_TOL
         assert _ratio(nodes) <= _RATIO * _SLACK
     explicit = np.union1d(x, [0.0153, -0.0042])
-    prepared = mw.scene.prepare_scene(scene.clone(grid=mw.GridSpec.custom(explicit, y, z)), lazy_meshgrid=True)
+    prepared = mw.scene.prepare_scene(scene.updated(grid=mw.GridSpec.custom(explicit, y, z)), lazy_meshgrid=True, device="cpu")
     assert np.all(np.diff(prepared.x_nodes64) > 0)
     assert np.isin([0.0153, -0.0042], prepared.x_nodes64).all()
     assert all(np.min(np.abs(prepared.x_nodes64 - c)) < _NODE_TOL for c in (0.0, 0.01, 0.02))
@@ -194,9 +194,9 @@ def test_refinement_inside_sim_only_drops_outside_corners():
 
 def test_bounds_refinement_min_steps_and_snapping_along_layer_axis():
     slab = mw.Structure(mw.Box(position=(0.0, 0.0, 0.0002), size=(0.2, 0.2, 0.0004)), mw.Material(eps_r=4.0))
-    layer = mw.LayerRefinementSpec(
+    layer = mw.grid.LayerRefinementSpec(
         min_cells=None, axis="z", bounds=(0.0, 0.0004), min_steps_along_axis=4,
-        bounds_refinement=mw.GridRefinement(dl=0.00005, num_cells=4), bounds_snapping="center",
+        bounds_refinement=mw.grid.GridRefinement(dl=0.00005, num_cells=4), bounds_snapping="center",
     )
     z = resolve_auto_grid(_scene([slab], mw.GridSpec.auto(wavelength=0.1, layer_refinement=layer)))[2]
     assert np.min(np.abs(z - 0.0002)) < _NODE_TOL
@@ -207,11 +207,11 @@ def test_bounds_refinement_min_steps_and_snapping_along_layer_axis():
         assert np.diff(z)[near].max() <= 0.00005 * _SLACK and np.count_nonzero(near) >= 4
     assert _ratio(z) <= _RATIO * _SLACK
     # Bounds refinement coarser than min_steps_along_axis is dropped.
-    coarse = mw.LayerRefinementSpec(
+    coarse = mw.grid.LayerRefinementSpec(
         min_cells=None, axis="z", bounds=(0.0, 0.0004), min_steps_along_axis=4,
-        bounds_refinement=mw.GridRefinement(dl=0.0002),
+        bounds_refinement=mw.grid.GridRefinement(dl=0.0002),
     )
-    steps_only = mw.LayerRefinementSpec(min_cells=None, axis="z", bounds=(0.0, 0.0004), min_steps_along_axis=4)
+    steps_only = mw.grid.LayerRefinementSpec(min_cells=None, axis="z", bounds=(0.0, 0.0004), min_steps_along_axis=4)
     za = resolve_auto_grid(_scene([slab], mw.GridSpec.auto(wavelength=0.1, layer_refinement=coarse)))[2]
     zb = resolve_auto_grid(_scene([slab], mw.GridSpec.auto(wavelength=0.1, layer_refinement=steps_only)))[2]
     assert np.array_equal(za, zb)
@@ -219,11 +219,11 @@ def test_bounds_refinement_min_steps_and_snapping_along_layer_axis():
 
 def test_gap_width_refinement_resolves_narrow_metal_gaps():
     strips = [
-        mw.Structure(mw.PlanarPEC.rectangle(((-0.04, -0.0003), (-0.005, 0.005)), coordinate=0.0), mw.Material.pec()),
-        mw.Structure(mw.PlanarPEC.rectangle(((0.0003, 0.04), (-0.005, 0.005)), coordinate=0.0), mw.Material.pec()),
+        mw.Structure(mw.geometry.PlanarPEC.rectangle(((-0.04, -0.0003), (-0.005, 0.005)), coordinate=0.0), mw.Material.pec()),
+        mw.Structure(mw.geometry.PlanarPEC.rectangle(((0.0003, 0.04), (-0.005, 0.005)), coordinate=0.0), mw.Material.pec()),
     ]
     bounds = ((-0.03, 0.03), (-0.03, 0.03), (-0.02, 0.02))
-    layer = mw.LayerRefinementSpec(min_cells=None, axis="z", bounds=(0.0, 0.0), dl_min_from_gap_width=True)
+    layer = mw.grid.LayerRefinementSpec(min_cells=None, axis="z", bounds=(0.0, 0.0), dl_min_from_gap_width=True)
     x = resolve_auto_grid(_scene(strips, mw.GridSpec.auto(wavelength=0.1, layer_refinement=layer), bounds))[0]
     gap = (x[:-1] >= -0.0003 - 1e-12) & (x[1:] <= 0.0003 + 1e-12)
     assert np.count_nonzero(gap) >= 2
@@ -233,11 +233,11 @@ def test_gap_width_refinement_resolves_narrow_metal_gaps():
 
 
 def test_convex_resolution_resolves_strip_width():
-    strip = mw.Structure(mw.PlanarPEC.rectangle(((-0.04, 0.04), (-0.0015, 0.0015)), coordinate=0.0), mw.Material.pec())
+    strip = mw.Structure(mw.geometry.PlanarPEC.rectangle(((-0.04, 0.04), (-0.0015, 0.0015)), coordinate=0.0), mw.Material.pec())
     bounds = ((-0.03, 0.03), (-0.03, 0.03), (-0.02, 0.02))
-    layer = mw.LayerRefinementSpec(
+    layer = mw.grid.LayerRefinementSpec(
         min_cells=None, axis="z", bounds=(0.0, 0.0),
-        corner_finder=mw.CornerFinderSpec(convex_resolution=6),
+        corner_finder=mw.grid.CornerFinderSpec(convex_resolution=6),
     )
     y = resolve_auto_grid(_scene([strip], mw.GridSpec.auto(wavelength=0.1, layer_refinement=layer), bounds))[1]
     across = (y[:-1] >= -0.0015 - 1e-12) & (y[1:] <= 0.0015 + 1e-12)
@@ -246,43 +246,43 @@ def test_convex_resolution_resolves_strip_width():
 
 
 def test_multiple_layer_specs_and_validation():
-    specs = (mw.LayerRefinementSpec(min_cells=2, axes=("x",)), mw.LayerRefinementSpec(min_cells=4, axes=("x", "y")), _corner_layer())
+    specs = (mw.grid.LayerRefinementSpec(min_cells=2, axes=("x",)), mw.grid.LayerRefinementSpec(min_cells=4, axes=("x", "y")), _corner_layer())
     grid = mw.GridSpec.auto(wavelength=0.1, layer_refinement=list(specs))
     assert grid.layer_refinement == specs
     resolve_auto_grid(_scene([_l_trace()], grid))
     with pytest.raises(TypeError, match="LayerRefinementSpec"):
-        mw.GridSpec.auto(layer_refinement=[mw.LayerRefinementSpec(), object()])
+        mw.GridSpec.auto(layer_refinement=[mw.grid.LayerRefinementSpec(), object()])
     with pytest.raises(TypeError, match="LayerRefinementSpec"):
         mw.GridSpec.auto(layer_refinement=[])
     with pytest.raises(ValueError, match="axis= and bounds="):
-        mw.LayerRefinementSpec(corner_finder=mw.CornerFinderSpec())
+        mw.grid.LayerRefinementSpec(corner_finder=mw.grid.CornerFinderSpec())
     with pytest.raises(ValueError, match="together"):
-        mw.LayerRefinementSpec(axis="z")
+        mw.grid.LayerRefinementSpec(axis="z")
     with pytest.raises(ValueError, match="requires corner_finder"):
-        mw.LayerRefinementSpec(axis="z", bounds=(0, 1), corner_refinement=mw.GridRefinement())
+        mw.grid.LayerRefinementSpec(axis="z", bounds=(0, 1), corner_refinement=mw.grid.GridRefinement())
     with pytest.raises(ValueError, match="lower <= upper"):
-        mw.LayerRefinementSpec(axis="z", bounds=(1, 0))
+        mw.grid.LayerRefinementSpec(axis="z", bounds=(1, 0))
     with pytest.raises(ValueError, match="angle_threshold"):
-        mw.CornerFinderSpec(angle_threshold=math.pi)
+        mw.grid.CornerFinderSpec(angle_threshold=math.pi)
     with pytest.raises(ValueError, match="medium"):
-        mw.CornerFinderSpec(medium="copper")
+        mw.grid.CornerFinderSpec(medium="copper")
     with pytest.raises(ValueError, match="num_cells"):
-        mw.GridRefinement(num_cells=0)
+        mw.grid.GridRefinement(num_cells=0)
     with pytest.raises(ValueError, match="dl"):
-        mw.GridRefinement(dl=-1.0)
-    assert mw.LayerRefinementSpec(axis=2, bounds=(0, 1)).axis == "z"
-    assert not mw.LayerRefinementSpec(min_cells=None).covers("x")
+        mw.grid.GridRefinement(dl=-1.0)
+    assert mw.grid.LayerRefinementSpec(axis=2, bounds=(0, 1)).axis == "z"
+    assert not mw.grid.LayerRefinementSpec(min_cells=None).covers("x")
 
 
 def test_grid_refinement_step_semantics():
-    assert mw.GridRefinement().grid_size(1.0) == 0.5
-    assert mw.GridRefinement(refinement_factor=4).grid_size(1.0) == 0.25
-    assert mw.GridRefinement(dl=0.1).grid_size(1.0) == 0.1
-    assert mw.GridRefinement(refinement_factor=4, dl=0.3).grid_size(1.0) == 0.25
+    assert mw.grid.GridRefinement().grid_size(1.0) == 0.5
+    assert mw.grid.GridRefinement(refinement_factor=4).grid_size(1.0) == 0.25
+    assert mw.grid.GridRefinement(dl=0.1).grid_size(1.0) == 0.1
+    assert mw.grid.GridRefinement(refinement_factor=4, dl=0.3).grid_size(1.0) == 0.25
 
 
 def test_layer_spec_from_structures():
-    spec = mw.LayerRefinementSpec.from_structures([_l_trace()], axis="z", corner_finder=mw.CornerFinderSpec())
+    spec = mw.grid.LayerRefinementSpec.from_structures([_l_trace()], axis="z", corner_finder=mw.grid.CornerFinderSpec())
     assert spec.axis == "z" and spec.bounds == pytest.approx((0.0, 0.001), abs=1e-9)
 
 

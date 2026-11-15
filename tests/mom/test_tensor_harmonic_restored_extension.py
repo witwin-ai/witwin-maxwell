@@ -11,7 +11,7 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 def test_restored_mixed_prefix_extends_only_new_frequency(tmp_path,monkeypatch):
     scene,config,_=setup()
     config=replace(config,harmonic_balance=replace(config.harmonic_balance,harmonics=1,pump_scales=(.5,)))
-    simulation=mw.Simulation.mom(scene,frequency=3e8,config=config).prepare()
+    simulation=mw.Simulation.mom(scene,frequencies=3e8,config=config).prepare()
     result=simulation.run();path=tmp_path/'prefix.pt';result.save(path)
     restored=mw.Result.load(path,scene=scene)
     prefix=restored._harmonic_data.decoder.prepared
@@ -27,9 +27,9 @@ def test_restored_mixed_prefix_extends_only_new_frequency(tmp_path,monkeypatch):
     from witwin.maxwell.mom.harmonic_material import compile_harmonic_material
     from witwin.maxwell.mom.mesh import SurfaceSystem
     from witwin.maxwell.mom.runtime import SystemOperator
-    from witwin.maxwell.mom.harmonic_state import recover_harmonic_state
+    from witwin.maxwell.mom.harmonic_recovery import recover_harmonic_state
     native_config=restored._harmonic_data.config
-    materials=_materials(scene,3e8,2,config.dtype)
+    materials=_materials(scene,3e8,2,config.dtype,'cuda')
     exterior=compile_harmonic_material(mw.Material(),3e8,2)
     system=SurfaceSystem.create([(body.structure_index,body.name,body.basis,material.linear_samples[1])
         for body,material in zip(prefix['operators'][0].system.bodies,materials)])
@@ -40,8 +40,8 @@ def test_restored_mixed_prefix_extends_only_new_frequency(tmp_path,monkeypatch):
         model,extended=preparation.prepare_mixed_tensor_harmonic_balance(
             (*prefix['operators'],new_operator),native_config.harmonic_balance.volumes,
             materials,exterior,reuse_prepared=prefix,query_config=config.query_config)
-        initial=torch.cat((restored.harmonic_state.cell_electric,
-            torch.zeros_like(restored.harmonic_state.cell_electric[:1])))
+        initial=torch.cat((mw.mom.harmonic_state(restored).cell_electric,
+            torch.zeros_like(mw.mom.harmonic_state(restored).cell_electric[:1])))
         solution=model.solve(initial,pump_scale=.5,**native_config.harmonic_balance.solve_settings())
         state=recover_harmonic_state(model,extended,solution)
     assert calls==[6e8]

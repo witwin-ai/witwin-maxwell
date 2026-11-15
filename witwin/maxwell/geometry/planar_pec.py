@@ -9,7 +9,11 @@ import torch
 from witwin.core import GeometryBase
 from witwin.core.geometry.polygon import polygon_loops_signed_distance_2d
 
+from ..errors import UnsupportedFeatureError
+from .._stability import experimental
 
+
+@experimental("pcb")
 class PlanarPEC(GeometryBase):
     """A zero-volume PEC polygon on a declared Yee node plane.
 
@@ -30,14 +34,21 @@ class PlanarPEC(GeometryBase):
                  physical_thickness=0.0, device=None):
         if normal_axis not in ("x", "y", "z"):
             raise ValueError("PlanarPEC.normal_axis must be 'x', 'y', or 'z'.")
-        if any(isinstance(v, torch.Tensor) and v.requires_grad for v in (coordinate, physical_thickness)):
-            raise NotImplementedError("PlanarPEC has discrete edge ownership; shape gradients are unsupported.")
+        if isinstance(coordinate, torch.Tensor) and coordinate.requires_grad:
+            raise UnsupportedFeatureError("PlanarPEC has discrete edge ownership; shape gradients are unsupported.",
+                                          feature="geometry.planar_pec", method=None)
         self.normal_axis = normal_axis
         self.coordinate = float(coordinate)
-        self.physical_thickness = float(physical_thickness)
+        # A trainable thickness only enters the layered MoM sheet impedance; it
+        # never moves the sheet, so it stays a tensor. Other values are floats.
+        trainable = isinstance(physical_thickness, torch.Tensor) and physical_thickness.requires_grad
+        if trainable and (physical_thickness.numel() != 1 or physical_thickness.is_complex()):
+            raise ValueError("A trainable PlanarPEC.physical_thickness must be one real tensor value.")
+        self.physical_thickness = physical_thickness.reshape(()) if trainable else float(physical_thickness)
+        thickness = float(self.physical_thickness.detach()) if trainable else self.physical_thickness
         if not math.isfinite(self.coordinate):
             raise ValueError("PlanarPEC.coordinate must be finite.")
-        if not math.isfinite(self.physical_thickness) or self.physical_thickness < 0:
+        if not math.isfinite(thickness) or thickness < 0:
             raise ValueError("PlanarPEC.physical_thickness must be finite and nonnegative.")
         self.vertices = self._loop(vertices, device=device)
         self.holes = tuple(self._loop(loop, device=device) for loop in holes)
@@ -84,7 +95,8 @@ class PlanarPEC(GeometryBase):
     @staticmethod
     def _loop(value, *, device):
         if isinstance(value, torch.Tensor) and value.requires_grad:
-            raise NotImplementedError("PlanarPEC has discrete edge ownership; shape gradients are unsupported.")
+            raise UnsupportedFeatureError("PlanarPEC has discrete edge ownership; shape gradients are unsupported.",
+                                          feature="geometry.planar_pec", method=None)
         loop = torch.as_tensor(value, dtype=torch.float64, device=device)
         if loop.ndim != 2 or loop.shape[0] < 3 or loop.shape[1] != 2:
             raise ValueError("PlanarPEC polygon loops require shape (N, 2), N >= 3.")
@@ -117,7 +129,8 @@ class PlanarPEC(GeometryBase):
 
     def to_mesh(self, segments=16):
         if self.holes:
-            raise NotImplementedError("PlanarPEC mesh export with holes is not implemented.")
+            raise UnsupportedFeatureError("PlanarPEC mesh export with holes is not implemented.",
+                                          feature="geometry.planar_pec", method=None)
         from .polyslab import PolySlab
         slab = PolySlab(vertices=self.vertices,
                                bounds=(self.coordinate, self.coordinate), axis=self.normal_axis,

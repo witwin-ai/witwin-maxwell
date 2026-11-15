@@ -10,7 +10,6 @@ from .common import (
     has_complex_fields,
 )
 from .cpml import (
-    DEFAULT_CPML_CONFIG,
     expand_cpml_memory_tensor,
     initialize_cpml_state,
     initialize_neutral_boundary_state,
@@ -26,7 +25,6 @@ __all__ = [
     "BOUNDARY_PERIODIC",
     "BOUNDARY_PMC",
     "BOUNDARY_PML",
-    "DEFAULT_CPML_CONFIG",
     "combine_complex_spectral_components",
     "expand_cpml_memory_tensor",
     "has_complex_fields",

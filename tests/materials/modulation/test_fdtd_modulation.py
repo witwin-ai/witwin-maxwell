@@ -5,6 +5,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.core import Box
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 _C0 = 299_792_458.0
@@ -22,28 +23,28 @@ def _to_numpy(value):
 
 
 def test_modulation_spec_validation():
-    spec = mw.ModulationSpec(frequency=1.0e9, amplitude=0.2, phase=0.5)
+    spec = mw.media.ModulationSpec(frequency=1.0e9, amplitude=0.2, phase=0.5)
     assert spec.frequency == 1.0e9
     assert spec.amplitude == 0.2
     assert spec.phase == 0.5
     assert spec.angular_frequency == pytest.approx(2.0 * np.pi * 1.0e9)
 
     with pytest.raises(ValueError):
-        mw.ModulationSpec(frequency=0.0, amplitude=0.2)
+        mw.media.ModulationSpec(frequency=0.0, amplitude=0.2)
     with pytest.raises(ValueError):
-        mw.ModulationSpec(frequency=1.0e9, amplitude=0.0)
+        mw.media.ModulationSpec(frequency=1.0e9, amplitude=0.0)
     with pytest.raises(ValueError):
-        mw.ModulationSpec(frequency=1.0e9, amplitude=0.6)
+        mw.media.ModulationSpec(frequency=1.0e9, amplitude=0.6)
     with pytest.raises(ValueError):
-        mw.ModulationSpec(frequency=1.0e9, amplitude=0.2, phase=float("inf"))
+        mw.media.ModulationSpec(frequency=1.0e9, amplitude=0.2, phase=float("inf"))
     with pytest.raises(ValueError):
-        mw.ModulationSpec(frequency=1.0e9, amplitude=torch.zeros(4, 4))
+        mw.media.ModulationSpec(frequency=1.0e9, amplitude=torch.zeros(4, 4))
     with pytest.raises(ValueError):
-        mw.ModulationSpec(frequency=1.0e9, amplitude=torch.full((2, 2, 2), 0.7))
+        mw.media.ModulationSpec(frequency=1.0e9, amplitude=torch.full((2, 2, 2), 0.7))
     with pytest.raises(ValueError):
-        mw.ModulationSpec(frequency=1.0e9, amplitude=0.2, phase=torch.zeros(3))
+        mw.media.ModulationSpec(frequency=1.0e9, amplitude=0.2, phase=torch.zeros(3))
 
-    grid_spec = mw.ModulationSpec(
+    grid_spec = mw.media.ModulationSpec(
         frequency=1.0e9,
         amplitude=torch.full((2, 2, 2), 0.3),
         phase=torch.zeros(2, 2, 2),
@@ -53,7 +54,7 @@ def test_modulation_spec_validation():
 
 
 def test_material_modulation_combination_guards():
-    modulation = mw.ModulationSpec(frequency=1.0e8, amplitude=0.1)
+    modulation = mw.media.ModulationSpec(frequency=1.0e8, amplitude=0.1)
 
     material = mw.Material(eps_r=4.0, modulation=modulation)
     assert material.is_modulated
@@ -93,25 +94,25 @@ def test_material_modulation_combination_guards():
 
 def _compile_scene_with_modulation(modulation, *, second_material=None):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.uniform(0.05),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
-            material=mw.Material(eps_r=4.0, modulation=modulation),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.uniform(0.05),
+                structures=(
+            mw.Structure(
+                geometry=Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+                material=mw.Material(eps_r=4.0, modulation=modulation),
+            ),
+            ),
+            )
     if second_material is not None:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=Box(position=(0.35, 0.0, 0.0), size=(0.1, 0.4, 0.4)),
                 material=second_material,
-            )
-        )
-    prepared = prepare_scene(scene)
-    return prepared, prepared.compile_materials()
+            ),
+        ))
+    prepared = prepare_scene(scene, device="cpu")
+    return prepared, compile_materials(prepared)
 
 
 def test_scene_compile_rasterizes_modulation_quadrature_fields():
@@ -119,7 +120,7 @@ def test_scene_compile_rasterizes_modulation_quadrature_fields():
     amplitude = 0.2
     phase = 0.5
     scene, model = _compile_scene_with_modulation(
-        mw.ModulationSpec(frequency=frequency, amplitude=amplitude, phase=phase)
+        mw.media.ModulationSpec(frequency=frequency, amplitude=amplitude, phase=phase)
     )
 
     center = (scene.Nx // 2, scene.Ny // 2, scene.Nz // 2)
@@ -140,7 +141,6 @@ def test_scene_compile_without_modulation_has_no_frequency():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.05),
-        device="cpu",
         structures=[
             mw.Structure(
                 geometry=Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
@@ -148,7 +148,7 @@ def test_scene_compile_without_modulation_has_no_frequency():
             )
         ],
     )
-    model = prepare_scene(scene).compile_materials()
+    model = compile_materials(prepare_scene(scene, device="cpu"))
     assert not torch.any(model["modulation_cos"] != 0)
     assert not torch.any(model["modulation_sin"] != 0)
     assert not torch.any(model["modulation_omega"] != 0)
@@ -161,9 +161,9 @@ def test_scene_compile_rasterizes_two_modulation_frequencies():
     freq_a = 2.0e8
     freq_b = 3.0e8
     _, model = _compile_scene_with_modulation(
-        mw.ModulationSpec(frequency=freq_a, amplitude=0.2),
+        mw.media.ModulationSpec(frequency=freq_a, amplitude=0.2),
         second_material=mw.Material(
-            eps_r=2.0, modulation=mw.ModulationSpec(frequency=freq_b, amplitude=0.2)
+            eps_r=2.0, modulation=mw.media.ModulationSpec(frequency=freq_b, amplitude=0.2)
         ),
     )
     omega = model["modulation_omega"]
@@ -181,40 +181,41 @@ def test_scene_compile_rasterizes_two_modulation_frequencies():
 
 def _build_modulated_slab_scene(*, carrier_frequency, modulation, amplitude=80.0, boundary=None):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.16, 0.16), (-0.16, 0.16))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=boundary if boundary is not None else mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.16, 0.16), (-0.16, 0.16))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=boundary if boundary is not None else mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=(0.0, 0.0, 1.0),
                 source_time=mw.CW(frequency=carrier_frequency, amplitude=amplitude),
                 name="pw",
             )
-        ],
-        structures=[
+            ],
+                structures=[
             mw.Structure(
                 geometry=Box(position=(0.0, 0.0, 0.0), size=(0.24, 0.64, 0.64)),
                 material=mw.Material(eps_r=4.0, modulation=modulation),  # modulation=None -> static slab
             )
-        ],
-    )
-    scene.add_monitor(
-        mw.FieldTimeMonitor("probe", components=("Ez",), position=(0.42, 0.0, 0.0), interval=1)
-    )
+            ],
+                monitors=(
+            mw.monitors.FieldTimeMonitor("probe", components=("Ez",), position=(0.42, 0.0, 0.0), interval=1),
+            ),
+            )
     return scene
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_modulated_scene_prepare_enables_modulation_runtime():
-    modulation = mw.ModulationSpec(frequency=2.5e8, amplitude=0.25)
+    modulation = mw.media.ModulationSpec(frequency=2.5e8, amplitude=0.25)
     scene = _build_modulated_slab_scene(carrier_frequency=1.0e9, modulation=modulation)
     solver = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=16),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=16),
+            full_field_dft=False,
+        ),
     ).prepare().solver
 
     assert solver.modulation_enabled
@@ -267,18 +268,20 @@ def test_fdtd_modulated_slab_generates_sidebands():
         result = mw.Simulation.fdtd(
             scene,
             frequencies=[carrier_frequency],
-            run_time=mw.TimeConfig(time_steps=time_steps),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=time_steps),
+                full_field_dft=False,
+            ),
         ).run()
         payload = result.monitor("probe")
-        trace = _to_numpy(payload["field"]).astype(np.float64)
+        trace = _to_numpy(payload.sel(component="Ez").values).astype(np.float64)
         dt = float(result.solver.dt)
         del result
         torch.cuda.empty_cache()
         return trace, dt
 
     modulated_trace, dt = run(
-        mw.ModulationSpec(frequency=modulation_frequency, amplitude=0.25)
+        mw.media.ModulationSpec(frequency=modulation_frequency, amplitude=0.25)
     )
     reference_trace, reference_dt = run(None)
     assert dt == reference_dt
@@ -306,7 +309,7 @@ def test_fdtd_modulated_slab_generates_sidebands():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_modulated_run_with_mur_boundaries_stays_finite():
     # Exercises the standard (non-CPML) modulated kernel path.
-    modulation = mw.ModulationSpec(frequency=2.5e8, amplitude=0.25)
+    modulation = mw.media.ModulationSpec(frequency=2.5e8, amplitude=0.25)
     scene = _build_modulated_slab_scene(
         carrier_frequency=1.0e9,
         modulation=modulation,
@@ -315,17 +318,19 @@ def test_fdtd_modulated_run_with_mur_boundaries_stays_finite():
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=256),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=256),
+            full_field_dft=False,
+        ),
     ).run()
-    trace = _to_numpy(result.monitor("probe")["field"])
+    trace = _to_numpy(result.monitor("probe").sel(component="Ez").values)
     assert np.all(np.isfinite(trace))
     assert float(np.abs(trace).max()) > 0.0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_modulation_rejects_bloch_runs():
-    modulation = mw.ModulationSpec(frequency=2.5e8, amplitude=0.25)
+    modulation = mw.media.ModulationSpec(frequency=2.5e8, amplitude=0.25)
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.16, 0.16), (-0.16, 0.16))),
         grid=mw.GridSpec.uniform(0.04),
@@ -338,7 +343,6 @@ def test_fdtd_modulation_rejects_bloch_runs():
             z="pml",
             bloch_wavevector=(1.0, 0.5, 0.0),
         ),
-        device="cuda",
         sources=[
             mw.PointDipole(
                 position=(0.0, 0.0, 0.0),
@@ -358,8 +362,10 @@ def test_fdtd_modulation_rejects_bloch_runs():
         mw.Simulation.fdtd(
             scene,
             frequencies=[1.0e9],
-            run_time=mw.TimeConfig(time_steps=8),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=8),
+                full_field_dft=False,
+            ),
         ).prepare()
 
 
@@ -369,19 +375,22 @@ def test_fdtd_modulation_composes_with_dispersive_scene():
     # feature flags stay enabled and the runtime no longer rejects the combination.
     # The full electro-optic-modulator physics lives in
     # tests/materials/combinations/test_modulated_dispersive_nonlinear.py.
-    modulation = mw.ModulationSpec(frequency=2.5e8, amplitude=0.25)
+    modulation = mw.media.ModulationSpec(frequency=2.5e8, amplitude=0.25)
     scene = _build_modulated_slab_scene(carrier_frequency=1.0e9, modulation=modulation)
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=Box(position=(0.4, 0.0, 0.0), size=(0.08, 0.32, 0.32)),
             material=mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=2.0e-10),
-        )
-    )
+        ),
+    ))
     solver = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=8),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=8),
+            full_field_dft=False,
+        ),
     ).prepare().solver
     assert solver.modulation_enabled
     assert solver.electric_dispersive_enabled

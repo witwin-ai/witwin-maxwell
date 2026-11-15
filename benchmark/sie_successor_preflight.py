@@ -310,7 +310,8 @@ def main(argv=None):
                     self.tests.append(row)
 
         collection = Collection()
-        command = SCOPE + ['--gpu', '-q', '-p', 'no:cacheprovider',
+        # The reviewed catalog covers the slow and MoM milestone tiers too.
+        command = SCOPE + ['--gpu', '--run-slow', '--run-mom-milestone', '-q', '-p', 'no:cacheprovider',
                            '--confcutdir=' + str(root)]
         command += ['--collect-only'] if args.mode == 'collect' else [f'--junitxml={out}/junit.xml']
         with (out / 'collection.log').open('x') as stream:

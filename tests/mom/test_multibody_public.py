@@ -16,9 +16,9 @@ def solve(eps=1.):
         mw.Structure(mw.Sphere(radius=.07, position=(-.2, 0., 0.)), mw.Material(eps_r=eps), name='left'),
         mw.Structure(mw.Sphere(radius=.06, position=(.2, 0., 0.)), mw.Material(eps_r=eps), name='right')],
         sources=[mw.PlaneWave()], monitors=[mw.PointMonitor(name='right_probe', position=(.2, 0., 0.), fields=('Ex',))])
-    config = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=4),
+    config = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=4),
         query_config=FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1')
-    return scene, mw.Simulation.mom(scene, frequency=3e8, config=config).run()
+    return scene, mw.Simulation.mom(scene, frequencies=3e8, config=config).run()
 
 
 @pytest.fixture(scope='module')
@@ -27,12 +27,12 @@ def invisible(): return solve()
 
 def test_two_invisible_bodies_public_routing_and_traces(invisible):
     scene, result = invisible
-    data = result.surface_currents
+    data = mw.mom.surface_currents(result)
     assert data.scattered_coefficients.shape == (120,) and torch.count_nonzero(data.scattered_coefficients) == 0
     assert [body.name for body in data.bodies] == ['left', 'right']
     assert data.bodies[1].J_slice == slice(30, 60) and data.bodies[1].M_slice == slice(90, 120)
-    assert result.monitors['right_probe']['region_id'] == 2
-    assert result.monitors['right_probe']['structure_name'] == 'right'
+    assert result.monitors['right_probe'].attrs['region_id'] == 2
+    assert result.monitors['right_probe'].attrs['structure_name'] == 'right'
     for region, position in [('exterior', (0., .3, 0.)), ('left', (-.2, 0., 0.)), (2, (.2, 0., 0.))]:
         point = torch.tensor([position], device='cuda', dtype=torch.float64)
         actual = result.query_fields(point, region_id=region, field_kind='total')
@@ -54,7 +54,7 @@ def test_two_invisible_bodies_public_routing_and_traces(invisible):
 
 def test_coherent_exterior_sum_and_gradients(invisible):
     _, result = invisible
-    original = result.surface_currents
+    original = mw.mom.surface_currents(result)
     x = torch.randn_like(original.scattered_coefficients).requires_grad_()
     data = SurfaceData(x, original.handle, original.config, original.scene_signature)
     points = torch.tensor([[0., .3, .2]], device='cuda', dtype=torch.float64)
@@ -75,11 +75,11 @@ def test_coherent_exterior_sum_and_gradients(invisible):
 
 def test_two_body_physical_rhs_solve_and_roundtrip(tmp_path):
     scene, result = solve(1.01)
-    data = result.surface_currents
+    data = mw.mom.surface_currents(result)
     assert torch.linalg.vector_norm(data.scattered_coefficients) > 0
     path = tmp_path/'bodies.pt'
     result.save(path)
-    restored = mw.Result.load(path, scene=scene).surface_currents
+    restored = mw.mom.surface_currents(mw.Result.load(path, scene=scene))
     assert not hasattr(restored.handle, 'matrix')
     assert torch.equal(restored.scattered_coefficients, data.scattered_coefficients)
     for region, position in [(0, (0., .3, .2)), ('right', (.2, 0., 0.))]:
@@ -89,14 +89,14 @@ def test_two_body_physical_rhs_solve_and_roundtrip(tmp_path):
     for key, value in [('edge_offset', 0), ('region_id', True), ('M_slice', [30, 60]), ('name', 'left')]:
         payload = copy.deepcopy(data.snapshot())
         payload['body_table'][1][key] = value
-        with pytest.raises(ValueError): SurfaceData.restore(payload, scene, 3e8)
+        with pytest.raises(ValueError): SurfaceData.restore(payload, scene, 3e8, 'cuda')
 
 
 def test_complete_field_adaptation_absorption_and_global_modes(invisible):
     from witwin.maxwell.mom.modes import RegularModes, build_modal_rhs, modal_response
     from witwin.maxwell.mom.linalg import StoppingRule
     _, result = invisible
-    data = result.surface_currents
+    data = mw.mom.surface_currents(result)
     points = torch.tensor([[0., .3, .2]], device='cuda', dtype=torch.float64)
     data.query_fields(points, 0, 'total', query_config=FieldQueryConfig(max_order=8))
     log = data.handle.last_field_query_log
@@ -127,7 +127,7 @@ def test_complete_field_adaptation_absorption_and_global_modes(invisible):
 
 def test_nonzero_trace_owns_only_its_jump_and_interior_ignores_foreign_trace(invisible):
     _, result = invisible
-    original = result.surface_currents
+    original = mw.mom.surface_currents(result)
     x = torch.randn_like(original.scattered_coefficients)
     data = SurfaceData(x, original.handle, original.config, original.scene_signature)
     point = data.bodies[0].mesh.centroids[:1]

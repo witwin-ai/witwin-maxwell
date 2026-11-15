@@ -12,6 +12,10 @@ from test_harmonic_dual_current import ac_fields
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
 
 
+# Milestone only, no regression twin: on one or two cells the DC dual currents are structural zeros
+# (<= 1e-17 against atol=1e-11), so the comparisons would be vacuous; the smallest nontrivial split
+# (3 cells) still costs about a fifth of this test per complete streamed bound.
+@pytest.mark.mom_milestone
 def test_streamed_dual_root_tangent_and_nonlinear_gradients(monkeypatch):
     volume=runpy.run_path('tests/mom/test_static_current_projector.py')['block']().volume
     ac=ac_fields(4)

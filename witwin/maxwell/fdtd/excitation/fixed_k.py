@@ -34,7 +34,10 @@ class FixedKIncidentLine:
         self.magnetic = torch.zeros_like(self.electric)
         self.psi_e = torch.zeros_like(self.electric)
         self.psi_h = torch.zeros_like(self.electric)
-        self.clock = torch.zeros((), dtype=torch.int64)
+        # Device step clock: the drive and spectral phase rows are gathered by it on the
+        # device, so the line advance carries no host input and replays in a graph.
+        self.clock = torch.zeros((), dtype=torch.int64, device=solver.device)
+        self.drive_rows = self.phase_rows = None
         # The fixed-k line keeps its own reference: its incident spectrum is sampled at the
         # TFSF entry plane and exported through incident_spectrum(). It does not use the
         # real-line physical-entry-plane convention (seeding, index translation and its
@@ -60,6 +63,18 @@ class FixedKIncidentLine:
         from ..boundary.cpml import cpml_line_profiles
         (self.inv_kappa_e, self.b_e, self.c_e), (self.inv_kappa_h, self.b_h, self.c_h) = cpml_line_profiles(
             solver, count, self.ds, self.absorber_cells, reflection=1.e-10)
+
+    def prepare_tables(self, steps):
+        """Stage every step's drive scale and spectral phase once, from the host formulas.
+
+        Row n holds the complex64 drive scale float(evaluate_source_time(n dt)) * 2 S and the
+        complex128 phase exp(1j omega n dt), the scalars the eager advance formed per step.
+        """
+        times = [step * self.dt for step in range(steps)]
+        self.drive_rows = torch.tensor([float(evaluate_source_time(self.source_time, time)) * 2 * self.courant
+                                        for time in times], dtype=self.electric.dtype, device=self.electric.device)
+        clock = torch.tensor(times, dtype=torch.float64, device=self.electric.device)
+        self.phase_rows = torch.exp(1j * self.omega[None, :] * clock[:, None])
 
     def state_tensors(self):
         return {name: getattr(self, name) for name in
@@ -89,15 +104,11 @@ class FixedKIncidentLine:
 
     def advance_electric(self):
         self.electric.add_(self._curl(self.magnetic, magnetic=False), alpha=self.ce)
-        # The host clock is checkpointed; waveform evaluation stays outside
-        # the captured field-update block, in the existing E-side TFSF hook.
-        step = int(self.clock.item())
-        value = evaluate_source_time(self.source_time, step * self.dt)
-        self.electric[:, self.source_index].add_(self.drive, alpha=float(value) * 2 * self.courant)
+        self.electric[:, self.source_index].add_(self.drive * self.drive_rows.index_select(0, self.clock.reshape(1)))
         self.electric[:, 0].zero_()
         self.electric[:, -1].zero_()
         self.magnetic[:, -1].zero_()
-        phase = torch.exp(1j * self.omega * (step * self.dt))
+        phase = self.phase_rows.index_select(0, self.clock.reshape(1)).reshape(-1)
         self.spectrum.add_(phase[:, None] * self.electric[:, self.reference_index])
         self.clock.add_(1)
 

@@ -29,6 +29,9 @@ from .lumped import (
 from .wire import _target_masses
 from .runtime.representation import spectral_scale
 from .runtime.spectral import source_normalization_spectrum
+from ..errors import UnsupportedFeatureError
+from ..compiler.lumped import compile_lumped_elements
+from ..compiler.ports import compile_ports
 
 
 PhasorNormalization = Literal["peak", "rms", "none"]
@@ -374,9 +377,10 @@ def _prepare_wire_port_provider(
         if sigma is not None and selected.numel() and bool(torch.any(
             sigma.reshape(-1).index_select(0, offsets.index_select(0, selected)) != 0
         )):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"Wire-bound port {geometry.port_name!r} intersects conductive Yee edges; "
-                "the generalized wire midpoint solve requires locally lossless support."
+                "the generalized wire midpoint solve requires locally lossless support.",
+                feature="port.wire_binding", method="fdtd"
             )
     templates = getattr(solver, "_dispersive_templates", {})
     for name, component in zip(("Ex", "Ey", "Ez"), range(3)):
@@ -385,9 +389,10 @@ def _prepare_wire_port_provider(
             for entry in templates.get(name, {}).get(kind, ()):
                 if selected.numel() and bool(torch.any(entry["drive"].reshape(-1).index_select(
                     0, offsets.index_select(0, selected)) != 0)):
-                    raise NotImplementedError(
+                    raise UnsupportedFeatureError(
                         f"Wire-bound port {geometry.port_name!r} intersects electric ADE support; "
-                        "the generalized wire midpoint solve requires locally nondispersive support."
+                        "the generalized wire midpoint solve requires locally nondispersive support.",
+                        feature="port.wire_binding", method="fdtd"
                     )
     field_control_volumes = field_masses / field_eps
     energy_masses = torch.cat((field_masses, node_capacitance)).reshape(-1, 1, 1)
@@ -463,16 +468,18 @@ def _require_forward_only_parameters(
         isinstance(port.reference_impedance, torch.Tensor)
         and port.reference_impedance.requires_grad
     ):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             f"Port {port.name!r} trainable reference_impedance is not supported by "
-            "the FDTD lumped adjoint."
+            "the FDTD lumped adjoint.",
+            feature="port", method="fdtd"
         )
     if excitation is not None:
         source_impedance = excitation.source_impedance
         if isinstance(source_impedance, torch.Tensor) and source_impedance.requires_grad:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"Port {port.name!r} trainable source_impedance is not supported by "
-                "the FDTD lumped adjoint; train amplitude or series R/L/C values instead."
+                "the FDTD lumped adjoint; train amplitude or series R/L/C values instead.",
+                feature="port", method="fdtd"
             )
     termination = getattr(port, "termination", None) if termination is None else termination
     if getattr(termination, "kind", None) == "parallel_rlc" and any(
@@ -480,45 +487,52 @@ def _require_forward_only_parameters(
         and getattr(termination, name).requires_grad
         for name in ("r", "l", "c")
     ):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             f"Port {port.name!r} trainable ParallelRLC is not supported by the FDTD "
-            "lumped adjoint; use a SeriesRLC termination."
+            "lumped adjoint; use a SeriesRLC termination.",
+            feature="port", method="fdtd"
         )
 
 
 def _validate_supported_field_coupling(solver) -> None:
     from ..compiler.breakdown import scene_has_breakdown
 
-    if scene_has_breakdown(solver.scene):
-        raise NotImplementedError(
+    if scene_has_breakdown(solver.scene.scene):
+        raise UnsupportedFeatureError(
             "Lumped FDTD coupling with dynamic dielectric breakdown requires refreshing "
-            "the coupled field/circuit response after every conductivity-state change."
+            "the coupled field/circuit response after every conductivity-state change.",
+            feature="lumped_element", method="fdtd"
         )
     if getattr(solver, "nonlinear_enabled", False):
-        raise NotImplementedError(
-            "Lumped FDTD coupling in nonlinear media requires a field-dependent circuit update coefficient."
+        raise UnsupportedFeatureError(
+            "Lumped FDTD coupling in nonlinear media requires a field-dependent circuit update coefficient.",
+            feature="lumped_element", method="fdtd"
         )
     if getattr(solver, "modulation_enabled", False):
-        raise NotImplementedError(
-            "Lumped FDTD coupling in time-modulated media requires a time-dependent circuit update coefficient."
+        raise UnsupportedFeatureError(
+            "Lumped FDTD coupling in time-modulated media requires a time-dependent circuit update coefficient.",
+            feature="lumped_element", method="fdtd"
         )
     if getattr(solver, "full_aniso_enabled", False):
-        raise NotImplementedError(
-            "Lumped FDTD coupling in full anisotropy requires a tensor-valued circuit injection operator."
+        raise UnsupportedFeatureError(
+            "Lumped FDTD coupling in full anisotropy requires a tensor-valued circuit injection operator.",
+            feature="lumped_element", method="fdtd"
         )
 
 
 def _validate_bloch_lumped_object(solver, obj, termination, excitation=None) -> None:
     """Admit only passive LTI Yee couplings with support inside one cell."""
     if excitation is not None:
-        raise NotImplementedError(f"Driven lumped port {obj.name!r} under Bloch boundaries is deferred to v2.")
+        raise UnsupportedFeatureError(f"Driven lumped port {obj.name!r} under Bloch boundaries is deferred to v2.",
+                                      feature="lumped_element", method="fdtd")
     if isinstance(obj, (LumpedPort, TerminalPort, Resistor, Capacitor, Inductor)):
         _reject_bloch_copper_terminals(solver, obj)
     if not isinstance(obj, (LumpedPort, Resistor, Capacitor, Inductor)) or (
         termination is not None
         and not isinstance(termination, (Resistor, Capacitor, Inductor, SeriesRLC, ParallelRLC))
     ):
-        raise NotImplementedError("Complex lumped coupling supports only passive LTI R/L/C and LumpedPort terminations.")
+        raise UnsupportedFeatureError("Complex lumped coupling supports only passive LTI R/L/C and LumpedPort terminations.",
+                                      feature="lumped_element", method="fdtd")
     supports = [("voltage path", tuple(min(a, b) for a, b in zip(obj.negative, obj.positive)),
                  tuple(max(a, b) for a, b in zip(obj.negative, obj.positive)))]
     for name in ("voltage_aperture", "current_surface"):
@@ -530,14 +544,15 @@ def _validate_bloch_lumped_object(solver, obj, termination, excitation=None) -> 
                              tuple(p - s / 2 for p, s in zip(position, size)),
                              tuple(p + s / 2 for p, s in zip(position, size))))
     for axis, label in enumerate("xyz"):
-        if solver.scene.boundary.axis_kind(label) != "bloch":
+        if solver.scene.scene.boundary.axis_kind(label) != "bloch":
             continue
-        low, high = solver.scene.domain.bounds[axis]
+        low, high = solver.scene.scene.domain.bounds[axis]
         for support, lower, upper in supports:
             if lower[axis] <= low or upper[axis] >= high:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     f"Lumped object {obj.name!r} {support} touches or crosses the {label} Bloch seam "
-                    f"at cell bounds ({low}, {high}); v1 requires support strictly inside one cell."
+                    f"at cell bounds ({low}, {high}); v1 requires support strictly inside one cell.",
+                    feature="lumped_element", method="fdtd"
                 )
 
 
@@ -545,7 +560,7 @@ def _reject_bloch_copper_terminals(solver, obj) -> None:
     """Reject terminal contact as well as the split-edge overlap checked later."""
     from ..geometry.terminal_support import conductor_support
 
-    for structure in solver.scene.structures:
+    for structure in solver.scene.scene.structures:
         if not getattr(structure, "enabled", True) or not getattr(structure.material, "is_copper_foil", False):
             continue
         if isinstance(obj, TerminalPort):
@@ -557,9 +572,10 @@ def _reject_bloch_copper_terminals(solver, obj) -> None:
             contact = any(support.contains(point, 1e-12 + max(support.roundoff))
                           for point in (obj.negative, obj.positive))
         if contact:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"Lumped object {obj.name!r} has a terminal on CopperFoil {structure.name!r}; "
-                "complex-field Bloch coupling requires an imaginary bank for the foil's two-sided state."
+                "complex-field Bloch coupling requires an imaginary bank for the foil's two-sided state.",
+                feature="lumped_element", method="fdtd"
             )
 
 
@@ -765,9 +781,10 @@ def _source_descriptor(
     ):
         return _tabulated_source_descriptor(excitation, source_time, device=device, dtype=dtype)
     if isinstance(source_time, CustomSourceTime):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "PortExcitation requires a sampled-table CustomSourceTime; a callable waveform "
-            "has no device-native port drive evaluation."
+            "has no device-native port drive evaluation.",
+            feature="guard:381ffb65", method="fdtd"
         )
     if not isinstance(source_time, (CW, GaussianPulse, RickerWavelet)):
         raise TypeError("Unsupported PortExcitation source_time type.")
@@ -823,41 +840,41 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
         dtype=torch.float64,
     )
     excitation_by_name = {excitation.port_name: excitation for excitation in excitations}
-    ports_by_name = {port.name: port for port in solver.scene.ports}
+    ports_by_name = {port.name: port for port in solver.scene.scene.ports}
     circuit_port_names = {
         binding.port_name
-        for circuit in getattr(solver.scene, "circuits", ())
+        for circuit in getattr(solver.scene.scene, "circuits", ())
         for binding in circuit.bindings
     }
     network_by_port = {
         port_name: network.name
-        for network in getattr(solver.scene, "networks", ())
+        for network in getattr(solver.scene.scene, "networks", ())
         for port_name in network.connected_port_names
     }
     termination_overrides = getattr(solver, "_port_termination_overrides", {})
     has_coupled_objects = bool(excitation_by_name) or any(
         termination_overrides.get(port.name, getattr(port, "termination", None)) is not None
         for port in ports_by_name.values()
-    ) or bool(solver.scene.lumped_elements) or bool(circuit_port_names) or bool(network_by_port)
+    ) or bool(solver.scene.scene.lumped_elements) or bool(circuit_port_names) or bool(network_by_port)
     if has_coupled_objects or (ports_by_name and getattr(solver, "complex_fields_enabled", False)):
         _validate_supported_field_coupling(solver)
     complex_fields = getattr(solver, "complex_fields_enabled", False)
     if complex_fields:
-        if getattr(solver.scene, "circuits", ()) or getattr(solver.scene, "networks", ()):
-            raise NotImplementedError("Circuits/MNA and embedded networks under Bloch boundaries are deferred to v2.")
+        if getattr(solver.scene.scene, "circuits", ()) or getattr(solver.scene.scene, "networks", ()):
+            raise UnsupportedFeatureError("Circuits/MNA and embedded networks under Bloch boundaries are deferred to v2.",
+                                          feature="circuit", method="fdtd")
         for port in ports_by_name.values():
             _validate_bloch_lumped_object(
                 solver, port, termination_overrides.get(port.name, port.termination),
                 excitation_by_name.get(port.name),
             )
-        for element in solver.scene.lumped_elements:
+        for element in solver.scene.scene.lumped_elements:
             _validate_bloch_lumped_object(solver, element, element)
     sheet_gaps = {f.port_name: f for c in getattr(solver, "_thin_sheet_complexes", ()) for f in c.feeds}
     runtimes = []
     if sheet_gaps:
-        from ..compiler.ports import compile_ports
         geometries = []
-        for port in solver.scene.ports:
+        for port in solver.scene.scene.ports:
             if port.name in sheet_gaps:
                 d = sheet_gaps[port.name].direction
                 axis = int(abs(d).argmax())
@@ -865,7 +882,7 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
             else:
                 geometries.extend(compile_ports(solver.scene, ports=(port,), device=solver.device))
     else:
-        geometries = solver.scene.compile_ports(device=solver.device)
+        geometries = compile_ports(solver.scene, device=solver.device)
     for geometry in geometries:
         port = ports_by_name[geometry.port_name]
         excitation = excitation_by_name.get(port.name)
@@ -912,9 +929,11 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
         sheet_feed = None
         if port.name in sheet_gaps:
             if port.name in circuit_port_names or embedded_network_name is not None:
-                raise NotImplementedError("Sheet gap feeds do not support circuits or embedded networks.")
+                raise UnsupportedFeatureError("Sheet gap feeds do not support circuits or embedded networks.",
+                                              feature="geometry.surface_mesh", method="fdtd")
             if termination is not None and (termination.l is not None or termination.c is not None):
-                raise NotImplementedError("Sheet gap feeds require a purely resistive termination.")
+                raise UnsupportedFeatureError("Sheet gap feeds require a purely resistive termination.",
+                                              feature="geometry.surface_mesh", method="fdtd")
             resistance = (_real_source_resistance(port, excitation, device=solver.device, dtype=torch.float64)
                           if excitation is not None else torch.as_tensor(
                               port.reference_impedance if termination is None else termination.r,
@@ -1078,9 +1097,9 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
         )
         _attach_tabulated_drive(runtimes[-1], excitation)
     solver._port_runtimes = tuple(runtimes)
-    element_by_name = {element.name: element for element in solver.scene.lumped_elements}
+    element_by_name = {element.name: element for element in solver.scene.scene.lumped_elements}
     element_runtimes = []
-    for geometry in solver.scene.compile_lumped_elements(device=solver.device):
+    for geometry in compile_lumped_elements(solver.scene, device=solver.device):
         field = getattr(solver, geometry.voltage_component)
         element = element_by_name[geometry.element_name]
         _open_declared_pec_terminal_edges(solver, geometry, element)
@@ -1172,9 +1191,10 @@ def _prepare_coaxial_port_runtime(
     """Prepare an annular port as a source/load/observer on the shared port clocks."""
 
     if circuit_bound or network_name is not None:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             f"CoaxialLumpedPort {port.name!r} cannot bind to a circuit or embedded network; "
-            "those couplings use a single-component Yee voltage row."
+            "those couplings use a single-component Yee voltage row.",
+            feature="port.CoaxialLumpedPort", method="fdtd"
         )
     _require_forward_only_parameters(port, excitation, termination)
     if excitation is not None and termination is not None:
@@ -1227,7 +1247,7 @@ def _prepare_coaxial_element_runtimes(solver) -> tuple[CoaxialLumpedRuntime, ...
     from ..lumped import CoaxialLumpedResistor
 
     runtimes = []
-    for element in solver.scene.lumped_elements:
+    for element in solver.scene.scene.lumped_elements:
         if not isinstance(element, CoaxialLumpedResistor):
             continue
         geometry = harmonic_coaxial_geometry(
@@ -1510,7 +1530,8 @@ def replay_port_runtimes(
     ):
         return electric_fields, {}
     if getattr(solver, "complex_fields_enabled", False):
-        raise NotImplementedError("Complex-field lumped adjoint/pullback requires the discrete transpose of the imaginary state bank.")
+        raise UnsupportedFeatureError("Complex-field lumped adjoint/pullback requires the discrete transpose of the imaginary state bank.",
+                                      feature="lumped_element", method="fdtd")
     fields = dict(electric_fields)
     next_auxiliary = {}
     sample_time = torch.as_tensor(
@@ -1923,7 +1944,8 @@ def pullback_port_runtimes(
     """Reverse all local branch solves before the Maxwell reverse step."""
 
     if getattr(solver, "complex_fields_enabled", False):
-        raise NotImplementedError("Complex-field lumped adjoint/pullback requires the discrete transpose of the imaginary state bank.")
+        raise UnsupportedFeatureError("Complex-field lumped adjoint/pullback requires the discrete transpose of the imaginary state bank.",
+                                      feature="lumped_element", method="fdtd")
     updated = dict(adjoint_state)
     grad_eps = {name: torch.zeros_like(value) for name, value in eps_by_field.items()}
     wire_runtime = getattr(solver, "_wire_runtime", None)
@@ -2048,7 +2070,7 @@ def pullback_port_runtimes(
                         key = ("port", port_runtime.port.name, component)
                         semantic_grads[key] = semantic_grads.get(key, torch.zeros_like(value)) + value
         else:
-            element = solver.scene.lumped_elements[lumped_trace.index]
+            element = solver.scene.scene.lumped_elements[lumped_trace.index]
             gradient = {
                 "resistor": result.grad_resistance,
                 "inductor": result.grad_inductance,

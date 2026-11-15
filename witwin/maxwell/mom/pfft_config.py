@@ -1,10 +1,14 @@
 """Versioned configuration of the precorrected-FFT (pFFT/AIM) MoM backend."""
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 import math
 
+from .options import MoMOption, option_asdict
 from .pfft_grid import PFFTGridSpec
+from ..errors import UnsupportedFeatureError
+from .._enums import parse_enum
+from .._stability import experimental
 
 PFFT_CONFIG_VERSION = 'pfft_precorrected_config_v2'
 SPACING_RULE_VERSION = 'pfft_mesh_tied_spacing_v1'
@@ -18,6 +22,21 @@ ACCURACY_TABLE = ((1e-2, 3, 10., 1.5), (1e-3, 3, 15., 1.), (1e-4, 4, 15., 1.))
 MINIMUM_SPACING_TO_EDGE = 0.25
 
 
+@experimental("mom")
+class PFFTGridPrecision(MoMOption):
+    """FFT grid and kernel precision selected by ``PFFTConfig.grid_precision``."""
+    COMPLEX64 = 'complex64'
+    COMPLEX128 = 'complex128'
+
+
+@experimental("mom")
+class PFFTExteriorGrids(MoMOption):
+    """Exterior grid layout selected by ``PFFTConfig.exterior_grids``."""
+    SINGLE = 'single'
+    CLUSTERS = 'clusters'
+
+
+@experimental("mom")
 @dataclass(frozen=True)
 class PFFTConfig:
     """Grid density, stencil order and admission tolerances of the pFFT backend.
@@ -44,17 +63,21 @@ class PFFTConfig:
     points_per_wavelength: float | None = None
     order: int | None = None
     target_accuracy: float = 1e-3
-    grid_precision: str = 'complex64'
+    grid_precision: PFFTGridPrecision = PFFTGridPrecision.COMPLEX64
     precorrection_factor: float | None = None
     near_pair_batch: int = 1 << 18
     tree_leaf_size: int = 32
     solve_dual_tolerance: float = 1e-8
     original_sample_tolerance: float = 1e-8
-    exterior_grids: str = 'single'
+    exterior_grids: PFFTExteriorGrids = PFFTExteriorGrids.SINGLE
     cluster_separation: float = 2.
     coupling_digits: float | None = None
 
     def __post_init__(self):
+        object.__setattr__(self, 'grid_precision',
+                           parse_enum(PFFTGridPrecision, self.grid_precision, name='PFFTConfig.grid_precision'))
+        object.__setattr__(self, 'exterior_grids',
+                           parse_enum(PFFTExteriorGrids, self.exterior_grids, name='PFFTConfig.exterior_grids'))
         if self.points_per_wavelength is not None and (
                 type(self.points_per_wavelength) not in (int, float) or not math.isfinite(self.points_per_wavelength)
                 or self.points_per_wavelength < 4):
@@ -65,16 +88,12 @@ class PFFTConfig:
                 or self.target_accuracy < ACCURACY_TABLE[-1][0] or self.target_accuracy >= 1):
             raise ValueError(f'pFFT target_accuracy must lie in [{ACCURACY_TABLE[-1][0]:g}, 1); tighter '
                              'operator accuracy is not characterised')
-        if self.exterior_grids not in ('single', 'clusters'):
-            raise ValueError("pFFT exterior_grids must be 'single' or 'clusters'")
         if (type(self.cluster_separation) not in (int, float) or not math.isfinite(self.cluster_separation)
                 or self.cluster_separation < 1.5):
             raise ValueError('pFFT cluster_separation must be finite and at least 1.5')
         if self.coupling_digits is not None and (type(self.coupling_digits) not in (int, float)
                                                  or not 1 <= self.coupling_digits <= 12):
             raise ValueError('pFFT coupling_digits must lie in [1, 12]')
-        if self.grid_precision not in ('complex64', 'complex128'):
-            raise ValueError('pFFT grid_precision must be complex64 or complex128')
         if self.precorrection_factor is not None and (type(self.precorrection_factor) not in (int, float)
                                                       or not math.isfinite(self.precorrection_factor)
                                                       or self.precorrection_factor < self.stencil_order):
@@ -118,7 +137,7 @@ class PFFTConfig:
                 spacing, rule = floor, 'quarter_edge_floor'
         order = self.stencil_order
         factor = order+2 if self.precorrection_factor is None else self.precorrection_factor
-        return PFFTGridSpec(spacing=spacing, order=order, precision=self.grid_precision,
+        return PFFTGridSpec(spacing=spacing, order=order, precision=self.grid_precision.value,
                             precorrection_radius=factor*spacing, mean_edge=edge, spacing_rule=rule)
 
     def solve_config(self):
@@ -126,7 +145,7 @@ class PFFTConfig:
         return DirectSolveConfig(self.solve_dual_tolerance, self.original_sample_tolerance)
 
     def payload(self):
-        return {'version': PFFT_CONFIG_VERSION, 'spacing_rule': SPACING_RULE_VERSION, 'parameters': asdict(self)}
+        return {'version': PFFT_CONFIG_VERSION, 'spacing_rule': SPACING_RULE_VERSION, 'parameters': option_asdict(self)}
 
     @classmethod
     def restore(cls, payload):
@@ -148,8 +167,9 @@ def admit_pfft(config):
                    'fmm': config.fmm}
     present = [name for name, value in unsupported.items() if value is not None]
     if present:
-        raise NotImplementedError('pFFT currently supports free-space scalar linear PMCHWT only; remove '
-                                  + ', '.join(present))
+        raise UnsupportedFeatureError('pFFT currently supports free-space scalar linear PMCHWT only; remove '
+                                  + ', '.join(present),
+                                      feature="guard:52989e60", method="mom")
     if config.dtype != torch.complex128:
         raise ValueError('pFFT requires complex128 currents (grid precision is set by PFFTConfig)')
     if not isinstance(config.stopping, StoppingRule) or config.stopping.preconditioner not in ('none', 'rwg_diagonal'):

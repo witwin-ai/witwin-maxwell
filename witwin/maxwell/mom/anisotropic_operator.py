@@ -12,6 +12,7 @@ from ..constants import EPSILON_0, MU_0
 from .operator import local_geometry
 from .quadrature import touching_pair_rule, triangle_rule
 from .dyadic_green import electrostatic_kernel
+from ..errors import UnsupportedFeatureError
 
 
 def weak_dyadic_pairs(test_basis, source_basis, rows, cols, kernel, *, category, order):
@@ -133,7 +134,8 @@ def assemble_tensor_region_weak(basis, medium, config, *, kernel=None, source_ba
            for b in (basis, source_basis)):
         raise ValueError('Tensor regional assembly requires matching CUDA mesh and medium precision')
     if medium.epsilon_r.requires_grad or medium.mu_r.requires_grad:
-        raise NotImplementedError('Tensor weak assembly currently requires fixed material samples; coefficient gradients remain supported')
+        raise UnsupportedFeatureError('Tensor weak assembly currently requires fixed material samples; coefficient gradients remain supported',
+                                      feature="guard:76a6cc5a", method="mom")
     kernel = DyadicGreenKernel(medium) if kernel is None else kernel
     if kernel.medium is not medium:
         raise ValueError('Regional kernel must bind the exact sampled medium')
@@ -269,7 +271,8 @@ def tensor_regional_block(test_basis, source_basis, test_edges, source_edges, me
         raise TypeError('Selected tensor blocks require TensorMedium and IntegrationConfig')
     medium.assert_current()
     if medium.epsilon_r.requires_grad or medium.mu_r.requires_grad:
-        raise NotImplementedError('Selected tensor blocks require fixed material samples')
+        raise UnsupportedFeatureError('Selected tensor blocks require fixed material samples',
+                                      feature="guard:956f3e4a", method="mom")
     for basis in (test_basis, source_basis):
         mesh = basis.mesh
         if mesh.device != medium.epsilon_r.device or mesh.dtype != medium.epsilon_r.real.dtype:

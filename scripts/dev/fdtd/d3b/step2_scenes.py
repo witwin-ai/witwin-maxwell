@@ -35,14 +35,14 @@ def simulation(scenario, steps, graph=True):
         # Well-conditioned control: a zero-mean Ricker current leaves no static charge residue,
         # so the strict E2 bounds apply (user decision 2026-11-01).
         scene = _scene(SCENARIOS["copper_patch"], True)
-        scene.sources = [mw.PointDipole(position=source.position, polarization=source.polarization,
+        scene = scene.updated(sources=[mw.PointDipole(position=source.position, polarization=source.polarization,
                                         width=source.width, profile=source.profile,
-                                        source_time=mw.RickerWavelet(frequency=2.4e9))
-                         for source in scene.sources]
-        return mw.Simulation.fdtd(scene, frequencies=[2.4e9], run_time=mw.TimeConfig(time_steps=steps),
-                                  cuda_graph=graph)
+                                        source_time=mw.sources.RickerWavelet(frequency=2.4e9))
+                         for source in scene.sources])
+        return mw.Simulation.fdtd(scene, frequencies=[2.4e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps),
+                                  cuda_graph=graph))
     return mw.Simulation.fdtd(_scene(SCENARIOS[scenario], True), frequencies=[2.4e9],
-                              run_time=mw.TimeConfig(time_steps=steps), cuda_graph=graph)
+                              config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps), cuda_graph=graph))
 
 
 def _add_roundoff_noise(prepared):
@@ -124,10 +124,10 @@ def _smooth_simulation(steps):
     """Well-conditioned E2 scene (user decision 2026-11-02): the V15 patch driven by a smooth
     1.5-cell Gaussian-profile dipole with a zero-mean Ricker pulse."""
     scene = _scene(SCENARIOS["copper_patch"], True)
-    scene.sources = [mw.PointDipole(position=source.position, polarization=source.polarization, profile="gaussian",
+    scene = scene.updated(sources=[mw.PointDipole(position=source.position, polarization=source.polarization, profile="gaussian",
                                     width=1.5 * SCENARIOS["copper_patch"]["cell"],
-                                    source_time=mw.RickerWavelet(frequency=2.4e9)) for source in scene.sources]
-    return mw.Simulation.fdtd(scene, frequencies=[2.4e9], run_time=mw.TimeConfig(time_steps=steps), cuda_graph=True)
+                                    source_time=mw.sources.RickerWavelet(frequency=2.4e9)) for source in scene.sources])
+    return mw.Simulation.fdtd(scene, frequencies=[2.4e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps), cuda_graph=True))
 
 
 def _fields(kernel, simulation_at, steps):

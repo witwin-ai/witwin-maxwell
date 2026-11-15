@@ -16,14 +16,16 @@ from __future__ import annotations
 import cupy as cp
 import torch
 
-from ...adjoint_inputs import material_dependent_inputs, scene_trainable_material_tensors
+from ...adjoint_inputs import ancestry_safe_trainable_tensors, named_trainable_tensors
 from ...result import Result
 from ...scene import prepare_scene
+from ..magnetic import require_fixed_permeability
 from ..materials import compile_fdfd_materials
+from ...errors import UnsupportedFeatureError
 
 
 def _unsupported_fdfd_adjoint_medium(scene):
-    for structure in getattr(scene, "structures", ()):
+    for structure in scene.structures:
         material = getattr(structure, "material", None)
         if material is None:
             continue
@@ -37,15 +39,17 @@ def _unsupported_fdfd_adjoint_medium(scene):
 
 
 class _FDFDGradientBridge:
+    """Admission and adjoint pullback for one single-frequency FDFD solve.
+
+    FDFD solves in CuPy, so its fields carry no autograd history of their own.
+    Every grad-carrying scene input must therefore be pulled back here or be
+    refused by name at construction, before any CUDA work.
+    """
+
     def __init__(self, simulation):
         self.simulation = simulation
         self.base_scene = simulation.scene
-        self.material_inputs = self._resolve_material_inputs()
-        if not self.material_inputs:
-            raise NotImplementedError(
-                "FDFD backward currently supports trainable scene inputs that contribute to "
-                "prepared-scene material tensors."
-            )
+        self.material_inputs, self.input_names = self._resolve_material_inputs()
         self.solver = None
         self.solver_stats = None
 
@@ -55,30 +59,57 @@ class _FDFDGradientBridge:
         self.simulation._refresh_scene()
         return self.simulation.scene
 
-    def _candidate_material_inputs(self) -> tuple[torch.Tensor, ...]:
-        if self.simulation.scene_module is not None:
-            return tuple(
-                parameter
-                for parameter in self.simulation.scene_module.parameters()
-                if parameter.requires_grad
+    def _resolve_material_inputs(self):
+        module = self.simulation.scene_module
+        with torch.enable_grad():
+            scene = self._material_graph_scene()
+            unsupported = _unsupported_fdfd_adjoint_medium(scene)
+            if unsupported is not None:
+                raise UnsupportedFeatureError(unsupported, feature="guard:4c1a0e64", method="fdfd")
+            declared = named_trainable_tensors(scene)
+            parameters = () if module is None else tuple(
+                (f"SceneModule parameter {name!r}", parameter)
+                for name, parameter in module.named_parameters() if parameter.requires_grad
             )
-        return scene_trainable_material_tensors(self.base_scene)
-
-    def _resolve_material_inputs(self) -> tuple[torch.Tensor, ...]:
-        scene = self._material_graph_scene()
-        return material_dependent_inputs(scene, self._candidate_material_inputs())
+            named = declared + parameters
+            prepared = prepare_scene(scene, device=self.simulation.config.device)
+            try:
+                permittivity, permeability = compile_fdfd_materials(prepared, self.simulation.frequency, edges=True)
+                require_fixed_permeability(
+                    permeability, tuple(tensor for _, tensor in named), names=tuple(name for name, _ in named),
+                )
+                edges = [permittivity[axis] for axis in "xyz" if permittivity[axis].requires_grad]
+                probe = sum(edge.real.sum() + edge.imag.sum() if edge.is_complex() else edge.sum() for edge in edges)
+                reached = torch.autograd.grad(
+                    probe, tuple(tensor for _, tensor in named), allow_unused=True, retain_graph=True,
+                ) if edges and named else (None,) * len(named)
+            finally:
+                prepared.release_meshgrid()
+        unclaimed = [name for (name, _), gradient in zip(named, reached) if gradient is None]
+        if unclaimed:
+            raise UnsupportedFeatureError(
+                f"Simulation.fdfd(...) cannot differentiate {len(unclaimed)} trainable input(s): the FDFD adjoint "
+                "pulls gradients back only through the compiled Yee-edge permittivity, and these inputs do not "
+                "reach it (for example PEC/PMC occupancy, a disabled structure or an unused SceneModule "
+                "parameter):\n"
+                + "\n".join(f"- {name}" for name in unclaimed)
+                + "\nProvide fixed values for them (requires_grad=False or .detach()).",
+                feature="guard:8f9be25f", method="fdfd"
+            )
+        if not named:
+            raise UnsupportedFeatureError(
+                "FDFD backward currently supports trainable scene inputs that contribute to "
+                "prepared-scene material tensors.",
+                feature="guard:b95a4570", method="fdfd"
+            )
+        if module is not None:
+            return tuple(tensor for _, tensor in parameters), tuple(name for name, _ in parameters)
+        roots = ancestry_safe_trainable_tensors(tensor for _, tensor in declared)
+        names = {id(tensor): name for name, tensor in declared}
+        return roots, tuple(names[id(tensor)] for tensor in roots)
 
     def forward(self, _material_inputs):
-        from ..magnetic import require_fixed_permeability
-        with torch.enable_grad():
-            graph_scene = prepare_scene(self._material_graph_scene())
-            _, permeability = compile_fdfd_materials(graph_scene, self.simulation.frequency, edges=True)
-            require_fixed_permeability(permeability,_material_inputs)
-        solver = self.simulation._build_fdfd_solver()
-        unsupported = _unsupported_fdfd_adjoint_medium(solver.scene)
-        if unsupported is not None:
-            raise NotImplementedError(unsupported)
-
+        solver = self.solver if self.solver is not None else self.simulation._build_fdfd_solver()
         solver_cfg = self.simulation.config.solver
         solver.solve(
             max_iter=solver_cfg.max_iter,
@@ -87,21 +118,8 @@ class _FDFDGradientBridge:
         )
         if solver.E_field is None:
             raise RuntimeError("FDFD solve did not produce any field data.")
-
         self.solver = solver
-        self.solver_stats = {
-            "solver": {
-                "type": solver_cfg.solver_type,
-                "max_iter": solver_cfg.max_iter,
-                "tol": solver_cfg.tol,
-                "restart": solver_cfg.restart,
-                "preconditioner": solver_cfg.preconditioner,
-                "precision": solver_cfg.precision,
-            },
-            "converged": getattr(solver, "converged", None),
-            "solver_info": getattr(solver, "solver_info", None),
-            "final_residual": getattr(solver, "final_residual", None),
-        }
+        self.solver_stats = self.simulation._fdfd_solver_stats(solver, solver_cfg)
         return solver.E_field
 
     def backward(self, material_inputs, grad_outputs):
@@ -146,7 +164,7 @@ class _FDFDGradientBridge:
 
         with torch.enable_grad():
             graph_scene = self._material_graph_scene()
-            prepared = prepare_scene(graph_scene)
+            prepared = prepare_scene(graph_scene, device=self.simulation.config.device)
             try:
                 components, _ = compile_fdfd_materials(prepared, solver.frequency, edges=True)
                 edges = tuple(components[axis] for axis in 'xyz')
@@ -159,10 +177,15 @@ class _FDFDGradientBridge:
                     [edge for edge, _ in pairs], material_inputs,
                     grad_outputs=[gradient for _, gradient in pairs], allow_unused=True,
                 ) if pairs else (None,) * len(material_inputs)
-                return tuple(
-                    torch.zeros_like(value) if gradient is None else gradient.to(value)
-                    for value, gradient in zip(material_inputs, gradients)
-                )
+                # Admission proved every input reaches these edges; a missing
+                # pullback is a broken graph, never a zero gradient.
+                missing = [name for name, gradient in zip(self.input_names, gradients) if gradient is None]
+                if missing:
+                    raise RuntimeError(
+                        "FDFD backward lost the material pullback for admitted trainable input(s): "
+                        + ", ".join(missing)
+                    )
+                return tuple(gradient.to(value) for value, gradient in zip(material_inputs, gradients))
             finally:
                 prepared.release_meshgrid()
 
@@ -180,8 +203,10 @@ class _FDFDMaterialGradientFunction(torch.autograd.Function):
         return (None, *gradients)
 
 
-def run_fdfd_with_gradient_bridge(simulation) -> Result:
-    bridge = _FDFDGradientBridge(simulation)
+def run_fdfd_with_gradient_bridge(simulation, *, bridge=None, solver=None) -> Result:
+    """Solve through the adjoint bridge; ``solver`` reuses a prepared FDFD solver."""
+    bridge = _FDFDGradientBridge(simulation) if bridge is None else bridge
+    bridge.solver = solver
     Ex, Ey, Ez = _FDFDMaterialGradientFunction.apply(bridge, *bridge.material_inputs)
     return Result(
         method="fdfd",

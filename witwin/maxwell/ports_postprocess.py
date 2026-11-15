@@ -10,6 +10,7 @@ import torch
 from .compiler.ports import compile_ports
 from .lumped import trapezoidal_impedance
 from .ports import ModePort, TerminalWavePort, WavePort
+from .errors import UnsupportedFeatureError
 
 
 @dataclass(frozen=True)
@@ -23,19 +24,24 @@ class PortDrive:
 def _resolve_port(prepared, port_name):
     solver = prepared.solver
     scene = solver.scene
-    port = {port.name: port for port in scene.ports}[port_name]
+    port = {port.name: port for port in scene.scene.ports}[port_name]
     if isinstance(port, (ModePort, WavePort, TerminalWavePort)):
-        raise NotImplementedError("Mode and wave ports require modal projections, not lumped field integrals.")
+        raise UnsupportedFeatureError("Mode and wave ports require modal projections, not lumped field integrals.",
+                                      feature="guard:42988a3c", method=None)
     if getattr(port, "wire_binding", None) is not None:
-        raise NotImplementedError("Wire-bound ports require the wire charge state in addition to Yee fields.")
-    if any(binding.port_name == port_name for circuit in scene.circuits for binding in circuit.bindings):
-        raise NotImplementedError("Circuit-bound port currents require the circuit state in addition to Yee fields.")
-    if any(port_name in network.connected_port_names for network in scene.networks):
-        raise NotImplementedError("Network-bound port currents require the network state in addition to Yee fields.")
+        raise UnsupportedFeatureError("Wire-bound ports require the wire charge state in addition to Yee fields.",
+                                      feature="port.wire_binding", method=None)
+    if any(binding.port_name == port_name for circuit in scene.scene.circuits for binding in circuit.bindings):
+        raise UnsupportedFeatureError("Circuit-bound port currents require the circuit state in addition to Yee fields.",
+                                      feature="circuit", method=None)
+    if any(port_name in network.connected_port_names for network in scene.scene.networks):
+        raise UnsupportedFeatureError("Network-bound port currents require the network state in addition to Yee fields.",
+                                      feature="network", method=None)
     for runtime in getattr(solver, "_port_runtimes", ()):
         if runtime.port.name == port_name:
             if runtime.sheet_feed is not None:
-                raise NotImplementedError("Sheet-gap feeds require sheet trace fields in addition to Yee fields.")
+                raise UnsupportedFeatureError("Sheet-gap feeds require sheet trace fields in addition to Yee fields.",
+                                              feature="geometry.surface_mesh", method=None)
             return port, runtime.geometry
     geometry, = compile_ports(scene, ports=(port,), device=scene.device)
     if getattr(geometry, "is_coaxial", False):

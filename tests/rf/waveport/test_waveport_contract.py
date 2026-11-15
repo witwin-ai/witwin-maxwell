@@ -10,6 +10,7 @@ from witwin.maxwell.compiler.waveports import (
     compile_waveport_cross_section,
 )
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_waveports
 
 
 def _voltage_path(*, plane=0.4):
@@ -31,7 +32,7 @@ def _tem_mode(**overrides):
         "current_contour": _current_contour(),
     }
     values.update(overrides)
-    return mw.WaveModeSpec(**values)
+    return mw.rf.WaveModeSpec(**values)
 
 
 def _port(**overrides):
@@ -41,10 +42,10 @@ def _port(**overrides):
         "size": (0.6, 0.6, 0.0),
         "direction": "+",
         "reference_plane": 0.4,
-        "modes": (_tem_mode(), mw.WaveModeSpec("te", mode_index=1)),
+        "modes": (_tem_mode(), mw.rf.WaveModeSpec("te", mode_index=1)),
     }
     values.update(overrides)
-    return mw.WavePort(**values)
+    return mw.rf.WavePort(**values)
 
 
 def _scene(*, ports=None):
@@ -53,21 +54,20 @@ def _scene(*, ports=None):
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
         ports=(_port(),) if ports is None else ports,
-        device="cpu",
     )
 
 
 def test_wave_mode_impedance_contracts_and_stable_default_names():
     tem = _tem_mode()
-    te = mw.WaveModeSpec("TE", mode_index=2)
-    tm = mw.WaveModeSpec("tm", mode_index=3)
-    hybrid_voltage = mw.WaveModeSpec(
+    te = mw.rf.WaveModeSpec("TE", mode_index=2)
+    tm = mw.rf.WaveModeSpec("tm", mode_index=3)
+    hybrid_voltage = mw.rf.WaveModeSpec(
         "hybrid",
         name="odd",
         impedance_definition="power_voltage",
         voltage_path=_voltage_path(),
     )
-    hybrid_current = mw.WaveModeSpec(
+    hybrid_current = mw.rf.WaveModeSpec(
         "hybrid",
         impedance_definition="power_current",
         current_contour=_current_contour(),
@@ -115,15 +115,15 @@ def test_scene_accepts_clones_and_prepares_waveports_without_expanding_modeport(
 
     assert scene.resolved_sources() == []
     assert [monitor.name for monitor in scene.resolved_monitors()] == ["optical"]
-    for resolved_scene in (scene.clone(), prepare_scene(scene)):
+    for resolved_scene in (scene, prepare_scene(scene, device="cpu").scene):
         assert isinstance(resolved_scene.ports[0], mw.ModePort)
-        assert isinstance(resolved_scene.ports[1], mw.WavePort)
+        assert isinstance(resolved_scene.ports[1], mw.rf.WavePort)
         assert resolved_scene.ports[1].modes[0].name == "TEM0"
 
 
 def test_compile_waveport_cross_section_and_tem_geometry_on_cpu():
     scene = _scene()
-    compiled = scene.compile_waveports(device="cpu")[0]
+    compiled = compile_waveports(prepare_scene(scene, device="cpu"))[0]
 
     assert isinstance(compiled, CompiledWavePortCrossSection)
     assert compiled.port_name == "wp1"
@@ -186,13 +186,13 @@ def test_cross_section_compiler_is_axis_generic(
     component,
     current_components,
 ):
-    mode = mw.WaveModeSpec(
+    mode = mw.rf.WaveModeSpec(
         "tem",
         voltage_path=path,
         current_contour=contour,
     )
     axis_index = "xyz".index(normal)
-    port = mw.WavePort(
+    port = mw.rf.WavePort(
         "axis-port",
         position,
         size,
@@ -210,21 +210,21 @@ def test_cross_section_compiler_is_axis_generic(
 
 def test_compiler_preserves_all_impedance_definitions_without_solving_modes():
     modes = (
-        mw.WaveModeSpec("te"),
-        mw.WaveModeSpec("tm"),
-        mw.WaveModeSpec(
+        mw.rf.WaveModeSpec("te"),
+        mw.rf.WaveModeSpec("tm"),
+        mw.rf.WaveModeSpec(
             "hybrid",
             name="hv",
             impedance_definition="power_voltage",
             voltage_path=_voltage_path(),
         ),
-        mw.WaveModeSpec(
+        mw.rf.WaveModeSpec(
             "hybrid",
             name="hi",
             impedance_definition="power_current",
             current_contour=_current_contour(),
         ),
-        mw.WaveModeSpec(
+        mw.rf.WaveModeSpec(
             "hybrid",
             name="hvi",
             impedance_definition="voltage_current",
@@ -255,21 +255,21 @@ def test_compiler_preserves_all_impedance_definitions_without_solving_modes():
 
 
 def test_wave_mode_polarization_uses_the_existing_tangential_axis_contract():
-    auto_port = mw.WavePort(
+    auto_port = mw.rf.WavePort(
         "auto-pol",
         (0.4, 0.5, 0.5),
         (0.0, 0.8, 0.6),
         "+",
         0.4,
-        (mw.WaveModeSpec("te"),),
+        (mw.rf.WaveModeSpec("te"),),
     )
-    explicit_port = mw.WavePort(
+    explicit_port = mw.rf.WavePort(
         "explicit-pol",
         (0.4, 0.5, 0.5),
         (0.0, 0.8, 0.6),
         "+",
         0.4,
-        (mw.WaveModeSpec("te", polarization="Ez"),),
+        (mw.rf.WaveModeSpec("te", polarization="Ez"),),
     )
 
     auto = compile_waveport_cross_section(_scene(ports=()), auto_port, device="cpu").modes[0]
@@ -287,18 +287,18 @@ def test_wave_mode_polarization_uses_the_existing_tangential_axis_contract():
 
 def test_wave_mode_rejects_invalid_or_normal_polarization():
     with pytest.raises(ValueError, match="polarization"):
-        mw.WaveModeSpec("te", polarization="diagonal")
+        mw.rf.WaveModeSpec("te", polarization="diagonal")
     with pytest.raises(ValueError, match="axis-aligned"):
-        mw.WaveModeSpec("te", polarization=(1.0, 1.0, 0.0))
+        mw.rf.WaveModeSpec("te", polarization=(1.0, 1.0, 0.0))
 
     with pytest.raises(ValueError, match="WavePort 'normal-pol'.*tangential"):
-        mw.WavePort(
+        mw.rf.WavePort(
             "normal-pol",
             (0.4, 0.5, 0.5),
             (0.0, 0.8, 0.6),
             "+",
             0.4,
-            (mw.WaveModeSpec("te", polarization="Ex"),),
+            (mw.rf.WaveModeSpec("te", polarization="Ex"),),
         )
 
 
@@ -324,29 +324,29 @@ def test_negative_direction_uses_the_preceding_magnetic_half_plane_and_orientati
 @pytest.mark.parametrize("family", ["", "quasi-tem", 3])
 def test_wave_mode_rejects_unknown_families(family):
     with pytest.raises(ValueError, match="family"):
-        mw.WaveModeSpec(family)
+        mw.rf.WaveModeSpec(family)
 
 
 def test_wave_mode_rejects_invalid_index_or_name():
     with pytest.raises(ValueError, match="mode_index"):
-        mw.WaveModeSpec("te", -1)
+        mw.rf.WaveModeSpec("te", -1)
     with pytest.raises(ValueError, match="name"):
-        mw.WaveModeSpec("te", name="")
+        mw.rf.WaveModeSpec("te", name="")
     with pytest.raises(ValueError, match="reserved"):
-        mw.WaveModeSpec("te", name="wp::te0")
+        mw.rf.WaveModeSpec("te", name="wp::te0")
 
 
 def test_tem_and_hybrid_require_the_geometry_used_by_their_impedance_definition():
     with pytest.raises(ValueError, match="TEM requires both"):
-        mw.WaveModeSpec("tem")
+        mw.rf.WaveModeSpec("tem")
     with pytest.raises(ValueError, match="voltage_current"):
         _tem_mode(impedance_definition="power_voltage")
     with pytest.raises(ValueError, match="explicitly"):
-        mw.WaveModeSpec("hybrid")
+        mw.rf.WaveModeSpec("hybrid")
     with pytest.raises(ValueError, match="requires voltage_path"):
-        mw.WaveModeSpec("hybrid", impedance_definition="power_voltage")
+        mw.rf.WaveModeSpec("hybrid", impedance_definition="power_voltage")
     with pytest.raises(ValueError, match="requires current_contour"):
-        mw.WaveModeSpec("hybrid", impedance_definition="power_current")
+        mw.rf.WaveModeSpec("hybrid", impedance_definition="power_current")
 
 
 @pytest.mark.parametrize(
@@ -355,20 +355,20 @@ def test_tem_and_hybrid_require_the_geometry_used_by_their_impedance_definition(
 )
 def test_te_tm_reject_wrong_impedance_contracts(family, impedance_definition):
     with pytest.raises(ValueError, match="impedance_definition"):
-        mw.WaveModeSpec(family, impedance_definition=impedance_definition)
+        mw.rf.WaveModeSpec(family, impedance_definition=impedance_definition)
     with pytest.raises(ValueError, match="does not accept"):
-        mw.WaveModeSpec(family, voltage_path=_voltage_path())
+        mw.rf.WaveModeSpec(family, voltage_path=_voltage_path())
 
 
 def test_wave_mode_rejects_invalid_voltage_path_or_current_contour():
     with pytest.raises(ValueError, match="axis-aligned"):
-        mw.WaveModeSpec(
+        mw.rf.WaveModeSpec(
             "tem",
             voltage_path=((0.3, 0.3, 0.4), (0.7, 0.7, 0.4)),
             current_contour=_current_contour(),
         )
     with pytest.raises(TypeError, match="current_contour"):
-        mw.WaveModeSpec(
+        mw.rf.WaveModeSpec(
             "tem",
             voltage_path=_voltage_path(),
             current_contour="loop",
@@ -401,7 +401,7 @@ def test_wave_port_rejects_direction_reference_plane_modes_and_duplicate_names()
         _port(modes=(object(),))
     with pytest.raises(TypeError, match="WavePort 'wp1'.*iterable"):
         _port(modes=None)
-    duplicate = mw.WaveModeSpec("te")
+    duplicate = mw.rf.WaveModeSpec("te")
     with pytest.raises(ValueError, match="WavePort 'wp1'.*unique"):
         _port(modes=(duplicate, duplicate))
 

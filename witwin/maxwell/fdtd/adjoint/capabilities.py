@@ -25,8 +25,3 @@ NATIVE_ADJOINT_CAPABILITIES = {
     "WIRE_STANDARD": {"complex": False, "cpml": False, "thin_wire": True},
     "WIRE_CPML": {"complex": False, "cpml": True, "thin_wire": True},
 }
-
-
-def native_adjoint_capabilities() -> dict[str, dict[str, bool]]:
-    """Return a defensive copy for tests and diagnostics."""
-    return {name: dict(features) for name, features in NATIVE_ADJOINT_CAPABILITIES.items()}

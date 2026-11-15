@@ -119,14 +119,10 @@ def sync_dft_primary_runtime_state(solver):
     if not solver._dft_entries or solver._dft_phase_cos is None:
         solver.dft_sample_count = 0
         solver.dft_window_normalization = 0.0
-        solver.dft_phase_step_cos = None
-        solver.dft_phase_step_sin = None
         return
 
     solver.dft_sample_count = int(solver._dft_sample_count_values[0])
     solver.dft_window_normalization = float(solver._dft_window_normalization_values[0])
-    solver.dft_phase_step_cos = float(solver._dft_phase_cos[0])
-    solver.dft_phase_step_sin = float(solver._dft_phase_sin[0])
 
 
 def sync_dft_legacy_state(solver):
@@ -155,8 +151,6 @@ def sync_dft_legacy_state(solver):
         solver.dft_start_step = None
         solver.dft_end_step = None
         solver.dft_window_normalization = 0.0
-        solver.dft_phase_step_cos = None
-        solver.dft_phase_step_sin = None
         reset_dft_runtime_state(solver)
         return
 
@@ -170,49 +164,27 @@ def sync_dft_legacy_state(solver):
     solver.dft_start_step = primary["start_step"]
     solver.dft_end_step = primary["end_step"]
     solver.dft_window_normalization = primary["window_normalization"]
-    solver.dft_phase_step_cos = primary["phase_cos"]
-    solver.dft_phase_step_sin = primary["phase_sin"]
 
 
 def sync_observer_legacy_state(solver):
     solver.observer_frequencies = tuple(entry["frequency"] for entry in solver._observer_spectral_entries)
     solver.observer_sample_counts = tuple(entry["sample_count"] for entry in solver._observer_spectral_entries)
-    solver.observer_start_steps = tuple(entry["start_step"] for entry in solver._observer_spectral_entries)
-    solver.observer_end_steps = tuple(entry["end_step"] for entry in solver._observer_spectral_entries)
 
     if not solver._observer_spectral_entries:
-        solver.observer_frequency = None
-        solver.observer_start_step = None
-        solver.observer_end_step = None
-        solver.observer_window_normalization = 0.0
         solver.observer_sample_count = 0
-        solver.observer_phase_step_cos = None
-        solver.observer_phase_step_sin = None
         return
 
     primary = solver._observer_spectral_entries[0]
-    solver.observer_frequency = primary["frequency"]
-    solver.observer_start_step = primary["start_step"]
-    solver.observer_end_step = primary["end_step"]
-    solver.observer_window_normalization = primary["window_normalization"]
     solver.observer_sample_count = primary["sample_count"]
-    solver.observer_phase_step_cos = primary["phase_step_cos"]
-    solver.observer_phase_step_sin = primary["phase_step_sin"]
 
 
 def sync_observer_primary_state(solver):
     if not solver._observer_spectral_entries:
         solver.observer_sample_count = 0
-        solver.observer_window_normalization = 0.0
-        solver.observer_phase_step_cos = None
-        solver.observer_phase_step_sin = None
         return
 
     primary = solver._observer_spectral_entries[0]
-    solver.observer_window_normalization = primary["window_normalization"]
     solver.observer_sample_count = primary["sample_count"]
-    solver.observer_phase_step_cos = primary["phase_cos"]
-    solver.observer_phase_step_sin = primary["phase_sin"]
 
 
 def build_observer_spectral_entry(solver, frequency, *, end_step, window_type):
@@ -383,6 +355,18 @@ def _dft_buffer(solver, previous, shape, dtype, *, value=None):
     return target
 
 
+# The volume DFT accumulates each Yee family with one launch of the three-component kernel:
+# E always (as before), H only when a magnetic component is recorded.
+DFT_FAMILIES = (("Ex", "Ey", "Ez"), ("Hx", "Hy", "Hz"))
+
+
+def dft_families(solver):
+    """The component families with at least one volume-DFT accumulator (E first)."""
+    recorded = solver._dft_batched_fields
+    return tuple(family for index, family in enumerate(DFT_FAMILIES)
+                 if index == 0 or any(component in recorded for component in family))
+
+
 def enable_dft(solver, frequencies, window_type="hanning", end_step=None, components=("Ex", "Ey", "Ez"), reuse_buffers=False):
     frequency_values = normalize_target_frequencies(solver, frequencies)
     resolved_window_type = resolve_spectral_window_type(solver, window_type)
@@ -392,8 +376,9 @@ def enable_dft(solver, frequencies, window_type="hanning", end_step=None, compon
     complex_enabled = has_complex_fields(solver)
     frequency_count = len(frequency_values)
     components = tuple(components)
-    if not components or len(set(components)) != len(components) or any(c not in ("Ex", "Ey", "Ez") for c in components):
-        raise ValueError("DFT components must be a nonempty unique selection of Ex, Ey, Ez.")
+    if (not components or len(set(components)) != len(components)
+            or any(c not in DFT_FAMILIES[0] + DFT_FAMILIES[1] for c in components)):
+        raise ValueError("DFT components must be a nonempty unique selection of Ex, Ey, Ez, Hx, Hy, Hz.")
     solver._dft_reuse_buffers = reuse_buffers
     previous = solver._dft_batched_fields
     solver._dft_batched_fields = {
@@ -544,6 +529,65 @@ def _dft_window_weight(n, window_type, active, start, end):
     return active.astype(np.float64)
 
 
+def _dft_step_sums(solver, steps, *, normalize, rows=None):
+    """Run accumulate_dft's float64 phase recurrence over the first ``steps`` steps.
+
+    Returns the window-weight sums, sample counts and (with ``normalize``) the source
+    DFT the per-step host path holds after those steps; ``rows`` receives the per-step
+    float32 weight rows when given.
+    """
+    frequency_count = len(solver._dft_entries)
+    window_norm = np.zeros(frequency_count, dtype=np.float64)
+    sample_count = np.zeros(frequency_count, dtype=np.int64)
+    src_real = np.zeros(frequency_count, dtype=np.float64)
+    src_imag = np.zeros(frequency_count, dtype=np.float64)
+
+    phase_cos = solver._dft_phase_step_cos_values.copy()
+    phase_sin = solver._dft_phase_step_sin_values.copy()
+    step_cos = solver._dft_phase_step_cos_values
+    step_sin = solver._dft_phase_step_sin_values
+    start = solver._dft_start_steps
+    end = solver._dft_end_steps
+    window_type = solver.dft_window_type
+    for n in range(steps):
+        active = (n >= start) & ((end < 0) | (n < end))
+        weight = _dft_window_weight(n, window_type, active, start, end)
+        wc = weight * phase_cos
+        ws = weight * phase_sin
+        if rows is not None:
+            rows[0][n] = wc
+            rows[1][n] = ws
+        window_norm += weight
+        sample_count += active.astype(np.int64)
+        if normalize:
+            # accumulate_dft's reference, including the analytic exp(-i omega t) of pure-CW Bloch runs.
+            signal = normalization_signal(solver, solver._normalization_source_time, normalization_sample_time(solver, n))
+            src_real += signal.real * wc - signal.imag * ws
+            src_imag += signal.real * ws + signal.imag * wc
+        next_cos = phase_cos * step_cos - phase_sin * step_sin
+        next_sin = phase_sin * step_cos + phase_cos * step_sin
+        phase_cos = next_cos.astype(np.float64, copy=False)
+        phase_sin = next_sin.astype(np.float64, copy=False)
+    return window_norm, sample_count, src_real, src_imag
+
+
+def restore_dft_partial_sums(solver, steps_run):
+    """Set the sample counts and source DFT to their sums over the first ``steps_run`` steps.
+
+    The precomputed tables hold full-run sums; a run that stops early (field shutoff)
+    reports the sums the per-step host accumulation reached instead.
+    """
+    if not solver.dft_enabled or not solver._dft_entries:
+        return
+    normalize = bool(getattr(solver, "_normalize_source", False)) and solver._normalization_source_time is not None
+    _, sample_count, src_real, src_imag = _dft_step_sums(solver, int(steps_run), normalize=normalize)
+    solver._dft_sample_count_values = sample_count
+    if normalize:
+        solver._dft_source_dft_real_values = src_real
+        solver._dft_source_dft_imag_values = src_imag
+    sync_dft_primary_runtime_state(solver)
+
+
 def build_dft_step_tables(solver, time_steps):
     """Precompute the full per-step running-DFT weight table on the GPU.
 
@@ -555,12 +599,11 @@ def build_dft_step_tables(solver, time_steps):
     DFT accumulation capturable and cheaper). Eager and graph-captured runs both
     use it whenever it can be built. Also fixes the final window normalization /
     sample count / source-DFT to their full-run sums (the values the host path
-    would reach, and what an early shutoff restores anyway).
-
-    Returns False (caller keeps the host path) for the complex-field DFT, whose
-    real/imaginary split accumulation the table path does not express.
+    would reach, and what an early shutoff restores anyway). Complex (Bloch split)
+    fields accumulate the imaginary field into the auxiliary buffers with the same
+    rows, as the host path does.
     """
-    if not solver.dft_enabled or not solver._dft_entries or has_complex_fields(solver):
+    if not solver.dft_enabled or not solver._dft_entries:
         return False
     frequency_count = len(solver._dft_entries)
     steps = int(time_steps)
@@ -586,37 +629,8 @@ def build_dft_step_tables(solver, time_steps):
         return True
     weighted_cos = np.zeros((steps, frequency_count), dtype=np.float32)
     weighted_sin = np.zeros((steps, frequency_count), dtype=np.float32)
-    window_norm = np.zeros(frequency_count, dtype=np.float64)
-    sample_count = np.zeros(frequency_count, dtype=np.int64)
-    src_real = np.zeros(frequency_count, dtype=np.float64)
-    src_imag = np.zeros(frequency_count, dtype=np.float64)
-
-    phase_cos = solver._dft_phase_step_cos_values.copy()
-    phase_sin = solver._dft_phase_step_sin_values.copy()
-    step_cos = solver._dft_phase_step_cos_values
-    step_sin = solver._dft_phase_step_sin_values
-    start = solver._dft_start_steps
-    end = solver._dft_end_steps
-    window_type = solver.dft_window_type
-    for n in range(steps):
-        active = (n >= start) & ((end < 0) | (n < end))
-        weight = _dft_window_weight(n, window_type, active, start, end)
-        wc = weight * phase_cos
-        ws = weight * phase_sin
-        weighted_cos[n] = wc
-        weighted_sin[n] = ws
-        window_norm += weight
-        sample_count += active.astype(np.int64)
-        if normalize:
-            from ...sources import evaluate_source_time_normalization
-
-            signal = float(evaluate_source_time_normalization(solver._normalization_source_time, normalization_sample_time(solver, n)))
-            src_real += signal * wc
-            src_imag += signal * ws
-        next_cos = phase_cos * step_cos - phase_sin * step_sin
-        next_sin = phase_sin * step_cos + phase_cos * step_sin
-        phase_cos = next_cos.astype(np.float64, copy=False)
-        phase_sin = next_sin.astype(np.float64, copy=False)
+    window_norm, sample_count, src_real, src_imag = _dft_step_sums(
+        solver, steps, normalize=normalize, rows=(weighted_cos, weighted_sin))
 
     for name, values in (("_dft_weighted_cos_table", weighted_cos), ("_dft_weighted_sin_table", weighted_sin)):
         setattr(solver, name, _dft_buffer(solver, getattr(solver, name, None), values.shape,
@@ -650,16 +664,21 @@ def accumulate_dft_gpu(solver):
         solver._dft_weighted_sin_table.index_select(0, solver._dft_step).squeeze(0)
     )
     _launch_dft_accumulation(solver, solver._dft_weighted_cos, solver._dft_weighted_sin)
+    if has_complex_fields(solver):
+        _launch_dft_accumulation(solver, solver._dft_weighted_cos, solver._dft_weighted_sin, auxiliary=True)
     solver._dft_step.add_(1)
 
 
 def _launch_dft_accumulation(solver, weighted_cos, weighted_sin, *, auxiliary=False):
-    arguments = dict(weightedCos=weighted_cos, weightedSin=weighted_sin)
+    # The kernel is elementwise and shape-agnostic: an H family takes the three slots of E,
+    # each accumulator element owned by one thread (no atomics).
     prefix = "aux_" if auxiliary else ""
-    for component in ("Ex", "Ey", "Ez"):
-        buffers = solver._dft_batched_fields.get(component)
-        arguments[component] = (getattr(solver, component + ("_imag" if auxiliary else ""))
-                                if buffers is not None else solver._dft_empty_field)
-        arguments[component + "RealAccum"] = (buffers[prefix + "real"] if buffers is not None else solver._dft_empty_accum)
-        arguments[component + "ImagAccum"] = (buffers[prefix + "imag"] if buffers is not None else solver._dft_empty_accum)
-    solver.fdtd_module.accumulateRunningDftYee3DBatched(**arguments).launchRaw()
+    for family in dft_families(solver):
+        arguments = dict(weightedCos=weighted_cos, weightedSin=weighted_sin)
+        for slot, component in zip(DFT_FAMILIES[0], family):
+            buffers = solver._dft_batched_fields.get(component)
+            arguments[slot] = (getattr(solver, component + ("_imag" if auxiliary else ""))
+                               if buffers is not None else solver._dft_empty_field)
+            arguments[slot + "RealAccum"] = (buffers[prefix + "real"] if buffers is not None else solver._dft_empty_accum)
+            arguments[slot + "ImagAccum"] = (buffers[prefix + "imag"] if buffers is not None else solver._dft_empty_accum)
+        solver.fdtd_module.accumulateRunningDftYee3DBatched(**arguments).launchRaw()

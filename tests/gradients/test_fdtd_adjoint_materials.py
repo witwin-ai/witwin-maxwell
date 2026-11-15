@@ -15,6 +15,7 @@ import witwin.maxwell as mw
 from witwin.maxwell.fdtd.material_pullback import pullback_material_input_gradients
 from witwin.maxwell.fdtd.runtime.materials import average_node_to_component
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_components, compile_materials
 
 _CUDA = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="needs CUDA for FDTD"
@@ -34,9 +35,11 @@ def _build_sim(model, *, time_steps, dt=None, max_electric_field=None):
     return mw.Simulation.fdtd(
         model,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=time_steps, dt=dt, max_electric_field=max_electric_field),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps, dt=dt, max_electric_field=max_electric_field),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
 
 
@@ -110,30 +113,29 @@ class _AnisotropicGeometryScene(mw.SceneModule):
     def to_scene(self):
         size = 0.30 + 0.12 * torch.sigmoid(self.logits)
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-            # Sub-cell geometry sensitivity needs subpixel occupancy averaging,
-            # matching the trainable-geometry FDFD gradient tests.
-            subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="aniso_box",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=size),
-                material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.5, 5.0)),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.30),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.30), fields=("Ez",)))
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    # Sub-cell geometry sensitivity needs subpixel occupancy averaging,
+                    # matching the trainable-geometry FDFD gradient tests.
+                    subpixel=mw.SubpixelSpec(samples=5, averaging="polarized"),
+                    structures=(
+                mw.Structure(
+                    name="aniso_box",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=size),
+                    material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.5, 5.0)),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.30),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.30), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -151,37 +153,36 @@ class _AnisotropicDensityScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="aniso_slab",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
-                material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.5, 5.0)),
-            )
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.18),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    structures=(
+                mw.Structure(
+                    name="aniso_slab",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+                    material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.5, 5.0)),
+                ),
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.18),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -215,7 +216,7 @@ def test_anisotropic_pullback_is_exact_transpose_of_component_averaging():
         # cotangent against the forward node->edge averaged absolute
         # permittivity of the matching axis component.
         reference_prepared = prepare_scene(model.to_scene())
-        eps_components, _ = reference_prepared.compile_material_components()
+        eps_components, _ = compile_material_components(reference_prepared)
         objective = (
             (grad_eps_ex * average_node_to_component(None, eps_components["x"] * _EPS0, "Ex")).sum()
             + (grad_eps_ey * average_node_to_component(None, eps_components["y"] * _EPS0, "Ey")).sum()
@@ -239,7 +240,7 @@ def test_scene_with_diagonal_anisotropic_medium_gradient_matches_fd():
 
     def loss_fn():
         result = _build_sim(model, time_steps=200).run()
-        return _abs2(result.monitor("probe")["data"])
+        return _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values)
 
     backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
 
@@ -270,41 +271,40 @@ class _MagneticDispersiveDensityScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="mu_lorentz_slab",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
-                material=mw.Material(
-                    mu_lorentz_poles=(
-                        mw.LorentzPole(delta_eps=1.0, resonance_frequency=1.5e9, gamma=3.0e8),
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    structures=(
+                mw.Structure(
+                    name="mu_lorentz_slab",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+                    material=mw.Material(
+                        mu_lorentz_poles=(
+                            mw.LorentzPole(delta_eps=1.0, resonance_frequency=1.5e9, gamma=3.0e8),
+                        ),
                     ),
                 ),
-            )
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.18),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.18),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -316,7 +316,7 @@ def test_scene_with_magnetic_dispersive_medium_gradient_matches_fd():
 
     def loss_fn():
         result = _build_sim(model, time_steps=200).run()
-        return _abs2(result.monitor("probe")["data"])
+        return _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values)
 
     backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
 
@@ -347,39 +347,40 @@ def _conductive_scene(sigma_e, *, density=None):
     native conductive reverse transpose that the linear standard/CPML rule drops.
     """
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+        subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.12),
         boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda",
     )
     if sigma_e != 0.0:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 name="lossy_slab",
                 geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.2, 1.2, 0.12)),
                 material=mw.Material(eps_r=1.0, sigma_e=sigma_e),
-            )
-        )
+            ),
+        ))
     if density is not None:
-        scene.add_material_region(
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
             mw.MaterialRegion(
                 name="design",
                 geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
                 density=density,
                 eps_bounds=(1.0, 6.0),
                 mu_bounds=(1.0, 1.0),
-            )
-        )
-    scene.add_source(
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=(0.0, 0.0, -0.30),
             polarization="Ez",
             width=0.04,
             source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (0.06, 0.06, 0.30), fields=("Ez",)))
+        ),
+    ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.06, 0.06, 0.30), fields=("Ez",))))
     return scene
 
 
@@ -409,7 +410,7 @@ def test_scene_with_conductive_medium_gradient_matches_fd():
 
     def loss_fn():
         result = _build_sim(model, time_steps=200).run()
-        return _abs2(result.monitor("probe")["data"])
+        return _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values)
 
     # The conduction loss must actually shape the solution, otherwise this would
     # only re-validate the lossless path (which the linear reverse handles). The
@@ -418,7 +419,7 @@ def test_scene_with_conductive_medium_gradient_matches_fd():
     lossless = _abs2(
         _build_sim(_ConductiveDensityScene(init=0.0, sigma_e=0.0), time_steps=200)
         .run()
-        .monitor("probe")["data"]
+        .monitor("probe").sel(component="Ez").values
     ).item()
     conductive = loss_fn().item()
     assert conductive < 0.6 * lossless, (
@@ -454,7 +455,7 @@ def test_conductive_reverse_routes_through_native_conductive():
     prepared = mw.Simulation.fdtd(
         _conductive_scene(_SIGMA_E),
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=8),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
     ).prepare()
     solver = prepared.solver
     assert solver.conductive_enabled
@@ -481,38 +482,38 @@ _KERR_CHI3 = 5.0e-3
 
 def _kerr_scene(chi3, *, density=None):
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="kerr_slab",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
-            material=mw.Material(eps_r=2.0, kerr_chi3=chi3),
-        )
-    )
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                structures=(
+            mw.Structure(
+                name="kerr_slab",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+                material=mw.Material(eps_r=2.0, kerr_chi3=chi3),
+            ),
+            ),
+            )
     if density is not None:
-        scene.add_material_region(
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
             mw.MaterialRegion(
                 name="design",
                 geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
                 density=density,
                 eps_bounds=(1.0, 6.0),
                 mu_bounds=(1.0, 1.0),
-            )
-        )
-    scene.add_source(
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=(0.0, 0.0, -0.18),
             polarization="Ez",
             width=0.04,
             source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+        ),
+    ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",))))
     return scene
 
 
@@ -542,7 +543,7 @@ def test_kerr_dynamic_curl_replica_matches_cuda_kernel():
     prepared = mw.Simulation.fdtd(
         _kerr_scene(_KERR_CHI3),
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=8),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
     ).prepare()
     solver = prepared.solver
     assert solver.kerr_enabled
@@ -577,14 +578,14 @@ def test_scene_with_kerr_medium_gradient_matches_fd():
 
     def loss_fn():
         result = _build_sim(model, time_steps=200).run()
-        return _abs2(result.monitor("probe")["data"])
+        return _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values)
 
     # The nonlinearity must actually shape the solution, otherwise this would
     # only re-validate the linear path.
     linear_loss = _abs2(
         _build_sim(_KerrDensityScene(init=0.0, chi3=0.0), time_steps=200)
         .run()
-        .monitor("probe")["data"]
+        .monitor("probe").sel(component="Ez").values
     ).item()
     kerr_loss = loss_fn().item()
     assert abs(kerr_loss - linear_loss) > 1e-3 * abs(linear_loss), (
@@ -612,7 +613,7 @@ def test_kerr_reverse_routes_through_native_kerr():
     prepared = mw.Simulation.fdtd(
         _kerr_scene(_KERR_CHI3),
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=8),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
     ).prepare()
     solver = prepared.solver
     assert solver.kerr_enabled and not getattr(solver, "nonlinear_general_enabled", False)
@@ -639,28 +640,27 @@ class _KerrGeometryScene(mw.SceneModule):
     def to_scene(self):
         size = 0.30 + 0.12 * torch.sigmoid(self.logits)
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-            subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="kerr_box",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=size),
-                material=mw.Material(eps_r=2.0, kerr_chi3=_KERR_CHI3),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.18),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    subpixel=mw.SubpixelSpec(samples=5, averaging="polarized"),
+                    structures=(
+                mw.Structure(
+                    name="kerr_box",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=size),
+                    material=mw.Material(eps_r=2.0, kerr_chi3=_KERR_CHI3),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.18),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -695,7 +695,7 @@ def test_kerr_pullback_chi3_channel_is_exact_transpose():
         )
 
         reference_prepared = prepare_scene(model.to_scene())
-        kerr_field = reference_prepared.compile_materials()["kerr_chi3"]
+        kerr_field = compile_materials(reference_prepared)["kerr_chi3"]
         objective = (
             (grad_chi3_ex * average_node_to_component(None, kerr_field, "Ex")).sum()
             + (grad_chi3_ey * average_node_to_component(None, kerr_field, "Ey")).sum()
@@ -723,7 +723,7 @@ def test_anisotropic_geometry_gradient_is_axis_distinct():
     """
     model = _AnisotropicGeometryScene(init=0.0).cuda()
     result = _build_sim(model, time_steps=400).run()
-    loss = _abs2(result.monitor("probe")["data"])
+    loss = _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values)
     loss.backward()
     grad = model.logits.grad.detach()
     assert grad is not None
@@ -746,84 +746,85 @@ _TPA_BETA = 40.0
 
 def _chi2_scene(chi2, *, density=None, boundary="pml"):
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=(
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=(
             mw.BoundarySpec.pml(num_layers=2, strength=1.0)
             if boundary == "pml"
             else mw.BoundarySpec.none()
-        ),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="chi2_slab",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
-            material=mw.Material(eps_r=2.0,
-                nonlinearity=[mw.NonlinearSusceptibility(chi2=chi2)] if chi2 else []),
-        )
-    )
+            ),
+                structures=(
+            mw.Structure(
+                name="chi2_slab",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+                material=mw.Material(eps_r=2.0,
+                    nonlinearity=[mw.media.NonlinearSusceptibility(chi2=chi2)] if chi2 else []),
+            ),
+            ),
+            )
     if density is not None:
-        scene.add_material_region(
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
             mw.MaterialRegion(
                 name="design",
                 geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
                 density=density,
                 eps_bounds=(1.0, 6.0),
                 mu_bounds=(1.0, 1.0),
-            )
-        )
-    scene.add_source(
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=(0.0, 0.0, -0.18),
             polarization="Ez",
             width=0.04,
             # Keep the active nonlinear field inside the certified envelope.
             source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=5.0),
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+        ),
+    ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",))))
     return scene
 
 
 def _tpa_scene(beta, *, density=None):
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+        subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.12),
         boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda",
     )
     if beta != 0.0:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 name="tpa_slab",
                 geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
                 material=mw.Material(
-                    eps_r=2.0, nonlinearity=[mw.TwoPhotonAbsorption(beta=beta)]
+                    eps_r=2.0, nonlinearity=[mw.media.TwoPhotonAbsorption(beta=beta)]
                 ),
-            )
-        )
+            ),
+        ))
     if density is not None:
-        scene.add_material_region(
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
             mw.MaterialRegion(
                 name="design",
                 geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
                 density=density,
                 eps_bounds=(1.0, 6.0),
                 mu_bounds=(1.0, 1.0),
-            )
-        )
-    scene.add_source(
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=(0.0, 0.0, -0.18),
             polarization="Ez",
             width=0.04,
             source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=80.0),
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+        ),
+    ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",))))
     return scene
 
 
@@ -831,33 +832,32 @@ def _general_nonlinear_scene():
     """A slab carrying chi2, chi3, and TPA together so the coefficient replica
     exercises every term of the general nonlinear kernel."""
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="general_slab",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
-            material=mw.Material(
-                eps_r=2.0,
-                nonlinearity=[
-                    mw.NonlinearSusceptibility(chi2=_CHI2, chi3=_KERR_CHI3),
-                    mw.TwoPhotonAbsorption(beta=_TPA_BETA),
-                ],
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                structures=(
+            mw.Structure(
+                name="general_slab",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+                material=mw.Material(
+                    eps_r=2.0,
+                    nonlinearity=[
+                        mw.media.NonlinearSusceptibility(chi2=_CHI2, chi3=_KERR_CHI3),
+                        mw.media.TwoPhotonAbsorption(beta=_TPA_BETA),
+                    ],
+                ),
             ),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, -0.18),
-            polarization="Ez",
-            width=0.04,
-            source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, -0.18),
+                polarization="Ez",
+                width=0.04,
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)),),
+            )
     return scene
 
 
@@ -872,7 +872,7 @@ def test_general_nonlinear_coefficient_replica_matches_cuda_kernel():
     prepared = mw.Simulation.fdtd(
         _general_nonlinear_scene(),
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=8),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
     ).prepare()
     solver = prepared.solver
     assert solver.nonlinear_general_enabled
@@ -942,14 +942,14 @@ def test_scene_with_chi2_medium_gradient_matches_fd(boundary):
 
     def loss_fn():
         result = simulation.run()
-        return _abs2(result.monitor("probe")["data"])
+        return _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values)
 
     # The chi2 nonlinearity must actually shape the solution, otherwise this
     # would only re-validate the linear path.
     linear_loss = _abs2(
         _build_sim(_Chi2DensityScene(init=0.0, chi2=0.0, boundary=boundary), time_steps=200)
         .run()
-        .monitor("probe")["data"]
+        .monitor("probe").sel(component="Ez").values
     ).item()
     chi2_loss = loss_fn().item()
     assert abs(chi2_loss - linear_loss) > 1e-3 * abs(linear_loss), (
@@ -997,13 +997,13 @@ def test_scene_with_tpa_medium_gradient_matches_fd():
 
     def loss_fn():
         result = _build_sim(model, time_steps=200).run()
-        return _abs2(result.monitor("probe")["data"])
+        return _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values)
 
     # The intensity-dependent loss must actually damp the solution.
     lossless = _abs2(
         _build_sim(_TpaDensityScene(init=0.0, beta=0.0), time_steps=200)
         .run()
-        .monitor("probe")["data"]
+        .monitor("probe").sel(component="Ez").values
     ).item()
     absorbed = loss_fn().item()
     assert absorbed < 0.999 * lossless, (
@@ -1037,34 +1037,33 @@ class _Chi2GeometryScene(mw.SceneModule):
     def to_scene(self):
         size = 0.30 + 0.12 * torch.sigmoid(self.logits)
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-            subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="chi2_box",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=size),
-                material=mw.Material(
-                    eps_r=2.0,
-                    nonlinearity=[
-                        mw.NonlinearSusceptibility(chi2=_CHI2),
-                        mw.TwoPhotonAbsorption(beta=_TPA_BETA),
-                    ],
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    subpixel=mw.SubpixelSpec(samples=5, averaging="polarized"),
+                    structures=(
+                mw.Structure(
+                    name="chi2_box",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=size),
+                    material=mw.Material(
+                        eps_r=2.0,
+                        nonlinearity=[
+                            mw.media.NonlinearSusceptibility(chi2=_CHI2),
+                            mw.media.TwoPhotonAbsorption(beta=_TPA_BETA),
+                        ],
+                    ),
                 ),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.18),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.18),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -1096,7 +1095,7 @@ def _pullback_transpose_reference(model, *, field_key, grad_ex_kwarg, grad_ey_kw
         )
 
         reference_prepared = prepare_scene(model.to_scene())
-        node_field = reference_prepared.compile_materials()[field_key]
+        node_field = compile_materials(reference_prepared)[field_key]
         objective = (
             (grad_ex * average_node_to_component(None, node_field, "Ex")).sum()
             + (grad_ey * average_node_to_component(None, node_field, "Ey")).sum()
@@ -1155,7 +1154,7 @@ def test_chi2_reverse_routes_through_native_general_nonlinear():
     prepared = mw.Simulation.fdtd(
         _general_nonlinear_scene(),
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=8),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
     ).prepare()
     solver = prepared.solver
     assert solver.nonlinear_general_enabled
@@ -1189,7 +1188,7 @@ _FULL_ANISO_OFFDIAG = 1.2
 
 
 def _full_aniso_tensor(offdiag):
-    return mw.Tensor3x3(
+    return mw.media.Tensor3x3(
         (
             (4.0, 0.0, offdiag),
             (0.0, 4.0, offdiag),
@@ -1206,41 +1205,41 @@ def _full_aniso_scene(offdiag=_FULL_ANISO_OFFDIAG, *, density=None):
     reflected back across) the off-diagonal coupling.
     """
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="full_aniso_slab",
-            # Kept clear of the 2-layer PML: the off-diagonal correction is only
-            # exact outside the absorber, so the slab (and its soft-SDF tail) must
-            # not touch it.
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.36, 0.36, 0.12)),
-            material=mw.Material(epsilon_tensor=_full_aniso_tensor(offdiag)),
-        )
-    )
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                structures=(
+            mw.Structure(
+                name="full_aniso_slab",
+                # Kept clear of the 2-layer PML: the off-diagonal correction is only
+                # exact outside the absorber, so the slab (and its soft-SDF tail) must
+                # not touch it.
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.36, 0.36, 0.12)),
+                material=mw.Material(epsilon_tensor=_full_aniso_tensor(offdiag)),
+            ),
+            ),
+            )
     if density is not None:
-        scene.add_material_region(
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
             mw.MaterialRegion(
                 name="design",
                 geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
                 density=density,
                 eps_bounds=(1.0, 6.0),
                 mu_bounds=(1.0, 1.0),
-            )
-        )
-    scene.add_source(
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=(0.0, 0.0, -0.18),
             polarization="Ez",
             width=0.04,
             source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+        ),
+    ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",))))
     return scene
 
 
@@ -1271,7 +1270,7 @@ def test_full_aniso_electric_correction_replica_matches_cuda_kernel():
     prepared = mw.Simulation.fdtd(
         _full_aniso_scene(),
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=8),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
     ).prepare()
     solver = prepared.solver
     assert solver.full_aniso_enabled
@@ -1317,7 +1316,7 @@ def test_full_aniso_reverse_routes_through_native_full_aniso():
     prepared = mw.Simulation.fdtd(
         _full_aniso_scene(),
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=8),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
     ).prepare()
     solver = prepared.solver
     assert solver.full_aniso_enabled
@@ -1345,16 +1344,18 @@ def test_full_aniso_bridge_forward_matches_reference_physics():
         mw.Simulation.fdtd(
             _full_aniso_scene(density=density),
             frequencies=[1e9],
-            run_time=mw.TimeConfig(time_steps=200),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=200),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False,
+            ),
         )
         .run()
-        .monitor("probe")["data"]
+        .monitor("probe").sel(component="Ez").values
     ).item()
 
     model = _FullAnisoDensityScene(init=0.0)
-    bridge = _abs2(_build_sim(model, time_steps=200).run().monitor("probe")["data"]).item()
+    bridge = _abs2(_build_sim(model, time_steps=200).run().monitor("probe", freq_index=0).sel(component="Ez").values).item()
 
     assert abs(bridge - reference) <= 1e-5 * abs(reference), (
         f"bridge forward diverges from reference physics: bridge={bridge:.6e}, reference={reference:.6e}"
@@ -1380,14 +1381,14 @@ def test_scene_with_full_aniso_medium_gradient_matches_fd():
 
     def loss_fn():
         result = _build_sim(model, time_steps=200).run()
-        return _abs2(result.monitor("probe")["data"])
+        return _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values)
 
     # The off-diagonal coupling must actually reshape the solution, otherwise
     # this would only re-validate the diagonal-anisotropic path.
     diagonal_only = _abs2(
         _build_sim(_FullAnisoDensityScene(init=0.0, offdiag=0.0), time_steps=200)
         .run()
-        .monitor("probe")["data"]
+        .monitor("probe").sel(component="Ez").values
     ).item()
     coupled = loss_fn().item()
     assert abs(coupled - diagonal_only) > 1e-2 * abs(diagonal_only), (
@@ -1426,13 +1427,6 @@ _BLOCH_DISP_K = math.pi / 1.8
 
 
 def _bloch_dispersive_scene(delta_eps, *, density=None):
-    scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=mw.BoundarySpec.bloch((_BLOCH_DISP_K, 0.0, 0.0)),
-        device="cuda",
-    )
     # Full-transverse (y,z) Lorentz slab centered on the Bloch (x) propagation
     # axis. Because it spans the entire y/z cross-section, every x-path between the
     # two halves of the periodic domain -- direct or Bloch-wrap -- must cross it,
@@ -1451,37 +1445,44 @@ def _bloch_dispersive_scene(delta_eps, *, density=None):
     # probe/design (the earlier fixture) left the adjoint on the probe side of the
     # slab, so zeroing that coupling perturbed the dominant gradient by only ~1e-4
     # (below the 1e-3 gate) -- the coupling could be dropped undetected.
-    scene.add_structure(
-        mw.Structure(
-            name="lorentz_slab",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.48, 1.2, 1.2)),
-            material=mw.Material.lorentz(
-                eps_inf=2.0,
-                delta_eps=delta_eps,
-                resonance_frequency=1.5e9,
-                gamma=0.2e9,
+    scene = mw.Scene(
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=mw.BoundarySpec.bloch((_BLOCH_DISP_K, 0.0, 0.0)),
+                structures=(
+            mw.Structure(
+                name="lorentz_slab",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.48, 1.2, 1.2)),
+                material=mw.Material.lorentz(
+                    eps_inf=2.0,
+                    delta_eps=delta_eps,
+                    resonance_frequency=1.5e9,
+                    gamma=0.2e9,
+                ),
             ),
-        )
-    )
+            ),
+            )
     if density is not None:
-        scene.add_material_region(
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
             mw.MaterialRegion(
                 name="design",
                 geometry=mw.Box(position=(-0.36, 0.06, 0.06), size=(0.24, 0.24, 0.24)),
                 density=density,
                 eps_bounds=(1.0, 6.0),
                 mu_bounds=(1.0, 1.0),
-            )
-        )
-    scene.add_source(
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=(-0.54, 0.06, 0.06),
             polarization="Ez",
             width=0.12,
             source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.3e9, amplitude=25.0),
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (0.30, 0.06, 0.06), fields=("Ez",)))
+        ),
+    ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.30, 0.06, 0.06), fields=("Ez",))))
     return scene
 
 
@@ -1515,7 +1516,7 @@ def test_bloch_dispersive_reverse_selects_native_bloch_dispersive_backend():
     prepared = mw.Simulation.fdtd(
         _bloch_dispersive_scene(3.5, density=density),
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=8),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
     ).prepare()
     solver = prepared.solver
     assert solver.electric_dispersive_enabled and solver.complex_fields_enabled
@@ -1641,7 +1642,7 @@ def test_scene_with_bloch_dispersive_medium_gradient_matches_fd():
 
     def loss_fn():
         result = simulation.run()
-        return _abs2(result.monitor("probe")["data"].to(torch.complex128))
+        return _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values.to(torch.complex128))
 
     # Dispersion must actually reshape the solution versus a nondispersive slab of
     # the same eps_inf, otherwise this would only re-validate the nondispersive
@@ -1649,7 +1650,7 @@ def test_scene_with_bloch_dispersive_medium_gradient_matches_fd():
     nondispersive = _abs2(
         _build_sim(_BlochDispersiveDensityScene(init=0.0, delta_eps=0.0), time_steps=time_steps, dt=dt)
         .run()
-        .monitor("probe")["data"]
+        .monitor("probe").sel(component="Ez").values
     ).item()
     dispersive = loss_fn().item()
     assert abs(dispersive - nondispersive) > 1e-2 * abs(nondispersive), (
@@ -1692,48 +1693,47 @@ class _BlochMagneticDispersiveDensityScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.15),
-            boundary=mw.BoundarySpec.bloch((_BLOCH_DISP_K, 0.0, 0.0)),
-            device="cuda",
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="mu_lorentz_slab",
-                geometry=mw.Box(position=(-0.15, 0.0, 0.0), size=(0.30, 1.2, 1.2)),
-                material=mw.Material(
-                    mu_lorentz_poles=(
-                        mw.LorentzPole(delta_eps=1.0, resonance_frequency=1.2e9, gamma=2.0e8),
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.15),
+                    boundary=mw.BoundarySpec.bloch((_BLOCH_DISP_K, 0.0, 0.0)),
+                    structures=(
+                mw.Structure(
+                    name="mu_lorentz_slab",
+                    geometry=mw.Box(position=(-0.15, 0.0, 0.0), size=(0.30, 1.2, 1.2)),
+                    material=mw.Material(
+                        mu_lorentz_poles=(
+                            mw.LorentzPole(delta_eps=1.0, resonance_frequency=1.2e9, gamma=2.0e8),
+                        ),
                     ),
                 ),
-            )
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.15, 0.0, 0.0), size=(0.24, 0.24, 0.24)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(-0.54, 0.06, 0.06),
-                polarization="Ez",
-                width=0.12,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.3e9, amplitude=25.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.15, 0.0, 0.0), fields=("Ez",)))
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.15, 0.0, 0.0), size=(0.24, 0.24, 0.24)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(-0.54, 0.06, 0.06),
+                    polarization="Ez",
+                    width=0.12,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.3e9, amplitude=25.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.15, 0.0, 0.0), fields=("Ez",)),),
+                )
         return scene
 
 
 @_CUDA
 def test_bloch_magnetic_dispersive_adjoint_runs_native():
     model = _BlochMagneticDispersiveDensityScene(init=0.0).cuda()
-    loss = _abs2(_build_sim(model, time_steps=16).run().monitor("probe")["data"])
+    loss = _abs2(_build_sim(model, time_steps=16).run().monitor("probe", freq_index=0).sel(component="Ez").values)
     loss.backward()
     assert model.logits.grad is not None
     assert torch.isfinite(model.logits.grad).all()
@@ -1762,46 +1762,45 @@ class _AnisoDispersiveDensityScene(mw.SceneModule):
 
     def to_scene(self):
         density = torch.sigmoid(self.logits)
-        scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
         poles = (
             ()
             if self._delta_eps == 0.0
             else (mw.LorentzPole(delta_eps=self._delta_eps, resonance_frequency=1.5e9, gamma=3.0e8),)
         )
-        scene.add_structure(
-            mw.Structure(
-                name="aniso_lorentz_slab",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
-                material=mw.Material(
-                    epsilon_tensor=mw.DiagonalTensor3(2.0, 3.5, 5.0),
-                    lorentz_poles=poles,
+        scene = mw.Scene(
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    structures=(
+                mw.Structure(
+                    name="aniso_lorentz_slab",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+                    material=mw.Material(
+                        epsilon_tensor=mw.DiagonalTensor3(2.0, 3.5, 5.0),
+                        lorentz_poles=poles,
+                    ),
                 ),
-            )
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.18),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.18),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -1817,7 +1816,7 @@ def test_scene_with_diagonal_aniso_dispersive_medium_gradient_matches_fd():
 
     def loss_fn():
         result = _build_sim(model, time_steps=200).run()
-        return _abs2(result.monitor("probe")["data"])
+        return _abs2(result.monitor("probe", freq_index=0).sel(component="Ez").values)
 
     # Dispersion must actually reshape the solution versus a nondispersive slab of
     # the same anisotropic eps_inf, otherwise this would only re-validate the
@@ -1825,7 +1824,7 @@ def test_scene_with_diagonal_aniso_dispersive_medium_gradient_matches_fd():
     nondispersive = _abs2(
         _build_sim(_AnisoDispersiveDensityScene(init=0.0, delta_eps=0.0).cuda(), time_steps=200)
         .run()
-        .monitor("probe")["data"]
+        .monitor("probe").sel(component="Ez").values
     ).item()
     dispersive = loss_fn().item()
     assert abs(dispersive - nondispersive) > 1e-2 * abs(nondispersive), (

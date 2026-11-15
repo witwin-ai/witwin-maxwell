@@ -15,7 +15,7 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 def setup():
     vertices=torch.tensor([[0.,0.,0.],[.1,0.,0.],[0.,.1,0.],[0.,0.,.1]],device='cuda',dtype=torch.float64)
     cells=torch.tensor([[0,1,2,3]],device='cuda')
-    volumes=tuple(mw.TetrahedralVolumeMesh(vertices+vertices.new_tensor([i*.24,0.,0.]),cells,region_id=i+1)
+    volumes=tuple(mw.mom.TetrahedralVolumeMesh(vertices+vertices.new_tensor([i*.24,0.,0.]),cells,region_id=i+1)
                   for i in range(2))
     system=SurfaceSystem.create([(i,f'body{i}',RWGBasis(v.boundary),compile_medium(mw.Material(eps_r=2+i),3e8))
                                  for i,v in enumerate(volumes)])

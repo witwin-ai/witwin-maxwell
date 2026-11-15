@@ -22,17 +22,25 @@ frequencies = (0.9e9, 1.0e9, 1.1e9)
 
 def run_once():
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.3, 0.3),) * 3), grid=mw.GridSpec.uniform(0.012),
-                     boundary=mw.BoundarySpec.pml(num_layers=8), device="cuda")
-    scene.add_structure(mw.Structure(geometry=mw.Box(position=(0.0, 0.0, 0.05), size=(0.12, 0.12, 0.12)),
-                                     material=mw.Material(eps_r=4.0)))
-    scene.add_source(mw.PointDipole(position=(0.0, 0.0, -0.1), polarization="Ez", profile="ideal",
-                                    source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.4e9)))
-    scene.add_monitor(mw.PlaneMonitor(name="xz", axis="y", position=0.0, fields=("Ex", "Ez"), frequencies=frequencies))
-    scene.add_monitor(mw.PlaneMonitor(name="xy", axis="z", position=0.15, fields=("Ex", "Ey"), frequencies=frequencies))
-    for i in range(4):
-        scene.add_monitor(mw.PointMonitor(f"p{i}", position=(0.05 * i, 0.02, 0.1), fields=("Ex", "Ez")))
+                     boundary=mw.BoundarySpec.pml(num_layers=8),
+                     structures=(
+                         mw.Structure(geometry=mw.Box(position=(0.0, 0.0, 0.05), size=(0.12, 0.12, 0.12)),
+                                      material=mw.Material(eps_r=4.0)),
+                     ),
+                     sources=(
+                         mw.PointDipole(position=(0.0, 0.0, -0.1), polarization="Ez", profile="ideal",
+                                        source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.4e9)),
+                     ),
+                     monitors=(
+                         mw.PlaneMonitor(name="xz", axis="y", position=0.0, fields=("Ex", "Ez"), frequencies=frequencies),
+                         mw.PlaneMonitor(name="xy", axis="z", position=0.15, fields=("Ex", "Ey"), frequencies=frequencies),
+                     ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.PointMonitor(f"p{i}", position=(0.05 * i, 0.02, 0.1), fields=("Ex", "Ez")) for i in range(4)),
+    ))
     result = mw.Simulation.fdtd(scene, frequencies=frequencies).prepare().run()
-    return float(result.monitor("p0")["Ez"].abs().max())
+    return float(result.raw_monitor("p0")["Ez"].abs().max())
 
 
 run_once()

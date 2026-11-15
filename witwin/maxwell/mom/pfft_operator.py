@@ -21,6 +21,7 @@ import time
 
 import torch
 
+from .ordered_reduction import ordered_index_add_
 from .pfft_grid import PFFTGridSpec, PFFTProjection
 
 
@@ -98,7 +99,7 @@ class PFFTRegion:
     def _scatter(self, coefficients, channel):
         grid = torch.zeros(math.prod(self.shape), device=self.device, dtype=self.dtype)
         values = self.weights[..., channel]*coefficients[:, None]
-        grid.index_add_(0, self.indices.flatten(), values.flatten())
+        ordered_index_add_(grid, 0, self.indices.flatten(), values.flatten())
         return grid.reshape(self.shape)
 
     def _gather(self, grid, channel):

@@ -43,11 +43,18 @@ def _uniform_cube_result(
     """
     mass_density = rho if mass_density is _USE_RHO else mass_density
     material = mw.Material(sigma_e=sigma, mass_density=mass_density, name="tissue")
+    monitor = mw.monitors.PowerLossMonitor(
+        "loss",
+        position=(1.0 * scale,) * 3,
+        size=(1.0 * scale,) * 3,
+        frequencies=frequencies,
+        channels=channels,
+    )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 2.0 * scale),) * 3),
-        grid=mw.GridSpec.uniform(0.1 * scale),
-        boundary=mw.BoundarySpec.none(),
-        structures=(
+                domain=mw.Domain(bounds=((0.0, 2.0 * scale),) * 3),
+                grid=mw.GridSpec.uniform(0.1 * scale),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
             mw.Structure(
                 name="bulk",
                 geometry=mw.Box(
@@ -55,23 +62,15 @@ def _uniform_cube_result(
                 ),
                 material=material,
             ),
-        ),
-        device=device,
-    )
-    monitor = mw.PowerLossMonitor(
-        "loss",
-        position=(1.0 * scale,) * 3,
-        size=(1.0 * scale,) * 3,
-        frequencies=frequencies,
-        channels=channels,
-    )
-    scene.add_monitor(monitor)
-    prepared = prepare_scene(scene)
+            ),
+                monitors=(monitor,),
+            )
+    prepared = prepare_scene(scene, device=device)
     compiled = compile_power_loss_monitor(prepared, monitor)
     fields = {}
     for component in ("Ex", "Ey", "Ez"):
         # Result stores per-frequency grids; single-frequency runs carry no
-        # leading frequency axis (Result.tensor restacks per requested frequency).
+        # leading frequency axis (Result.field restacks per requested frequency).
         shape = compiled.full_component_shapes[component]
         if len(frequencies) > 1:
             shape = (len(frequencies), *shape)
@@ -99,7 +98,7 @@ def _nanmax(tensor):
 
 def test_point_sar_matches_analytic_conduction():
     result, params = _uniform_cube_result()
-    sar = result.sar("loss")
+    sar = mw.sar.sar(result, "loss")
 
     analytic = 0.5 * params["sigma"] * (3.0 * params["e0"] ** 2) / params["rho"]
     peak = _nanmax(sar.point_sar("total"))
@@ -117,7 +116,7 @@ def test_point_sar_matches_analytic_conduction():
 
 def test_volume_integrated_power_closes_against_power_loss_total():
     result, _ = _uniform_cube_result()
-    sar = result.sar("loss")
+    sar = mw.sar.sar(result, "loss")
 
     q_total = sar.absorbed_power_density["total"]
     region_power = (q_total * sar.cell_volume[None]).sum(dim=(1, 2, 3))
@@ -125,7 +124,7 @@ def test_volume_integrated_power_closes_against_power_loss_total():
     torch.testing.assert_close(region_power, electric_total, rtol=1e-5, atol=1e-9)
 
     # And the electric channel powers match the PowerLossData directly.
-    power_loss = result.power_loss("loss")
+    power_loss = result.monitor("loss")
     torch.testing.assert_close(region_power, power_loss.total, rtol=1e-5, atol=1e-9)
 
 
@@ -142,10 +141,8 @@ def test_per_channel_decomposition_sums_to_total():
             torch.full(ex_shape, 0.2, device=prepared.device),
         )
     )
-    sar = result.sar(
-        "loss",
-        volume_channels={"electric_dispersion": {"Ex": dispersive}},
-    )
+    sar = mw.sar.sar(result, "loss",
+        volume_channels={"electric_dispersion": {"Ex": dispersive}},)
     total = sar.point_sar("total")
     summed = sar.point_sar("conduction") + sar.point_sar("electric_dispersion")
     valid = sar.valid[None].expand_as(total)
@@ -156,7 +153,7 @@ def test_per_channel_decomposition_sums_to_total():
 def test_missing_mass_density_raises():
     result, _ = _uniform_cube_result(mass_density=None)
     with pytest.raises(ValueError, match="without a mass_density"):
-        result.sar("loss")
+        mw.sar.sar(result, "loss")
 
 
 def test_no_electric_volumetric_channel_fails_closed():
@@ -176,13 +173,12 @@ def test_no_electric_volumetric_channel_fails_closed():
                 material=material,
             ),
         ),
-        device="cpu",
     )
-    monitor = mw.PowerLossMonitor(
+    monitor = mw.monitors.PowerLossMonitor(
         "loss", position=(0.5, 0.5, 0.5), size=(0.5, 0.5, 0.5),
         frequencies=(1.0e9,), channels=("circuit",),
     )
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     compiled = compile_power_loss_monitor(prepared, monitor)
     power_loss = compute_power_loss_data(
         compiled,
@@ -206,7 +202,7 @@ def test_cpu_float64_oracle_parity():
     result, params = _uniform_cube_result(
         frequencies=(1.0e9,), e0=1.5, sigma=0.8, rho=1100.0
     )
-    sar = result.sar("loss")
+    sar = mw.sar.sar(result, "loss")
 
     prepared = result.prepared_scene
     monitor = result.scene.monitors[0]
@@ -261,7 +257,7 @@ def _compute_sar_with_mass(result, mass, *, normalization=None):
     prepared = result.prepared_scene
     monitor = result.scene.monitors[0]
     compiled = compile_power_loss_monitor(prepared, monitor)
-    power_loss = result.power_loss("loss")
+    power_loss = result.monitor("loss")
     return compute_sar(
         prepared_scene=prepared,
         monitor=monitor,
@@ -313,7 +309,7 @@ def test_occupancy_below_epsilon_is_excluded_from_point_sar_and_statistics():
 
 def test_region_statistics_report_power_and_sar_per_tissue():
     result, params = _uniform_cube_result(frequencies=(1.0e9,))
-    sar = result.sar("loss")
+    sar = mw.sar.sar(result, "loss")
 
     assert set(sar.statistics) == {0}
     stats = sar.statistics[0]
@@ -333,10 +329,8 @@ def test_region_statistics_report_power_and_sar_per_tissue():
 
 def test_normalization_source_amplitude_scales_sar_by_square():
     result, _ = _uniform_cube_result(frequencies=(1.0e9,))
-    base = result.sar("loss")
-    scaled = result.sar(
-        "loss", normalization=mw.PowerNormalization.source(amplitude=2.0)
-    )
+    base = mw.sar.sar(result, "loss")
+    scaled = mw.sar.sar(result, "loss", normalization=mw.sar.PowerNormalization.source(amplitude=2.0))
     ratio = scaled.point_sar("total")[base.valid[None].expand_as(scaled.point_sar("total"))] / base.point_sar(
         "total"
     )[base.valid[None].expand_as(base.point_sar("total"))]
@@ -347,41 +341,38 @@ def test_accepted_power_normalization_fails_closed_without_port():
     """accepted_power normalization must fail closed when the named port is absent."""
     result, _ = _uniform_cube_result(frequencies=(1.0e9,))
     with pytest.raises(KeyError, match="feed"):
-        result.sar(
-            "loss",
-            normalization=mw.PowerNormalization.accepted_power(port="feed", watts=1.0),
-        )
+        mw.sar.sar(result, "loss",
+            normalization=mw.sar.PowerNormalization.accepted_power(port="feed", watts=1.0),)
 
 
 def test_input_power_normalization_fails_closed():
     """input_power scaling has no source-power diagnostic in this build; fail closed."""
     result, _ = _uniform_cube_result(frequencies=(1.0e9,))
     with pytest.raises(NotImplementedError, match="input_power"):
-        result.sar(
-            "loss",
-            normalization=mw.PowerNormalization.input_power(watts=1.0),
-        )
+        mw.sar.sar(result, "loss",
+            normalization=mw.sar.PowerNormalization.input_power(watts=1.0),)
 
 
 def test_point_sar_preserves_field_autograd():
     result, _ = _uniform_cube_result(
         frequencies=(1.0e9,), dtype=torch.complex64, requires_grad=True
     )
-    sar = result.sar("loss")
+    sar = mw.sar.sar(result, "loss")
     total = sar.point_sar("total")
     objective = torch.nan_to_num(total, nan=0.0).sum()
     objective.backward()
-    for field in result.fields.values():
+    # The stored leaf tensors (Result.E/field return FieldData views of them).
+    for field in (result._fields["EX"], result._fields["EY"], result._fields["EZ"]):
         assert field.grad is not None
         assert torch.all(torch.isfinite(field.grad))
 
 
 def test_sar_result_serialization_roundtrip(tmp_path):
     result, _ = _uniform_cube_result(frequencies=(1.0e9, 2.0e9))
-    sar = result.sar("loss")
+    sar = mw.sar.sar(result, "loss")
     path = tmp_path / "sar.pt"
     sar.save(path)
-    loaded = mw.SARResult.load(path)
+    loaded = mw.sar.SARResult.load(path)
 
     torch.testing.assert_close(
         torch.nan_to_num(loaded.point_sar("total"), nan=0.0),
@@ -400,7 +391,7 @@ def test_sar_result_serialization_roundtrip(tmp_path):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_sar_stays_on_cuda_device():
     result, _ = _uniform_cube_result(device="cuda", frequencies=(1.0e9,))
-    sar = result.sar("loss")
+    sar = mw.sar.sar(result, "loss")
     assert sar.point_sar("total").device.type == "cuda"
     assert sar.rho_cell.device.type == "cuda"
     assert sar.valid.device.type == "cuda"

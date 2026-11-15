@@ -5,6 +5,7 @@ are one-based. CUDA_VISIBLE_DEVICES selects the physical GPU outside this script
 """
 
 import math
+from dataclasses import replace
 import sys
 
 import numpy as np
@@ -16,13 +17,12 @@ from witwin.maxwell.fdtd.runtime import stepping
 C0 = 299792458.0
 
 
-def _cube(n, span, *, device):
+def _cube(n, span):
     nodes = np.linspace(-span / 2, span / 2, n + 1)
     return mw.Scene(
         domain=mw.Domain(((float(nodes[0]), float(nodes[-1])),) * 3),
         grid=mw.GridSpec.custom(nodes, nodes, nodes),
         boundary=mw.BoundarySpec.pml(num_layers=8),
-        device=device,
     )
 
 
@@ -30,18 +30,21 @@ def _kwargs(frequencies):
     center = (frequencies[0] + frequencies[-1]) / 2
     return dict(
         frequencies=frequencies,
-        shutoff=0.0,
-        full_field_dft=False,
-        excitations=(mw.PortExcitation(
+        config=mw.FDTDConfig(shutoff=0.0, full_field_dft=False),
+        excitations=(mw.rf.PortExcitation(
             "feed", source_time=mw.GaussianPulse(frequency=center, fwidth=0.8 * center)
         ),),
     )
 
 
 def _surface(scene, frequencies, size):
-    scene.add_monitor(mw.ClosedSurfaceMonitor.box(
-        "radiation", size=size, frequencies=frequencies
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.ClosedSurfaceMonitor.box(
+            "radiation", size=size, frequencies=frequencies
+        ),
     ))
+    return scene
 
 
 def build_scene(segs, n, *, finite, port=True):
@@ -49,24 +52,30 @@ def build_scene(segs, n, *, finite, port=True):
     wavelength = C0 / frequency
     span = 1.6 * wavelength
     dx = span / n
-    scene = _cube(n, span, device=torch.device("cuda:0"))
-    conductor = (mw.WireConductor.finite(conductivity=5.8e7)
-                 if finite else mw.WireConductor.pec())
+    scene = _cube(n, span)
+    conductor = (mw.rf.WireConductor.finite(conductivity=5.8e7)
+                 if finite else mw.rf.WireConductor.pec())
     for side, sign in (("negative", -1), ("positive", 1)):
         points = [(0.0, 0.0, sign * value)
                   for value in np.linspace(dx / 2, 0.24 * wavelength, segs + 1)]
-        scene.add_thin_wire(mw.ThinWire(
-            side, points, 0.12 * dx, conductor, snap="continuous"
+        scene = scene.updated(thin_wires=(
+            *scene.thin_wires,
+            mw.rf.ThinWire(
+                side, points, 0.12 * dx, conductor, snap="continuous"
+            ),
         ))
     if port:
-        scene.add_port(mw.LumpedPort(
-            "feed", wire_binding=mw.WirePortBinding.nodes(
-                negative=mw.WireNodeRef("negative", 0),
-                positive=mw.WireNodeRef("positive", 0),
+        scene = scene.updated(ports=(
+            *scene.ports,
+            mw.LumpedPort(
+                "feed", wire_binding=mw.rf.WirePortBinding.nodes(
+                negative=mw.rf.WireNodeRef("negative", 0),
+                positive=mw.rf.WireNodeRef("positive", 0),
             ), reference_impedance=50.0,
+            ),
         ))
     frequencies = tuple(np.linspace(0.8 * frequency, 1.2 * frequency, 11))
-    _surface(scene, frequencies, (1.2 * wavelength,) * 3)
+    scene = _surface(scene, frequencies, (1.2 * wavelength,) * 3)
     return scene, frequencies
 
 
@@ -76,7 +85,7 @@ def main():
     finite = len(sys.argv) > 4 and sys.argv[4] == "cu"
     scene, frequencies = build_scene(segs, n, finite=finite)
     kwargs = _kwargs(frequencies)
-    kwargs["run_time"] = mw.TimeConfig.auto(steady_cycles=cycles, transient_cycles=8)
+    kwargs["config"] = replace(kwargs["config"], run_time=mw.TimeConfig.auto(steady_cycles=cycles, transient_cycles=8))
     prepared = mw.Simulation.fdtd(scene, **kwargs).prepare()
     solver = prepared.solver
     model = solver._wire_runtime.lossy_model
@@ -122,12 +131,12 @@ def main():
     stepping.accumulate_wire_monitors = record
     result = prepared.run()
     stepping.accumulate_wire_monitors = original
-    print(f"{result.solver_stats['steps_run']},"
-          f"{result.solver_stats['steps_run'] / steps_per_cycle:.3f},"
+    print(f"{result.stats()['steps_run']},"
+          f"{result.stats()['steps_run'] / steps_per_cycle:.3f},"
           f"{peak_current:.9e},{peak_energy:.9e}", flush=True)
     port = result.port("feed")
     print(f"wire={'finite' if finite else 'pec'} n={n} segs={segs} cycles={cycles} "
-          f"steps={result.solver_stats['steps_run']} onset={onset} "
+          f"steps={result.stats()['steps_run']} onset={onset} "
           f"runtime_dt_after={solver.dt:.17g} "
           f"final_current_peak_A={float(solver._wire_runtime.current.abs().max()):.9e} "
           f"max_incident_power={float(torch.as_tensor(port.incident_power).abs().max()):.3e} "

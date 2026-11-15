@@ -142,23 +142,22 @@ def test_float32_reduction_matches_float64_reference(device):
 
 def _stress_result(v_time, i_time):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
-        grid=mw.GridSpec.uniform(0.5),
-        device="cpu",
-    )
-    scene.add_monitor(
-        mw.ComponentStressMonitor(
-            "part",
-            port="feed",
-            rating=ComponentRating(voltage=100.0),
-            voltage_series="vprobe",
-            current_series="iprobe",
-        )
-    )
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
+                grid=mw.GridSpec.uniform(0.5),
+                monitors=(
+            mw.esd.ComponentStressMonitor(
+                "part",
+                port="feed",
+                rating=ComponentRating(voltage=100.0),
+                voltage_series="vprobe",
+                current_series="iprobe",
+            ),
+            ),
+            )
     n = v_time.numel()
     monitors = {
-        "vprobe": {"t": v_time, "field": torch.ones(n, dtype=torch.float64)},
-        "iprobe": {"t": i_time, "field": torch.full((n,), 2.0, dtype=torch.float64)},
+        "vprobe": {"t": v_time, "components": {"Ez": torch.ones(n, dtype=torch.float64)}},
+        "iprobe": {"t": i_time, "components": {"Hx": torch.full((n,), 2.0, dtype=torch.float64)}},
     }
     return Result(method="fdtd", scene=scene, frequency=1e9, monitors=monitors)
 
@@ -166,7 +165,7 @@ def _stress_result(v_time, i_time):
 def test_component_stress_reduces_on_shared_time_axis():
     t = torch.linspace(0.0, 1e-8, 6, dtype=torch.float64)
     result = _stress_result(t, t.clone())
-    data = result.component_stress("part")
+    data = mw.esd.component_stress(result, "part")
     # P = V*I = 1*2 = 2 everywhere on a shared axis.
     assert float(data.power[0]) == pytest.approx(2.0)
 
@@ -178,7 +177,7 @@ def test_component_stress_rejects_mismatched_time_axes():
     i_time = torch.linspace(0.0, 2e-8, 6, dtype=torch.float64)
     result = _stress_result(v_time, i_time)
     with pytest.raises(ValueError, match="different time axes"):
-        result.component_stress("part")
+        mw.esd.component_stress(result, "part")
 
 
 def test_falsify_rectangle_energy_would_break_trapezoid_parity():

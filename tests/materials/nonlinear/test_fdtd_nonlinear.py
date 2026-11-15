@@ -5,6 +5,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.core import Box
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 def _to_cpu_numpy(value):
@@ -25,13 +26,13 @@ def _plane_complex_mean(data):
 
 def test_nonlinear_susceptibility_requires_nonzero_chi2():
     with pytest.raises(ValueError, match="nonzero"):
-        mw.NonlinearSusceptibility(chi2=0.0)
+        mw.media.NonlinearSusceptibility(chi2=0.0)
     with pytest.raises(ValueError, match="finite"):
-        mw.NonlinearSusceptibility(chi2=float("nan"))
+        mw.media.NonlinearSusceptibility(chi2=float("nan"))
 
 
 def test_material_composes_chi2_nonlinearity():
-    material = mw.Material(eps_r=2.25, nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6))
+    material = mw.Material(eps_r=2.25, nonlinearity=mw.media.NonlinearSusceptibility(chi2=1.0e-6))
     assert material.is_nonlinear
     assert material.nonlinear_chi2 == pytest.approx(1.0e-6)
     assert material.nonlinear_chi3 == 0.0
@@ -39,8 +40,8 @@ def test_material_composes_chi2_nonlinearity():
     stacked = mw.Material(
         eps_r=2.25,
         nonlinearity=(
-            mw.NonlinearSusceptibility(chi2=1.0e-6),
-            mw.NonlinearSusceptibility(chi2=2.0e-6),
+            mw.media.NonlinearSusceptibility(chi2=1.0e-6),
+            mw.media.NonlinearSusceptibility(chi2=2.0e-6),
         ),
     )
     assert stacked.nonlinear_chi2 == pytest.approx(3.0e-6)
@@ -50,7 +51,7 @@ def test_material_composes_chi2_nonlinearity():
 
 
 def test_nonlinear_susceptibility_chi3_folds_into_kerr_channel():
-    chi3_only = mw.Material(eps_r=2.25, nonlinearity=mw.NonlinearSusceptibility(chi3=2.0e-10))
+    chi3_only = mw.Material(eps_r=2.25, nonlinearity=mw.media.NonlinearSusceptibility(chi3=2.0e-10))
     assert chi3_only.is_nonlinear
     assert chi3_only.nonlinear_chi2 == 0.0
     assert chi3_only.nonlinear_chi3 == pytest.approx(2.0e-10)
@@ -58,7 +59,7 @@ def test_nonlinear_susceptibility_chi3_folds_into_kerr_channel():
     combined = mw.Material(
         eps_r=2.25,
         kerr_chi3=1.0e-10,
-        nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6, chi3=2.0e-10),
+        nonlinearity=mw.media.NonlinearSusceptibility(chi2=1.0e-6, chi3=2.0e-10),
     )
     assert combined.nonlinear_chi3 == pytest.approx(3.0e-10)
     assert combined.nonlinear_chi2 == pytest.approx(1.0e-6)
@@ -66,11 +67,11 @@ def test_nonlinear_susceptibility_chi3_folds_into_kerr_channel():
 
 def test_two_photon_absorption_descriptor_validation():
     with pytest.raises(ValueError, match="beta"):
-        mw.TwoPhotonAbsorption(beta=0.0)
+        mw.media.TwoPhotonAbsorption(beta=0.0)
     with pytest.raises(ValueError, match="beta"):
-        mw.TwoPhotonAbsorption(beta=-1.0e-4)
+        mw.media.TwoPhotonAbsorption(beta=-1.0e-4)
     with pytest.raises(ValueError, match="n0"):
-        mw.TwoPhotonAbsorption(beta=1.0e-4, n0=0.0)
+        mw.media.TwoPhotonAbsorption(beta=1.0e-4, n0=0.0)
 
 
 def test_material_composes_two_photon_absorption():
@@ -78,7 +79,7 @@ def test_material_composes_two_photon_absorption():
     c0 = 299_792_458.0
     beta = 1.0e-4
 
-    material = mw.Material(eps_r=2.25, nonlinearity=mw.TwoPhotonAbsorption(beta=beta))
+    material = mw.Material(eps_r=2.25, nonlinearity=mw.media.TwoPhotonAbsorption(beta=beta))
     assert material.is_nonlinear
     assert material.nonlinear_chi2 == 0.0
     assert material.nonlinear_chi3 == 0.0
@@ -90,7 +91,7 @@ def test_material_composes_two_photon_absorption():
     actual_heat = np.mean(material.tpa_sigma_scale * electric**4)
     assert actual_heat == pytest.approx(beta * intensity**2, rel=1.0e-9)
 
-    explicit = mw.Material(eps_r=2.25, nonlinearity=mw.TwoPhotonAbsorption(beta=beta, n0=2.0))
+    explicit = mw.Material(eps_r=2.25, nonlinearity=mw.media.TwoPhotonAbsorption(beta=beta, n0=2.0))
     explicit_intensity = 0.5 * 2.0 * eps0 * c0 * 100.0**2
     explicit_heat = np.mean(explicit.tpa_sigma_scale * electric**4)
     assert explicit_heat == pytest.approx(beta * explicit_intensity**2, rel=1.0e-9)
@@ -101,14 +102,14 @@ def test_nonlinear_material_declares_dispersion_and_tensor_backgrounds():
     # needs the dispersion to set the phase-matching between w and 2w).
     dispersive_nonlinear = mw.Material(
         eps_r=2.25,
-        nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6),
+        nonlinearity=mw.media.NonlinearSusceptibility(chi2=1.0e-6),
         debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-9),),
     )
     assert dispersive_nonlinear.is_nonlinear
     assert dispersive_nonlinear.is_electric_dispersive
     tensor_nonlinear = mw.Material(
         eps_r=2.25,
-        nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6),
+        nonlinearity=mw.media.NonlinearSusceptibility(chi2=1.0e-6),
         epsilon_tensor=mw.DiagonalTensor3(2.0, 2.5, 3.0),
     )
     assert tensor_nonlinear.is_nonlinear and tensor_nonlinear.is_anisotropic
@@ -116,41 +117,34 @@ def test_nonlinear_material_declares_dispersion_and_tensor_backgrounds():
 
 def test_scene_allows_nonlinear_and_dispersive_materials_in_separate_structures():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="chi2_box",
-            geometry=Box(position=(-0.4, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
-            material=mw.Material(eps_r=2.25, nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6)),
-        )
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="kerr_box",
-            geometry=Box(position=(0.0, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
-            material=mw.Material(eps_r=2.25, kerr_chi3=1.0e-10),
-        )
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="debye_box",
-            geometry=Box(position=(0.4, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
-            material=mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=1.0e-9),
-        )
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="aniso_box",
-            geometry=Box(position=(0.0, 0.0, 0.25), size=(0.3, 0.3, 0.1)),
-            material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 2.5, 3.0)),
-        )
-    )
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                structures=(
+            mw.Structure(
+                name="chi2_box",
+                geometry=Box(position=(-0.4, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
+                material=mw.Material(eps_r=2.25, nonlinearity=mw.media.NonlinearSusceptibility(chi2=1.0e-6)),
+            ),
+            mw.Structure(
+                name="kerr_box",
+                geometry=Box(position=(0.0, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
+                material=mw.Material(eps_r=2.25, kerr_chi3=1.0e-10),
+            ),
+            mw.Structure(
+                name="debye_box",
+                geometry=Box(position=(0.4, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
+                material=mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=1.0e-9),
+            ),
+            mw.Structure(
+                name="aniso_box",
+                geometry=Box(position=(0.0, 0.0, 0.25), size=(0.3, 0.3, 0.1)),
+                material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 2.5, 3.0)),
+            ),
+            ),
+            )
 
-    model = prepare_scene(scene).compile_materials()
+    model = compile_materials(prepare_scene(scene, device="cpu"))
 
     assert bool(torch.any(model["chi2"] != 0))
     assert bool(torch.any(model["kerr_chi3"] != 0))
@@ -168,7 +162,6 @@ def _build_plane_wave_scene(
         domain=mw.Domain(bounds=domain),
         grid=mw.GridSpec.uniform(spacing),
         boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device="cuda",
         sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
@@ -293,26 +286,24 @@ def test_nonlinear_coefficient_kernel_matches_torch_reference():
         domain=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4)),
         spacing=0.04,
     )
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.4, 0.4)),
             material=mw.Material(
                 eps_r=2.25,
                 sigma_e=0.02,
                 nonlinearity=(
-                    mw.NonlinearSusceptibility(chi2=1.0e-4),
-                    mw.TwoPhotonAbsorption(beta=1.0e-4),
+                    mw.media.NonlinearSusceptibility(chi2=1.0e-4),
+                    mw.media.TwoPhotonAbsorption(beta=1.0e-4),
                 ),
             ),
-        )
-    )
-    # A Kerr structure elsewhere exercises the chi3 channel of the general kernel.
-    scene.add_structure(
+        ),
         mw.Structure(
             geometry=Box(position=(-0.6, 0.0, 0.0), size=(0.2, 0.4, 0.4)),
             material=mw.Material(eps_r=2.0, kerr_chi3=1.0e-8),
-        )
-    )
+        ),
+    ))
     solver = mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare().solver
 
     assert solver.nonlinear_enabled
@@ -348,27 +339,32 @@ def test_chi3_descriptor_matches_kerr_material_run():
             domain=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4)),
             spacing=0.04,
         )
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=Box(position=(0.0, 0.0, 0.0), size=(0.8, 0.8, 0.8)),
                 material=material,
-            )
-        )
-        scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.34, fields=("Ez",)))
+            ),
+        ), monitors=(
+            *scene.monitors,
+            mw.PlaneMonitor("post", axis="x", position=0.34, fields=("Ez",)),
+        ))
         result = mw.Simulation.fdtd(
             scene,
             frequencies=[frequency],
-            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-            spectral_sampler=mw.SpectralSampler(window="hanning"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                full_field_dft=False,
+            ),
         ).run()
-        payload = result.monitor("post")["components"]["Ez"]
+        payload = result.raw_monitor("post")["components"]["Ez"]
         data = payload["data"] if isinstance(payload, dict) else payload
         return data.detach().clone()
 
     kerr_data = _run(mw.Material(eps_r=2.25, kerr_chi3=chi3))
     descriptor_data = _run(
-        mw.Material(eps_r=2.25, nonlinearity=mw.NonlinearSusceptibility(chi3=chi3))
+        mw.Material(eps_r=2.25, nonlinearity=mw.media.NonlinearSusceptibility(chi3=chi3))
     )
 
     assert torch.allclose(kerr_data, descriptor_data, rtol=1.0e-6, atol=1.0e-8)
@@ -384,12 +380,13 @@ def test_general_kernel_chi3_only_matches_kerr_fast_path():
         domain=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4)),
         spacing=0.04,
     )
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.4, 0.4)),
-            material=mw.Material(eps_r=2.25, nonlinearity=mw.NonlinearSusceptibility(chi3=1.0e-8)),
-        )
-    )
+            material=mw.Material(eps_r=2.25, nonlinearity=mw.media.NonlinearSusceptibility(chi3=1.0e-8)),
+        ),
+    ))
     solver = mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare().solver
 
     # chi3-only stays on the Kerr fast path.
@@ -442,7 +439,6 @@ def _second_harmonic_amplitude(*, chi2, amplitude, thickness):
         domain=mw.Domain(bounds=((-1.0, 1.0), (-0.3, 0.3), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(0.02),
         boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device="cuda",
         sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
@@ -458,33 +454,35 @@ def _second_harmonic_amplitude(*, chi2, amplitude, thickness):
     )
     material_kwargs = {}
     if chi2 != 0.0:
-        material_kwargs["nonlinearity"] = mw.NonlinearSusceptibility(chi2=chi2)
+        material_kwargs["nonlinearity"] = mw.media.NonlinearSusceptibility(chi2=chi2)
     # Fixed entrance face so the interaction length is exactly `thickness`.
     entrance = -0.35
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=Box(
                 position=(entrance + thickness / 2.0, 0.0, 0.0),
                 size=(thickness, 0.8, 0.8),
             ),
             material=mw.Material(eps_r=2.25, **material_kwargs),
-        )
-    )
-    scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.55, fields=("Ez",)))
+        ),
+    ), monitors=(*scene.monitors, mw.PlaneMonitor("post", axis="x", position=0.55, fields=("Ez",))))
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[frequency, 2.0 * frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-        spectral_sampler=mw.SpectralSampler(window="hanning", normalize_source=False),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning", normalize_source=False),
+            full_field_dft=False,
+        ),
     ).run()
-    payload = result.monitor("post", freq_index=1)
+    payload = result.raw_monitor("post", freq_index=1)
     return abs(_plane_complex_mean(payload["components"]["Ez"]))
 
 
 def _native_transmitted_pulse_energy(result):
     """Signed native E(t) x H(t-dt/2) sum in joules, including resolved harmonics."""
-    payload = result.monitor("post_energy")
+    payload = result.raw_monitor("post_energy")
     stats = result.stats()
     times = np.asarray(_to_cpu_numpy(payload["t"]), dtype=np.float64)
     flux = np.asarray(_to_cpu_numpy(payload["flux"]), dtype=np.float64)
@@ -504,7 +502,6 @@ def _tpa_transmitted_pulse_energy(*, beta, amplitude):
         domain=mw.Domain(bounds=((-1.0, 1.0), (-0.3, 0.3), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(0.02),
         boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device="cuda",
         sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
@@ -516,21 +513,26 @@ def _tpa_transmitted_pulse_energy(*, beta, amplitude):
     )
     material_kwargs = {}
     if beta != 0.0:
-        material_kwargs["nonlinearity"] = mw.TwoPhotonAbsorption(beta=beta)
-    scene.add_structure(
+        material_kwargs["nonlinearity"] = mw.media.TwoPhotonAbsorption(beta=beta)
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=Box(position=(-0.2, 0.0, 0.0), size=(0.3, 0.8, 0.8)),
             material=mw.Material(eps_r=2.25, **material_kwargs),
-        )
-    )
-    scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.55, fields=("Ez",)))
-    scene.add_monitor(mw.FluxTimeMonitor("post_energy", axis="x", position=0.55, interval=1))
+        ),
+    ), monitors=(
+        *scene.monitors,
+        mw.PlaneMonitor("post", axis="x", position=0.55, fields=("Ez",)),
+        mw.monitors.FluxTimeMonitor("post_energy", axis="x", position=0.55, interval=1),
+    ))
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-        spectral_sampler=mw.SpectralSampler(window="hanning", normalize_source=False),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning", normalize_source=False),
+            full_field_dft=False,
+        ),
     ).run()
     return _native_transmitted_pulse_energy(result)
 

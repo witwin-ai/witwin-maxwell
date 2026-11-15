@@ -11,7 +11,7 @@ from witwin.maxwell.scene import prepare_scene
 @pytest.mark.parametrize('reverse',[False,True])
 def test_gap_current_opposes_ampere_source_and_delivers_positive_passive_power(axis,reverse):
     scene=prepare_scene(mw.Scene(domain=mw.Domain(bounds=((0.,1.),)*3),grid=mw.GridSpec.uniform(.1),
-        boundary=mw.BoundarySpec.none(),device='cpu'))
+        boundary=mw.BoundarySpec.none()), device="cpu")
     normal='xyz'.index(axis)
     negative=[.5]*3
     positive=[.5]*3
@@ -31,7 +31,7 @@ def test_gap_current_opposes_ampere_source_and_delivers_positive_passive_power(a
     tangents={'x':('y','z'),'y':('z','x'),'z':('x','y')}[axis]
     fields={}
     for field in ('Ex','Ey','Ez','Hx','Hy','Hz'):
-        coordinates=tuple(torch.tensor(value,dtype=torch.float64) for value in component_coords(scene,field))
+        coordinates=tuple(torch.tensor(value,dtype=torch.float64) for value in component_coords(scene,field, device=scene.device))
         shape=tuple(len(value) for value in coordinates)
         values=torch.zeros(shape,dtype=torch.complex128)
         if field=='E'+axis:

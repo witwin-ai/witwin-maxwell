@@ -39,13 +39,15 @@ def build_scene(kind, n, count):
         domain=mw.Domain(((float(nodes[0]), float(nodes[-1])),) * 3),
         grid=mw.GridSpec.custom(nodes, nodes, nodes),
         boundary=mw.BoundarySpec.pml(num_layers=8),
-        device="cuda:0",
     )
     pulse = mw.GaussianPulse(frequency=FC, fwidth=0.8 * FC)
     frequencies = tuple(np.linspace(0.8 * FC, 1.2 * FC, count))
     if kind == "vacuum":
-        scene.add_source(mw.PointDipole(
-            position=(0., 0., 0.), polarization="Ez", profile="ideal", source_time=pulse,
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PointDipole(
+                position=(0., 0., 0.), polarization="Ez", profile="ideal", source_time=pulse,
+            ),
         ))
         excitations = ()
     else:
@@ -60,25 +62,34 @@ def build_scene(kind, n, count):
                            0.07 * wavelength * math.sin(t),
                            sign * (dx / 2 + 0.12 * wavelength * t / (4 * math.pi)))
                           for t in np.linspace(0., 4 * math.pi, segments + 1)]
-            scene.add_thin_wire(mw.ThinWire(
-                side, points, 0.12 * dx, mw.WireConductor.pec(), snap="continuous",
+            scene = scene.updated(thin_wires=(
+                *scene.thin_wires,
+                mw.rf.ThinWire(
+                    side, points, 0.12 * dx, mw.rf.WireConductor.pec(), snap="continuous",
+                ),
             ))
-        scene.add_port(mw.LumpedPort(
-            "feed", wire_binding=mw.WirePortBinding.nodes(
-                negative=mw.WireNodeRef("negative", 0),
-                positive=mw.WireNodeRef("positive", 0),
+        scene = scene.updated(ports=(
+            *scene.ports,
+            mw.LumpedPort(
+                "feed", wire_binding=mw.rf.WirePortBinding.nodes(
+                negative=mw.rf.WireNodeRef("negative", 0),
+                positive=mw.rf.WireNodeRef("positive", 0),
             ), reference_impedance=50.,
+            ),
         ))
-        excitations = (mw.PortExcitation("feed", source_time=pulse),)
-    scene.add_monitor(mw.PointMonitor("point", (0.35 * wavelength, 0., 0.), fields=("Ez",)))
-    scene.add_monitor(mw.PlaneMonitor(
-        "plane", axis="x", position=0.35 * wavelength, fields=("Ez",), frequencies=frequencies,
-    ))
-    scene.add_monitor(mw.FluxMonitor(
-        "flux", axis="x", position=0.35 * wavelength, frequencies=frequencies,
-    ))
-    scene.add_monitor(mw.ClosedSurfaceMonitor.box(
-        "radiation", size=(1.2 * wavelength,) * 3, frequencies=frequencies,
+        excitations = (mw.rf.PortExcitation("feed", source_time=pulse),)
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PointMonitor("point", (0.35 * wavelength, 0., 0.), fields=("Ez",)),
+        mw.PlaneMonitor(
+            "plane", axis="x", position=0.35 * wavelength, fields=("Ez",), frequencies=frequencies,
+        ),
+        mw.FluxMonitor(
+            "flux", axis="x", position=0.35 * wavelength, frequencies=frequencies,
+        ),
+        mw.monitors.ClosedSurfaceMonitor.box(
+            "radiation", size=(1.2 * wavelength,) * 3, frequencies=frequencies,
+        ),
     ))
     return scene, frequencies, excitations
 
@@ -91,17 +102,19 @@ def run_case(args, cycles, shutoff):
     scene, frequencies, excitations = build_scene(args.scene, args.n, args.count)
     prepared = mw.Simulation.fdtd(
         scene, frequencies=frequencies, excitations=excitations,
-        run_time=mw.TimeConfig.auto(steady_cycles=cycles, transient_cycles=8),
-        shutoff=shutoff, full_field_dft=args.full_field_dft,
-        spectral_sampler=mw.SpectralSampler(normalize_source=args.normalize_source),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=cycles, transient_cycles=8),
+            shutoff=shutoff, full_field_dft=args.full_field_dft,
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=args.normalize_source),
+        ),
     ).prepare()
     result = prepared.run()
     solver = prepared.solver
     stats = result.stats()
     entries = solver._observer_spectral_entries
     denominator = entries[0]["window_normalization"]
-    point = torch.as_tensor(result.monitor("point")["Ez"])
-    plane = torch.as_tensor(result.monitor("plane")["Ez"]).reshape(args.count, -1)
+    point = torch.as_tensor(result.monitor("point").sel(component="Ez").values)
+    plane = torch.as_tensor(result.monitor("plane").sel(component="Ez").values).reshape(args.count, -1)
     row = dict(
         scene=args.scene, n=args.n, cycles=cycles, shutoff=shutoff,
         normalize_source=args.normalize_source, frequencies_Hz=frequencies,
@@ -111,8 +124,8 @@ def run_case(args, cycles, shutoff):
         observer_samples=[entry["sample_count"] for entry in entries],
         observer_weight_sums=[entry["window_normalization"] for entry in entries],
         point_abs=values(point.abs()), plane_norm=values(torch.linalg.vector_norm(plane, dim=1)),
-        flux=values(result.monitor("flux")["flux"]),
-        closed_flux=values(result.monitor("radiation")["flux"]),
+        flux=values(result.monitor("flux").values),
+        closed_flux=values(result.monitor("radiation").values),
         point_abs_times_N_over_2=values(point.abs() * denominator / 2),
         raw_source_sum_abs=[abs(complex(entry["source_dft_real"], entry["source_dft_imag"]))
                             for entry in entries],
@@ -121,7 +134,7 @@ def run_case(args, cycles, shutoff):
         row["full_field_norm"] = values(torch.linalg.vector_norm(
             result.fields["EZ"].reshape(args.count, -1), dim=1))
         row["full_field_weight_sums"] = list(solver.dft_window_normalizations)
-    projection = FieldProjector.from_monitor(result, "radiation", device=scene.device).angles(
+    projection = FieldProjector.from_monitor(result, "radiation", device=solver.scene.device).angles(
         np.linspace(0., math.pi, 19), np.linspace(0., 2 * math.pi, 37),
     )
     angular = [compute_directivity(dict(

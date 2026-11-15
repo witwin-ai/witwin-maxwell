@@ -22,7 +22,7 @@ def problem(epsilons=(2.,2.)):
     entries = [(i, f'body{i}', RWGBasis(SurfaceMesh(v.boundary.vertices.clone(),v.boundary.faces.clone())),materials[i])
                for i,v in enumerate(volumes)]
     system = SurfaceSystem.create(entries)
-    config = mw.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),riesz_storage='compact_rwg_v1')
+    config = mw.mom.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),riesz_storage='compact_rwg_v1')
     operator = SystemOperator(system,compile_medium(mw.Material(),3e8),[mw.PlaneWave()],config)
     return operator, [bind_volume_region(v,system) for v in volumes]
 

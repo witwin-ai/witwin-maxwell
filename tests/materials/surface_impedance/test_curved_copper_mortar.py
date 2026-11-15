@@ -4,7 +4,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.compiler.cut_surface import compile_integrated_traces
-from witwin.maxwell.compiler.curved_copper import compile_copper_yee_response
+from tests.oracles.curved_copper_channels import compile_copper_yee_response
 from tests.materials.surface_impedance.test_cut_surface import _mesh
 
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason="True mortar integration requires CUDA")
@@ -12,7 +12,7 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason="True mortar 
 
 @pytest.mark.parametrize("bent",(False,True))
 def test_two_native_trace_spaces_reproduce_independent_polynomials_and_surface_work(bent):
-    geometry=(mw.SurfaceMesh.bent_rectangle(width=.02,length=.016,radius=.03,segments=12,device="cuda")
+    geometry=(mw.geometry.SurfaceMesh.bent_rectangle(width=.02,length=.016,radius=.03,segments=12,device="cuda")
               if bent else _mesh())
     vertices,faces=geometry.to_mesh()
     nodes=(torch.linspace(-.04,.04,17,device="cuda",dtype=torch.float64),)*3
@@ -74,7 +74,7 @@ def test_magnetic_reaction_curl_response_matches_both_native_yee_updates():
     old_h = tuple(getattr(solver,name).clone() for name in ("Hx","Hy","Hz"))
     for name in ("Hx","Hy","Hz"):
         getattr(solver,name).zero_()
-    update_magnetic_fields(solver,solver.Hx,solver.Hy,solver.Hz,solver.Ex,solver.Ey,solver.Ez)
+    update_magnetic_fields(solver)
     # Isolate -C E from zero H; subtracting two O(1) float32 fields would
     # contaminate this deliberately small increment with cancellation roundoff.
     magnetic_change = []
@@ -92,7 +92,7 @@ def test_magnetic_reaction_curl_response_matches_both_native_yee_updates():
     torch.testing.assert_close(actual_h,expected_h,rtol=5e-5,atol=3e-11)
     for name in ("Ex","Ey","Ez"):
         getattr(solver,name).zero_()
-    update_electric_fields(solver,solver.Ex,solver.Ey,solver.Ez,solver.Hx,solver.Hy,solver.Hz,time_value=0.)
+    update_electric_fields(solver)
     electric_change = []
     for name in ("Ex","Ey","Ez"):
         _,widths = _component_geometry(solver.scene,name)

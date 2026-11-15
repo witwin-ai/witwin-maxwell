@@ -8,7 +8,7 @@ import pytest
 td = pytest.importorskip("tidy3d")
 
 import witwin.maxwell as mw  # noqa: E402
-from witwin.maxwell.adapters.tidy3d import _convert_geometry  # noqa: E402
+from witwin.maxwell.adapters.tidy3d import _convert_geometry, scene_to_tidy3d  # noqa: E402
 
 S = 1.0e6  # metre -> micrometre
 
@@ -18,7 +18,7 @@ def _bounds(geometry):
 
 
 def test_sharp_union_maps_to_geometry_group_of_analytic_children():
-    union = mw.Union(mw.Box(size=(2e-6, 2e-6, 2e-6)), mw.Sphere(position=(2e-6, 0, 0), radius=1e-6))
+    union = mw.geometry.Union(mw.Box(size=(2e-6, 2e-6, 2e-6)), mw.Sphere(position=(2e-6, 0, 0), radius=1e-6))
     exported = _convert_geometry(union, td, S)
     assert isinstance(exported, td.GeometryGroup)
     assert [type(child) for child in exported.geometries] == [td.Box, td.Sphere]
@@ -28,7 +28,7 @@ def test_sharp_union_maps_to_geometry_group_of_analytic_children():
 def test_difference_and_intersection_map_to_clip_operations():
     base = mw.Box(size=(2e-6, 2e-6, 2e-6))
     tools = (mw.Sphere(radius=0.5e-6), mw.Cylinder(radius=0.2e-6, height=4e-6))
-    difference = _convert_geometry(mw.Difference(base, *tools), td, S)
+    difference = _convert_geometry(mw.geometry.Difference(base, *tools), td, S)
     assert isinstance(difference, td.ClipOperation)
     assert difference.operation == "difference"
     assert isinstance(difference.geometry_a, td.Box)
@@ -36,7 +36,7 @@ def test_difference_and_intersection_map_to_clip_operations():
     np.testing.assert_allclose(_bounds(difference), [[-1, -1, -1], [1, 1, 1]], atol=1e-9)
 
     lens = _convert_geometry(
-        mw.Intersection(
+        mw.geometry.Intersection(
             mw.Sphere(position=(-0.5e-6, 0, 0), radius=1e-6),
             mw.Sphere(position=(0.5e-6, 0, 0), radius=1e-6),
             mw.Box(size=(4e-6, 4e-6, 1e-6)),
@@ -51,7 +51,7 @@ def test_difference_and_intersection_map_to_clip_operations():
 
 
 def test_node_frame_maps_to_transformed_geometry():
-    node = mw.Difference(
+    node = mw.geometry.Difference(
         mw.Box(size=(2e-6, 1e-6, 1e-6)),
         mw.Sphere(radius=0.3e-6),
         position=(1e-6, 0, 0),
@@ -66,7 +66,7 @@ def test_node_frame_maps_to_transformed_geometry():
 
 
 def test_smooth_boolean_falls_back_to_closed_triangle_mesh():
-    smooth = mw.Union(
+    smooth = mw.geometry.Union(
         mw.Sphere(position=(-0.6e-6, 0, 0), radius=0.5e-6),
         mw.Sphere(position=(0.6e-6, 0, 0), radius=0.5e-6),
         smoothness=0.3e-6,
@@ -83,22 +83,21 @@ def test_scene_with_difference_structure_exports_simulation():
             domain=mw.Domain(bounds=((-2e-6, 2e-6), (-2e-6, 2e-6), (-2e-6, 2e-6))),
             grid=mw.GridSpec.uniform(0.1e-6),
             boundary=mw.BoundarySpec.pml(num_layers=8),
-            device="cpu",
-        )
-        .add_structure(
-            mw.Structure(
-                mw.Difference(mw.Box(size=(1.5e-6, 1.5e-6, 1.5e-6)), mw.Sphere(radius=0.5e-6)),
-                mw.Material(eps_r=4.0),
-            )
-        )
-        .add_source(
-            mw.PointDipole(
-                position=(1.8e-6, 0, 0),
-                polarization="Ez",
-                source_time=mw.GaussianPulse(frequency=2e14, fwidth=2e13),
-            )
+            structures=(
+                mw.Structure(
+                    mw.geometry.Difference(mw.Box(size=(1.5e-6, 1.5e-6, 1.5e-6)), mw.Sphere(radius=0.5e-6)),
+                    mw.Material(eps_r=4.0),
+                ),
+            ),
+            sources=(
+                mw.PointDipole(
+                    position=(1.8e-6, 0, 0),
+                    polarization="Ez",
+                    source_time=mw.GaussianPulse(frequency=2e14, fwidth=2e13),
+                ),
+            ),
         )
     )
-    simulation = scene.to_tidy3d(frequencies=[2e14])
+    simulation = scene_to_tidy3d(scene, frequencies=[2e14])
     geometry = simulation.structures[0].geometry
     assert isinstance(geometry, td.ClipOperation) and geometry.operation == "difference"

@@ -11,25 +11,24 @@ from witwin.maxwell.scene import prepare_scene
 def _ramp_field_result(*, dx=0.1, sigma=0.5, rho=1000.0, freq=1.0e9, requires_grad=False):
     """Uniform-cube result whose field amplitude ramps along x, so SAR is non-uniform."""
     material = mw.Material(sigma_e=sigma, mass_density=rho, name="tissue")
+    monitor = mw.monitors.PowerLossMonitor(
+        "loss", position=(1.0, 1.0, 1.0), size=(1.0, 1.0, 1.0),
+        frequencies=(freq,), channels=("conduction",),
+    )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 2.0),) * 3),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.none(),
-        structures=(
+                domain=mw.Domain(bounds=((0.0, 2.0),) * 3),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
             mw.Structure(
                 name="bulk",
                 geometry=mw.Box(position=(1.0, 1.0, 1.0), size=(8.0, 8.0, 8.0)),
                 material=material,
             ),
-        ),
-        device="cpu",
-    )
-    monitor = mw.PowerLossMonitor(
-        "loss", position=(1.0, 1.0, 1.0), size=(1.0, 1.0, 1.0),
-        frequencies=(freq,), channels=("conduction",),
-    )
-    scene.add_monitor(monitor)
-    prepared = prepare_scene(scene)
+            ),
+                monitors=(monitor,),
+            )
+    prepared = prepare_scene(scene, device="cpu")
     compiled = compile_power_loss_monitor(prepared, monitor)
     fields = {}
     for component in ("Ex", "Ey", "Ez"):
@@ -47,8 +46,8 @@ def _ramp_field_result(*, dx=0.1, sigma=0.5, rho=1000.0, freq=1.0e9, requires_gr
 
 def test_soft_peak_below_hard_peak_and_above_mean():
     result, params = _ramp_field_result()
-    averaging = mw.SARAveraging(mass=(params["m0"],))
-    sar = result.sar("loss", averaging=averaging)
+    averaging = mw.sar.SARAveraging(mass=(params["m0"],))
+    sar = mw.sar.sar(result, "loss", averaging=averaging)
 
     hard = float(sar.peak(params["m0"]).sar[0])
     field = sar.averaged_sar(params["m0"])[0]
@@ -62,8 +61,8 @@ def test_soft_peak_below_hard_peak_and_above_mean():
 
 def test_soft_peak_approaches_hard_peak_as_temperature_drops():
     result, params = _ramp_field_result()
-    averaging = mw.SARAveraging(mass=(params["m0"],))
-    sar = result.sar("loss", averaging=averaging)
+    averaging = mw.sar.SARAveraging(mass=(params["m0"],))
+    sar = mw.sar.sar(result, "loss", averaging=averaging)
     hard = float(sar.peak(params["m0"]).sar[0])
 
     warm = float(sar.soft_peak(temperature=1.0, mass=params["m0"])[0])
@@ -74,8 +73,8 @@ def test_soft_peak_approaches_hard_peak_as_temperature_drops():
 
 def test_soft_peak_single_mass_defaults_mass():
     result, params = _ramp_field_result()
-    averaging = mw.SARAveraging(mass=(params["m0"],))
-    sar = result.sar("loss", averaging=averaging)
+    averaging = mw.sar.SARAveraging(mass=(params["m0"],))
+    sar = mw.sar.sar(result, "loss", averaging=averaging)
     explicit = sar.soft_peak(temperature=0.5, mass=params["m0"])
     implicit = sar.soft_peak(temperature=0.5)
     torch.testing.assert_close(explicit, implicit)
@@ -83,24 +82,24 @@ def test_soft_peak_single_mass_defaults_mass():
 
 def test_soft_peak_is_differentiable():
     result, params = _ramp_field_result(requires_grad=True)
-    averaging = mw.SARAveraging(mass=(params["m0"],))
-    sar = result.sar("loss", averaging=averaging)
+    averaging = mw.sar.SARAveraging(mass=(params["m0"],))
+    sar = mw.sar.sar(result, "loss", averaging=averaging)
     soft = sar.soft_peak(temperature=0.2, mass=params["m0"])
     soft[0].backward()
-    grad = result.fields["EX"].grad
+    grad = result._fields["EX"].grad  # the stored leaf behind result.E.x
     assert grad is not None
     assert bool((grad.abs() > 0).any())
 
 
 def test_soft_peak_requires_averaging():
     result, params = _ramp_field_result()
-    sar = result.sar("loss")  # no averaging
+    sar = mw.sar.sar(result, "loss")  # no averaging
     with pytest.raises(ValueError, match="mass-averaged"):
         sar.soft_peak(temperature=0.1, mass=params["m0"])
 
 
 def test_soft_peak_rejects_nonpositive_temperature():
     result, params = _ramp_field_result()
-    sar = result.sar("loss", averaging=mw.SARAveraging(mass=(params["m0"],)))
+    sar = mw.sar.sar(result, "loss", averaging=mw.sar.SARAveraging(mass=(params["m0"],)))
     with pytest.raises(ValueError, match="temperature"):
         sar.soft_peak(temperature=0.0, mass=params["m0"])

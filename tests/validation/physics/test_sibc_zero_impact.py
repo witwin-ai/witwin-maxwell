@@ -44,26 +44,27 @@ def _scene(*, metal: bool):
         domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(0.02),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1e6),
-        device="cuda",
     )
     if metal:
         # A mid-domain lossy-metal box: its exposed faces (not flush against the
         # PML) staircase into the surface-impedance layout, so the SIBC path is
         # actually engaged.
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=Box(position=(0.0, 0.0, 0.0), size=(0.12, 0.24, 0.24)),
-                material=mw.LossyMetalMedium(conductivity=50.0),
-            )
-        )
-    scene.add_source(
+                material=mw.media.LossyMetalMedium(conductivity=50.0),
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=(-0.2, 0.0, 0.0),
             width=0.04,
             polarization=(0.0, 0.0, 1.0),
             source_time=mw.CW(frequency=1e9, amplitude=1.0),
-        )
-    )
+        ),
+    ))
     return scene
 
 
@@ -72,9 +73,11 @@ def _run(scene):
         mw.Simulation.fdtd(
             scene,
             frequencies=[1e9],
-            run_time=mw.TimeConfig(time_steps=80),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=True,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=80),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=True,
+            ),
         ).run()
     )
 

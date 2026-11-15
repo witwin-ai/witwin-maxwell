@@ -96,31 +96,29 @@ def wall_length(dx: float, guide_len: float) -> float:
     return 2.0 * (domain_x + _pml_layers(dx) * dx) + 8.0 * dx
 
 
-def _wave_port(name: str, x: float, direction: str) -> mw.WavePort:
-    return mw.WavePort(
+def _wave_port(name: str, x: float, direction: str) -> mw.rf.WavePort:
+    return mw.rf.WavePort(
         name,
         position=(x, 0.0, 0.0),
         size=(0.0, GUIDE_A, GUIDE_B),
         direction=direction,
         reference_plane=x,
-        modes=(mw.WaveModeSpec("te", polarization="Ez"),),
+        modes=(mw.rf.WaveModeSpec("te", polarization="Ez"),),
     )
 
 
-def lossy_waveguide_scene(
-    *,
+def lossy_waveguide_scene(*,
     guide_len: float = SHORT_LENGTH,
     dx: float = 0.0025,
     sigma: float = WALL_CONDUCTIVITY,
     pec_walls: bool = False,
-    device: str = "cuda",
 ) -> mw.Scene:
     """Build a two-port lossy-wall (or PEC-wall) rectangular waveguide of ``guide_len``."""
 
     domain_x = 0.5 * guide_len + 0.03
     half = 0.5 * guide_len
     wl = wall_length(dx, guide_len)
-    metal = mw.Material.pec() if pec_walls else mw.LossyMetalMedium(conductivity=sigma)
+    metal = mw.Material.pec() if pec_walls else mw.media.LossyMetalMedium(conductivity=sigma)
     yb, zb, tw = 0.5 * GUIDE_A, 0.5 * GUIDE_B, WALL_THICKNESS
     # All four walls carry the SAME material instance so shared corner edges resolve
     # by owner rank (not the different-material conflicting-owner rejection).
@@ -145,7 +143,6 @@ def lossy_waveguide_scene(
         boundary=mw.BoundarySpec.pml(num_layers=_pml_layers(dx)),
         ports=ports,
         structures=structures,
-        device=device,
     )
 
 
@@ -171,12 +168,10 @@ REF_OUT_X = 0.30
 REF_LENGTH = REF_OUT_X - REF_IN_X
 
 
-def lossy_waveguide_reference_scene(
-    *,
+def lossy_waveguide_reference_scene(*,
     dx: float = 0.0025,
     sigma: float = WALL_CONDUCTIVITY,
     frequencies: tuple[float, ...] | None = None,
-    device: str = "cpu",
 ) -> mw.Scene:
     """TE10 ModeSource-driven lossy guide for the external-reference attenuation cross-check.
 
@@ -193,7 +188,7 @@ def lossy_waveguide_reference_scene(
     wl = wall_length(dx, REF_GUIDE_LENGTH)
     domain_x = 0.5 * REF_GUIDE_LENGTH + 0.03
     yb, zb, tw = 0.5 * GUIDE_A, 0.5 * GUIDE_B, WALL_THICKNESS
-    metal = mw.LossyMetalMedium(conductivity=sigma)
+    metal = mw.media.LossyMetalMedium(conductivity=sigma)
     walls = (
         ((0.0, yb + 0.5 * tw, 0.0), (wl, tw, 2.0 * DOMAIN_Z), "wall_y_high"),
         ((0.0, -yb - 0.5 * tw, 0.0), (wl, tw, 2.0 * DOMAIN_Z), "wall_y_low"),
@@ -209,33 +204,32 @@ def lossy_waveguide_reference_scene(
         for position, size, name in walls
     )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-domain_x, domain_x), (-DOMAIN_Y, DOMAIN_Y), (-DOMAIN_Z, DOMAIN_Z))),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pml(num_layers=_pml_layers(dx)),
-        structures=structures,
-        device=device,
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(REF_SOURCE_X, 0.0, 0.0),
-            size=(0.0, GUIDE_A, GUIDE_B),
-            mode_index=0,
-            direction="+",
-            polarization="Ez",
-            source_time=mw.GaussianPulse(frequency=center, fwidth=fwidth),
-            name="te10_source",
-        )
-    )
-    for name, x in (("ref_in", REF_IN_X), ("ref_out", REF_OUT_X)):
-        scene.add_monitor(
-            mw.ModeMonitor(
-                name,
-                position=(x, 0.0, 0.0),
+                domain=mw.Domain(bounds=((-domain_x, domain_x), (-DOMAIN_Y, DOMAIN_Y), (-DOMAIN_Z, DOMAIN_Z))),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.pml(num_layers=_pml_layers(dx)),
+                structures=structures,
+                sources=(
+            mw.ModeSource(
+                position=(REF_SOURCE_X, 0.0, 0.0),
                 size=(0.0, GUIDE_A, GUIDE_B),
                 mode_index=0,
                 direction="+",
                 polarization="Ez",
-                frequencies=freqs,
+                source_time=mw.GaussianPulse(frequency=center, fwidth=fwidth),
+                name="te10_source",
+            ),
+            ),
             )
-        )
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.ModeMonitor(
+              name,
+              position=(x, 0.0, 0.0),
+              size=(0.0, GUIDE_A, GUIDE_B),
+              mode_index=0,
+              direction="+",
+              polarization="Ez",
+              frequencies=freqs,
+          ) for name, x in (("ref_in", REF_IN_X), ("ref_out", REF_OUT_X))),
+    ))
     return scene

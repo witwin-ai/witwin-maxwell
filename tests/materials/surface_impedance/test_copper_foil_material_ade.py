@@ -8,6 +8,7 @@ from witwin.maxwell.fdtd.copper_foil_ade import (
     initialize_copper_trace_ade, prepare_copper_trace_history,
     finalize_copper_trace_ade, copper_material_energy, iter_copper_trace_ade_state,
 )
+import witwin.maxwell as mw
 
 
 @pytest.mark.parametrize("device", ("cpu", "cuda"))
@@ -95,9 +96,9 @@ def _local_scene(kind, *, one_side=False):
     model = FoilDesign()
     model.requires_grad_(False)
     scene = model.to_scene()
-    scene.structures = (*scene.structures, mw.Structure(name="substrate",
+    scene = scene.updated(structures=(*scene.structures, mw.Structure(name="substrate",
         geometry=mw.Box(position=(.01, 0., 0.) if one_side else (0., 0., 0.),
-                        size=(.02, .04, .04) if one_side else (.04, .04, .04)), material=_local_material(kind)))
+                        size=(.02, .04, .04) if one_side else (.04, .04, .04)), material=_local_material(kind))))
     return scene
 
 
@@ -106,7 +107,7 @@ def _local_scene(kind, *, one_side=False):
 def test_gpu_local_material_and_foil_ampere_energy_close_independently(kind):
     import witwin.maxwell as mw
     from witwin.maxwell.fdtd.copper_foil import begin_copper_step, advance_copper_electric
-    solver = mw.Simulation.fdtd(_local_scene(kind), frequency=3.e9).prepare().solver
+    solver = mw.Simulation.fdtd(_local_scene(kind), frequencies=3.e9).prepare().solver
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         setattr(solver, name, getattr(solver, name).double())
     snapshots = []
@@ -160,14 +161,14 @@ def test_gpu_local_material_and_foil_ampere_energy_close_independently(kind):
 def test_local_material_foil_public_graph_and_checkpoint_resume(kind, one_side, tmp_path):
     import witwin.maxwell as mw
     def simulation(graph):
-        return mw.Simulation.fdtd(_local_scene(kind, one_side=one_side), frequency=3.e9,
-            cuda_graph=graph, run_time=mw.TimeConfig(time_steps=128), spectral_sampler=mw.SpectralSampler(window="none"),
-            excitations=mw.PortExcitation("feed", source_time=mw.CW(3.e9)))
+        return mw.Simulation.fdtd(_local_scene(kind, one_side=one_side), frequencies=3.e9,
+            config=mw.FDTDConfig(cuda_graph=graph, run_time=mw.TimeConfig(time_steps=128), spectral_sampler=mw.fdtd.SpectralSampler(window="none")),
+            excitations=mw.rf.PortExcitation("feed", source_time=mw.CW(3.e9)))
     eager = simulation(False).run()
     graph = simulation(True).run()
     assert graph.stats()["cuda_graph_active"]
     torch.testing.assert_close(graph.port("feed").voltage, eager.port("feed").voltage, rtol=2.e-5, atol=1.e-8)
-    assert eager.conductor_losses["foil"]["dissipated_energy"] > 0
+    assert mw.rf.conductor_losses(eager)["foil"]["dissipated_energy"] > 0
     for entry in eager.solver._copper_foils:
         if kind == "magnetic":
             continue
@@ -183,7 +184,7 @@ def test_local_material_foil_public_graph_and_checkpoint_resume(kind, one_side, 
     checkpoint = simulation(True).prepare().run_until(47)
     path = tmp_path / "local-material.pt"
     checkpoint.save(path)
-    resumed = simulation(True).prepare().run(resume_from=mw.FDTDResumeCheckpoint.load(path))
+    resumed = simulation(True).prepare().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path))
     torch.testing.assert_close(resumed.port("feed").voltage, graph.port("feed").voltage, rtol=2.e-5, atol=1.e-8)
-    assert resumed.conductor_losses["foil"]["dissipated_energy"] == pytest.approx(
-        graph.conductor_losses["foil"]["dissipated_energy"], rel=1.e-6)
+    assert mw.rf.conductor_losses(resumed)["foil"]["dissipated_energy"] == pytest.approx(
+        mw.rf.conductor_losses(graph)["foil"]["dissipated_energy"], rel=1.e-6)

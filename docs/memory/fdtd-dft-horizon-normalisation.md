@@ -151,7 +151,7 @@ channels are recorded, not repaired or independently qualified here.
 | `FluxMonitor`, plane `power`, closed-surface flux | `1/N_plan**2` | Common squared source factor cancels. |
 | Far-field/projected E/H and equivalent surface currents | `1/N_plan` from the surface fields | Inherit the normalised surface fields. |
 | Far-field power density, radiation intensity U, P_rad, antenna EIRP | `1/N_plan**2` | Inherit the normalised surface fields. |
-| `Result.antenna` p_incident/p_accepted | Port powers above | Port powers above; inconsistent with normalised radiation fields. |
+| `mw.antenna.antenna` p_incident/p_accepted | Port powers above | Port powers above; inconsistent with normalised radiation fields. |
 | S-parameters, impedance, directivity | Common scale cancels after convergence | Same within each consistent input convention. |
 | Efficiencies/gain/realized gain computed from radiation and port power | Common scale cancels when both are unnormalised consistently | **Can become horizon-dependent** because fields are normalised but ports are not. Turning on this flag alone is not an antenna-label fix. |
 

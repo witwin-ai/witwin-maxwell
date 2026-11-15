@@ -7,6 +7,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
 from witwin.maxwell.compiler.materials import LocalMaterialCache, compile_material_model
+from witwin.maxwell.compiler import compile_materials
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
@@ -17,16 +18,19 @@ def scene(*, samples, averaging, periodic=False, graded=False):
         coordinates = coordinates + .1 * coordinates**3
     grid = mw.GridSpec.custom(coordinates, coordinates, coordinates) if graded else mw.GridSpec.uniform(.0125)
     domain = mw.Domain(bounds=((-float(coordinates[-1]), float(coordinates[-1])),) * 3)
-    public = mw.Scene(domain=domain, grid=grid, device="cuda:0",
-        boundary=mw.BoundarySpec.periodic() if periodic else mw.BoundarySpec.pml(num_layers=3),
-        subpixel_samples=mw.SubpixelSpec(samples=samples, averaging=averaging))
-    public.add_structure(mw.Structure(name="background",
-        geometry=mw.Sphere(radius=.12, position=(.02, 0., 0.), device="cuda:0"),
-        material=mw.Material(eps_r=2.7, sigma_e=.01)))
-    public.add_material_region(mw.MaterialRegion(name="design",
-        geometry=mw.Box(size=(.04, .05, .03), device="cuda:0"),
-        density=torch.full((4, 5, 3), .2, device="cuda:0"), eps_bounds=(1., 4.),
-        mu_bounds=(1., 1.2), filter_radius=.013, projection_beta=2.))
+    public = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.periodic() if periodic else mw.BoundarySpec.pml(num_layers=3),
+                 subpixel=mw.SubpixelSpec(samples=samples, averaging=averaging),
+                      structures=(
+                          mw.Structure(name="background",
+                              geometry=mw.Sphere(radius=.12, position=(.02, 0., 0.), device="cuda:0"),
+                              material=mw.Material(eps_r=2.7, sigma_e=.01)),
+                      ),
+                      material_regions=(
+                          mw.MaterialRegion(name="design",
+                              geometry=mw.Box(size=(.04, .05, .03), device="cuda:0"),
+                              density=torch.full((4, 5, 3), .2, device="cuda:0"), eps_bounds=(1., 4.),
+                              mu_bounds=(1., 1.2), filter_radius=.013, projection_beta=2.),
+                      ))
     return public
 
 
@@ -55,17 +59,17 @@ def test_local_material_bank_matches_full_recompilation(samples, averaging, peri
     if not periodic:
         assert all(s.stop - s.start < n for s, n in zip(cache.node_selection, (base.Nx, base.Ny, base.Nz)))
     for density in (.8, .0, .2):
-        changed = public.clone()
-        changed.material_regions = [replace(changed.material_regions[0],
-            density=torch.full((4, 5, 3), density, device="cuda:0"))]
+        changed = public
+        changed = changed.updated(material_regions=(replace(changed.material_regions[0],
+            density=torch.full((4, 5, 3), density, device="cuda:0")),))
         prepared = prepare_scene(changed)
         actual = cache.compile(prepared)
-        expected = compile_material_model(prepared, subpixel=prepared.subpixel)
+        expected = compile_material_model(prepared, subpixel=prepared.scene.subpixel)
         assert_model(actual, expected)
     assert cache.full_compilations == 1
     assert cache.patch_compilations == 3
-    changed.structures = [mw.Structure(name="background", geometry=changed.structures[0].geometry,
-                                      material=mw.Material(eps_r=3.))]
+    changed = changed.updated(structures=(mw.Structure(name="background", geometry=changed.structures[0].geometry,
+                                      material=mw.Material(eps_r=3.)),))
     with pytest.raises(ValueError, match="Fixed material definition"):
         cache.compile(prepare_scene(changed))
 
@@ -74,19 +78,22 @@ def test_local_material_bank_matches_full_recompilation(samples, averaging, peri
 def test_structure_influence_envelopes_match_full_materials(periodic, graded):
     public = scene(samples=2, averaging="polarized", periodic=periodic, graded=graded)
     envelope = mw.Box(size=(.32, .32, .32), device="cuda:0")
-    public.add_structure(mw.Structure(name="moving", priority=2,
-        geometry=mw.Box(size=(.04, .05, .03), device="cpu"), material=mw.Material(eps_r=3.)))
+    public = public.updated(structures=(
+        *public.structures,
+        mw.Structure(name="moving", priority=2,
+            geometry=mw.Box(size=(.04, .05, .03), device="cpu"), material=mw.Material(eps_r=3.)),
+    ))
     cache = LocalMaterialCache(prepare_scene(public), structure_envelopes={"moving": envelope})
     for position, radius, epsilon in ((.05, .025, 4.), (-.06, .035, 1.2), (0., .02, 3.)):
-        changed = public.clone()
-        changed.structures[-1] = mw.Structure(name="moving", priority=2,
+        changed = public
+        changed = changed.updated(structures=(*changed.structures[:-1], mw.Structure(name="moving", priority=2,
             geometry=mw.Sphere(position=(position, 0., 0.), radius=radius, device="cuda:0"),
-            material=mw.Material(eps_r=epsilon, sigma_e=.02, mu_r=1.1))
+            material=mw.Material(eps_r=epsilon, sigma_e=.02, mu_r=1.1))))
         compiled = prepare_scene(changed)
-        assert_model(cache.compile(compiled), compile_material_model(compiled, subpixel=compiled.subpixel))
-    changed.structures[-1] = mw.Structure(name="moving", priority=2,
+        assert_model(cache.compile(compiled), compile_material_model(compiled, subpixel=compiled.scene.subpixel))
+    changed = changed.updated(structures=(*changed.structures[:-1], mw.Structure(name="moving", priority=2,
         geometry=mw.Sphere(position=(.2, 0., 0.), radius=.02, device="cuda:0"),
-        material=mw.Material(eps_r=3.))
+        material=mw.Material(eps_r=3.))))
     with pytest.raises(ValueError, match="envelope"):
         cache.compile(prepare_scene(changed))
     envelope.size.mul_(2)
@@ -123,7 +130,7 @@ def _nodes(lo, hi, fine_lo, fine_hi):
 
 
 def _sheet(name, x0, x1, y0, y1, z=.2, priority=0):
-    return mw.Structure(mw.PlanarPEC.rectangle(((x0 * MM, x1 * MM), (y0 * MM, y1 * MM)), normal_axis="z",
+    return mw.Structure(mw.geometry.PlanarPEC.rectangle(((x0 * MM, x1 * MM), (y0 * MM, y1 * MM)), normal_axis="z",
                                                coordinate=z * MM), mw.Material.pec(), name=name, priority=priority)
 
 
@@ -147,8 +154,7 @@ def _patch(top=.6, *, width=.7, extra=(), drop=(), load=None, pec=None):
 def _patch_scene(items, *, subpixel=None):
     x, y, z = _nodes(-2., 2., -1., 1.), _nodes(-2., 2., -1.3, 1.), _nodes(-1., 1.2, -.2, .4)
     return prepare_scene(mw.Scene(domain=mw.Domain(bounds=((x[0], x[-1]), (y[0], y[-1]), (z[0], z[-1]))),
-        grid=mw.GridSpec.custom(x, y, z), boundary=mw.BoundarySpec.pml(num_layers=3), device="cuda:0",
-        structures=items, subpixel_samples=subpixel or mw.SubpixelSpec(averaging="arithmetic", samples=1)))
+        grid=mw.GridSpec.custom(x, y, z), boundary=mw.BoundarySpec.pml(num_layers=3), structures=items, subpixel=subpixel or mw.SubpixelSpec(averaging="arithmetic", samples=1)))
 
 
 _LOAD = ((1.1, 0., .1), (.4, .4, .2))
@@ -171,12 +177,12 @@ PATCH_EDITS = {
 @pytest.mark.parametrize("edit", sorted(PATCH_EDITS))
 def test_material_cache_local_recompile_is_identical_to_full_compile(edit):
     base, changed = PATCH_EDITS[edit]
-    cache = mw.FDTDMaterialCache()
+    cache = mw.fdtd.FDTDMaterialCache()
     assert cache._bind(_patch_scene(base), frequency=60e9)["outcome"] == "miss"
     scene = _patch_scene(changed)
     info = cache._bind(scene, frequency=60e9)
     assert info["outcome"] == "local" and info["local_recompiles"] == 1
-    expected = compile_material_model(_patch_scene(changed), subpixel=scene.subpixel)
+    expected = compile_material_model(_patch_scene(changed), subpixel=scene.scene.subpixel)
     assert_identical(scene._material_model_override, expected)
     # The solver copy is owned: the retained snapshot and its base survive mutation.
     scene._material_model_override["eps_components"]["x"].zero_()
@@ -188,7 +194,7 @@ def test_material_cache_local_recompile_is_identical_to_full_compile(edit):
 def test_local_recompile_reuses_unchanged_sheets_and_follows_successive_edits():
     from witwin.maxwell.compiler import planar_pec
     base = _patch_scene(_patch())
-    local = LocalMaterialCache(base, base=base.compile_materials())
+    local = LocalMaterialCache(base, base=compile_materials(base))
     calls = []
     original = planar_pec._compile_planar_sheet
     def counting(scene, structure, *args):
@@ -202,7 +208,7 @@ def test_local_recompile_reuses_unchanged_sheets_and_follows_successive_edits():
     assert calls == ["ground", "patch", "feed", "patch", "patch", "patch"]
     for top, model in zip(tops, actual):
         expected = _patch_scene(_patch(top))
-        assert_identical(model, compile_material_model(expected, subpixel=expected.subpixel))
+        assert_identical(model, compile_material_model(expected, subpixel=expected.scene.subpixel))
     assert local.full_compilations == 0 and local.patch_compilations == 4
 
 
@@ -211,24 +217,24 @@ def test_local_recompile_reuses_unchanged_sheets_and_follows_successive_edits():
     ("volume PEC change", _patch(pec=_PIN), _patch(pec=((.4, .3, .1), (.2, .2, .2))), None),
 ])
 def test_unproven_local_changes_fall_back_to_a_full_compile(reason, base, changed, subpixel):
-    cache = mw.FDTDMaterialCache()
+    cache = mw.fdtd.FDTDMaterialCache()
     cache._bind(_patch_scene(base, subpixel=subpixel), frequency=60e9)
     scene = _patch_scene(changed, subpixel=subpixel)
     assert cache._bind(scene, frequency=60e9)["outcome"] == "miss", reason
     assert cache.stats["local_recompiles"] == 0
     assert_identical(scene._material_model_override,
-                     compile_material_model(_patch_scene(changed, subpixel=subpixel), subpixel=scene.subpixel))
+                     compile_material_model(_patch_scene(changed, subpixel=subpixel), subpixel=scene.scene.subpixel))
 
 
 @pytest.mark.parametrize("material", [
-    mw.Material.pec(), mw.CopperFoil(thickness=2e-6, frequency_range=(50e9, 70e9)),
+    mw.Material.pec(), mw.media.CopperFoil(thickness=2e-6, frequency_range=(50e9, 70e9)),
 ], ids=["pec", "copper"])
 def test_surface_mesh_material_flip_requires_full_compile(material):
-    mesh = mw.SurfaceMesh(np.array([[-.7, -.6, .2], [.7, -.6, .2], [.7, .6, .2], [-.7, .6, .2]]) * MM,
+    mesh = mw.geometry.SurfaceMesh(np.array([[-.7, -.6, .2], [.7, -.6, .2], [.7, .6, .2], [-.7, .6, .2]]) * MM,
                           [(0, 1, 2), (0, 2, 3)], device="cuda:0")
     base = _patch()
     base[2] = replace(base[2], geometry=mesh, material=material)
-    cache = mw.FDTDMaterialCache()
+    cache = mw.fdtd.FDTDMaterialCache()
     # Future admission of SurfaceMesh must handle thin-sheet ownership flips (owns_thin_sheet) as a full compile.
     with pytest.raises(NotImplementedError, match="FDTDMaterialCache supports static Mesh/Box/PlanarPEC"):
         cache._bind(_patch_scene(base), frequency=60e9)
@@ -238,17 +244,17 @@ def test_surface_mesh_material_flip_requires_full_compile(material):
 @pytest.mark.parametrize("subpixel", [mw.SubpixelSpec(samples=2, averaging="arithmetic"), mw.SubpixelSpec(samples=2, averaging="polarized")])
 def test_multi_sample_local_recompile_is_identical(subpixel):
     base, changed = PATCH_EDITS["dielectric_added_and_sheet_moved"]
-    cache = mw.FDTDMaterialCache()
+    cache = mw.fdtd.FDTDMaterialCache()
     cache._bind(_patch_scene(base, subpixel=subpixel), frequency=60e9)
     scene = _patch_scene(changed, subpixel=subpixel)
     assert cache._bind(scene, frequency=60e9)["outcome"] == "local"
     assert_identical(scene._material_model_override,
-                     compile_material_model(_patch_scene(changed, subpixel=subpixel), subpixel=scene.subpixel))
+                     compile_material_model(_patch_scene(changed, subpixel=subpixel), subpixel=scene.scene.subpixel))
 
 
 def test_reordered_structures_are_not_local():
     base = _patch_scene(_patch())
-    local = LocalMaterialCache(base, base=base.compile_materials())
+    local = LocalMaterialCache(base, base=compile_materials(base))
     assert local.recompile(_patch_scene(_patch()), {0: 1, 1: 0}) is None
 
 
@@ -259,6 +265,6 @@ def test_batch_planar_pec_envelopes_match_full_materials(edit):
     cache = LocalMaterialCache(_patch_scene(base), structure_envelopes={"patch": envelope})
     items = [new if new.name == "patch" else old for old, new in zip(base, changed)]
     scene = _patch_scene(items)
-    assert_identical(cache.compile(scene), compile_material_model(_patch_scene(items), subpixel=scene.subpixel))
+    assert_identical(cache.compile(scene), compile_material_model(_patch_scene(items), subpixel=scene.scene.subpixel))
     with pytest.raises(ValueError, match="envelope"):
         cache.compile(_patch_scene([_sheet("patch", -.7, 1.8, -.6, .6) if s.name == "patch" else s for s in base]))

@@ -15,30 +15,31 @@ def test_pec_cavity_te101_ringdown_matches_analytic_frequency():
     spacing = 0.01
     analytic = 0.5 * C0 * math.sqrt((1.0 / a) ** 2 + (1.0 / d) ** 2)
 
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, a), (0.0, b), (0.0, d))),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.pec(),
-        device="cuda",
-    )
     pulse = mw.GaussianPulse(frequency=analytic, fwidth=0.3e9)
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.37 * a, 0.5 * b, 0.41 * d),
-            polarization="Ey",
-            width=spacing,
-            source_time=pulse,
-            name="src",
-        )
-    )
-    scene.add_monitor(
-        mw.FieldTimeMonitor("probe", components=("Ey",), position=(0.62 * a, 0.5 * b, 0.57 * d), interval=2)
-    )
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((0.0, a), (0.0, b), (0.0, d))),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.pec(),
+                sources=(
+            mw.PointDipole(
+                position=(0.37 * a, 0.5 * b, 0.41 * d),
+                polarization="Ey",
+                width=spacing,
+                source_time=pulse,
+                name="src",
+            ),
+            ),
+                monitors=(
+            mw.monitors.FieldTimeMonitor("probe", components=("Ey",), position=(0.62 * a, 0.5 * b, 0.57 * d), interval=2),
+            ),
+            )
     result = mw.Simulation.fdtd(
         scene,
-        frequency=analytic,
-        run_time=mw.TimeConfig(time_steps=3000),
-        full_field_dft=False,
+        frequencies=analytic,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=3000),
+            full_field_dft=False,
+        ),
     ).run()
 
     payload = result.monitor("probe")

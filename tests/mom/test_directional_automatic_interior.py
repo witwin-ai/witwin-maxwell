@@ -52,6 +52,10 @@ def test_actual_automatic_magnetic_interior_far_complete_support_partition(tmp_p
     (tmp_path/'catalog.json').write_text(json.dumps(record,indent=2)+'\n');print(record,flush=True)
 
 
+# Milestone only, no regression twin: the cost is the adaptive near-field construction of the three
+# automatically partitioned regions (see test_directional_sparse_system); the smallest admissible
+# shorter box only halves it. The cheap partition test above stays in the regression tier.
+@pytest.mark.mom_milestone
 def test_automatic_actual_complete_magnetic_system_original_actions_and_native_current(tmp_path):
     provider=_provider();plans=_plans(provider)
     regions=[]

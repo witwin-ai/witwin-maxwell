@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 
+from .errors import SchemaError
 from .network import NetworkData
 
 
@@ -21,7 +22,7 @@ _PORT_NAME_COMMENT = re.compile(r"^\s*Port\[([1-9][0-9]*)\]\s*=\s*(.*?)\s*$", re
 _DB_ZERO_FLOOR = -400.0
 
 
-class TouchstoneParseError(ValueError):
+class TouchstoneParseError(SchemaError):
     """A strict Touchstone parse error with source-line context."""
 
     def __init__(self, message: str, *, path: str | Path, line_number: int):

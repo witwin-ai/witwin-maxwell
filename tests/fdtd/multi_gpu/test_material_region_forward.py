@@ -27,6 +27,7 @@ from witwin.maxwell.fdtd.distributed import DistributedFDTD
 from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd_parallel import FDTDParallelConfig
 from witwin.maxwell.scene import prepare_scene
+from tests.support.core_solver import bind_core
 
 
 _FREQUENCY = 1.0e9
@@ -49,38 +50,35 @@ def _region_scene(device: str) -> mw.Scene:
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (float(x[0]), float(x[-1])),
                 (float(y[0]), float(y[-1])),
                 (float(z[0]), float(z[-1])),
             )
-        ),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.none(),
-        device=device,
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design",
-            # Straddles x = 0.0, the 6/5 partition interface of the 11-node grid.
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
-            density=_density().to(device),
-            eps_bounds=(1.0, 4.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.3, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
-            name="source",
-        )
-    )
-    scene.add_monitor(
-        mw.PointMonitor("probe", (0.1, 0.0, 0.0), fields=_FIELD_NAMES)
-    )
+            ),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.none(),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                # Straddles x = 0.0, the 6/5 partition interface of the 11-node grid.
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
+                density=_density().to(device),
+                eps_bounds=(1.0, 4.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(-0.3, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
+                name="source",
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (0.1, 0.0, 0.0), fields=_FIELD_NAMES),),
+            )
     return scene
 
 
@@ -122,6 +120,7 @@ def test_distributed_box_material_region_forward_matches_single_gpu(
         absorber_type="none",
     )
     single.init_field()
+    bind_core(single)
     single_output = single.solve(
         time_steps=_TIME_STEPS,
         dft_frequency=_FREQUENCY,

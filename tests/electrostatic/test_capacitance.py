@@ -14,30 +14,28 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="electrost
 
 
 def _tol(tol=1e-11):
-    return mw.ElectrostaticSolverConfig(tolerance=tol)
+    return mw.electrostatic.ElectrostaticSolverConfig(tolerance=tol)
 
 
 def _shell_scene(n, a=0.2, b=0.8):
     half = 1.0
     domain = mw.Domain(bounds=((-half, half),) * 3)
     grid = mw.GridSpec.uniform(2.0 * half / n)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="inner", geometry=Sphere(position=(0, 0, 0), radius=a), potential=1.0)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="outer", geometry=OutsideSphere(b), grounded=True)
-    )
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(name="inner", geometry=Sphere(position=(0, 0, 0), radius=a), potential=1.0),
+                mw.electrostatic.ElectrostaticTerminal(name="outer", geometry=OutsideSphere(b), grounded=True),
+            ))
     return scene
 
 
 def test_sphere_in_grounded_shell_analytic_capacitance():
     a, b = 0.2, 0.8
     scene = _shell_scene(80, a=a, b=b)
-    cap = mw.Simulation.capacitance(
-        scene, terminals=("inner", "outer"), reference="outer",
-        boundary=mw.ElectrostaticBoundarySpec.neumann(), solver=_tol(),
-    ).run().capacitance
+    cap = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+        scene, config=mw.electrostatic.CapacitanceConfig(
+            terminals=("inner", "outer"), reference="outer",
+            boundary=mw.electrostatic.ElectrostaticBoundarySpec.neumann(), solver=_tol()),
+    ).run())
 
     assert cap.terminal_order == ("inner",)
     assert cap.reference == "outer"
@@ -52,10 +50,11 @@ def test_sphere_in_grounded_shell_capacitance_convergence():
     c_analytic = concentric_sphere_capacitance(a, b)
     errors = []
     for n in (40, 60, 80):
-        cap = mw.Simulation.capacitance(
-            _shell_scene(n, a=a, b=b), terminals=("inner", "outer"), reference="outer",
-            boundary=mw.ElectrostaticBoundarySpec.neumann(), solver=_tol(),
-        ).run().capacitance
+        cap = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+            _shell_scene(n, a=a, b=b), config=mw.electrostatic.CapacitanceConfig(
+                terminals=("inner", "outer"), reference="outer",
+                boundary=mw.electrostatic.ElectrostaticBoundarySpec.neumann(), solver=_tol()),
+        ).run())
         c = float(cap.capacitance("inner", "inner"))
         errors.append(abs(c - c_analytic) / c_analytic)
     assert errors[0] > errors[1] > errors[2]
@@ -66,16 +65,11 @@ def _three_terminal_scene(n=40):
     r = 0.18
     domain = mw.Domain(bounds=((-half, half),) * 3)
     grid = mw.GridSpec.uniform(2.0 * half / n)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="a", geometry=Sphere(position=(-0.5, 0, 0), radius=r), potential=1.0)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="b", geometry=Sphere(position=(0.5, 0, 0), radius=r), potential=2.0)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="c", geometry=Sphere(position=(0, 0.5, 0), radius=r), potential=-1.0)
-    )
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(name="a", geometry=Sphere(position=(-0.5, 0, 0), radius=r), potential=1.0),
+                mw.electrostatic.ElectrostaticTerminal(name="b", geometry=Sphere(position=(0.5, 0, 0), radius=r), potential=2.0),
+                mw.electrostatic.ElectrostaticTerminal(name="c", geometry=Sphere(position=(0, 0.5, 0), radius=r), potential=-1.0),
+            ))
     return scene
 
 
@@ -86,24 +80,19 @@ def _two_terminal_floating_scene(q, n=40):
     r = 0.18
     domain = mw.Domain(bounds=((-half, half),) * 3)
     grid = mw.GridSpec.uniform(2.0 * half / n)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="a", geometry=Sphere(position=(-0.5, 0, 0), radius=r), charge=q)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="b", geometry=Sphere(position=(0.5, 0, 0), radius=r), charge=-q)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="c", geometry=Sphere(position=(0, 0.5, 0), radius=r), grounded=True)
-    )
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(name="a", geometry=Sphere(position=(-0.5, 0, 0), radius=r), charge=q),
+                mw.electrostatic.ElectrostaticTerminal(name="b", geometry=Sphere(position=(0.5, 0, 0), radius=r), charge=-q),
+                mw.electrostatic.ElectrostaticTerminal(name="c", geometry=Sphere(position=(0, 0.5, 0), radius=r), grounded=True),
+            ))
     return scene
 
 
 def test_three_terminal_matrix_symmetry_and_signs():
     scene = _three_terminal_scene()
-    cap = mw.Simulation.capacitance(
-        scene, boundary=mw.ElectrostaticBoundarySpec.grounded_box(), solver=_tol(),
-    ).run().capacitance
+    cap = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+        scene, config=mw.electrostatic.CapacitanceConfig(boundary=mw.electrostatic.ElectrostaticBoundarySpec.grounded_box(), solver=_tol()),
+    ).run())
 
     C = cap.matrix
     assert C.shape == (3, 3)
@@ -120,9 +109,9 @@ def test_three_terminal_matrix_symmetry_and_signs():
 def test_three_terminal_energy_equivalence():
     """0.5 Vᵀ C V equals the field energy of the same driven configuration."""
     scene = _three_terminal_scene()
-    boundary = mw.ElectrostaticBoundarySpec.grounded_box()
-    cap = mw.Simulation.capacitance(scene, boundary=boundary, solver=_tol()).run().capacitance
-    es = mw.Simulation.electrostatic(scene, boundary=boundary, solver=_tol()).run().electrostatic
+    boundary = mw.electrostatic.ElectrostaticBoundarySpec.grounded_box()
+    cap = mw.electrostatic.capacitance(mw.Simulation.capacitance(scene, config=mw.electrostatic.CapacitanceConfig(boundary=boundary, solver=_tol())).run())
+    es = mw.electrostatic.electrostatic(mw.Simulation.electrostatic(scene, config=mw.electrostatic.ElectrostaticConfig(boundary=boundary, solver=_tol())).run())
 
     v = torch.tensor([1.0, 2.0, -1.0], dtype=cap.matrix.dtype, device=cap.matrix.device)
     w_matrix = 0.5 * float(v @ cap.matrix @ v)
@@ -132,13 +121,13 @@ def test_three_terminal_energy_equivalence():
 
 def test_three_terminal_reordering_invariance():
     scene = _three_terminal_scene()
-    boundary = mw.ElectrostaticBoundarySpec.grounded_box()
-    cap1 = mw.Simulation.capacitance(
-        scene, terminals=("a", "b", "c"), boundary=boundary, solver=_tol()
-    ).run().capacitance
-    cap2 = mw.Simulation.capacitance(
-        scene, terminals=("c", "a", "b"), boundary=boundary, solver=_tol()
-    ).run().capacitance
+    boundary = mw.electrostatic.ElectrostaticBoundarySpec.grounded_box()
+    cap1 = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+        scene, config=mw.electrostatic.CapacitanceConfig(terminals=("a", "b", "c"), boundary=boundary, solver=_tol())
+    ).run())
+    cap2 = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+        scene, config=mw.electrostatic.CapacitanceConfig(terminals=("c", "a", "b"), boundary=boundary, solver=_tol())
+    ).run())
     for x in ("a", "b", "c"):
         for y in ("a", "b", "c"):
             c1 = float(cap1.capacitance(x, y))
@@ -153,20 +142,16 @@ def test_row_sum_charge_conservation_under_insulating_boundary():
     r = 0.2
     domain = mw.Domain(bounds=((-half, half),) * 3)
     grid = mw.GridSpec.uniform(2.0 * half / 40)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="a", geometry=Sphere(position=(-0.45, 0, 0), radius=r), potential=1.0)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="b", geometry=Sphere(position=(0.45, 0, 0), radius=r), potential=0.0)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="ref", geometry=OutsideSphere(0.9), grounded=True)
-    )
-    cap = mw.Simulation.capacitance(
-        scene, terminals=("a", "b", "ref"), reference="ref",
-        boundary=mw.ElectrostaticBoundarySpec.neumann(), solver=_tol(),
-    ).run().capacitance
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(name="a", geometry=Sphere(position=(-0.45, 0, 0), radius=r), potential=1.0),
+                mw.electrostatic.ElectrostaticTerminal(name="b", geometry=Sphere(position=(0.45, 0, 0), radius=r), potential=0.0),
+                mw.electrostatic.ElectrostaticTerminal(name="ref", geometry=OutsideSphere(0.9), grounded=True),
+            ))
+    cap = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+        scene, config=mw.electrostatic.CapacitanceConfig(
+            terminals=("a", "b", "ref"), reference="ref",
+            boundary=mw.electrostatic.ElectrostaticBoundarySpec.neumann(), solver=_tol()),
+    ).run())
     assert cap.terminal_order == ("a", "b")
     assert cap.row_sum_error < 1e-6
 
@@ -174,10 +159,11 @@ def test_row_sum_charge_conservation_under_insulating_boundary():
 def test_capacitance_to_reference_single_terminal():
     a, b = 0.2, 0.8
     scene = _shell_scene(60, a=a, b=b)
-    cap = mw.Simulation.capacitance(
-        scene, terminals=("inner", "outer"), reference="outer",
-        boundary=mw.ElectrostaticBoundarySpec.neumann(), solver=_tol(),
-    ).run().capacitance
+    cap = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+        scene, config=mw.electrostatic.CapacitanceConfig(
+            terminals=("inner", "outer"), reference="outer",
+            boundary=mw.electrostatic.ElectrostaticBoundarySpec.neumann(), solver=_tol()),
+    ).run())
     # Single active terminal: capacitance-to-reference equals the self term.
     c_self = float(cap.capacitance_to_reference("inner"))
     assert abs(c_self - float(cap.capacitance("inner", "inner"))) < 1e-18
@@ -193,12 +179,13 @@ def test_two_terminal_equivalent_capacitance():
     floating-charge superposition solve. Agreement is therefore a genuine
     cross-check, not a restatement of the 2x2 matrix inverse.
     """
-    boundary = mw.ElectrostaticBoundarySpec.grounded_box()
+    boundary = mw.electrostatic.ElectrostaticBoundarySpec.grounded_box()
     # Closed-form route: reference "c" leaves an active 2x2 matrix over ("a", "b").
-    cap = mw.Simulation.capacitance(
-        _three_terminal_scene(), terminals=("a", "b", "c"), reference="c",
-        boundary=boundary, solver=_tol(),
-    ).run().capacitance
+    cap = mw.electrostatic.capacitance(mw.Simulation.capacitance(
+        _three_terminal_scene(), config=mw.electrostatic.CapacitanceConfig(
+            terminals=("a", "b", "c"), reference="c",
+            boundary=boundary, solver=_tol()),
+    ).run())
     assert cap.terminal_order == ("a", "b")
     assert cap.matrix.shape == (2, 2)
     c_eq = float(cap.two_terminal_capacitance("a", "b"))
@@ -208,9 +195,9 @@ def test_two_terminal_equivalent_capacitance():
     # problem (+Q on "a", -Q on "b", "c" grounded) through the floating-charge
     # solver and recover C_eq from the stored field energy W = 0.5 Q^2 / C_eq.
     Q = 1.0e-12
-    es = mw.Simulation.electrostatic(
-        _two_terminal_floating_scene(Q), boundary=boundary, solver=_tol()
-    ).run().electrostatic
+    es = mw.electrostatic.electrostatic(mw.Simulation.electrostatic(
+        _two_terminal_floating_scene(Q), config=mw.electrostatic.ElectrostaticConfig(boundary=boundary, solver=_tol())
+    ).run())
     c_eq_energy = Q * Q / (2.0 * float(es.energy))
     assert abs(c_eq - c_eq_energy) / abs(c_eq_energy) < 1e-6
 
@@ -226,14 +213,14 @@ def test_capacitance_needs_return_path():
     scene = _three_terminal_scene()
     with pytest.raises(ValueError):
         mw.Simulation.capacitance(
-            scene, boundary=mw.ElectrostaticBoundarySpec.neumann(), solver=_tol()
+            scene, config=mw.electrostatic.CapacitanceConfig(boundary=mw.electrostatic.ElectrostaticBoundarySpec.neumann(), solver=_tol())
         ).run()
 
 
 def test_capacitance_result_accessor_guard():
     scene = _three_terminal_scene()
     es = mw.Simulation.electrostatic(
-        scene, boundary=mw.ElectrostaticBoundarySpec.grounded_box(), solver=_tol()
+        scene, config=mw.electrostatic.ElectrostaticConfig(boundary=mw.electrostatic.ElectrostaticBoundarySpec.grounded_box(), solver=_tol())
     ).run()
     with pytest.raises(AttributeError):
         _ = es.capacitance

@@ -109,9 +109,8 @@ def _closed_box_solver(*, circuits=()):
         boundary=mw.BoundarySpec.none(),
         ports=(_port(),) if circuits else (),
         circuits=circuits,
-        device="cuda",
     )
-    return mw.Simulation.fdtd(scene, frequency=3.0e9).prepare().solver
+    return mw.Simulation.fdtd(scene, frequencies=3.0e9).prepare().solver
 
 
 def _magnetic_control_volumes(solver) -> dict[str, torch.Tensor]:
@@ -207,14 +206,12 @@ def _run_coupled_balance(circuit, *, resistor_names, source_names, steps=_STEPS)
     source_energy = 0.0
     for step in range(steps):
         half_step_previous = {name: getattr(solver, name).clone() for name in ("Hx", "Hy", "Hz")}
-        update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
+        update_magnetic_fields(solver)
         u_field[step] = float(
             _electric_energy(solver, cvE) + _magnetic_energy(solver, control_volumes, half_step_previous)
         )
         u_circuit[step] = float(runtime._stored_energy(runtime.state))
-        update_electric_fields(
-            solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz, time_value=step * dt
-        )
+        update_electric_fields(solver)
         apply_port_runtimes(solver)
         enforce_pec_boundaries(solver)
         sample = step + 1
@@ -264,7 +261,7 @@ def _assert_field_link(record: _BalanceRecord) -> None:
     assert link_residual <= _LINK_TOL * peak_field
 
 
-def _scenario_a_circuit() -> mw.Circuit:
+def _scenario_a_circuit() -> mw.circuits.Circuit:
     """(a) Resistive load on a driven port: source drives the port THROUGH a
     50 ohm series resistor.
 
@@ -274,18 +271,18 @@ def _scenario_a_circuit() -> mw.Circuit:
     develops a drop across R1). This is the two-way-coupled resistive-load case.
     """
 
-    circuit = mw.Circuit("resistive_load")
+    circuit = mw.circuits.Circuit("resistive_load")
     node_in = circuit.node("input")
     node_p = circuit.node("port")
     circuit.add(
-        mw.VoltageSource("V1", node_in, circuit.ground, 0.0, waveform=mw.SineWaveform(0.0, 1.0, 3.0e9))
+        mw.circuits.VoltageSource("V1", node_in, circuit.ground, 0.0, waveform=mw.circuits.SineWaveform(0.0, 1.0, 3.0e9))
     )
-    circuit.add(mw.Resistor("R1", node_in, node_p, 50.0))
+    circuit.add(mw.rf.Resistor("R1", node_in, node_p, 50.0))
     circuit.bind_port("feed", positive=node_p, negative=circuit.ground)
     return circuit
 
 
-def _scenario_b_circuit() -> mw.Circuit:
+def _scenario_b_circuit() -> mw.circuits.Circuit:
     """(b) Resonant series RLC assembled from MNA primitives (not native SeriesRLC).
 
     R, L and C are in series between the source and the port node, so the port
@@ -293,22 +290,22 @@ def _scenario_b_circuit() -> mw.Circuit:
     the field-driven port current (two-way coupled through the RLC branch).
     """
 
-    circuit = mw.Circuit("series_rlc")
+    circuit = mw.circuits.Circuit("series_rlc")
     node_in = circuit.node("in")
     node_r = circuit.node("nr")
     node_l = circuit.node("nl")
     node_p = circuit.node("port")
     circuit.add(
-        mw.VoltageSource("V1", node_in, circuit.ground, 0.0, waveform=mw.SineWaveform(0.0, 1.0, 3.0e9))
+        mw.circuits.VoltageSource("V1", node_in, circuit.ground, 0.0, waveform=mw.circuits.SineWaveform(0.0, 1.0, 3.0e9))
     )
-    circuit.add(mw.Resistor("R1", node_in, node_r, 20.0))
-    circuit.add(mw.Inductor("L1", node_r, node_l, 0.5e-9))
-    circuit.add(mw.Capacitor("C1", node_l, node_p, 1.0e-12))
+    circuit.add(mw.rf.Resistor("R1", node_in, node_r, 20.0))
+    circuit.add(mw.rf.Inductor("L1", node_r, node_l, 0.5e-9))
+    circuit.add(mw.rf.Capacitor("C1", node_l, node_p, 1.0e-12))
     circuit.bind_port("feed", positive=node_p, negative=circuit.ground)
     return circuit
 
 
-def _scenario_c_circuit() -> mw.Circuit:
+def _scenario_c_circuit() -> mw.circuits.Circuit:
     """(c) Controlled-source network: a VCVS output stage drives the port.
 
     The VCVS output (twice the sensed divider voltage) reaches the port through a
@@ -316,20 +313,20 @@ def _scenario_c_circuit() -> mw.Circuit:
     the field back-reacts through R3 (the port is not pinned to any source node).
     """
 
-    circuit = mw.Circuit("vcvs_network")
+    circuit = mw.circuits.Circuit("vcvs_network")
     node_in = circuit.node("in")
     node_sense = circuit.node("sense")
     node_out = circuit.node("outp")
     node_p = circuit.node("port")
     circuit.add(
-        mw.VoltageSource("V1", node_in, circuit.ground, 0.0, waveform=mw.SineWaveform(0.0, 1.0, 3.0e9))
+        mw.circuits.VoltageSource("V1", node_in, circuit.ground, 0.0, waveform=mw.circuits.SineWaveform(0.0, 1.0, 3.0e9))
     )
-    circuit.add(mw.Resistor("R1", node_in, node_sense, 30.0))
-    circuit.add(mw.Resistor("R2", node_sense, circuit.ground, 70.0))
+    circuit.add(mw.rf.Resistor("R1", node_in, node_sense, 30.0))
+    circuit.add(mw.rf.Resistor("R2", node_sense, circuit.ground, 70.0))
     circuit.add(
-        mw.VoltageControlledVoltageSource("E1", node_out, circuit.ground, node_sense, circuit.ground, 2.0)
+        mw.circuits.VoltageControlledVoltageSource("E1", node_out, circuit.ground, node_sense, circuit.ground, 2.0)
     )
-    circuit.add(mw.Resistor("R3", node_out, node_p, 50.0))
+    circuit.add(mw.rf.Resistor("R3", node_out, node_p, 50.0))
     circuit.bind_port("feed", positive=node_p, negative=circuit.ground)
     return circuit
 
@@ -345,7 +342,6 @@ def test_lossless_cavity_conserves_discrete_energy():
     """
 
     solver = _closed_box_solver()
-    dt = float(solver.dt)
     control_volumes = _magnetic_control_volumes(solver)
     cvE = {name: _edge_control_volume(solver, name) for name in ("Ex", "Ey", "Ez")}
 
@@ -359,13 +355,11 @@ def test_lossless_cavity_conserves_discrete_energy():
     energies = []
     for step in range(3000):
         half_step_previous = {name: getattr(solver, name).clone() for name in ("Hx", "Hy", "Hz")}
-        update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
+        update_magnetic_fields(solver)
         energies.append(
             float(_electric_energy(solver, cvE) + _magnetic_energy(solver, control_volumes, half_step_previous))
         )
-        update_electric_fields(
-            solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz, time_value=step * dt
-        )
+        update_electric_fields(solver)
         enforce_pec_boundaries(solver)
 
     energies = np.asarray(energies)

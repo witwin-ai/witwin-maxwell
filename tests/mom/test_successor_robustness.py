@@ -14,7 +14,7 @@ def test_dense_capacity_and_allocation_failure_allow_fresh_prepare(monkeypatch, 
     from witwin.maxwell.mom import runtime
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=2.25))],
                      sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=4))
+    config = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=4))
     calls = []
     original = runtime.assemble_system
 
@@ -29,10 +29,10 @@ def test_dense_capacity_and_allocation_failure_allow_fresh_prepare(monkeypatch, 
             patch.setattr(torch.cuda, 'memory_reserved', lambda device: 0)
             patch.setattr(torch.cuda, 'memory_allocated', lambda device: 0)
         with pytest.raises(torch.cuda.OutOfMemoryError, match='capacity preflight|injected assembly'):
-            mw.Simulation.mom(scene, frequency=3e8, config=config).prepare()
+            mw.Simulation.mom(scene, frequencies=3e8, config=config).prepare()
         assert len(calls) == (0 if failure == 'capacity' else 1)
     assert runtime.assemble_system is original
-    prepared = mw.Simulation.mom(scene, frequency=3e8, config=config).prepare()
+    prepared = mw.Simulation.mom(scene, frequencies=3e8, config=config).prepare()
     receipt = prepared.solver.handle.metadata['memory_preflight']
     assert receipt['minimum_required_bytes'] <= receipt['available_bytes']
     assert receipt['workspace_included'] is False
@@ -54,14 +54,14 @@ def test_actual_compact_dense_solver_matrix_and_cross_device(dtype):
                     ((0, 1, 0), (1, 0, 0)), ((0, 1, 0), (0, 0, 1))]
     for device in ('cuda:0', 'cuda:1'):
         with torch.cuda.device(device):
-            scene = mw.Scene(device=device, structures=[mw.Structure(
+            scene = mw.Scene(structures=[mw.Structure(
                 mw.Sphere(radius=.1), mw.Material(eps_r=2.25, sigma_e=.004))],
                 sources=[mw.PlaneWave()])
             per_storage = []
             for storage in ('dense', 'compact_rwg_v1'):
-                config = mw.MoMConfig(subdivisions=0, dtype=dtype, riesz_storage=storage,
+                config = mw.mom.MoMConfig(subdivisions=0, dtype=dtype, riesz_storage=storage,
                     integration=IntegrationConfig(order=3, singular_order=4))
-                op = mw.Simulation.mom(scene, frequency=3e8, config=config).prepare().solver.handle
+                op = mw.Simulation.mom(scene, frequencies=3e8, config=config).prepare().solver.handle
                 sources = [mw.PlaneWave(direction=d, polarization=p) for d, p in orientations]
                 rhs = torch.stack([build_rhs(op.basis, op.exterior, [s], order=3) for s in sources])
                 oracle = torch.linalg.solve(op.matrix, rhs.mT).mT
@@ -119,11 +119,11 @@ def test_legal_sliver_mesh_storage_residual_adjoint_and_queries(fraction):
         fill_mode='solid', recenter=False), mw.Material(eps_r=2.25, sigma_e=.004))], sources=[mw.PlaneWave()])
     observations = []
     for storage in ('dense', 'compact_rwg_v1'):
-        prepared = mw.Simulation.mom(scene, frequency=3e8, config=mw.MoMConfig(riesz_storage=storage,
+        prepared = mw.Simulation.mom(scene, frequencies=3e8, config=mw.mom.MoMConfig(riesz_storage=storage,
             integration=IntegrationConfig(order=4, singular_order=6))).prepare()
         result = prepared.run()
         op, rhs = prepared.solver.handle, prepared.solver.rhs
-        x = result.surface_currents.scattered_coefficients
+        x = mw.mom.surface_currents(result).scattered_coefficients
         assert result.stats()['converged']
         assert float(torch.linalg.vector_norm(op.apply(x)-rhs)/torch.linalg.vector_norm(rhs)) < 1e-10
         lhs, rhs_dot = torch.vdot(op.apply(x), rhs), torch.vdot(x, op.adjoint(rhs))

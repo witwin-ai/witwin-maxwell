@@ -8,6 +8,8 @@ import torch
 from witwin.core import GeometryBase
 from witwin.core.geometry.polygon import polygon_loops_signed_distance_2d
 
+from ..errors import UnsupportedFeatureError
+
 
 def _as_scalar(value, *, device=None) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
@@ -296,4 +298,5 @@ class ComplexPolySlab(PolySlab):
         self.loop_sizes = tuple(int(loop.shape[0]) for loop in loop_tensors)
 
     def to_mesh(self, segments=16):
-        raise NotImplementedError("ComplexPolySlab does not support mesh export.")
+        raise UnsupportedFeatureError("ComplexPolySlab does not support mesh export.",
+                                      feature="guard:8338ee6a", method=None)

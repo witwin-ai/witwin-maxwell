@@ -25,8 +25,8 @@ def _scene():
 
 
 def _config(grids, **kwargs):
-    return mw.MoMConfig(integration=INTEGRATION, operator_backend='pfft', riesz_storage='local_rwg_v1',
-                        pfft=mw.PFFTConfig(exterior_grids=grids, solve_dual_tolerance=1e-4,
+    return mw.mom.MoMConfig(integration=INTEGRATION, operator_backend='pfft', riesz_storage='local_rwg_v1',
+                        pfft=mw.mom.PFFTConfig(exterior_grids=grids, solve_dual_tolerance=1e-4,
                                            original_sample_tolerance=3e-2),
                         stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal', rtol=1e-5, atol=0.,
                                               maxiter=2000, restart=300, stagnation_window=300), **kwargs)
@@ -52,11 +52,11 @@ def _relative(a, b):
 
 @pytest.fixture(scope='module')
 def prepared():
-    dense = mw.Simulation.mom(_scene(), frequency=FREQUENCY, config=mw.MoMConfig(
+    dense = mw.Simulation.mom(_scene(), frequencies=FREQUENCY, config=mw.mom.MoMConfig(
         integration=INTEGRATION, riesz_storage='compact_rwg_v1',
         stopping=StoppingRule(method='direct', rtol=1e-10, atol=0.))).prepare()
-    single = mw.Simulation.mom(_scene(), frequency=FREQUENCY, config=_config('single')).prepare()
-    clusters = mw.Simulation.mom(_scene(), frequency=FREQUENCY, config=_config('clusters')).prepare()
+    single = mw.Simulation.mom(_scene(), frequencies=FREQUENCY, config=_config('single')).prepare()
+    clusters = mw.Simulation.mom(_scene(), frequencies=FREQUENCY, config=_config('clusters')).prepare()
     return dense, single, clusters
 
 
@@ -98,13 +98,13 @@ def test_clustered_action_matches_single_grid_and_dense(prepared):
 def test_clustered_solve_matches_dense(prepared):
     dense, _, _ = prepared
     reference = dense.run()
-    config = _config('clusters', right_preconditioner=mw.FunctionRightPreconditioner(_body_lu, name='body_lu'))
-    result = mw.Simulation.mom(_scene(), frequency=FREQUENCY, config=config).run()
+    config = _config('clusters', right_preconditioner=mw.mom.FunctionRightPreconditioner(_body_lu, name='body_lu'))
+    result = mw.Simulation.mom(_scene(), frequencies=FREQUENCY, config=config).run()
     stats = result.stats()
     assert stats['converged'] and stats['iterations'] < 60
     directions = torch.nn.functional.normalize(torch.randn((64, 3), device='cuda', dtype=torch.float64), dim=-1)
-    far, _ = result.surface_currents.far_field(directions)
-    far_ref, _ = reference.surface_currents.far_field(directions)
+    far, _ = mw.mom.surface_currents(result).far_field(directions)
+    far_ref, _ = mw.mom.surface_currents(reference).far_field(directions)
     assert _relative(far, far_ref) < 5e-3
 
 
@@ -117,6 +117,6 @@ def test_clusters_merge_close_bodies_and_fail_closed():
     groups, _ = form_clusters(bases, 2.)
     assert groups == [[0, 1], [2]]
     with pytest.raises(ValueError):
-        mw.PFFTConfig(exterior_grids='per_body')
+        mw.mom.PFFTConfig(exterior_grids='per_body')
     with pytest.raises(ValueError):
-        mw.PFFTConfig(cluster_separation=1.)
+        mw.mom.PFFTConfig(cluster_separation=1.)

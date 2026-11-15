@@ -17,6 +17,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.compiler.materials import _axis_averaging_width, _axis_sample_offsets
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_components, compile_materials
 
 
 # --- Regression guard: uniform grid stays bit-close through the new per-node path ---
@@ -30,49 +31,44 @@ def _rich_scene(grid, bounds, *, samples, averaging):
     not just the linear permittivity.
     """
     scene = mw.Scene(
-        domain=mw.Domain(bounds=bounds),
-        grid=grid,
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=samples, averaging=averaging),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="nl",
-            geometry=mw.Box(position=(-0.12, 0.05, 0.0), size=(0.3, 0.3, 0.3)),
-            material=mw.Material(
-                eps_r=6.0,
-                sigma_e=0.3,
-                kerr_chi3=1e-18,
-                nonlinearity=(
-                    mw.NonlinearSusceptibility(chi2=2e-12),
-                    mw.TwoPhotonAbsorption(beta=1e-11),
+                domain=mw.Domain(bounds=bounds),
+                grid=grid,
+                subpixel=mw.SubpixelSpec(samples=samples, averaging=averaging),
+                structures=(
+            mw.Structure(
+                name="nl",
+                geometry=mw.Box(position=(-0.12, 0.05, 0.0), size=(0.3, 0.3, 0.3)),
+                material=mw.Material(
+                    eps_r=6.0,
+                    sigma_e=0.3,
+                    kerr_chi3=1e-18,
+                    nonlinearity=(
+                        mw.media.NonlinearSusceptibility(chi2=2e-12),
+                        mw.media.TwoPhotonAbsorption(beta=1e-11),
+                    ),
                 ),
             ),
-        )
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="mod",
-            geometry=mw.Box(position=(0.14, -0.04, 0.02), size=(0.28, 0.28, 0.28)),
-            material=mw.Material(
-                eps_r=4.0,
-                modulation=mw.ModulationSpec(frequency=1e9, amplitude=0.1, phase=0.4),
-            ),
-        )
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="disp",
-            geometry=mw.Box(position=(0.0, 0.2, -0.15), size=(0.25, 0.25, 0.25)),
-            material=mw.Material(
-                eps_r=2.0,
-                lorentz_poles=(
-                    mw.LorentzPole(delta_eps=1.5, resonance_frequency=2e9, gamma=1e8),
+            mw.Structure(
+                name="mod",
+                geometry=mw.Box(position=(0.14, -0.04, 0.02), size=(0.28, 0.28, 0.28)),
+                material=mw.Material(
+                    eps_r=4.0,
+                    modulation=mw.media.ModulationSpec(frequency=1e9, amplitude=0.1, phase=0.4),
                 ),
             ),
-        )
-    )
-    return prepare_scene(scene)
+            mw.Structure(
+                name="disp",
+                geometry=mw.Box(position=(0.0, 0.2, -0.15), size=(0.25, 0.25, 0.25)),
+                material=mw.Material(
+                    eps_r=2.0,
+                    lorentz_poles=(
+                        mw.LorentzPole(delta_eps=1.5, resonance_frequency=2e9, gamma=1e8),
+                    ),
+                ),
+            ),
+            ),
+            )
+    return prepare_scene(scene, device="cpu")
 
 
 def _flatten_model(model):
@@ -100,14 +96,14 @@ def test_uniform_grid_custom_masters_subpixel_bit_close(samples, averaging):
     dl = 0.05
     bounds = ((-0.4, 0.4), (-0.4, 0.4), (-0.4, 0.4))
     uniform = _rich_scene(mw.GridSpec.uniform(dl), bounds, samples=samples, averaging=averaging)
-    uniform_model = uniform.compile_materials()
+    uniform_model = compile_materials(uniform)
 
     custom_grid = mw.GridSpec.custom(uniform.x_nodes64, uniform.y_nodes64, uniform.z_nodes64)
     custom_bounds = tuple(
         (float(nodes[0]), float(nodes[-1]))
         for nodes in (uniform.x_nodes64, uniform.y_nodes64, uniform.z_nodes64)
     )
-    custom_model = _rich_scene(custom_grid, custom_bounds, samples=samples, averaging=averaging).compile_materials()
+    custom_model = compile_materials(_rich_scene(custom_grid, custom_bounds, samples=samples, averaging=averaging))
 
     uniform_flat = _flatten_model(uniform_model)
     custom_flat = _flatten_model(custom_model)
@@ -126,21 +122,20 @@ def test_uniform_grid_custom_masters_subpixel_bit_close(samples, averaging):
 def test_auto_grid_subpixel_compiles(averaging):
     # Pre-P5.3 this raised inside _sample_offsets via the scalar Scene.dx.
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.3),
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=(2, 2, 2), averaging=averaging),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="sphere",
-            geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=0.15),
-            material=mw.Material(eps_r=12.0),
-        )
-    )
-    prepared = prepare_scene(scene)
-    assert prepared.grid.is_custom  # auto resolved to a nonuniform grid
-    eps, mu = prepared.compile_material_components()
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.3),
+                subpixel=mw.SubpixelSpec(samples=(2, 2, 2), averaging=averaging),
+                structures=(
+            mw.Structure(
+                name="sphere",
+                geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=0.15),
+                material=mw.Material(eps_r=12.0),
+            ),
+            ),
+            )
+    prepared = prepare_scene(scene, device="cpu")
+    assert prepared.scene.grid.is_custom  # auto resolved to a nonuniform grid
+    eps, mu = compile_material_components(prepared)
     for axis in ("x", "y", "z"):
         assert torch.isfinite(eps[axis]).all()
         assert torch.isfinite(mu[axis]).all()
@@ -162,9 +157,9 @@ def test_subpixel_offsets_scale_with_local_dual_cell():
         mw.Scene(
             domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
             grid=mw.GridSpec.custom(graded, graded, graded),
-            device="cpu",
-            subpixel_samples=mw.SubpixelSpec(samples=(2, 1, 1), averaging="arithmetic"),
-        )
+            subpixel=mw.SubpixelSpec(samples=(2, 1, 1), averaging="arithmetic"),
+        ),
+        device="cpu",
     )
     width = _axis_averaging_width(scene, "x")
     assert torch.is_tensor(width)
@@ -189,9 +184,9 @@ def test_subpixel_offsets_scale_with_local_dual_cell():
         mw.Scene(
             domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
             grid=mw.GridSpec.uniform(0.1),
-            device="cpu",
-            subpixel_samples=mw.SubpixelSpec(samples=(2, 1, 1), averaging="arithmetic"),
-        )
+            subpixel=mw.SubpixelSpec(samples=(2, 1, 1), averaging="arithmetic"),
+        ),
+        device="cpu",
     )
     scalar_offsets = _axis_sample_offsets(uniform, "x", 2)
     assert scalar_offsets == [-0.025, 0.025]
@@ -214,19 +209,18 @@ def test_graded_grid_interface_arithmetic_and_polarized():
 
     def _eps(averaging, samples):
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-            grid=mw.GridSpec.custom(xg, yg, zg),
-            device="cpu",
-            subpixel_samples=mw.SubpixelSpec(samples=samples, averaging=averaging),
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="slab",
-                geometry=mw.Box(position=(0.25, 0.0, 0.0), size=(0.5, 2.0, 2.0)),
-                material=mw.Material(eps_r=eps_r),
-            )
-        )
-        eps, _ = prepare_scene(scene).compile_material_components()
+                    domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                    grid=mw.GridSpec.custom(xg, yg, zg),
+                    subpixel=mw.SubpixelSpec(samples=samples, averaging=averaging),
+                    structures=(
+                mw.Structure(
+                    name="slab",
+                    geometry=mw.Box(position=(0.25, 0.0, 0.0), size=(0.5, 2.0, 2.0)),
+                    material=mw.Material(eps_r=eps_r),
+                ),
+                ),
+                )
+        eps, _ = compile_material_components(prepare_scene(scene, device="cpu"))
         return eps
 
     # Resolve the smooth interface inside its actual asymmetric dual volume.
@@ -250,28 +244,27 @@ def test_graded_grid_interface_arithmetic_and_polarized():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
 def test_auto_grid_subpixel_fdtd_smoke():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.35, 0.35), (-0.35, 0.35), (-0.35, 0.35))),
-        grid=mw.GridSpec.auto(),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
-        subpixel_samples=mw.SubpixelSpec(samples=(2, 2, 2), averaging="polarized"),
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Sphere(position=(0.05, 0.0, 0.0), radius=0.1),
-            material=mw.Material(eps_r=6.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1e9),
-            name="src",
-        )
-    )
-    solver = mw.Simulation.fdtd(scene, frequency=1e9).prepare().solver
+                domain=mw.Domain(bounds=((-0.35, 0.35), (-0.35, 0.35), (-0.35, 0.35))),
+                grid=mw.GridSpec.auto(),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                subpixel=mw.SubpixelSpec(samples=(2, 2, 2), averaging="polarized"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Sphere(position=(0.05, 0.0, 0.0), radius=0.1),
+                material=mw.Material(eps_r=6.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1e9),
+                name="src",
+            ),
+            ),
+            )
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9).prepare().solver
     solver.solve(time_steps=40, dft_frequency=None, dft_window="none", full_field_dft=False)
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         assert torch.isfinite(getattr(solver, name)).all(), name

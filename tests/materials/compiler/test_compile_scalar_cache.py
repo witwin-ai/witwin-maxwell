@@ -166,12 +166,11 @@ def _tensors(value,path=''):
 @pytest.mark.parametrize('samples,averaging',[(1,'arithmetic'),((1,1,3),'polarized'),((1,1,512),'polarized')])
 def test_real_CPU_compiled_all_material_and_PEC_tensor_coefficients_bitwise(samples,averaging):
     before=torch.cuda.is_initialized();nodes=np.linspace(-1,1,5)
-    scene=mw.Scene(domain=mw.Domain(bounds=((-1.,1.),)*3),grid=mw.GridSpec.custom(nodes,nodes,nodes),device='cpu',
-        boundary=mw.BoundarySpec.pml(num_layers=1),subpixel_samples=mw.SubpixelSpec(samples=samples,averaging=averaging),structures=[
+    scene=mw.Scene(domain=mw.Domain(bounds=((-1.,1.),)*3),grid=mw.GridSpec.custom(nodes,nodes,nodes),boundary=mw.BoundarySpec.pml(num_layers=1),subpixel=mw.SubpixelSpec(samples=samples,averaging=averaging),structures=[
             mw.Structure(mw.Box(position=(-.1,0.,.2),size=(1.1,1.7,1.5)),mw.Material(eps_r=4.,mu_r=1.,sigma_e=.01),name='one'),
             mw.Structure(mw.Box(position=(.2,-.1,0.),size=(1.7,1.1,1.3)),mw.Material(eps_r=2.5,mu_r=1.4,sigma_e=.02),name='two'),
-            mw.Structure(mw.PlanarPEC.rectangle(((-1.,1.),(-1.,1.)),coordinate=0.),mw.Material.pec(),name='PEC')])
-    prepared=prepare_scene(scene)
+            mw.Structure(mw.geometry.PlanarPEC.rectangle(((-1.,1.),(-1.,1.)),coordinate=0.),mw.Material.pec(),name='PEC')])
+    prepared=prepare_scene(scene, device='cpu')
     assert cache._SCALARS.get()is None
     original=candidate.compile_material_model.__wrapped__(prepared,subpixel=scene.subpixel)
     changed=candidate.compile_material_model(prepared,subpixel=scene.subpixel)

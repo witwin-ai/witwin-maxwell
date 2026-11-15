@@ -63,7 +63,7 @@ def main(argv=None):
     start = time.perf_counter()
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=2.25, sigma_e=.004))],
                      sources=[mw.PlaneWave()])
-    prepared = mw.Simulation.mom(scene, frequency=3e8, config=mw.MoMConfig(
+    prepared = mw.Simulation.mom(scene, frequencies=3e8, config=mw.mom.MoMConfig(
         subdivisions=args.subdivisions, integration=integration)).prepare()
     op = prepared.solver.handle
     report['edges'] = op.basis.n_edges

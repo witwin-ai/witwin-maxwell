@@ -63,23 +63,23 @@ def main():
         scene = mw.Scene(structures=[mw.Structure(mw.Mesh(mesh.vertices, mesh.faces,
             recenter=False, fill_mode='solid', device='cuda'), mw.Material(eps_r=2.), name='body0')],
             sources=[mw.PlaneWave()])
-        config = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=4, singular_order=6),
-            periodic=mw.MoMPeriodicConfig(((.7, 0., 0.), (0., .8, 0.)), eta_per_m=3.5,
+        config = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=4, singular_order=6),
+            periodic=mw.mom.MoMPeriodicConfig(((.7, 0., 0.), (0., .8, 0.)), eta_per_m=3.5,
                 real_shells=3, reciprocal_shells=8, quadrature_order=64),
             operator_backend='fmm', riesz_storage='local_rwg_v1',
-            fmm=mw.FMMConfig(order=8, table_storage=args.table_storage, separation_ratio=.25,
+            fmm=mw.mom.FMMConfig(order=8, table_storage=args.table_storage, separation_ratio=.25,
                             leaf_factor_kernel=args.leaf_factor_kernel),
             stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal',
                 rtol=1e-12, atol=0., maxiter=args.maxiter, restart=args.restart,
                 stagnation_window=args.stagnation_window),
             query_config=FieldQueryConfig(adaptive=False))
         stage('geometry_ready')
-        prepared = mw.Simulation.mom(scene, frequency=3e8, config=config).prepare()
+        prepared = mw.Simulation.mom(scene, frequencies=3e8, config=config).prepare()
         stage('fmm_and_rhs_ready')
         result = prepared.run()
         stage('solve_finished')
         result.save(args.output/'result.pt')
-        data = result.surface_currents
+        data = mw.mom.surface_currents(result)
         handle, coefficients = data.handle, data.scattered_coefficients
         axis = torch.arange(-3, 4, device='cuda')
         orders = torch.stack(torch.meshgrid(axis, axis, indexing='ij'), -1).reshape(-1, 2)

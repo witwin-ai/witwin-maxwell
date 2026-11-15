@@ -214,8 +214,6 @@ def aux_field_time_payload(solver, record, t, count):
         "position": record["position"],
         "size": record["size"],
     }
-    if len(components) == 1:
-        payload["data"] = next(iter(components.values()))
     return payload
 
 
@@ -223,7 +221,7 @@ def aux_field_time_payload(solver, record, t, count):
 # Differentiable-run guard
 # ---------------------------------------------------------------------------
 
-_GUARDED_TRACE_KINDS = ("surface_field_time", "aux_field_time")
+_GUARDED_TRACE_KINDS = ("field_time", "flux_time", "surface_field_time", "aux_field_time")
 
 
 class _NonDifferentiableTrace(torch.autograd.Function):
@@ -245,7 +243,7 @@ class _NonDifferentiableTrace(torch.autograd.Function):
 
 
 def guard_nondifferentiable_traces(monitors):
-    """Mark surface/auxiliary time traces of a differentiable run as non-differentiable.
+    """Mark the time-domain traces of a differentiable run as non-differentiable.
 
     The traces stay numerically identical, but any objective that depends on
     them raises a clear error during ``backward()`` instead of silently
@@ -262,15 +260,15 @@ def guard_nondifferentiable_traces(monitors):
             return _NonDifferentiableTrace.apply(value, anchor, name, kind)
 
         guarded = dict(payload)
-        if kind == "aux_field_time":
-            guarded["components"] = {key: guard(value) for key, value in payload["components"].items()}
-            if "data" in payload:
-                guarded["data"] = next(iter(guarded["components"].values()))
-        else:
+        if kind == "flux_time":
+            guarded["flux"] = guard(payload["flux"])
+        elif kind == "surface_field_time":
             guarded["faces"] = {
                 label: {**face, "components": {key: guard(value) for key, value in face["components"].items()}}
                 for label, face in payload["faces"].items()
             }
+        else:
+            guarded["components"] = {key: guard(value) for key, value in payload["components"].items()}
         guarded["differentiable"] = False
         monitors[name] = guarded
     return monitors

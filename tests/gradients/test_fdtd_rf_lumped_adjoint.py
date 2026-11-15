@@ -301,7 +301,7 @@ def test_zero_internal_lc_flags_are_mirrored_and_open_resistance_is_rejected():
         lumped=open_runtime,
     )
     solver = SimpleNamespace(
-        scene=SimpleNamespace(structures=()),
+        scene=SimpleNamespace(scene=SimpleNamespace(structures=(), material_regions=())),
         _full_aniso_cpml_overlap=False,
         boundary_x_low_code=BOUNDARY_NONE,
         boundary_x_high_code=BOUNDARY_NONE,
@@ -483,7 +483,6 @@ def _physical_scene(*, termination=None, reference_impedance=50.0):
                 reference_impedance=reference_impedance,
             ),
         ),
-        device="cuda",
     )
     return scene
 
@@ -491,9 +490,11 @@ def _physical_scene(*, termination=None, reference_impedance=50.0):
 def _passive_port_objective(scene):
     result = mw.Simulation.fdtd(
         scene,
-        frequency=3.0e9,
-        run_time=mw.TimeConfig(time_steps=32),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        frequencies=3.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=32),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     voltage = result.port("feed").voltage
     return voltage.abs().square().sum(), result
@@ -547,16 +548,17 @@ def test_port_series_rlc_adjoint_matches_three_step_central_difference(
     steps,
 ):
     parameter = torch.tensor(center, device="cuda", requires_grad=True)
-    termination = mw.SeriesRLC(**{component: parameter})
+    termination = mw.rf.SeriesRLC(**{component: parameter})
     scene = _physical_scene(termination=termination)
-    scene.add_source(
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=(0.005, 0.0, 0.0),
             polarization="Ez",
             width=0.002,
             source_time=mw.CW(frequency=3.0e9, amplitude=1000.0),
-        )
-    )
+        ),
+    ))
     result = _assert_three_step_central_difference(
         parameter,
         lambda: _passive_port_objective(scene),
@@ -568,9 +570,9 @@ def test_port_series_rlc_adjoint_matches_three_step_central_difference(
 @pytest.mark.parametrize(
     ("element_type", "center", "steps"),
     (
-        (mw.Resistor, 50.0, (5.0, 2.5, 1.25)),
-        (mw.Inductor, 1.0e-9, (1.0e-10, 5.0e-11, 2.5e-11)),
-        (mw.Capacitor, 1.0e-12, (1.0e-13, 5.0e-14, 2.5e-14)),
+        (mw.rf.Resistor, 50.0, (5.0, 2.5, 1.25)),
+        (mw.rf.Inductor, 1.0e-9, (1.0e-10, 5.0e-11, 2.5e-11)),
+        (mw.rf.Capacitor, 1.0e-12, (1.0e-13, 5.0e-14, 2.5e-14)),
     ),
 )
 def test_standalone_rlc_adjoint_matches_three_step_central_difference(
@@ -581,29 +583,32 @@ def test_standalone_rlc_adjoint_matches_three_step_central_difference(
     parameter = torch.tensor(center, device="cuda", requires_grad=True)
     scene = _physical_scene()
     value_name = {
-        mw.Resistor: "resistance",
-        mw.Inductor: "inductance",
-        mw.Capacitor: "capacitance",
+        mw.rf.Resistor: "resistance",
+        mw.rf.Inductor: "inductance",
+        mw.rf.Capacitor: "capacitance",
     }[element_type]
-    scene.add_lumped_element(
+    scene = scene.updated(lumped_elements=(
+        *scene.lumped_elements,
         element_type(
             "standalone",
             positive=(0.01, 0.0, 0.005),
             negative=(0.01, 0.0, -0.005),
             **{value_name: parameter},
-        )
-    )
+        ),
+    ))
 
     def objective():
         result = mw.Simulation.fdtd(
             scene,
-            frequency=3.0e9,
-            excitations=mw.PortExcitation(
+            frequencies=3.0e9,
+            excitations=mw.rf.PortExcitation(
                 "feed",
                 source_time=mw.CW(3.0e9),
             ),
-            run_time=mw.TimeConfig(time_steps=32),
-            spectral_sampler=mw.SpectralSampler(window="none"),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=32),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            ),
         ).run()
         voltage = result.port("feed").voltage
         return voltage.abs().square().sum(), result
@@ -623,14 +628,16 @@ def test_port_amplitude_and_available_power_match_three_step_central_difference(
     def objective():
         result = mw.Simulation.fdtd(
             scene,
-            frequency=3.0e9,
-            excitations=mw.PortExcitation(
+            frequencies=3.0e9,
+            excitations=mw.rf.PortExcitation(
                 "feed",
                 amplitude=amplitude,
                 source_time=mw.CW(3.0e9),
             ),
-            run_time=mw.TimeConfig(time_steps=24),
-            spectral_sampler=mw.SpectralSampler(window="none"),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=24),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            ),
         ).run()
         port = result.port("feed")
         return (
@@ -659,9 +666,10 @@ class _DensityPortScene(mw.SceneModule):
 
     def to_scene(self):
         scene = _physical_scene()
-        scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
+        scene = scene.updated(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
         density = torch.sigmoid(self.logit).expand(2, 2, 2)
-        scene.add_material_region(
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
             mw.MaterialRegion(
                 name="feed_design",
                 geometry=mw.Box(
@@ -670,8 +678,8 @@ class _DensityPortScene(mw.SceneModule):
                 ),
                 density=density,
                 eps_bounds=(1.0, 4.0),
-            )
-        )
+            ),
+        ))
         return scene
 
 
@@ -681,13 +689,15 @@ def test_material_region_density_and_lumped_port_adjoint_coexist():
     def objective():
         result = mw.Simulation.fdtd(
             model,
-            frequency=3.0e9,
-            excitations=mw.PortExcitation(
+            frequencies=3.0e9,
+            excitations=mw.rf.PortExcitation(
                 "feed",
                 source_time=mw.CW(3.0e9),
             ),
-            run_time=mw.TimeConfig(time_steps=24),
-            spectral_sampler=mw.SpectralSampler(window="none"),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=24),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            ),
         ).run()
         voltage = result.port("feed").voltage
         return voltage.abs().square().sum(), result
@@ -705,12 +715,12 @@ def test_unsupported_trainable_rf_combinations_fail_explicitly():
     with pytest.raises(NotImplementedError, match="trainable source_impedance"):
         mw.Simulation.fdtd(
             _physical_scene(),
-            frequency=3.0e9,
-            excitations=mw.PortExcitation(
+            frequencies=3.0e9,
+            excitations=mw.rf.PortExcitation(
                 "feed",
                 source_impedance=source_impedance,
             ),
-            run_time=mw.TimeConfig(time_steps=8),
+            config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
         ).run()
 
     reference_impedance = torch.tensor(
@@ -721,17 +731,17 @@ def test_unsupported_trainable_rf_combinations_fail_explicitly():
     with pytest.raises(NotImplementedError, match="trainable reference_impedance"):
         mw.Simulation.fdtd(
             _physical_scene(reference_impedance=reference_impedance),
-            frequency=3.0e9,
-            excitations=mw.PortExcitation("feed"),
-            run_time=mw.TimeConfig(time_steps=8),
+            frequencies=3.0e9,
+            excitations=mw.rf.PortExcitation("feed"),
+            config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
         ).run()
 
     parallel_r = torch.tensor(50.0, device="cuda", requires_grad=True)
     with pytest.raises(NotImplementedError, match="ParallelRLC"):
         mw.Simulation.fdtd(
-            _physical_scene(termination=mw.ParallelRLC(r=parallel_r)),
-            frequency=3.0e9,
-            run_time=mw.TimeConfig(time_steps=8),
+            _physical_scene(termination=mw.rf.ParallelRLC(r=parallel_r)),
+            frequencies=3.0e9,
+            config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
         ).run()
 
 
@@ -740,8 +750,8 @@ def test_trainable_observer_only_port_fails_explicitly():
     with pytest.raises(NotImplementedError, match="observer-only contour ports"):
         mw.Simulation.fdtd(
             model,
-            frequency=3.0e9,
-            run_time=mw.TimeConfig(time_steps=8),
+            frequencies=3.0e9,
+            config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8)),
         ).run()
 
 
@@ -765,10 +775,10 @@ def test_terminal_port_uses_the_same_amplitude_adjoint_runtime():
             material=mw.Material.pec(),
         ),
     )
-    port = mw.TerminalPort(
+    port = mw.rf.TerminalPort(
         name="terminal_feed",
-        positive_terminal=mw.TerminalRef("signal"),
-        negative_terminal=mw.TerminalRef("ground"),
+        positive_terminal=mw.rf.TerminalRef("signal"),
+        negative_terminal=mw.rf.TerminalRef("ground"),
         integration_path=mw.AxisPath("z"),
         reference_plane=0.0025,
         reference_impedance=50.0,
@@ -781,18 +791,19 @@ def test_terminal_port_uses_the_same_amplitude_adjoint_runtime():
         boundary=mw.BoundarySpec.none(),
         structures=structures,
         ports=(port,),
-        device="cuda",
     )
     result = mw.Simulation.fdtd(
         scene,
-        frequency=3.0e9,
-        excitations=mw.PortExcitation(
+        frequencies=3.0e9,
+        excitations=mw.rf.PortExcitation(
             "terminal_feed",
             amplitude=amplitude,
             source_time=mw.CW(3.0e9),
         ),
-        run_time=mw.TimeConfig(time_steps=16),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=16),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     loss = (
         result.port("terminal_feed").voltage.abs().square().sum()

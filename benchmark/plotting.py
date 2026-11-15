@@ -21,8 +21,9 @@ from benchmark.paths import ensure_directories, scenario_plot_dir
 from benchmark.tidy3d_scene import benchmark_physical_bounds
 from witwin.maxwell.adapters.tidy3d import _M_TO_UM, _convert_geometry
 from witwin.maxwell.fdtd.excitation.spatial import resolve_injection_axis, soft_plane_wave_index
-from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.scene import prepare_scene, scene_declarations
 from witwin.maxwell.sources import PlaneWave, PointDipole
+from witwin.maxwell.scene import place_scene
 
 
 AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
@@ -104,7 +105,7 @@ def source_plane_map(
     component: str,
     source=None,
 ) -> np.ndarray:
-    source = _first_resolved_source(scene) if source is None else source
+    source = _first_resolved_source(scene_declarations(scene)) if source is None else source
     scene = prepare_scene(scene)
     values = np.zeros((scene.Nx, scene.Ny, scene.Nz), dtype=np.float64)
     target_axis = component[-1].lower()
@@ -127,7 +128,7 @@ def source_plane_map(
     elif isinstance(source, PlaneWave):
         inject_axis = resolve_injection_axis(source.direction, source.injection_axis)
         direction_component = float(source.direction[AXIS_INDEX[inject_axis]])
-        plane_idx = soft_plane_wave_index(scene, inject_axis, direction_component)
+        plane_idx = soft_plane_wave_index(scene, inject_axis, direction_component, device=scene.device)
         if inject_axis == "x":
             values[plane_idx, :, :] = 1.0
         elif inject_axis == "y":
@@ -315,9 +316,9 @@ def _geometry_export_masks(scene: mw.Scene) -> tuple[np.ndarray, np.ndarray]:
     """Sample public and Tidy3D-exported geometry envelopes on one Maxwell grid."""
     import tidy3d as td
 
-    prepared = prepare_scene(scene.clone(device="cpu"))
-    geometries = tuple(structure.geometry for structure in prepared.structures) + tuple(
-        region.geometry for region in prepared.material_regions
+    prepared = prepare_scene(place_scene(scene, "cpu"), device="cpu")
+    geometries = tuple(structure.geometry for structure in prepared.scene.structures) + tuple(
+        region.geometry for region in prepared.scene.material_regions
     )
     maxwell_mask = np.zeros((prepared.Nx, prepared.Ny, prepared.Nz), dtype=bool)
     tidy3d_mask = np.zeros_like(maxwell_mask)
@@ -377,7 +378,7 @@ def save_material_source_plot(
 ) -> Path:
     maxwell_source = _first_resolved_source(scene)
     source_component = dominant_source_component(scene)
-    scene = prepare_scene(scene)
+    scene = prepare_scene(scene, device="cpu")  # plotted on the host
     ensure_directories()
     scenario_dir = scenario_plot_dir(scenario_name)
     scenario_dir.mkdir(parents=True, exist_ok=True)

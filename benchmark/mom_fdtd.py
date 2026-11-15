@@ -9,7 +9,6 @@ joint error budget and demonstrated convergence.
 from __future__ import annotations
 
 import argparse
-import copy
 from dataclasses import asdict
 import itertools
 import tempfile
@@ -45,7 +44,7 @@ def add_query_stencils(scene, points=POINTS):
     prepared = prepare_scene(scene)
     seen = set()
     for component in ('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz'):
-        axes = component_coords(prepared, component)
+        axes = component_coords(prepared, component, device=prepared.device)
         for point in points:
             lower = [int(np.searchsorted(axis, value, side='right').clip(1, len(axis)-1)-1)
                      for axis, value in zip(axes, point)]
@@ -55,7 +54,10 @@ def add_query_stencils(scene, points=POINTS):
                 if key not in seen:
                     seen.add(key)
                     position = tuple(float(axis[i]) for axis, i in zip(axes, index))
-                    scene.add_monitor(mw.PointMonitor('query_'+'_'.join(map(str, key)), position, fields=(component,)))
+                    scene = scene.updated(monitors=(
+                        *scene.monitors,
+                        mw.PointMonitor('query_'+'_'.join(map(str, key)), position, fields=(component,)),
+                    ))
     return scene
 
 
@@ -69,22 +71,20 @@ def make_scene(family, spacing, *, pml=.2, empty=False, query_points=POINTS):
                           injection=mw.TFSF(bounds=((-0.3, .3), (-.3, .3), (-.3, .3))))
     structures = []
     if not empty:
-        geometry = (mw.Ellipsoid(radii=(.1, .08, .065)) if family == 'ellipsoid'
+        geometry = (mw.geometry.Ellipsoid(radii=(.1, .08, .065)) if family == 'ellipsoid'
                     else mw.Sphere(radius=.1))
         epsilon = 1. if family == 'no_contrast' else 2.25
         sigma = .004 if family == 'lossy_sphere' else 0.
         structures = [mw.Structure(geometry=geometry, material=mw.Material(eps_r=epsilon, sigma_e=sigma))]
     scene = mw.Scene(domain=mw.Domain(bounds=((-extent, extent),)*3),
                      grid=mw.GridSpec.uniform(spacing), boundary=boundary,
-                     structures=structures, sources=[source], device='cuda')
+                     structures=structures, sources=[source])
     return add_query_stencils(scene, query_points)
 
 
 def physical_scene_without_stencils(scene):
-    """Remove only this driver's auxiliary Yee sampling from a shallow Scene copy."""
-    physical = copy.copy(scene)
-    physical.monitors = [monitor for monitor in scene.monitors if not monitor.name.startswith('query_')]
-    return physical
+    """Remove only this driver's auxiliary Yee sampling monitors."""
+    return scene.updated(monitors=tuple(monitor for monitor in scene.monitors if not monitor.name.startswith('query_')))
 
 
 def _relative(actual, expected):
@@ -152,12 +152,12 @@ def fdtd_pair(family, spacing, *, pml=.2, dt_fraction=.8, cycles=16, query_point
     empty = make_scene(family, spacing, pml=pml, empty=True, query_points=query_points)
     dt = dt_fraction * spacing/(C_0*math.sqrt(3))
     run_time = mw.TimeConfig(transient_cycles=cycles, steady_cycles=cycles, dt=dt)
-    sampler = mw.SpectralSampler(window='hanning', normalize_source=False)
+    sampler = mw.fdtd.SpectralSampler(window='hanning', normalize_source=False)
     start = time.perf_counter()
-    reference = mw.Simulation.fdtd(empty, frequency=FREQUENCY, run_time=run_time,
-                                  spectral_sampler=sampler, cuda_graph=False, full_field_dft=full_field_dft).run()
-    total = mw.Simulation.fdtd(scene, frequency=FREQUENCY, run_time=run_time,
-                              spectral_sampler=sampler, cuda_graph=False, full_field_dft=full_field_dft).run()
+    reference = mw.Simulation.fdtd(empty, frequencies=FREQUENCY, config=mw.FDTDConfig(run_time=run_time,
+                                  spectral_sampler=sampler, cuda_graph=False, full_field_dft=full_field_dft)).run()
+    total = mw.Simulation.fdtd(scene, frequencies=FREQUENCY, config=mw.FDTDConfig(run_time=run_time,
+                              spectral_sampler=sampler, cuda_graph=False, full_field_dft=full_field_dft)).run()
     points = torch.tensor(query_points, dtype=torch.float64, device='cuda')
     reference_e, reference_h = reference.query_fields(points, region_id='exterior', field_kind='total')
     medium = compile_medium(mw.Material(), FREQUENCY, background=True)
@@ -194,10 +194,10 @@ def compare_case(family, spacing, subdivisions, *, pml=.2, dt_fraction=.8, cycle
     try:
         # Both solvers share physical Scene objects; Yee stencil monitors belong
         # only to FDTD interpolation, not to the requested physical queries.
-        config = mw.MoMConfig(subdivisions=subdivisions,
+        config = mw.mom.MoMConfig(subdivisions=subdivisions,
                              integration=IntegrationConfig(order=order, singular_order=order),
-                             query_config=mw.FieldQueryConfig(max_order=128))
-        mom = mw.Simulation.mom(scene, frequency=FREQUENCY, config=config).run()
+                             query_config=mw.mom.FieldQueryConfig(max_order=128))
+        mom = mw.Simulation.mom(scene, frequencies=FREQUENCY, config=config).run()
         points = torch.tensor(POINTS, dtype=torch.float64, device='cuda')
         e, h = mom.query_fields(points[:-1], region_id='exterior', field_kind='total')
         ei, hi = mom.query_fields(points[-1:], region_id='interior', field_kind='total')
@@ -302,16 +302,16 @@ def compare_observables(family, spacing, subdivision, *, angular_order=6, radius
     points, normals, weights, solid_angles = control_sphere(angular_order,radius=radius)
     point_config = (*POINTS[:-1], *(tuple(row) for row in points.cpu().tolist()), POINTS[-1])
     scene, fdtd, report = fdtd_pair(family, spacing, cycles=cycles, query_points=point_config)
-    config = mw.MoMConfig(subdivisions=subdivision,
+    config = mw.mom.MoMConfig(subdivisions=subdivision,
         integration=INTEGRATION,
-        query_config=mw.FieldQueryConfig(max_order=128))
-    result = mw.Simulation.mom(scene, frequency=FREQUENCY, config=config).run()
+        query_config=mw.mom.FieldQueryConfig(max_order=128))
+    result = mw.Simulation.mom(scene, frequencies=FREQUENCY, config=config).run()
     mom_e, mom_h = result.query_fields(points, region_id='exterior', field_kind='scattered')
     total_e, total_h = result.query_fields(points, region_id='exterior', field_kind='total')
     fields = {'fdtd': (fdtd['scattered_E'][3:], fdtd['scattered_H'][3:],
                         fdtd['total_E'][3:-1], fdtd['total_H'][3:-1]),
               'mom': (mom_e, mom_h, total_e, total_h)}
-    medium = result.surface_currents.handle.exterior
+    medium = mw.mom.surface_currents(result).handle.exterior
     far_fields = {}
     powers = {}
     for backend, (es,hs,et,ht) in fields.items():
@@ -331,7 +331,7 @@ def compare_observables(family, spacing, subdivision, *, angular_order=6, radius
                            'flux_far_absolute_difference_W':float(abs(scattered-far_power)),
                            'flux_far_relative_difference': (None if family == 'no_contrast' else
                                float(abs(scattered-far_power)/abs(far_power).clamp_min(1e-14)))}
-    native_far,_ = result.far_field(normals)
+    native_far = mw.mom.far_field(result, normals)[0].values[0]
     native_rcs = radar_cross_section(native_far, 1.)
     fdtd_rcs = radar_cross_section(far_fields['fdtd'], 1.)
     report.update({'control_surface': {'kind':'sphere','radius_m':radius,'angular_order':angular_order,
@@ -390,7 +390,7 @@ def tetrahedral_volume_rule(mesh, *, degree=2):
 def fdtd_volume_absorption(result, common_phasor_gain):
     """Independent physical Joule integral on the actual conductive Yee edges."""
     from witwin.maxwell.compiler.power_loss import _selected_control_volumes
-    total = torch.zeros((),device=result.scene.device,dtype=torch.float64)
+    total = torch.zeros((),device=result.solver.scene.device,dtype=torch.float64)
     component_counts = {}
     for component in ('Ex','Ey','Ez'):
         sigma = getattr(result.solver,'sigma_e_'+component)
@@ -398,7 +398,7 @@ def fdtd_volume_absorption(result, common_phasor_gain):
         component_counts[component] = int(mask.sum())
         if not bool(mask.any()):
             continue
-        field = result.tensor(component)
+        field = result.field(component, freq_index=0).values
         if not field.is_complex():
             raise ValueError('Independent volume loss requires full_field_dft=True')
         volume = _selected_control_volumes(result.prepared_scene,component,mask).to(torch.float64)
@@ -414,10 +414,10 @@ def compare_volume_absorption(spacing, subdivision, *, cycles=16):
     scene,_,report = fdtd_pair('lossy_sphere',spacing,cycles=cycles,
                                full_field_dft=True,runtime_results=runtime)
     fdtd_power,counts = fdtd_volume_absorption(runtime['total'],runtime['common_phasor_gain'])
-    config = mw.MoMConfig(subdivisions=subdivision,
-        integration=INTEGRATION,query_config=mw.FieldQueryConfig(max_order=128))
-    result = mw.Simulation.mom(scene,frequency=FREQUENCY,config=config).run()
-    data = result.surface_currents
+    config = mw.mom.MoMConfig(subdivisions=subdivision,
+        integration=INTEGRATION,query_config=mw.mom.FieldQueryConfig(max_order=128))
+    result = mw.Simulation.mom(scene,frequencies=FREQUENCY,config=config).run()
+    data = mw.mom.surface_currents(result)
     powers = []
     for degree in (1,2):
         points,weights = tetrahedral_volume_rule(data.mesh,degree=degree)

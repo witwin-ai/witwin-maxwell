@@ -1,0 +1,816 @@
+{
+  "fixture": "F-E",
+  "description": "Microstrip on a PEC ground (h = w = 254 um, eps 9.8) and finite-ground CPW on a silicon half-space (10/10/40 um), full-width edge ports (tests/support/rfic_a4_fixtures). De-embedded line quantities: two-line gamma (deembed.line_parameters, error-box free) -> eps_eff(f), quasi-static limit by the even f^2 dispersion term; C' = dC_open/dL at 10 MHz (ports and ends cancel); Z0 = sqrt(eps_eff)/(c C').",
+  "reference": {
+    "values": {
+      "fe_microstrip": {
+        "C_F_per_m": 1.734650737384043e-10,
+        "C_air_F_per_m": 2.638458231826057e-11,
+        "eps_eff": 6.574486252842837,
+        "Z0_ohm": 49.3058173780946,
+        "hammerstad_jensen": [
+          6.579026554066487,
+          49.32292185161568
+        ]
+      },
+      "fe_cpw": {
+        "C_F_per_m": 1.439745536014198e-10,
+        "C_air_F_per_m": 2.232163621727466e-11,
+        "eps_eff": 6.449999999999921,
+        "Z0_ohm": 58.840101569371406,
+        "ghione_naldi": [
+          6.45,
+          58.84010156972487
+        ]
+      }
+    },
+    "dispersion_pairs": {
+      "microstrip": [
+        [
+          300000000.0,
+          1000000000.0
+        ],
+        [
+          1000000000.0,
+          3000000000.0
+        ]
+      ],
+      "cpw": [
+        [
+          2000000000.0,
+          5000000000.0
+        ],
+        [
+          5000000000.0,
+          10000000000.0
+        ]
+      ]
+    },
+    "low_frequency_bound": {
+      "microstrip": 5.3907218628634194e-06,
+      "cpw": 4.7597849034045016e-07
+    },
+    "provenance": {
+      "generator": "scripts/dev/rfic/quasistatic_sda_r7.py",
+      "generator_sha256": "28e29c034f2722a4b0a5d16bb4cb6d281332a86d2d4b724ea5b45ae7fa2bce54",
+      "version": "witwin-maxwell 33b33110747ab1cc46f42d6b0be3e059d71bbc10 (numpy/scipy, CPU fp64)",
+      "inputs": {
+        "orders": 32,
+        "command": "python scripts/dev/rfic/quasistatic_sda_r7.py references"
+      },
+      "outputs": "<evidence-root>/rfic-mom-20261106/r7-2/sda/references.json",
+      "outputs_sha256": "024d21a0b3b5629759abab7e3848c29a6388a0af123991cc4366fd057eb67d2b",
+      "self_checks": "CPW vs exact finite-ground conformal map 6e-12; microstrip grounded vs image pair 3e-12; Hammerstad-Jensen -0.07% eps_eff (stated 0.2%)"
+    }
+  },
+  "sequences": {
+    "microstrip": [
+      "fe-microstrip-e15.875um",
+      "fe-microstrip-e7.9375um",
+      "fe-microstrip-e3.96875um"
+    ],
+    "cpw": [
+      "fe-cpw-e2.5um",
+      "fe-cpw-e1.25um",
+      "fe-cpw-e0.625um"
+    ]
+  },
+  "fast_record": "fe-cpw-e2.5um",
+  "mom": {
+    "fe-microstrip-e15.875um": {
+      "fixture": "F-E",
+      "kind": "microstrip",
+      "edge_m": 1.5875e-05,
+      "max_edge_m": 0.000127,
+      "lengths_m": [
+        0.002,
+        0.004
+      ],
+      "frequency_Hz": [
+        10000000.0,
+        300000000.0,
+        1000000000.0,
+        3000000000.0
+      ],
+      "unknowns": [
+        1089,
+        1457
+      ],
+      "eps_eff": [
+        6.596064799513305,
+        6.596682027551304,
+        6.602045769219275
+      ],
+      "attenuation_np_per_m": [
+        2.619357957257066e-07,
+        3.229453231906225e-05,
+        0.00252077464586435
+      ],
+      "impedance_two_line_ohm": [
+        49.702421200963535,
+        49.69601839475145,
+        49.639425231250094
+      ],
+      "open_capacitance_10MHz_F": [
+        5.134703230636625e-13,
+        8.581918043294446e-13
+      ],
+      "C_per_length_F_per_m": 1.7236074063289103e-10,
+      "Z0_from_C_ohm": [
+        49.70309148020673,
+        49.70541691400132,
+        49.725620468030414
+      ],
+      "checks": [
+        {
+          "reciprocity": 3.764058088703925e-14,
+          "max_singular_S": 1.000000000000011
+        },
+        {
+          "reciprocity": 8.78592106616019e-14,
+          "max_singular_S": 1.0000000000000009
+        }
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fe-microstrip",
+        "edge": 1.5875e-05,
+        "max": null
+      }
+    },
+    "fe-microstrip-e7.9375um": {
+      "fixture": "F-E",
+      "kind": "microstrip",
+      "edge_m": 7.9375e-06,
+      "max_edge_m": 0.000127,
+      "lengths_m": [
+        0.002,
+        0.004
+      ],
+      "frequency_Hz": [
+        10000000.0,
+        300000000.0,
+        1000000000.0,
+        3000000000.0
+      ],
+      "unknowns": [
+        1867,
+        2379
+      ],
+      "eps_eff": [
+        6.597931859213365,
+        6.5985508493145835,
+        6.603929909190158
+      ],
+      "attenuation_np_per_m": [
+        2.627206147649392e-07,
+        3.239469651885231e-05,
+        0.0025285627537424407
+      ],
+      "impedance_two_line_ohm": [
+        49.54910839432778,
+        49.53983503065159,
+        49.45809946601503
+      ],
+      "open_capacitance_10MHz_F": [
+        5.34605914970712e-13,
+        8.804409991348287e-13
+      ],
+      "C_per_length_F_per_m": 1.7291754208205833e-10,
+      "Z0_from_C_ohm": [
+        49.55005677101044,
+        49.55238100502713,
+        49.572574145270906
+      ],
+      "checks": [
+        {
+          "reciprocity": 3.342913515617282e-14,
+          "max_singular_S": 1.0000000000000082
+        },
+        {
+          "reciprocity": 1.3219417503596532e-13,
+          "max_singular_S": 1.0000000000000158
+        }
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fe-microstrip",
+        "edge": 7.9375e-06,
+        "max": null
+      }
+    },
+    "fe-microstrip-e3.96875um": {
+      "fixture": "F-E",
+      "kind": "microstrip",
+      "edge_m": 3.96875e-06,
+      "max_edge_m": 0.000127,
+      "lengths_m": [
+        0.002,
+        0.004
+      ],
+      "frequency_Hz": [
+        10000000.0,
+        300000000.0,
+        1000000000.0,
+        3000000000.0
+      ],
+      "unknowns": [
+        3048,
+        3663
+      ],
+      "eps_eff": [
+        6.599235223778671,
+        6.599855169565449,
+        6.605242500554023
+      ],
+      "attenuation_np_per_m": [
+        2.631331810957799e-07,
+        3.244576644171139e-05,
+        0.0025325247123135337
+      ],
+      "impedance_two_line_ohm": [
+        49.47142725129538,
+        49.45891929094174,
+        49.34890743414994
+      ],
+      "open_capacitance_10MHz_F": [
+        5.546904327670229e-13,
+        9.011005514187176e-13
+      ],
+      "C_per_length_F_per_m": 1.7320505932584737e-10,
+      "Z0_from_C_ohm": [
+        49.47269030717891,
+        49.475014035959624,
+        49.49520265367468
+      ],
+      "checks": [
+        {
+          "reciprocity": 6.073339816648555e-14,
+          "max_singular_S": 1.000000000000042
+        },
+        {
+          "reciprocity": 2.458486082555703e-13,
+          "max_singular_S": 1.0000000000000038
+        }
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fe-microstrip",
+        "edge": 3.96875e-06,
+        "max": null
+      }
+    },
+    "fe-cpw-e2.5um": {
+      "fixture": "F-E",
+      "kind": "cpw",
+      "edge_m": 2.4999999999999998e-06,
+      "max_edge_m": 1.9999999999999998e-05,
+      "lengths_m": [
+        0.0006,
+        0.0012
+      ],
+      "frequency_Hz": [
+        10000000.0,
+        2000000000.0,
+        5000000000.0,
+        10000000000.0,
+        20000000000.0
+      ],
+      "unknowns": [
+        3914,
+        5624
+      ],
+      "eps_eff": [
+        6.464664690979078,
+        6.464727508616364,
+        6.464970032915224,
+        6.4662862969578985
+      ],
+      "attenuation_np_per_m": [
+        1.0509830062741249e-08,
+        2.618432951439303e-06,
+        0.00018109153911337995,
+        0.015273125062668943
+      ],
+      "impedance_two_line_ohm": [
+        60.632493379138374,
+        60.63330403768934,
+        60.636270192284734,
+        60.649346389813175
+      ],
+      "open_capacitance_10MHz_F": [
+        8.628854318284258e-14,
+        1.7021500833149434e-13
+      ],
+      "C_per_length_F_per_m": 1.398774419144196e-10,
+      "Z0_from_C_ohm": [
+        60.6323802463675,
+        60.632674830371435,
+        60.63381213732062,
+        60.63998432716614
+      ],
+      "checks": [
+        {
+          "reciprocity": 2.6451810322889743e-13,
+          "max_singular_S": 1.0000000000003428
+        },
+        {
+          "reciprocity": 2.3855501678496684e-12,
+          "max_singular_S": 1.0000000000000637
+        }
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fe-cpw",
+        "edge": 2.4999999999999998e-06,
+        "max": null
+      }
+    },
+    "fe-cpw-e1.25um": {
+      "fixture": "F-E",
+      "kind": "cpw",
+      "edge_m": 1.2499999999999999e-06,
+      "max_edge_m": 1.9999999999999998e-05,
+      "lengths_m": [
+        0.0006,
+        0.0012
+      ],
+      "frequency_Hz": [
+        10000000.0,
+        2000000000.0,
+        5000000000.0,
+        10000000000.0,
+        20000000000.0
+      ],
+      "unknowns": [
+        7021,
+        9451
+      ],
+      "eps_eff": [
+        6.455388182151982,
+        6.455450507771328,
+        6.455691126307904,
+        6.456996828176166
+      ],
+      "attenuation_np_per_m": [
+        1.6256787579319594e-08,
+        2.678490434790241e-06,
+        0.0001797808541232104,
+        0.015148198864884454
+      ],
+      "impedance_two_line_ohm": [
+        59.72948030786488,
+        59.73023684228491,
+        59.733007700392925,
+        59.7452689458635
+      ],
+      "open_capacitance_10MHz_F": [
+        8.783239890267073e-14,
+        1.7296653631410905e-13
+      ],
+      "C_per_length_F_per_m": 1.4189022901906389e-10,
+      "Z0_from_C_ohm": [
+        59.72937753521728,
+        59.729665872754666,
+        59.730779035256084,
+        59.73681918224708
+      ],
+      "checks": [
+        {
+          "reciprocity": 1.71258796240193e-12,
+          "max_singular_S": 1.0000000000000546
+        },
+        {
+          "reciprocity": 2.7816052507499353e-12,
+          "max_singular_S": 1.0000000000001026
+        }
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fe-cpw",
+        "edge": 1.2499999999999999e-06,
+        "max": null
+      }
+    },
+    "fe-cpw-e0.625um": {
+      "fixture": "F-E",
+      "kind": "cpw",
+      "edge_m": 6.249999999999999e-07,
+      "max_edge_m": 1.9999999999999998e-05,
+      "lengths_m": [
+        0.0006,
+        0.0012
+      ],
+      "frequency_Hz": [
+        10000000.0,
+        2000000000.0,
+        5000000000.0,
+        10000000000.0,
+        20000000000.0
+      ],
+      "unknowns": [
+        11307,
+        14457
+      ],
+      "eps_eff": [
+        6.4528454130919775,
+        6.452907564919378,
+        6.453147542292255,
+        6.454449239823069
+      ],
+      "attenuation_np_per_m": [
+        9.697708945838689e-09,
+        2.6271568797849217e-06,
+        0.0001787864541888096,
+        0.015085549414154333
+      ],
+      "impedance_two_line_ohm": [
+        59.28120349591449,
+        59.28190955950556,
+        59.28449866268887,
+        59.2960109216429
+      ],
+      "open_capacitance_10MHz_F": [
+        8.893480006153663e-14,
+        1.7469578356341144e-13
+      ],
+      "C_per_length_F_per_m": 1.429349725031247e-10,
+      "Z0_from_C_ohm": [
+        59.2811234095552,
+        59.2814088976649,
+        59.28251119646296,
+        59.28848998486416
+      ],
+      "checks": [
+        {
+          "reciprocity": 1.060398615719417e-12,
+          "max_singular_S": 1.0000000000002156
+        },
+        {
+          "reciprocity": 9.878447503205029e-12,
+          "max_singular_S": 1.0000000000000395
+        }
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fe-cpw",
+        "edge": 6.249999999999999e-07,
+        "max": null
+      }
+    }
+  },
+  "checks": {
+    "fe-microstrip-e1.98438um": {
+      "fixture": "F-E",
+      "kind": "microstrip",
+      "edge_m": 1.984375e-06,
+      "max_edge_m": 0.000127,
+      "lengths_m": [
+        0.002,
+        0.004
+      ],
+      "frequency_Hz": [
+        10000000.0,
+        300000000.0,
+        1000000000.0,
+        3000000000.0
+      ],
+      "unknowns": [
+        4735,
+        5583
+      ],
+      "eps_eff": [
+        6.600009231987937,
+        6.600629716467397,
+        6.606021756686561
+      ],
+      "attenuation_np_per_m": [
+        2.6334785189563567e-07,
+        3.247170271425722e-05,
+        0.0025345339068742765
+      ],
+      "impedance_two_line_ohm": [
+        49.431929464128636,
+        49.415842636930606,
+        49.27460815613822
+      ],
+      "open_capacitance_10MHz_F": [
+        5.740932993218464e-13,
+        9.207980886894875e-13
+      ],
+      "C_per_length_F_per_m": 1.7335239468382054e-10,
+      "Z0_from_C_ohm": [
+        49.433541281287816,
+        49.435864916238835,
+        49.45605282007994
+      ],
+      "checks": [
+        {
+          "reciprocity": 1.8267527107369464e-14,
+          "max_singular_S": 1.0000000000000078
+        },
+        {
+          "reciprocity": 6.098771998772125e-13,
+          "max_singular_S": 1.0000000000000113
+        }
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fe-microstrip",
+        "edge": 1.984375e-06,
+        "max": null
+      }
+    },
+    "fe-cpw-e0.3125um": {
+      "fixture": "F-E",
+      "kind": "cpw",
+      "edge_m": 3.1249999999999997e-07,
+      "max_edge_m": 1.9999999999999998e-05,
+      "lengths_m": [
+        0.0006,
+        0.0012
+      ],
+      "frequency_Hz": [
+        10000000.0,
+        2000000000.0,
+        5000000000.0,
+        10000000000.0,
+        20000000000.0
+      ],
+      "unknowns": [
+        18089,
+        22229
+      ],
+      "eps_eff": [
+        6.452071115700031,
+        6.452130427812462,
+        6.452370626066149,
+        6.453673962391041
+      ],
+      "attenuation_np_per_m": [
+        1.2346561538254672e-08,
+        2.6437633436968893e-06,
+        0.0001784988352809573,
+        0.015056730429409063
+      ],
+      "impedance_two_line_ohm": [
+        59.05703147894928,
+        59.057696176966836,
+        59.060089215621126,
+        59.070796491097674
+      ],
+      "open_capacitance_10MHz_F": [
+        8.974644249728722e-14,
+        1.7582780351296625e-13
+      ],
+      "C_per_length_F_per_m": 1.4346893502613173e-10,
+      "Z0_from_C_ohm": [
+        59.05694745616119,
+        59.05721890266221,
+        59.058318175916696,
+        59.06428257018484
+      ],
+      "checks": [
+        {
+          "reciprocity": 1.6654292024934829e-12,
+          "max_singular_S": 1.0000000000000187
+        },
+        {
+          "reciprocity": 1.7558294351529148e-11,
+          "max_singular_S": 1.0000000000000702
+        }
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fe-cpw",
+        "edge": 3.1249999999999997e-07,
+        "max": null
+      }
+    }
+  },
+  "attribution": {
+    "fe-microstrip-e7.9375um-m63.5um": {
+      "fixture": "F-E",
+      "kind": "microstrip",
+      "edge_m": 7.9375e-06,
+      "max_edge_m": 6.35e-05,
+      "lengths_m": [
+        0.002,
+        0.004
+      ],
+      "frequency_Hz": [
+        10000000.0,
+        300000000.0,
+        1000000000.0,
+        3000000000.0
+      ],
+      "unknowns": [
+        2283,
+        3275
+      ],
+      "eps_eff": [
+        6.5983734191381105,
+        6.598992980761288,
+        6.604377050530873
+      ],
+      "attenuation_np_per_m": [
+        2.627300228123687e-07,
+        3.2395023781781195e-05,
+        0.002528582213898683
+      ],
+      "impedance_two_line_ohm": [
+        49.54882848340244,
+        49.539555504305184,
+        49.457825884726205
+      ],
+      "open_capacitance_10MHz_F": [
+        5.346194270280757e-13,
+        8.804680317579496e-13
+      ],
+      "C_per_length_F_per_m": 1.72924302364937e-10,
+      "Z0_from_C_ohm": [
+        49.54977761795399,
+        49.55210382913518,
+        49.5723143058555
+      ],
+      "checks": [
+        {
+          "reciprocity": 2.458386134294585e-14,
+          "max_singular_S": 1.0000000000000164
+        },
+        {
+          "reciprocity": 6.741909232058235e-14,
+          "max_singular_S": 1.000000000000002
+        }
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fe-microstrip",
+        "edge": 7.9375e-06,
+        "max": 6.35e-05
+      }
+    },
+    "fe-microstrip-air-e15.875um": {
+      "fixture": "F-E",
+      "kind": "microstrip-air",
+      "edge_m": 1.5875e-05,
+      "max_edge_m": 0.000127,
+      "lengths_m": [
+        0.002,
+        0.004
+      ],
+      "frequency_Hz": [
+        10000000.0,
+        300000000.0,
+        1000000000.0,
+        3000000000.0
+      ],
+      "unknowns": [
+        1089,
+        1457
+      ],
+      "eps_eff": [
+        1.0069570264928012,
+        1.0069811967069167,
+        1.0071850440641081
+      ],
+      "attenuation_np_per_m": [
+        2.0132679101500235e-07,
+        2.4812600440114423e-05,
+        0.0019788892252924975
+      ],
+      "impedance_two_line_ohm": [
+        127.20884996791327,
+        127.20516472187681,
+        127.17277971165923
+      ],
+      "open_capacitance_10MHz_F": [
+        7.35060407340804e-14,
+        1.2613150201965597e-13
+      ],
+      "C_per_length_F_per_m": 2.6312730642787788e-11,
+      "Z0_from_C_ohm": [
+        127.20929491642583,
+        127.2108216238048,
+        127.22369687790693
+      ],
+      "checks": [
+        {
+          "reciprocity": 4.396716941961148e-14,
+          "max_singular_S": 1.0000000000000309
+        },
+        {
+          "reciprocity": 1.5098372839402696e-14,
+          "max_singular_S": 1.0000000000000095
+        }
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fe-microstrip-air",
+        "edge": 1.5875e-05,
+        "max": null
+      }
+    },
+    "fe-microstrip-air-e7.9375um": {
+      "fixture": "F-E",
+      "kind": "microstrip-air",
+      "edge_m": 7.9375e-06,
+      "max_edge_m": 0.000127,
+      "lengths_m": [
+        0.002,
+        0.004
+      ],
+      "frequency_Hz": [
+        10000000.0,
+        300000000.0,
+        1000000000.0,
+        3000000000.0
+      ],
+      "unknowns": [
+        1867,
+        2379
+      ],
+      "eps_eff": [
+        1.006758312577102,
+        1.006782549376438,
+        1.0069869582357203
+      ],
+      "attenuation_np_per_m": [
+        2.0183224313815328e-07,
+        2.488199952018371e-05,
+        0.001984424815053305
+      ],
+      "impedance_two_line_ohm": [
+        126.84759772530187,
+        126.84335381118392,
+        126.80606241665431
+      ],
+      "open_capacitance_10MHz_F": [
+        7.571164505953898e-14,
+        1.2848174996623413e-13
+      ],
+      "C_per_length_F_per_m": 2.638505245334757e-11,
+      "Z0_from_C_ohm": [
+        126.84809438013191,
+        126.84962124773666,
+        126.86249784676842
+      ],
+      "checks": [
+        {
+          "reciprocity": 4.700900750929882e-14,
+          "max_singular_S": 1.0000000000000333
+        },
+        {
+          "reciprocity": 2.6664885054192943e-14,
+          "max_singular_S": 1.000000000000008
+        }
+      ],
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fe-microstrip-air",
+        "edge": 7.9375e-06,
+        "max": null
+      }
+    }
+  },
+  "known_offsets": {
+    "microstrip L' [H/m]": {
+      "attribution": "PEC-ground microstrip (h = w = 254 um, eps 9.8): the de-embedded L' = eps_eff/(c^2 C') converges first order in the transverse edge cell (W/16..W/128: +0.970/+0.674/+0.526/+0.453%, steps halving) to a nonzero limit, while C' converges to the exact value (limit +0.02%). eps_eff carries the L' offset, Z0 half of it. Not the transverse mesh and not the de-embedding (two-line gamma, length-differenced C'). The finite-ground CPW on a half-space with the same edge-cell sequence and cell aspect up to 64 has no offset (L' limit +0.005%), which points at the PEC-ground path. The longitudinal cell is excluded: halving the maximum edge (127 -> 63.5 um, W/32) moves L' by +0.003% (fe-microstrip-e7.9375um-m63.5um). The dielectric is excluded: the air-filled line (fe-microstrip-air-e7.9375um, exact eps_eff = 1, pure TEM) has C' exact to +0.002% and the same L' error (+0.674% vs +0.6735% with eps 9.8). Remaining term: the vector-potential (horizontal current) part over the PEC ground, i.e. its PEC image / the image-extracted Green table on that path; the scalar-potential image is exact (C'). To be localized in the solver (layered green/assembly owners); no solver change here.",
+      "quantified": {
+        "L_per_length_limit_rel": 0.00379,
+        "C_per_length_limit_rel": 0.0002,
+        "eps_eff_limit_rel": 0.004,
+        "Z0_limit_rel": 0.0018
+      }
+    },
+    "microstrip eps_eff (f->0)": {
+      "attribution": "PEC-ground microstrip (h = w = 254 um, eps 9.8): the de-embedded L' = eps_eff/(c^2 C') converges first order in the transverse edge cell (W/16..W/128: +0.970/+0.674/+0.526/+0.453%, steps halving) to a nonzero limit, while C' converges to the exact value (limit +0.02%). eps_eff carries the L' offset, Z0 half of it. Not the transverse mesh and not the de-embedding (two-line gamma, length-differenced C'). The finite-ground CPW on a half-space with the same edge-cell sequence and cell aspect up to 64 has no offset (L' limit +0.005%), which points at the PEC-ground path. The longitudinal cell is excluded: halving the maximum edge (127 -> 63.5 um, W/32) moves L' by +0.003% (fe-microstrip-e7.9375um-m63.5um). The dielectric is excluded: the air-filled line (fe-microstrip-air-e7.9375um, exact eps_eff = 1, pure TEM) has C' exact to +0.002% and the same L' error (+0.674% vs +0.6735% with eps 9.8). Remaining term: the vector-potential (horizontal current) part over the PEC ground, i.e. its PEC image / the image-extracted Green table on that path; the scalar-potential image is exact (C'). To be localized in the solver (layered green/assembly owners); no solver change here.",
+      "quantified": {
+        "L_per_length_limit_rel": 0.00379,
+        "C_per_length_limit_rel": 0.0002,
+        "eps_eff_limit_rel": 0.004,
+        "Z0_limit_rel": 0.0018
+      }
+    }
+  },
+  "acquisition_device": "NVIDIA RTX A6000",
+  "numerical_lock": {
+    "rule": "D-P1 (user decision 2026-11-09): committed numeric evidence is locked by value with the tiers of numerical_equivalence_standard.md (T0 bitwise, T1 within the fp64 run-level bound, T2 only with a per-field user approval); source hashes are not gates. Harness: scripts/dev/rfic/evidence_lock.py.",
+    "renewals": [
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round67/a4/fe/reacquisition",
+        "acquisition_commit": "b6b88dd2b75302676b9caccb52ec62d3b094a67e",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round67/a4/fe/reacquisition/tier_table.json",
+        "tier_table_sha256": "8629e572ec0f49f1e98bc8502c2c4a9a2573a24a7a2f573cb3ca2705fdbc888e",
+        "summary": {
+          "T0": 132,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      }
+    ]
+  }
+}

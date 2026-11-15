@@ -2,6 +2,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_components
 
 
 def _slab_components(averaging, eps_r=12.0):
@@ -14,19 +15,18 @@ def _slab_components(averaging, eps_r=12.0):
     domain = mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)))
     grid = mw.GridSpec.uniform(0.25)
     scene = mw.Scene(
-        domain=domain,
-        grid=grid,
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=4, averaging=averaging),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="slab",
-            geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 2.0, 2.0)),
-            material=mw.Material(eps_r=eps_r),
-        )
-    )
-    eps, _ = prepare_scene(scene).compile_material_components()
+                domain=domain,
+                grid=grid,
+                subpixel=mw.SubpixelSpec(samples=4, averaging=averaging),
+                structures=(
+            mw.Structure(
+                name="slab",
+                geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 2.0, 2.0)),
+                material=mw.Material(eps_r=eps_r),
+            ),
+            ),
+            )
+    eps, _ = compile_material_components(prepare_scene(scene, device="cpu"))
     return eps
 
 

@@ -2,7 +2,7 @@
 
 Usage::
 
-    td_sim = scene.to_tidy3d(frequencies=frequencies)
+    td_sim = scene_to_tidy3d(scene, frequencies=frequencies)
     td_result = tidy3d.web.run(td_sim)
 
 Requires ``tidy3d`` as an optional dependency.
@@ -22,6 +22,7 @@ import torch
 from witwin.core import BooleanGeometry
 from witwin.core.material import VACUUM_PERMITTIVITY
 from ..fdtd.excitation.spatial import resolve_injection_axis, soft_plane_wave_coordinate
+from ..errors import UnsupportedFeatureError
 
 if TYPE_CHECKING:
     import tidy3d
@@ -58,7 +59,7 @@ def _ensure_tidy3d():
         return td
     except ImportError:
         raise ImportError(
-            "tidy3d is required for Scene.to_tidy3d(). "
+            "tidy3d is required for scene_to_tidy3d(). "
             "Install it with: pip install tidy3d"
         ) from None
 
@@ -328,11 +329,12 @@ def _fully_anisotropic_medium(material, td, length_scale: float):
     Tidy3D's own commutation validator rejects the medium.
     """
     if material.is_dispersive:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Tidy3D's FullyAnisotropicMedium is strictly non-dispersive, so a full "
             "off-diagonal permittivity tensor combined with dispersive poles has no Tidy3D "
             "equivalent; supply an axis-aligned DiagonalTensor3 (which exports as a per-axis "
-            "dispersive AnisotropicMedium) or drop the dispersion."
+            "dispersive AnisotropicMedium) or drop the dispersion.",
+            feature="material.full_tensor", method=None
         )
     from ..media import DiagonalTensor3
 
@@ -362,15 +364,17 @@ def _anisotropic_medium(material, td, length_scale: float):
     """
     from ..media import Tensor3x3
     if isinstance(material.sigma_e_tensor, Tensor3x3):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             'Reference-backend export of full sigma_e_tensor is not implemented; '
-            'its off-diagonal conductivity must be preserved.'
+            'its off-diagonal conductivity must be preserved.',
+            feature="material.full_tensor", method=None
         )
     if material.mu_tensor is not None:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Tidy3D has no anisotropic magnetic medium: its AnisotropicMedium and "
             "FullyAnisotropicMedium describe the electric permittivity/conductivity tensor "
-            "with mu_r = 1, so a mu_tensor (anisotropic permeability) has no Tidy3D equivalent."
+            "with mu_r = 1, so a mu_tensor (anisotropic permeability) has no Tidy3D equivalent.",
+            feature="guard:449f721e", method=None
         )
     if material.has_full_epsilon_tensor:
         return _fully_anisotropic_medium(material, td, length_scale)
@@ -408,16 +412,18 @@ def _nonlinear_spec(material, td, length_scale: float):
     from ..media import TwoPhotonAbsorption
 
     if getattr(material,'has_tensor_nonlinearity',False):
-        raise NotImplementedError('Tensor nonlinear susceptibility export is not supported')
+        raise UnsupportedFeatureError('Tensor nonlinear susceptibility export is not supported',
+                                      feature="material.nonlinear", method=None)
 
     if not material.is_nonlinear:
         return None
 
     if material.nonlinear_chi2 != 0.0:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Tidy3D has no second-order (chi2 / second-harmonic-generation) nonlinear "
             "medium; its public nonlinear API is the chi3 / Kerr / two-photon-absorption "
-            "family only. Validate chi2 against an FDTD analytic reference instead."
+            "family only. Validate chi2 against an FDTD analytic reference instead.",
+            feature="material.nonlinear", method=None
         )
 
     models = []
@@ -484,22 +490,24 @@ def _modulated_medium(material, modulation, td, length_scale: float):
     # nonlinear polarization currents unmodulated. The two models therefore disagree,
     # so a modulated + dispersive / + nonlinear material has no equivalent Tidy3D medium.
     if material.is_dispersive or material.is_nonlinear:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Tidy3D's ModulationSpec modulates only the non-dispersive permittivity "
             "(eps_inf) and conductivity, but maxwell folds the same per-step modulation "
             "factor through the dispersive polarization current and the instantaneous "
             "Kerr/chi2/TPA coefficient, so a time-modulated Material that also carries "
             "dispersion or a nonlinearity has no equivalent Tidy3D construct. Validate the "
-            "modulated dispersive/nonlinear cell against an FDTD analytic reference instead."
+            "modulated dispersive/nonlinear cell against an FDTD analytic reference instead.",
+            feature="material.modulation", method=None
         )
 
     if not isinstance(modulation.amplitude, float) or not isinstance(modulation.phase, float):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Tidy3D represents a spatially-varying modulation profile as a SpaceModulation "
             "carrying a SpatialDataArray on absolute simulation coordinates, but maxwell's "
             "per-cell modulation amplitude/phase tensors are defined relative to the owning "
             "structure's Box and are not available at material-conversion time. Export a "
-            "scalar-amplitude, scalar-phase ModulationSpec instead."
+            "scalar-amplitude, scalar-phase ModulationSpec instead.",
+            feature="material.modulation", method=None
         )
 
     eps_static = float(material.eps_r)
@@ -619,7 +627,7 @@ def _lossy_metal_medium(material, td, length_scale: float, frequencies):
         raise ValueError(
             "LossyMetalMedium export needs the operating frequencies: Tidy3D fits the "
             "surface impedance Z_s(omega) over a frequency_range, so pass frequencies=... "
-            "to Scene.to_tidy3d()."
+            "to scene_to_tidy3d()."
         )
     freqs = tuple(float(frequency) for frequency in frequencies)
     f_min, f_max = min(freqs), max(freqs)
@@ -699,13 +707,14 @@ def _homogenize_custom_poles(material):
             return pole
         grid = pole.plasma_frequency if isinstance(pole, CustomDrudePole) else pole.delta_eps
         if _uniform_grid_value(grid) is None:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Tidy3D export of a spatially-varying custom dispersive pole would need a "
                 "CustomPoleResidue on a SpatialDataArray in absolute simulation coordinates, but "
                 "maxwell's per-cell pole-strength grid is defined relative to the owning structure's "
                 "Box and cannot be resolved into Tidy3D coordinates at material-conversion time. "
                 "Export a spatially-uniform custom pole (it lowers to the equivalent homogeneous "
-                "pole) or validate the per-cell profile against an FDTD/analytic reference."
+                "pole) or validate the per-cell profile against an FDTD/analytic reference.",
+                feature="guard:80bb466a", method=None
             )
         return pole.reference_pole()
 
@@ -744,13 +753,14 @@ def _homogenize_perturbation(material):
 
     value = _uniform_grid_value(material.perturbation)
     if value is None:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Tidy3D export of a spatially-varying PerturbationMedium would need a CustomMedium on a "
             "SpatialDataArray in absolute simulation coordinates, but its perturbation field is "
             "defined relative to the owning structure's Box and cannot be resolved into Tidy3D "
             "coordinates at material-conversion time. Export a spatially-uniform perturbation (it "
             "lowers to a homogeneous permittivity shift eps_base + eps_sensitivity*value) or validate "
-            "the perturbed profile against an FDTD/analytic reference."
+            "the perturbed profile against an FDTD/analytic reference.",
+            feature="material.perturbation", method=None
         )
 
     shift = float(material.eps_sensitivity) * value
@@ -809,7 +819,7 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
         # with a designed reference-backend mapping (handled above); the generic
         # rational surface has no reference-backend surface-impedance construct wired
         # yet, so fail closed rather than export a physically wrong vacuum structure.
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Reference-backend export of a generic SurfaceImpedanceMedium is not yet "
             "designed: its physics is a broadband causal rational tangential surface "
             "impedance E_t = Z_s(omega) (n x H), which has no finite bulk-permittivity "
@@ -818,7 +828,8 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
             "dedicated lossy-metal surface path; a rational model has no such mapping "
             "until the surface-impedance adapter is designed. Resolve the metal "
             "volumetrically with Material(sigma_e=...), use a LossyMetalMedium for a "
-            "good conductor, or use Material.pec() for a lossless conductor."
+            "good conductor, or use Material.pec() for a lossless conductor.",
+            feature="material.surface_impedance", method=None
         )
     if getattr(material, "is_gyromagnetic", False):
         # A gyromagnetic ferrite carries its physics in a non-reciprocal complex 3x3
@@ -829,12 +840,13 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
         # exporting as a reciprocal isotropic dielectric and dropping the entire
         # gyrotropy (the same silent-vacuum trap the PEC branch documents). Tidy3D
         # has no non-reciprocal / gyromagnetic medium construct, so fail closed.
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Tidy3D export for a gyromagnetic ferrite has no equivalent: its permeability is a "
             "non-reciprocal complex 3x3 Polder tensor, and Tidy3D has no gyromagnetic (magnetic, "
             "non-reciprocal) material model -- its FDTD solver fixes mu_r = 1 and exposes no "
             "permeability tensor. Validate the ferrite against the analytic LLG reference oracle "
-            "(tests/materials/ferrite/test_ferrite_reference.py) instead."
+            "(tests/materials/ferrite/test_ferrite_reference.py) instead.",
+            feature="material.gyromagnetic", method=None
         )
     if getattr(material, "perturbation", None) is not None:
         # Resolve the background shift first: the lowered Material may still carry
@@ -843,20 +855,22 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
     if getattr(material, "has_custom_poles", False):
         return _convert_material(_homogenize_custom_poles(material), td, length_scale, frequencies=frequencies)
     if material.is_magnetic_dispersive:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Tidy3D export for magnetic dispersive Material has no equivalent: Tidy3D has no "
             "magnetic-material model. Its FDTD solver fixes the relative permeability at mu_r = 1 "
             "and exposes no permeability pole (Debye/Drude/Lorentz) construct, so a frequency-"
-            "dispersive mu(omega) cannot be represented."
+            "dispersive mu(omega) cannot be represented.",
+            feature="guard:9b7271fc", method=None
         )
     if not math.isclose(float(material.mu_r), 1.0, rel_tol=0.0, abs_tol=1.0e-12) or float(
         getattr(material, "sigma_m", 0.0)
     ) != 0.0:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Tidy3D export currently assumes mu_r = 1 and no static magnetic conductivity "
             "(sigma_m = 0): Tidy3D has no magnetic-material model. Its FDTD solver fixes the "
             "relative permeability at 1 and models no magnetic loss, so a magnetic (mu_r != 1) "
-            "or magnetically-lossy (sigma_m != 0) medium has no Tidy3D equivalent."
+            "or magnetically-lossy (sigma_m != 0) medium has no Tidy3D equivalent.",
+            feature="guard:1ad882d3", method=None
         )
 
     modulation = getattr(material, "modulation", None)
@@ -1116,9 +1130,10 @@ def _convert_geometry(geometry, td, s):
         # prism, hollow box) tessellates to a TriangleMesh from its own surface mesh.
         return _triangle_mesh(geometry, td, s)
 
-    raise NotImplementedError(
+    raise UnsupportedFeatureError(
         f"Geometry type '{kind}' exposes no surface mesh, so it has no Tidy3D geometry mapping. "
-        f"Analytic primitives (box, sphere, cylinder, cone) and any mesh-able primitive are supported."
+        f"Analytic primitives (box, sphere, cylinder, cone) and any mesh-able primitive are supported.",
+        feature="guard:bc8dd8ef", method=None
     )
 
 
@@ -1138,18 +1153,21 @@ def _convert_material_region(region, td, s):
     import torch
 
     if getattr(region.geometry, "kind", None) != "box":
-        raise NotImplementedError("Tidy3D export supports MaterialRegion with Box geometry only.")
+        raise UnsupportedFeatureError("Tidy3D export supports MaterialRegion with Box geometry only.",
+                                      feature="guard:2340b8f6", method=None)
     if region.filter_radius is not None:
-        raise NotImplementedError(
-            "Tidy3D export cannot preserve a filtered MaterialRegion density field."
+        raise UnsupportedFeatureError(
+            "Tidy3D export cannot preserve a filtered MaterialRegion density field.",
+            feature="guard:88ae7c77", method=None
         )
 
     density = region.density.detach().cpu().to(torch.float64)
     density_min = float(density.min())
     density_max = float(density.max())
     if not np.isclose(density_min, density_max, rtol=0.0, atol=1.0e-12):
-        raise NotImplementedError(
-            "Tidy3D export currently supports only spatially uniform MaterialRegion density."
+        raise UnsupportedFeatureError(
+            "Tidy3D export currently supports only spatially uniform MaterialRegion density.",
+            feature="guard:c510e78e", method=None
         )
 
     lower, upper = region.bounds
@@ -1165,8 +1183,9 @@ def _convert_material_region(region, td, s):
     eps_r = eps_lo + normalized * (eps_hi - eps_lo)
     mu_r = mu_lo + normalized * (mu_hi - mu_lo)
     if not np.isclose(mu_r, 1.0):
-        raise NotImplementedError(
-            "Tidy3D export does not support MaterialRegion with relative permeability other than 1."
+        raise UnsupportedFeatureError(
+            "Tidy3D export does not support MaterialRegion with relative permeability other than 1.",
+            feature="guard:e82f5fd7", method=None
         )
 
     return td.Structure(
@@ -1280,7 +1299,7 @@ def _custom_source_frequency(source, frequencies):
         return float(frequencies[0])
     raise ValueError(
         f"Custom source '{source.name}' export needs an injection frequency: attach a source_time "
-        "or pass frequencies=... to Scene.to_tidy3d()."
+        "or pass frequencies=... to scene_to_tidy3d()."
     )
 
 
@@ -1323,7 +1342,11 @@ def _convert_source(source, scene, td, s, frequencies=None):
 
         center = list((lo + hi) / 2.0 * s for lo, hi in domain_bounds)
         size = [td.inf, td.inf, td.inf]
-        center[axis_idx] = soft_plane_wave_coordinate(scene, injection_axis, float(direction[axis_idx])) * s
+        from ..scene import place_scene
+
+        # Host-side export: the launch plane is read from a host copy of the scene.
+        center[axis_idx] = soft_plane_wave_coordinate(
+            place_scene(scene, "cpu"), injection_axis, float(direction[axis_idx]), device="cpu") * s
         size[axis_idx] = 0.0
 
         pol_angle, angle_theta, angle_phi = _direction_to_angles(
@@ -1351,8 +1374,10 @@ def _convert_source(source, scene, td, s, frequencies=None):
         dominant_axis = int(np.argmax(abs_dir))
         inject_dir = "+" if direction[dominant_axis] > 0 else "-"
 
+        from ..scene import place_scene
+
         source_plane = soft_plane_wave_coordinate(
-            scene, "xyz"[dominant_axis], float(direction[dominant_axis])
+            place_scene(scene, "cpu"), "xyz"[dominant_axis], float(direction[dominant_axis]), device="cpu"
         )
         source_axis_parameter = (
             source_plane - float(source.focus[dominant_axis])
@@ -1461,8 +1486,9 @@ def _convert_source(source, scene, td, s, frequencies=None):
             name=source.name or "custom_current",
         )
 
-    raise NotImplementedError(
-        f"Source type '{type(source).__name__}' has no Tidy3D source mapping."
+    raise UnsupportedFeatureError(
+        f"Source type '{type(source).__name__}' has no Tidy3D source mapping.",
+        feature="guard:7f70f07e", method=None
     )
 
 
@@ -1969,7 +1995,7 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
     )
     if not monitor_frequencies:
         raise ValueError(
-            f"Monitor '{monitor.name}' has no frequencies and none were passed to to_tidy3d()."
+            f"Monitor '{monitor.name}' has no frequencies and none were passed to scene_to_tidy3d()."
         )
 
     if isinstance(monitor, PointMonitor):
@@ -2078,8 +2104,9 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
             colocate=True,
         )
 
-    raise NotImplementedError(
-        f"Monitor type '{type(monitor).__name__}' has no Tidy3D monitor mapping."
+    raise UnsupportedFeatureError(
+        f"Monitor type '{type(monitor).__name__}' has no Tidy3D monitor mapping.",
+        feature="guard:50d56913", method=None
     )
 
 
@@ -2092,7 +2119,7 @@ def _projection_surface_kwargs(monitor, frequencies, s):
     monitor_frequencies = monitor.frequencies or frequencies
     if not monitor_frequencies:
         raise ValueError(
-            f"Monitor '{monitor.name}' has no frequencies and none were passed to to_tidy3d()."
+            f"Monitor '{monitor.name}' has no frequencies and none were passed to scene_to_tidy3d()."
         )
     kwargs = dict(
         center=_scale3(monitor.position, s),
@@ -2141,9 +2168,10 @@ def _convert_in_simulation_monitor(monitor, frequencies, td, s):
         planar_normal = monitor.surface_kind == "planar" and monitor.faces[0].axis == monitor.axis
         expected = monitor.normal_direction if planar_normal else "+"
         if monitor.hemisphere != expected:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"KSpaceProjectionMonitor '{monitor.name}' projects onto the {monitor.hemisphere!r} hemisphere; "
-                "the Tidy3D k-space monitor projects onto the hemisphere of its normal direction only."
+                "the Tidy3D k-space monitor projects onto the hemisphere of its normal direction only.",
+                feature="monitor.KSpaceProjectionMonitor", method=None
             )
         return td.FieldProjectionKSpaceMonitor(
             **_projection_surface_kwargs(monitor, frequencies, s),
@@ -2156,14 +2184,15 @@ def _convert_in_simulation_monitor(monitor, frequencies, td, s):
         monitor_frequencies = monitor.frequencies or frequencies
         if not monitor_frequencies:
             raise ValueError(
-                f"Monitor '{monitor.name}' has no frequencies and none were passed to to_tidy3d()."
+                f"Monitor '{monitor.name}' has no frequencies and none were passed to scene_to_tidy3d()."
             )
         axis_index = _axis_name_to_index(monitor.axis)
         if monitor.normal_direction != "+":
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"Gaussian-overlap monitor '{monitor.name}' declares a beam travelling toward -{monitor.axis}; "
                 "this adapter does not map a -normal beam onto the Tidy3D overlap monitor's backward ('-') "
-                "amplitude, so export a +normal beam."
+                "amplitude, so export a +normal beam.",
+                feature="monitor.GaussianOverlapMonitor", method=None
             )
         pol_angle, angle_theta, angle_phi = _direction_to_angles(
             monitor.direction, axis_index, monitor.polarization
@@ -2444,9 +2473,9 @@ def _convert_grid(scene, td, s):
 
 def _scene_time_step(scene, courant: float) -> float:
     """Return the physical FDTD step represented by Tidy3D's Courant factor."""
-    from ..scene import prepare_scene
+    from ..scene import place_scene, prepare_scene
 
-    prepared = prepare_scene(scene.clone(device="cpu"))
+    prepared = prepare_scene(place_scene(scene, "cpu"), device="cpu")
     spacings = (
         float(prepared.dx_primal64.min()),
         float(prepared.dy_primal64.min()),
@@ -2456,39 +2485,100 @@ def _scene_time_step(scene, courant: float) -> float:
     return float(courant) * dt_cfl
 
 
+def mirrored_domain_bounds(scene) -> tuple[tuple[float, float], ...]:
+    """Physical bounds of the explicit mirrored domain a face-symmetric scene stands for.
+
+    A low-face plane mirrors ``[plane, upper]`` downward to ``[2*plane - upper, upper]``
+    and a high-face plane mirrors ``[lower, plane]`` upward. Unfolded axes keep their bounds.
+    """
+    bounds = []
+    for (lower, upper), entry in zip(scene.domain.bounds, scene.symmetry):
+        lower, upper = float(lower), float(upper)
+        if entry is not None:
+            if entry[1] == "low":
+                lower -= upper - lower
+            else:
+                upper += upper - lower
+        bounds.append((lower, upper))
+    return tuple(bounds)
+
+
+def _mirrored_nodes(nodes, entry):
+    nodes = np.asarray(nodes, dtype=np.float64)
+    if entry[1] == "low":
+        return np.concatenate((2.0 * nodes[0] - nodes[:0:-1], nodes))
+    return np.concatenate((nodes, 2.0 * nodes[-1] - nodes[-2::-1]))
+
+
+def mirrored_twin_scene(scene):
+    """The face-symmetric scene as its explicit mirrored domain, without ``Scene.symmetry``.
+
+    Structures, regions and sources are kept as declared: the export admits only
+    those that are their own mirror image (``_validate_tidy3d_symmetry_equivalence``).
+    """
+    grid = scene.grid
+    if grid.is_auto or grid.is_custom:
+        if grid.is_auto:
+            from ..fdtd.meshing import resolve_auto_grid
+
+            nodes = resolve_auto_grid(scene)
+        else:
+            nodes = (grid.x_coords, grid.y_coords, grid.z_coords)
+        grid = type(grid).custom(*(
+            node if entry is None else _mirrored_nodes(node, entry)
+            for node, entry in zip(nodes, scene.symmetry)
+        ))
+    from ..scene import Domain
+
+    return scene.updated(domain=Domain(bounds=mirrored_domain_bounds(scene)), grid=grid, symmetry=None)
+
+
 def _validate_tidy3d_symmetry_equivalence(scene) -> None:
-    """Reject face symmetry that is not invariant under moving the plane to center."""
+    """Reject face symmetry whose explicit mirrored domain is not mirror-symmetric as declared.
+
+    Tidy3D symmetry is center-based, so the export is the mirrored domain with a center
+    plane. Every structure and material region is exported once, so each must already be
+    its own mirror image there: a box whose extent inside the mirrored domain is
+    symmetric about the plane. Sources must be plane waves that do not vary along the axis.
+    """
     from ..sources import PlaneWave
 
+    mirrored = mirrored_domain_bounds(scene)
     for axis_index, entry in enumerate(scene.symmetry):
         if entry is None:
             continue
-        lower, upper = scene.domain.bounds[axis_index]
-        span = float(upper) - float(lower)
-        for structure in scene.structures:
-            geometry = structure.geometry
+        lower, upper = mirrored[axis_index]
+        plane = 0.5 * (lower + upper)
+        tolerance = 1.0e-12 * max(upper - lower, 1.0)
+
+        def mirror_symmetric(geometry):
             if getattr(geometry, "kind", None) != "box":
-                raise NotImplementedError(
-                    "Tidy3D symmetry is center-based; Maxwell face symmetry can only be "
-                    "exported when the scene is translation-invariant along the symmetry axis."
-                )
-            if float(geometry.size[axis_index]) < span - 1.0e-12:
-                raise NotImplementedError(
-                    "Tidy3D symmetry is center-based; Maxwell face symmetry can only be "
-                    "exported when every structure spans the symmetry axis."
+                return False
+            center = float(geometry.position[axis_index])
+            half = 0.5 * float(geometry.size[axis_index])
+            low, high = max(center - half, lower), min(center + half, upper)
+            return abs(low + high - 2.0 * plane) <= tolerance
+
+        for structure in scene.structures:
+            if not mirror_symmetric(structure.geometry):
+                raise UnsupportedFeatureError(
+                    "Tidy3D symmetry is center-based; Maxwell face symmetry exports the mirrored domain, "
+                    "so every structure must be a box symmetric about the symmetry plane there.",
+                    feature="symmetry", method=None
                 )
         for region in scene.material_regions:
-            geometry = region.geometry
-            if getattr(geometry, "kind", None) != "box" or float(geometry.size[axis_index]) < span - 1.0e-12:
-                raise NotImplementedError(
-                    "Tidy3D symmetry is center-based; Maxwell MaterialRegion must span the "
-                    "symmetry axis for an equivalent export."
+            if not mirror_symmetric(region.geometry):
+                raise UnsupportedFeatureError(
+                    "Tidy3D symmetry is center-based; Maxwell MaterialRegion must be a box symmetric "
+                    "about the symmetry plane in the mirrored domain for an equivalent export.",
+                    feature="symmetry", method=None
                 )
         for source in scene.resolved_sources():
             if not isinstance(source, PlaneWave) or abs(float(source.direction[axis_index])) > 1.0e-12:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Tidy3D symmetry is center-based; Maxwell face symmetry with a localized "
-                    "or symmetry-axis-varying source has no equivalent direct export."
+                    "or symmetry-axis-varying source has no equivalent direct export.",
+                    feature="symmetry", method=None
                 )
 
 
@@ -2555,6 +2645,16 @@ def scene_to_tidy3d(
     """
     td = _ensure_tidy3d()
     s = length_scale  # shorthand
+
+    # -- symmetry --------------------------------------------------------------
+    # A face symmetry plane stands for the explicit mirrored domain. Tidy3D encodes
+    # symmetry about the domain center only, so export that domain with a center plane.
+    td_symmetry = (0, 0, 0)
+    if scene.domain is not None and scene.has_symmetry:
+        _validate_tidy3d_symmetry_equivalence(scene)
+        sym_map = {"PEC": -1, "PMC": 1}
+        td_symmetry = tuple(0 if entry is None else sym_map[entry[0]] for entry in scene.symmetry)
+        scene = mirrored_twin_scene(scene)
 
     # -- frequencies -----------------------------------------------------------
     if isinstance(frequencies, (int, float)):
@@ -2649,18 +2749,19 @@ def scene_to_tidy3d(
             td_monitors.extend(_convert_surface_field_time_monitor(monitor, td, s, time_step=time_step))
             continue
         if isinstance(monitor, AuxFieldTimeMonitor):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"AuxFieldTimeMonitor '{monitor.name}' records dispersive ADE polarization state; the "
-                "Tidy3D auxiliary-field monitor only stores free-carrier densities, so there is no equivalent."
+                "Tidy3D auxiliary-field monitor only stores free-carrier densities, so there is no equivalent.",
+                feature="monitor.AuxFieldTimeMonitor", method=None
             )
         if prepared_scene is None and (
             getattr(monitor, "compute_flux", False)
             or getattr(monitor, "closure_planes", None) is not None
             or isinstance(monitor, FluxTimeMonitor)
         ):
-            from ..scene import prepare_scene
+            from ..scene import place_scene, prepare_scene
 
-            prepared_scene = prepare_scene(scene.clone(device="cpu"), lazy_meshgrid=True)
+            prepared_scene = prepare_scene(place_scene(scene, "cpu"), device="cpu", lazy_meshgrid=True)
         td_monitors.append(
             _convert_monitor(
                 monitor,
@@ -2673,18 +2774,6 @@ def scene_to_tidy3d(
             )
         )
     td_monitors.extend(port_monitors)
-
-    # -- symmetry --------------------------------------------------------------
-    td_symmetry = (0, 0, 0)
-    if scene.symmetry is not None:
-        _validate_tidy3d_symmetry_equivalence(scene)
-        # Tidy3D encodes symmetry about the domain center only; the folded face
-        # (low/high) has no Tidy3D counterpart and is dropped in the export.
-        sym_map = {"PEC": -1, "PMC": 1}
-        td_symmetry = tuple(
-            0 if entry is None else sym_map.get(entry[0], 0)
-            for entry in scene.symmetry
-        )
 
     # -- build simulation ------------------------------------------------------
     coaxial_elements = _convert_coaxial_lumped_elements(scene, td, s)

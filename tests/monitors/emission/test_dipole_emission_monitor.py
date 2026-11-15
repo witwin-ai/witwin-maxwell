@@ -36,30 +36,60 @@ def _to_numpy(value):
 
 
 def test_monitor_construction_and_export():
-    monitor = mw.DipoleEmissionMonitor("emit", source_name="d0", frequencies=[F])
+    monitor = mw.monitors.DipoleEmissionMonitor("emit", source_name="d0", frequencies=[F])
     assert monitor.kind == "dipole_emission"
     assert monitor.source_name == "d0"
     assert monitor.frequencies == (F,)
-    assert "DipoleEmissionMonitor" in mw.__all__
-    assert mw.DipoleEmissionMonitor is monitor.__class__
+    assert "DipoleEmissionMonitor" in mw.monitors.__all__
+    assert mw.monitors.DipoleEmissionMonitor is monitor.__class__
+
+
+def _emission_payload(power, frequencies=(F, 2 * F)):
+    """The FluxData a DipoleEmissionMonitor returns for this delivered power."""
+    power = torch.as_tensor(power)
+    return mw.FluxData(values=power, dims=("f",), coords={"f": frequencies},
+                       attrs={"current_spectrum": torch.ones_like(power)})
+
+
+def test_purcell_factor_returns_differentiable_tensors():
+    structured = torch.tensor([2.0, 0.5], dtype=torch.float64, requires_grad=True)
+    vacuum = torch.tensor([1.25, 0.8], dtype=torch.float32)
+    data = mw.postprocess.purcell_factor(_emission_payload(structured), _emission_payload(vacuum), "emit")
+    for key in ("purcell_factor", "power_delivered", "power_delivered_vacuum"):
+        assert isinstance(data[key], torch.Tensor) and data[key].dtype == torch.float64
+    assert data["purcell_factor"].requires_grad
+    assert data["frequencies"] == (F, 2 * F)
+    assert torch.autograd.gradcheck(
+        lambda s, v: mw.postprocess.purcell_factor(_emission_payload(s), _emission_payload(v), "emit")["purcell_factor"],
+        (structured, vacuum.to(torch.float64).requires_grad_()),
+    )
+
+
+def test_single_frequency_purcell_factor_is_zero_dim_tensor():
+    structured = torch.tensor([3.0], dtype=torch.float64, requires_grad=True)
+    data = mw.postprocess.purcell_factor(
+        _emission_payload(structured, (F,)), _emission_payload([1.5], (F,)), "emit")
+    factor = data["purcell_factor"]
+    assert factor.shape == () and factor.item() == 2.0
+    factor.backward()
+    assert structured.grad.item() == 1.0 / 1.5
 
 
 def _cpu_scene(pol="Ez", position=(0.1, 0.0, -0.1)):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        boundary=mw.BoundarySpec.pml(num_layers=2),
-        device="cpu",
-    )
-    scene.add_source(
-        mw.PointDipole(position=position, polarization=pol, source_time=mw.CW(frequency=F), name="d0")
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                boundary=mw.BoundarySpec.pml(num_layers=2),
+                sources=(
+            mw.PointDipole(position=position, polarization=pol, source_time=mw.CW(frequency=F), name="d0"),
+            ),
+            )
     return scene
 
 
 def test_compiler_resolves_dipole_cell_and_polarization():
     scene = _cpu_scene(pol="Ez", position=(0.1, 0.0, -0.1))
-    scene.add_monitor(mw.DipoleEmissionMonitor("emit", source_name="d0"))
+    scene = scene.updated(monitors=(*scene.monitors, mw.monitors.DipoleEmissionMonitor("emit", source_name="d0")))
 
     records = compile_fdtd_observers(scene)
     assert len(records) == 1
@@ -75,7 +105,7 @@ def test_compiler_resolves_dipole_cell_and_polarization():
 
 def test_compiler_maps_transverse_polarization():
     scene = _cpu_scene(pol="Ex", position=(0.0, 0.0, 0.0))
-    scene.add_monitor(mw.DipoleEmissionMonitor("emit", source_name="d0"))
+    scene = scene.updated(monitors=(*scene.monitors, mw.monitors.DipoleEmissionMonitor("emit", source_name="d0")))
 
     records = compile_fdtd_observers(scene)
     assert [r["component"] for r in records] == ["ex"]
@@ -84,7 +114,10 @@ def test_compiler_maps_transverse_polarization():
 
 def test_compiler_errors_on_missing_source():
     scene = _cpu_scene()
-    scene.add_monitor(mw.DipoleEmissionMonitor("emit", source_name="does_not_exist"))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.DipoleEmissionMonitor("emit", source_name="does_not_exist"),
+    ))
     with pytest.raises(ValueError, match="does_not_exist"):
         compile_fdtd_observers(scene)
 
@@ -103,35 +136,34 @@ def _run_dipole(position, pol, *, pec_z_low=False):
     else:
         boundary = mw.BoundarySpec.pml(num_layers=8, strength=1.0)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=_BOUNDS),
-        grid=mw.GridSpec.uniform(_SPACING),
-        boundary=boundary,
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=position,
-            polarization=pol,
-            source_time=mw.CW(frequency=F, amplitude=1.0),
-            name="d",
-        )
-    )
-    scene.add_monitor(mw.DipoleEmissionMonitor("emit", source_name="d"))
+                domain=mw.Domain(bounds=_BOUNDS),
+                grid=mw.GridSpec.uniform(_SPACING),
+                boundary=boundary,
+                sources=(
+            mw.PointDipole(
+                position=position,
+                polarization=pol,
+                source_time=mw.CW(frequency=F, amplitude=1.0),
+                name="d",
+            ),
+            ),
+                monitors=(mw.monitors.DipoleEmissionMonitor("emit", source_name="d"),),
+            )
     return mw.Simulation.fdtd(
         scene,
         frequencies=[F],
-        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).run()
 
 
 def _power(result):
-    payload = result.monitor("emit")
-    assert payload["kind"] == "dipole_emission"
-    # A lone run cannot form the Purcell factor without a vacuum reference.
-    assert payload["purcell_factor"] is None
-    power = _to_numpy(payload["power_delivered"]).reshape(-1)
+    data = result.monitor("emit")
+    assert isinstance(data, mw.FluxData) and data.dims == ("f",)
+    power = _to_numpy(data.values).reshape(-1)
     assert power.size == 1
     return float(power[0])
 
@@ -154,7 +186,9 @@ def test_vacuum_dipole_purcell_is_unity():
 
     purcell = mw.postprocess.purcell_factor(structured, reference, "emit")
     assert purcell["frequencies"] == (F,)
-    assert purcell["purcell_factor"] == pytest.approx(1.0, abs=0.12)
+    assert isinstance(purcell["purcell_factor"], torch.Tensor)
+    assert purcell["purcell_factor"].shape == ()
+    assert float(purcell["purcell_factor"]) == pytest.approx(1.0, abs=0.12)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -170,7 +204,7 @@ def test_dipole_near_pec_mirror_matches_analytic():
         purcell = mw.postprocess.purcell_factor(mirror, vacuum, "emit")["purcell_factor"]
         analytic = _perpendicular_analytic(2.0 * K * separation)
         # Discretization-limited: soft-source width, coarse grid, image method.
-        assert purcell == pytest.approx(analytic, rel=0.15)
+        assert float(purcell) == pytest.approx(analytic, rel=0.15)
 
     # The enhancement at the closer separation must exceed free space.
     close = mw.postprocess.purcell_factor(

@@ -1,4 +1,5 @@
 """Fixed-topology conductive material gradients through RF sources and MNA."""
+from dataclasses import replace
 import math
 
 import pytest
@@ -22,15 +23,15 @@ class ConductiveDesign(mw.SceneModule):
     def to_scene(self):
         circuits = ()
         if self.mna:
-            network = mw.Circuit("load")
+            network = mw.circuits.Circuit("load")
             node = network.node("input")
-            network.add(mw.Resistor("r", node, network.ground, self.log_resistance.exp()))
-            network.add(mw.CurrentSource("source", network.ground, node,
-                                        waveform=mw.SineWaveform(0., .01, 3.e9)))
+            network.add(mw.rf.Resistor("r", node, network.ground, self.log_resistance.exp()))
+            network.add(mw.circuits.CurrentSource("source", network.ground, node,
+                                        waveform=mw.circuits.SineWaveform(0., .01, 3.e9)))
             network.bind_port("feed", positive=node, negative=network.ground)
             circuits = (network,)
         return mw.Scene(domain=mw.Domain(bounds=((-0.02, .02),) * 3), grid=mw.GridSpec.uniform(.005),
-            boundary=mw.BoundarySpec.none(), device="cuda", circuits=circuits,
+            boundary=mw.BoundarySpec.none(), circuits=circuits,
             ports=(mw.LumpedPort(name="feed", positive=(0., 0., .005), negative=(0., 0., -.005),
                 voltage_path=mw.AxisPath("z"), current_surface=mw.Box(
                     position=(0., 0., -.0025), size=(.015, .015, 0.))),),
@@ -41,11 +42,10 @@ class ConductiveDesign(mw.SceneModule):
                        {"lorentz_poles": (mw.LorentzPole(delta_eps=1.5, resonance_frequency=2.5e9, gamma=.3e9),)} if self.ade else {}))),))
 
     def simulation(self, *, checkpoint_stride=None):
-        kwargs = {} if self.mna else {"excitations": mw.PortExcitation("feed", source_time=mw.CW(3.e9))}
-        simulation = mw.Simulation.fdtd(self, frequency=3.e9, run_time=mw.TimeConfig(time_steps=32),
-                                  cuda_graph=self.graph, spectral_sampler=mw.SpectralSampler(window="none"), **kwargs)
-        simulation.config.adjoint_checkpoint_stride = checkpoint_stride or self.checkpoint_stride
-        return simulation
+        excitations = None if self.mna else mw.rf.PortExcitation("feed", source_time=mw.CW(3.e9))
+        return mw.Simulation.fdtd(self, frequencies=3.e9, excitations=excitations, config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=32), cuda_graph=self.graph, spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            adjoint_checkpoint_stride=checkpoint_stride or self.checkpoint_stride))
 
 
 
@@ -159,9 +159,9 @@ def test_direct_scene_retains_scalar_conductivity_tensor_connection():
     first.backward()
     expected = model.log_sigma.grad.detach().clone()
     model.zero_grad()
-    simulation = mw.Simulation.fdtd(model.to_scene(), frequency=3.e9,
-        run_time=mw.TimeConfig(time_steps=32), spectral_sampler=mw.SpectralSampler(window="none"),
-        excitations=mw.PortExcitation("feed", source_time=mw.CW(3.e9)))
+    simulation = mw.Simulation.fdtd(model.to_scene(), frequencies=3.e9,
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=32), spectral_sampler=mw.fdtd.SpectralSampler(window="none")),
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.CW(3.e9)))
     simulation.run().port("feed").voltage.abs().square().sum().backward()
     torch.testing.assert_close(model.log_sigma.grad, expected, rtol=.001, atol=1.e-9)
 
@@ -192,8 +192,8 @@ def test_zero_initial_conductivity_has_nonzero_one_sided_material_gradient():
 
         def to_scene(self):
             scene = super().to_scene()
-            scene.structures = (mw.Structure(geometry=scene.structures[0].geometry,
-                material=mw.Material(eps_r=2., sigma_e=self.sigma)),)
+            scene = scene.updated(structures=(mw.Structure(geometry=scene.structures[0].geometry,
+                material=mw.Material(eps_r=2., sigma_e=self.sigma)),))
             return scene
     model = ZeroConductivity()
     base = _objective(model)

@@ -51,13 +51,13 @@ def test_every_planned_case_builds_with_source_and_display_monitor():
 
 def test_named_feature_scenarios_exercise_the_claimed_public_objects():
     custom = SCENARIOS["custom_pole_uniform_slab"].builder()
-    assert isinstance(custom.structures[0].material.lorentz_poles[0], mw.CustomLorentzPole)
+    assert isinstance(custom.structures[0].material.lorentz_poles[0], mw.media.CustomLorentzPole)
 
     perturbation = SCENARIOS["perturbation_uniform_slab"].builder()
-    assert isinstance(perturbation.structures[0].material, mw.PerturbationMedium)
+    assert isinstance(perturbation.structures[0].material, mw.media.PerturbationMedium)
 
     medium2d = SCENARIOS["static_medium2d_sheet"].builder()
-    assert type(medium2d.structures[0].material) is mw.Medium2D
+    assert type(medium2d.structures[0].material) is mw.media.Medium2D
 
     material_region = SCENARIOS["material_region_slab"].builder()
     assert len(material_region.material_regions) == 1
@@ -68,7 +68,7 @@ def test_named_feature_scenarios_exercise_the_claimed_public_objects():
     assert len(mode_port.resolved_sources()) == 1
 
     ricker = SCENARIOS["ricker_axis_x_anisotropic"].builder()
-    assert isinstance(ricker.sources[0].source_time, mw.RickerWavelet)
+    assert isinstance(ricker.sources[0].source_time, mw.sources.RickerWavelet)
     assert ricker.sources[0].direction == (-1.0, 0.0, 0.0)
 
     mesh = SCENARIOS["explicit_mesh_scatter"].builder()

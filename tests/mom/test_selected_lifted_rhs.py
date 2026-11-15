@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA requ
 def test_selected_lifted_rows_match_full_analytic_rhs(monkeypatch):
     basis = RWGBasis(sphere_mesh(radius=.07, subdivisions=0, device='cuda'))
     system = SurfaceSystem.create([(0, 'body', basis, compile_medium(mw.Material(eps_r=2., mu_r=1.2), 3e8))])
-    config = mw.MoMConfig(integration=IntegrationConfig(order=3, singular_order=4, pair_batch=7, far_pair_batch=11))
+    config = mw.mom.MoMConfig(integration=IntegrationConfig(order=3, singular_order=4, pair_batch=7, far_pair_batch=11))
     handle = SystemDecodeHandle(system, compile_medium(mw.Material(), 3e8), [mw.PlaneWave()], config, {}).body_handles[0]
     full, _ = build_lifted_rhs(handle)
     import witwin.maxwell.mom.lifting as lifting

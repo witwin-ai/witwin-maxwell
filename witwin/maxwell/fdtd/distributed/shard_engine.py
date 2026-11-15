@@ -38,17 +38,20 @@ from ...monitors import (
     PowerLossMonitor,
     WireMonitor,
 )
-from ...scene import Domain, GridSpec, Scene
+from ...fdtd_cpml import CPMLConfig
+from ...scene import Domain, GridSpec, Scene, place_scene, prepare_scene
 from ..excitation import (
     inject_electric_surface_source_terms,
     inject_magnetic_surface_source_terms,
 )
 from ..runtime import stepping
+from ..runtime.spectral import restore_dft_partial_sums
 from ..excitation.temporal import injection_time
 from ..solver import FDTD
 from .source_corrections import correct_ideal_point_ex_control_volume
 from .sources import crop_solver_source_terms_to_owned_x
 from .observations import sampled_monitor_for_shard
+from ...errors import UnsupportedFeatureError
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +61,8 @@ from .observations import sampled_monitor_for_shard
 
 def _physical_axis_nodes(prepared_scene, axis: str) -> np.ndarray:
     nodes = np.asarray(getattr(prepared_scene, f"{axis}_nodes64"), dtype=np.float64)
-    low = int(prepared_scene.pml_thickness_for_face(axis, "low"))
-    high = int(prepared_scene.pml_thickness_for_face(axis, "high"))
+    low = int(prepared_scene.scene.pml_thickness_for_face(axis, "low"))
+    high = int(prepared_scene.scene.pml_thickness_for_face(axis, "high"))
     stop = nodes.size - high if high else nodes.size
     return np.array(nodes[low:stop], copy=True)
 
@@ -164,7 +167,7 @@ def _build_local_scene(
         )
     )
     local_grid = GridSpec.custom(local_x, local_y, local_z)
-    return logical_scene.clone(
+    local_scene = logical_scene.updated(
         domain=local_domain,
         grid=local_grid,
         boundary=local_boundary,
@@ -177,9 +180,9 @@ def _build_local_scene(
         # DistributedWireRuntime owns the compressed I/q state on one shard and
         # drives the distributed sampling/deposition explicitly.
         thin_wires=(),
-        device=str(layout.device),
         symmetry=(None, logical_scene.symmetry[1], logical_scene.symmetry[2]),
     )
+    return prepare_scene(place_scene(local_scene, layout.device), device=layout.device)
 
 
 @dataclass
@@ -226,7 +229,7 @@ class ShardEngine:
         *,
         frequency: float,
         absorber_type: str,
-        cpml_config: dict,
+        cpml: CPMLConfig,
         dt: float,
     ) -> "ShardEngine":
         """Deterministically build one rank's engine from partition metadata.
@@ -248,7 +251,7 @@ class ShardEngine:
                 local_scene,
                 frequency=frequency,
                 absorber_type=absorber_type,
-                cpml_config=cpml_config,
+                cpml=cpml,
             )
             local_solver.dt = dt
             local_solver._requested_dt = dt
@@ -272,11 +275,12 @@ class ShardEngine:
                 # joint solve would silently simulate a reciprocal medium with
                 # uncorrected seam planes. Fail closed until seam-aware distributed
                 # ferrite support exists (contract boundary 8: rejected until Phase 4).
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Multi-GPU distributed FDTD does not support GyromagneticFerrite media: the "
                     "shard phases do not run the magnetization-ADE hooks and the shard-local "
                     "gyromagnetic layout has no rank-seam handling, so a joint solve would silently "
-                    "drop the non-reciprocal gyrotropy. Run the ferrite scene on a single device."
+                    "drop the non-reciprocal gyrotropy. Run the ferrite scene on a single device.",
+                    feature="material.gyromagnetic", method="fdtd"
                 )
             crop_solver_source_terms_to_owned_x(local_solver, layout)
             correct_ideal_point_ex_control_volume(local_solver, layout, global_prepared)
@@ -373,7 +377,9 @@ class ShardEngine:
     def accumulate(self, n: int) -> None:
         solver = self.solver
         with torch.cuda.device(self.device), torch.cuda.stream(self.compute_stream):
-            solver.accumulate_dft(n)
+            # Device-table DFT: the weight row is gathered by the shard's device step
+            # counter (bit-identical to the per-step host weights; no host work per step).
+            solver.accumulate_dft_gpu()
             solver.accumulate_observers(n)
             solver.accumulate_time_observers(n)
 
@@ -411,6 +417,7 @@ class ShardEngine:
         with torch.cuda.device(self.device), torch.cuda.stream(self.compute_stream):
             if dft_frequency is not None and full_field_dft:
                 solver.enable_dft(dft_frequency, window_type=dft_window, end_step=time_steps)
+                solver.build_dft_step_tables(time_steps)
             else:
                 solver.dft_enabled = False
                 solver._dft_entries = []
@@ -480,6 +487,8 @@ class ShardEngine:
         solver._shutoff_step = shutoff_step
         if shutoff_triggered:
             with torch.cuda.device(self.device):
+                # The tables carry full-run sums; a stopped run reports the sums of its steps.
+                restore_dft_partial_sums(solver, int(shutoff_step) + 1)
                 stepping._complete_spectral_normalization(solver, int(time_steps))
         if solver.dft_enabled:
             solver._sync_dft_legacy_state()

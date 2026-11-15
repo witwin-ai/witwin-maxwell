@@ -7,10 +7,12 @@ Nonzero constitutive closure belongs to the harmonic-balance path.
 from dataclasses import dataclass
 import torch
 from .volume_mesh import TetrahedralVolumeMesh, bind_volume_region
+from .._stability import experimental
 
 PARTITION = 'regional_linear_green_zero_additional_polarization_v1'
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class LinearCoupledConfig:
     """Explicit conforming volumes for the zero-induced-source linear limit."""

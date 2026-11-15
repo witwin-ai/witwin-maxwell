@@ -25,6 +25,7 @@ class _FixedTangentInverse:
         if type(refinement_steps) is not int or refinement_steps<0:
             raise ValueError('Refinement steps must be a nonnegative integer')
         tangent.assert_current()
+        rule=rule.resolved()
         self.tangent,self.rule,self.refinement_steps=tangent,rule,refinement_steps
         self.shape,self.device,self.dtype=tangent.shape,tangent.device,tangent.dtype
         self.error_type=error_type
@@ -90,7 +91,7 @@ def _streamed_inverse_bounds(inverse,*,column_batch=8):
     These numerical bounds do not certify underlying action errors or outward
     rounding. Partial solves cannot establish any global bound.
     """
-    from dataclasses import asdict
+    from .options import option_asdict
     inverse.assert_current()
     tangent,rule=inverse.tangent,inverse.rule
     if type(column_batch) is not int or column_batch<1:
@@ -127,7 +128,7 @@ def _streamed_inverse_bounds(inverse,*,column_batch=8):
     cutoff=64*torch.finfo(tangent.dtype).eps*size*upper
     admitted=complete and finite and math.isfinite(cutoff) and lower>cutoff
     return {'method':'complete_streamed_inverse_residual','columns_checked':checked,
-        'column_batch':column_batch,'complete':complete,'tangent_rule':asdict(rule),
+        'column_batch':column_batch,'complete':complete,'tangent_rule':option_asdict(rule),
         'sigma_min_lower':lower,'sigma_max_upper':upper if complete else None,
         'inverse_norm_upper':inverse_upper if complete else None,
         'inverse_residual_norm_upper':residual_upper if complete else None,

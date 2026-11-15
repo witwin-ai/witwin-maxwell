@@ -1,0 +1,396 @@
+{
+ "schema": "mom_string_only_pin_renewal_v2",
+ "purpose": "Renew the unchanged_historical_sha256 pins of fixture_r4b_closed_comparison.json whose targets the 0.6.0 snapshot scrub changed, by a string-only identity proof (no T0 re-acquisition, no numeric change)",
+ "branch": "mom/rfic-dev-v2",
+ "base": "1484e8ee",
+ "pinning_file": "tests/mom/layered/data/fixture_r4b_closed_comparison.json",
+ "pin_key": "unchanged_historical_sha256",
+ "method": "For each pinned file F: old = F@74f2d6aa bytes, new = live F bytes. Both parsed with json.loads keeping every number's source token. Proof obligations: (1) identical structure: same value type at every JSON pointer, same dict key order, same list lengths; (2) every non-string leaf bitwise equal: float64 bit pattern (struct '<d') and source token for floats, value and token for ints, identity for true/false/null; (3) every differing string has old starting with the private evidence-store prefix and new equal to '<evidence-root>/' + the remainder; (4) the set of (pointer, old, new) string differences equals the one the scrub commit made on the same file (8bf41f88 -> 3da9da07); (5) replacing exactly those JSON string tokens in the old bytes reproduces the new bytes. A pin is renewed only when its current digest equals sha256(old) (current proof); the new digest is sha256(live F). Private evidence-store strings are recorded only as sha256 (old_sha256); old = '<private evidence-store prefix>' + new[len('<evidence-root>/'):].",
+ "rule": "Only pins whose target bytes changed are renewed, each against its current digest; no other pin in any file changes. fixture_r6b_shunt_evidence.json changes only in stage 2.",
+ "stages": [
+  {
+   "name": "release snapshot scrub",
+   "old_tree": "74f2d6aa (mom/rfic-dev)",
+   "scrub_commit": "3da9da07 (Snapshot scrub (test fixtures): placeholder evidence paths in the R6 RFIC fixtures); 8bf41f88..1484e8ee changes these files only in 3da9da07",
+   "files": [
+    {
+     "path": "tests/mom/layered/data/fixture_r6_native_evidence.json",
+     "changed": true,
+     "old_ref": "74f2d6aa",
+     "old_sha256": "40ae36c3f2a5bcc0539d84f34ce36d7afd8b7745e04d7d1b1d5356189c21df95",
+     "new_sha256": "36917dd5ed6cc0d27081c078a98badec09e21f1556c06ac7d38790f12cb0eda6",
+     "structure_identical": true,
+     "non_string_leaves_bitwise_equal": 153,
+     "float64_leaves_bitwise_equal": 141,
+     "string_leaves": 99,
+     "string_differences": 19,
+     "string_differences_equal_scrub_commit": "3da9da07 (8bf41f88..3da9da07) on the same file: same pointers, same old and new values",
+     "new_bytes_equal_old_bytes_with_only_these_strings_replaced": true,
+     "differences": [
+      {
+       "pointer": "/coarse/none/sources/0",
+       "old_sha256": "d4119899d86cc51704398dfa7044a1bbd0da6b65e4f830a215828647759091d9",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-shield-grounded1-sigma10-peak.json"
+      },
+      {
+       "pointer": "/coarse/none/sources/1",
+       "old_sha256": "4543272f6e57151a24d2358fd3f328418cf026306e7d7df594c4cc9255c2ca8c",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-shield-grounded1-sigma10-resonance.json"
+      },
+      {
+       "pointer": "/coarse/none/sources/2",
+       "old_sha256": "e676f69453324e0c508283a16abcfff8de96e2807631ce02b68477a356d44914",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-shield-grounded1-sigma10.json"
+      },
+      {
+       "pointer": "/coarse/pgs/sources/0",
+       "old_sha256": "39b9cfd68ebbd89f6de2337ec24fb5de724ec7e7fd68887c56cc70ce52a071e6",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield-grounded1-sigma10-peak.json"
+      },
+      {
+       "pointer": "/coarse/pgs/sources/1",
+       "old_sha256": "322b7db707e24780026a473833a1b7ea9c6a76599de5f2d934329e21b6de0cca",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield-grounded1-sigma10-resonance.json"
+      },
+      {
+       "pointer": "/coarse/pgs/sources/2",
+       "old_sha256": "173eef07489e663c74816641107446752f8a253e35a4d00bdd3576d3d0082e0d",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield-grounded1-sigma10.json"
+      },
+      {
+       "pointer": "/coarse/solid/sources/0",
+       "old_sha256": "3ed2324634a42cbcce7bbeeb12abeaa3c61cd59f530c9b9bcbff5e3592a4763d",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield-grounded1-sigma10-peak.json"
+      },
+      {
+       "pointer": "/coarse/solid/sources/1",
+       "old_sha256": "7dc7af0b339e4dac89de0947e4985d7b13f571c49f10adb87163da75fc64c586",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield-grounded1-sigma10-resonance.json"
+      },
+      {
+       "pointer": "/coarse/solid/sources/2",
+       "old_sha256": "06a016e1626ee057a259fcf2d677049465af840850152639b15df5e38463dc80",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield-grounded1-sigma10.json"
+      },
+      {
+       "pointer": "/finest/none/sources/0",
+       "old_sha256": "702948dfb90d8408d549624ba6ef580c48a8f1f37e055c39a8a23b19226fa6c7",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-full-grounded1-sigma10-peak.json"
+      },
+      {
+       "pointer": "/finest/none/sources/1",
+       "old_sha256": "9db2fc5801ff8952c63527a1b7c7ad1290cf6215c13831864b46826e3dd3d387",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-full-grounded1-sigma10-refined.json"
+      },
+      {
+       "pointer": "/finest/none/sources/2",
+       "old_sha256": "c41e81e30d0d51b209cf6b4b64bf8856e8ac63096013162c2ec65d939f080014",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-full-grounded1-sigma10-resonance.json"
+      },
+      {
+       "pointer": "/finest/none/sources/3",
+       "old_sha256": "f45614c2d8be088f45a67a2bf0f0c49a352eca6b9971ffea9e84066a05b1cd35",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/none-full-grounded1-sigma10.json"
+      },
+      {
+       "pointer": "/finest/pgs/sources/0",
+       "old_sha256": "1a4bd4a74e698596012ea58f1d9941f9ba99dba42a5c14813832d5e184945fcf",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield_fine-grounded1-sigma10-peak.json"
+      },
+      {
+       "pointer": "/finest/pgs/sources/1",
+       "old_sha256": "ad3f7f1f0af67ce60b0c746b328c656b4c843fc8b050e277b3ead95432088ad2",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield_fine-grounded1-sigma10-resonance.json"
+      },
+      {
+       "pointer": "/finest/pgs/sources/2",
+       "old_sha256": "b87f8192398688ed33327dae29bbd42e40dc7e99ca3ed4c949ce8e28ec183ab1",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/pgs-shield_fine-grounded1-sigma10.json"
+      },
+      {
+       "pointer": "/finest/solid/sources/0",
+       "old_sha256": "e8021a4e3e004468369f0f70c1cb51fb05a131261e958cccffc689091cda0bcb",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield_fine-grounded1-sigma10-peak.json"
+      },
+      {
+       "pointer": "/finest/solid/sources/1",
+       "old_sha256": "36d778fe1011b48f5afca824ad108fe7cc8a87e3124c3461e5cbb232204bc2ee",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield_fine-grounded1-sigma10-resonance.json"
+      },
+      {
+       "pointer": "/finest/solid/sources/2",
+       "old_sha256": "13e1373aec284dc30ace4d25ebe48ef2943c3d2dc352deb7daf5902035551fd6",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/mpie/solid-shield_fine-grounded1-sigma10.json"
+      }
+     ]
+    },
+    {
+     "path": "tests/mom/layered/data/fixture_r6_reference.json",
+     "changed": true,
+     "old_ref": "74f2d6aa",
+     "old_sha256": "4c00d57b5ec731931acece11c8b72378961d64521293ebd7ffd767f3da18e16c",
+     "new_sha256": "c1710b96579baee5ff1b136f849ec9af53fe19bf679faaca4137c4ae6af1825c",
+     "structure_identical": true,
+     "non_string_leaves_bitwise_equal": 1137,
+     "float64_leaves_bitwise_equal": 1056,
+     "string_leaves": 163,
+     "string_differences": 24,
+     "string_differences_equal_scrub_commit": "3da9da07 (8bf41f88..3da9da07) on the same file: same pointers, same old and new values",
+     "new_bytes_equal_old_bytes_with_only_these_strings_replaced": true,
+     "differences": [
+      {
+       "pointer": "/reference_variants/none/10/sources/0/input_xml",
+       "old_sha256": "c2428c946117f1dae71537314fdeed345d28e9103ae61a81688300b1dcb2c2ec",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-none-10/port1/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/none/10/sources/0/log",
+       "old_sha256": "6bcf98d95caf8b8bbd704ae44b55c2971078e55673afac7312d555ede87dd05b",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-none-10/port1/run.log"
+      },
+      {
+       "pointer": "/reference_variants/none/10/sources/1/input_xml",
+       "old_sha256": "161e736b4157207623dfda66ceb53b4cd8ffbbb6170f48e146919bb59f1efda3",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-none-10/port2/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/none/10/sources/1/log",
+       "old_sha256": "3f11aa91f12895030fbb0e6fc5b60c472d2ca673ba35544f0d5cd7cf2ef66e6e",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-none-10/port2/run.log"
+      },
+      {
+       "pointer": "/reference_variants/none/5/sources/0/input_xml",
+       "old_sha256": "82565d7a00e985e2523f5fb7ef1098dfe4bf5dbda07b46818dd81d07eba878a6",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-none-5/port1/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/none/5/sources/0/log",
+       "old_sha256": "96f105667f48aa9dd93f947f11275c25c9e03d7e1f166977ae826cd62c791a65",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-none-5/port1/run.log"
+      },
+      {
+       "pointer": "/reference_variants/none/5/sources/1/input_xml",
+       "old_sha256": "122208bf018a541b0f08f90d772dc0ef05fde6069d6068a03958f75196bfd5e6",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-none-5/port2/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/none/5/sources/1/log",
+       "old_sha256": "1c09b5cf4957212d56d1d0c04361e7d487c039d109ccb0ef24ef12c2694204b0",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-none-5/port2/run.log"
+      },
+      {
+       "pointer": "/reference_variants/pgs/10/sources/0/input_xml",
+       "old_sha256": "b227739def51384880818b295327c4b09471d8c48fe170266f7dbcb53c555ea7",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-pgs-10/port1/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/pgs/10/sources/0/log",
+       "old_sha256": "af74a0c1a038a433a4a552409fb01209cbbe8010710679c1d000e59974f1506e",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-pgs-10/port1/run.log"
+      },
+      {
+       "pointer": "/reference_variants/pgs/10/sources/1/input_xml",
+       "old_sha256": "e524fac2db9c9541f9d7e59b6442109f475dfde701ac6338a8a64b59ba0e3870",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-pgs-10/port2/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/pgs/10/sources/1/log",
+       "old_sha256": "92415bc99e6c73fa70be1befe4379aa5b99b2864440c74c94ca4bfc4623486f5",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-pgs-10/port2/run.log"
+      },
+      {
+       "pointer": "/reference_variants/pgs/5/sources/0/input_xml",
+       "old_sha256": "91791b3ddc1f20dcef532ca8e1e971253dcff6abc8cbda915514c73290d413a3",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-pgs-5/port1/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/pgs/5/sources/0/log",
+       "old_sha256": "74b5e2d2814e16c427f39b4528b3ed63469a9e365c492a8178cf924d6c271c05",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-pgs-5/port1/run.log"
+      },
+      {
+       "pointer": "/reference_variants/pgs/5/sources/1/input_xml",
+       "old_sha256": "1d607e8a92f7e3c32bf11290c96bf580b9d3f7516a35a4c07e9659568269098f",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-pgs-5/port2/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/pgs/5/sources/1/log",
+       "old_sha256": "2cfa26ba28dd1da6b5689a3a5c060afa96e32902f57fc2a3f8e3e026e60595f5",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-pgs-5/port2/run.log"
+      },
+      {
+       "pointer": "/reference_variants/solid/10/sources/0/input_xml",
+       "old_sha256": "bb9071b699930b7a09f6f4ec7979b5357cd057f74199e3fb55b96449411eba85",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-solid-10/port1/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/solid/10/sources/0/log",
+       "old_sha256": "0d2860160489367f839561aa8afec0b73c56951f75e8d28fb6317376ed0a9df3",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-solid-10/port1/run.log"
+      },
+      {
+       "pointer": "/reference_variants/solid/10/sources/1/input_xml",
+       "old_sha256": "b30951a37e6364106fc522af76e0e2a322aad3fbae94cd7e7755f084219815a5",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-solid-10/port2/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/solid/10/sources/1/log",
+       "old_sha256": "d9bfe4f748c4eb8c77604be820b3535a80cd17235e33a13c2cd0d203a77beadb",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-solid-10/port2/run.log"
+      },
+      {
+       "pointer": "/reference_variants/solid/5/sources/0/input_xml",
+       "old_sha256": "19e9c28d14305203c2a97ed4e1666b267a9ca52004a28d3f2ce600ffac81f6b9",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-solid-5/port1/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/solid/5/sources/0/log",
+       "old_sha256": "dd824a9b994921e1d2894f28100d49d138842ba23ca17e46c3c18b123f7efe5d",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-solid-5/port1/run.log"
+      },
+      {
+       "pointer": "/reference_variants/solid/5/sources/1/input_xml",
+       "old_sha256": "c5dce419eed72344e1c62cc392408dbbbc214fb91788850f28da4e0590b6d5ea",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-solid-5/port2/model.xml"
+      },
+      {
+       "pointer": "/reference_variants/solid/5/sources/1/log",
+       "old_sha256": "912483e5d3a5f2da93344ff4ba00a468f68757b650d183a9d9578fa0ce4d39b3",
+       "new": "<evidence-root>/rfic-mom-20261106/codex/r6/reference-solid-5/port2/run.log"
+      }
+     ]
+    },
+    {
+     "path": "tests/mom/layered/data/fixture_r6b_shunt_evidence.json",
+     "old_sha256": "c14001b1989a1c9332f813fa594dda950f04f48b533d1eeed42ee79f66c65267",
+     "new_sha256": "c14001b1989a1c9332f813fa594dda950f04f48b533d1eeed42ee79f66c65267",
+     "changed": false
+    }
+   ],
+   "renewed_pins": {
+    "tests/mom/layered/data/fixture_r6_native_evidence.json": {
+     "old_sha256": "40ae36c3f2a5bcc0539d84f34ce36d7afd8b7745e04d7d1b1d5356189c21df95",
+     "new_sha256": "36917dd5ed6cc0d27081c078a98badec09e21f1556c06ac7d38790f12cb0eda6"
+    },
+    "tests/mom/layered/data/fixture_r6_reference.json": {
+     "old_sha256": "4c00d57b5ec731931acece11c8b72378961d64521293ebd7ffd767f3da18e16c",
+     "new_sha256": "c1710b96579baee5ff1b136f849ec9af53fe19bf679faaca4137c4ae6af1825c"
+    }
+   },
+   "comparison_file": {
+    "old_sha256": "b0819c58fb5d24b443786cd3e4f20bb2ecd1c0b4e1ed21c4d0d9ec141b3fda57",
+    "new_sha256": "ab59c7dbe88f6747d138ebb59408c545848758a4d101a44e1fced9558bddd48c",
+    "changes": [
+     "unchanged_historical_sha256: the renewed_pins above",
+     "historical_pin_renewal: the R4b entry kept verbatim as element 0, this renewal appended as element 1 (dict -> list)"
+    ]
+   },
+   "proof_script": {
+    "path": "<evidence-root>/rfic-mom-20261106/rfic-dev-v2/scrub_pin_proof.py",
+    "sha256": "3915da64c59a84f915863a65f5d819097fee630f5ca39ab35d704a514c2753c7",
+    "usage": "python -I scrub_pin_proof.py <repo> <out.json> (re-derives files and renewals from git blobs 74f2d6aa, 8bf41f88, 3da9da07 and the live tree)"
+   }
+  },
+  {
+   "name": "R4b receipt-path scrub",
+   "old_tree": "2538701c (mom/rfic-dev-v2, stage 1 head)",
+   "edits": "R4b's own private evidence-store paths rewritten to <evidence-root>/ (convention of 3da9da07/a86dc4af/d3bd1eac): source_renewal_receipt in fixture_r6_native_evidence.json and fixture_r6b_shunt_evidence.json, historical_pin_renewal[0].receipt in fixture_r4b_closed_comparison.json, the report path in docs/plans/rfic_mom_r0_spec.md, and the scripts/dev/rfic/closed_reference_r4b.py FastHenry binary default (now WITWIN_EVIDENCE_ROOT-derived with a --binary argument, as scripts/dev/rfic/inductance_fixture_r6b.py)",
+   "files": [
+    {
+     "path": "tests/mom/layered/data/fixture_r6_native_evidence.json",
+     "old_ref": "2538701c",
+     "old_sha256": "36917dd5ed6cc0d27081c078a98badec09e21f1556c06ac7d38790f12cb0eda6",
+     "new_sha256": "11280ffd13129034c45bc8f37605b82e74dfefd0cda1d3aad66f6a434e2d27de",
+     "changed": true,
+     "structure_identical": true,
+     "non_string_leaves_bitwise_equal": 153,
+     "float64_leaves_bitwise_equal": 141,
+     "string_leaves": 99,
+     "string_differences": 1,
+     "new_bytes_equal_old_bytes_with_only_these_strings_replaced": true,
+     "differences": [
+      {
+       "pointer": "/source_renewal_receipt",
+       "old_sha256": "36026db9afca0a4113fef8c21d2d0c5e06aa5c4517a20d6ab136ca29b7a5e5d5",
+       "new": "<evidence-root>/rfic-mom-20261106/review/checkpoint/r4b-receipts/receipt.json"
+      }
+     ]
+    },
+    {
+     "path": "tests/mom/layered/data/fixture_r6b_shunt_evidence.json",
+     "old_ref": "2538701c",
+     "old_sha256": "c14001b1989a1c9332f813fa594dda950f04f48b533d1eeed42ee79f66c65267",
+     "new_sha256": "749ad030b829b46d144311ce69c959ebb1996a7a6c156bc85613806b91a3003c",
+     "changed": true,
+     "structure_identical": true,
+     "non_string_leaves_bitwise_equal": 189,
+     "float64_leaves_bitwise_equal": 138,
+     "string_leaves": 117,
+     "string_differences": 1,
+     "new_bytes_equal_old_bytes_with_only_these_strings_replaced": true,
+     "differences": [
+      {
+       "pointer": "/source_renewal_receipt",
+       "old_sha256": "36026db9afca0a4113fef8c21d2d0c5e06aa5c4517a20d6ab136ca29b7a5e5d5",
+       "new": "<evidence-root>/rfic-mom-20261106/review/checkpoint/r4b-receipts/receipt.json"
+      }
+     ]
+    },
+    {
+     "path": "tests/mom/layered/data/fixture_r4b_closed_comparison.json",
+     "old_ref": "2538701c",
+     "old_sha256": "ab59c7dbe88f6747d138ebb59408c545848758a4d101a44e1fced9558bddd48c",
+     "new_sha256": "eea49764009601d9f8e5019e375a1c328b2033bfaf8a1b39c6433bd344c0d33c",
+     "changed": true,
+     "structure_identical": true,
+     "non_string_leaves_bitwise_equal": 108,
+     "float64_leaves_bitwise_equal": 83,
+     "string_leaves": 123,
+     "string_differences": 1,
+     "new_bytes_equal_old_bytes_with_only_these_strings_replaced": true,
+     "differences": [
+      {
+       "pointer": "/historical_pin_renewal/0/receipt",
+       "old_sha256": "36026db9afca0a4113fef8c21d2d0c5e06aa5c4517a20d6ab136ca29b7a5e5d5",
+       "new": "<evidence-root>/rfic-mom-20261106/review/checkpoint/r4b-receipts/receipt.json"
+      }
+     ]
+    }
+   ],
+   "renewed_pins": {
+    "tests/mom/layered/data/fixture_r6_native_evidence.json": {
+     "old_sha256": "36917dd5ed6cc0d27081c078a98badec09e21f1556c06ac7d38790f12cb0eda6",
+     "new_sha256": "11280ffd13129034c45bc8f37605b82e74dfefd0cda1d3aad66f6a434e2d27de"
+    },
+    "tests/mom/layered/data/fixture_r6b_shunt_evidence.json": {
+     "old_sha256": "c14001b1989a1c9332f813fa594dda950f04f48b533d1eeed42ee79f66c65267",
+     "new_sha256": "749ad030b829b46d144311ce69c959ebb1996a7a6c156bc85613806b91a3003c"
+    }
+   },
+   "comparison_file": {
+    "old_sha256": "eea49764009601d9f8e5019e375a1c328b2033bfaf8a1b39c6433bd344c0d33c",
+    "new_sha256": "1861fb22967dfa82c25145ceb8db9c265db373af9c116a9e1fe6a54e779db75a",
+    "changes": [
+     "unchanged_historical_sha256: the renewed_pins above",
+     "historical_pin_renewal[0].receipt: string-only scrub (the files entry for this file above, proven against 2538701c before the pin edit)",
+     "historical_pin_renewal: this renewal appended as element 2"
+    ]
+   },
+   "non_json_edits": {
+    "docs/plans/rfic_mom_r0_spec.md": {
+     "old_sha256": "0917539d10ab10675fa1dcecca55e3e16c9dfed2a8084bf310d74709a020df49",
+     "new_sha256": "e0bb81d584eee0113978299014d9c3ba8b7901ff85ec1c6531f86b1efb9ec50c"
+    },
+    "scripts/dev/rfic/closed_reference_r4b.py": {
+     "old_sha256": "56ed1ec1621589e4867252cd5587d2cfe30d132ca7b36059b970a16cea860785",
+     "new_sha256": "481025e253915bb93457319a7e17e937cea36b94334ab44b4dd26c953fb8e959"
+    }
+   },
+   "proof_script": {
+    "path": "<evidence-root>/rfic-mom-20261106/rfic-dev-v2/scrub_pin_proof_v2.py",
+    "sha256": "44c53fba0a4d7f253f18f34cf7daeaf1655e7d75847d75c1f8aecce04a2d9afb",
+    "usage": "python -I scrub_pin_proof_v2.py <repo> <out.json> 2538701c tests/mom/layered/data/fixture_r6_native_evidence.json tests/mom/layered/data/fixture_r6b_shunt_evidence.json (stage 2; run before the comparison-file pin edit for that file)"
+   }
+  }
+ ]
+}

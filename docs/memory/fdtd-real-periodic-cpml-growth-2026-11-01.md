@@ -55,7 +55,7 @@ there it gives r/t errors of 0.2–0.5 (TM εr 4 slab, k∥ 0.55 k0, 40 layers, 
 absorber may be selected explicitly:
 
 ```python
-sim = mw.Simulation.fdtd(scene, frequencies=..., absorber="absorber")
+sim = mw.Simulation.fdtd(scene, frequencies=..., config=mw.FDTDConfig(absorber="absorber"))
 ```
 
 - In the native TM matrix it has only damped oscillatory modes. Both modulated benchmark scenes

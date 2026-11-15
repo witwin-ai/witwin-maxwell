@@ -152,19 +152,19 @@ def build_config(args):
                         maxiter=args.maxiter, restart=args.restart, stagnation_window=args.restart)
     leaf = dict(leaf_factor_kernel='primary', leaf_factor_max_edges=32) if args.leaf_factors else {}
     if args.backend == 'directional':
-        fmm = mw.DirectionalFMMConfig(**({'leaf_factor_kernel': 'original'} if args.leaf_factors else {}))
+        fmm = mw.mom.DirectionalFMMConfig(**({'leaf_factor_kernel': 'original'} if args.leaf_factors else {}))
     elif args.config == 'default':
-        fmm = mw.FMMConfig(**leaf)
+        fmm = mw.mom.FMMConfig(**leaf)
     elif args.config == 'budgeted':
-        fmm = mw.FMMConfig(action_retained_budget_bytes=budget, table_budget_bytes=budget//2,
+        fmm = mw.mom.FMMConfig(action_retained_budget_bytes=budget, table_budget_bytes=budget//2,
                            near_budget_bytes=budget//2, projection_budget_bytes=budget//2, **leaf)
     else:
-        fmm = mw.FMMConfig(order=args.fmm_order, table_storage='compact_shared_displacement_v1',
+        fmm = mw.mom.FMMConfig(order=args.fmm_order, table_storage='compact_shared_displacement_v1',
                            shift_storage='separable_v1', near_storage='scalar_reciprocal_dk_v1',
                            leaf_size=args.leaf_size, separation_ratio=args.separation_ratio,
                            action_retained_budget_bytes=budget, table_budget_bytes=budget//2,
                            near_budget_bytes=budget//2, projection_budget_bytes=budget//2, **leaf)
-    return mw.MoMConfig(integration=integration, operator_backend='fmm', fmm=fmm,
+    return mw.mom.MoMConfig(integration=integration, operator_backend='fmm', fmm=fmm,
                         riesz_storage='local_rwg_v1', stopping=rule)
 
 
@@ -219,7 +219,8 @@ def main(argv=None):
     parser.add_argument('--solve', action='store_true')
     parser.add_argument('--skip-rhs', action='store_true',
                         help='replace RHS lifting by zeros (operator memory/time only; incompatible with --solve)')
-    parser.add_argument('--rtol', type=float, default=1e-6)
+    parser.add_argument('--rtol', type=float, default=None,
+                        help='inner GMRES rtol; default 0.1 * the backend solve_dual_tolerance')
     parser.add_argument('--maxiter', type=int, default=500)
     parser.add_argument('--restart', type=int, default=500)
     parser.add_argument('--memory-fraction', type=float, default=0.)
@@ -260,7 +261,7 @@ def main(argv=None):
     try:
         profiler.enable()
         with tracer.stage('prepare_total'):
-            prepared = mw.Simulation.mom(scene, frequency=args.frequency, config=config).prepare()
+            prepared = mw.Simulation.mom(scene, frequencies=args.frequency, config=config).prepare()
         profiler.disable()
         report['status'] = 'prepared'
     except Exception as error:  # Profiling records the failure instead of hiding it.

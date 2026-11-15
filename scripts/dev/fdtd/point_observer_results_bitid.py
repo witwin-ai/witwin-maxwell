@@ -57,19 +57,22 @@ def dump(mode, output, baseline_rev):
         solver_module.get_observer_results_impl = namespace["get_observer_results"]
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.32, 0.32),) * 3),
-        grid=mw.GridSpec.uniform(0.04),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
-    )
-    scene.add_structure(mw.Structure(
-        name="dielectric", geometry=mw.Box(position=(0.04, 0.08, 0.0), size=(0.16, 0.16, 0.16)),
-        material=mw.Material(eps_r=3.5),
-    ))
-    scene.add_source(mw.PointDipole(
-        name="source", position=(-0.12, -0.04, 0.04), polarization="Ez", width=0.04,
-        source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.6e9, amplitude=100.0),
-    ))
+                domain=mw.Domain(bounds=((-0.32, 0.32),) * 3),
+                grid=mw.GridSpec.uniform(0.04),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                structures=(
+            mw.Structure(
+                name="dielectric", geometry=mw.Box(position=(0.04, 0.08, 0.0), size=(0.16, 0.16, 0.16)),
+                material=mw.Material(eps_r=3.5),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                name="source", position=(-0.12, -0.04, 0.04), polarization="Ez", width=0.04,
+                source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.6e9, amplitude=100.0),
+            ),
+            ),
+            )
     field_sets = (
         ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"), ("Ez",), ("Hx",),
         ("Ex", "Hy"), ("Ey", "Hz"), ("Ez", "Hx", "Hy"),
@@ -78,12 +81,15 @@ def dump(mode, output, baseline_rev):
         position = (-0.24 + 0.048 * (index % 10),
                     -0.20 + 0.10 * ((index // 10) % 5),
                     -0.18 + 0.12 * (index // 50))
-        scene.add_monitor(mw.PointMonitor(f"point_{index:03d}", position,
-                                          fields=field_sets[index % len(field_sets)]))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.PointMonitor(f"point_{index:03d}", position,
+                            fields=field_sets[index % len(field_sets)]),
+        ))
     result = mw.Simulation.fdtd(
-        scene, frequencies=(0.9e9, 1.1e9), run_time=mw.TimeConfig(time_steps=160),
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
-        full_field_dft=False,
+        scene, frequencies=(0.9e9, 1.1e9), config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=160),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+        full_field_dft=False),
     ).prepare().run()
     payload = snapshot(result.monitors)
     assert len(payload) == 200

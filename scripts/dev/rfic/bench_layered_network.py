@@ -2,8 +2,9 @@
 
 Use the assigned GPU1 timing runner, one target per <=30 minute lock window.
 The script does not select a device or acquire a workstation lock. V and P
-share the same quadrature/gather pass, so their assembly time is reported
-jointly. Chunk GPU times are divided by their frequency count.
+share the same quadrature/gather pass into the in-place chunk system, so their
+assembly time is reported jointly. Chunk GPU times are divided by their
+frequency count.
 """
 
 import argparse
@@ -21,10 +22,9 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.layers import HalfSpace, Layer, LayerStack
-from witwin.maxwell.mom.layered.assembly import assemble_potentials
-from witwin.maxwell.mom.layered.lowfreq import build_loop_tree, scale_potentials
+from witwin.maxwell.mom.layered.lowfreq import assemble_chunk, build_loop_tree, transform_chunk
 from witwin.maxwell.mom.layered.network import (
-    available_work_memory, frequency_chunk_capacity, prepare_layered_network,
+    _wall_nodes, available_work_memory, frequency_chunk_capacity, prepare_layered_network,
     recover_scaled_chunk, solve_scaled_chunk)
 
 
@@ -117,7 +117,7 @@ def kernel_model(prepared, chunk_size):
     static = samples["static_fp64"] + samples["static_fp32"]
     n, trees = prepared.layout.basis.n_edges, lt.trees
     nnz, charge_nnz = lt.sparse_q[1].numel(), lt.sparse_charge[1].numel()
-    sparse_terms = 2 * n * nnz + (faces + trees) * charge_nnz
+    loop_terms = int(lt.sparse_q[0][lt.loops].item())
     return {"counts": samples, "nnz_transform": nnz, "nnz_charge": charge_nnz,
             "regular_face_pairs": {
                 "logical_bytes": 128*(samples["remainder_fp64"]*((chunk_size+1)//2)/chunk_size + samples["remainder_fp32"]*((chunk_size+3)//4)/chunk_size)
@@ -133,10 +133,11 @@ def kernel_model(prepared, chunk_size):
             "scalar_points_kernel": {"logical_bytes": (72*faces+48*faces*8*65)/chunk_size,
                                      "real_FLOP": 8*faces*8*65/chunk_size},
             "radial_metadata_kernel": {"logical_bytes": 40/chunk_size, "real_FLOP": 2/chunk_size},
-            "gather_potentials": {"logical_bytes": 256*n*n + 32*faces*faces, "real_FLOP": 32*n*n},
-            "sparse_product": {"logical_bytes": 16*sparse_terms + 32*(n*n + trees*trees),
-                               "real_FLOP": 4*sparse_terms},
-            "scaled_kernel": {"logical_bytes": 128*n*n, "real_FLOP": 70*n*n},
+            "gather_system": {"logical_bytes": 256*n*n + 16*faces*faces, "real_FLOP": 32*n*n},
+            "congruence_rows_kernel": {"logical_bytes": 16*n*(loop_terms + lt.loops), "real_FLOP": 4*n*loop_terms},
+            "congruence_columns_kernel": {"logical_bytes": 16*n*(loop_terms + lt.loops), "real_FLOP": 4*n*loop_terms},
+            "system_entries_kernel": {"logical_bytes": 32*n*n + 64*trees*trees, "real_FLOP": 40*n*n + 16*trees*trees},
+            "factor_cast_kernel": {"logical_bytes": 24*n*n, "real_FLOP": 0},
             "LU_complex64": {"real_FLOP": 8*n**3/3, "logical_bytes": 8*n*n}}
 
 
@@ -144,12 +145,9 @@ def profile_kernels(prepared, output, frequency_count=1):
     """Profile a real chunk and report amortized seconds per frequency."""
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
                                             torch.profiler.ProfilerActivity.CUDA]) as profiler:
-        vector, scalar = assemble_potentials(prepared.layout, prepared.table, frequency_index=-1,
-                                            frequency_stop=frequency_count, far_dtype=torch.float32,
-                                            _network_accuracy=True)
-        matrix, rhs, recovery = scale_potentials(prepared, vector, scalar)
-        solution, _ = solve_scaled_chunk(matrix, rhs)
-        recover_scaled_chunk(prepared, solution, rhs, recovery)
+        system = transform_chunk(prepared, assemble_chunk(prepared, frequency_stop=frequency_count))
+        solution, _ = solve_scaled_chunk(system)
+        recover_scaled_chunk(prepared, solution, system.rhs, system.recovery)
         torch.cuda.synchronize()
     trace = output.with_name(output.stem + "-kernels.json")
     profiler.export_chrome_trace(str(trace))
@@ -176,9 +174,7 @@ def fixture(unknowns):
                   (0., length, -gap / 2 - width, -gap / 2, z)]
     ports = [mw.LumpedPort(
         name, positive=(x, gap / 2, z), negative=(x, -gap / 2, z),
-        voltage_path=mw.AxisPath("y"),
-        current_surface=mw.Box(position=(x, 0., z), size=(bridge, gap, bridge)),
-        reference_impedance=50.) for name, x in (("p1", h), ("p2", length - h))]
+        voltage_path=mw.AxisPath("y"), reference_impedance=50.) for name, x in (("p1", h), ("p2", length - h))]
     frequencies = tuple(10.**(6 + 3 * i / 19) for i in range(20))
     return stack, rectangles, ports, frequencies, h, bridge, 46 * cells + 28
 
@@ -221,7 +217,8 @@ def main():
     setup_peak = torch.cuda.max_memory_allocated()
     torch.cuda.empty_cache()
     available = available_work_memory(prepared.excitation.device)
-    capacity = frequency_chunk_capacity(expected, len(prepared.layout.mesh.faces), 20, available)
+    capacity = frequency_chunk_capacity(expected, len(prepared.layout.mesh.faces), len(ports), 20, available,
+                                        wall_nodes=_wall_nodes(prepared.table))
     if args.chunk_size is not None:
         capacity = min(capacity, args.chunk_size)
     capacity = min(capacity, measured)
@@ -242,21 +239,17 @@ def main():
         "loop_tree_setup": setup_time, "prepare_peak_allocated_bytes": prepare_peak,
         "loop_tree_peak_allocated_bytes": setup_peak,
         "available_work_bytes": available, "frequency_chunk_size": capacity,
-        "assembly_note": "V and P emitted together by the same face-pair pass",
+        "assembly_note": "V and packed P emitted together by the same face-pair pass into the chunk system",
         "chunks": [], "factor_dtype": [], "refinement_steps": [], "backward_error": []}
     torch.cuda.reset_peak_memory_stats()
     for start in range(args.frequency_start, args.frequency_stop, capacity):
         stop = min(start + capacity, args.frequency_stop)
-        assembly_time, (vector, scalar) = timed(lambda: assemble_potentials(
-            prepared.layout, prepared.table, frequency_index=-1,
-            frequency_start=start, frequency_stop=stop, far_dtype=torch.float32,
-            _network_accuracy=True))
-        scale_time, (matrix, rhs, recovery) = timed(lambda: scale_potentials(
-            prepared, vector, scalar, frequency_start=start))
-        del vector, scalar
-        solve_time, (solution, info) = timed(lambda: solve_scaled_chunk(matrix, rhs))
+        assembly_time, system = timed(lambda: assemble_chunk(
+            prepared, frequency_start=start, frequency_stop=stop))
+        scale_time, _ = timed(lambda: transform_chunk(prepared, system, frequency_start=start))
+        solve_time, (solution, info) = timed(lambda: solve_scaled_chunk(system))
         recovery_time, (y, x) = timed(lambda: recover_scaled_chunk(
-            prepared, solution, rhs, recovery, frequency_start=start))
+            prepared, solution, system.rhs, system.recovery, frequency_start=start))
         count = stop - start
         record = {"frequency_start": start, "frequency_stop": stop,
                   "assembly_VP": assembly_time, "scale": scale_time,
@@ -277,7 +270,7 @@ def main():
               f"LU/refinement={record['LU_refinement_seconds_per_frequency']:.6f}s/f, "
               f"steps={info[1]}, dtype={info[0]}, "
               f"peak={data['solve_peak_allocated_bytes']/2**30:.3f}GiB", flush=True)
-        del matrix, rhs, recovery, solution, y, x
+        del system, solution, y, x
     data["seconds_per_frequency"] = {
         name: sum(c[field]["gpu_seconds"] for c in data["chunks"]) / measured
         for name, field in (("assembly_VP", "assembly_VP"), ("scale", "scale"),

@@ -6,8 +6,10 @@ from typing import Any
 
 import torch
 
-from ..compiler.electrostatic import CompiledElectrostatics, TerminalConstraint, compile_electrostatics
-from .api import ElectrostaticBoundarySpec, ElectrostaticSolverConfig
+from ..compiler.electrostatic import CompiledElectrostatics
+from .api import ElectrostaticConfig, ElectrostaticSolverConfig
+from ..errors import UnsupportedFeatureError
+from .._stability import experimental
 
 _AXES = ("x", "y", "z")
 
@@ -337,6 +339,7 @@ def _pcg(apply_A, b, inv_diag, *, tol, max_iterations):
     return x, report
 
 
+@experimental("electrostatics")
 @dataclass
 class ElectrostaticResultData:
     """Typed electrostatic solver output on the cell-centred grid.
@@ -578,12 +581,13 @@ def _reject_trainable_tensor(compiled) -> None:
         or compiled.free_charge.requires_grad
         or compiled.epsilon_r.requires_grad
     ):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Differentiable electrostatics through a full tensor (anisotropic) permittivity is "
             "not implemented: the tensor operator's off-diagonal cross-flux terms have no "
             "reverse-mode (implicit-diff) VJP, so a trainable tensor permittivity or free charge "
             "would silently detach its gradient. Detach the permittivity and free charge, or use "
-            "an isotropic Material for a differentiable electrostatic solve."
+            "an isotropic Material for a differentiable electrostatic solve.",
+            feature="material.full_tensor", method="electrostatic"
         )
 
 
@@ -748,21 +752,23 @@ def solve_electrostatics(
     # fixed-potential/grounded terminal; floating conductors do not anchor it.
     has_level_anchor = bool(fixed_terms) or compiled.boundary.has_dirichlet
     if not has_solve_anchor:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Pure-Neumann electrostatic problems are gauge-singular (potential defined only "
             "up to a constant) and require charge-compatibility plus a gauge fix; supply at "
-            "least one Dirichlet boundary face or a fixed-potential/grounded terminal."
+            "least one Dirichlet boundary face or a fixed-potential/grounded terminal.",
+            feature="guard:6786d545", method="electrostatic"
         )
 
     requires_grad = compiled.epsilon_r.requires_grad or compiled.free_charge.requires_grad
     b_full = operator.rhs_full()
     if floating_terms:
         if requires_grad:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Gradients through the floating-conductor superposition solve are not "
                 "implemented; the prescribed-charge k x k reduction is not yet differentiated. "
                 "Detach the permittivity / free charge, or use only fixed-potential "
-                "(grounded / potential=) terminals for a differentiable electrostatic solve."
+                "(grounded / potential=) terminals for a differentiable electrostatic solve.",
+                feature="electrostatic_terminal.floating", method="electrostatic"
             )
         phi, reports = _solve_floating_superposition(
             operator, compiled, fixed_terms, floating_terms, free_mask, config,
@@ -835,44 +841,24 @@ def solve_electrostatics(
     )
 
 
-class ElectrostaticSimulation:
-    """Runner returned by ``Simulation.electrostatic(...)``.
+def electrostatic_result(scene, compiled: CompiledElectrostatics, config: ElectrostaticConfig):
+    """Solve ``compiled`` and wrap it as a ``Result(method="electrostatic")``.
 
-    Keeps the public entry ``Scene -> Simulation -> Result``: ``run()`` returns a
-    standard ``Result(method="electrostatic")`` whose ``result.electrostatic``
-    accessor is the typed :class:`ElectrostaticResultData`.
+    ``Simulation.electrostatic(...).run()`` calls this with the scene it compiled;
+    ``mw.electrostatic.electrostatic(result)`` is the typed :class:`ElectrostaticResultData`.
     """
+    from ..result import Result
 
-    def __init__(self, scene, boundary=None, solver=None):
-        self.scene = scene
-        if boundary is None:
-            boundary = ElectrostaticBoundarySpec.grounded_box()
-        if not isinstance(boundary, ElectrostaticBoundarySpec):
-            raise TypeError("boundary must be an ElectrostaticBoundarySpec.")
-        self.boundary = boundary
-        if solver is None:
-            solver = ElectrostaticSolverConfig()
-        if not isinstance(solver, ElectrostaticSolverConfig):
-            raise TypeError("solver must be an ElectrostaticSolverConfig.")
-        self.solver = solver
-
-    def prepare(self) -> CompiledElectrostatics:
-        return compile_electrostatics(self.scene, self.boundary, dtype=self.solver.dtype)
-
-    def run(self):
-        from ..result import Result
-
-        compiled = self.prepare()
-        data = solve_electrostatics(compiled, self.solver)
-        return Result(
-            method="electrostatic",
-            scene=self.scene,
-            frequency=0.0,
-            solver_stats={
-                "iterations": data.iterations,
-                "residual": data.residual,
-                "residual_abs": data.residual_abs,
-                "gauss_error": data.gauss_error,
-            },
-            raw_output=data,
-        )
+    data = solve_electrostatics(compiled, config.solver)
+    return Result(
+        method="electrostatic",
+        scene=scene,
+        frequency=0.0,
+        solver_stats={
+            "iterations": data.iterations,
+            "residual": data.residual,
+            "residual_abs": data.residual_abs,
+            "gauss_error": data.gauss_error,
+        },
+        raw_output=data,
+    )

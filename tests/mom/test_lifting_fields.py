@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA requ
 def handle(epsilon, *, dtype=torch.complex128, sources=None):
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=epsilon))],
                      sources=[mw.PlaneWave()] if sources is None else sources)
-    config = mw.MoMConfig(subdivisions=0, dtype=dtype, integration=IntegrationConfig(order=4, singular_order=6))
+    config = mw.mom.MoMConfig(subdivisions=0, dtype=dtype, integration=IntegrationConfig(order=4, singular_order=6))
     basis, exterior, interior = compile_surface(scene, 3e8, config)
     return DecodeHandle(basis, exterior, interior, tuple(scene.sources), config.integration, {})
 

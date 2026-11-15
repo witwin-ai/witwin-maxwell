@@ -19,24 +19,30 @@ MISSING_FIELDS = (
 
 def _scene(*, gap_port=False):
     scene = _DensityFluxScene().to_scene()
-    scene.material_regions.clear()
-    scene.add_monitor(mw.PointMonitor("point", (0., 0., 0.), fields=("Ez", "Hy")))
-    scene.add_monitor(mw.PlaneMonitor("plane", axis="z", position=0.06, fields=("Ex", "Ey", "Hx", "Hy")))
+    scene = scene.updated(material_regions=())
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PointMonitor("point", (0., 0., 0.), fields=("Ez", "Hy")),
+        mw.PlaneMonitor("plane", axis="z", position=0.06, fields=("Ex", "Ey", "Hx", "Hy")),
+    ))
     if gap_port:
-        scene.add_port(mw.LumpedPort(
-            "feed", positive=(0., 0., 0.12), negative=(0., 0., 0.),
-            voltage_path=mw.AxisPath("z"),
-            current_surface=mw.Box(position=(0., 0., 0.06), size=(0.12, 0.12, 0.)),
-            termination=mw.SeriesRLC(r=50.),
+        scene = scene.updated(ports=(
+            *scene.ports,
+            mw.LumpedPort(
+                "feed", positive=(0., 0., 0.12), negative=(0., 0., 0.),
+                voltage_path=mw.AxisPath("z"),
+                current_surface=mw.Box(position=(0., 0., 0.06), size=(0.12, 0.12, 0.)),
+                termination=mw.rf.SeriesRLC(r=50.),
+            ),
         ))
     return scene
 
 
 def _simulation(scene, **kwargs):
     return mw.Simulation.fdtd(
-        scene, frequencies=FREQUENCIES, cuda_graph=False,
+        scene, frequencies=FREQUENCIES, config=mw.FDTDConfig(cuda_graph=False,
         run_time=mw.TimeConfig(time_steps=24),
-        spectral_sampler=mw.SpectralSampler(window="none"), **kwargs,
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"), **kwargs),
     )
 
 
@@ -67,9 +73,9 @@ def test_default_multifrequency_records_volume_fields():
     simulation = _simulation(_scene())
     assert simulation.config.full_field_dft is None
     result = simulation.run()
-    assert result.fields and result.E.z.is_complex()
-    assert result.solver_stats["full_field_dft"] is True
-    assert result.solver_stats["full_field_dft_source"] == "auto"
+    assert result.fields and result.E.z.values.is_complex()
+    assert result.stats()["full_field_dft"] is True
+    assert result.stats()["full_field_dft_source"] == "auto"
 
 
 @pytest.mark.parametrize("gap_port", [False, True])
@@ -77,8 +83,8 @@ def test_explicit_false_preserves_every_monitor_and_port_tensor(gap_port):
     scene = _scene(gap_port=gap_port)
     result = _simulation(scene, full_field_dft=False).run()
     reference = _simulation(scene, full_field_dft=True).run()
-    assert result.solver_stats["full_field_dft"] is False
-    assert result.solver_stats["full_field_dft_source"] == "explicit"
+    assert result.stats()["full_field_dft"] is False
+    assert result.stats()["full_field_dft_source"] == "explicit"
     assert not result.solver.dft_enabled and not result.solver._dft_entries
     assert not result._fields
     for actual, expected in ((result.monitors, reference.monitors), (result.ports, reference.ports)):
@@ -90,7 +96,7 @@ def test_explicit_false_preserves_every_monitor_and_port_tensor(gap_port):
     for access in (
         lambda: result.E, lambda: result.H, lambda: result.field(),
         lambda: result.fields, lambda: result.at(freq_index=0).E.z,
-        lambda: result._native_tensor("Ez"), lambda: result.tensor("Ez"),
+        lambda: result._native_tensor("Ez"), lambda: result.field("Ez").values,
     ):
         with pytest.raises(RuntimeError, match=re.escape(MISSING_FIELDS)):
             access()
@@ -99,13 +105,16 @@ def test_explicit_false_preserves_every_monitor_and_port_tensor(gap_port):
 @pytest.mark.parametrize("channel", ["conduction", "electric_dispersion"])
 def test_explicit_false_defers_automatic_power_loss_to_evaluation(channel):
     scene = _scene()
-    scene.add_monitor(mw.PowerLossMonitor("loss", position=(0.,)*3, size=(0.12,)*3, channels=(channel,)))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.PowerLossMonitor("loss", position=(0.,)*3, size=(0.12,)*3, channels=(channel,)),
+    ))
     simulation = _simulation(scene, full_field_dft=False)
     simulation.prepare()
     result = simulation.run()
 
     with pytest.raises(RuntimeError, match="full_field_dft=True or pass electric_fields"):
-        result.power_loss("loss")
+        result.monitor("loss")
 
     if channel == "conduction":
         reference = _simulation(scene, full_field_dft=True).run()
@@ -116,8 +125,8 @@ def test_explicit_false_defers_automatic_power_loss_to_evaluation(channel):
             )
             for component in ("Ex", "Ey", "Ez")
         }
-        actual = result.power_loss("loss", electric_fields=electric_fields)
-        expected = reference.power_loss("loss")
+        actual = mw.postprocess.power_loss(result, "loss", electric_fields=electric_fields)
+        expected = reference.monitor("loss")
         actual_tensors, expected_tensors = list(_tensors(actual)), list(_tensors(expected))
         assert len(actual_tensors) == len(expected_tensors)
         for index, (actual, expected) in enumerate(zip(actual_tensors, expected_tensors)):
@@ -128,16 +137,17 @@ def test_explicit_false_defers_automatic_power_loss_to_evaluation(channel):
 
 def _transmission_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.36, 0.36), (-0.36, 0.36), (-0.48, 0.48))),
-        grid=mw.GridSpec.uniform(0.06),
-        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(mw.PointDipole(
-        position=(0., 0., -0.18), polarization="Ex", width=0.04,
-        source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.8e9, amplitude=50.),
-    ))
-    scene.add_monitor(mw.FluxMonitor("flux_probe", axis="z", position=0.18, normal_direction="+"))
+                domain=mw.Domain(bounds=((-0.36, 0.36), (-0.36, 0.36), (-0.48, 0.48))),
+                grid=mw.GridSpec.uniform(0.06),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0., 0., -0.18), polarization="Ex", width=0.04,
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.8e9, amplitude=50.),
+            ),
+            ),
+                monitors=(mw.FluxMonitor("flux_probe", axis="z", position=0.18, normal_direction="+"),),
+            )
     return scene
 
 
@@ -148,9 +158,12 @@ class _TransmissionPermittivityScene(mw.SceneModule):
 
     def to_scene(self):
         scene = _transmission_scene()
-        scene.add_structure(mw.Structure(
-            name="design", geometry=mw.Box(position=(0., 0., 0.), size=(0.36, 0.36, 0.12)),
-            material=mw.Material(eps_r=self.eps_r),
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(
+                name="design", geometry=mw.Box(position=(0., 0., 0.), size=(0.36, 0.36, 0.12)),
+                material=mw.Material(eps_r=self.eps_r),
+            ),
         ))
         return scene
 
@@ -162,10 +175,13 @@ class _TransmissionDensityScene(mw.SceneModule):
 
     def to_scene(self):
         scene = _transmission_scene()
-        scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
-        scene.add_material_region(mw.MaterialRegion(
-            name="design", geometry=mw.Box(position=(0., 0., 0.), size=(0.36, 0.36, 0.12)),
-            density=self.logits.sigmoid(), eps_bounds=(1., 6.), mu_bounds=(1., 1.),
+        scene = scene.updated(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
+            mw.MaterialRegion(
+                name="design", geometry=mw.Box(position=(0., 0., 0.), size=(0.36, 0.36, 0.12)),
+                density=self.logits.sigmoid(), eps_bounds=(1., 6.), mu_bounds=(1., 1.),
+            ),
         ))
         return scene
 
@@ -182,17 +198,17 @@ def _comparison(actual, expected):
 
 def _flux_gradient(model, parameter, requested):
     simulation = _simulation(model, full_field_dft=requested)
-    simulation.config.run_time = mw.TimeConfig(time_steps=96)
-    simulation.config.adjoint_checkpoint_stride = 16
+    simulation.config = dataclasses.replace(simulation.config, run_time=mw.TimeConfig(time_steps=96),
+                                            adjoint_checkpoint_stride=16)
     result = simulation.run()
-    flux = result.monitor("flux_probe")["flux"]
+    flux = result.monitor("flux_probe").values
     loss = flux.abs().square().sum()
     loss.backward()
     gradient = parameter.grad.detach().clone()
     print(f"full_field_dft={requested}: flux={flux.detach().tolist()}, "
           f"loss={loss.item():.17g}, gradient={gradient.flatten().tolist()}, "
           f"abs_gradient/loss={gradient.abs().max().item() / loss.item():.17g}")
-    assert result.solver_stats["full_field_dft"] is requested
+    assert result.stats()["full_field_dft"] is requested
     if not requested:
         assert not result.solver._dft_entries and not result._fields
     return gradient, flux.detach().clone()

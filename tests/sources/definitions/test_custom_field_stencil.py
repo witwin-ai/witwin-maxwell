@@ -1,5 +1,6 @@
 """Absolute discrete-wave controls for common-plane equivalent currents."""
 
+from dataclasses import replace
 import math
 
 import numpy as np
@@ -19,6 +20,9 @@ def _single_cpu_thread():
     torch.set_num_threads(previous)
 
 
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+
+
 def _compatible_wave(dx, *, mode=0, shift=0.0, direction=1.0, partial=False, sine=False, periodic=False):
     frequency = 2.0e9
     c = 299792458.0
@@ -26,8 +30,7 @@ def _compatible_wave(dx, *, mode=0, shift=0.0, direction=1.0, partial=False, sin
     half_y = 0.2 if mode else 2.0 * dx
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-2.0 * dx, 2.0 * dx), (-half_y, half_y), (-0.64, 0.64))),
-        grid=mw.GridSpec.uniform(dx), device="cuda" if periodic else "cpu",
-        boundary=mw.BoundarySpec.pml(num_layers=8).with_faces(
+        grid=mw.GridSpec.uniform(dx), boundary=mw.BoundarySpec.pml(num_layers=8).with_faces(
             x_low="pec", x_high="pec",
             y_low="periodic" if periodic else "pec" if sine else "pmc",
             y_high="periodic" if periodic else "pec" if sine else "pmc",
@@ -45,15 +48,18 @@ def _compatible_wave(dx, *, mode=0, shift=0.0, direction=1.0, partial=False, sin
     transverse = (np.sin if sine else np.cos)(mode * np.pi * (y - y[0]) / (y[-1] - y[0]))
     profile = np.broadcast_to(transverse[None, :, None], (len(x), len(y), 1)).copy()
     # Resolve the actual run clock before constructing the modal admittance.
-    simulation = mw.Simulation.fdtd(
-        scene, absorber="cpml", frequencies=[frequency], backend="native" if periodic else "cpu_reference", cuda_graph=False,
-        run_time=mw.TimeConfig(time_steps=1), full_field_dft=True,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=True),
-    )
     # Resolve the run clock with the same waveform before adding its matching H.
-    scene.add_source(mw.CustomFieldSource(
-        mw.FieldDataset((x, y, [source_z]), {"Ex": profile}), source_time=pulse,
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomFieldSource(
+            mw.sources.FieldDataset((x, y, [source_z]), {"Ex": profile}), source_time=pulse,
+        ),
     ))
+    simulation = mw.Simulation.fdtd(
+        scene, frequencies=[frequency], config=mw.FDTDConfig(absorber="cpml", cuda_graph=False,
+        run_time=mw.TimeConfig(time_steps=1), full_field_dft=True,
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=True)),
+    )
     dt = simulation.prepare().solver.dt
     K = 2.0 * math.sin(math.pi * frequency * dt) / (c * dt)
     hy = float(y[1] - y[0])
@@ -62,15 +68,16 @@ def _compatible_wave(dx, *, mode=0, shift=0.0, direction=1.0, partial=False, sin
     kappa_z = math.sqrt(K * K - kappa_y * kappa_y)
     kz = 2.0 * math.asin(kappa_z * h / 2.0) / h
     if not partial:
-        scene.sources[:] = [mw.CustomFieldSource(
-            mw.FieldDataset((x, y, [source_z]), {
+        scene = scene.updated(sources=[mw.sources.CustomFieldSource(
+            mw.sources.FieldDataset((x, y, [source_z]), {
                 "Ex": profile, "Hy": direction * profile * kappa_z / (K * eta),
             }), source_time=pulse,
-        )]
-    simulation.config.run_time = mw.TimeConfig(time_steps=math.ceil((18e-9 if mode else 9e-9) / dt))
+        )])
+    simulation = mw.Simulation.fdtd(scene, frequencies=simulation.frequencies, config=replace(
+        simulation.config, run_time=mw.TimeConfig(time_steps=math.ceil((18e-9 if mode else 9e-9) / dt))))
     prepared = simulation.prepare()
     result = prepared.run()
-    field = result.tensor("Ex").detach().cpu().numpy()
+    field = result.field("Ex").isel(f=0).values.detach().cpu().numpy()
     z = prepared.solver.scene.z_nodes64
     # Project onto the exact transverse eigenmode, including nodal half cells.
     weights = np.ones_like(y)
@@ -94,6 +101,7 @@ def _compatible_wave(dx, *, mode=0, shift=0.0, direction=1.0, partial=False, sin
     }
 
 
+@requires_cuda
 def test_compatible_normal_wave_refines_without_source_gain_or_leakage(record_property):
     errors = []
     for dx in (0.025, 0.0125, 0.00625):
@@ -106,6 +114,7 @@ def test_compatible_normal_wave_refines_without_source_gain_or_leakage(record_pr
     assert errors[2] < errors[1] < errors[0]
 
 
+@requires_cuda
 @pytest.mark.parametrize("shift", (-0.5, 0.5))
 def test_normal_half_cell_translation_preserves_source_strength(shift, record_property):
     metrics = _compatible_wave(0.025, shift=shift)
@@ -114,6 +123,7 @@ def test_normal_half_cell_translation_preserves_source_strength(shift, record_pr
     assert metrics["backward"] < 1e-3, metrics
 
 
+@requires_cuda
 @pytest.mark.parametrize("direction", (1.0, -1.0))
 @pytest.mark.parametrize("sine", (False, True), ids=("even_wall", "odd_wall"))
 def test_compatible_oblique_wave_has_unit_gain_and_no_artificial_backwave(direction, sine, record_property):
@@ -124,7 +134,7 @@ def test_compatible_oblique_wave_has_unit_gain_and_no_artificial_backwave(direct
     assert metrics["yee_l2"] < 1e-3, metrics
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="native periodic FDTD requires CUDA")
+@requires_cuda
 @pytest.mark.parametrize("direction", (1.0, -1.0))
 def test_compatible_periodic_oblique_wave(direction, record_property):
     errors = []
@@ -138,6 +148,7 @@ def test_compatible_periodic_oblique_wave(direction, record_property):
     assert errors[2] < errors[1] < errors[0]
 
 
+@requires_cuda
 def test_partial_electric_profile_keeps_its_two_sided_radiation(record_property):
     metrics = _compatible_wave(0.025, partial=True)
     record_property("metrics", metrics)

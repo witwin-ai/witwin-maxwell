@@ -56,54 +56,53 @@ class _TwoPortBarrierScene(mw.SceneModule):
 
     def to_scene(self):
         density = torch.sigmoid(self.logits)
-        scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.90, 0.90), (-0.60, 0.60), (-0.60, 0.60))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="waveguide",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.56, 0.36, 0.36)),
-                material=mw.Material(eps_r=8.0),
-            )
-        )
         # Full-cross-section barrier spanning 4 cells along the guide; the wide
         # eps range lets the optimizer turn it into a matched section or a
         # reflector, giving a strong, smooth handle on the port response.
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.48, 0.36, 0.36)),
-                density=density,
-                eps_bounds=(1.0, 20.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.ModeSource(
-                position=(-0.48, 0.0, 0.0),
-                size=(0.0, 0.36, 0.36),
-                polarization="Ez",
-                direction="+",
-                source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
-                name="port1",
-            )
-        )
-        scene.add_source(
-            mw.ModeSource(
-                position=(0.48, 0.0, 0.0),
-                size=(0.0, 0.36, 0.36),
-                polarization="Ez",
-                direction="-",
-                source_time=mw.CW(frequency=1.0e9, amplitude=15.0),
-                name="port2",
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("port2_thru", (0.30, 0.0, 0.0), fields=("Ez",)))
-        scene.add_monitor(mw.PointMonitor("port1_refl", (-0.30, 0.0, 0.0), fields=("Ez",)))
+        scene = mw.Scene(
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.90, 0.90), (-0.60, 0.60), (-0.60, 0.60))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    structures=(
+                mw.Structure(
+                    name="waveguide",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.56, 0.36, 0.36)),
+                    material=mw.Material(eps_r=8.0),
+                ),
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.48, 0.36, 0.36)),
+                    density=density,
+                    eps_bounds=(1.0, 20.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.ModeSource(
+                    position=(-0.48, 0.0, 0.0),
+                    size=(0.0, 0.36, 0.36),
+                    polarization="Ez",
+                    direction="+",
+                    source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
+                    name="port1",
+                ),
+                mw.ModeSource(
+                    position=(0.48, 0.0, 0.0),
+                    size=(0.0, 0.36, 0.36),
+                    polarization="Ez",
+                    direction="-",
+                    source_time=mw.CW(frequency=1.0e9, amplitude=15.0),
+                    name="port2",
+                ),
+                ),
+                    monitors=(
+                mw.PointMonitor("port2_thru", (0.30, 0.0, 0.0), fields=("Ez",)),
+                mw.PointMonitor("port1_refl", (-0.30, 0.0, 0.0), fields=("Ez",)),
+                ),
+                )
         return scene
 
 
@@ -112,12 +111,14 @@ def _sparam_objective(model, *, time_steps):
     result = mw.Simulation.fdtd(
         model,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).run()
-    thru = result.monitor("port2_thru")["data"]
-    refl = result.monitor("port1_refl")["data"]
+    thru = result.monitor("port2_thru").sel(component="Ez").values
+    refl = result.monitor("port1_refl").sel(component="Ez").values
     return _abs2(thru) + _abs2(refl)
 
 

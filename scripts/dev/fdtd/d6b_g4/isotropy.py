@@ -42,7 +42,7 @@ def scene_for(phi_deg, material, dl, *, with_sheet, offset=(0.0, 0.0), native=Fa
             c, r = np.array(center[:2]), np.array((-axis[1], axis[0]))
             a, b = 0.5 * length * axis[:2], 0.5 * width * r
             corners = [tuple(c - a - b), tuple(c + a - b), tuple(c + a + b), tuple(c - a + b)]
-            geometry = mw.PlanarPEC(corners, normal_axis="z", coordinate=0.0)
+            geometry = mw.geometry.PlanarPEC(corners, normal_axis="z", coordinate=0.0)
         elif native:
             # Validated axis-aligned planar foil path on the z = 0 grid plane (0 deg only).
             from witwin.core import Box
@@ -56,18 +56,16 @@ def scene_for(phi_deg, material, dl, *, with_sheet, offset=(0.0, 0.0), native=Fa
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-half, half), (-half, half), (-zhalf, zhalf))),
         grid=mw.GridSpec.uniform(dl),
-        boundary=mw.BoundarySpec.faces(default="pml", num_layers=10), device="cuda",
-        sources=[mw.PlaneWave(direction=(0.0, 0.0, -1.0), polarization=tuple(axis),
+        boundary=mw.BoundarySpec.faces(default="pml", num_layers=10), sources=[mw.PlaneWave(direction=(0.0, 0.0, -1.0), polarization=tuple(axis),
                               source_time=mw.GaussianPulse(frequency=F0, fwidth=0.5 * F0))],
         structures=structures,
-        monitors=[mw.FieldTimeMonitor("obs", components=("Ex", "Ey"), position=observer)])
+        monitors=[mw.monitors.FieldTimeMonitor("obs", components=("Ex", "Ey"), position=observer)])
     return scene, axis
 
 
 def projected_series(scene, axis, steps, dt):
     """Run with an explicit timestep so empty and loaded runs share one clock."""
-    result = mw.Simulation.fdtd(scene, frequencies=[F0], run_time=mw.TimeConfig(time_steps=steps, dt=dt),
-                                backend="native").run()
+    result = mw.Simulation.fdtd(scene, frequencies=[F0], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps, dt=dt))).run()
     t, ex = field_series(result, "obs", "Ex")
     _, ey = field_series(result, "obs", "Ey")
     return t, axis[0] * ex + axis[1] * ey
@@ -75,8 +73,7 @@ def projected_series(scene, axis, steps, dt):
 
 def native_dt(scene):
     """The solver's own (cut-bound-limited) timestep for this scene."""
-    return float(mw.Simulation.fdtd(scene, frequencies=[F0], run_time=mw.TimeConfig(time_steps=1),
-                                    backend="native").prepare().solver.dt)
+    return float(mw.Simulation.fdtd(scene, frequencies=[F0], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare().solver.dt)
 
 
 def resonance(t, scattered, incident):
@@ -127,7 +124,7 @@ def main():
                         help="native axis-aligned foil reference (0 deg); 'planar' for PlanarPEC (any angle)")
     args = parser.parse_args()
     materials = {"pec": pec_material(),
-                 "cu": mw.CopperFoil(thickness=35e-6, conductivity=5.8e7, frequency_range=(0.5e9, 1.5e9))}
+                 "cu": mw.media.CopperFoil(thickness=35e-6, conductivity=5.8e7, frequency_range=(0.5e9, 1.5e9))}
     angles = [float(a) for a in args.angles.split(",")]
     report = {"dl": args.dl, "steps": args.steps, "f0": F0, "cases": {}}
     for name in args.materials.split(","):

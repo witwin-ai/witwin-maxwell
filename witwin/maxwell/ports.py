@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from witwin.core import Box
 
+from ._enums import Direction, ModePolarization, parse_enum
 from ._fixed_inputs import require_fixed_input
 from .lumped import ParallelRLC, SeriesRLC
 from .monitors import ModeMonitor, _normalize_frequencies, _normalize_normal_direction
@@ -22,6 +23,8 @@ from .sources import (
     _resolve_mode_source_polarization_axis,
     polarization_vector,
 )
+from .errors import SetupError, UnsupportedFeatureError
+from ._stability import experimental
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,7 @@ class AxisPath:
         object.__setattr__(self, "axis", resolved_axis)
 
 
+@experimental("thin_wire")
 @dataclass(frozen=True)
 class WireNodeRef:
     """Stable reference to one declared point of a thin-wire polyline."""
@@ -60,6 +64,7 @@ class WireNodeRef:
         object.__setattr__(self, "point", int(point))
 
 
+@experimental("thin_wire")
 @dataclass(frozen=True)
 class WirePortBinding:
     """Bind a standard RF port to thin-wire nodes or a removed feed gap."""
@@ -173,6 +178,9 @@ class LumpedPort:
     An optional ``voltage_aperture`` Box distributes the voltage row over
     parallel paths using normalized transverse dual-cell quadrature. Current
     deposition uses the same row, preserving field/circuit power duality.
+
+    FDTD field ports require ``current_surface``. Layered MoM ports omit it:
+    their port current is the delta-gap MoM current.
     """
 
     name: str
@@ -222,8 +230,8 @@ class LumpedPort:
         else:
             if not isinstance(voltage_path, AxisPath):
                 raise TypeError("voltage_path must be an AxisPath.")
-            if not isinstance(current_surface, Box):
-                raise TypeError("current_surface must be a witwin.core.Box.")
+            if current_surface is not None and not isinstance(current_surface, Box):
+                raise TypeError("current_surface must be a witwin.core.Box or None.")
 
             resolved_positive = _require_length3("positive", positive)
             resolved_negative = _require_length3("negative", negative)
@@ -258,7 +266,8 @@ class LumpedPort:
                 raise TypeError("voltage_aperture must be an axis-aligned Box.")
             if any(torch.is_tensor(v) and v.requires_grad for v in
                    (voltage_aperture.position, voltage_aperture.size, voltage_aperture.rotation)):
-                raise NotImplementedError("Trainable aperture geometry changes discrete voltage support.")
+                raise UnsupportedFeatureError("Trainable aperture geometry changes discrete voltage support.",
+                                              feature="guard:42a03e3e", method=None)
 
         resolved_name = str(name)
         if not resolved_name:
@@ -286,6 +295,7 @@ class LumpedPort:
         object.__setattr__(self, "power_convention", "0.5*Re(V*conj(I))")
 
 
+@experimental("rf_ports")
 @dataclass(frozen=True)
 class TerminalRef:
     """Reference one uniquely named conductor structure in a scene."""
@@ -301,6 +311,7 @@ class TerminalRef:
         object.__setattr__(self, "structure_name", resolved_name)
 
 
+@experimental("rf_ports")
 @dataclass(frozen=True)
 class TerminalPort:
     """Declare a port between named PEC volumes or planar PEC/CopperFoil supports.
@@ -367,7 +378,8 @@ class TerminalPort:
             if box is not None and not isinstance(box,Box):
                 raise TypeError(f"TerminalPort {label} must be a Box or None.")
             if box is not None and any(torch.is_tensor(v) and v.requires_grad for v in (box.position,box.size,box.rotation)):
-                raise NotImplementedError("Trainable terminal integration geometry changes discrete support.")
+                raise UnsupportedFeatureError("Trainable terminal integration geometry changes discrete support.",
+                                              feature="guard:6eb28e4d", method=None)
         resolved_name = str(name)
         if not resolved_name:
             raise ValueError("TerminalPort name must not be empty.")
@@ -512,7 +524,8 @@ def _resolve_terminal_port(port: TerminalPort, structures, domain_bounds) -> Ter
     try:
         return port._with_resolved_geometry(**resolve_named_terminals(port,structures,domain_bounds))
     except (TypeError,ValueError,NotImplementedError) as error:
-        raise type(error)(f"TerminalPort {port.name!r}: {error}") from error
+        error.args = (f"TerminalPort {port.name!r}: {error}",)
+        raise
 
 
 _WAVE_MODE_FAMILIES = {"tem", "te", "tm", "hybrid"}
@@ -550,15 +563,9 @@ def _normalize_wave_voltage_path(value):
 
 def _normalize_wave_polarization(value):
     if value is None:
-        return "auto"
+        return ModePolarization.AUTO
     if isinstance(value, str):
-        token = value.strip().lower()
-        if token not in {"auto", "ex", "ey", "ez", "x", "y", "z"}:
-            raise ValueError(
-                "WaveModeSpec polarization must be 'auto', Ex/Ey/Ez, x/y/z, "
-                "or an axis-aligned vector."
-            )
-        return token
+        return parse_enum(ModePolarization, value, name="WaveModeSpec polarization")
     vector = polarization_vector(value)
     active = [component for component in vector if abs(float(component)) > 1.0e-9]
     if len(active) != 1:
@@ -566,6 +573,7 @@ def _normalize_wave_polarization(value):
     return vector
 
 
+@experimental("rf_ports")
 @dataclass(frozen=True)
 class WaveModeSpec:
     """Select one RF waveguide mode and freeze its impedance definition.
@@ -587,7 +595,7 @@ class WaveModeSpec:
     name: str
     impedance_definition: str
     impedance_formula: str
-    polarization: str | tuple[float, float, float]
+    polarization: ModePolarization | tuple[float, float, float]
     voltage_path: tuple[
         tuple[float, float, float],
         tuple[float, float, float],
@@ -601,7 +609,7 @@ class WaveModeSpec:
         mode_index=0,
         *,
         name=None,
-        polarization="auto",
+        polarization=ModePolarization.AUTO,
         impedance_definition=None,
         voltage_path=None,
         current_contour=None,
@@ -693,6 +701,7 @@ class WaveModeSpec:
         object.__setattr__(self, "current_contour", current_contour)
 
 
+@experimental("rf_ports")
 @dataclass(frozen=True)
 class WavePort:
     """Declare an axis-aligned RF modal aperture without invoking a solver."""
@@ -700,7 +709,7 @@ class WavePort:
     name: str
     position: tuple[float, float, float]
     size: tuple[float, float, float]
-    direction: str
+    direction: Direction
     reference_plane: float
     modes: tuple[WaveModeSpec, ...]
     normal_axis: str
@@ -748,7 +757,7 @@ class WavePort:
         try:
             resolved_direction = _normalize_mode_direction(direction)
         except ValueError as error:
-            raise ValueError(f"WavePort {resolved_name!r} direction must be '+' or '-'.") from error
+            raise SetupError(f"WavePort {resolved_name!r} direction must be '+' or '-'.") from error
         try:
             resolved_reference_plane = _fixed_reference_plane(reference_plane)
         except (TypeError, ValueError) as error:
@@ -808,7 +817,7 @@ class WavePort:
         object.__setattr__(self, "reference_plane", resolved_reference_plane)
         object.__setattr__(self, "modes", resolved_modes)
         object.__setattr__(self, "normal_axis", normal_axis)
-        object.__setattr__(self, "direction_sign", 1 if resolved_direction == "+" else -1)
+        object.__setattr__(self, "direction_sign", 1 if resolved_direction is Direction.PLUS else -1)
         object.__setattr__(self, "kind", "wave_port")
         object.__setattr__(self, "phasor_convention", "peak")
         object.__setattr__(self, "power_convention", "0.5*Re(V*conj(I))")
@@ -848,7 +857,7 @@ def _normalize_wave_aperture(label, name, position, size, direction, reference_p
     try:
         resolved_direction = _normalize_mode_direction(direction)
     except ValueError as error:
-        raise ValueError(f"{label} {name!r} direction must be '+' or '-'.") from error
+        raise SetupError(f"{label} {name!r} direction must be '+' or '-'.") from error
     try:
         resolved_reference_plane = _fixed_reference_plane(reference_plane)
     except (TypeError, ValueError) as error:
@@ -919,6 +928,7 @@ def _normalize_reference_impedance_matrix(label, name, value, count):
     )
 
 
+@experimental("rf_ports")
 @dataclass(frozen=True)
 class TerminalWavePort:
     """Declare a multi-conductor quasi-TEM wave port between named conductors.
@@ -953,7 +963,7 @@ class TerminalWavePort:
     name: str
     position: tuple[float, float, float]
     size: tuple[float, float, float]
-    direction: str
+    direction: Direction
     reference_plane: float
     terminals: tuple[TerminalRef, ...]
     reference: tuple[TerminalRef, ...]
@@ -1077,7 +1087,7 @@ class TerminalWavePort:
         object.__setattr__(self, "impedance_definition", definition)
         object.__setattr__(self, "conductor_model", conductor_model)
         object.__setattr__(self, "normal_axis", "xyz"[normal_index])
-        object.__setattr__(self, "direction_sign", 1 if direction_value == "+" else -1)
+        object.__setattr__(self, "direction_sign", 1 if direction_value is Direction.PLUS else -1)
         object.__setattr__(self, "_position_roundoff", _coordinate_roundoff(position))
         object.__setattr__(self, "_size_roundoff", _coordinate_roundoff(size))
         object.__setattr__(self, "_reference_roundoff", _coordinate_roundoff((reference_plane,))[0])
@@ -1118,7 +1128,8 @@ def _resolve_terminal_wave_port(port: TerminalWavePort, structures) -> TerminalW
             return port
         return port._with_default_voltage_path(resolve_wave_terminal_default_path(port, structures))
     except (TypeError, ValueError, NotImplementedError) as error:
-        raise type(error)(f"TerminalWavePort {port.name!r}: {error}") from error
+        error.args = (f"TerminalWavePort {port.name!r}: {error}",)
+        raise
 
 
 @dataclass(frozen=True)
@@ -1129,12 +1140,12 @@ class ModePort:
     position: tuple[float, float, float]
     size: tuple[float, float, float]
     mode_index: int
-    direction: str
+    direction: Direction
     polarization: tuple[float, float, float]
     frequencies: tuple[float, ...] | None = None
     source_time: SourceTime | None = None
     monitor_offset: float = 0.0
-    normal_direction: str = "+"
+    normal_direction: Direction = Direction.PLUS
     normal_axis: str = "z"
     polarization_axis: str = "x"
     bend_radius: float | None = None
@@ -1147,8 +1158,8 @@ class ModePort:
         position=(0.0, 0.0, 0.0),
         size=(1.0, 1.0, 0.0),
         mode_index=0,
-        direction="+",
-        polarization="auto",
+        direction=Direction.PLUS,
+        polarization=ModePolarization.AUTO,
         frequencies=None,
         source_time=None,
         monitor_offset=0.0,
@@ -1220,6 +1231,7 @@ class ModePort:
         )
 
 
+@experimental("rf_ports")
 @dataclass(frozen=True)
 class CoaxialLumpedPort:
     """Annular lumped port between two concentric circles on a Yee node plane.
@@ -1241,7 +1253,7 @@ class CoaxialLumpedPort:
     inner_diameter: float
     outer_diameter: float
     normal_axis: str
-    direction: str
+    direction: Direction
     reference_impedance: complex | float | torch.Tensor
     reference_plane: float | None = None
     termination: SeriesRLC | None = None
@@ -1258,7 +1270,7 @@ class CoaxialLumpedPort:
         inner_diameter,
         outer_diameter,
         normal_axis,
-        direction="+",
+        direction=Direction.PLUS,
         reference_impedance=50.0,
         reference_plane=None,
         termination=None,
@@ -1271,7 +1283,7 @@ class CoaxialLumpedPort:
         try:
             resolved_direction = _normalize_mode_direction(direction)
         except ValueError as error:
-            raise ValueError(f"CoaxialLumpedPort {resolved[0]!r} direction must be '+' or '-'.") from error
+            raise SetupError(f"CoaxialLumpedPort {resolved[0]!r} direction must be '+' or '-'.") from error
         if termination is not None and not isinstance(termination, SeriesRLC):
             raise TypeError(
                 f"CoaxialLumpedPort {resolved[0]!r} termination must be a SeriesRLC or None."
@@ -1296,9 +1308,10 @@ class CoaxialLumpedPort:
 
     @property
     def direction_sign(self) -> int:
-        return 1 if self.direction == "+" else -1
+        return 1 if self.direction is Direction.PLUS else -1
 
 
+@experimental("rf_ports")
 @dataclass(frozen=True)
 class PECFrame:
     """Thin PEC frame around a modal injection aperture.
@@ -1310,7 +1323,7 @@ class PECFrame:
     aperture walls, so the launched field has no unsupported tangential E at the
     aperture edge. ``structures`` materializes the frame for a declared
     :class:`WavePort`, :class:`ModePort` or :class:`ModeSource`; add the returned
-    structures to the scene with ``Scene.add_structure``.
+    structures to the scene's ``structures`` (``scene.updated(structures=...)``).
     """
 
     length: int = 2
@@ -1324,7 +1337,7 @@ class PECFrame:
         object.__setattr__(self, "length", int(length))
         object.__setattr__(self, "kind", "pec_frame")
 
-    def structures(self, port, scene) -> tuple:
+    def structures(self, port, scene, *, device) -> tuple:
         """Return the named PlanarPEC wall structures for ``port`` on ``scene``'s grid."""
         from witwin.core import Structure
 
@@ -1337,7 +1350,7 @@ class PECFrame:
         position = getattr(port, "position", None)
         size = getattr(port, "size", None)
         direction = getattr(port, "direction", None)
-        if name is None or position is None or size is None or direction not in ("+", "-"):
+        if name is None or position is None or size is None or direction not in (Direction.PLUS, Direction.MINUS):
             raise TypeError("PECFrame requires a WavePort, ModePort or ModeSource with position, size and direction.")
         position = _require_length3("position", position)
         size = _require_length3("size", size)
@@ -1345,10 +1358,10 @@ class PECFrame:
         if len(zero) != 1:
             raise ValueError(f"PECFrame target {name!r} must be a planar aperture with one zero size component.")
         normal = zero[0]
-        prepared = prepare_scene(scene)
+        prepared = prepare_scene(scene, device=device)
         nodes = [np.asarray(getattr(prepared, f"{axis}_nodes64"), dtype=np.float64) for axis in "xyz"]
         plane = _snap_index(nodes[normal], position[normal], label=f"{'xyz'[normal]} PECFrame aperture plane")
-        sign = 1 if direction == "+" else -1
+        sign = 1 if direction == Direction.PLUS else -1
         far = plane + sign * self.length
         if not 0 <= far < nodes[normal].size:
             raise ValueError(f"PECFrame of length {self.length} around {name!r} leaves the grid along {'xyz'[normal]}.")

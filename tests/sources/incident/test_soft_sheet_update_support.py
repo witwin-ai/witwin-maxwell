@@ -9,6 +9,8 @@ from witwin.maxwell.fdtd.boundary import BOUNDARY_KIND_TO_CODE
 from witwin.maxwell.fdtd.runtime import stepping
 from witwin.maxwell.fdtd.runtime.core_tables import compile_source_tables
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+
 
 @pytest.fixture(autouse=True)
 def _single_cpu_thread():
@@ -18,12 +20,12 @@ def _single_cpu_thread():
     torch.set_num_threads(previous)
 
 
-def _prepare(*, polarization="Ez", kind="plane", boundary=None, sign=1, device="cpu",
-             steps=1, core=False):
+def _prepare(*, polarization="Ez", kind="plane", boundary=None, sign=1, device="cuda",
+             steps=1):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
         grid=mw.GridSpec.uniform(0.025),
-        boundary=boundary or mw.BoundarySpec.pml(num_layers=4), device=device,
+        boundary=boundary or mw.BoundarySpec.pml(num_layers=4),
     )
     kwargs = dict(direction=(sign, 0, 0), polarization=polarization, injection_axis="x",
                   source_time=mw.CW(frequency=1e9))
@@ -32,16 +34,21 @@ def _prepare(*, polarization="Ez", kind="plane", boundary=None, sign=1, device="
     elif kind == "gaussian":
         source = mw.GaussianBeam(beam_waist=0.16, focus=(0.03, 0.02, -0.01), **kwargs)
     else:
-        source = mw.AstigmaticGaussianBeam(beam_waist=(0.16, 0.22),
+        source = mw.sources.AstigmaticGaussianBeam(beam_waist=(0.16, 0.22),
                                          focus=(0.03, 0.02, -0.01), **kwargs)
-    scene.add_source(source)
+    scene = scene.updated(sources=(*scene.sources, source))
     if steps > 1:
-        scene.add_monitor(mw.PointMonitor("probe", position=(0, 0, 0), fields=("Ez", "Hy")))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.PointMonitor("probe", position=(0, 0, 0), fields=("Ez", "Hy")),
+        ))
     return mw.Simulation.fdtd(
-        scene, frequency=1e9, backend="cpu_reference" if device == "cpu" else "native",
+        scene, frequencies=1e9,
         # These support checks exercise the CPML electric kernels: pin CPML explicitly.
-        absorber="cpml", cuda_graph=False, fdtd_core_path=core, full_field_dft=False,
-        run_time=mw.TimeConfig(time_steps=steps),
+        config=mw.FDTDConfig(
+            absorber="cpml", cuda_graph=False, full_field_dft=False,
+            run_time=mw.TimeConfig(time_steps=steps), device=device,
+        ),
     ).prepare()
 
 
@@ -80,12 +87,7 @@ def test_full_aperture_sheets_exclude_exactly_inactive_electric_rows(polarizatio
 
 
 @pytest.mark.parametrize("polarization", ("Ey", "Ez"))
-def test_periodic_y_keeps_all_rows_and_pml_z_excludes_only_node_walls(polarization, monkeypatch):
-    from witwin.maxwell.fdtd import cpu_profile
-
-    # Compile only: the CPU stepping profile does not implement periodic curls.
-    monkeypatch.setattr(cpu_profile, "admit_cpu_reference_scene", lambda simulation, scene:
-                        setattr(scene, "_fdtd_cpu_reference", True))
+def test_periodic_y_keeps_all_rows_and_pml_z_excludes_only_node_walls(polarization):
     boundary = mw.BoundarySpec.pml(num_layers=4).with_faces(y_low="periodic", y_high="periodic")
     solver = _prepare(polarization=polarization, boundary=boundary).solver
     _assert_supported(solver)
@@ -132,8 +134,11 @@ def test_support_per_face_kind_and_component(kind, component):
 
 
 @pytest.mark.parametrize("kind", ("none", "pml", "pec", "pmc", "mur"))
-@pytest.mark.parametrize("cpml", (False, True), ids=("standard", "cpml"))
-def test_support_matches_electric_kernel_evolution(kind, cpml):
+def test_support_matches_electric_kernel_evolution(kind):
+    # The Torch Yee oracle mirrors the per-component kernels' boundary rows (frozen for
+    # none/PML, zeroed for PEC, mirrored for PMC); the core path reads its own compiled
+    # coefficient tables, so the oracle steps the overwritten coefficients here (W7 row 16e).
+    from tests.oracles import yee_cpu_reference
     boundary = mw.BoundarySpec.pml(num_layers=4).with_faces(
         y_low=kind, y_high=kind, z_low=kind, z_high=kind,
     )
@@ -141,9 +146,7 @@ def test_support_matches_electric_kernel_evolution(kind, cpml):
     for axis in "xyz":
         getattr(solver, "E" + axis).fill_(1)
         getattr(solver, f"ce{axis}_decay").fill_(0.5)
-    update = (stepping.update_electric_fields_cpml_dense if cpml
-              else stepping.update_electric_fields_standard)
-    update(solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+    yee_cpu_reference.electric_step(solver)
     for component in ("Ex", "Ey", "Ez"):
         field = getattr(solver, component)
         expected = torch.ones_like(field)
@@ -181,7 +184,8 @@ def test_normalization_and_retained_profiles_are_bitwise_unchanged(kind, monkeyp
 def test_core_source_tables_use_the_same_trimmed_terms():
     solver = _prepare().solver
     extension = SimpleNamespace(CoreStepLaunch=lambda *args: SimpleNamespace(args=args))
-    tables = compile_source_tables(solver, extension, torch.zeros(1, dtype=torch.int64), 2)
+    tables = compile_source_tables(solver, extension,
+                                   torch.zeros(1, dtype=torch.int64, device=solver.device), 2)
     for family in ("electric", "magnetic"):
         term, = getattr(solver, f"_{family}_source_terms")
         launch, = tables.groups[family]
@@ -192,14 +196,13 @@ def test_core_source_tables_use_the_same_trimmed_terms():
         assert tuple(integers[:3]) == term["offsets"]
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for late-time stability")
-@pytest.mark.parametrize("core", (False, True), ids=("standard", "core"))
-def test_soft_plane_wave_cw_energy_and_corner_field_stay_bounded(core):
+def test_soft_plane_wave_cw_energy_and_corner_field_stay_bounded():
     energies = []
     for steps in (2048, 4096):
-        prepared = _prepare(device="cuda", steps=steps, core=core)
+        prepared = _prepare(device="cuda", steps=steps)
         prepared.run()
         solver = prepared.solver
+        assert prepared.solver._core_runtime is not None
         energy = sum((getattr(solver, "E" + axis).double().square().sum() * solver.eps0
                       + getattr(solver, "H" + axis).double().square().sum() * solver.mu0)
                      for axis in "xyz")

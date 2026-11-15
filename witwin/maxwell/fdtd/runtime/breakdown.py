@@ -45,6 +45,7 @@ from ...breakdown import (
 )
 from ...compiler.breakdown import compile_breakdown_layout, scene_has_breakdown
 from ..boundary.common import has_complex_fields
+from ...errors import UnsupportedFeatureError
 
 
 # Above this semi-implicit loss ratio a = 0.5*sigma*dt/eps the decay factor
@@ -210,17 +211,18 @@ def initialize_breakdown_runtime(solver):
     # calls compile_breakdown_layout (which would otherwise allocate seven
     # full-grid (Nx,Ny,Nz) tensors on every FDTD prepare), so the breakdown
     # machinery costs nothing on non-breakdown scenes.
-    if not scene_has_breakdown(solver.scene):
+    if not scene_has_breakdown(solver.scene.scene):
         return
     layout = compile_breakdown_layout(solver.scene)
     if not layout.has_breakdown or int(layout.node_mask.sum().item()) == 0:
         return
 
     if has_complex_fields(solver):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Dielectric breakdown requires the real-valued FDTD update; a Bloch-periodic "
             "run carries complex phase-shifted fields, for which the real conductivity "
-            "scatter is undefined. Use a real-field boundary."
+            "scatter is undefined. Use a real-field boundary.",
+            feature="material.breakdown", method="fdtd"
         )
     for flag, feature in (
         ("dispersive_enabled", "dispersive media"),
@@ -229,16 +231,18 @@ def initialize_breakdown_runtime(solver):
         ("modulation_enabled", "time-modulated media"),
     ):
         if bool(getattr(solver, flag, False)):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"Dielectric breakdown does not yet compose with {feature} in the same "
                 "scene: they share the per-edge E-update coefficient representation that "
-                "the breakdown conductivity scatter rewrites."
+                "the breakdown conductivity scatter rewrites.",
+                feature="material.breakdown", method="fdtd"
             )
     if getattr(solver, "gyromagnetic_enabled", False):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Dielectric breakdown does not compose with gyromagnetic ferrite media in the "
             "same scene: the ferrite forward advances a coupled magnetization ADE whose "
-            "energy accounting the breakdown dissipation channel does not model."
+            "energy accounting the breakdown dissipation channel does not model.",
+            feature="material.breakdown", method="fdtd"
         )
 
     device = solver.device

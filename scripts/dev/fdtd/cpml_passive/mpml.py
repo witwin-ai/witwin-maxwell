@@ -41,8 +41,9 @@ def tangential_profile(nodes, positions, cell, p, *, magnetic=False, native=Fals
     if p < 0:
         raise ValueError("p must be nonnegative")
     import torch
-    from witwin.maxwell.fdtd.boundary.cpml import _cpml_profile_1d, DEFAULT_CPML_CONFIG
-    config = dict(DEFAULT_CPML_CONFIG, grading_order=cell.grading,
+    from dataclasses import asdict
+    from witwin.maxwell.fdtd.boundary.cpml import _cpml_profile_1d, CPMLGrading, DEFAULT_CPML_GRADING
+    config = dict(asdict(DEFAULT_CPML_GRADING), grading_order=cell.grading,
                   kappa_max=cell.kappa, reflection=cell.reflection)
     rate, floor = None, 0.
     if cell.preset == "cfs":
@@ -62,7 +63,7 @@ def tangential_profile(nodes, positions, cell, p, *, magnetic=False, native=Fals
     dtype = torch.float32 if native else torch.float64
     values = _cpml_profile_1d(positions, nodes, cell.layers, cell.dt,
         MU0 if magnetic else EPS0,
-        torch.tensor(MU0/EPS0 if magnetic else 1., dtype=dtype), ETA, config,
+        torch.tensor(MU0/EPS0 if magnetic else 1., dtype=dtype), ETA, CPMLGrading(**config),
         apply_low=not one_sided, shift_rate=None if rate is None else p*rate,
         shift_floor=floor)
     return tuple(v.numpy().copy() for v in values)

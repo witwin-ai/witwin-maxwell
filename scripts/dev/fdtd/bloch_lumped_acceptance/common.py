@@ -36,39 +36,50 @@ def simulation(*, transverse="bloch", angle=0., termination=None, empty=False,
         grid=mw.GridSpec.uniform(SPACING),
         boundary=mw.BoundarySpec.faces(default="pml", num_layers=16,
             x=transverse, y=transverse, z="pml", bloch_wavevector=(0., k_parallel, 0.)),
-        device="cuda:0",
     )
     if not empty:
-        for name, bounds in (("left", (-.007, -.0005)), ("right", (.0005, .007))):
-            scene.add_structure(mw.Structure(
-                geometry=mw.PlanarPEC.rectangle((bounds, (-.007, .007)), normal_axis="z", coordinate=0.),
-                material=mw.Material.pec(), name=name))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            *(mw.Structure(
+                  geometry=mw.geometry.PlanarPEC.rectangle((bounds, (-.007, .007)), normal_axis="z", coordinate=0.),
+                  material=mw.Material.pec(), name=name) for name, bounds in (("left", (-.007, -.0005)), ("right", (.0005, .007)))),
+        ))
     if conductivity:
         # A resolved Ohmic bridge across the same gap, without circuit state.
         # sigma=L/(R*A) gives a nominal 50-ohm, one-cell-square bridge.
-        scene.add_structure(mw.Structure(name="conductive_load",
-            geometry=mw.Box(position=(0., load_y, 0.), size=(.001, SPACING, SPACING)),
-            material=mw.Material(sigma_e=.001 / (50. * SPACING ** 2))))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(name="conductive_load",
+                geometry=mw.Box(position=(0., load_y, 0.), size=(.001, SPACING, SPACING)),
+                material=mw.Material(sigma_e=.001 / (50. * SPACING ** 2))),
+        ))
     # The reference retains only a field observation contour (no termination or
     # structures), avoiding the implicit full-volume multifrequency DFT path.
-    scene.add_port(mw.LumpedPort(
-        name="load", negative=(-.0005, load_y, 0.), positive=(.0005, load_y, 0.),
-        voltage_path=mw.AxisPath("x"),
-        current_surface=mw.Box(position=(-.00025, load_y, 0.), size=(0., .0015, .0015)),
-        termination=None if empty else termination,
+    scene = scene.updated(ports=(
+        *scene.ports,
+        mw.LumpedPort(
+            name="load", negative=(-.0005, load_y, 0.), positive=(.0005, load_y, 0.),
+            voltage_path=mw.AxisPath("x"),
+            current_surface=mw.Box(position=(-.00025, load_y, 0.), size=(0., .0015, .0015)),
+            termination=None if empty else termination,
+        ),
+    ), sources=(
+        *scene.sources,
+        mw.PlaneWave(
+            name="incident", direction=(0., math.sin(theta), math.cos(theta)),
+            polarization=(1., 0., 0.),
+            source_time=mw.GaussianPulse(frequency=F0, fwidth=.9e9),
+            injection=mw.TFSF.slab(axis="z", bounds=(-.045, .045)),
+        ),
     ))
-    scene.add_source(mw.PlaneWave(
-        name="incident", direction=(0., math.sin(theta), math.cos(theta)),
-        polarization=(1., 0., 0.),
-        source_time=mw.GaussianPulse(frequency=F0, fwidth=.9e9),
-        injection=mw.TFSF.slab(axis="z", bounds=(-.045, .045)),
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.FluxMonitor(name, axis="z", position=z) for name, z in (("upstream", -.03), ("downstream", .03))),
     ))
-    for name, z in (("upstream", -.03), ("downstream", .03)):
-        scene.add_monitor(mw.FluxMonitor(name, axis="z", position=z))
     return mw.Simulation.fdtd(
-        scene, frequencies=FREQUENCIES, absorber="cpml", cuda_graph=graph,
+        scene, frequencies=FREQUENCIES, config=mw.FDTDConfig(absorber="cpml", cuda_graph=graph,
         run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"), device="cuda:0"),
     )
 
 

@@ -1,9 +1,19 @@
 #include <cstdint>
-#include <c10/cuda/CUDAException.h>
+#include <type_traits>
+#include "../launch.h"
 #include "yee.cuh"
 #include "../kernels/modulation.cuh"
 
 namespace {
+
+// Correctly rounded primitives in the field precision. The float32 forms are the
+// pinned intrinsics of the existing kernels; float64 uses the matching double ones.
+__device__ __forceinline__ float fma_rn(float a, float b, float c) { return __fmaf_rn(a, b, c); }
+__device__ __forceinline__ double fma_rn(double a, double b, double c) { return __fma_rn(a, b, c); }
+__device__ __forceinline__ float mul_rn(float a, float b) { return __fmul_rn(a, b); }
+__device__ __forceinline__ double mul_rn(double a, double b) { return __dmul_rn(a, b); }
+__device__ __forceinline__ float sub_rn(float a, float b) { return __fsub_rn(a, b); }
+__device__ __forceinline__ double sub_rn(double a, double b) { return __dsub_rn(a, b); }
 
 __device__ __forceinline__ long long offset(unsigned i, unsigned j, unsigned k,
                                             unsigned ny, unsigned nz) {
@@ -15,17 +25,17 @@ __device__ __forceinline__ long long stride(unsigned ny, unsigned nz) {
   return Axis == 0 ? static_cast<long long>(ny) * nz : (Axis == 1 ? nz : 1);
 }
 
-template <int Axis>
-__device__ __forceinline__ float forward(const float* source, float center,
-    unsigned i, unsigned j, unsigned k, unsigned ny, unsigned nz, const float* inv) {
+template <int Axis, typename T>
+__device__ __forceinline__ T forward(const T* source, T center,
+    unsigned i, unsigned j, unsigned k, unsigned ny, unsigned nz, const T* inv) {
   const unsigned coord = Axis == 0 ? i : (Axis == 1 ? j : k);
   return (source[offset(i, j, k, ny, nz) + stride<Axis>(ny, nz)] - center) * inv[coord];
 }
 
-template <int Axis>
-__device__ __forceinline__ float backward(const float* source, float center,
+template <int Axis, typename T>
+__device__ __forceinline__ T backward(const T* source, T center,
     unsigned i, unsigned j, unsigned k, unsigned nx, unsigned ny, unsigned nz,
-    CoreAxis axis) {
+    CoreAxis<T> axis) {
   const unsigned coord = Axis == 0 ? i : (Axis == 1 ? j : k);
   const unsigned size = Axis == 0 ? nx : (Axis == 1 ? ny : nz);
   const long long current = offset(i, j, k, ny, nz);
@@ -34,37 +44,45 @@ __device__ __forceinline__ float backward(const float* source, float center,
     if (mode == 2) {
       const long long low = current - coord * stride<Axis>(ny, nz);
       const long long high = low + (size - 1) * stride<Axis>(ny, nz);
-      const float low_value = coord == 0 ? center : source[low];
+      const T low_value = coord == 0 ? center : source[low];
       return (low_value - source[high]) * axis.inv[coord];
     }
-    return 0.0f;
+    if (mode == 5) {
+      // PMC: tangential H has an odd image across the face (electric.cu boundary_diff_low/high).
+      return coord == 0 ? T(2) * center * axis.inv[coord]
+                        : T(-2) * source[current - stride<Axis>(ny, nz)] * axis.inv[coord];
+    }
+    return T(0);
   }
   return (center - source[current - stride<Axis>(ny, nz)]) * axis.inv[coord];
 }
 
-__device__ __forceinline__ bool pec(unsigned coord, unsigned size, CoreAxis axis) {
+template <typename T>
+__device__ __forceinline__ bool pec(unsigned coord, unsigned size, CoreAxis<T> axis) {
   return (coord == 0 && axis.low_mode == 4) ||
          (coord + 1 == size && axis.high_mode == 4);
 }
 
-__device__ __forceinline__ bool inactive(unsigned coord, unsigned size, CoreAxis axis) {
+template <typename T>
+__device__ __forceinline__ bool inactive(unsigned coord, unsigned size, CoreAxis<T> axis) {
   return (coord == 0 && (axis.low_mode == 0 || axis.low_mode == 1)) ||
          (coord + 1 == size && (axis.high_mode == 0 || axis.high_mode == 1));
 }
 
-__device__ __forceinline__ bool inactive_pair(CoreAxis axis) {
+template <typename T>
+__device__ __forceinline__ bool inactive_pair(CoreAxis<T> axis) {
   return (axis.low_mode == 0 || axis.low_mode == 1) &&
          (axis.high_mode == 0 || axis.high_mode == 1);
 }
 
-template <int Axis>
-__device__ __forceinline__ float interior_difference(const float* source, float center,
+template <int Axis, typename T>
+__device__ __forceinline__ T interior_difference(const T* source, T center,
     unsigned i, unsigned j, unsigned k, unsigned ny, unsigned nz) {
   return center - source[offset(i, j, k, ny, nz) - stride<Axis>(ny, nz)];
 }
 
-template <int Axis, int Cpml, bool Explicit = false>
-__device__ __forceinline__ float psi_update(CorePsi psi, CoreAxis axis, float d,
+template <int Axis, int Cpml, bool Explicit = false, typename T>
+__device__ __forceinline__ T psi_update(CorePsi<T> psi, CoreAxis<T> axis, T d,
     unsigned i, unsigned j, unsigned k, unsigned ny, unsigned nz) {
   const unsigned coord = Axis == 0 ? i : (Axis == 1 ? j : k);
   long long index;
@@ -75,15 +93,15 @@ __device__ __forceinline__ float psi_update(CorePsi psi, CoreAxis axis, float d,
     if (coord < unsigned(psi.low)) local = coord;
     else if (coord >= unsigned(psi.high_start) && coord < unsigned(psi.high_start + psi.high))
       local = psi.low + coord - psi.high_start;
-    else return 0.0f;
+    else return T(0);
     const unsigned length = psi.low + psi.high;
     if constexpr (Axis == 0) index = offset(local, j, k, ny, nz);
     else if constexpr (Axis == 1) index = offset(i, local, k, length, nz);
     else index = offset(i, j, local, ny, length);
   }
-  float value;
+  T value;
   if constexpr (Explicit)
-    value = __fmaf_rn(axis.b[coord], psi.data[index], __fmul_rn(axis.c[coord], d));
+    value = fma_rn(axis.b[coord], psi.data[index], mul_rn(axis.c[coord], d));
   else
     value = axis.b[coord] * psi.data[index] + axis.c[coord] * d;
   psi.data[index] = value;
@@ -97,11 +115,13 @@ __device__ __forceinline__ float psi_update(CorePsi psi, CoreAxis axis, float d,
 // before the derivative loads by every lane of the row; lanes outside the slab read
 // an in-row element and discard it, and only slab lanes store. The per-cell
 // arithmetic is that of psi_update.
-struct ZPsi { long long index; float old; bool in_slab; bool active; };
+template <typename T>
+struct ZPsi { long long index; T old; bool in_slab; bool active; };
 
-__device__ __forceinline__ ZPsi z_psi_load(CorePsi psi, unsigned i, unsigned j, unsigned k,
+template <typename T>
+__device__ __forceinline__ ZPsi<T> z_psi_load(CorePsi<T> psi, unsigned i, unsigned j, unsigned k,
     unsigned ny) {
-  ZPsi z{0, 0.0f, false, false};
+  ZPsi<T> z{0, T(0), false, false};
   const unsigned length = psi.low + psi.high;
   if (length == 0) return z;
   int local = -1;
@@ -115,22 +135,22 @@ __device__ __forceinline__ ZPsi z_psi_load(CorePsi psi, unsigned i, unsigned j, 
   return z;
 }
 
-template <bool Explicit>
-__device__ __forceinline__ float z_psi_update(CorePsi psi, CoreAxis axis, float d, ZPsi z, unsigned k) {
-  if (!z.active) return 0.0f;
-  float value;
+template <bool Explicit, typename T>
+__device__ __forceinline__ T z_psi_update(CorePsi<T> psi, CoreAxis<T> axis, T d, ZPsi<T> z, unsigned k) {
+  if (!z.active) return T(0);
+  T value;
   if constexpr (Explicit)
-    value = __fmaf_rn(axis.b[k], z.old, __fmul_rn(axis.c[k], d));
+    value = fma_rn(axis.b[k], z.old, mul_rn(axis.c[k], d));
   else
     value = axis.b[k] * z.old + axis.c[k] * d;
   if (z.in_slab) psi.data[z.index] = value;
-  return z.in_slab ? value : 0.0f;
+  return z.in_slab ? value : T(0);
 }
 
 // Coefficients: 0 = uniform, 1 = indexed table, 2 = live dense, 3 = live modulated.
-template <int Component, bool Electric, int Cpml, int Mode>
-__device__ __forceinline__ void component(CoreHalf half, unsigned i, unsigned j, unsigned k,
-    float s0, float s1, float s2, const float* coefficients) {
+template <int Component, bool Electric, int Cpml, int Mode, typename T>
+__device__ __forceinline__ void component(CoreHalf<T> half, unsigned i, unsigned j, unsigned k,
+    T s0, T s1, T s2, const T* coefficients) {
   constexpr bool Uniform = Mode == 0;
   constexpr bool Live = Mode >= 2;
   constexpr bool Modulated = Mode == 3;
@@ -141,26 +161,26 @@ __device__ __forceinline__ void component(CoreHalf half, unsigned i, unsigned j,
   const unsigned nz = half.nz - (Electric ? Component == 2 : Component != 2);
   if (i >= nx || j >= ny || k >= nz) return;
   const long long linear = offset(i, j, k, ny, nz);
-  float* field = half.field[Component];
+  T* field = half.field[Component];
   const unsigned coord_a = A == 0 ? i : j;
   const unsigned coord_b = B == 1 ? j : k;
   if constexpr (Electric) {
     const unsigned size_a = A == 0 ? nx : ny;
     const unsigned size_b = B == 1 ? ny : nz;
     if (pec(coord_a, size_a, half.axes[A]) || pec(coord_b, size_b, half.axes[B])) {
-      field[linear] = 0.0f;
+      field[linear] = T(0);
       return;
     }
     if (inactive(coord_a, size_a, half.axes[A]) || inactive(coord_b, size_b, half.axes[B])) return;
   }
-  ZPsi z_psi{0, 0.0f, false, false};
+  ZPsi<T> z_psi{0, T(0), false, false};
   if constexpr (Cpml == 2 && B == 2) z_psi = z_psi_load(half.psi[2*Component+1], i, j, k, ny);
   // The center of each cross field is loaded once by the caller and shared
   // between the two components that differentiate it.
   if constexpr (Electric && Cpml == 0 && !Modulated) {
     // Match the standard launch's per-component interior-kernel selection.
     if (inactive_pair(half.axes[A]) && inactive_pair(half.axes[B])) {
-      float delta_a, delta_b;
+      T delta_a, delta_b;
       if constexpr (Component == 0) {
         delta_a = interior_difference<1>(half.source[2], s2, i,j,k, ny-1,nz);
         delta_b = interior_difference<2>(half.source[1], s1, i,j,k, ny,nz-1);
@@ -172,18 +192,18 @@ __device__ __forceinline__ void component(CoreHalf half, unsigned i, unsigned j,
         delta_b = interior_difference<1>(half.source[0], s0, i,j,k, ny-1,nz);
       }
       // The standard interior SASS fuses the positive derivative into curl.
-      float curl;
+      T curl;
       if constexpr (Component == 1)
-        curl = __fmaf_rn(delta_b, half.axes[B].inv[coord_b], -__fmul_rn(delta_a, half.axes[A].inv[coord_a]));
+        curl = fma_rn(delta_b, half.axes[B].inv[coord_b], -mul_rn(delta_a, half.axes[A].inv[coord_a]));
       else
-        curl = __fmaf_rn(delta_a, half.axes[A].inv[coord_a], -__fmul_rn(delta_b, half.axes[B].inv[coord_b]));
-      const float decay = Live ? half.dense[2*Component][linear] : (Uniform ? half.coefficients[2*Component] : coefficients[2*Component]);
-      const float factor = Live ? half.dense[2*Component+1][linear] : (Uniform ? half.coefficients[2*Component+1] : coefficients[2*Component+1]);
-      field[linear] = __fmaf_rn(field[linear], decay, __fmul_rn(factor, curl));
+        curl = fma_rn(delta_a, half.axes[A].inv[coord_a], -mul_rn(delta_b, half.axes[B].inv[coord_b]));
+      const T decay = Live ? half.dense[2*Component][linear] : (Uniform ? half.coefficients[2*Component] : coefficients[2*Component]);
+      const T factor = Live ? half.dense[2*Component+1][linear] : (Uniform ? half.coefficients[2*Component+1] : coefficients[2*Component+1]);
+      field[linear] = fma_rn(field[linear], decay, mul_rn(factor, curl));
       return;
     }
   }
-  float d_a, d_b;
+  T d_a, d_b;
   if constexpr (Electric) {
     if constexpr (Component == 0) {
       d_a = backward<1>(half.source[2], s2, i,j,k, nx,ny-1,nz, half.axes[A]);
@@ -207,10 +227,10 @@ __device__ __forceinline__ void component(CoreHalf half, unsigned i, unsigned j,
       d_b = forward<1>(half.source[0], s0, i,j,k, ny+1,nz, half.axes[B].inv);
     }
   }
-  float curl;
+  T curl;
   if constexpr (Cpml != 0) {
-    const float psi_a = psi_update<A, Cpml, Electric && Mode == 2>(half.psi[2*Component], half.axes[A], d_a, i,j,k,ny,nz);
-    float psi_b;
+    const T psi_a = psi_update<A, Cpml, Electric && Mode == 2>(half.psi[2*Component], half.axes[A], d_a, i,j,k,ny,nz);
+    T psi_b;
     if constexpr (Cpml == 2 && B == 2)
       psi_b = z_psi_update<Electric && Mode == 2>(half.psi[2*Component+1], half.axes[B], d_b, z_psi, k);
     else
@@ -220,15 +240,15 @@ __device__ __forceinline__ void component(CoreHalf half, unsigned i, unsigned j,
       // nvcc 13.0.88 (kernels/electric.cu update_electric_*cpml* with non-uniform
       // decay/curl): psi = fma(b, psi, c*d), curl assembly as below, E = fma(E, D, C*curl).
       // Those kernels rely on default contraction; this path must not.
-      const float corrected_a = __fmaf_rn(d_a, half.axes[A].kappa[coord_a], psi_a);
-      const float corrected_b = __fmaf_rn(d_b, half.axes[B].kappa[coord_b], psi_b);
+      const T corrected_a = fma_rn(d_a, half.axes[A].kappa[coord_a], psi_a);
+      const T corrected_b = fma_rn(d_b, half.axes[B].kappa[coord_b], psi_b);
       if constexpr (Cpml == 2) {
         if constexpr (Component == 1)
-          curl = __fsub_rn(__fmaf_rn(-d_a, half.axes[A].kappa[coord_a], corrected_b), psi_a);
+          curl = sub_rn(fma_rn(-d_a, half.axes[A].kappa[coord_a], corrected_b), psi_a);
         else
-          curl = __fsub_rn(__fmaf_rn(-d_b, half.axes[B].kappa[coord_b], corrected_a), psi_b);
+          curl = sub_rn(fma_rn(-d_b, half.axes[B].kappa[coord_b], corrected_a), psi_b);
       } else {
-        curl = Component == 1 ? __fsub_rn(corrected_b, corrected_a) : __fsub_rn(corrected_a, corrected_b);
+        curl = Component == 1 ? sub_rn(corrected_b, corrected_a) : sub_rn(corrected_a, corrected_b);
       }
     } else if constexpr (Electric && (Cpml == 2 || Modulated)) {
       // Slab and modulated E use the historical flat expression; static dense E
@@ -238,21 +258,21 @@ __device__ __forceinline__ void component(CoreHalf half, unsigned i, unsigned j,
       else
         curl = d_a * half.axes[A].kappa[coord_a] + psi_a - d_b * half.axes[B].kappa[coord_b] - psi_b;
     } else {
-      const float corrected_a = d_a * half.axes[A].kappa[coord_a] + psi_a;
-      const float corrected_b = d_b * half.axes[B].kappa[coord_b] + psi_b;
+      const T corrected_a = d_a * half.axes[A].kappa[coord_a] + psi_a;
+      const T corrected_b = d_b * half.axes[B].kappa[coord_b] + psi_b;
       curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
     }
   } else {
     if constexpr (Electric && Mode == 2)
-      curl = Component == 1 ? __fsub_rn(d_b, d_a) : __fsub_rn(d_a, d_b);
+      curl = Component == 1 ? sub_rn(d_b, d_a) : sub_rn(d_a, d_b);
     else
       curl = Component == 1 ? d_b - d_a : d_a - d_b;
   }
-  const float decay = Live ? half.dense[2*Component][linear] : (Uniform ? half.coefficients[2*Component] : coefficients[2*Component]);
-  const float factor = Live ? half.dense[2*Component+1][linear] : (Uniform ? half.coefficients[2*Component+1] : coefficients[2*Component+1]);
+  const T decay = Live ? half.dense[2*Component][linear] : (Uniform ? half.coefficients[2*Component] : coefficients[2*Component]);
+  const T factor = Live ? half.dense[2*Component+1][linear] : (Uniform ? half.coefficients[2*Component+1] : coefficients[2*Component+1]);
   if constexpr (Electric && Mode == 2) {
     // Dense live loads fuse the decay product, including dense/slab CPML.
-    field[linear] = __fmaf_rn(field[linear], decay, __fmul_rn(factor, curl));
+    field[linear] = fma_rn(field[linear], decay, mul_rn(factor, curl));
   } else if constexpr (Modulated) {
     const float mc = half.mod_cos[Component][linear];
     const float ms = half.mod_sin[Component][linear];
@@ -265,14 +285,14 @@ __device__ __forceinline__ void component(CoreHalf half, unsigned i, unsigned j,
     field[linear] = field[linear] * (decay * m_prev * inv_next) + (factor * inv_next) * curl;
   } else if constexpr (Electric && Cpml == 0) {
     // Standard E rounds the curl product before fusing the decay product.
-    field[linear] = __fmaf_rn(field[linear], decay, __fmul_rn(factor, curl));
+    field[linear] = fma_rn(field[linear], decay, mul_rn(factor, curl));
   }
   else if constexpr (Electric) field[linear] = field[linear] * decay + factor * curl;
   else field[linear] = field[linear] * decay - factor * curl;
 }
 
-template <bool Electric, int Cpml, int Mode, typename Index, bool Swizzled>
-__global__ void yee(CoreHalf half, unsigned strip) {
+template <bool Electric, int Cpml, int Mode, typename Index, bool Swizzled, typename T>
+__global__ void yee(CoreHalf<T> half, unsigned strip) {
   unsigned kb = blockIdx.x, jb = blockIdx.y, ib = blockIdx.z;
   if constexpr (Swizzled) {
     const unsigned gx = gridDim.x, gy = gridDim.y, gz = gridDim.z;
@@ -292,16 +312,16 @@ __global__ void yee(CoreHalf half, unsigned strip) {
   const unsigned j = jb * blockDim.y + threadIdx.y;
   const unsigned i = ib;
   if (i >= half.nx || j >= half.ny || k >= half.nz) return;
-  float centers[3];
+  T centers[3];
   #pragma unroll
   for (int c = 0; c < 3; ++c) {
     const unsigned nx = half.nx - (Electric ? c != 0 : c == 0);
     const unsigned ny = half.ny - (Electric ? c != 1 : c == 1);
     const unsigned nz = half.nz - (Electric ? c != 2 : c == 2);
     centers[c] = (i < nx && j < ny && k < nz)
-        ? half.source[c][offset(i,j,k,ny,nz)] : 0.0f;
+        ? half.source[c][offset(i,j,k,ny,nz)] : T(0);
   }
-  const float* coefficients = nullptr;
+  const T* coefficients = nullptr;
   if constexpr (Mode == 1) {
     const auto index = static_cast<const Index*>(half.indices)[offset(i,j,k,half.ny,half.nz)];
     coefficients = half.table + static_cast<long long>(index) * 6;
@@ -311,28 +331,29 @@ __global__ void yee(CoreHalf half, unsigned strip) {
   component<2,Electric,Cpml,Mode>(half,i,j,k,centers[0],centers[1],centers[2],coefficients);
 }
 
-template <bool Electric, int Cpml, bool Swizzled>
-void dispatch(CoreHalf half, bool uniform, bool wide, bool live, bool modulated, cudaStream_t stream) {
+template <bool Electric, int Cpml, bool Swizzled, typename T>
+void dispatch(CoreHalf<T> half, bool uniform, bool wide, bool live, bool modulated, cudaStream_t stream) {
   const dim3 block(128,2,1);
   const dim3 grid((uint64_t(half.nz)+127)/128, (uint64_t(half.ny)+1)/2, half.nx);
-  if (modulated) yee<Electric,Cpml,3,uint16_t,Swizzled><<<grid,block,0,stream>>>(half,half.block_strip);
-  else if (live) yee<Electric,Cpml,2,uint16_t,Swizzled><<<grid,block,0,stream>>>(half,half.block_strip);
-  else if (uniform) yee<Electric,Cpml,0,uint16_t,Swizzled><<<grid,block,0,stream>>>(half,half.block_strip);
+  if constexpr (std::is_same_v<T, float>) {
+    if (modulated) { yee<Electric,Cpml,3,uint16_t,Swizzled><<<grid,block,0,stream>>>(half,half.block_strip); return; }
+    if (live) { yee<Electric,Cpml,2,uint16_t,Swizzled><<<grid,block,0,stream>>>(half,half.block_strip); return; }
+  }
+  if (uniform) yee<Electric,Cpml,0,uint16_t,Swizzled><<<grid,block,0,stream>>>(half,half.block_strip);
   else if (wide) yee<Electric,Cpml,1,uint32_t,Swizzled><<<grid,block,0,stream>>>(half,half.block_strip);
   else yee<Electric,Cpml,1,uint16_t,Swizzled><<<grid,block,0,stream>>>(half,half.block_strip);
 }
 
-template <bool Electric, bool Swizzled>
-void dispatch_cpml(CoreHalf half, int cpml, bool uniform, bool wide, bool live, bool modulated, cudaStream_t stream) {
+template <bool Electric, bool Swizzled, typename T>
+void dispatch_cpml(CoreHalf<T> half, int cpml, bool uniform, bool wide, bool live, bool modulated, cudaStream_t stream) {
   if (cpml == 0) dispatch<Electric,0,Swizzled>(half,uniform,wide,live,modulated,stream);
   else if (cpml == 1) dispatch<Electric,1,Swizzled>(half,uniform,wide,live,modulated,stream);
   else dispatch<Electric,2,Swizzled>(half,uniform,wide,live,modulated,stream);
 }
 
-}  // namespace
-
-void launch_core(CoreHalf half, bool electric, int cpml, bool uniform,
-                 bool wide_indices, bool live, bool modulated, cudaStream_t stream) {
+template <typename T>
+void launch(CoreHalf<T> half, bool electric, int cpml, bool uniform,
+            bool wide_indices, bool live, bool modulated, cudaStream_t stream) {
   // Specialize the stock order so strip zero adds no device-side remap or branch.
   if (half.block_strip) {
     if (electric) dispatch_cpml<true,true>(half,cpml,uniform,wide_indices,live,modulated,stream);
@@ -341,5 +362,17 @@ void launch_core(CoreHalf half, bool electric, int cpml, bool uniform,
     if (electric) dispatch_cpml<true,false>(half,cpml,uniform,wide_indices,live,modulated,stream);
     else dispatch_cpml<false,false>(half,cpml,uniform,wide_indices,live,modulated,stream);
   }
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  STD_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+}  // namespace
+
+void launch_core(CoreHalf<float> half, bool electric, int cpml, bool uniform,
+                 bool wide_indices, bool live, bool modulated, cudaStream_t stream) {
+  launch(half, electric, cpml, uniform, wide_indices, live, modulated, stream);
+}
+
+void launch_core(CoreHalf<double> half, bool electric, int cpml, bool uniform,
+                 bool wide_indices, cudaStream_t stream) {
+  launch(half, electric, cpml, uniform, wide_indices, false, false, stream);
 }

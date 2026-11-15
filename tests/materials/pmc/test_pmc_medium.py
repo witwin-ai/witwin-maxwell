@@ -11,6 +11,7 @@ from witwin.maxwell.compiler.materials import _pmc_occupancy
 from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
 from witwin.maxwell.fdtd.runtime.materials import average_node_to_magnetic_component
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 _CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD/FDFD")
 
@@ -20,10 +21,8 @@ def _cpu_scene(*structures):
         domain=mw.Domain(bounds=((-0.3, 0.3), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cpu",
     )
-    for structure in structures:
-        scene.add_structure(structure)
+    scene = scene.updated(structures=(*scene.structures, *structures))
     return scene
 
 
@@ -38,13 +37,13 @@ def test_pmc_material_construction_and_validation():
     with pytest.raises(ValueError, match="PMC Material must not carry"):
         mw.Material(pmc=True, sigma_m=1.0)
     with pytest.raises(ValueError, match="cannot wrap a PMC"):
-        mw.PerturbationMedium(pmc, perturbation=torch.zeros(2, 2, 2))
+        mw.media.PerturbationMedium(pmc, perturbation=torch.zeros(2, 2, 2))
 
 
 def test_pmc_structure_compiles_to_magnetic_occupancy_not_bulk_material():
     box = Box(position=(0.075, 0.0, 0.0), size=(0.15, 0.2, 0.2))
-    vacuum = prepare_scene(_cpu_scene()).compile_materials()
-    model = prepare_scene(_cpu_scene(mw.Structure(geometry=box, material=mw.Material.pmc()))).compile_materials()
+    vacuum = compile_materials(prepare_scene(_cpu_scene(), device="cpu"))
+    model = compile_materials(prepare_scene(_cpu_scene(mw.Structure(geometry=box, material=mw.Material.pmc())), device="cpu"))
     assert vacuum["pmc_occupancy"] is None
     assert model["pec_occupancy"] is None
     occupancy = model["pmc_occupancy"]
@@ -59,7 +58,7 @@ def test_pmc_staircase_holds_h_components_inside_the_box():
     # The box face x = 0.0 sits on a node plane; the H component half a cell
     # inside (x = 0.025) is covered, the one half a cell outside (x = -0.025) is open.
     box = Box(position=(0.075, 0.0, 0.0), size=(0.15, 0.2, 0.2))
-    prepared = prepare_scene(_cpu_scene(mw.Structure(geometry=box, material=mw.Material.pmc())))
+    prepared = prepare_scene(_cpu_scene(mw.Structure(geometry=box, material=mw.Material.pmc())), device="cpu")
     occupancy = _pmc_occupancy(prepared)
     hy = average_node_to_magnetic_component(None, occupancy, "Hy") >= 0.5
     x_half = 0.5 * (prepared.x[:-1] + prepared.x[1:])
@@ -77,7 +76,7 @@ def test_fdtd_adjoint_rejects_trainable_pmc_geometry():
     position = torch.tensor([0.075, 0.0, 0.0], requires_grad=True)
     box = Box(position=position, size=(0.15, 0.2, 0.2))
     scene = _cpu_scene(mw.Structure(geometry=box, material=mw.Material.pmc()))
-    scene.subpixel = mw.SubpixelSpec(samples=2, averaging="polarized")
+    scene = scene.updated(subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"))
     reason = _unsupported_adjoint_medium(scene)
     assert reason is not None and "PMC" in reason
     fixed = _cpu_scene(mw.Structure(geometry=Box(position=(0.075, 0.0, 0.0), size=(0.15, 0.2, 0.2)),
@@ -99,25 +98,32 @@ def _plane_wave_run(material):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.45, 0.45), (-0.015, 0.015), (-0.015, 0.015))),
         grid=mw.GridSpec.uniform(_DX),
-        device="cuda",
         boundary=mw.BoundarySpec.faces(default="none", x="pml", y="periodic", z="periodic", num_layers=12),
     )
     if material is not None:
-        scene.add_structure(mw.Structure(geometry=Box(position=(_WALL + 0.25, 0.0, 0.0), size=(0.5, 0.1, 0.1)),
-                                         material=material))
-    scene.add_source(mw.PlaneWave(direction=(1.0, 0.0, 0.0), polarization=(0.0, 0.0, 1.0),
-                                  source_time=mw.CW(_F, amplitude=1.0)))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=Box(position=(_WALL + 0.25, 0.0, 0.0), size=(0.5, 0.1, 0.1)),
+                         material=material),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PlaneWave(direction=(1.0, 0.0, 0.0), polarization=(0.0, 0.0, 1.0),
+                     source_time=mw.CW(_F, amplitude=1.0)),
+    ))
     positions = (*_PROBES, _WALL, _WALL + 0.5 * _DX)
-    for index, x in enumerate(positions):
-        scene.add_monitor(mw.PointMonitor(f"p{index}", (x, 0.0, 0.0), fields=("Ez", "Hy")))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.PointMonitor(f"p{index}", (x, 0.0, 0.0), fields=("Ez", "Hy")) for index, x in enumerate(positions)),
+    ))
     result = mw.Simulation.fdtd(
-        scene, absorber="cpml", frequency=_F, full_field_dft=False,
+        scene, frequencies=_F, config=mw.FDTDConfig(absorber="cpml", full_field_dft=False,
         run_time=mw.TimeConfig.auto(transient_cycles=14, steady_cycles=8),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="hanning")),
     ).run()
 
     def value(index, component):
-        return complex(torch.as_tensor(result.monitor(f"p{index}")[component]).reshape(-1)[0])
+        return complex(torch.as_tensor(result.raw_monitor(f"p{index}")[component]).reshape(-1)[0])
 
     ez = [value(i, "Ez") for i in range(len(positions))]
     hy = [value(i, "Hy") for i in range(len(positions))]
@@ -160,13 +166,18 @@ def _dipole_scene(material):
         domain=mw.Domain(bounds=((-0.24, 0.24), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.02),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=4.0),
-        device="cuda",
     )
     if material is not None:
-        scene.add_structure(mw.Structure(geometry=Box(position=(0.12, 0.0, 0.0), size=(0.16, 0.2, 0.2)),
-                                         material=material))
-    scene.add_source(mw.PointDipole(position=(-0.04, 0.0, 0.0), polarization="Ez", width=0.02,
-                                    source_time=mw.CW(1.5e9, amplitude=1.0)))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=Box(position=(0.12, 0.0, 0.0), size=(0.16, 0.2, 0.2)),
+                         material=material),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(-0.04, 0.0, 0.0), polarization="Ez", width=0.02,
+                       source_time=mw.CW(1.5e9, amplitude=1.0)),
+    ))
     return scene
 
 
@@ -174,8 +185,8 @@ _DIPOLE_PROBES = ((-0.08, 0.04, 0.0), (0.02, -0.06, 0.02), (-0.12, 0.0, 0.06))
 
 
 def _probe_values(result, scene):
-    prepared = prepare_scene(scene)
-    ez = torch.as_tensor(result.tensor("Ez"))
+    prepared = prepare_scene(scene, device="cpu")
+    ez = torch.as_tensor(result.field("Ez").isel(f=0).values)
 
     def index(nodes, value):
         return int(torch.argmin((torch.as_tensor(nodes).cpu().double() - value).abs()))
@@ -187,17 +198,17 @@ def _probe_values(result, scene):
 def _fdtd_dipole(material):
     scene = _dipole_scene(material)
     result = mw.Simulation.fdtd(
-        scene, frequency=1.5e9, full_field_dft=True,
+        scene, frequencies=1.5e9, config=mw.FDTDConfig(full_field_dft=True,
         run_time=mw.TimeConfig.auto(transient_cycles=14, steady_cycles=8),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="hanning")),
     ).run()
     return _probe_values(result, scene)
 
 
 def _fdfd_dipole(material):
     scene = _dipole_scene(material)
-    result = mw.Simulation.fdfd(scene, frequency=1.5e9,
-                                solver=mw.GMRES(solver_type="direct", precision="double")).run()
+    result = mw.Simulation.fdfd(scene, frequencies=1.5e9,
+                                config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type="direct", precision="double"))).run()
     return _probe_values(result, scene)
 
 

@@ -11,7 +11,7 @@ from witwin.maxwell.mom.dyadic_green import DyadicIntegrationConfig
 from witwin.maxwell.mom.fields import FieldQueryConfig
 from witwin.maxwell.mom.harmonic_material import compile_harmonic_material,compile_tensor_harmonic_material
 from witwin.maxwell.mom.tensor_harmonic_preparation import prepare_mixed_tensor_harmonic_balance
-from witwin.maxwell.mom.harmonic_state import preparation_signature,recover_harmonic_state
+from witwin.maxwell.mom.harmonic_recovery import preparation_signature,recover_harmonic_state
 
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
 
@@ -24,7 +24,7 @@ def test_actual_ac_current_hb_preparation_and_ownership(monkeypatch,tmp_path,reo
     current=TetrahedralVolumeMesh(vertices+vertices.new_tensor([.2,0.,0.]),cells,region_id=2)
     tensor=compile_tensor_harmonic_material(mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.,2.,2.),mu_r=1.3),3e8,2,device='cuda')
     scalar=compile_harmonic_material(mw.Material(eps_r=2.,sigma_e=.001,nonlinearity=(
-        mw.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.TwoPhotonAbsorption(beta=5.))),3e8,2)
+        mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.media.TwoPhotonAbsorption(beta=5.))),3e8,2)
     if tensor_current:
         # Discrete DC integration control: keep the existing scalar AC maps.
         # This deliberately does not claim a consistent dispersive material.
@@ -42,14 +42,14 @@ def test_actual_ac_current_hb_preparation_and_ownership(monkeypatch,tmp_path,reo
         second=TetrahedralVolumeMesh(vertices+vertices.new_tensor([.4,0.,0.]),cells,region_id=3)
         dielectric=TetrahedralVolumeMesh(vertices+vertices.new_tensor([.6,0.,0.]),cells,region_id=4)
         second_material=compile_harmonic_material(mw.Material(eps_r=3.,sigma_e=.002,nonlinearity=(
-            mw.NonlinearSusceptibility(chi2=.001),mw.TwoPhotonAbsorption(beta=3.))),3e8,2)
+            mw.media.NonlinearSusceptibility(chi2=.001),mw.media.TwoPhotonAbsorption(beta=3.))),3e8,2)
         dielectric_material=compile_harmonic_material(mw.Material(eps_r=2.,nonlinearity=
-            mw.NonlinearSusceptibility(chi2=.003)),3e8,2)
+            mw.media.NonlinearSusceptibility(chi2=.003)),3e8,2)
         volumes+=(second,dielectric)
         materials+=(second_material,dielectric_material)
         selected=(dielectric,second,current)
     exterior=compile_harmonic_material(mw.Material(),3e8,2)
-    config=mw.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),
+    config=mw.mom.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),
         dyadic_integration=DyadicIntegrationConfig(),riesz_storage='compact_rwg_v1')
     operators=tuple(SystemOperator(SurfaceSystem.create([
         (i,f'body{i}',RWGBasis(v.boundary),m.linear_samples[n]) for i,(v,m) in enumerate(zip(volumes,materials))]),

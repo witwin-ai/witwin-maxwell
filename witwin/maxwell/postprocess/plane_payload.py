@@ -1,5 +1,7 @@
 """Native plane-monitor payloads from externally computed Yee fields."""
 
+import torch
+
 from ..compiler.monitors import _compile_plane_observers
 from ..fdtd.observers import (
     _assemble_plane_monitor_payload,
@@ -42,7 +44,8 @@ def plane_payload(scene, monitor, fields, *, frequencies, prepared_scene=None) -
     if not isinstance(monitor, (PlaneMonitor, FinitePlaneMonitor, FluxMonitor)):
         raise TypeError("plane_payload() expects a PlaneMonitor, FinitePlaneMonitor, or FluxMonitor.")
     if prepared_scene is None:
-        prepared_scene = prepare_scene(scene)
+        device = next((value.device for value in fields.values() if isinstance(value, torch.Tensor)), "cpu")
+        prepared_scene = prepare_scene(scene, device=device)
     native_fields = {normalize_component(key): value for key, value in fields.items()}
     frequencies = _normalize_frequency_list(frequencies)
     monitor_frequencies = _normalize_frequency_list(monitor.frequencies) or frequencies

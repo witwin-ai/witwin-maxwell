@@ -61,7 +61,7 @@ def _axis_nodes(bounds, anchors, refinement, fine_dl, air_dl, half_planes, local
 
 def printed_patch_scene(*, lateral_dl=.001, substrate_cells=3, air_dl=.002,
                         frequencies=(3.0e9, 3.2e9, 3.4e9), pml_layers=8,
-                        air_padding=0., device="cuda", radiation_monitor=True, edge_dl=None,
+                        air_padding=0., radiation_monitor=True, edge_dl=None,
                         metal="pec", dielectric_sigma=0., copper_conductivity=5.8e7,
                         copper_frequency_range=(.1e9, 10e9)):
     """Create one fixed physical antenna with PEC or finite 35 um copper foils.
@@ -99,13 +99,13 @@ def printed_patch_scene(*, lateral_dl=.001, substrate_cells=3, air_dl=.002,
                     (-.002, SUBSTRATE_HEIGHT+.002), layer_dl, air_dl, (FEED_GAP/2,))
     def foil(name, half_x, half_y, z):
         if metal == "pec":
-            geometry = mw.PlanarPEC.rectangle(((-half_x, half_x), (-half_y, half_y)),
+            geometry = mw.geometry.PlanarPEC.rectangle(((-half_x, half_x), (-half_y, half_y)),
                                               coordinate=z, physical_thickness=35e-6)
             material = mw.Material.pec()
         else:
             geometry = mw.Box(position=torch.tensor((0., 0., z), dtype=torch.float64),
                               size=torch.tensor((2*half_x, 2*half_y, 0.), dtype=torch.float64))
-            material = mw.CopperFoil(thickness=35e-6, conductivity=copper_conductivity,
+            material = mw.media.CopperFoil(thickness=35e-6, conductivity=copper_conductivity,
                                     frequency_range=copper_frequency_range)
         return mw.Structure(geometry, material, name=name)
 
@@ -125,16 +125,15 @@ def printed_patch_scene(*, lateral_dl=.001, substrate_cells=3, air_dl=.002,
         voltage_aperture=_physical_box(position=(FEED_X, 0., FEED_GAP/2), size=(FEED_WIDTH, FEED_WIDTH, FEED_GAP)))
     monitors = []
     if dielectric_sigma:
-        monitors.append(mw.PowerLossMonitor("substrate_loss",
+        monitors.append(mw.monitors.PowerLossMonitor("substrate_loss",
             position=(0., 0., SUBSTRATE_HEIGHT/2),
             size=(2*GROUND_HALF_X, 2*GROUND_HALF_Y, SUBSTRATE_HEIGHT),
             frequencies=tuple(frequencies), channels=("conduction",)))
     if radiation_monitor:
-        monitors.append(mw.ClosedSurfaceMonitor.box("radiation", position=(0., 0., .0065),
+        monitors.append(mw.monitors.ClosedSurfaceMonitor.box("radiation", position=(0., 0., .0065),
                          size=(.052, .060, .033), frequencies=tuple(frequencies)))
     return mw.Scene(domain=mw.Domain(bounds=bounds), grid=mw.GridSpec.custom(x, y, z),
-                    boundary=mw.BoundarySpec.pml(num_layers=pml_layers), device=device,
-                    structures=structures, ports=[port], monitors=monitors,
+                    boundary=mw.BoundarySpec.pml(num_layers=pml_layers), structures=structures, ports=[port], monitors=monitors,
                     metadata={"physical_model": "fixed-geometry-printed-patch-v1",
                               "lateral_dl_m": lateral_dl, "edge_dl_m": edge_dl, "substrate_cells": int(substrate_cells),
                               "air_dl_m": air_dl, "physical_copper_thickness_m": 35e-6,

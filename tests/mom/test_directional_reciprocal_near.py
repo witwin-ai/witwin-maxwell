@@ -19,27 +19,27 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 
 
 def test_directional_reciprocal_configuration_all_fields_and_old_default_identity(tmp_path):
-    config=mw.DirectionalFMMConfig(near_storage='scalar_reciprocal_dk_v1')
+    config=mw.mom.DirectionalFMMConfig(near_storage='scalar_reciprocal_dk_v1')
     payload=json.loads(json.dumps(config.payload()))
     assert payload['version']=='automatic_directional_reciprocal_dag_fmm_config_v1'
-    assert mw.FMMConfig.restore(payload)==mw.DirectionalFMMConfig.restore(payload)==config
+    assert mw.mom.FMMConfig.restore(payload)==mw.mom.DirectionalFMMConfig.restore(payload)==config
     for field in payload['parameters']:
         bad=copy.deepcopy(payload);del bad['parameters'][field]
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     for key,value in (('version','automatic_directional_dag_fmm_config_v1'),('version','cartesian_fmm_reciprocal_dk_config_v1')):
         bad=copy.deepcopy(payload);bad[key]=value
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     bad=copy.deepcopy(payload);bad['parameters']['near_storage']='scalar_dk_v1'
-    with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+    with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     default=replace(config,near_storage='scalar_dk_v1').payload()
     assert default['version']=='automatic_directional_dag_fmm_config_v1' and 'near_storage' not in default['parameters']
-    assert mw.FMMConfig.restore(default).near_storage=='scalar_dk_v1'
+    assert mw.mom.FMMConfig.restore(default).near_storage=='scalar_dk_v1'
     for mode in ('full_matrix','unknown',None):
         with pytest.raises(ValueError):replace(config,near_storage=mode)
     options=dict(operator_backend='fmm',fmm=config,riesz_storage='local_rwg_v1',stopping=StoppingRule(preconditioner='rwg_diagonal'))
-    assert mw.MoMConfig(**options).fmm is config
-    with pytest.raises(NotImplementedError):mw.MoMConfig(**options,periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)))
-    with pytest.raises(ValueError):mw.MoMConfig(**options,dtype=torch.complex64)
+    assert mw.mom.MoMConfig(**options).fmm is config
+    with pytest.raises(NotImplementedError):mw.mom.MoMConfig(**options,periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)))
+    with pytest.raises(ValueError):mw.mom.MoMConfig(**options,dtype=torch.complex64)
     (tmp_path/'configuration.json').write_text(json.dumps(dict(payload=payload,all_fields_bound=True,old_payload_omits_default_near=True,qualification=False),indent=2)+'\n')
 
 
@@ -47,13 +47,13 @@ def test_directional_reciprocal_configuration_all_fields_and_old_default_identit
 def physical():
     scene=mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.02,position=(i,1e-6*(i%2),0.)),
         mw.Material(eps_r=2.+i,mu_r=1.3+.1*i,sigma_e=.01,sigma_m=.02)) for i in range(3)],sources=[mw.PlaneWave()])
-    fmm=mw.DirectionalFMMConfig(leaf_size=4,separation_ratio=.15,cone_subdivisions=(2**20,),
+    fmm=mw.mom.DirectionalFMMConfig(leaf_size=4,separation_ratio=.15,cone_subdivisions=(2**20,),
         max_contexts=4096,tensor_workspace_budget_bytes=512*1024**2,
         leaf_factor_kernel='original',leaf_factor_max_edges=16,near_storage='scalar_reciprocal_dk_v1')
-    config=mw.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=6,singular_order=3,pair_batch=4,
+    config=mw.mom.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=6,singular_order=3,pair_batch=4,
         far_pair_batch=16,near_max_order=32),operator_backend='fmm',fmm=fmm,riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='gmres',preconditioner='rwg_diagonal',rtol=1e-12,atol=0.,maxiter=240,restart=120))
-    prepared=mw.Simulation.mom(scene,frequency=3e8,config=config).prepare()
+    prepared=mw.Simulation.mom(scene,frequencies=3e8,config=config).prepare()
     actions=prepared.solver.handle.actions
     assert actions.exterior.test.plan_guard.selected_positive_links>0
     regions=(actions.exterior,*actions.interiors)
@@ -140,18 +140,18 @@ def test_public_directional_reciprocal_solve_exact_restore_and_policy_binding(ph
     assert stats['converged'] and stats['error_budget']['checked'] and not stats['fallback_used']
     assert not stats['original_global_residual_certified']
     path=tmp_path/'directional-reciprocal-result.pt';result.save(path)
-    current=result.surface_currents.scattered_coefficients
+    current=mw.mom.surface_currents(result).scattered_coefficients
     def forbidden(*args,**kwargs):raise AssertionError('Reciprocal directional restore repeated construction or solving')
     with monkeypatch.context() as patch:
         for cls in (DirectionalSystemActions,DirectionalMultipoleOperator,MultipoleOperator,AutomaticDirectionalDAGPlan,SystemOperator):
             patch.setattr(cls,'__init__',forbidden)
         patch.setattr(torch.linalg,'solve',forbidden)
         restored=mw.Result.load(path,scene=scene)
-        torch.testing.assert_close(restored.surface_currents.scattered_coefficients,current,rtol=0,atol=0)
-        assert restored.surface_currents.config.fmm==fmm
+        torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,current,rtol=0,atol=0)
+        assert mw.mom.surface_currents(restored).config.fmm==fmm
         for key,value in (('near_storage','scalar_dk_v1'),('max_candidates',256),('phase_relative_budget',1e-11),('cone_subdivisions',[2])):
-            bad=copy.deepcopy(result.surface_currents.snapshot());bad['fmm_config']['parameters'][key]=value
-            with pytest.raises(ValueError):SurfaceData.restore(bad,scene,3e8)
+            bad=copy.deepcopy(mw.mom.surface_currents(result).snapshot());bad['fmm_config']['parameters'][key]=value
+            with pytest.raises(ValueError):SurfaceData.restore(bad,scene,3e8,'cuda')
     (tmp_path/'public.json').write_text(json.dumps(dict(artifact=str(path),artifact_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         configuration=fmm.payload(),stats=stats,near_receipts=[r.near.receipt() for r in (actions.exterior,*actions.interiors)],
         exact_current_restore=True,constructor_and_solve_refused=True,original_residual_sample_not_global=True,

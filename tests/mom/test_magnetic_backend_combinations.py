@@ -18,10 +18,10 @@ def magnetic_reference():
             (-.5, mw.Material(eps_r=2., mu_r=1.3, sigma_e=.001, sigma_m=.002)),
             (.5, mw.Material(eps_r=3., mu_r=1.7, sigma_e=.002, sigma_m=.003))))],
         sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(subdivisions=0,
+    config = mw.mom.MoMConfig(subdivisions=0,
         integration=IntegrationConfig(order=4, singular_order=4),
         query_config=FieldQueryConfig(adaptive=False))
-    result = mw.Simulation.mom(scene, frequency=3e8, config=config).run()
+    result = mw.Simulation.mom(scene, frequencies=3e8, config=config).run()
     assert result.stats()['converged']
     return scene, config, result
 
@@ -32,16 +32,16 @@ def test_public_magnetic_multibody_backend_gate(magnetic_reference, backend, mon
     config = replace(dense_config, operator_backend=backend, riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='gmres', rtol=1e-12, atol=0., maxiter=240, restart=120,
             preconditioner='rwg_diagonal' if backend in ('direct_h2', 'fmm') else 'row_column_norm'),
-        hierarchical=mw.HMatrixConfig(pivoting='adaptive') if backend in ('hmatrix', 'h2') else None,
-        fmm=mw.FMMConfig(order=6, table_storage='compact') if backend == 'fmm' else None)
+        hierarchical=mw.mom.HMatrixConfig(pivoting='adaptive') if backend in ('hmatrix', 'h2') else None,
+        fmm=mw.mom.FMMConfig(order=6, table_storage='compact') if backend == 'fmm' else None)
     import witwin.maxwell.mom.runtime as runtime
     def forbidden(*args, **kwargs):
         raise AssertionError('Accelerated combination must not assemble a dense system')
     monkeypatch.setattr(runtime, 'assemble_system', forbidden)
-    result = mw.Simulation.mom(scene, frequency=3e8, config=config).run()
+    result = mw.Simulation.mom(scene, frequencies=3e8, config=config).run()
     stats = result.stats()
     assert stats['converged'] and stats['error_budget']['checked'], stats
-    data, original = result.surface_currents, reference.surface_currents
+    data, original = mw.mom.surface_currents(result), mw.mom.surface_currents(reference)
     current, expected = data.scattered_coefficients, original.scattered_coefficients
     metrics = {'backend': backend, 'iterations': stats.get('iterations')}
     # Check each body and family separately to prevent units or a stronger body
@@ -85,6 +85,6 @@ def test_public_magnetic_multibody_backend_gate(magnetic_reference, backend, mon
     path = tmp_path/'magnetic_combination.pt'
     result.save(path)
     restored = mw.Result.load(path, scene=scene)
-    assert torch.equal(restored.surface_currents.scattered_coefficients, current)
-    assert restored.surface_currents.snapshot()['operator_metadata']['physical_qualification'] is False
+    assert torch.equal(mw.mom.surface_currents(restored).scattered_coefficients, current)
+    assert mw.mom.surface_currents(restored).snapshot()['operator_metadata']['physical_qualification'] is False
     print(metrics)

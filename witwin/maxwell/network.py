@@ -26,6 +26,8 @@ from .network_math import (
     power_waves_to_voltage_current,
     voltage_current_to_power_waves,
 )
+from .results import SParameterData
+from ._stability import experimental
 
 if TYPE_CHECKING:
     from .rational import FitReport, RationalFitConfig, RationalModel, StateSpaceNetwork
@@ -36,6 +38,7 @@ POWER_WAVE_CONVENTION = "Kurokawa power waves normalized to sqrt(watt)"
 PERSISTENCE_SCHEMA_VERSION = 1
 
 
+@experimental("networks")
 @dataclass(frozen=True)
 class NetworkPhysicalityReport:
     """Sampled passivity and finite-band causality diagnostics.
@@ -644,6 +647,33 @@ class NetworkData:
             )
             object.__setattr__(self, "reference_matrix", matrix)
             object.__setattr__(self, "z0", torch.diagonal(matrix, dim1=-2, dim2=-1).clone())
+
+    @property
+    def s_parameters(self) -> SParameterData:
+        """The scattering matrix ``s`` as ``SParameterData`` with dims ``("f", "out_port", "in_port")``.
+
+        The values are ``s`` itself (no copy, autograd intact); ``out_port`` and
+        ``in_port`` are labelled by ``port_names`` and ``attrs`` carry ``z0``, ``port_names``, the
+        phasor and power-wave conventions, and ``reference_matrix`` and
+        ``valid_columns`` when set.
+        """
+
+        attrs = {
+            "z0": self.z0,
+            "port_names": self.port_names,
+            "phasor_convention": self.phasor_convention,
+            "power_wave_convention": self.power_wave_convention,
+        }
+        if self.reference_matrix is not None:
+            attrs["reference_matrix"] = self.reference_matrix
+        if self.valid_columns is not None:
+            attrs["valid_columns"] = self.valid_columns
+        return SParameterData(
+            self.s,
+            ("f", "out_port", "in_port"),
+            coords={"f": self.frequencies, "out_port": self.port_names, "in_port": self.port_names},
+            attrs=attrs,
+        )
 
     def _require_diagonal_reference(self, operation: str):
         if self.reference_matrix is not None:
@@ -1437,6 +1467,7 @@ def _network_from_snapshot(payload) -> NetworkData:
     )
 
 
+@experimental("networks")
 @dataclass(frozen=True)
 class NetworkBlock:
     """Declarative passive network connected to named Scene terminal ports.
@@ -1588,6 +1619,7 @@ def _default_fit_config():
     return RationalFitConfig()
 
 
+@experimental("networks")
 class TouchstoneNetwork(NetworkBlock):
     """NetworkBlock convenience constructor accepting a file or NetworkData."""
 
@@ -1623,6 +1655,7 @@ class TouchstoneNetwork(NetworkBlock):
         )
 
 
+@experimental("networks")
 @dataclass(frozen=True)
 class EmbeddedNetworkData:
     """Structured, tensor-native diagnostics for one embedded network."""

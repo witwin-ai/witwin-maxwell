@@ -12,7 +12,7 @@ from witwin.maxwell.mom.linalg import StoppingRule
 from witwin.maxwell.mom.mesh import SurfaceSystem
 from witwin.maxwell.mom.harmonic_material import compile_harmonic_material
 from witwin.maxwell.mom.harmonic_preparation import prepare_harmonic_balance
-from witwin.maxwell.mom.harmonic_state import recover_harmonic_state
+from witwin.maxwell.mom.harmonic_recovery import recover_harmonic_state
 from witwin.maxwell.mom.surface_volume_hmatrix import SurfaceVolumeHConfig
 from witwin.maxwell.mom.interior_volume_hmatrix import InteriorVolumeHConfig
 from witwin.maxwell.mom.volume_hmatrix import VolumeHConfig
@@ -21,7 +21,7 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 
 
 def config(integration):
-    return mw.MoMConfig(operator_backend='h2',integration=integration,
+    return mw.mom.MoMConfig(operator_backend='h2',integration=integration,
         hierarchical=HMatrixConfig(leaf_size=64),riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='block_gmres',preconditioner='row_column_norm'))
 
@@ -50,7 +50,7 @@ def test_pump_scaled_decode_view_and_dense_matrix_mutation_guards():
 def test_actual_compressed_prefix_only_prepares_appended_harmonic(monkeypatch):
     dense,bindings=runpy.run_path('tests/mom/test_surface_volume.py')['problem']((2.,3.))
     volumes=[b.volume for b in bindings]
-    public=[mw.Material(eps_r=e,nonlinearity=mw.NonlinearSusceptibility(chi2=.002,chi3=.001)) for e in (2.,3.)]
+    public=[mw.Material(eps_r=e,nonlinearity=mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001)) for e in (2.,3.)]
     def materials(n):return [compile_harmonic_material(m,3e8,n) for m in public],compile_harmonic_material(mw.Material(),3e8,n)
     def operator(n,ms,ex):
         system=SurfaceSystem.create([(b.structure_index,b.name,b.basis,m.linear_samples[n]) for b,m in zip(dense.system.bodies,ms)])

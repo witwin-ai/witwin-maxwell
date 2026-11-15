@@ -3,19 +3,19 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_components
 
 
 def _slab_scene(spec):
     domain = mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)))
     grid = mw.GridSpec.uniform(0.1)
-    scene = mw.Scene(domain=domain, grid=grid, device="cpu", subpixel_samples=spec)
-    scene.add_structure(
-        mw.Structure(
+    scene = mw.Scene(domain=domain, grid=grid, subpixel=spec, structures=(
+                mw.Structure(
             name="slab",
             geometry=mw.Box(position=(0.35, 0.5, 0.5), size=(0.5, 1.0, 1.0)),
             material=mw.Material(eps_r=6.0),
-        )
-    )
+            ),
+            ))
     return scene
 
 
@@ -64,8 +64,8 @@ def test_polarized_spec_requires_more_than_one_sample(averaging):
 
 
 def test_explicit_single_sample_spec_matches_int_bitwise():
-    eps_int, mu_int = prepare_scene(_slab_scene(1)).compile_material_components()
-    eps_spec, mu_spec = prepare_scene(_slab_scene(mw.SubpixelSpec(averaging="arithmetic", samples=1))).compile_material_components()
+    eps_int, mu_int = compile_material_components(prepare_scene(_slab_scene(1), device="cpu"))
+    eps_spec, mu_spec = compile_material_components(prepare_scene(_slab_scene(mw.SubpixelSpec(averaging="arithmetic", samples=1)), device="cpu"))
     for axis in ("x", "y", "z"):
         assert torch.equal(eps_int[axis], eps_spec[axis])
         assert torch.equal(mu_int[axis], mu_spec[axis])
@@ -75,10 +75,10 @@ def test_default_spec_matches_explicit_edge_policy_bitwise():
     assert mw.SubpixelSpec().samples == (4, 4, 4)
     assert mw.SubpixelSpec().averaging == "kottke_edge"
     assert mw.SubpixelSpec().pec == "staircase"
-    eps_default, mu_default = prepare_scene(_slab_scene(mw.SubpixelSpec())).compile_material_components()
-    eps_arith, mu_arith = prepare_scene(
-        _slab_scene(mw.SubpixelSpec(samples=4, averaging="kottke_edge", pec="staircase"))
-    ).compile_material_components()
+    eps_default, mu_default = compile_material_components(prepare_scene(_slab_scene(mw.SubpixelSpec()), device="cpu"))
+    eps_arith, mu_arith = compile_material_components(prepare_scene(
+        _slab_scene(mw.SubpixelSpec(samples=4, averaging="kottke_edge", pec="staircase")), device="cpu"
+    ))
     for axis in ("x", "y", "z"):
         assert torch.equal(eps_default[axis], eps_arith[axis])
         assert torch.equal(mu_default[axis], mu_arith[axis])
@@ -87,7 +87,7 @@ def test_default_spec_matches_explicit_edge_policy_bitwise():
 def test_scene_clone_round_trips_averaging_and_pec():
     """Uses samples=2 since single-sample polarized averaging raises (2026-10-29)."""
     scene = _slab_scene(mw.SubpixelSpec(samples=2, averaging="polarized", pec="conformal"))
-    clone = scene.clone()
+    clone = scene
     assert clone.subpixel.averaging == "polarized"
     assert clone.subpixel.pec == "conformal"
-    assert clone.subpixel_samples == (2, 2, 2)
+    assert clone.subpixel.samples == (2, 2, 2)

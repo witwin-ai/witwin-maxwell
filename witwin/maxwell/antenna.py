@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 
 import torch
+from ._stability import experimental
 
 
 def _power_normalized_antenna_metrics(
@@ -95,6 +96,7 @@ def _power_normalized_antenna_metrics(
     }
 
 
+@experimental("antenna")
 @dataclass(frozen=True)
 class Ludwig3:
     """Ludwig-3 co/cross-polarization basis.
@@ -127,6 +129,7 @@ class Ludwig3:
         return co_polarized, cross_polarized
 
 
+@experimental("antenna")
 @dataclass(frozen=True)
 class AntennaData:
     """Device-resident frequency-domain antenna engineering results.
@@ -304,4 +307,57 @@ class AntennaData:
         return torch.amax(self.realized_gain, dim=(-2, -1))
 
 
-__all__ = ["AntennaData", "Ludwig3"]
+@experimental("antenna")
+def antenna(result, *, surface: str, driven_port, polarization=None, theta=None, phi=None,
+            theta_points: int = 181, phi_points: int = 361, radius=1.0, phase_center=None, frame=None,
+            batch_size: int = 1024) -> AntennaData:
+    """Antenna engineering data of ``result`` from a closed near-field surface monitor."""
+    from .postprocess.antenna import antenna_data_from_result
+
+    return antenna_data_from_result(
+        result, surface=surface, driven_port=driven_port, polarization=polarization, theta=theta, phi=phi,
+        theta_points=theta_points, phi_points=phi_points, radius=radius, phase_center=phase_center,
+        frame=frame, batch_size=batch_size,
+    )
+
+
+@experimental("antenna")
+def array_basis(result, *, monitor: str, polarization=None, theta=None, phi=None, theta_points: int = 181,
+                phi_points: int = 361, radius=1.0, phase_center=None, frame=None, batch_size: int = 1024):
+    """A reusable power-wave / embedded-pattern basis (``ArrayBasisData``) from a PortSweep ``result``."""
+    from .postprocess.array import array_basis_from_result
+
+    return array_basis_from_result(
+        result, monitor=monitor, polarization=polarization, theta=theta, phi=phi, theta_points=theta_points,
+        phi_points=phi_points, radius=radius, phase_center=phase_center, frame=frame, batch_size=batch_size,
+    )
+
+
+# Public namespace ``mw.antenna``: antenna patterns, arrays, beams and MIMO.
+# ``array`` imports this module, so the array names are read on first access.
+from ._lazy import lazy_attributes  # noqa: E402
+
+__all__ = [
+    "AggregatedSceneGradient",
+    "AntennaData",
+    "ArrayBasisData",
+    "BeamCodebook",
+    "BeamData",
+    "BeamWeights",
+    "EmbeddedElementPatternData",
+    "Ludwig3",
+    "MIMOData",
+    "MaxHoldComposite",
+    "MultipathEnvironment",
+    "aggregate_scene_gradient_vjp",
+    "antenna",
+    "array_basis",
+    "ensemble_scene_gradient_vjp",
+]
+
+__getattr__, __dir__ = lazy_attributes(__name__, names={
+    ".array": ("ArrayBasisData", "BeamCodebook", "BeamData", "BeamWeights", "EmbeddedElementPatternData",
+               "MaxHoldComposite", "MIMOData", "MultipathEnvironment"),
+    ".array_gradient": ("AggregatedSceneGradient", "aggregate_scene_gradient_vjp", "ensemble_scene_gradient_vjp"),
+})
+del lazy_attributes

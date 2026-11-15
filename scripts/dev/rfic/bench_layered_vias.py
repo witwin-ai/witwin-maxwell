@@ -10,7 +10,7 @@ from torch.profiler import ProfilerActivity, profile
 
 from witwin.maxwell.mom.layered.assembly import assemble_potentials
 from witwin.maxwell.mom.layered.build import build_extension
-from witwin.maxwell.mom.layered.lowfreq import scale_potentials
+from witwin.maxwell.mom.layered.lowfreq import assemble_chunk,transform_chunk
 from witwin.maxwell.mom.layered.network import recover_scaled_chunk, solve_scaled_chunk
 from tests.mom.layered.test_layered_vias import vertical_loop, underpass
 
@@ -51,11 +51,10 @@ def main():
         prepared=prepare()
         torch.cuda.synchronize()
         setup=time.perf_counter()-started
-        seconds,(vector,scalar)=timed(lambda:assemble_potentials(
-            prepared.layout,prepared.table,frequency_index=-1,far_dtype=torch.float32,_network_accuracy=True))
-        transform,(matrix,rhs,recovery)=timed(lambda:scale_potentials(prepared,vector,scalar))
-        solve,(solution,info)=timed(lambda:solve_scaled_chunk(matrix,rhs))
-        recover,_=timed(lambda:recover_scaled_chunk(prepared,solution,rhs,recovery))
+        seconds,system=timed(lambda:assemble_chunk(prepared))
+        transform,_=timed(lambda:transform_chunk(prepared,system))
+        solve,(solution,info)=timed(lambda:solve_scaled_chunk(system))
+        recover,_=timed(lambda:recover_scaled_chunk(prepared,solution,system.rhs,system.recovery))
         count=len(prepared.table.frequencies)
         with profile(activities=[ProfilerActivity.CPU,ProfilerActivity.CUDA]) as trace:
             assemble_potentials(prepared.layout,prepared.table,frequency_index=0,

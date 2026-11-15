@@ -38,7 +38,7 @@ def _monitor_node_mask(scene, bounds) -> torch.Tensor:
 def _reject_lossy_material_without_density(scene, monitor):
     """Fail closed when the SAR region covers electric loss with no mass density."""
     region_mask = _monitor_node_mask(scene, monitor.bounds)
-    for structure in _bulk_structures(scene):
+    for structure in _bulk_structures(scene.scene):
         material = _structure_material(structure)
         if material is None:
             continue
@@ -200,7 +200,7 @@ def compute_sar(
     volumetric loss channel is available. ``power_scale`` is the resolved
     multiplicative power scale (scalar or per-frequency ``[F]`` tensor). When
     ``None`` it is resolved from ``normalization`` (source-amplitude only); the
-    port-accepted-power scale is resolved by ``Result.sar`` which carries the port.
+    port-accepted-power scale is resolved by ``mw.sar.sar`` which carries the port.
     """
     if not isinstance(power_loss, PowerLossData):
         raise TypeError("power_loss must be a PowerLossData instance.")

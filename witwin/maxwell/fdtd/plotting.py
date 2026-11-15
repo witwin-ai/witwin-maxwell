@@ -4,7 +4,6 @@ import torch
 from ..visualization import (
     extract_orthogonal_slice,
     plot_cross_section_panels,
-    plot_orthogonal_views,
 )
 from .postprocess import (
     get_centered_permittivity,
@@ -44,17 +43,17 @@ def plot_cross_section(
     elif component_str == "ex":
         field_data = np.abs(ex)
         title_prefix = "|Ex|"
-        x_coords, y_coords, z_coords = component_coords(solver.scene, "Ex")
+        x_coords, y_coords, z_coords = component_coords(solver.scene, "Ex", device=solver.scene.device)
         eps_np = (solver.eps_Ex / solver.eps0).cpu().numpy()
     elif component_str == "ey":
         field_data = np.abs(ey)
         title_prefix = "|Ey|"
-        x_coords, y_coords, z_coords = component_coords(solver.scene, "Ey")
+        x_coords, y_coords, z_coords = component_coords(solver.scene, "Ey", device=solver.scene.device)
         eps_np = (solver.eps_Ey / solver.eps0).cpu().numpy()
     elif component_str == "ez":
         field_data = np.abs(ez)
         title_prefix = "|Ez|"
-        x_coords, y_coords, z_coords = component_coords(solver.scene, "Ez")
+        x_coords, y_coords, z_coords = component_coords(solver.scene, "Ez", device=solver.scene.device)
         eps_np = (solver.eps_Ez / solver.eps0).cpu().numpy()
     else:
         field_data, x_coords, y_coords, z_coords = interpolate_yee_to_center(solver, freq_solution)
@@ -89,33 +88,4 @@ def plot_cross_section(
         verbose=verbose,
         contour_levels=[1.5],
         contour_color="cyan",
-    )
-
-
-def plot_isotropic_3views(
-    solver,
-    position=0.0,
-    field_log_scale=True,
-    figsize=(18, 5),
-    save_path=None,
-    vmin_db=-60,
-    verbose=True,
-):
-    freq_solution = get_frequency_solution(solver)
-    field_data, x_coords, y_coords, z_coords = interpolate_yee_to_center(solver, freq_solution)
-    eps = get_centered_permittivity(solver).cpu().numpy()
-
-    plot_orthogonal_views(
-        field_data=field_data,
-        permittivity=eps,
-        x_coords=x_coords,
-        y_coords=y_coords,
-        z_coords=z_coords,
-        position=position,
-        field_log_scale=field_log_scale,
-        figsize=figsize,
-        save_path=save_path,
-        vmin_db=vmin_db,
-        verbose=verbose,
-        suptitle="Total Electric Field Intensity |E| (FDTD)",
     )

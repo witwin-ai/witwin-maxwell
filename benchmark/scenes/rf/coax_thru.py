@@ -123,12 +123,12 @@ def snap_contour_half(dx: float, *, target: float = CONTOUR_HALF) -> tuple[float
     return half, abs(half - target)
 
 
-def _coax_port(name: str, x: float, direction: str, *, dx: float) -> mw.WavePort:
+def _coax_port(name: str, x: float, direction: str, *, dx: float) -> mw.rf.WavePort:
     # The current contour sits on the magnetic half-grid one half-cell into the
     # guide from the reference plane, in the propagation direction.
     contour_x = x + (0.5 * dx if direction == "+" else -0.5 * dx)
     contour_half, _snap = snap_contour_half(dx)
-    mode = mw.WaveModeSpec(
+    mode = mw.rf.WaveModeSpec(
         "tem",
         polarization="Ey",
         voltage_path=((x, INNER_RADIUS, 0.0), (x, OUTER_RADIUS, 0.0)),
@@ -137,7 +137,7 @@ def _coax_port(name: str, x: float, direction: str, *, dx: float) -> mw.WavePort
             size=(0.0, 2.0 * contour_half, 2.0 * contour_half),
         ),
     )
-    return mw.WavePort(
+    return mw.rf.WavePort(
         name,
         position=(x, 0.0, 0.0),
         size=(0.0, 0.40, 0.40),
@@ -147,48 +147,45 @@ def _coax_port(name: str, x: float, direction: str, *, dx: float) -> mw.WavePort
     )
 
 
-def coax_thru_scene(*, dx: float = 0.0025, device: str = "cuda") -> mw.Scene:
+def coax_thru_scene(*, dx: float = 0.0025) -> mw.Scene:
     """Build a two-port air-filled coaxial thru line."""
 
     length = line_length(dx)
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (-DOMAIN_X, DOMAIN_X),
                 (-DOMAIN_TRANSVERSE, DOMAIN_TRANSVERSE),
                 (-DOMAIN_TRANSVERSE, DOMAIN_TRANSVERSE),
             )
-        ),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
-        ports=(
+            ),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
+                ports=(
             _coax_port("left", -PORT_X, "+", dx=dx),
             _coax_port("right", PORT_X, "-", dx=dx),
-        ),
-        device=device,
-    )
-    scene.add_structure(
-        mw.Structure(
-            mw.Cylinder(
-                position=(0.0, 0.0, 0.0),
-                radius=INNER_RADIUS,
-                height=length,
-                axis="x",
             ),
-            mw.Material.pec(),
-            name="inner_conductor",
-        )
-    )
-    scene.add_structure(
-        mw.Structure(
-            _HollowCylinder(
-                position=(0.0, 0.0, 0.0),
-                inner_radius=OUTER_RADIUS,
-                outer_radius=SHIELD_OUTER,
-                length=length,
+                structures=(
+            mw.Structure(
+                mw.Cylinder(
+                    position=(0.0, 0.0, 0.0),
+                    radius=INNER_RADIUS,
+                    height=length,
+                    axis="x",
+                ),
+                mw.Material.pec(),
+                name="inner_conductor",
             ),
-            mw.Material.pec(),
-            name="outer_conductor",
-        )
-    )
+            mw.Structure(
+                _HollowCylinder(
+                    position=(0.0, 0.0, 0.0),
+                    inner_radius=OUTER_RADIUS,
+                    outer_radius=SHIELD_OUTER,
+                    length=length,
+                ),
+                mw.Material.pec(),
+                name="outer_conductor",
+            ),
+            ),
+            )
     return scene

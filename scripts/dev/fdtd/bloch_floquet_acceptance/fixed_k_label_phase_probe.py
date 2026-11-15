@@ -43,22 +43,23 @@ def _previous_labels(line, solver):
 def _simulation(device, steps):
     sine = 0.25
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.06, 0.06), (-0.06, 0.06), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(0.015), device=device,
-        boundary=mw.BoundarySpec.faces(
+                domain=mw.Domain(bounds=((-0.06, 0.06), (-0.06, 0.06), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(0.015), boundary=mw.BoundarySpec.faces(
             x="bloch", y="bloch", z="pml", num_layers=4,
             bloch_wavevector=(sine * 2 * math.pi * 1e9 / C_0, 0., 0.)),
-    )
-    scene.add_source(mw.PlaneWave(
-        direction=(sine, 0., math.sqrt(1 - sine**2)), polarization="Ey",
-        source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.2e9),
-        injection=mw.TFSF.slab(axis="z", bounds=(-0.15, 0.15)),
-    ))
+                sources=(
+            mw.PlaneWave(
+                direction=(sine, 0., math.sqrt(1 - sine**2)), polarization="Ey",
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.2e9),
+                injection=mw.TFSF.slab(axis="z", bounds=(-0.15, 0.15)),
+            ),
+            ),
+            )
     return mw.Simulation.fdtd(
-        scene, frequencies=FREQUENCIES, field_dtype=torch.float32,
+        scene, frequencies=FREQUENCIES, config=mw.FDTDConfig(field_dtype=torch.float32,
         run_time=mw.TimeConfig(time_steps=steps), cuda_graph=False,
         full_field_dft=False, shutoff=0.,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False), device=device),
     )
 
 

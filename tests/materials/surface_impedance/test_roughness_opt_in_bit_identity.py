@@ -30,7 +30,8 @@ from tests.support.pinned_baselines import baseline_tree as _baseline_tree
 # Re-baselined at f52aa33f for the additive-J (n+1/2) injection timing; proven equal to 075491bc plus only
 # that hunk (<evidence-root>/coverage-e-timing-proof/results/added_gates_gpu/). Copper stays 1b242d6d.
 # Re-pinned 2026-11-04 to f36cdaf1 for the observer time origin (A) (physical Yee labels: raw E/H spectra and port V/I rotate by exp(+i omega dt), derived invariants hold to FP32 rounding, all else bitwise; user-approved T2; per-key proof docs/assessments/observer-origin-repin-cpu-2026-11-03/, <evidence-root>/coverage-observer-origin/repin-proof-final/). Previous: f52aa33f.
-_BASELINE_REV = os.environ.get("WITWIN_ROUGHNESS_BASELINE_REV", "f36cdaf1")
+# Re-pinned 2026-11-12 to 1ac9110516, the deterministic lstsq driver commit (gelsd on CPU), for rational.model.poles only: relative change 2.2e-14 against f36cdaf1, fitted responses <= 1.8e-13, every other entry, including all prepared.* and run.* fields, bitwise equal to f36cdaf1; user-approved T2 2026-11-12; proof <evidence-root>/rfic-mom-20261106/p7a-final/logs/repin-rebased.log (first proof at 57815d8c2a: p7a-stack/repin/). Previous: f36cdaf1.
+_BASELINE_REV = os.environ.get("WITWIN_ROUGHNESS_BASELINE_REV", "1ac9110516")
 # Copper realizations and fields include compression on the batch-2 base.
 # Re-pinned 2026-11-04 to f36cdaf1 for the observer time origin (A) (physical Yee labels: raw E/H spectra and port V/I rotate by exp(+i omega dt), derived invariants hold to FP32 rounding, all else bitwise; user-approved T2; per-key proof docs/assessments/observer-origin-repin-cpu-2026-11-03/, <evidence-root>/coverage-observer-origin/repin-proof-final/). Previous: 1b242d6d.
 _COPPER_BASELINE_REV = "f36cdaf1"
@@ -46,7 +47,7 @@ _FITTED_KEYS = {
 
 
 def _fit_realizations(dump):
-    model = mw.RationalModel(
+    model = mw.rf.rational.RationalModel(
         poles=dump["rational.model.poles"], residues=dump["rational.model.residues"],
         direct=dump["rational.model.direct"], representation="Y",
     )
@@ -57,7 +58,7 @@ def _fit_realizations(dump):
     # Undo the probe's bilinear discretization (dt=2e-12) before evaluating with
     # the shared continuous-time convention s=-i*2*pi*f.
     dt = 2.0e-12
-    zfit = mw.StateSpaceNetwork(
+    zfit = mw.rf.rational.StateSpaceNetwork(
         A=(2.0 / dt) * torch.linalg.solve(left, A - identity),
         B=(2.0 / dt) * solved_B,
         C=2.0 * torch.linalg.solve(left.T, C.T).T,

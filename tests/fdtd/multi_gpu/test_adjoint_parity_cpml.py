@@ -91,7 +91,7 @@ def _parallel(devices):
     )
 
 
-def _scene(density, *, source_x, monitor_x, device):
+def _scene(density, *, source_x, monitor_x):
     # 21 x-nodes (20 physical cells) + a 4-cell CPML pad on each x face -> Nx=29,
     # cell_count=28: rank 0 owns cells [0, 14) (all four low x-PML), rank 1 owns
     # [14, 28) (all four high x-PML), interface at global cell 14 == x=0.0. The
@@ -102,30 +102,29 @@ def _scene(density, *, source_x, monitor_x, device):
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device=device,
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
-            density=density,
-            eps_bounds=(1.0, 6.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(source_x, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
-            name="drive",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (monitor_x, 0.0, 0.0), fields=("Ez",)))
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(source_x, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+                name="drive",
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (monitor_x, 0.0, 0.0), fields=("Ez",)),),
+            )
     return scene
 
 
@@ -133,16 +132,15 @@ def _solve(density_values, *, parallel_devices, source_x, monitor_x, want_grad, 
     density = density_values.clone().to("cuda:0")
     if want_grad:
         density.requires_grad_(True)
-    scene = _scene(density, source_x=source_x, monitor_x=monitor_x, device="cuda:0")
+    scene = _scene(density, source_x=source_x, monitor_x=monitor_x)
     kwargs = dict(
-        frequency=_FREQUENCY,
         run_time=mw.TimeConfig(time_steps=steps),
         absorber="cpml",
     )
     if parallel_devices is not None:
         kwargs["parallel"] = _parallel(parallel_devices)
-    result = mw.Simulation.fdtd(scene, **kwargs).run()
-    spectrum = result.monitors["probe"]["Ez"]
+    result = mw.Simulation.fdtd(scene, frequencies=_FREQUENCY, config=mw.FDTDConfig(**kwargs)).run()
+    spectrum = result.monitor("probe").sel(component="Ez").values
     loss = (spectrum.real ** 2 + spectrum.imag ** 2).sum()
     if want_grad:
         loss.backward()
@@ -461,15 +459,17 @@ def test_cpml_psi_active_zero_psi_carry_falsification(
 
 def _solve_capture_grad_eps(base, *, parallel_devices, source_x, monitor_x):
     density = base.clone().to("cuda:0").requires_grad_(True)
-    scene = _scene(density, source_x=source_x, monitor_x=monitor_x, device="cuda:0")
+    scene = _scene(density, source_x=source_x, monitor_x=monitor_x)
     result = mw.Simulation.fdtd(
         scene,
-        frequency=_FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=_STEPS),
-        absorber="cpml",
-        parallel=_parallel(parallel_devices),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=_STEPS),
+            absorber="cpml",
+            parallel=_parallel(parallel_devices),
+        ),
     ).run()
-    spectrum = result.monitors["probe"]["Ez"]
+    spectrum = result.monitor("probe").sel(component="Ez").values
     loss = (spectrum.real ** 2 + spectrum.imag ** 2).sum()
     loss.backward()
     grad_eps = {
@@ -521,13 +521,15 @@ def test_cpml_trainable_parallel_scene_prepares(cuda_p2p_devices, cuda_memory_cl
     from witwin.maxwell.fdtd.distributed import DistributedFDTD
 
     density = _base_density().clone().to("cuda:0").requires_grad_(True)
-    scene = _scene(density, source_x=-0.18, monitor_x=0.18, device="cuda:0")
+    scene = _scene(density, source_x=-0.18, monitor_x=0.18)
     simulation = mw.Simulation.fdtd(
         scene,
-        frequency=_FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=_STEPS),
-        absorber="cpml",
-        parallel=_parallel(cuda_p2p_devices),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=_STEPS),
+            absorber="cpml",
+            parallel=_parallel(cuda_p2p_devices),
+        ),
     )
     prepared = simulation.prepare()
     assert isinstance(prepared.solver, DistributedFDTD)

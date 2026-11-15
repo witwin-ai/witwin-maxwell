@@ -8,11 +8,8 @@ import witwin.maxwell as mw
 @pytest.fixture(autouse=True)
 def host_preparation(monkeypatch):
     # Preparation allocates fields but launches no kernels in these fixtures.
-    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda *args, **kwargs: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.solver._require_cuda_scene", lambda scene: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.solver._get_fdtd_module", lambda: object())
-    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.initialization.require_cuda_scene", lambda scene: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.initialization.get_fdtd_module", lambda: object())
+    from tests.support.host_preparation import stub_cuda_preparation
+    stub_cuda_preparation(monkeypatch)
 
 
 def _simulation(source_time, *, x="bloch", k=2., secondary=False, plane_wave=False, polarization="Ey"):
@@ -22,23 +19,31 @@ def _simulation(source_time, *, x="bloch", k=2., secondary=False, plane_wave=Fal
         boundary=(mw.BoundarySpec.faces(x="bloch", y="bloch", z="pml", num_layers=2,
                                        bloch_wavevector=(k, 0., 0.)) if plane_wave else
                   mw.BoundarySpec.faces(default="pec", x=x, bloch_wavevector=(k, 0., 0.))),
-        device="cpu",
     )
     if secondary:
-        scene.add_source(mw.PointDipole(position=(0., 0., 0.), polarization="Ez",
-                                       source_time=source_time))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PointDipole(position=(0., 0., 0.), polarization="Ez",
+                          source_time=source_time),
+        ))
     if plane_wave:
-        scene.add_source(mw.PlaneWave(direction=(.1, 0., .99), polarization=polarization, source_time=source_time,
-                                     injection=mw.TFSF.slab(axis="z", bounds=(-.15, .15))))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PlaneWave(direction=(.1, 0., .99), polarization=polarization, source_time=source_time,
+                        injection=mw.TFSF.slab(axis="z", bounds=(-.15, .15))),
+        ))
     else:
-        scene.add_source(mw.PointDipole(position=(0.05, 0., 0.), polarization="Ez", source_time=source_time))
-    return mw.Simulation.fdtd(scene, frequencies=(1.e9,), run_time=mw.TimeConfig(time_steps=10))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PointDipole(position=(0.05, 0., 0.), polarization="Ez", source_time=source_time),
+        ))
+    return mw.Simulation.fdtd(scene, frequencies=(1.e9,), config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=10), device="cpu"))
 
 
 @pytest.mark.parametrize("source_time", (
     mw.GaussianPulse(frequency=1.e9, fwidth=.2e9),
-    mw.RickerWavelet(frequency=1.e9),
-    mw.CustomSourceTime(lambda t: t * 0., characteristic_frequency=1.e9),
+    mw.sources.RickerWavelet(frequency=1.e9),
+    mw.sources.CustomSourceTime(lambda t: t * 0., characteristic_frequency=1.e9),
 ))
 @pytest.mark.parametrize("secondary", (False, True))
 @pytest.mark.parametrize("plane_wave", (False, True))
@@ -59,6 +64,7 @@ def test_fixed_k_incident_reference_uses_physical_yee_labels():
 
     solver = _simulation(mw.GaussianPulse(frequency=1.e9, fwidth=.2e9), plane_wave=True).prepare().solver
     line = solver._tfsf_state["auxiliary_grid"]
+    line.prepare_tables(800)  # the device drive and phase rows a solve stages at entry
     expected = torch.zeros_like(line.spectrum)
     # Reach the entry plane from the soft launch, including a nonzero spectrum.
     for step in range(160):
@@ -94,19 +100,21 @@ def test_fixed_k_checkpoint_preserves_all_line_state_on_disk(tmp_path):
     pulse = mw.GaussianPulse(frequency=1.e9, fwidth=.2e9)
     solver = _simulation(pulse, plane_wave=True).prepare().solver
     line = solver._tfsf_state["auxiliary_grid"]
+    line.prepare_tables(800)  # the device drive and phase rows a solve stages at entry
     for _ in range(100):
         line.advance_magnetic()
         line.advance_electric()
     state = capture_checkpoint_state(solver, 100)
     names = {"tfsf_aux_" + name for name in line.state_tensors()}
     assert names.issubset(state.tensors)
-    checkpoint = mw.FDTDResumeCheckpoint(step=100, total_steps=200, dt=solver.dt,
+    checkpoint = mw.fdtd.FDTDResumeCheckpoint(step=100, total_steps=200, dt=solver.dt,
         physics=state, signature={}, auxiliary={})
     path = tmp_path / "fixed-k.pt"
     checkpoint.save(path)
     restored = _simulation(pulse, plane_wave=True).prepare().solver
-    restore_checkpoint_state(restored, mw.FDTDResumeCheckpoint.load(path).physics)
+    restore_checkpoint_state(restored, mw.fdtd.FDTDResumeCheckpoint.load(path).physics)
     other = restored._tfsf_state["auxiliary_grid"]
+    other.prepare_tables(800)
     for _ in range(30):
         for current in (line, other):
             current.advance_magnetic()
@@ -124,6 +132,7 @@ def test_empty_fixed_k_slab_confines_the_incident_field_on_the_yee_grid(polariza
     solver = _simulation(mw.GaussianPulse(frequency=1.e9, fwidth=.2e9), plane_wave=True,
                          polarization=polarization).prepare().solver
     line = solver._tfsf_state["auxiliary_grid"]
+    line.prepare_tables(800)  # the device drive and phase rows a solve stages at entry
     fields = {name: torch.zeros_like(getattr(solver, name), dtype=torch.complex64)
               for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
     spacing = .05
@@ -189,11 +198,12 @@ def test_empty_fixed_k_slab_confines_the_incident_field_on_the_yee_grid(polariza
 def test_broadband_acceptance_fixture_prepares_on_host(monkeypatch, resolution, polarization):
     from scripts.dev.fdtd.bloch_floquet_acceptance import common
 
-    scene_type = mw.Scene
-    monkeypatch.setattr(common.mw, "Scene", lambda **kwargs: scene_type(**dict(kwargs, device="cpu")))
+    config_type = mw.FDTDConfig
+    monkeypatch.setattr(common.mw, "FDTDConfig", lambda **kwargs: config_type(**dict(kwargs, device="cpu")))
     simulation = common.make_simulation(resolution, .55 * common.K0, polarization, 12.)
     solver = simulation.prepare().solver
     line = solver._tfsf_state["auxiliary_grid"]
+    line.prepare_tables(800)  # the device drive and phase rows a solve stages at entry
     assert line.frequencies == common.FREQUENCIES
     assert line.ds == pytest.approx(common.LAMBDA0 / resolution)
     assert line.incident_spectrum(solver)["position"] == pytest.approx(-.65 * common.LAMBDA0)
@@ -220,7 +230,7 @@ def test_unchanged_path_gpu_probe_prepares_its_scenes_on_host():
 
 @pytest.mark.parametrize("source_time", (
     mw.GaussianPulse(frequency=1.e9, fwidth=.2e9),
-    mw.RickerWavelet(frequency=1.e9),
+    mw.sources.RickerWavelet(frequency=1.e9),
 ))
 @pytest.mark.parametrize("make_source", ("soft_plane_wave", "gaussian_beam"))
 def test_fixed_k_bloch_rejects_non_cw_directional_source_without_slab_line(source_time, make_source):
@@ -231,21 +241,26 @@ def test_fixed_k_bloch_rejects_non_cw_directional_source_without_slab_line(sourc
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.faces(x="bloch", y="bloch", z="pml", num_layers=2,
                                        bloch_wavevector=(2., 0., 0.)),
-        device="cpu",
     )
     if make_source == "soft_plane_wave":
-        scene.add_source(mw.PlaneWave(direction=(.1, 0., .99), polarization="Ey", source_time=source_time,
-                                     injection="soft", injection_axis="z"))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PlaneWave(direction=(.1, 0., .99), polarization="Ey", source_time=source_time,
+                        injection="soft", injection_axis="z"),
+        ))
     else:
-        scene.add_source(mw.GaussianBeam(direction=(.1, 0., .99), polarization="Ey", beam_waist=.2,
-                                        focus=(0., 0., 0.), source_time=source_time, injection_axis="z"))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.GaussianBeam(direction=(.1, 0., .99), polarization="Ey", beam_waist=.2,
+                           focus=(0., 0., 0.), source_time=source_time, injection_axis="z"),
+        ))
     with pytest.raises(NotImplementedError, match="Broadband fixed-k injection of beams.*off the carrier"):
-        mw.Simulation.fdtd(scene, frequencies=(1.e9,), run_time=mw.TimeConfig(time_steps=10)).prepare()
+        mw.Simulation.fdtd(scene, frequencies=(1.e9,), config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=10), device="cpu")).prepare()
 
 
 @pytest.mark.parametrize("source_time", (
     mw.GaussianPulse(frequency=1.e9, fwidth=.2e9),
-    mw.RickerWavelet(frequency=1.e9),
+    mw.sources.RickerWavelet(frequency=1.e9),
 ))
 def test_fixed_k_bloch_admits_broadband_point_source(source_time):
     # The Bloch boundary gives a point source the exact fixed-k phase at every frequency.

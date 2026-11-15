@@ -9,7 +9,7 @@ from witwin.maxwell.mom.layered.assembly import assemble_potentials
 from witwin.maxwell.mom.layered.green import LayeredGreenTable
 from witwin.maxwell.mom.layered.mesh import mesh_rectangles
 
-pytestmark = pytest.mark.cuda
+pytestmark = [pytest.mark.cuda, pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")]
 
 
 @pytest.mark.parametrize("dtype", (torch.float32, torch.float64))

@@ -11,7 +11,7 @@ from witwin.maxwell.postprocess.fdtd_loss import conductor_region_power
 
 
 def regional_record(frequency,dt,thickness):
-    foil=mw.CopperFoil(thickness=thickness,frequency_range=(.8e9,1.2e9))
+    foil=mw.media.CopperFoil(thickness=thickness,frequency_range=(.8e9,1.2e9))
     response=compile_copper_response(foil)
     phasor=torch.tensor([[[2.+.3j,2.+.3j],[7.-.2j,7.-.2j]]],dtype=torch.complex128)
     area=torch.tensor([2.,4.],dtype=torch.float64)
@@ -70,21 +70,21 @@ def test_diagnostic_ownership_clones_nested_tensors_without_detaching_existing_l
     parameter=torch.tensor(3.,requires_grad=True)
     record={'surface_power_traces':[{'power':parameter.square().reshape(1)}]}
     result=mw.Result(method='fdtd',frequency=1e9,
-        scene=mw.Scene(domain=mw.Domain(bounds=((0.,1.),)*3),grid=mw.GridSpec.uniform(.5),device='cpu'),
+        scene=mw.Scene(domain=mw.Domain(bounds=((0.,1.),)*3),grid=mw.GridSpec.uniform(.5)),
         metadata={'conductor_losses':{'foil':record},'conductor_loss_columns':{'feed':{'foil':record}}})
-    a=result.conductor_losses['foil']['surface_power_traces'][0]['power']
-    b=result.conductor_loss_columns['feed']['foil']['surface_power_traces'][0]['power']
+    a=mw.rf.conductor_losses(result)['foil']['surface_power_traces'][0]['power']
+    b=mw.rf.conductor_loss_columns(result)['feed']['foil']['surface_power_traces'][0]['power']
     derivative,=torch.autograd.grad(a.sum()+b.sum(),parameter)
     assert derivative.item()==12.
     a.zero_()
-    assert result.conductor_losses['foil']['surface_power_traces'][0]['power'].item()==9.
+    assert mw.rf.conductor_losses(result)['foil']['surface_power_traces'][0]['power'].item()==9.
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(),reason='requires CUDA')
 def test_actual_spectral_diagnostic_geometry_and_half_volume_survive_result_roundtrip(tmp_path):
     from tests.materials.surface_impedance.test_copper_foil_power_loss import _simulation
     result=_simulation(graph=True,steps=128).run()
-    before=result.conductor_losses
+    before=mw.rf.conductor_losses(result)
     bounds=((-1.,1.),)*3
     for record in before.values():
         total=conductor_region_power(record,bounds)
@@ -95,10 +95,10 @@ def test_actual_spectral_diagnostic_geometry_and_half_volume_survive_result_roun
             torch.testing.assert_close(trace['normal_half_widths'],torch.full_like(trace['normal_half_widths'],.0025))
     path=tmp_path/'regional.pt';result.save(path)
     loaded=mw.Result.load(path,scene=result.scene,map_location='cpu')
-    for name,record in loaded.conductor_losses.items():
+    for name,record in mw.rf.conductor_losses(loaded).items():
         torch.testing.assert_close(conductor_region_power(record,bounds),before[name]['surface_power'],rtol=4e-15,atol=0.)
         assert all(not trace['power'].requires_grad for trace in record['surface_power_traces'])
-    first=next(iter(result.conductor_losses.values()))
+    first=next(iter(mw.rf.conductor_losses(result).values()))
     first['surface_power_traces'][0]['power'].zero_()
-    for name,record in result.conductor_losses.items():
+    for name,record in mw.rf.conductor_losses(result).items():
         torch.testing.assert_close(conductor_region_power(record,bounds),before[name]['surface_power'],rtol=4e-15,atol=0.)

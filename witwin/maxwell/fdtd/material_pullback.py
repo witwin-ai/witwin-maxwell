@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from ..compiler.materials import _density_kernel_size
 from ..scene import prepare_scene
 from witwin.core import Box
+from ..compiler.materials import compile_materials
 
 
 @dataclass(frozen=True)
@@ -219,10 +220,11 @@ def pullback_density_gradients(
     grad_eps_ey: torch.Tensor,
     grad_eps_ez: torch.Tensor,
     eps0: float,
+    device=None,
 ) -> tuple[torch.Tensor, ...]:
     if not density_tensors:
         return ()
-    prepared_scene = prepare_scene(scene)
+    prepared_scene = prepare_scene(scene, device=grad_eps_ex.device if device is None else device)
 
     grad_eps_r = node_gradient_from_yee_permittivity(
         prepared_scene,
@@ -234,7 +236,7 @@ def pullback_density_gradients(
 
     region_layouts = [
         _resolve_region_layout(prepared_scene, region)
-        for region in prepared_scene.material_regions
+        for region in prepared_scene.scene.material_regions
     ]
     outputs = [torch.zeros_like(density) for density in density_tensors]
     output_positions = {
@@ -247,12 +249,12 @@ def pullback_density_gradients(
         dtype=torch.bool,
     )
 
-    for region_index in range(len(prepared_scene.material_regions) - 1, -1, -1):
+    for region_index in range(len(prepared_scene.scene.material_regions) - 1, -1, -1):
         layout = region_layouts[region_index]
         if layout is None:
             continue
 
-        region = prepared_scene.material_regions[region_index]
+        region = prepared_scene.scene.material_regions[region_index]
         region_slice = layout.region
         effective_mask = ~covered_mask[region_slice]
 
@@ -299,12 +301,13 @@ def pullback_material_input_gradients(
     grad_tpa_ey: torch.Tensor | None = None,
     grad_tpa_ez: torch.Tensor | None = None,
     grad_aniso_inverse: dict[str, torch.Tensor] | None = None,
+    device=None,
 ) -> tuple[torch.Tensor, ...]:
     if not inputs:
         return ()
-    prepared_scene = prepare_scene(scene)
+    prepared_scene = prepare_scene(scene, device=grad_eps_ex.device if device is None else device)
 
-    model = prepared_scene.compile_materials()
+    model = compile_materials(prepared_scene)
     edge_components = model.get("edge_components")
     outputs = []
     grad_outputs = []
@@ -399,7 +402,7 @@ def pullback_material_input_gradients(
     if grad_copper_coefficients:
         from ..compiler.copper_foil import compile_copper_response
         for gradients in grad_copper_coefficients:
-            material = prepared_scene.structures[gradients["structure_index"]].material
+            material = prepared_scene.scene.structures[gradients["structure_index"]].material
             response = compile_copper_response(material)
             for key, value in (("B", response.state_space.B), ("rates", response.rates), ("D", response.state_space.D)):
                 alpha = gradients.get("response_alpha", 1.)

@@ -22,6 +22,7 @@ import witwin.maxwell as mw
 from witwin.maxwell.compiler.materials import _pec_signed_distance
 from witwin.maxwell.fdtd.runtime.materials import _pec_edge_open_fractions, average_node_to_component
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 H = 0.25e-3
 HALF = 3.0e-3
@@ -61,27 +62,28 @@ def _scene(geometries, pec_mode="staircase"):
         domain=mw.Domain(bounds=((-HALF, HALF), (-HALF, HALF), (0.0, LZ))),
         grid=mw.GridSpec.uniform(H),
         boundary=mw.BoundarySpec.pec(),
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
-        device="cpu",
+        subpixel=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
     )
-    for index, geometry in enumerate(geometries):
-        scene.add_structure(mw.Structure(geometry, mw.Material.pec(), name=f"pec{index}"))
-    return prepare_scene(scene)
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(geometry, mw.Material.pec(), name=f"pec{index}") for index, geometry in enumerate(geometries)),
+    ))
+    return prepare_scene(scene, device="cpu")
 
 
 def _round_shield(radius=2.3e-3, vertices=96):
     frame = [(-HALF - H, -HALF - H), (HALF + H, -HALF - H), (HALF + H, HALF + H), (-HALF - H, HALF + H)]
     hole = [(radius * math.cos(2 * math.pi * k / vertices), radius * math.sin(2 * math.pi * k / vertices))
             for k in range(vertices)]
-    return mw.ComplexPolySlab([frame, hole], bounds=(-LZ, 2 * LZ), axis="z")
+    return mw.geometry.ComplexPolySlab([frame, hole], bounds=(-LZ, 2 * LZ), axis="z")
 
 
 def _open_fractions(prepared):
-    return _pec_edge_open_fractions(SimpleNamespace(_compiled_material_model=prepared.compile_materials()))
+    return _pec_edge_open_fractions(SimpleNamespace(_compiled_material_model=compile_materials(prepared)))
 
 
 def _former_average_rule(prepared, component):
-    occupancy = prepared.compile_materials()["pec_occupancy"]
+    occupancy = compile_materials(prepared)["pec_occupancy"]
     return 1.0 - (average_node_to_component(None, occupancy, component) >= 0.5).to(occupancy.dtype)
 
 
@@ -142,7 +144,7 @@ def test_abutting_box_union_shorts_like_one_box():
     lambda: [mw.Box(position=(0.25e-3, -0.5e-3, 0.5 * LZ), size=(1.5e-3, 1.0e-3, 0.5e-3))],
     lambda: _slab_boxes(1.0e-3),
     lambda: [mw.Box(position=(0.0, 0.0, 0.5 * LZ), size=(2.0e-3, 2.0e-3, 4 * LZ)),
-             mw.ComplexPolySlab([[(-HALF - H, -HALF - H), (HALF + H, -HALF - H), (HALF + H, HALF + H),
+             mw.geometry.ComplexPolySlab([[(-HALF - H, -HALF - H), (HALF + H, -HALF - H), (HALF + H, HALF + H),
                                   (-HALF - H, HALF + H)],
                                  [(-1.75e-3, -1.75e-3), (1.75e-3, -1.75e-3), (1.75e-3, 1.75e-3),
                                   (-1.75e-3, 1.75e-3)]], bounds=(-LZ, 2 * LZ), axis="z")],

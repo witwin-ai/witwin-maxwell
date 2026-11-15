@@ -25,9 +25,9 @@ def config(**options):
         shift_storage='separable_v1',near_storage='scalar_reciprocal_streamed_dk_v1',
         expansion_center_policy='binary_lattice_v1',far_action_batch=16,m2l_row_batch=8,
         leaf_size=2,separation_ratio=.2,near_coefficient_workspace_budget_bytes=4096,
-        kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5),kernel_bound_rule='direct_first_wave_min_v1')
+        kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5),kernel_bound_rule='direct_first_wave_min_v1')
     values.update(options)
-    return mw.FMMConfig(**values)
+    return mw.mom.FMMConfig(**values)
 
 
 def scene():
@@ -63,11 +63,11 @@ def test_new_signed_axis_version_and_affected_payload_branches(tmp_path):
         dict(table_storage='compact',near_storage='scalar_reciprocal_streamed_dk_v1'))
     for kwargs in choices:
         expected=old.FMMConfig(**kwargs)
-        actual=mw.FMMConfig(**kwargs)
+        actual=mw.mom.FMMConfig(**kwargs)
         assert actual.payload()==expected.payload() and actual.construction()==expected.construction()
     cfg=config();payload=cfg.payload()
     assert payload['version']=='cartesian_fmm_signed_axis_config_v1'
-    assert mw.FMMConfig.restore(json.loads(json.dumps(payload)))==cfg
+    assert mw.mom.FMMConfig.restore(json.loads(json.dumps(payload)))==cfg
     for kind in ('policy','version','missing','extra','bool_budget','high_order','high_rows'):
         bad=copy.deepcopy(payload)
         if kind=='policy':bad['parameters']['table_storage']='compact_shared_displacement_v1'
@@ -77,16 +77,16 @@ def test_new_signed_axis_version_and_affected_payload_branches(tmp_path):
         elif kind=='bool_budget':bad['parameters']['near_coefficient_workspace_budget_bytes']=True
         elif kind=='high_order':bad['parameters']['max_order']=13
         else:bad['parameters']['m2l_row_batch']=17
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     for version in ('cartesian_fmm_config_v7','cartesian_fmm_shared_compact_config_v1',
         'cartesian_fmm_binary_lattice_config_v1','cartesian_fmm_batched_compact_config_v1'):
         bad=copy.deepcopy(payload);bad['version']=version
-        with pytest.raises(ValueError,match='explicit configuration version'):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError,match='explicit configuration version'):mw.mom.FMMConfig.restore(bad)
     with pytest.raises(NotImplementedError,match='free space'):
-        mw.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',stopping=StoppingRule(preconditioner='none',fallback='none'),
-            periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)))
+        mw.mom.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',stopping=StoppingRule(preconditioner='none',fallback='none'),
+            periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)))
     with pytest.raises(ValueError,match='complex128'):
-        mw.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',stopping=StoppingRule(preconditioner='none',fallback='none'),dtype=torch.complex64)
+        mw.mom.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',stopping=StoppingRule(preconditioner='none',fallback='none'),dtype=torch.complex64)
     raw_write(tmp_path/'signed-axis-configuration.json',dict(new_schema_exact=True,
         affected_old_payloads_exact=True,no_old_numeric_replay=True,production_qualification=False))
 
@@ -186,11 +186,11 @@ def test_new_public_signed_axis_original_columns_native_H_gradients_solve_and_re
         production_qualification=False,physical_qualification=False)
     path=tmp_path/'signed-axis-public.json';raw_write(path,raw)
     declared_scene=scene()
-    cfg=mw.MoMConfig(integration=IntegrationConfig(order=4,singular_order=3),operator_backend='fmm',
+    cfg=mw.mom.MoMConfig(integration=IntegrationConfig(order=4,singular_order=3),operator_backend='fmm',
         fmm=config(leaf_factor_kernel='original'),riesz_storage='local_rwg_v1',stopping=StoppingRule(method='gmres',preconditioner='rwg_diagonal',
             fallback='none',rtol=1e-12,atol=0.,maxiter=240,restart=120))
     try:
-        prepared=mw.Simulation.mom(declared_scene,frequency=1.43e8,config=cfg).prepare()
+        prepared=mw.Simulation.mom(declared_scene,frequencies=1.43e8,config=cfg).prepare()
         op=prepared.solver.handle.actions
         regions=(op.exterior,*op.interiors)
         views=[coupling._compact for region in regions for _,_,coupling in region.far]
@@ -248,7 +248,7 @@ def test_new_public_signed_axis_original_columns_native_H_gradients_solve_and_re
         assert owned==op.capacity_plan['planned_bytes']
         result=prepared.run()
         assert result.stats()['converged'] and result.stats()['error_budget']['checked']
-        current=result.surface_currents.scattered_coefficients
+        current=mw.mom.surface_currents(result).scattered_coefficients
         residual=relative(current@reference.mT,prepared.solver.rhs)
         raw.update(complete_original_residual=residual,residual_relative_gate=1e-10,
             residual_absolute_gate=0.,actual_owned_bytes=owned)
@@ -259,11 +259,11 @@ def test_new_public_signed_axis_original_columns_native_H_gradients_solve_and_re
             for cls in (MultipoleOperator,MultipoleSystemActions,SystemOperator):patch.setattr(cls,'__init__',forbidden)
             patch.setattr(torch.linalg,'solve',forbidden)
             restored=mw.Result.load(artifact,scene=declared_scene)
-            assert restored.surface_currents.config.fmm==cfg.fmm
-            torch.testing.assert_close(restored.surface_currents.scattered_coefficients,current,rtol=0,atol=0)
-            bad=copy.deepcopy(result.surface_currents.snapshot())
+            assert mw.mom.surface_currents(restored).config.fmm==cfg.fmm
+            torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,current,rtol=0,atol=0)
+            bad=copy.deepcopy(mw.mom.surface_currents(result).snapshot())
             bad['fmm_config']['parameters']['table_storage']='compact_shared_displacement_v1'
-            with pytest.raises(ValueError):SurfaceData.restore(bad,declared_scene,1.43e8)
+            with pytest.raises(ValueError):SurfaceData.restore(bad,declared_scene,1.43e8,'cuda')
         raw.update(completed=True,artifact=str(artifact),artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
             reference_sha256=hashlib.sha256(reference_artifact.read_bytes()).hexdigest(),exact_restore=True,
             whole_peak_qualified=False,original_scalar_reference_is_not_independent_EM_reference=True)

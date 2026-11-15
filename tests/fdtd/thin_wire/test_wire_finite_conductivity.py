@@ -23,7 +23,7 @@ from witwin.maxwell.rational import (
     RationalModel,
     StateSpaceNetwork,
 )
-from witwin.maxwell.fdtd.thin_wire_reference import ACCEPTANCE_BUDGET
+from tests.oracles.thin_wire_reference import ACCEPTANCE_BUDGET
 from witwin.maxwell.scene import prepare_scene
 
 
@@ -45,21 +45,21 @@ def _analytic_zint(f, a=RADIUS, sigma=COPPER, mu=wi.MU_0):
 
 
 def test_wire_conductor_finite_construction_and_defaults():
-    conductor = mw.WireConductor.finite(COPPER)
+    conductor = mw.rf.WireConductor.finite(COPPER)
     assert conductor.kind == "finite"
     assert conductor.conductivity == COPPER
     assert conductor.permeability == pytest.approx(wi.MU_0)
 
-    magnetic = mw.WireConductor.finite(COPPER, permeability=2.0 * wi.MU_0)
+    magnetic = mw.rf.WireConductor.finite(COPPER, permeability=2.0 * wi.MU_0)
     assert magnetic.permeability == pytest.approx(2.0 * wi.MU_0)
 
-    pec = mw.WireConductor.pec()
+    pec = mw.rf.WireConductor.pec()
     assert pec.kind == "pec"
     assert pec.conductivity is None and pec.permeability is None
 
 
 def test_wire_conductor_finite_is_frozen():
-    conductor = mw.WireConductor.finite(COPPER)
+    conductor = mw.rf.WireConductor.finite(COPPER)
     with pytest.raises(Exception):
         conductor.conductivity = 1.0  # type: ignore[misc]
 
@@ -67,16 +67,16 @@ def test_wire_conductor_finite_is_frozen():
 @pytest.mark.parametrize("bad", [0.0, -1.0, float("inf"), float("nan"), True, 1 + 2j])
 def test_wire_conductor_finite_rejects_bad_conductivity(bad):
     with pytest.raises((ValueError, TypeError)):
-        mw.WireConductor.finite(bad)
+        mw.rf.WireConductor.finite(bad)
 
 
 def test_wire_conductor_finite_requires_conductivity_and_pec_rejects_params():
     with pytest.raises(ValueError):
-        mw.WireConductor("finite")
+        mw.rf.WireConductor("finite")
     with pytest.raises(ValueError):
-        mw.WireConductor("pec", conductivity=COPPER)
+        mw.rf.WireConductor("pec", conductivity=COPPER)
     with pytest.raises(ValueError):
-        mw.WireConductor("nichrome")
+        mw.rf.WireConductor("nichrome")
 
 
 # --------------------------------------------------------------------------- #
@@ -256,20 +256,19 @@ def test_fit_series_impedance_rejects_per_segment_radius_and_bad_band():
 def test_scene_compile_accepts_finite_conductor_metadata():
     # Finite conductors are consumed by the lossy current recurrence: compilation
     # succeeds and carries the conductor material parameters through metadata.
-    wire = mw.ThinWire(
+    wire = mw.rf.ThinWire(
         name="lossy",
         points=((0.25, 0.5, 0.5), (0.75, 0.5, 0.5)),
         radius=1.0e-3,
-        conductor=mw.WireConductor.finite(COPPER),
+        conductor=mw.rf.WireConductor.finite(COPPER),
     )
     scene = mw.Scene(
         domain=mw.Domain(bounds=((0.0, 1.0),) * 3),
         grid=mw.GridSpec.uniform(0.25),
         boundary=mw.BoundarySpec.none(),
         thin_wires=(wire,),
-        device="cpu",
     )
-    network = compile_thin_wires(prepare_scene(scene))
+    network = compile_thin_wires(prepare_scene(scene, device="cpu"))
     conductor = network.metadata["conductor"]
     assert conductor["kinds"] == ("finite",)
     assert conductor["conductivity"] == (COPPER,)

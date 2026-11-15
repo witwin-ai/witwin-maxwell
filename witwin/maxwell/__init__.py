@@ -1,634 +1,149 @@
-from .fdtd.runtime.passivity import FDTDPassivityError
-from witwin.core import Box, Cone, Cylinder, Ellipsoid, HollowBox, Mesh, Prism, Pyramid, Sphere, Structure, Torus
-from .antenna import AntennaData, Ludwig3
-from .copper_foil import CopperFoil
-from .coordinates import BendCoordinates, FieldFrame, FramedFieldData
-from .array import (
-    ArrayBasisData,
-    BeamCodebook,
-    BeamData,
-    BeamWeights,
-    EmbeddedElementPatternData,
-    MaxHoldComposite,
-    MIMOData,
-    MultipathEnvironment,
+"""PyTorch-native differentiable Maxwell solvers: ``Scene -> Simulation -> Result``.
+
+The top level holds the core objects of that model. Every other public object has one
+home in a domain namespace, loaded on first access::
+
+    mw.rf, mw.rf.rational          ports, lumped elements, networks, path integrals, rational fits
+    mw.media, mw.media.fit,        material models beyond the core poles; dispersion fitting;
+    mw.media.library               the bundled material library
+    mw.geometry, mw.grid           non-core primitives and CSG; grid refinement specs
+    mw.sources, mw.monitors        non-core sources, waveforms and monitors
+    mw.fdtd, mw.fdfd               solver-specific configuration, absorbers and errors
+    mw.circuits, mw.antenna, mw.esd, mw.breakdown, mw.sar, mw.electrostatic,
+    mw.coordinates, mw.execution, mw.capability, mw.postprocess, mw.invdes, mw.mom
+    mw.io                          scene dictionary migration (``Scene.to_dict``/``from_dict`` read and write)
+
+A namespace's ``__all__`` is its public contract. The modules that implement the objects
+are internal.
+"""
+from ._version import __version__
+from .errors import (
+    CapacityError,
+    ConvergenceError,
+    ExperimentalWarning,
+    MaxwellError,
+    MaxwellWarning,
+    SchemaError,
+    SetupError,
+    UnsupportedFeatureError,
 )
-from .circuits import (
-    Circuit,
-    CircuitData,
-    CircuitDevice,
-    CircuitNode,
-    CurrentControlledCurrentSource,
-    CurrentControlledVoltageSource,
-    CurrentSource,
-    MNAConfig,
-    MutualInductor,
-    PiecewiseLinearWaveform,
-    PortBinding,
-    PulseWaveform,
-    SineWaveform,
-    TimedSwitch,
-    VoltageControlledCurrentSource,
-    VoltageControlledVoltageSource,
-    VoltageSource,
-    parse_spice,
-)
-from .circuit_devices import (
-    BJT,
-    Diode,
-    MOSFET,
-    NonlinearSolveConfig,
-    PiecewiseLinearIV,
-    PolynomialIV,
-    VoltageDependentCapacitor,
-)
-from .electrostatic import (
-    CapacitanceData,
-    ChargeDensity,
-    ElectrostaticBoundarySpec,
-    ElectrostaticInitialCondition,
-    ElectrostaticResultData,
-    ElectrostaticSolverConfig,
-    ElectrostaticTerminal,
-    TruncationEstimate,
-    TruncationReport,
-)
-from .esd import (
-    ESDCurrentSource,
-    ESDDiagnostics,
-    ESDPortRecord,
-    ESDResampledWaveform,
-    ESDVoltageSource,
-    ESDWaveform,
-    MeasuredWaveform,
-)
-from .breakdown_stress import (
-    BreakdownStressData,
-    ComponentRating,
-    ComponentStressData,
-)
-from .geometry import ComplexPolySlab, PolySlab, PlanarPEC, SurfaceMesh
-from .breakdown import (
-    BreakdownEvent,
-    BreakdownResultData,
-)
-from .breakdown_risk import (
-    SmoothBreakdownRisk,
-    SmoothBreakdownRiskData,
-)
-from .media import (
-    CustomDebyePole,
-    CustomDrudePole,
-    CustomLorentzPole,
-    DebyePole,
-    DiagonalTensor3,
-    DielectricBreakdown,
-    DrudePole,
-    Graphene,
-    GyromagneticFerrite,
-    LorentzPole,
-    LossyMetalMedium,
-    Material,
-    Medium2D,
-    ModulationSpec,
-    NonlinearSusceptibility,
-    TensorNonlinearSusceptibility,
-    PerturbationMedium,
-    RationalSurfaceImpedance,
-    SurfaceImpedanceMedium,
-    SurfaceImpedanceModel,
-    Tensor3x3,
-    ComplexTensor3x3,
-    TwoPhotonAbsorption,
-)
-from .roughness import (
-    GroisseRoughness,
-    HammerstadRoughness,
-    HurayRoughness,
-    SurfaceRoughness,
-)
-from .monitors import (
-    BreakdownMonitor,
-    ClosedSurfaceMonitor,
-    ComponentStressMonitor,
-    DiffractionMonitor,
-    DipoleEmissionMonitor,
-    FieldTimeMonitor,
-    FinitePlaneMonitor,
-    FluxMonitor,
-    FluxTimeMonitor,
-    IncidentPowerDensityMonitor,
-    MediumMonitor,
-    ModeMonitor,
-    PermittivityMonitor,
-    PlaneMonitor,
-    PointMonitor,
-    PowerLossMonitor,
-    WireMonitor,
-)
-from .monitors import (
-    AngleProjectionMonitor,
-    AstigmaticGaussianOverlapMonitor,
-    AuxFieldTimeMonitor,
-    CartesianProjectionMonitor,
-    GaussianOverlapMonitor,
-    KSpaceProjectionMonitor,
-    SurfaceFieldTimeMonitor,
-)
-from .lumped import (
-    Capacitor,
-    CoaxialLumpedResistor,
-    Inductor,
-    ParallelRLC,
-    PortExcitation,
-    PortSweep,
-    Resistor,
-    SeriesRLC,
-)
-from .network import (
-    EmbeddedNetworkData,
-    NetworkBlock,
-    NetworkData,
-    NetworkPhysicalityReport,
-    PortData,
-    TouchstoneNetwork,
-)
-from .rational import (
-    DiscreteStateSpaceNetwork,
-    FitReport,
-    NetworkFitReport,
-    PassivityReport,
-    RationalFitConfig,
-    RationalModel,
-    StateSpaceNetwork,
-    bilinear_discretize,
-    check_sampled_passivity,
-    fit_rational,
-)
-from .touchstone import TouchstoneParseError
-from .power_loss import PowerLossData
-from .sar import (
-    AVERAGING_PROFILE,
-    PowerNormalization,
-    SARAveraging,
-    SARPeak,
-    SARResult,
-)
-from .postprocess.sar_combine import combine_coherent_sar, combine_incoherent_sar
-from .postprocess.incident_power import IncidentPowerDensity
-from .thin_wire import ThinWire, WireConductor, WireData, WireEnd
-from .ports import (
-    AxisPath,
-    CoaxialLumpedPort,
-    LumpedPort,
-    PECFrame,
-    ModePort,
-    TerminalPort,
-    TerminalRef,
-    TerminalWavePort,
-    WireNodeRef,
-    WirePortBinding,
-    WaveModeSpec,
-    WavePort,
-)
-from .terminal_waveport import TerminalWavePortApertureWarning
-from .path_integrals import (
-    AxisSegment,
-    CircleLoop,
-    CompositeCurrentIntegral,
-    CompositeVoltageIntegral,
-    CustomCurrentIntegral,
-    CustomVoltageIntegral,
-    PolygonLoop,
-    PolylinePath,
-    RectangleLoop,
-)
-from . import postprocess
-from .ports_postprocess import PortDrive, port_phasors, port_voltage, trapezoidal_impedance
-from .result import Result
-from .absorbers import InternalAbsorber, ModeABC, MurABC
+from .capability import capabilities
+# ``scene`` and the compiler import each other; the cycle resolves when the compiler loads first.
+from . import compiler as _compiler
+from witwin.core import Box, Cylinder, Mesh, Sphere, Structure
+from .geometry import PolySlab
+from .media import DebyePole, DiagonalTensor3, DrudePole, LorentzPole, Material
 from .scene import (
     BoundaryKind,
     BoundarySpec,
-    CornerFinderSpec,
     Domain,
-    GridRefinement,
     GridSpec,
-    LayerRefinementSpec,
     MaterialRegion,
-    MeshOverrideStructure,
     Scene,
     SceneModule,
     SubpixelSpec,
 )
-from .postprocess.low_frequency import LowFrequencySmoothingSpec, smooth_low_frequency
-from .sources import (
-    BasebandGaussianPulse,
-    BasebandRectangularPulse,
-    AstigmaticGaussianBeam,
-    BroadbandPulse,
-    CurrentDataset,
-    CustomCurrentSource,
-    CustomFieldSource,
-    CustomSourceTime,
-    CW,
-    FieldDataset,
-    GaussianBeam,
-    GaussianPulse,
-    ModeSource,
-    PlaneWave,
-    MaxwellPlaneModes,
-    PointDipole,
-    RickerWavelet,
-    TFSF,
-    UniformCurrentSource,
-)
-from .mom.periodic_config import MoMPeriodicConfig, MoMDyadicPeriodicConfig
-from .mom.hmatrix import HMatrixConfig
-from .mom.h2 import H2Config
-from .mom.direct_config import DirectH2Config
-from .mom.fmm_config import FMMConfig, DirectionalFMMConfig
-from .mom.pfft_config import PFFTConfig
-from .mom.preconditioning import (IdentityRightPreconditioner, LeafBlockRightPreconditioner,
-    FunctionRightPreconditioner, PreconditionerContext)
-from .mom.near_preconditioner import NearFieldRightPreconditioner
-from .mom.interpolation_error import KernelErrorBudget
-from .mom.harmonic_config import HarmonicBalanceConfig, HarmonicCutoffConfig
-from .mom.linear_volume_state import LinearCoupledConfig
-from .mom.volume_mesh import TetrahedralVolumeMesh
-from .mom.efie_open import OpenSurfaceConfig
-from .mom.layered.config import AdaptiveSweep, LayeredSurfaceConfig
-from .mom.layered.process import LayerMap, ProcessStack, ViaMap
-from .mom.layered.sweep import AdaptiveSweepResult
-from .layers import HalfSpace, Layer, LayerStack
-from .mom.efie_preconditioning import CalderonPreconditioner
-from .simulation import (
-    AbsorberKind,
-    FDFDConfig,
-    FDTDConfig,
-    FDTDCoreFallbackWarning,
-    MoMConfig,
-    GMRES,
-    Simulation,
-    SimulationMethod,
-    SpectralSampler,
-    SpectralWindowKind,
-    TimeConfig,
-    run,
-)
-from .mom.fields import FieldQueryConfig
-from .mom.primitive_mesh import EdgeGrading, SurfaceMeshConfig
-from .mom.dyadic_green import DyadicIntegrationConfig
-from .fdtd_parallel import FDTDParallelConfig
-from .material_cache import FDTDMaterialCache
-from .execution.batch import BatchExecution, BatchOutput, BatchParameters, BatchSimulation, BatchVariation
-from .execution.plan import BatchPlanReport
-from .execution.batch_runtime import PreparedBatch, BatchResultIterator
-from .execution.records import BatchItem, BatchResult
-from .execution import (
-    DistributedFailure,
-    ExecutionRecord,
-    FailureKind,
-    MultiGPUExecution,
-    ResultSequence,
-    run_many,
-)
-from .array_gradient import (
-    AggregatedSceneGradient,
-    aggregate_scene_gradient_vjp,
-    ensemble_scene_gradient_vjp,
-)
-from .fdtd.resume import FDTDResumeCheckpoint
+from .sources import CW, GaussianBeam, GaussianPulse, ModeSource, PlaneWave, PointDipole, TFSF, UniformCurrentSource
+from .monitors import FinitePlaneMonitor, FluxMonitor, ModeMonitor, PlaneMonitor, PointMonitor
+from .ports import AxisPath, LumpedPort, ModePort
+# The layered feature group loads before ``simulation`` loads ``mom.runtime``, the order the
+# consumer-metadata bridge's import probe was receipted with.
+from .mom import layered as _layered  # noqa: F401
+
+from .simulation import FDFDConfig, FDTDConfig, Simulation, SimulationMethod, TimeConfig
+from .result import Result
+from .results import FarFieldData, FieldData, FluxData, ModeAmplitudeData, SParameterData
+
+from ._lazy import lazy_attributes
+# Installs the GPU mesh-distance hook into witwin.core.
+from .compiler.accel import mesh as _mesh_accelerator
 
 __all__ = [
-    "FDTDPassivityError",
-    "BendCoordinates", "FieldFrame", "FramedFieldData",
-    "CopperFoil",
-    "FDTDMaterialCache",
-    "BatchExecution",
-    "BatchOutput",
-    "BatchParameters",
-    "BatchSimulation",
-    "BatchVariation",
-    "BatchPlanReport",
-    "PreparedBatch",
-    "BatchResultIterator",
-    "BatchItem",
-    "BatchResult",
-    "AstigmaticGaussianBeam",
-    "AntennaData",
-    "AggregatedSceneGradient",
-    "aggregate_scene_gradient_vjp",
-    "ensemble_scene_gradient_vjp",
-    "ArrayBasisData",
-    "AxisPath",
-    "BoundarySpec",
-    "BoundaryKind",
-    "InternalAbsorber",
-    "ModeABC",
-    "MurABC",
-    "BeamCodebook",
-    "BeamData",
-    "BeamWeights",
-    "Box",
-    "BreakdownEvent",
-    "BreakdownResultData",
-    "ClosedSurfaceMonitor",
-    "Capacitor",
-    "Circuit",
-    "CircuitData",
-    "CircuitDevice",
-    "CircuitNode",
-    "BJT",
-    "Diode",
-    "MOSFET",
-    "NonlinearSolveConfig",
-    "PiecewiseLinearIV",
-    "PolynomialIV",
-    "VoltageDependentCapacitor",
-    "ComplexPolySlab",
-    "DiffractionMonitor",
-    "Cone",
-    "CurrentDataset",
-    "CurrentControlledCurrentSource",
-    "CurrentControlledVoltageSource",
-    "CurrentSource",
-    "CustomCurrentSource",
-    "CustomFieldSource",
-    "CW",
-    "CustomDebyePole",
-    "CustomDrudePole",
-    "CustomLorentzPole",
-    "BreakdownMonitor",
-    "BreakdownStressData",
-    "SmoothBreakdownRisk",
-    "SmoothBreakdownRiskData",
-    "ComponentRating",
-    "ComponentStressData",
-    "ComponentStressMonitor",
-    "CustomSourceTime",
-    "BasebandGaussianPulse",
-    "BasebandRectangularPulse",
-    "BroadbandPulse",
-    "CoaxialLumpedPort",
-    "CoaxialLumpedResistor",
-    "Cylinder",
-    "DebyePole",
-    "DielectricBreakdown",
-    "DipoleEmissionMonitor",
-    "Domain",
-    "DrudePole",
-    "CapacitanceData",
-    "ChargeDensity",
-    "ElectrostaticBoundarySpec",
-    "ElectrostaticInitialCondition",
-    "ElectrostaticResultData",
-    "ElectrostaticSolverConfig",
-    "ElectrostaticTerminal",
-    "TruncationEstimate",
-    "TruncationReport",
-    "Ellipsoid",
-    "ESDCurrentSource",
-    "ESDDiagnostics",
-    "ESDPortRecord",
-    "ESDResampledWaveform",
-    "ESDVoltageSource",
-    "ESDWaveform",
-    "EmbeddedElementPatternData",
-    "EmbeddedNetworkData",
-    "FieldDataset",
-    "FieldTimeMonitor",
-    "AngleProjectionMonitor",
-    "AstigmaticGaussianOverlapMonitor",
-    "AuxFieldTimeMonitor",
-    "CartesianProjectionMonitor",
-    "GaussianOverlapMonitor",
-    "KSpaceProjectionMonitor",
-    "SurfaceFieldTimeMonitor",
-    "FluxMonitor",
-    "FluxTimeMonitor",
-    "FDFDConfig",
-    "FDTDConfig",
-    "MoMConfig",
-    "OpenSurfaceConfig",
-    "LayeredSurfaceConfig",
-    "AdaptiveSweep",
-    "AdaptiveSweepResult",
-    "LayerMap",
-    "ProcessStack",
-    "ViaMap",
-    "Layer",
-    "HalfSpace",
-    "LayerStack",
-    "CalderonPreconditioner",
-    "DyadicIntegrationConfig",
-    "MoMPeriodicConfig",
-    "MoMDyadicPeriodicConfig",
-    "HMatrixConfig",
-    "H2Config",
-    "DirectH2Config",
-    "FMMConfig",
-    "DirectionalFMMConfig",
-    "PFFTConfig",
-    "IdentityRightPreconditioner",
-    "LeafBlockRightPreconditioner",
-    "NearFieldRightPreconditioner",
-    "FunctionRightPreconditioner",
-    "PreconditionerContext",
-    "KernelErrorBudget",
-    "HarmonicBalanceConfig",
-    "LinearCoupledConfig",
-    "HarmonicCutoffConfig",
-    "TetrahedralVolumeMesh",
-    "FieldQueryConfig",
-    "SurfaceMeshConfig",
-    "EdgeGrading",
-    "FDTDParallelConfig",
-    "FDTDResumeCheckpoint",
-    "FinitePlaneMonitor",
-    "IncidentPowerDensity",
-    "IncidentPowerDensityMonitor",
-    "GaussianBeam",
-    "GaussianPulse",
-    "GMRES",
-    "Graphene",
-    "GridSpec",
-    "GridRefinement",
-    "CornerFinderSpec",
-    "GyromagneticFerrite",
-    "HollowBox",
-    "LayerRefinementSpec",
-    "Inductor",
-    "LorentzPole",
-    "Ludwig3",
-    "LowFrequencySmoothingSpec",
-    "LumpedPort",
-    "PECFrame",
-    "smooth_low_frequency",
-    "LossyMetalMedium",
-    "Material",
-    "RationalSurfaceImpedance",
-    "SurfaceImpedanceMedium",
-    "SurfaceImpedanceModel",
-    "SurfaceRoughness",
-    "HammerstadRoughness",
-    "HurayRoughness",
-    "GroisseRoughness",
-    "MaterialRegion",
-    "MaxHoldComposite",
-    "MeasuredWaveform",
-    "Medium2D",
-    "MediumMonitor",
-    "Mesh",
-    "MeshOverrideStructure",
-    "MIMOData",
-    "MultipathEnvironment",
-    "ModeMonitor",
-    "ModePort",
-    "ModeSource",
-    "MNAConfig",
-    "MutualInductor",
-    "NetworkData",
-    "NetworkBlock",
-    "NetworkFitReport",
-    "NetworkPhysicalityReport",
-    "ModulationSpec",
-    "NonlinearSusceptibility",
-    "TensorNonlinearSusceptibility",
-    "PermittivityMonitor",
-    "ParallelRLC",
-    "PiecewiseLinearWaveform",
-    "PerturbationMedium",
-    "PlaneMonitor",
-    "PlaneWave",
-    "MaxwellPlaneModes",
-    "PointDipole",
-    "PointMonitor",
-    "PowerLossData",
-    "PowerLossMonitor",
-    "PowerNormalization",
-    "SARAveraging",
-    "SARResult",
-    "SARPeak",
-    "combine_coherent_sar",
-    "combine_incoherent_sar",
-    "AVERAGING_PROFILE",
-    "ThinWire",
-    "PortData",
-    "PortDrive",
-    "port_voltage",
-    "port_phasors",
-    "trapezoidal_impedance",
-    "PortBinding",
-    "PortExcitation",
-    "PortSweep",
-    "PulseWaveform",
-    "PassivityReport",
-    "PolySlab",
-    "PlanarPEC",
-    "SurfaceMesh",
-    "postprocess",
-    "Prism",
-    "Pyramid",
-    "Result",
-    "RationalFitConfig",
-    "RationalModel",
-    "Resistor",
-    "RickerWavelet",
-    "SeriesRLC",
-    "SineWaveform",
+    # errors and warnings
+    "MaxwellError",
+    "UnsupportedFeatureError",
+    "SetupError",
+    "ConvergenceError",
+    "SchemaError",
+    "CapacityError",
+    "MaxwellWarning",
+    "ExperimentalWarning",
+    # scene
     "Scene",
     "SceneModule",
-    "Simulation",
-    "FDTDCoreFallbackWarning",
-    "SimulationMethod",
-    "StateSpaceNetwork",
-    "SpectralSampler",
-    "SpectralWindowKind",
-    "Sphere",
-    "Structure",
+    "Domain",
+    "GridSpec",
+    "BoundarySpec",
+    "BoundaryKind",
     "SubpixelSpec",
-    "Tensor3x3",
-    "ComplexTensor3x3",
-    "TimeConfig",
-    "TouchstoneParseError",
-    "TouchstoneNetwork",
-    "TerminalPort",
-    "TerminalRef",
-    "TerminalWavePort",
-    "TerminalWavePortApertureWarning",
-    "AxisSegment",
-    "CircleLoop",
-    "CompositeCurrentIntegral",
-    "CompositeVoltageIntegral",
-    "CustomCurrentIntegral",
-    "CustomVoltageIntegral",
-    "PolygonLoop",
-    "PolylinePath",
-    "RectangleLoop",
-    "TimedSwitch",
-    "DiscreteStateSpaceNetwork",
-    "FitReport",
-    "bilinear_discretize",
-    "check_sampled_passivity",
-    "fit_rational",
-    "WireNodeRef",
-    "WirePortBinding",
-    "TFSF",
-    "Torus",
-    "TwoPhotonAbsorption",
-    "UniformCurrentSource",
-    "VoltageControlledCurrentSource",
-    "VoltageControlledVoltageSource",
-    "VoltageSource",
-    "WaveModeSpec",
-    "WavePort",
-    "WireConductor",
-    "WireData",
-    "WireEnd",
-    "WireMonitor",
+    "MaterialRegion",
+    "Structure",
+    "Box",
+    "Sphere",
+    "Cylinder",
+    "Mesh",
+    "PolySlab",
+    "Material",
+    "DebyePole",
+    "DrudePole",
+    "LorentzPole",
     "DiagonalTensor3",
-    "AbsorberKind",
-    "parse_spice",
-    "run",
-    "run_many",
-    "MultiGPUExecution",
-    "ResultSequence",
-    "ExecutionRecord",
-    "DistributedFailure",
-    "FailureKind",
+    # sources, monitors, ports
+    "CW",
+    "GaussianPulse",
+    "PointDipole",
+    "PlaneWave",
+    "GaussianBeam",
+    "ModeSource",
+    "TFSF",
+    "UniformCurrentSource",
+    "PointMonitor",
+    "PlaneMonitor",
+    "FinitePlaneMonitor",
+    "FluxMonitor",
+    "ModeMonitor",
+    "ModePort",
+    "LumpedPort",
+    "AxisPath",
+    # simulation
+    "Simulation",
+    "SimulationMethod",
+    "FDTDConfig",
+    "FDFDConfig",
+    "TimeConfig",
+    "capabilities",
+    # results
+    "Result",
+    "FieldData",
+    "FluxData",
+    "ModeAmplitudeData",
+    "SParameterData",
+    "FarFieldData",
 ]
 
-
-def __getattr__(name):
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-from .fdfd_response import FieldProjection, LocalDesignRegion, LocalResponseConfig
-__all__ += ["FieldProjection", "LocalDesignRegion", "LocalResponseConfig"]
-from .fdfd_response import FarFieldProjection, LumpedCurrentSource
-__all__ += ["FarFieldProjection", "LumpedCurrentSource"]
-from witwin.core import Difference, Intersection, Union
-__all__ += ["Union", "Intersection", "Difference"]
-from .dispersion_fit import (
-    DispersionFit,
-    DispersionFitReport,
-    fit_dispersion,
-    fit_dispersion_nk,
-    load_dispersion_csv,
-    permittivity_from_nk,
+_NAMESPACES = (
+    "antenna",
+    "breakdown",
+    "capability",
+    "circuits",
+    "coordinates",
+    "electrostatic",
+    "esd",
+    "execution",
+    "fdfd",
+    "fdtd",
+    "geometry",
+    "grid",
+    "invdes",
+    "io",
+    "media",
+    "mom",
+    "monitors",
+    "postprocess",
+    "rf",
+    "sar",
+    "sources",
 )
-__all__ += [
-    "DispersionFit",
-    "DispersionFitReport",
-    "fit_dispersion",
-    "fit_dispersion_nk",
-    "load_dispersion_csv",
-    "permittivity_from_nk",
-]
-from .material_library import MATERIAL_LIBRARY, MaterialLibraryEntry, library_material
-__all__ += ["MATERIAL_LIBRARY", "MaterialLibraryEntry", "library_material"]
-from .modal_sweep import ModalPortSweep, run_modal_port_sweep
-__all__ += ["ModalPortSweep", "run_modal_port_sweep"]
-from . import invdes
-__all__ += ["invdes"]
-from .compiler.accel import mesh as _mesh_accelerator
+
+__getattr__, __dir__ = lazy_attributes(__name__, modules={name: f".{name}" for name in _NAMESPACES})
+del lazy_attributes

@@ -196,15 +196,14 @@ def test_nccl_transport_without_launcher_raises_and_never_builds_p2p(monkeypatch
         domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
         grid=mw.GridSpec.uniform(0.25),
         boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
     )
-    parallel = mw.FDTDParallelConfig(
+    parallel = mw.fdtd.FDTDParallelConfig(
         devices=("cuda:0", "cuda:1"),
         transport="nccl",
     )
 
     with pytest.raises(RuntimeError, match="torchrun"):
-        DistributedFDTD(scene, frequency=1.0e9, parallel=parallel)
+        DistributedFDTD(scene, frequency=1.0e9, parallel=parallel, device="cpu")
 
 
 def test_public_simulation_nccl_transport_raises_before_solver_allocation():
@@ -225,13 +224,12 @@ def test_public_simulation_nccl_transport_raises_before_solver_allocation():
         domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
         grid=mw.GridSpec.uniform(0.25),
         boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
     )
-    parallel = mw.FDTDParallelConfig(
+    parallel = mw.fdtd.FDTDParallelConfig(
         devices=("cuda:0", "cuda:1"),
         transport="nccl",
     )
-    simulation = mw.Simulation.fdtd(scene, frequency=1.0e9, parallel=parallel)
+    simulation = mw.Simulation.fdtd(scene, frequencies=1.0e9, config=mw.FDTDConfig(parallel=parallel, device="cuda:0"))
 
     with pytest.raises(RuntimeError, match="torchrun"):
         simulation.prepare()
@@ -587,11 +585,10 @@ def test_coordinator_nccl_world_size_mismatch_raises(monkeypatch):
         domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
         grid=mw.GridSpec.uniform(0.25),
         boundary=mw.BoundarySpec.none(),
-        device="cpu",
     )
-    parallel = mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl")
+    parallel = mw.fdtd.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl")
     with pytest.raises(RuntimeError, match="does not match the configured device"):
-        DistributedFDTD(scene, frequency=1.0e9, parallel=parallel)
+        DistributedFDTD(scene, frequency=1.0e9, parallel=parallel, device="cpu")
 
 
 # -- NCCL forward fail-closed fences (host-only) --------------------------
@@ -615,7 +612,7 @@ def _set_nccl_launcher_env(monkeypatch, *, world_size=2):
 def _nccl_parallel():
     import witwin.maxwell as mw
 
-    return mw.FDTDParallelConfig(
+    return mw.fdtd.FDTDParallelConfig(
         devices=("cuda:0", "cuda:1"),
         transport="nccl",
         gather_fields=True,
@@ -632,7 +629,6 @@ def _nccl_base_scene():
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
-        device="cpu",
     )
 
 
@@ -642,24 +638,25 @@ def test_nccl_forward_rejects_monitors(monkeypatch):
 
     _set_nccl_launcher_env(monkeypatch)
     scene = _nccl_base_scene()
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",)))
+    scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",))))
 
     with pytest.raises(ValueError, match="per-monitor payload gather"):
-        DistributedFDTD(scene, frequency=1.0e9, parallel=_nccl_parallel())
+        DistributedFDTD(scene, frequency=1.0e9, parallel=_nccl_parallel(), device="cpu")
 
 
 def _coupled_wire_scene():
     import witwin.maxwell as mw
 
     scene = _nccl_base_scene()
-    scene.add_thin_wire(
-        mw.ThinWire(
+    scene = scene.updated(thin_wires=(
+        *scene.thin_wires,
+        mw.rf.ThinWire(
             name="wire",
             points=((-0.2, 0.0, 0.0), (0.2, 0.0, 0.0)),
             radius=1.0e-3,
-            conductor=mw.WireConductor.pec(),
-        )
-    )
+            conductor=mw.rf.WireConductor.pec(),
+        ),
+    ))
     return scene
 
 
@@ -667,7 +664,8 @@ def _coupled_port_scene():
     import witwin.maxwell as mw
 
     scene = _nccl_base_scene()
-    scene.add_port(
+    scene = scene.updated(ports=(
+        *scene.ports,
         mw.LumpedPort(
             name="port",
             positive=(0.0, 0.0, 0.1),
@@ -675,8 +673,8 @@ def _coupled_port_scene():
             voltage_path=mw.AxisPath("z"),
             current_surface=mw.Box(position=(0.0, 0.0, -0.05), size=(0.2, 0.2, 0.0)),
             reference_impedance=50.0,
-        )
-    )
+        ),
+    ))
     return scene
 
 
@@ -692,7 +690,7 @@ def test_nccl_forward_rejects_coupled_runtimes(monkeypatch, scene_builder):
     scene = scene_builder()
 
     with pytest.raises(ValueError, match="owner-resident circuit/network/wire/port"):
-        DistributedFDTD(scene, frequency=1.0e9, parallel=_nccl_parallel())
+        DistributedFDTD(scene, frequency=1.0e9, parallel=_nccl_parallel(), device="cpu")
 
 
 def test_nccl_forward_rejects_trainable_density(monkeypatch):
@@ -703,19 +701,20 @@ def test_nccl_forward_rejects_trainable_density(monkeypatch):
 
     _set_nccl_launcher_env(monkeypatch)
     scene = _nccl_base_scene()
-    scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
+    scene = scene.updated(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
     density = torch.rand((4, 4, 4), dtype=torch.float32, requires_grad=True)
-    scene.add_material_region(
+    scene = scene.updated(material_regions=(
+        *scene.material_regions,
         mw.MaterialRegion(
             name="design",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
             density=density,
             eps_bounds=(1.0, 4.0),
-        )
-    )
+        ),
+    ))
 
     with pytest.raises(ValueError, match="Multi-GPU NCCL adjoint"):
-        DistributedFDTD(scene, frequency=1.0e9, parallel=_nccl_parallel())
+        DistributedFDTD(scene, frequency=1.0e9, parallel=_nccl_parallel(), device="cpu")
 
 
 def test_nccl_forward_rejects_field_shutoff(monkeypatch):
@@ -725,7 +724,7 @@ def test_nccl_forward_rejects_field_shutoff(monkeypatch):
     # A fully accepted scene constructs on the host; the shutoff fence is at the top
     # of solve(), before init_field(), so it raises without any CUDA allocation.
     distributed = DistributedFDTD(
-        _nccl_base_scene(), frequency=1.0e9, parallel=_nccl_parallel()
+        _nccl_base_scene(), frequency=1.0e9, parallel=_nccl_parallel(), device="cpu"
     )
 
     with pytest.raises(ValueError, match="does not support field shutoff"):
@@ -766,9 +765,9 @@ def test_parallel_config_timeout_validation():
     import witwin.maxwell as mw
 
     with pytest.raises(ValueError, match="timeout_s must be positive"):
-        mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl", timeout_s=0.0)
+        mw.fdtd.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl", timeout_s=0.0)
     with pytest.raises(TypeError, match="timeout_s must be a number"):
-        mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl", timeout_s="soon")
+        mw.fdtd.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl", timeout_s="soon")
     # A valid positive timeout is accepted and coerced to float.
-    config = mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl", timeout_s=30)
+    config = mw.fdtd.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl", timeout_s=30)
     assert config.timeout_s == 30.0

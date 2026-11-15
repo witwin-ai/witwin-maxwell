@@ -10,7 +10,7 @@ from witwin.maxwell.mom.dyadic_green import DyadicIntegrationConfig
 from witwin.maxwell.mom.fields import FieldQueryConfig
 from witwin.maxwell.mom.harmonic_material import compile_harmonic_material,compile_tensor_harmonic_material
 from witwin.maxwell.mom.tensor_harmonic_preparation import prepare_mixed_tensor_harmonic_balance
-from witwin.maxwell.mom.harmonic_state import preparation_signature,recover_harmonic_state
+from witwin.maxwell.mom.harmonic_recovery import preparation_signature,recover_harmonic_state
 
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
 
@@ -21,9 +21,9 @@ def test_actual_mixed_harmonic_model_generates_dc_and_second_harmonic(monkeypatc
     linear=TetrahedralVolumeMesh(vertices,cells,region_id=1)
     nonlinear=TetrahedralVolumeMesh(vertices+vertices.new_tensor([.2,0.,0.]),cells,region_id=2)
     tensor=compile_tensor_harmonic_material(mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.,2.,2.),mu_r=1.3),3e8,2,device='cuda')
-    scalar=compile_harmonic_material(mw.Material(eps_r=2.,nonlinearity=mw.NonlinearSusceptibility(chi2=.002,chi3=.001)),3e8,2)
+    scalar=compile_harmonic_material(mw.Material(eps_r=2.,nonlinearity=mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001)),3e8,2)
     exterior=compile_harmonic_material(mw.Material(),3e8,2)
-    config=mw.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),
+    config=mw.mom.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),
         dyadic_integration=DyadicIntegrationConfig(),riesz_storage='compact_rwg_v1')
     operators=tuple(SystemOperator(SurfaceSystem.create([
         (0,'linear',RWGBasis(linear.boundary),tensor.linear_samples[n]),

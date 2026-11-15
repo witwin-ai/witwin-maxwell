@@ -28,45 +28,45 @@ def _classic_huray(delta, radius, surface_ratio, relative_area=1.0):
 
 
 _ROUGH_MODELS = [
-    mw.HammerstadRoughness(rms_height=1.0e-6),
-    mw.HurayRoughness.cannonball(0.5e-6),
-    mw.HurayRoughness(sphere_radius=0.4e-6, sphere_density=1.5e11, relative_area=1.3),
+    mw.media.HammerstadRoughness(rms_height=1.0e-6),
+    mw.media.HurayRoughness.cannonball(0.5e-6),
+    mw.media.HurayRoughness(sphere_radius=0.4e-6, sphere_density=1.5e11, relative_area=1.3),
 ]
 
 
 def test_exports_and_validation():
-    assert issubclass(mw.HammerstadRoughness, mw.SurfaceRoughness)
-    assert issubclass(mw.HurayRoughness, mw.SurfaceRoughness)
-    assert issubclass(mw.GroisseRoughness, mw.SurfaceRoughness)
+    assert issubclass(mw.media.HammerstadRoughness, mw.media.SurfaceRoughness)
+    assert issubclass(mw.media.HurayRoughness, mw.media.SurfaceRoughness)
+    assert issubclass(mw.media.GroisseRoughness, mw.media.SurfaceRoughness)
     with pytest.raises(ValueError):
-        mw.HammerstadRoughness(rms_height=0.0)
+        mw.media.HammerstadRoughness(rms_height=0.0)
     with pytest.raises(ValueError):
-        mw.HammerstadRoughness(rms_height=1e-6, roughness_factor=1.0)
+        mw.media.HammerstadRoughness(rms_height=1e-6, roughness_factor=1.0)
     with pytest.raises(ValueError):
-        mw.HurayRoughness(sphere_radius=1e-6, sphere_density=-1.0)
+        mw.media.HurayRoughness(sphere_radius=1e-6, sphere_density=-1.0)
     with pytest.raises(ValueError):
-        mw.GroisseRoughness(rms_height=float("nan"))
+        mw.media.GroisseRoughness(rms_height=float("nan"))
     with pytest.raises(TypeError):
-        mw.LossyMetalMedium(conductivity=_SIGMA, roughness=2.0)
+        mw.media.LossyMetalMedium(conductivity=_SIGMA, roughness=2.0)
     with pytest.raises(ValueError):
-        mw.HammerstadRoughness(rms_height=1e-6).impedance_factor(torch.tensor([0.0], dtype=torch.float64))
-    model = mw.HammerstadRoughness(rms_height=1e-6)
+        mw.media.HammerstadRoughness(rms_height=1e-6).impedance_factor(torch.tensor([0.0], dtype=torch.float64))
+    model = mw.media.HammerstadRoughness(rms_height=1e-6)
     with pytest.raises(Exception):
         model.rms_height = 2e-6  # frozen
-    assert mw.LossyMetalMedium(conductivity=_SIGMA).roughness is None
+    assert mw.media.LossyMetalMedium(conductivity=_SIGMA).roughness is None
 
 
 def test_hammerstad_loss_factor_is_exactly_the_classic_formula():
-    model = mw.HammerstadRoughness(rms_height=1.0e-6)
+    model = mw.media.HammerstadRoughness(rms_height=1.0e-6)
     ratio = torch.logspace(-3, 3, 241, dtype=torch.float64)
     delta = model.rms_height / ratio
     torch.testing.assert_close(model.loss_factor(delta), _classic_hammerstad(ratio), rtol=1e-12, atol=0)
-    triple = mw.HammerstadRoughness(rms_height=1.0e-6, roughness_factor=3.0)
+    triple = mw.media.HammerstadRoughness(rms_height=1.0e-6, roughness_factor=3.0)
     torch.testing.assert_close(triple.loss_factor(delta), _classic_hammerstad(ratio, 3.0), rtol=1e-12, atol=0)
 
 
 def test_hammerstad_limits():
-    model = mw.HammerstadRoughness(rms_height=1.0e-6)
+    model = mw.media.HammerstadRoughness(rms_height=1.0e-6)
     # Rq/delta -> 0: smooth conductor.
     small = model.impedance_factor(torch.tensor([1.0e-2], dtype=torch.float64))  # delta = 1 cm >> Rq
     assert abs(complex(small[0]) - 1.0) < 1e-3
@@ -85,7 +85,7 @@ def test_hammerstad_limits():
 
 def test_huray_matches_hand_computed_value():
     radius = 0.5e-6
-    model = mw.HurayRoughness.cannonball(radius)
+    model = mw.media.HurayRoughness.cannonball(radius)
     assert model.surface_ratio == pytest.approx(14.0 * math.pi / 9.0, rel=1e-14)
     # At delta == r: denominator 1 + (1 + i)/2, so K = 1 + f (0.9 - 0.3 i) and the loss
     # ratio is 1 + f / (1 + 1 + 1/2) * 3/2 = 1 + 0.6 f = 1 + 14 pi / 15.
@@ -97,9 +97,9 @@ def test_huray_matches_hand_computed_value():
 
 
 def test_huray_loss_factor_is_exactly_the_classic_formula_and_limits():
-    model = mw.HurayRoughness(sphere_radius=0.4e-6, sphere_density=1.5e11, relative_area=1.3)
+    model = mw.media.HurayRoughness(sphere_radius=0.4e-6, sphere_density=1.5e11, relative_area=1.3)
     assert model.surface_ratio == pytest.approx(1.5e11 * 4.0 * math.pi * 0.16e-12)
-    same = mw.HurayRoughness.from_surface_ratio(0.4e-6, model.surface_ratio, relative_area=1.3)
+    same = mw.media.HurayRoughness.from_surface_ratio(0.4e-6, model.surface_ratio, relative_area=1.3)
     assert same.sphere_density == pytest.approx(model.sphere_density, rel=1e-14)
     delta = torch.logspace(-9, -3, 241, dtype=torch.float64)
     expected = _classic_huray(delta, 0.4e-6, model.surface_ratio, 1.3)
@@ -110,12 +110,12 @@ def test_huray_loss_factor_is_exactly_the_classic_formula_and_limits():
     assert abs(low - 1.3) < 1e-5
     high = complex(model.impedance_factor(torch.tensor([1.0e-14], dtype=torch.float64))[0])
     assert abs(high - (1.3 + 1.5 * model.surface_ratio)) < 1e-6
-    smooth_base = mw.HurayRoughness(sphere_radius=1.0e-12, sphere_density=1.0e20)
+    smooth_base = mw.media.HurayRoughness(sphere_radius=1.0e-12, sphere_density=1.0e20)
     assert abs(complex(smooth_base.impedance_factor(torch.tensor([1.0e-3], dtype=torch.float64))[0]) - 1.0) < 1e-7
 
 
 def test_groisse_formula_and_limits():
-    model = mw.GroisseRoughness(rms_height=1.0e-6)
+    model = mw.media.GroisseRoughness(rms_height=1.0e-6)
     assert not model.causal
     at = complex(model.impedance_factor(torch.tensor([2.0e-6], dtype=torch.float64))[0])
     assert at == pytest.approx(1.0 + math.exp(-1.0), rel=1e-14)
@@ -126,16 +126,16 @@ def test_groisse_formula_and_limits():
 
 def test_causal_factors_add_internal_reactance():
     # A causal complex correction must add internal reactance as well as resistance.
-    for model in (mw.HammerstadRoughness(rms_height=1e-6), mw.HurayRoughness.cannonball(0.5e-6)):
+    for model in (mw.media.HammerstadRoughness(rms_height=1e-6), mw.media.HurayRoughness.cannonball(0.5e-6)):
         assert model.causal
         factor = model.impedance_factor(torch.tensor([1.0e-6], dtype=torch.float64))
         assert float(factor.imag[0]) < 0.0
 
 
-@pytest.mark.parametrize("roughness", _ROUGH_MODELS + [mw.GroisseRoughness(rms_height=1e-6)])
+@pytest.mark.parametrize("roughness", _ROUGH_MODELS + [mw.media.GroisseRoughness(rms_height=1e-6)])
 def test_lossy_metal_applies_roughness_to_complex_impedance(roughness):
-    smooth = mw.LossyMetalMedium(conductivity=_SIGMA)
-    rough = mw.LossyMetalMedium(conductivity=_SIGMA, roughness=roughness)
+    smooth = mw.media.LossyMetalMedium(conductivity=_SIGMA)
+    rough = mw.media.LossyMetalMedium(conductivity=_SIGMA, roughness=roughness)
     frequencies = torch.logspace(8, 11, 13, dtype=torch.float64)
     for frequency in frequencies.tolist():
         z_smooth = smooth.surface_impedance_at_freq(frequency)
@@ -157,16 +157,16 @@ def test_lossy_metal_applies_roughness_to_complex_impedance(roughness):
 
 # Rough models inside the validated broadband envelope (refit direct-term ratio <= 3.1).
 _BROADBAND_MODELS = [
-    mw.HammerstadRoughness(rms_height=1.0e-6),
-    mw.HammerstadRoughness(rms_height=1.0e-6, roughness_factor=3.0),
-    mw.HurayRoughness(sphere_radius=0.4e-6, sphere_density=1.5e11, relative_area=1.3),
+    mw.media.HammerstadRoughness(rms_height=1.0e-6),
+    mw.media.HammerstadRoughness(rms_height=1.0e-6, roughness_factor=3.0),
+    mw.media.HurayRoughness(sphere_radius=0.4e-6, sphere_density=1.5e11, relative_area=1.3),
 ]
 
 
 @pytest.mark.parametrize("roughness", [None] + _BROADBAND_MODELS)
 @pytest.mark.parametrize("representation", ["Y", "Z"])
 def test_rational_fit_matches_analytic_rough_impedance_and_is_passive(roughness, representation):
-    metal = mw.LossyMetalMedium(conductivity=_SIGMA, roughness=roughness)
+    metal = mw.media.LossyMetalMedium(conductivity=_SIGMA, roughness=roughness)
     model = metal.rational_surface_impedance(_BAND, order=6, representation=representation)
     assert model.passivity.passive and model.passivity.certified
     dense = torch.logspace(math.log10(_BAND[0]), math.log10(_BAND[1]), 1601, dtype=torch.float64)
@@ -189,9 +189,9 @@ def test_rational_fit_matches_analytic_rough_impedance_and_is_passive(roughness,
 
 
 def test_rough_fit_carries_the_roughness_loss():
-    smooth = mw.LossyMetalMedium(conductivity=_SIGMA)
-    roughness = mw.HammerstadRoughness(rms_height=1.0e-6)
-    rough = mw.LossyMetalMedium(conductivity=_SIGMA, roughness=roughness)
+    smooth = mw.media.LossyMetalMedium(conductivity=_SIGMA)
+    roughness = mw.media.HammerstadRoughness(rms_height=1.0e-6)
+    rough = mw.media.LossyMetalMedium(conductivity=_SIGMA, roughness=roughness)
     f = torch.tensor([10.0e9], dtype=torch.float64)
     ratio = rough.rational_surface_impedance(_BAND).surface_impedance(f).real / smooth.rational_surface_impedance(_BAND).surface_impedance(f).real
     assert float(ratio[0]) == pytest.approx(rough.roughness_loss_factor(10.0e9), rel=3e-3)
@@ -199,10 +199,10 @@ def test_rough_fit_carries_the_roughness_loss():
 
 
 def test_rational_fit_fails_closed():
-    metal = mw.LossyMetalMedium(conductivity=_SIGMA, roughness=mw.GroisseRoughness(rms_height=1e-6))
+    metal = mw.media.LossyMetalMedium(conductivity=_SIGMA, roughness=mw.media.GroisseRoughness(rms_height=1e-6))
     with pytest.raises(ValueError, match="non-causal"):
         metal.rational_surface_impedance(_BAND)
-    hammerstad = mw.LossyMetalMedium(conductivity=_SIGMA, roughness=mw.HammerstadRoughness(rms_height=1e-6))
+    hammerstad = mw.media.LossyMetalMedium(conductivity=_SIGMA, roughness=mw.media.HammerstadRoughness(rms_height=1e-6))
     with pytest.raises((ValueError, RuntimeError)):
         hammerstad.rational_surface_impedance(_BAND, order=2)
     with pytest.raises(ValueError, match="representation"):
@@ -213,14 +213,14 @@ def test_rational_fit_fails_closed():
     "sigma,band,roughness",
     [
         # Diverged in the broadband surface update at 45 and 60 cells/wavelength.
-        (50.0, (0.5e9, 5.0e9), mw.HurayRoughness.cannonball(0.3e-3)),
-        (50.0, (0.5e9, 5.0e9), mw.HurayRoughness.cannonball(0.1e-3)),
+        (50.0, (0.5e9, 5.0e9), mw.media.HurayRoughness.cannonball(0.3e-3)),
+        (50.0, (0.5e9, 5.0e9), mw.media.HurayRoughness.cannonball(0.1e-3)),
         # Saturating copper Huray: refit direct-term ratio ~8.2, outside the envelope.
-        (_SIGMA, _BAND, mw.HurayRoughness.cannonball(0.5e-6)),
+        (_SIGMA, _BAND, mw.media.HurayRoughness.cannonball(0.5e-6)),
     ],
 )
 def test_broadband_fit_rejects_rough_surfaces_outside_the_validated_envelope(sigma, band, roughness):
-    metal = mw.LossyMetalMedium(conductivity=sigma, roughness=roughness)
+    metal = mw.media.LossyMetalMedium(conductivity=sigma, roughness=roughness)
     with pytest.raises(ValueError, match="narrowband surface"):
         metal.rational_surface_impedance(band)
     # The narrowband surface stays available for the same rough conductor.
@@ -229,20 +229,20 @@ def test_broadband_fit_rejects_rough_surfaces_outside_the_validated_envelope(sig
 
 @pytest.mark.parametrize(
     "roughness",
-    [mw.HammerstadRoughness(rms_height=1.5e-3), mw.HammerstadRoughness(rms_height=1.5e-3, roughness_factor=3.0)],
+    [mw.media.HammerstadRoughness(rms_height=1.5e-3), mw.media.HammerstadRoughness(rms_height=1.5e-3, roughness_factor=3.0)],
 )
 def test_broadband_fit_accepts_the_validated_stable_cases(roughness):
     # FDTD-stable at 45 and 60 cells/wavelength (refit direct-term ratios 2.01 and 3.04).
-    metal = mw.LossyMetalMedium(conductivity=50.0, roughness=roughness)
+    metal = mw.media.LossyMetalMedium(conductivity=50.0, roughness=roughness)
     model = metal.rational_surface_impedance((0.5e9, 5.0e9))
     assert model.passivity.passive and model.passivity.certified
 
 
 def test_rough_rational_model_builds_a_surface_impedance_medium():
-    metal = mw.LossyMetalMedium(
+    metal = mw.media.LossyMetalMedium(
         conductivity=_SIGMA,
-        roughness=mw.HurayRoughness(sphere_radius=0.4e-6, sphere_density=1.5e11, relative_area=1.3),
+        roughness=mw.media.HurayRoughness(sphere_radius=0.4e-6, sphere_density=1.5e11, relative_area=1.3),
     )
-    medium = mw.SurfaceImpedanceMedium(impedance=metal.rational_surface_impedance(_BAND))
+    medium = mw.media.SurfaceImpedanceMedium(impedance=metal.rational_surface_impedance(_BAND))
     assert medium.is_surface_impedance
     assert medium.frequency_range == _BAND

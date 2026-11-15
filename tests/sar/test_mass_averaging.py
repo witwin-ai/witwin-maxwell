@@ -109,7 +109,7 @@ def test_uniform_one_gram_cube_exact_size_and_mass():
     inputs = _uniform_grid_inputs(n=11, dx=0.1, rho=1000.0, q=2.0)
     m0 = 27.0
     averaged, peaks = compute_mass_averaged_sar(
-        mw.SARAveraging(mass=(m0,)), **inputs
+        mw.sar.SARAveraging(mass=(m0,)), **inputs
     )
     peak = peaks[m0]
     assert float(peak.mass_kg[0]) == pytest.approx(27.0, rel=1e-6)
@@ -138,7 +138,7 @@ def test_prefix_matches_bruteforce_random():
                                   frequencies=(1.0e9, 2.4e9))
     for m0, min_frac in ((5.0, 0.1), (12.0, 0.0), (20.0, 0.3)):
         averaged, _ = compute_mass_averaged_sar(
-            mw.SARAveraging(mass=(m0,), min_tissue_fraction=min_frac), **inputs
+            mw.sar.SARAveraging(mass=(m0,), min_tissue_fraction=min_frac), **inputs
         )
         ref_avg, ref_mass, ref_hw = _brute_force_average(inputs, m0, min_frac)
         got = averaged[m0]["sar"].detach().cpu().numpy()
@@ -161,7 +161,7 @@ def test_peak_monotonic_in_mass():
     q = (gx[:, None, None] * gx[None, :, None] * gx[None, None, :])[None]  # [1,n,n,n]
     inputs = _uniform_grid_inputs(n=n, dx=0.1, rho=1000.0, q=q)
     _, peaks = compute_mass_averaged_sar(
-        mw.SARAveraging(mass=(1.0, 10.0)), **inputs
+        mw.sar.SARAveraging(mass=(1.0, 10.0)), **inputs
     )
     peak_1 = float(peaks[1.0].sar[0])
     peak_10 = float(peaks[10.0].sar[0])
@@ -183,7 +183,7 @@ def test_two_material_halfspace_average_is_mass_weighted():
     inputs = _uniform_grid_inputs(n=n, dx=dx, rho=rho, q=q)
     # Target mass forces a 3x3x3 cube (h=1) even in the rho=2000 region.
     m0 = 3.0  # small enough that h=1 in either region reaches it
-    averaged, _ = compute_mass_averaged_sar(mw.SARAveraging(mass=(m0,)), **inputs)
+    averaged, _ = compute_mass_averaged_sar(mw.sar.SARAveraging(mass=(m0,)), **inputs)
     center = (4, 4, 4)  # on the interface plane index n//2 = 4
     sl = (slice(3, 6), slice(3, 6), slice(3, 6))
     vol = dx ** 3
@@ -201,7 +201,7 @@ def test_partial_occupancy_uses_effective_mass():
     rho = torch.full((n, n, n), 1000.0)  # effective (already occupancy-weighted)
     inputs = _uniform_grid_inputs(n=n, dx=0.1, rho=rho, q=1.0, occupancy=occ)
     m0 = 1.0
-    averaged, peaks = compute_mass_averaged_sar(mw.SARAveraging(mass=(m0,)), **inputs)
+    averaged, peaks = compute_mass_averaged_sar(mw.sar.SARAveraging(mass=(m0,)), **inputs)
     # mass_cell = rho*V = 1000*0.001 = 1 kg. A single cell already reaches 1 kg,
     # but min_tissue_fraction default 0.1 <= 0.5 so it stays valid.
     peak = peaks[m0]
@@ -223,17 +223,17 @@ def test_min_tissue_fraction_rejects_air_makeup():
     inputs = _uniform_grid_inputs(n=n, dx=0.1, rho=rho, q=q, occupancy=occ, valid=valid)
     # mass_cell of the tissue cell = 1 kg. Ask for 4 kg -> needs a cube reaching 4
     # kg, impossible (only one tissue cell) -> unreachable -> invalid regardless.
-    averaged, _ = compute_mass_averaged_sar(mw.SARAveraging(mass=(4.0,)), **inputs)
+    averaged, _ = compute_mass_averaged_sar(mw.sar.SARAveraging(mass=(4.0,)), **inputs)
     assert bool(torch.all(torch.isnan(averaged[4.0]["sar"])))
     # A reachable mass (1 kg = the single cell, h=0) stays valid (fraction 1.0).
-    averaged1, _ = compute_mass_averaged_sar(mw.SARAveraging(mass=(1.0,)), **inputs)
+    averaged1, _ = compute_mass_averaged_sar(mw.sar.SARAveraging(mass=(1.0,)), **inputs)
     assert bool(averaged1[1.0]["valid"][4, 4, 4])
     # Now force h=1 by asking 1.0 kg but zero out the center's own mass fraction
     # via a low fill: a cube of mostly-air fails the fraction gate.
     occ2 = torch.full((n, n, n), 0.05)  # 5% fill everywhere < default 0.1
     rho2 = torch.full((n, n, n), 50.0)  # effective density (0.05 * 1000)
     inputs2 = _uniform_grid_inputs(n=n, dx=0.1, rho=rho2, q=1.0, occupancy=occ2)
-    averaged2, _ = compute_mass_averaged_sar(mw.SARAveraging(mass=(0.5,)), **inputs2)
+    averaged2, _ = compute_mass_averaged_sar(mw.sar.SARAveraging(mass=(0.5,)), **inputs2)
     assert bool(torch.all(torch.isnan(averaged2[0.5]["sar"])))
 
 
@@ -243,7 +243,7 @@ def test_unreachable_mass_marks_invalid():
     # most (2*3+1)^3=343 only from the exact center; ask for more than any interior
     # cube can hold -> all invalid.
     huge = 1.0e6
-    averaged, peaks = compute_mass_averaged_sar(mw.SARAveraging(mass=(huge,)), **inputs)
+    averaged, peaks = compute_mass_averaged_sar(mw.sar.SARAveraging(mass=(huge,)), **inputs)
     assert bool(torch.all(torch.isnan(averaged[huge]["sar"])))
     assert bool(torch.isnan(peaks[huge].sar[0]))
     assert int(peaks[huge].cube_half_width[0]) == -1
@@ -252,7 +252,7 @@ def test_unreachable_mass_marks_invalid():
 def test_strict_interior_boundary_invalidates_clipped_centers():
     inputs = _uniform_grid_inputs(n=11, dx=0.1, rho=1000.0, q=1.0)
     m0 = 27.0  # needs h=1
-    averaged, _ = compute_mass_averaged_sar(mw.SARAveraging(mass=(m0,)), **inputs)
+    averaged, _ = compute_mass_averaged_sar(mw.sar.SARAveraging(mass=(m0,)), **inputs)
     valid = averaged[m0]["valid"]
     # Every face cell cannot host an h=1 cube.
     assert not bool(valid[0].any())
@@ -278,7 +278,7 @@ def test_grid_convergence_of_peak_averaged_sar():
         g = torch.exp(-((centers - c) ** 2) / (2 * sig ** 2))
         q = (g[:, None, None] * g[None, :, None] * g[None, None, :])[None]
         inputs = _uniform_grid_inputs(n=n, dx=dx, rho=rho, q=q)
-        _, peaks = compute_mass_averaged_sar(mw.SARAveraging(mass=(m0,)), **inputs)
+        _, peaks = compute_mass_averaged_sar(mw.sar.SARAveraging(mass=(m0,)), **inputs)
         return float(peaks[m0].sar[0])
 
     p = [peak_at(n) for n in (16, 24, 40)]
@@ -293,7 +293,7 @@ def test_averaged_sar_is_differentiable():
     n = 9
     q = torch.rand(1, n, n, n, requires_grad=True)
     inputs = _uniform_grid_inputs(n=n, dx=0.1, rho=1000.0, q=q)
-    averaged, _ = compute_mass_averaged_sar(mw.SARAveraging(mass=(3.0,)), **inputs)
+    averaged, _ = compute_mass_averaged_sar(mw.sar.SARAveraging(mass=(3.0,)), **inputs)
     sar = averaged[3.0]["sar"]
     objective = torch.nan_to_num(sar, nan=0.0).sum()
     objective.backward()
@@ -312,25 +312,24 @@ def _uniform_cube_result(*, dx=0.1, sigma=0.5, rho=1000.0, e0=2.0,
     from witwin.maxwell.compiler.power_loss import compile_power_loss_monitor
 
     material = mw.Material(sigma_e=sigma, mass_density=rho, name="tissue")
+    monitor = mw.monitors.PowerLossMonitor(
+        "loss", position=(1.0, 1.0, 1.0), size=(1.0, 1.0, 1.0),
+        frequencies=frequencies, channels=("conduction",),
+    )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 2.0),) * 3),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.none(),
-        structures=(
+                domain=mw.Domain(bounds=((0.0, 2.0),) * 3),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
             mw.Structure(
                 name="bulk",
                 geometry=mw.Box(position=(1.0, 1.0, 1.0), size=(8.0, 8.0, 8.0)),
                 material=material,
             ),
-        ),
-        device=device,
-    )
-    monitor = mw.PowerLossMonitor(
-        "loss", position=(1.0, 1.0, 1.0), size=(1.0, 1.0, 1.0),
-        frequencies=frequencies, channels=("conduction",),
-    )
-    scene.add_monitor(monitor)
-    prepared = prepare_scene(scene)
+            ),
+                monitors=(monitor,),
+            )
+    prepared = prepare_scene(scene, device=device)
     compiled = compile_power_loss_monitor(prepared, monitor)
     fields = {}
     for component in ("Ex", "Ey", "Ez"):
@@ -346,19 +345,19 @@ def _uniform_cube_result(*, dx=0.1, sigma=0.5, rho=1000.0, e0=2.0,
 def test_result_sar_peak_matches_point_analytic_for_uniform_field():
     result, params = _uniform_cube_result()
     m0 = params["rho"] * (0.3) ** 3  # 3x3x3 cube at dx=0.1
-    sar = result.sar("loss", averaging=mw.SARAveraging(mass=(m0,)))
+    sar = mw.sar.sar(result, "loss", averaging=mw.sar.SARAveraging(mass=(m0,)))
     analytic = 0.5 * params["sigma"] * (3.0 * params["e0"] ** 2) / params["rho"]
     peak = sar.peak(m0)
     assert float(peak.sar[0]) == pytest.approx(analytic, rel=1e-4)
     assert int(peak.cube_half_width[0]) == 1
     assert float(peak.mass_kg[0]) == pytest.approx(m0, rel=1e-4)
     assert peak.position.shape == (1, 3)
-    assert peak.profile == mw.AVERAGING_PROFILE
+    assert peak.profile is mw.sar.AveragingProfile.CUBICAL_PREFIX_V1
 
 
 def test_peak_requires_averaging_request():
     result, _ = _uniform_cube_result()
-    sar = result.sar("loss")  # no averaging
+    sar = mw.sar.sar(result, "loss")  # no averaging
     with pytest.raises(ValueError, match="No mass-averaged peak"):
         sar.peak(1e-3)
     with pytest.raises(ValueError, match="No mass-averaged SAR field"):
@@ -368,7 +367,7 @@ def test_peak_requires_averaging_request():
 def test_peak_unknown_mass_fails_closed():
     result, params = _uniform_cube_result()
     m0 = params["rho"] * (0.3) ** 3
-    sar = result.sar("loss", averaging=mw.SARAveraging(mass=(m0,)))
+    sar = mw.sar.sar(result, "loss", averaging=mw.sar.SARAveraging(mass=(m0,)))
     with pytest.raises(KeyError, match="No mass-averaged SAR for mass"):
         sar.peak(999.0)
 
@@ -376,10 +375,10 @@ def test_peak_unknown_mass_fails_closed():
 def test_averaged_and_peaks_serialization_roundtrip(tmp_path):
     result, params = _uniform_cube_result(frequencies=(1.0e9, 2.0e9))
     m0 = params["rho"] * (0.3) ** 3
-    sar = result.sar("loss", averaging=mw.SARAveraging(mass=(m0, 5 * m0)))
+    sar = mw.sar.sar(result, "loss", averaging=mw.sar.SARAveraging(mass=(m0, 5 * m0)))
     path = tmp_path / "sar_avg.pt"
     sar.save(path)
-    loaded = mw.SARResult.load(path)
+    loaded = mw.sar.SARResult.load(path)
 
     assert set(loaded.averaging_masses) == set(sar.averaging_masses)
     a = sar.averaged_sar(m0)
@@ -399,6 +398,6 @@ def test_averaged_and_peaks_serialization_roundtrip(tmp_path):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_averaging_stays_on_cuda_device():
     inputs = _uniform_grid_inputs(n=11, dx=0.1, rho=1000.0, q=1.0, device="cuda")
-    averaged, peaks = compute_mass_averaged_sar(mw.SARAveraging(mass=(27.0,)), **inputs)
+    averaged, peaks = compute_mass_averaged_sar(mw.sar.SARAveraging(mass=(27.0,)), **inputs)
     assert averaged[27.0]["sar"].device.type == "cuda"
     assert peaks[27.0].sar.device.type == "cuda"

@@ -18,8 +18,10 @@ from __future__ import annotations
 import time
 
 import torch
+from .._stability import experimental
 
 
+@experimental("mom")
 class PreconditionerContext:
     """Read-only preparation view of one prepared scalar MoM operator.
 
@@ -139,12 +141,14 @@ class PreconditionerContext:
         return self.handle.apply(value)
 
 
+@experimental("mom")
 class IdentityRightPreconditioner:
     """P = I; flexible GMRES then reproduces unpreconditioned GMRES iterates."""
     def bind(self, context):
         return _Bound(lambda residual: residual.clone(), {'version': 'identity_right_preconditioner_v1'})
 
 
+@experimental("mom")
 class LeafBlockRightPreconditioner:
     """Block Jacobi: LU of original principal blocks over disjoint support-tree leaves.
 
@@ -200,6 +204,7 @@ class LeafBlockRightPreconditioner:
                               'block_source': context.backend})
 
 
+@experimental("mom")
 class FunctionRightPreconditioner:
     """Adapter for a plain callable ``factory(context) -> apply(residual) -> correction``."""
     def __init__(self, factory, *, name='user_function'):

@@ -43,12 +43,12 @@ def main():
         if input_bound and digest(path) != original['input_sha256']:
             raise ValueError('The original enclosing-surface input changed.')
         definition = json.loads(path.read_text())
-        scene = import_pcb_scene(definition, frequency=2.45e9, device=args.device)
-        scene = scene.clone(monitors=power_observations(definition, scene, 2.45e9))
+        scene = import_pcb_scene(definition, frequency=2.45e9)
+        scene = scene.updated(monitors=power_observations(definition, scene, 2.45e9))
         result_path = args.surface_report.parent/'result.pt'
         result_hash = digest(result_path)
         result = mw.Result.load(result_path, scene=scene, map_location=args.device)
-        bulk = float(result.power_loss('bulk_loss').conduction[0])
+        bulk = float(result.monitor('bulk_loss').conduction[0])
         port = result.port(scene.ports[0].name)
         port_values = {key: {'real': value.real.detach().cpu().tolist(),
                              'imag': value.imag.detach().cpu().tolist()}
@@ -85,15 +85,15 @@ def main():
         if digest(path) != row['input_sha256']:
             raise ValueError('The original application input changed.')
         definition = json.loads(path.read_text())
-        scene = import_pcb_scene(definition, frequency=row['frequency_hz'], device=args.device,
+        scene = import_pcb_scene(definition, frequency=row['frequency_hz'],
             selected_conductors=row['selected_conductor_ids'])
-        scene = scene.clone(monitors=power_observations(definition, scene, row['frequency_hz']))
+        scene = scene.updated(monitors=power_observations(definition, scene, row['frequency_hz']))
         outputs = []
         for label in ('direct', 'adapter'):
             result_path = args.campaign.parent/f"{row['family']}-{label}.pt"
             result_hash = digest(result_path)
             result = mw.Result.load(result_path, scene=scene, map_location=args.device)
-            loss = result.power_loss('bulk_loss').conduction
+            loss = result.monitor('bulk_loss').conduction
             outputs.append(loss.detach().cpu())
             if digest(result_path) != result_hash:
                 raise RuntimeError('The retained result changed during reduction.')

@@ -54,18 +54,18 @@ def run_case(level, order, epsilon, angular_order):
     start = time.perf_counter()
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=radius), mw.Material(
         eps_r=epsilon.real, sigma_e=epsilon.imag*2*np.pi*frequency*mw.constants.EPSILON_0))], sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(subdivisions=level, integration=IntegrationConfig(order=order, singular_order=order),
+    config = mw.mom.MoMConfig(subdivisions=level, integration=IntegrationConfig(order=order, singular_order=order),
                           query_config=FieldQueryConfig(relative_tolerance=1e-5, max_order=128))
-    result = mw.Simulation.mom(scene, frequency=frequency, config=config).run()
+    result = mw.Simulation.mom(scene, frequencies=frequency, config=config).run()
     if not result.stats()["converged"]:
         raise RuntimeError("Actual MoM reference algebra did not converge")
-    handle = result.surface_currents.handle
+    handle = mw.mom.surface_currents(result).handle
     records = []
     for factor, points, weights in query_shells(radius, angular_order):
         region = "interior" if factor < 1 else "exterior"
         for kind in (["total"] if factor < 1 else ["total", "scattered"]):
             try:
-                numerical = result.query_fields(torch.as_tensor(points, device=scene.device, dtype=torch.float64),
+                numerical = result.query_fields(torch.as_tensor(points, device="cuda", dtype=torch.float64),
                                                 region_id=region, field_kind=kind)
             except RuntimeError as exc:
                 raise RuntimeError(f"Field shell r/a={factor}, {region}/{kind}: {handle.last_field_query_log}") from exc
@@ -88,12 +88,12 @@ def run_case(level, order, epsilon, angular_order):
     z, p = np.meshgrid(mu, phi, indexing="ij")
     directions = np.stack((np.sqrt(1-z*z)*np.cos(p), np.sqrt(1-z*z)*np.sin(p), z), -1).reshape(-1, 3)
     angular_weights = np.repeat(angular_weights, 24)*2*np.pi/24
-    numeric_far, _ = result.far_field(torch.as_tensor(directions, device=scene.device, dtype=torch.float64))
+    numeric_far = mw.mom.far_field(result, torch.as_tensor(directions, device="cuda", dtype=torch.float64))[0].values[0]
     numeric_far = numeric_far.detach().cpu().numpy()
     reference_far = sphere_far_field(radius, handle.exterior.k.real, epsilon, directions)
     reference_cs = sphere_cross_sections(radius, handle.exterior.k.real, epsilon)
     scattering = float(np.sum(angular_weights*np.sum(np.abs(numeric_far)**2, -1)))
-    forward, _ = result.far_field(torch.tensor([[0., 0., 1.]], device=scene.device, dtype=torch.float64))
+    forward = mw.mom.far_field(result, torch.tensor([[0., 0., 1.]], device="cuda", dtype=torch.float64))[0].values[0]
     extinction = float(4*np.pi/handle.exterior.k.real*forward[0, 0].imag)
     far_report = {**far_field_error_metrics(numeric_far, reference_far, angular_weights),
                   "angular_rule": {"gauss_mu": 12, "uniform_phi": 24},

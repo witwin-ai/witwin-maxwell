@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from witwin.maxwell.fdfd.pml import stretch_profile_1d
-from witwin.maxwell.fdtd.boundary.cpml import DEFAULT_CPML_CONFIG, _cpml_profile_1d
+from witwin.maxwell.fdtd.boundary.cpml import DEFAULT_CPML_GRADING, _cpml_profile_1d
 
 MU0 = 4e-7 * math.pi
 C0 = 299792458.0
@@ -32,7 +32,7 @@ def _fdtd_rate(positions, nodes, layers, strength, vacuum_constant, *, low=True,
         scale *= MU0 / EPS0
     _kappa, decay, _c = _cpml_profile_1d(
         positions, nodes, layers, DT, vacuum_constant,
-        torch.tensor(scale, dtype=torch.float64), ETA0, DEFAULT_CPML_CONFIG,
+        torch.tensor(scale, dtype=torch.float64), ETA0, DEFAULT_CPML_GRADING,
         apply_low=low, apply_high=high,
     )
     return -np.log(decay.double().numpy()) / DT

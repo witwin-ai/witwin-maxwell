@@ -421,36 +421,35 @@ def _build_scene(mw: Any, *, grid_cells: int) -> Any:
     domain_size = 0.6
     cell_size = domain_size / grid_cells
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (-0.5 * domain_size, 0.5 * domain_size),
                 (-0.5 * domain_size, 0.5 * domain_size),
                 (-0.5 * domain_size, 0.5 * domain_size),
             )
-        ),
-        grid=mw.GridSpec.uniform(cell_size),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=1.5 * cell_size,
-            source_time=mw.GaussianPulse(
-                frequency=FREQUENCY_HZ,
-                fwidth=0.5 * FREQUENCY_HZ,
-                amplitude=1.0,
             ),
-        )
-    )
-    scene.add_monitor(
-        mw.PointMonitor(
-            name="probe",
-            position=(0.1, 0.0, 0.0),
-            fields=("Ez",),
-        )
-    )
+                grid=mw.GridSpec.uniform(cell_size),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=1.5 * cell_size,
+                source_time=mw.GaussianPulse(
+                    frequency=FREQUENCY_HZ,
+                    fwidth=0.5 * FREQUENCY_HZ,
+                    amplitude=1.0,
+                ),
+            ),
+            ),
+                monitors=(
+            mw.PointMonitor(
+                name="probe",
+                position=(0.1, 0.0, 0.0),
+                fields=("Ez",),
+            ),
+            ),
+            )
     if getattr(scene, "ports", ()) or getattr(scene, "lumped_elements", ()):
         raise AssertionError("The no-feature benchmark scene must contain no RF state.")
     if len(scene.monitors) != 1 or not isinstance(scene.monitors[0], mw.PointMonitor):
@@ -481,11 +480,13 @@ def _run_sample(args: argparse.Namespace) -> dict[str, Any]:
     for run_index in range(total_runs):
         simulation = mw.Simulation.fdtd(
             scene,
-            frequency=FREQUENCY_HZ,
-            run_time=mw.TimeConfig(time_steps=args.steps),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False,
-            cuda_graph=False,
+            frequencies=FREQUENCY_HZ,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=args.steps),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False,
+                cuda_graph=False,
+            ),
         )
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
@@ -528,7 +529,6 @@ def _run_sample(args: argparse.Namespace) -> dict[str, Any]:
             "cuda_runtime": torch.version.cuda,
             "device_name": properties.name,
             "compute_capability": f"{properties.major}.{properties.minor}",
-            "fdtd_backend": os.environ.get("WITWIN_MAXWELL_FDTD_BACKEND", "cuda"),
             "cuda_extension": os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0"),
         },
         "samples_ms": samples_ms,

@@ -3,7 +3,7 @@
 Measures forward solve ms/step for benchmark scenarios and forward+adjoint
 ms/step for a representative differentiable scene. Run with:
 
-    WITWIN_MAXWELL_FDTD_BACKEND=cuda WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION=1 \
+    WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION=1 \
     python scripts/dev/fdtd/native_cuda/bench_baseline.py [scenario ...]
 
 Timing uses torch.cuda.synchronize around the solve loop, after one warm-up
@@ -11,6 +11,7 @@ solve in the same process (extension load + Tidy3D-free).
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import argparse
 import os
 import time
@@ -20,7 +21,7 @@ import torch
 import witwin.maxwell as mw
 from benchmark.runner import _clone_scene, _compute_num_steps
 from benchmark.scenes import SCENARIOS
-from witwin.maxwell.simulation import Simulation, TimeConfig
+from witwin.maxwell.simulation import Simulation, FDTDConfig, TimeConfig
 
 
 def time_forward(name: str, *, repeats: int = 2) -> dict:
@@ -34,12 +35,14 @@ def time_forward(name: str, *, repeats: int = 2) -> dict:
         sim = Simulation.fdtd(
             scene,
             frequencies=scenario.frequencies,
-            run_time=TimeConfig(time_steps=1),
-            spectral_sampler=mw.SpectralSampler(normalize_source=normalize),
+            config=FDTDConfig(
+                run_time=TimeConfig(time_steps=1),
+                spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=normalize),
+            ),
         )
         prepared = sim.prepare()
         n_steps = _compute_num_steps(scene, scenario.run_time_factor, dt=prepared.solver.dt)
-        sim.config.run_time = TimeConfig(time_steps=n_steps)
+        sim.config = replace(sim.config, run_time=TimeConfig(time_steps=n_steps))
         torch.cuda.synchronize()
         start = time.perf_counter()
         result = prepared.run()
@@ -66,30 +69,29 @@ class _AdjointScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.03),
-            boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, 0.12), size=(0.24, 0.24, 0.24)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.18),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.03),
+                    boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.12), size=(0.24, 0.24, 0.24)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.18),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -100,14 +102,16 @@ def time_adjoint(*, time_steps: int = 300, repeats: int = 2) -> dict:
         sim = Simulation.fdtd(
             model,
             frequencies=[1e9],
-            run_time=TimeConfig(time_steps=time_steps),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False,
+            config=FDTDConfig(
+                run_time=TimeConfig(time_steps=time_steps),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False,
+            ),
         )
         torch.cuda.synchronize()
         start = time.perf_counter()
         result = sim.run()
-        value = result.monitor("probe")["components"]["Ez"]
+        value = result.monitor("probe").sel(component="Ez").values
         loss = (value.real**2 + value.imag**2).sum()
         torch.cuda.synchronize()
         fwd = time.perf_counter() - start
@@ -138,9 +142,8 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=2)
     args = parser.parse_args()
 
-    backend = os.environ.get("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
     use_ext = os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
-    print(f"backend={backend} extension={use_ext} gpu={torch.cuda.get_device_name(0)}")
+    print(f"extension={use_ext} gpu={torch.cuda.get_device_name(0)}")
 
     scenarios = args.scenarios or ["dipole_vacuum", "planewave_vacuum"]
     for name in scenarios:

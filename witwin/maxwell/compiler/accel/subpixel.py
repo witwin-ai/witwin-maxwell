@@ -36,7 +36,7 @@ def kottke_component(scene, component, bases, samples, background, structures, g
     widths = []
     stagger = m._EDGE_STAGGER_AXES[component]
     for i, a in enumerate("xyz"):
-        if not (scene.grid.is_custom or scene.grid.is_auto):
+        if not (scene.scene.grid.is_custom or scene.scene.grid.is_auto):
             width = points.new_full((len(bases[a]),), m._uniform_axis_spacing(scene, a))
         else:
             if i in stagger:
@@ -60,8 +60,8 @@ def kottke_component(scene, component, bases, samples, background, structures, g
         options = shifts[id(geometry)]
         if options is None:
             options = tuple((-float(hi-lo), 0., float(hi-lo))
-                            if scene.boundary.axis_kind(a) in ("periodic", "bloch") else (0.,)
-                            for a, (lo, hi) in zip("xyz", scene.domain.bounds))
+                            if scene.scene.boundary.axis_kind(a) in ("periodic", "bloch") else (0.,)
+                            for a, (lo, hi) in zip("xyz", scene.scene.domain.bounds))
         return options
 
     def distance(j, query):

@@ -62,29 +62,29 @@ def _port(kind, name, x, direction, dx, half_y, half_z, longitudinal_dl, metal="
     model = {"conductor_model": "good_conductor"} if metal == "copper" else {}
     if kind == "cpw":
         path = ((x, 0., 0.), (x, WIDTH/2+GAP, 0.))
-        modes = (mw.WaveModeSpec("tem", polarization="Ey", voltage_path=path, **model,
+        modes = (mw.rf.WaveModeSpec("tem", polarization="Ey", voltage_path=path, **model,
                     current_contour=_contour(current_x, 0., contour_y, contour_z)),)
     elif kind == "differential_pair":
         common_half_y = (math.ceil((PAIR_OFFSET+PAIR_WIDTH/2)/dx)+.5)*dx
         odd_half_y = (math.ceil(PAIR_WIDTH/(2*dx))+.5)*dx
         modes = (
-            mw.WaveModeSpec("tem", mode_index=0, name="common", polarization="Ez", **model,
+            mw.rf.WaveModeSpec("tem", mode_index=0, name="common", polarization="Ez", **model,
                 voltage_path=((x, PAIR_OFFSET, 0.), (x, PAIR_OFFSET, -HEIGHT)),
                 current_contour=_contour(current_x, 0., common_half_y, contour_z)),
-            mw.WaveModeSpec("tem", mode_index=1, name="differential", polarization="Ey", **model,
+            mw.rf.WaveModeSpec("tem", mode_index=1, name="differential", polarization="Ey", **model,
                 voltage_path=((x, PAIR_OFFSET, 0.), (x, -PAIR_OFFSET, 0.)),
                 current_contour=_contour(current_x, PAIR_OFFSET, odd_half_y, contour_z)),
         )
     else:
-        modes = (mw.WaveModeSpec("tem", polarization="Ez", **model,
+        modes = (mw.rf.WaveModeSpec("tem", polarization="Ez", **model,
                     voltage_path=((x, 0., 0.), (x, 0., -HEIGHT)),
                     current_contour=_contour(current_x, 0., contour_y, contour_z)),)
-    return mw.WavePort(name, position=(x, 0., 0.), size=(0., 2*half_y, 2*half_z),
+    return mw.rf.WavePort(name, position=(x, 0., 0.), size=(0., 2*half_y, 2*half_z),
                        direction=direction, reference_plane=x, modes=modes)
 
 
 def printed_line_scene(kind, *, dx=.0025, port_separation=.040, eps_r=2.25,
-                       sigma_e=0., pml_thickness=.020, transverse_padding=0., device="cuda",
+                       sigma_e=0., pml_thickness=.020, transverse_padding=0., 
                        longitudinal_dl=None, pair_perturbation=False, axial_half_length=.060, metal="pec", transverse_refinement_radius=None, copper_frequency_range=None):
     """Build a two-port planar line (four modal channels for a differential pair).
 
@@ -145,9 +145,9 @@ def printed_line_scene(kind, *, dx=.0025, port_separation=.040, eps_r=2.25,
         if metal == "copper":
             geometry=mw.Box(position=torch.tensor((0., (y0+y1)/2, z),dtype=torch.float64),
                             size=torch.tensor((2*extended_x, y1-y0, 0.),dtype=torch.float64))
-            material=mw.CopperFoil(thickness=35e-6,frequency_range=(.8e9,1.2e9) if copper_frequency_range is None else copper_frequency_range)
+            material=mw.media.CopperFoil(thickness=35e-6,frequency_range=(.8e9,1.2e9) if copper_frequency_range is None else copper_frequency_range)
         else:
-            geometry=mw.PlanarPEC.rectangle(((-extended_x, extended_x), (y0, y1)),
+            geometry=mw.geometry.PlanarPEC.rectangle(((-extended_x, extended_x), (y0, y1)),
                                            coordinate=z, physical_thickness=35e-6)
             material=mw.Material.pec()
         structures.append(mw.Structure(geometry, material, name=name))
@@ -167,14 +167,14 @@ def printed_line_scene(kind, *, dx=.0025, port_separation=.040, eps_r=2.25,
         # A local asymmetric capacitive paddle, outside both unchanged port
         # cross-sections, provides actual common/differential conversion.
         structures.append(mw.Structure(
-            mw.PlanarPEC.rectangle(((-.005, .005), (PAIR_OFFSET-PAIR_WIDTH/2, .010)),
+            mw.geometry.PlanarPEC.rectangle(((-.005, .005), (PAIR_OFFSET-PAIR_WIDTH/2, .010)),
                                    coordinate=0., physical_thickness=35e-6),
             mw.Material.pec(), name="positive_signal_paddle"))
     ports = [_port(kind, "in", -port_separation/2, "+", dx, half_y-.010, half_z-.010, longitudinal_dl, metal),
              _port(kind, "out", port_separation/2, "-", dx, half_y-.010, half_z-.010, longitudinal_dl, metal)]
     return mw.Scene(domain=mw.Domain(bounds=tuple((float(a[0]), float(a[-1])) for a in nodes)),
                     grid=mw.GridSpec.custom(*nodes), boundary=mw.BoundarySpec.pml(num_layers=layers),
-                    device=device, structures=structures, ports=ports,
+                    structures=structures, ports=ports,
                     metadata={"physical_model": f"printed-{kind}-v1", "dx_m": dx,
                               "port_separation_m": port_separation, "axial_half_length_m": half_x, "longitudinal_dl_m": longitudinal_dl,
                               "pml_physical_thickness_m": layers*longitudinal_dl,

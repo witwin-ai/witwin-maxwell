@@ -48,7 +48,7 @@ def _mixed_periodic_bloch_source_solver():
         bloch_wavevector=(0.0, math.pi, 0.0),
     )
     solver = SimpleNamespace(
-        scene=SimpleNamespace(boundary=boundary),
+        scene=SimpleNamespace(scene=SimpleNamespace(boundary=boundary)),
         fdtd_module=fdtd_module,
         Ex=object(),
         Ex_imag=object(),
@@ -101,21 +101,20 @@ def _grating_boundary(*, bloch_wavevector=(math.pi, 0.5 * math.pi, 0.0)):
 
 def _grating_scene(*, injection, boundary=None, grid_step=0.12):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(grid_step),
-        boundary=_grating_boundary() if boundary is None else boundary,
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.2, 0.1, 0.9746794344808963),
-            polarization=(1.0, 0.0, -0.20519567041703082),
-            source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
-            injection=injection,
-            name="grating_tfsf",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(grid_step),
+                boundary=_grating_boundary() if boundary is None else boundary,
+                sources=(
+            mw.PlaneWave(
+                direction=(0.2, 0.1, 0.9746794344808963),
+                polarization=(1.0, 0.0, -0.20519567041703082),
+                source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
+                injection=injection,
+                name="grating_tfsf",
+            ),
+            ),
+                monitors=(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")),),
+            )
     return scene
 
 
@@ -127,7 +126,7 @@ def _to_numpy(value):
 
 def _component_volume(result, component: str):
     solver = result.solver
-    field = _to_numpy(result.tensor(component))
+    field = _to_numpy(result.field(component).isel(f=0).values)
     if component == "Ex":
         z = np.linspace(solver.scene.domain_range[4], solver.scene.domain_range[5], field.shape[2])
     elif component == "Ez":
@@ -156,10 +155,12 @@ def _run_grating_full_field(*, scene=None, time_steps=64):
     return mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=True,
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=True,
+            absorber="cpml",
+        ),
     ).run()
 
 
@@ -171,18 +172,19 @@ def _grating_flux_scene(*, with_dielectric_slab: bool):
         grid_step=0.06,
     )
     if with_dielectric_slab:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.2, 1.2, 0.12)),
                 material=mw.Material(eps_r=9.0),
                 name="dielectric_slab",
-            )
-        )
-    scene.add_monitor(mw.FluxMonitor("reflection", axis="z", position=-0.36, normal_direction="-"))
-    # The transmitted total field must be sampled inside the TFSF region and
-    # above the slab. Outside the upper TFSF face only the scattered field is
-    # present, so using z=0.36 as an incident-power denominator is invalid.
-    scene.add_monitor(mw.FluxMonitor("transmission", axis="z", position=0.18, normal_direction="+"))
+            ),
+        ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.FluxMonitor("reflection", axis="z", position=-0.36, normal_direction="-"),
+        mw.FluxMonitor("transmission", axis="z", position=0.18, normal_direction="+"),
+    ))
     return scene
 
 
@@ -191,12 +193,14 @@ def _grating_flux_metrics(with_dielectric_slab: bool):
     result = mw.Simulation.fdtd(
         _grating_flux_scene(with_dielectric_slab=with_dielectric_slab),
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=256),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=256),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            absorber="cpml",
+        ),
     ).run()
-    reflection = float(torch.as_tensor(result.monitor("reflection")["flux"]).detach().cpu().real)
-    transmission = float(torch.as_tensor(result.monitor("transmission")["flux"]).detach().cpu().real)
+    reflection = float(torch.as_tensor(result.monitor("reflection", freq_index=0).values).detach().cpu().real)
+    transmission = float(torch.as_tensor(result.monitor("transmission", freq_index=0).values).detach().cpu().real)
     del result
     torch.cuda.empty_cache()
     return {
@@ -241,8 +245,10 @@ def test_grating_mixed_bloch_pml_prepare_enables_complex_and_cpml_state():
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=1),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            absorber="cpml",
+        ),
     ).prepare()
     solver = prepared.solver
     assert solver.boundary_kind == "mixed"
@@ -260,8 +266,10 @@ def test_grating_tfsf_slab_initializes_state():
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=1),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            absorber="cpml",
+        ),
     ).prepare()
     state = prepared.solver._tfsf_state
     assert prepared.solver.tfsf_enabled is True
@@ -277,7 +285,7 @@ def test_grating_tfsf_rejects_box_tfsf_with_bloch_boundaries():
     scene = _grating_scene(
         injection=mw.TFSF(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.24, 0.24)))
     )
-    simulation = mw.Simulation.fdtd(scene, frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=1))
+    simulation = mw.Simulation.fdtd(scene, frequencies=[1.0e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1)))
     with pytest.raises(NotImplementedError, match="TFSF slab"):
         simulation.prepare()
 
@@ -285,21 +293,20 @@ def test_grating_tfsf_rejects_box_tfsf_with_bloch_boundaries():
 def _nonperiodic_slab_scene(*, direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
                             source_time=None, injection=None):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.06),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=direction,
-            polarization=polarization,
-            source_time=source_time if source_time is not None else mw.CW(frequency=1.0e9, amplitude=20.0),
-            injection=injection if injection is not None else mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
-            name="slab_tfsf",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.06),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PlaneWave(
+                direction=direction,
+                polarization=polarization,
+                source_time=source_time if source_time is not None else mw.CW(frequency=1.0e9, amplitude=20.0),
+                injection=injection if injection is not None else mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
+                name="slab_tfsf",
+            ),
+            ),
+                monitors=(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")),),
+            )
     return scene
 
 
@@ -308,8 +315,10 @@ def test_nonperiodic_tfsf_slab_initializes_axis_aligned_state():
     prepared = mw.Simulation.fdtd(
         _nonperiodic_slab_scene(),
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=1),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            absorber="cpml",
+        ),
     ).prepare()
     solver = prepared.solver
     state = solver._tfsf_state
@@ -325,9 +334,9 @@ def test_nonperiodic_tfsf_slab_initializes_axis_aligned_state():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
 def test_nonperiodic_cw_incident_phase_requires_propagating_native_grid():
     scene = _nonperiodic_slab_scene()
-    scene.grid = mw.GridSpec.uniform(0.12)
+    scene = scene.updated(grid=mw.GridSpec.uniform(0.12))
     with pytest.raises(ValueError, match="propagating band; refine the spatial grid"):
-        mw.Simulation.fdtd(scene, frequencies=[1.e9], run_time=mw.TimeConfig(time_steps=1)).prepare()
+        mw.Simulation.fdtd(scene, frequencies=[1.e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
@@ -337,7 +346,7 @@ def test_nonperiodic_tfsf_slab_rejects_oblique_incidence():
         polarization=(0.0, 1.0, 0.0),
     )
     with pytest.raises(ValueError, match="normally incident"):
-        mw.Simulation.fdtd(scene, frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=1)).prepare()
+        mw.Simulation.fdtd(scene, frequencies=[1.0e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -346,10 +355,12 @@ def test_nonperiodic_tfsf_slab_forward_confines_total_field():
     result = mw.Simulation.fdtd(
         _nonperiodic_slab_scene(injection=mw.TFSF.slab(axis="z", bounds=bounds)),
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=96),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=True,
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=96),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=True,
+            absorber="cpml",
+        ),
     ).run()
 
     field, z_coords = _component_volume(result, "Ex")
@@ -370,7 +381,7 @@ def test_grating_explicit_bloch_phases_are_resolved_on_solver():
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=1),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1)),
     ).prepare()
 
     phase_x = complex(prepared.solver.boundary_phase_cos[0], prepared.solver.boundary_phase_sin[0])
@@ -392,27 +403,26 @@ def test_grating_auto_bloch_wavevector_matches_incident_direction():
         z="pml",
         bloch_wavevector="auto",
     )
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=boundary,
-        device="cuda",
-    )
     direction = (0.2, 0.1, 0.9746794344808963)
-    scene.add_source(
-        mw.PlaneWave(
-            direction=direction,
-            polarization=(1.0, 0.0, -0.20519567041703082),
-            source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
-            injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
-            name="grating_tfsf",
-        )
-    )
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=boundary,
+                sources=(
+            mw.PlaneWave(
+                direction=direction,
+                polarization=(1.0, 0.0, -0.20519567041703082),
+                source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
+                injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
+                name="grating_tfsf",
+            ),
+            ),
+            )
 
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=1),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1)),
     ).prepare()
 
     kx, ky, kz = prepared.solver.resolved_bloch_wavevector
@@ -441,63 +451,64 @@ def test_auto_bloch_rejects_non_cw_source_time():
         bloch_wavevector="auto",
     )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=boundary,
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.2, 0.1, 0.9746794344808963),
-            polarization=(1.0, 0.0, -0.20519567041703082),
-            source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.2e9),
-            injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
-            name="grating_tfsf",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=boundary,
+                sources=(
+            mw.PlaneWave(
+                direction=(0.2, 0.1, 0.9746794344808963),
+                polarization=(1.0, 0.0, -0.20519567041703082),
+                source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.2e9),
+                injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
+                name="grating_tfsf",
+            ),
+            ),
+            )
     with pytest.raises(ValueError, match="CW"):
-        mw.Simulation.fdtd(scene, frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=1)).prepare()
+        mw.Simulation.fdtd(scene, frequencies=[1.0e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
 def test_grating_tfsf_rejects_gaussian_beam_slab_source():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=_grating_boundary(),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.GaussianBeam(
-            direction=(0.2, 0.1, 0.9746794344808963),
-            polarization=(1.0, 0.0, -0.20519567041703082),
-            beam_waist=0.4,
-            focus=(0.0, 0.0, 0.0),
-            source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
-            injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
-            name="invalid_grating_tfsf",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=_grating_boundary(),
+                sources=(
+            mw.GaussianBeam(
+                direction=(0.2, 0.1, 0.9746794344808963),
+                polarization=(1.0, 0.0, -0.20519567041703082),
+                beam_waist=0.4,
+                focus=(0.0, 0.0, 0.0),
+                source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
+                injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
+                name="invalid_grating_tfsf",
+            ),
+            ),
+            )
     with pytest.raises(ValueError, match="PlaneWave"):
-        mw.Simulation.fdtd(scene, frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=1)).prepare()
+        mw.Simulation.fdtd(scene, frequencies=[1.0e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
 def test_grating_tfsf_allows_material_on_transverse_bloch_boundary():
     scene = _grating_scene(injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)))
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=mw.Box(position=(-0.54, 0.0, 0.0), size=(0.12, 0.24, 0.12)),
             material=mw.Material(eps_r=2.0),
             name="transverse_edge_feature",
-        )
-    )
+        ),
+    ))
 
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=1),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            absorber="cpml",
+        ),
     ).prepare()
 
     assert prepared.solver._tfsf_state["provider"] == "plane_wave_grating_slab_cw"
@@ -513,8 +524,10 @@ def test_grating_tfsf_rejects_slab_bounds_inside_pml_margin():
         mw.Simulation.fdtd(
             scene,
             frequencies=[1.0e9],
-            run_time=mw.TimeConfig(time_steps=1),
-            absorber="cpml",
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=1),
+                absorber="cpml",
+            ),
         ).prepare()
 
 
@@ -526,22 +539,21 @@ def test_grating_explicit_bloch_rejects_non_pml_slab_normal_axis():
         bloch_wavevector=(math.pi, 0.0, 0.0),
     )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=boundary,
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.2, 0.1, 0.9746794344808963),
-            polarization=(1.0, 0.0, -0.20519567041703082),
-            source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
-            injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
-            name="invalid_grating_tfsf",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=boundary,
+                sources=(
+            mw.PlaneWave(
+                direction=(0.2, 0.1, 0.9746794344808963),
+                polarization=(1.0, 0.0, -0.20519567041703082),
+                source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
+                injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
+                name="invalid_grating_tfsf",
+            ),
+            ),
+            )
 
-    simulation = mw.Simulation.fdtd(scene, frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=1))
+    simulation = mw.Simulation.fdtd(scene, frequencies=[1.0e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1)))
     with pytest.raises(ValueError, match="normal axis to use PML"):
         simulation.prepare()
 
@@ -552,8 +564,10 @@ def test_grating_tfsf_slab_forward_runs_after_phase_resolution():
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=2),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=2),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).prepare()
 
     result = prepared.run()
@@ -601,16 +615,18 @@ def test_grating_tfsf_auto_bloch_phase_runs_forward():
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=32),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=32),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            absorber="cpml",
+        ),
     ).run()
 
     assert result.solver.resolved_bloch_wavevector[0] > 0.0
     assert result.solver.resolved_bloch_wavevector[1] > 0.0
-    center = result.monitor("center")
-    assert torch.isfinite(torch.as_tensor(center["Ex"]).abs()).all()
-    assert torch.isfinite(torch.as_tensor(center["Ez"]).abs()).all()
+    center = result.monitor("center", freq_index=0)
+    assert torch.isfinite(torch.as_tensor(center.sel(component="Ex").values).abs()).all()
+    assert torch.isfinite(torch.as_tensor(center.sel(component="Ez").values).abs()).all()
 
 
 _GRATING_BASE_DIRECTION = (0.2, 0.1, 0.9746794344808963)
@@ -636,27 +652,26 @@ def _general_axis_grating_scene(axis, *, source_time=None, bounds=(-0.24, 0.24))
     boundary_kinds = {other: "bloch" for other in "xyz"}
     boundary_kinds[axis] = "pml"
     scene = mw.Scene(
-        domain=mw.Domain(bounds=domain_bounds),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=mw.BoundarySpec.faces(
+                domain=mw.Domain(bounds=domain_bounds),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=mw.BoundarySpec.faces(
             default="pml",
             num_layers=4,
             strength=1.0,
             bloch_wavevector=wavevector,
             **boundary_kinds,
-        ),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=direction,
-            polarization=polarization,
-            source_time=source_time if source_time is not None else mw.CW(frequency=1.0e9, amplitude=20.0),
-            injection=mw.TFSF.slab(axis=axis, bounds=bounds),
-            name="grating_tfsf",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=direction,
+                polarization=polarization,
+                source_time=source_time if source_time is not None else mw.CW(frequency=1.0e9, amplitude=20.0),
+                injection=mw.TFSF.slab(axis=axis, bounds=bounds),
+                name="grating_tfsf",
+            ),
+            ),
+                monitors=(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")),),
+            )
     return scene
 
 
@@ -679,8 +694,10 @@ def test_grating_tfsf_slab_initializes_state_for_general_normal_axis(axis):
     prepared = mw.Simulation.fdtd(
         _general_axis_grating_scene(axis),
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=1),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            absorber="cpml",
+        ),
     ).prepare()
     state = prepared.solver._tfsf_state
     axis_index = {"x": 0, "y": 1, "z": 2}[axis]
@@ -703,10 +720,12 @@ def test_grating_tfsf_general_axis_forward_confines_total_field(axis):
     result = mw.Simulation.fdtd(
         _general_axis_grating_scene(axis, bounds=bounds),
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=64),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=True,
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=64),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=True,
+            absorber="cpml",
+        ),
     ).run()
 
     axis_index = {"x": 0, "y": 1, "z": 2}[axis]
@@ -716,7 +735,7 @@ def test_grating_tfsf_general_axis_forward_confines_total_field(axis):
 
     ratios = []
     for component in ("Ex", "Ez"):
-        field = _to_numpy(result.tensor(component))
+        field = _to_numpy(result.field(component).isel(f=0).values)
         assert np.isfinite(np.abs(field)).all()
         coords = np.linspace(lo, hi, field.shape[axis_index])
         leakage_ratio, inside_max, outside_max = _normal_axis_leakage(
@@ -742,8 +761,10 @@ def test_grating_tfsf_general_axis_broadband_runs_finite(axis):
             bounds=(-0.24, 0.24),
         ),
         frequencies=list(frequencies),
-        run_time=mw.TimeConfig(time_steps=192),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=192),
+            absorber="cpml",
+        ),
     ).run()
 
     assert result.solver.tfsf_enabled is True
@@ -752,8 +773,8 @@ def test_grating_tfsf_general_axis_broadband_runs_finite(axis):
     assert result.solver._tfsf_state["axis"] == axis
     for frequency in frequencies:
         payload = result.monitor("center", frequency=frequency)
-        assert torch.isfinite(torch.as_tensor(payload["Ex"]).abs()).all()
-        assert torch.isfinite(torch.as_tensor(payload["Ez"]).abs()).all()
+        assert torch.isfinite(torch.as_tensor(payload.sel(component="Ex").values).abs()).all()
+        assert torch.isfinite(torch.as_tensor(payload.sel(component="Ez").values).abs()).all()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")

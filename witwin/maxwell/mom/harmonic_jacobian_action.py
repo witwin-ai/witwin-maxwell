@@ -4,6 +4,7 @@ import torch
 from .fixed_tangent_inverse import _FixedTangentInverse,_streamed_inverse_bounds
 from .harmonic_balance import DenseHarmonicBalance
 from .action_harmonic_balance import ActionHarmonicBalance
+from ..errors import ConvergenceError
 
 
 class _Product(torch.autograd.Function):
@@ -75,7 +76,7 @@ class HarmonicJacobianAction:
     def adjoint(self,value):return _Product.apply(value,self,True)
 
 
-class HarmonicTangentConvergenceError(RuntimeError):
+class HarmonicTangentConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         super().__init__('Harmonic tangent solve failed its original RHS residual tolerance')
         self.receipt=receipt

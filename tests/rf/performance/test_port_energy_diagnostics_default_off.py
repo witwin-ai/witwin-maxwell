@@ -45,35 +45,36 @@ def _solver(ports, *, excitations=()):
         grid=mw.GridSpec.uniform(0.005),
         boundary=mw.BoundarySpec.none(),
         ports=ports,
-        device="cuda",
     )
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=(3.0e9,),
-        run_time=mw.TimeConfig(time_steps=16),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=16),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
         excitations=excitations,
     )
     return simulation.prepare().solver
 
 
 def test_series_rlc_termination_runtime_defaults_to_diagnostics_off():
-    solver = _solver((_port("p", termination=mw.SeriesRLC(r=60.0, l=1.2e-9, c=0.8e-12)),))
+    solver = _solver((_port("p", termination=mw.rf.SeriesRLC(r=60.0, l=1.2e-9, c=0.8e-12)),))
     lumped = solver._port_runtimes[0].lumped
     assert lumped is not None
     assert lumped.diagnostics_enabled is False
 
 
 def test_parallel_rlc_termination_runtime_defaults_to_diagnostics_off():
-    solver = _solver((_port("p", termination=mw.ParallelRLC(r=75.0, l=2.0e-9, c=0.5e-12)),))
+    solver = _solver((_port("p", termination=mw.rf.ParallelRLC(r=75.0, l=2.0e-9, c=0.5e-12)),))
     lumped = solver._port_runtimes[0].lumped
     assert lumped is not None
     assert lumped.diagnostics_enabled is False
 
 
 def test_matched_excitation_runtime_defaults_to_diagnostics_off():
-    excitation = mw.PortExcitation(
+    excitation = mw.rf.PortExcitation(
         port_name="p",
         source_time=mw.GaussianPulse(frequency=3.0e9, fwidth=1.0e9, amplitude=1.0),
     )
@@ -86,8 +87,8 @@ def test_matched_excitation_runtime_defaults_to_diagnostics_off():
 def test_all_port_lumped_runtimes_default_to_diagnostics_off():
     solver = _solver(
         (
-            _port("a", termination=mw.SeriesRLC(r=50.0), offset=0.0),
-            _port("b", termination=mw.ParallelRLC(r=50.0), offset=0.02),
+            _port("a", termination=mw.rf.SeriesRLC(r=50.0), offset=0.0),
+            _port("b", termination=mw.rf.ParallelRLC(r=50.0), offset=0.02),
         )
     )
     lumped_runtimes = [

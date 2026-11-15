@@ -46,7 +46,7 @@ def partition(anchors, step, *, fine=(), half_planes=()):
     return np.asarray(nodes)
 
 
-def build_scene(variant, *, device="cuda:0"):
+def build_scene(variant):
     import witwin.maxwell as mw
 
     lateral, air, finest, height = .002, .004, .0002, .0014
@@ -65,28 +65,39 @@ def build_scene(variant, *, device="cuda:0"):
     frequencies = tuple(np.linspace(1.8e9, 3.0e9, 11))
     scene = mw.Scene(domain=mw.Domain(tuple((float(a[0]), float(a[-1])) for a in (x, y, z))),
                      grid=mw.GridSpec.custom(x, y, z),
-                     boundary=mw.BoundarySpec.pml(num_layers=8), device=device)
-    scene.add_structure(mw.Structure(box((0., 0., -height / 2), (.090, .011, height)),
-                                     mw.Material(eps_r=3.5), name="substrate"))
+                     boundary=mw.BoundarySpec.pml(num_layers=8),
+                     structures=(
+                         mw.Structure(box((0., 0., -height / 2), (.090, .011, height)),
+                                      mw.Material(eps_r=3.5), name="substrate"),
+                     ))
     for name, lo, hi in (("negative", -.040, -.001), ("positive", .001, .040)):
-        material = (mw.CopperFoil(thickness=35e-6, conductivity=5.8e7,
+        material = (mw.media.CopperFoil(thickness=35e-6, conductivity=5.8e7,
                                  frequency_range=(.1e9, 10e9))
                     if variant.startswith("copper") else mw.Material.pec())
-        scene.add_structure(mw.Structure(box(((lo + hi) / 2, 0., 0.), (hi - lo, .002, 0.)),
-                                         material, name=name))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(box(((lo + hi) / 2, 0., 0.), (hi - lo, .002, 0.)),
+                         material, name=name),
+        ))
     pulse = mw.GaussianPulse(frequency=2.4e9, fwidth=1.92e9)
     excitations = ()
     if variant.endswith("port"):
-        scene.add_port(mw.LumpedPort(
-            "feed", positive=(.001, 0., 0.), negative=(-.001, 0., 0.),
-            voltage_path=mw.AxisPath("x"), reference_impedance=50.,
-            current_surface=box((x[np.searchsorted(x, 0.) + 1] / 2, 0., 0.), (0., .007, .005)),
-            voltage_aperture=box((0., 0., 0.), (.002, .002, 0.))))
-        excitations = (mw.PortExcitation("feed", source_time=pulse),)
+        scene = scene.updated(ports=(
+            *scene.ports,
+            mw.LumpedPort(
+                "feed", positive=(.001, 0., 0.), negative=(-.001, 0., 0.),
+                voltage_path=mw.AxisPath("x"), reference_impedance=50.,
+                current_surface=box((x[np.searchsorted(x, 0.) + 1] / 2, 0., 0.), (0., .007, .005)),
+                voltage_aperture=box((0., 0., 0.), (.002, .002, 0.))),
+        ))
+        excitations = (mw.rf.PortExcitation("feed", source_time=pulse),)
     else:
-        scene.add_source(mw.PointDipole(position=(0., 0., 0.), polarization="Ex",
-                                       profile="ideal", source_time=pulse, name="feed"))
-    scene.add_monitor(mw.PointMonitor("probe", position=(0., 0., .01), fields=("Ex",)))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PointDipole(position=(0., 0., 0.), polarization="Ex",
+                          profile="ideal", source_time=pulse, name="feed"),
+        ))
+    scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", position=(0., 0., .01), fields=("Ex",))))
     return scene, frequencies, excitations
 
 
@@ -511,8 +522,10 @@ def profile_variant(args, variant):
 
     scene, frequencies, excitations = build_scene(variant)
     simulation = mw.Simulation.fdtd(scene, frequencies=frequencies, excitations=excitations,
-        run_time=mw.TimeConfig(time_steps=args.warmup + args.steps),
-        full_field_dft=False, shutoff=0., cuda_graph=True)
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=args.warmup + args.steps),
+            full_field_dft=False, shutoff=0., cuda_graph=True,
+        ))
     prepared = simulation.prepare()
     solver = prepared.solver
     solver.verbose = False

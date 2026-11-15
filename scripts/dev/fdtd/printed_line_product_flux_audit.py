@@ -36,9 +36,9 @@ for result,base in zip(results,bases):
    assert np.all(np.asarray(payload['samples'])==base.execution_contract.planned_steps)
 combined=CoherentObservations(results,bases,coefficient);records=[]
 from witwin.maxwell.fdtd.coords import component_coords
-axes={name:component_coords(results[0].prepared_scene,name) for name in ('Ex','Ey','Ez')}
+axes={name:component_coords(results[0].prepared_scene,name, device=results[0].prepared_scene.device) for name in ('Ex','Ey','Ez')}
 for fi,f in enumerate(case.frequencies):
- selected=combined.monitor('line_roi_flux',frequency=f);faces={}
+ selected=combined.raw_monitor('line_roi_flux',frequency=f);faces={}
  for label,face in selected['faces'].items():
   raw=copy.copy(results[0]._monitors['line_roi_flux::'+label]);raw['components']={}
   for name,value in results[0]._monitors['line_roi_flux::'+label]['components'].items():

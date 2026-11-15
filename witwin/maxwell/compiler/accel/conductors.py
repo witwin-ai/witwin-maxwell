@@ -38,7 +38,7 @@ def try_pec_edge_fill(scene):
         return UNCHANGED
     m.validate_legacy_thin_pec(scene)
     union = None
-    tolerance = 1.e-5 * min(scene.grid.min_spacing)
+    tolerance = 1.e-5 * min(scene.scene.grid.min_spacing)
     shifts = m._pec_periodic_shift_options(scene)
     for structure in structures:
         geometry = sampling_geometry(structure.geometry)

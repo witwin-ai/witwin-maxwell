@@ -12,7 +12,7 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.fdtd import ferrite_reference as fr
+from tests.oracles import ferrite_reference as fr
 
 BUDGET = fr.ACCEPTANCE_BUDGET
 
@@ -105,7 +105,7 @@ def test_discrete_converges_to_continuous_three_dt_tiers():
 
 def test_material_polder_matches_oracle_continuous():
     """The public GyromagneticFerrite formula matches the independent oracle."""
-    ferrite = mw.GyromagneticFerrite(
+    ferrite = mw.media.GyromagneticFerrite(
         eps_r=14.5, saturation_magnetization=1.40e5, bias_field=(0.0, 0.0, 1.75e5),
         gilbert_damping=2.0e-3,
     )
@@ -192,7 +192,7 @@ def test_falsify_gyromagnetic_sign():
     params = _params()
     omega = _in_band_omega()
     good = fr.reference_polder_tensor(params, omega)
-    ferrite = mw.GyromagneticFerrite(
+    ferrite = mw.media.GyromagneticFerrite(
         eps_r=14.5, saturation_magnetization=1.40e5, bias_field=(0.0, 0.0, 1.75e5),
         gilbert_damping=2.0e-3,
     )

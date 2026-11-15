@@ -12,27 +12,29 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA requi
 def test_disjoint_nonlinear_bodies_reversed_volumes_and_restore(tmp_path,monkeypatch,current_dc):
     _,config,_=runpy.run_path('tests/mom/test_harmonic_public.py')['setup']()
     first=config.harmonic_balance.volumes[0]
-    second=mw.TetrahedralVolumeMesh(first.vertices+first.vertices.new_tensor([.18,.02,.01]),
+    second=mw.mom.TetrahedralVolumeMesh(first.vertices+first.vertices.new_tensor([.18,.02,.01]),
                                     first.cells,region_id=2)
     structures=[]
     for index,volume in enumerate((first,second)):
-        nonlinear=[mw.NonlinearSusceptibility(chi2=.002*(index+1),chi3=.001)]
+        nonlinear=[mw.media.NonlinearSusceptibility(chi2=.002*(index+1),chi3=.001)]
         conducting = current_dc is True or (current_dc == 'mixed' and index == 0)
         if conducting:
-            nonlinear.append(mw.TwoPhotonAbsorption(beta=5.))
+            nonlinear.append(mw.media.TwoPhotonAbsorption(beta=5.))
         material=mw.Material(eps_r=2.+index,mu_r=1.+index,
                              sigma_e=.001 if conducting else 0.,nonlinearity=tuple(nonlinear))
         structures.append(mw.Structure(name=f'body{index+1}',material=material,
             geometry=mw.Mesh(volume.boundary.vertices,volume.boundary.faces,recenter=False,fill_mode='solid')))
     scene=mw.Scene(structures=structures,sources=[mw.PlaneWave()])
     if current_dc=='mixed':
-        for volume in (first,second):
-            scene.add_monitor(mw.PointMonitor(f'inside{volume.region_id}',tuple(volume.vertices.mean(0).tolist()),
-                                              fields=('Ex','Hx','Hy','Hz')))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            *(mw.PointMonitor(f'inside{volume.region_id}',tuple(volume.vertices.mean(0).tolist()),
+                              fields=('Ex','Hx','Hy','Hz')) for volume in (first,second)),
+        ))
     volumes=(second,first)
     config=replace(config,harmonic_balance=replace(config.harmonic_balance,volumes=volumes))
-    result=mw.Simulation.mom(scene,frequency=3e8,config=config).run()
-    state=result.harmonic_state
+    result=mw.Simulation.mom(scene,frequencies=3e8,config=config).run()
+    state=mw.mom.harmonic_state(result)
     assert not state.receipt['physical_qualification']
     assert len(state.cell_electric[0])==2
     prepared=result._harmonic_data.decoder.prepared
@@ -43,20 +45,20 @@ def test_disjoint_nonlinear_bodies_reversed_volumes_and_restore(tmp_path,monkeyp
     observations=[]
     for index,volume in enumerate(volumes):
         point=volume.vertices[volume.cells].mean(1)
-        dc=result.query_dc(point,region_id=volume.region_id)
+        dc=mw.mom.query_dc(result, point,region_id=volume.region_id)
         torch.testing.assert_close(dc[1],state.cell_electric[0,index:index+1].real,rtol=1e-8,atol=1e-10)
         ac=result.query_fields(point,region_id=volume.region_id,field_kind='total',harmonic=2)
         torch.testing.assert_close(ac[0],state.cell_electric[2,index:index+1],rtol=3e-4,atol=1e-9)
-        magnetic=result.query_dc_magnetic(point,region_id=volume.region_id) if current_dc else None
+        magnetic=mw.mom.query_dc_magnetic(result, point,region_id=volume.region_id) if current_dc else None
         observations.append((point,volume.region_id,dc,ac,magnetic))
     if current_dc=='mixed':
         assert state.dc_current_regions==(1,)
         for point,region,dc,ac,magnetic in observations:
             monitor=result.monitor(f'inside{region}')
-            assert monitor['dc']['magnetic_available']
-            torch.testing.assert_close(monitor['dc']['components']['Ex'],dc[1][0,0],rtol=0,atol=0)
+            assert monitor.attrs['dc']['magnetic_available']
+            torch.testing.assert_close(monitor.attrs['dc']['components']['Ex'],dc[1][0,0],rtol=0,atol=0)
             for i,name in enumerate(('Hx','Hy','Hz')):
-                torch.testing.assert_close(monitor['dc']['components'][name],magnetic[0][0,i],rtol=0,atol=0)
+                torch.testing.assert_close(monitor.attrs['dc']['components'][name],magnetic[0][0,i],rtol=0,atol=0)
     assert state.cell_electric[2].norm()>0
     path=tmp_path/'two-body.pt'
     result.save(path)
@@ -69,17 +71,17 @@ def test_disjoint_nonlinear_bodies_reversed_volumes_and_restore(tmp_path,monkeyp
         patch.setattr(runtime,'assemble_system',forbidden)
         restored=mw.Result.load(path,scene=scene)
         for point,region,dc,ac,magnetic in observations:
-            actual_dc=restored.query_dc(point,region_id=region)
+            actual_dc=mw.mom.query_dc(restored, point,region_id=region)
             actual_ac=restored.query_fields(point,region_id=region,field_kind='total',harmonic=2)
             for actual,expected in zip((*actual_dc,*actual_ac),(*dc,*ac)):
                 torch.testing.assert_close(actual,expected,rtol=0,atol=0)
             if magnetic is not None:
-                for actual,expected in zip(restored.query_dc_magnetic(point,region_id=region),magnetic):
+                for actual,expected in zip(mw.mom.query_dc_magnetic(restored, point,region_id=region),magnetic):
                     torch.testing.assert_close(actual,expected,rtol=0,atol=0)
     if current_dc=='mixed':
         for region in (1,2):
             for name in ('Ex','Hx','Hy','Hz'):
-                torch.testing.assert_close(restored.monitor(f'inside{region}')['dc']['components'][name],
-                    result.monitor(f'inside{region}')['dc']['components'][name].cpu(),rtol=0,atol=0)
+                torch.testing.assert_close(restored.monitor(f'inside{region}').attrs['dc']['components'][name],
+                    result.monitor(f'inside{region}').attrs['dc']['components'][name].cpu(),rtol=0,atol=0)
     print({'current_dc':current_dc,'cell_order':[v.region_id for v in volumes],
            'second_harmonic_norm':float(state.cell_electric[2].norm()),'physical_qualification':False})

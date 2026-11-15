@@ -12,6 +12,7 @@ import math
 import torch
 
 from witwin.maxwell.fdtd.copper_foil import copper_spectral_power
+import witwin.maxwell as mw
 
 
 def _cpu(value):
@@ -109,7 +110,7 @@ def capture_loss_basis(result, execution_contract):
     frequencies = tuple(float(f) for f in result.frequencies)
     if not frequencies or any(not math.isfinite(f) or f <= 0 for f in frequencies) or not math.isfinite(dt) or dt <= 0:
         raise ValueError('Loss basis requires finite positive frequencies and actual timestep.')
-    records = _cpu(result.conductor_losses)
+    records = _cpu(mw.rf.conductor_losses(result))
     entries = tuple(getattr(solver, '_copper_foils', ()))
     realizations = []
     claimed = set()

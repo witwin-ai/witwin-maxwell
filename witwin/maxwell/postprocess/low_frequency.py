@@ -7,8 +7,10 @@ import math
 import torch
 
 from ..network import NetworkData, PortData
+from .._stability import experimental
 
 
+@experimental("networks")
 @dataclass(frozen=True)
 class LowFrequencySmoothingSpec:
     """Replace under-sampled low-frequency spectral samples by a trusted polynomial fit.
@@ -93,6 +95,7 @@ def _smooth_tensor(values: torch.Tensor, frequencies: torch.Tensor, spec, run_ti
     return torch.movedim(smoothed, 0, dim), int(replaced_index.numel())
 
 
+@experimental("networks")
 def smooth_low_frequency(data, spec: LowFrequencySmoothingSpec, *, run_time: float, frequencies=None, dim: int = -1):
     """Apply :class:`LowFrequencySmoothingSpec` to port, network or raw spectral data.
 

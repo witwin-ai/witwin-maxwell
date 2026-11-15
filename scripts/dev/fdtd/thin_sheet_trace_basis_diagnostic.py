@@ -44,8 +44,8 @@ def compile_pair(build):
     """(prepared scene, PEC complex, copper complex) for the same geometry."""
     out = []
     for kind in ("pec", "cu"):
-        scene = prepare_scene(build(kind))
-        structure = next(s for s in scene.structures if owns_thin_sheet(s))
+        scene = prepare_scene(build(kind), device="cpu")
+        structure = next(s for s in scene.scene.structures if owns_thin_sheet(s))
         out.append((scene, compile_thin_sheet(scene, structure)))
     (scene, pec), (_, cu) = out
     assert np.array_equal(pec.e_volume, cu.e_volume) and np.array_equal(pec.h_area, cu.h_area)
@@ -182,10 +182,10 @@ def sliver_bias(chords, volumes, removed, normal, h):
 
 def part_a():
     from witwin.maxwell.compiler.copper_foil import compile_copper_response
-    foil = mw.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9))
+    foil = mw.media.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9))
     scene = prepare_scene(rt._cavity(mw.Structure(geometry=hn.rectangle_mesh(rt.CENTER, rt.NORMAL, 0.2, 0.2), material=foil),
-                                     source_position=tuple(rt.CENTER - 0.03 * rt.NORMAL)))
-    c = compile_thin_sheet(scene, next(s for s in scene.structures if owns_thin_sheet(s)))
+                                     source_position=tuple(rt.CENTER - 0.03 * rt.NORMAL)), device="cpu")
+    c = compile_thin_sheet(scene, next(s for s in scene.scene.structures if owns_thin_sheet(s)))
     h = 0.005
     dt = 0.985 / (2.998e8 * math.sqrt(3.0) / h)
     foil._frequencies((1e9,))
@@ -229,10 +229,10 @@ def prism_scene(kind, dl, side_cells, phase=0.5, center=(0.37, 0.21)):
     pts = hn.polygon_points(radius, 4, center=(center[0] * dl, center[1] * dl), phase=phase)
     kw = {} if kind == "cu" else dict(sheet_model="conformal_two_sided")
     mesh = hn.extruded_polyline_mesh(pts, (-2 * dl, 4 * dl), closed=True, **kw)
-    material = mw.CopperFoil(thickness=35e-6, frequency_range=(0.3e9, 2e9)) if kind == "cu" else hn.pec_material()
+    material = mw.media.CopperFoil(thickness=35e-6, frequency_range=(0.3e9, 2e9)) if kind == "cu" else hn.pec_material()
     return mw.Scene(domain=mw.Domain(bounds=((-extent, extent), (-extent, extent), (0.0, 2 * dl))),
                     grid=mw.GridSpec.uniform(dl), boundary=mw.BoundarySpec.faces(default="pec", z="pmc"),
-                    device="cpu", structures=[mw.Structure(geometry=mesh, material=material)])
+                    structures=[mw.Structure(geometry=mesh, material=material)])
 
 
 def interior_modes(c, K, volume, side_length, constraint=None):
@@ -337,7 +337,7 @@ def part_b():
 
 def plate(kind, normal=rt.NORMAL, half=(0.03, 0.025)):
     if kind == "cu":
-        material = mw.CopperFoil(thickness=2e-6, frequency_range=(0.5e9, 4e9)); kw = {}
+        material = mw.media.CopperFoil(thickness=2e-6, frequency_range=(0.5e9, 4e9)); kw = {}
     else:
         material = hn.pec_material(); kw = dict(sheet_model="conformal_two_sided")
     return rt._cavity(mw.Structure(geometry=hn.rectangle_mesh(rt.CENTER, normal, *half, **kw), material=material))
@@ -587,7 +587,7 @@ def part_g(rule="remove", kappas=(None,), floor_mode="sheet_faces", case_names=N
     dl = 0.005
     h = 0.005
     yee = 12.0 / (EPS0 * MU0 * h * h)
-    materials = {"35um Cu": mw.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9)),
+    materials = {"35um Cu": mw.media.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9)),
                  "g=4": hn.resistive_foil(4 / hn.ETA0), "g=0.5": hn.resistive_foil(0.5 / hn.ETA0), "no sheet (Y=0)": None}
     cases = [("plate", lambda kind: plate(kind)), ("prism L=10h", lambda kind: prism_scene(kind, dl, 10)),
              ("prism L=30h", lambda kind: prism_scene(kind, dl, 30))]
@@ -641,7 +641,7 @@ def part_g3(kappa=0.25):
     dl = 0.005
     h = 0.005
     yee = 12.0 / (EPS0 * MU0 * h * h)
-    materials = {"35um Cu": mw.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9)),
+    materials = {"35um Cu": mw.media.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9)),
                  "g=0.5": hn.resistive_foil(0.5 / hn.ETA0), "no sheet (Y=0)": None}
     cases = [("plate", lambda kind: plate(kind)), ("prism L=10h", lambda kind: prism_scene(kind, dl, 10)),
              ("prism L=30h", lambda kind: prism_scene(kind, dl, 30)),

@@ -2,8 +2,10 @@
 from dataclasses import dataclass, asdict
 import math
 from .interpolation_error import KernelErrorBudget
+from .._stability import experimental
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class DirectH2Config:
     order: int = 6

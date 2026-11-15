@@ -17,6 +17,10 @@ from witwin.maxwell.mom.volume_hmatrix import VolumeCellBlocks
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
 
 
+# Milestone only, no regression twin: one tetrahedron already; the cost is the
+# adaptive tensor field-order refinement (source max orders 64), which cannot
+# shrink without changing quadrature budgets or tolerances.
+@pytest.mark.mom_milestone
 def test_actual_adaptive_tensor_compressed_preparation(monkeypatch,tmp_path):
     inverse,binding=inverse_for(True)
     print('START adaptive tensor compressed response',flush=True)

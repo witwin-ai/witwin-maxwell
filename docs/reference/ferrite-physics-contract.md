@@ -14,7 +14,7 @@ below may be silently changed; the change rule in the last section governs
 loosening any tolerance.
 
 The reference oracle that binds this contract to code is
-`witwin/maxwell/fdtd/ferrite_reference.py` (a verification oracle, not a solver
+`tests/oracles/ferrite_reference.py` (a verification oracle, not a solver
 and not a CPU fallback — nothing in the runtime may import it), and the public
 material type is `witwin.maxwell.GyromagneticFerrite`.
 
@@ -328,11 +328,13 @@ in the ADE state, never widened into `mu_tensor`):
 
 Slices 1b/1c have landed. The compiler lowers a ferrite to
 `CompiledGyromagneticLayout` (`compiler/gyromagnetic.py`,
-`Scene.compile_gyromagnetic_materials`) and its diagonal background compiles
+`compile_gyromagnetic_materials(prepared)`) and its diagonal background compiles
 through the ordinary material path; the FDTD forward advances the local
 magnetization-ADE and applies `H -= dM/mu_infinity`
 (`fdtd/runtime/gyromagnetic.py`, inserted at the magnetic-update slot in
-`stepping.py`). Slice 1c covers the axis-aligned z/x/y fast path with identity
+`stepping.py` and in the core-path closure; since W7 row 9 the drive snapshot and
+the coupled step are the CUDA kernels of `fdtd/cuda/kernels/gyromagnetic.cu`, with
+their Torch form kept as the test oracle `tests/oracles/gyromagnetic_recurrence.py`). Slice 1c covers the axis-aligned z/x/y fast path with identity
 collocation (`C = I`), valid for the transversely-uniform-field regime; the
 general-bias 4-point collocation and the arbitrary-bias local-frame rotation (and
 a complex-field / Bloch ferrite correction) remain fail-closed until the later

@@ -17,6 +17,8 @@ from ..fdtd.cuda.runtime.graph import capture_participant
 from .batch import BatchParameters
 from .plan import BatchPlanReport
 from .records import BatchItem, BatchResult, DistributedFailure, ExecutionRecord, FailureKind
+from ..errors import UnsupportedFeatureError
+from .._stability import experimental
 
 
 class _BatchCancelled(Exception):
@@ -58,6 +60,7 @@ def _owned(value, device, memo):
     return value
 
 
+@experimental("batch")
 class PreparedBatch:
     """Reusable native CUDA context, dispatched to a slot coordinator as needed."""
 
@@ -72,16 +75,19 @@ class PreparedBatch:
         self._record_grad = torch.is_grad_enabled()
         policy = batch.execution
         if len(policy.devices) != 1 or policy.slots_per_device != 1:
-            raise NotImplementedError("PreparedBatch currently requires one GPU and one execution slot.")
+            raise UnsupportedFeatureError("PreparedBatch currently requires one GPU and one execution slot.",
+                                          feature="guard:475d8186", method="fdtd")
         if policy.tune:
             raise ValueError("Resolve measured tuning through BatchSimulation.prepare().")
         if batch.outputs.materials or any(name.startswith("H") for name in batch.outputs.fields):
-            raise NotImplementedError(
-                "Batch material snapshots and magnetic full-field spectra have no output-buffer allocation in PreparedBatch."
+            raise UnsupportedFeatureError(
+                "Batch material snapshots and magnetic full-field spectra have no output-buffer allocation in PreparedBatch.",
+                feature="guard:054db259", method="fdtd"
             )
         if batch.outputs.result_device not in ("local", "cpu", policy.devices[0]):
             if batch.outputs.result_device not in getattr(batch, "_export_pools", {}):
-                raise NotImplementedError("Cross-device batch result export requires a destination allocation pool.")
+                raise UnsupportedFeatureError("Cross-device batch result export requires a destination allocation pool.",
+                                              feature="guard:e4221f61", method="fdtd")
         self._validate_inputs(batch.parameters)
         self.device = policy.devices[0]
         if not torch.cuda.is_available():
@@ -220,16 +226,20 @@ class PreparedBatch:
             scene = model.scene
             for name in ("thin_wires",):
                 if getattr(scene, name, ()):
-                    raise NotImplementedError(f"Native batch execution does not yet support Scene.{name}.")
+                    raise UnsupportedFeatureError(f"Native batch execution does not yet support Scene.{name}.",
+                                                  feature="guard:af3ff99c", method="fdtd")
             if model.port_sweep is not None:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Batch RF port excitation requires per-variant modal injection and port-state buffers; "
-                    "the native batch runtime only packs PointDipole drives."
+                    "the native batch runtime only packs PointDipole drives.",
+                    feature="guard:47eb61ae", method="fdtd"
                 )
             if any(not isinstance(source, PointDipole) for source in scene.resolved_sources()):
-                raise NotImplementedError("The current native batch tier supports PointDipole sources.")
+                raise UnsupportedFeatureError("The current native batch tier supports PointDipole sources.",
+                                              feature="guard:34dac30b", method="fdtd")
             if any(not isinstance(m, (PointMonitor, PlaneMonitor, FinitePlaneMonitor, FluxMonitor, PowerLossMonitor)) for m in scene.resolved_monitors()):
-                raise NotImplementedError("The current native batch tier supports point, finite/full plane, flux and postprocessed power-loss monitors.")
+                raise UnsupportedFeatureError("The current native batch tier supports point, finite/full plane, flux and postprocessed power-loss monitors.",
+                                              feature="guard:f6641105", method="fdtd")
             if model.config.enable_plot:
                 raise ValueError("Batch execution does not support per-step plotting.")
 
@@ -282,19 +292,20 @@ class PreparedBatch:
             if free <= self.batch.execution.reserve_bytes:
                 raise torch.cuda.OutOfMemoryError("Insufficient free device memory above BatchExecution.reserve_bytes.")
             model = copy.copy(self.batch.template or self.batch.simulations[index])
-            model.config = copy.deepcopy(model.config)
             with torch.enable_grad():
-                source_device = str(torch.device(model.scene.device))
+                source_device = model.config.device
                 account = getattr(self.batch, "_device_accounts", {}).get(source_device)
                 if model.scene_module is not None and source_device != self.device and account is not None:
                     with torch.cuda.device(source_device), account.activate():
                         scene = materializer.scene(index)
                 else:
                     scene = materializer.scene(index)
-                scene = scene.clone(device=self.device)
+                from ..scene import place_scene
+                scene = place_scene(scene, self.device)
             if self.batch.outputs.monitors != "all":
                 selected = set(self.batch.outputs.monitors)
-                scene.monitors = [m for m in scene.monitors if m.name in selected]
+                scene = scene.updated(monitors=[m for m in scene.monitors if m.name in selected])
+            model.config = replace(model.config, device=str(self.device))
             model.scene = scene
             model.scene_input = scene
             model.scene_module = None
@@ -318,7 +329,7 @@ class PreparedBatch:
                 model._batch_differentiable = bridge is not None
                 model._batch_input_guards = inputs
             from ..scene import prepare_scene
-            compiled_scene = prepare_scene(scene)
+            compiled_scene = prepare_scene(scene, device=model.config.device)
             # Template source scales cannot alter geometry, material sampling,
             # or the grid. Retain one material bank across all such cohorts.
             # Density templates and independent Scene lists have no such proof.
@@ -341,14 +352,14 @@ class PreparedBatch:
                 compiled_scene._material_model_override = material_model
             elif self.batch.template is not None and parameters.region_densities and not model.has_trainable_parameters:
                 from ..compiler.materials import LocalMaterialCache, PerturbationMedium
-                if not any(isinstance(s.material, PerturbationMedium) for s in compiled_scene.structures):
+                if not any(isinstance(s.material, PerturbationMedium) for s in compiled_scene.scene.structures):
                     if self._local_material_cache is None:
                         self._local_material_cache = LocalMaterialCache(compiled_scene, parameters.region_densities)
                         material_model = self._local_material_cache.base
                     else:
                         material_model = self._local_material_cache.compile(compiled_scene)
                     compiled_scene._material_model_override = material_model
-            solver = model._build_fdtd_solver_for_scene(compiled_scene, initialize=True)
+            solver = model._build_fdtd_solver_for_scene(compiled_scene, initialize=True, batch_lane=True)
             solver._batch_source_scale_amplitudes = {
                 i: amplitude for i, (_, amplitude) in model._batch_source_scales.items()}
             solver.verbose = False
@@ -417,10 +428,12 @@ class PreparedBatch:
                 from ..fdtd.ports import prepare_port_drive_tables
                 prepare_port_drive_tables(solver, steps)
                 if solver.dft_enabled and not descriptor["gpu_dft"]:
-                    raise NotImplementedError("Batch full-field spectra require GPU-driven accumulation.")
+                    raise UnsupportedFeatureError("Batch full-field spectra require GPU-driven accumulation.",
+                                                  feature="guard:6767e322", method="fdtd")
                 for runtime in getattr(solver, "_circuit_runtimes", ()):
                     if not runtime.graph_eligible:
-                        raise NotImplementedError("Native batch MNA requires fixed circuit parameters and prepared source/switch schedules.")
+                        raise UnsupportedFeatureError("Native batch MNA requires fixed circuit parameters and prepared source/switch schedules.",
+                                                      feature="circuit", method="fdtd")
                 solver._native_batch_circuit_indices = tuple(0 for _runtime in getattr(solver, "_circuit_runtimes", ()))
                 pending[lane] = (steps, descriptor["shutoff_min_step"])
             observers.bind()
@@ -470,7 +483,7 @@ class PreparedBatch:
                 lanes = tuple(pending)
                 def advance_chunk():
                     for _ in range(count):
-                        slot.advance()
+                        slot.advance(lanes)
                         self._sources.advance(observers.step)
                         for lane in lanes:
                             _port_step_block(slot.solvers[lane], observers.step)
@@ -578,6 +591,11 @@ class PreparedBatch:
         with (destination.activate() if destination is not None else contextlib.nullcontext()), torch.set_grad_enabled(differentiable):
             exported_fields = _owned(field_payload, device, memo)
             exported_monitors = _owned(monitor_payload, device, memo)
+            # Port, circuit and network records of a differentiable lane carry
+            # the adjoint graph; export them with the fields and monitors.
+            exported_ports = _owned(port_payload, device, memo)
+            exported_circuits = _owned(circuit_payload, device, memo)
+            exported_networks = _owned(network_payload, device, memo)
         with torch.no_grad():
             scene_snapshot = _owned(model.scene, self.device, {})
         loss_metadata = {}
@@ -594,9 +612,9 @@ class PreparedBatch:
             loss_metadata["conductor_losses"] = copper_loss_report(solver)
         result = Result(method="fdtd", scene=scene_snapshot, frequencies=model.frequencies,
             fields=exported_fields, monitors=exported_monitors,
-            ports=_owned(port_payload, device, memo),
-            circuits=_owned(circuit_payload, device, memo),
-            embedded_networks=_owned(network_payload, device, memo),
+            ports=exported_ports,
+            circuits=exported_circuits,
+            embedded_networks=exported_networks,
             raw_output=loss_output,
             metadata={**model.metadata, **loss_metadata, "batch_index": index, "variant_id": self.batch.variant_ids[index]},
             solver_stats=model._build_fdtd_solver_stats(solver,
@@ -775,6 +793,7 @@ class PreparedBatch:
         self.close()
 
 
+@experimental("batch")
 class BatchResultIterator:
     """Demand-driven result delivery; no unbounded completed-result queue."""
 
@@ -857,7 +876,8 @@ class ParallelPreparedBatch(PreparedBatch):
         self._capacity_retries = []
         slots = batch.execution.slots_per_device
         if slots not in (1, 2):
-            raise NotImplementedError("Automatic slot selection requires measured throughput tuning.")
+            raise UnsupportedFeatureError("Automatic slot selection requires measured throughput tuning.",
+                                          feature="guard:235c1d54", method="fdtd")
         if batch.outputs.result_device not in ("local", "cpu", *batch.execution.devices):
             raise ValueError("A parallel Batch export device must belong to its execution devices.")
         try:
@@ -897,7 +917,7 @@ class ParallelPreparedBatch(PreparedBatch):
             raise
 
     def _input_events(self, parameters):
-        devices = {str(model.scene.device) for model in self.batch.simulations}
+        devices = {model.config.device for model in self.batch.simulations}
         devices.update(self.batch.execution.devices)
         if parameters is not None:
             devices.update(str(value.device) for kind in ("region_densities", "source_scales")

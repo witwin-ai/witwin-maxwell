@@ -17,6 +17,7 @@ from tests.mom.layered.test_layered_network import (
 
 
 pytestmark = pytest.mark.cuda
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")
 EPS0 = 8.8541878128e-12
 MU0 = 1 / (EPS0 * 299792458.0**2)
 
@@ -28,10 +29,19 @@ def vacuum():
 def loop(frequencies, *, copper=False):
     side, width, gap, z = 100e-6, 5e-6, 5e-6, 0.
     rectangles = square_loop(side, width, gap, z)
-    port = gap_port("loop", (gap / 2, -side / 2, z), (-gap / 2, -side / 2, z), "x", width)
+    port = gap_port("loop", (gap / 2, -side / 2, z), (-gap / 2, -side / 2, z), "x")
     return prepare_layered_network(
         vacuum(), rectangles, [port], frequencies, bridge_width=width, max_edge=5e-6,
         sheet_materials=[(5.8e7, 1e-6, None)] * len(rectangles) if copper else None)
+
+
+def dense_columns(columns, rows):
+    """Small-test oracle: densify native CSC columns (offsets, row indices, values)."""
+    offsets, indices, values = columns
+    owners = torch.repeat_interleave(torch.arange(len(offsets) - 1, device=offsets.device), offsets.diff())
+    dense = torch.zeros((rows, len(offsets) - 1), device=values.device, dtype=values.dtype)
+    dense[indices, owners] = values
+    return dense
 
 
 def measure(record_property, **values):
@@ -61,6 +71,7 @@ def graph_reference(plus, minus, faces):
     return components
 
 
+@requires_cuda
 @pytest.mark.parametrize("kind", ["loop", "strips", "rfic", "disconnected"])
 def test_basis_complete_and_deterministic(kind, record_property):
     if kind == "loop":
@@ -83,21 +94,35 @@ def test_basis_complete_and_deterministic(kind, record_property):
     assert lt.components == components
     assert lt.trees == f - components
     assert lt.loops == n - (f - components)
-    assert torch.linalg.matrix_rank(lt.transform) == n
+    transform = dense_columns(lt.sparse_transform, n)
+    assert torch.linalg.matrix_rank(transform) == n
+    # Normalized columns, their row transpose and the tree charge are the
+    # sparse images of transform/norms and D*Q_tree.
+    q = dense_columns(lt.sparse_q, n)
+    assert torch.equal(q, transform / lt.norms)
+    assert torch.equal(dense_columns(lt.sparse_q_rows, n), q.T)
+    charge = torch.ops.witwin_maxwell_mom_layered.divergence(
+        q[:, lt.loops:].contiguous(), basis.face_edges.contiguous(), basis.face_signs.contiguous(),
+        basis.edge_lengths.contiguous())
+    assert torch.equal(dense_columns(lt.sparse_charge, f), charge)
     d = layout.mesh.areas[:, None] * basis.divergence
-    divergence = d @ lt.lam
+    divergence = d @ transform[:, :lt.loops]
     # Unit-integral P0 convention: D is integrated face flux, in metres.
     defect = divergence.abs().max().item() if lt.loops else 0.
-    bound = 1e-12 * lt.lam.abs().max().item() if lt.loops else 0.
+    bound = 1e-12 * transform[:, :lt.loops].abs().max().item() if lt.loops else 0.
     assert defect <= bound
     for _ in range(2):
         again = build_loop_tree(layout, length_scale=10e-6)
-        for name in ("order", "parents", "transform", "q", "r", "charge"):
+        for name in ("order", "parents", "norms"):
             assert torch.equal(getattr(lt, name), getattr(again, name))
+        for name in ("sparse_transform", "sparse_q", "sparse_q_rows", "sparse_charge"):
+            for mine, other in zip(getattr(lt, name), getattr(again, name)):
+                assert torch.equal(mine, other)
     measure(record_property, unknowns=n, faces=f, components=components,
             loops=lt.loops, trees=lt.trees, divergence_defect=defect, divergence_bound=bound)
 
 
+@requires_cuda
 def test_separate_potentials_match_summed_assembly(record_property):
     prepared = loop((1e9,))
     vector, scalar = assemble_potentials(prepared.layout, prepared.table)
@@ -121,6 +146,7 @@ def pec_loop():
     return prepared, solve_prepared_network(prepared)[0]
 
 
+@requires_cuda
 def test_loop_inductance_flat_to_dc(pec_loop, record_property):
     prepared, network = pec_loop
     z = network.to_z()[:, 0, 0]
@@ -137,10 +163,11 @@ def test_loop_inductance_flat_to_dc(pec_loop, record_property):
             inductance_H=inductance.tolist(), flatness=flatness, GHz_legacy_relative=relative)
 
 
+@requires_cuda
 def test_scaled_condition_is_frequency_bounded(pec_loop, record_property):
     prepared, _ = pec_loop
     assert prepared.layout.basis.n_edges <= 2000
-    matrix, _, _ = scaled_system(prepared)
+    matrix = scaled_system(prepared).matrix
     stable = torch.linalg.cond(matrix).tolist()
     # Direct assembly is diagnostic only: it becomes numerically singular
     # before DC, so its computed condition eventually saturates at 1/eps.
@@ -154,6 +181,7 @@ def test_scaled_condition_is_frequency_bounded(pec_loop, record_property):
             scaled_variation=variation)
 
 
+@requires_cuda
 def test_copper_dc_and_continuity(record_property):
     frequencies = tuple(10.**(3 + i * .5) for i in range(15))
     prepared = loop(frequencies, copper=True)
@@ -165,7 +193,7 @@ def test_copper_dc_and_continuity(record_property):
     sheet = prepared.loss
     dc_impedance = torch.where(sheet.impedance.real > 0,
                                1 / (5.8e7 * 1e-6), 0).to(torch.complex128)
-    SheetLoss(sheet.blocks, sheet.columns, sheet.supports, dc_impedance).add_to(reference, 10)
+    SheetLoss(sheet.blocks, sheet.columns, sheet.supports, dc_impedance, sheet.owners).add_to(reference, 10)
     x, _ = solve_dense(reference, prepared.excitation)
     dc = (1 / (prepared.excitation.T @ x))[0, 0].real.item()
     relative = abs(resistance[0].item() / dc - 1)
@@ -179,10 +207,11 @@ def test_copper_dc_and_continuity(record_property):
             dc_reference_ohm=dc, dc_relative=relative, max_adjacent_ratio=ratio.max().item())
 
 
+@requires_cuda
 def test_capacitive_static_limit(record_property):
     rectangles = [(-110e-6, -10e-6, -50e-6, 50e-6, 0.),
                   (0., 100e-6, -50e-6, 50e-6, 0.)]
-    port = gap_port("capacitor", (0., 0., 0.), (-10e-6, 0., 0.), "x", 5e-6)
+    port = gap_port("capacitor", (0., 0., 0.), (-10e-6, 0., 0.), "x")
     prepared = prepare_layered_network(vacuum(), rectangles, [port],
                                        (1., 1e3, 1e6, 100e6), bridge_width=5e-6, max_edge=20e-6)
     network, currents = solve_prepared_network(prepared)
@@ -191,9 +220,9 @@ def test_capacitive_static_limit(record_property):
     assert (z.imag > 0).all()
     variation = (capacitance / capacitance[1] - 1).abs().max().item()
     assert variation < .005
-    # A gradient gap source has exactly zero cycle work before QR.
-    work = torch.ops.witwin_maxwell_mom_layered.port_work(
-        prepared.loop_tree.transform, prepared.layout.basis.edge_lengths.contiguous(),
+    # A gradient gap source has exactly zero cycle work before normalization.
+    work = torch.ops.witwin_maxwell_mom_layered.sparse_port_work(
+        prepared.loop_tree.sparse_q, prepared.layout.basis.edge_lengths.contiguous(),
         prepared.excitation)
     assert (work[:prepared.loop_tree.loops] == 0).all()
     current_y = prepared.excitation.T @ currents
@@ -211,6 +240,7 @@ def test_capacitive_static_limit(record_property):
             current_over_frequency_flatness=current_flatness)
 
 
+@requires_cuda
 def test_rfic_low_frequency_reciprocity_passivity_determinism(record_property):
     stack = rfic_stack()
     strips, ports = coplanar_strips(100e-6, 5e-6, 5e-6, 2e-6, stack.interfaces()[5])
@@ -244,6 +274,7 @@ def test_dc_is_a_limit_not_a_zero_frequency_solve(frequency):
         loop((frequency,))
 
 
+@requires_cuda
 @pytest.mark.parametrize("copper", [False, True])
 def test_frequency_chunks_are_bitwise_identical(copper, record_property):
     prepared = loop((1e3, 1e6, 100e6, 1e9), copper=copper)
@@ -264,9 +295,11 @@ def test_frequency_chunks_are_bitwise_identical(copper, record_property):
             backward_error=reference.metadata["backward_error"])
 
 
+@requires_cuda
 def test_refinement_escalates_only_failed_frequencies():
     from witwin.maxwell.mom.layered.build import build_extension
     from witwin.maxwell.mom.layered.network import solve_scaled_chunk
+    from witwin.maxwell.mom.layered.operator import DenseLayeredSystem
     build_extension()
     # Second matrix is nonsingular in fp64 but exactly singular after fp32
     # conversion. The well-conditioned first frequency must retain fp32 LU.
@@ -274,23 +307,31 @@ def test_refinement_escalates_only_failed_frequencies():
                            [[1., 1.], [1., 1. + 1e-9]]],
                           device="cuda", dtype=torch.complex128)
     rhs = torch.tensor([[[1.], [2.]], [[1.], [2.]]], device="cuda", dtype=torch.complex128)
-    x, info = solve_scaled_chunk(matrix, rhs)
+
+    def solve():
+        return solve_scaled_chunk(DenseLayeredSystem.from_matrix(matrix, rhs))
+
+    x, info = solve()
     assert info[0] == ("complex64", "complex128")
     assert max(info[2]) <= 64 * 2.**-53
     assert torch.allclose(matrix @ x, rhs, atol=2e-7, rtol=0.)
     for _ in range(2):
-        again, metadata = solve_scaled_chunk(matrix, rhs)
+        again, metadata = solve()
         assert torch.equal(again, x)
         assert metadata == info
 
 
 def test_memory_admission_depends_on_one_frequency():
     from witwin.maxwell.mom.layered.network import frequency_chunk_capacity
-    n, faces = 8000, 5500
-    one = 16 * (12 * n * n + faces * faces)
-    available = 2 * one
-    assert frequency_chunk_capacity(n, faces, 1, available) == 1
-    assert frequency_chunk_capacity(n, faces, 50, available) == 1
-    assert frequency_chunk_capacity(n, faces, 50, 4 * one) == 3
+    from witwin.maxwell.mom.layered.operator import dense_chunk_bytes, dense_frequency_bytes
+    n, faces, ports = 8000, 5500, 2
+    one = dense_frequency_bytes(n, faces, ports)
+    # Two O(N^2) buffers: 16 N^2 system plus 8 max(N^2, F(F+1)) workspace.
+    assert 24 * n * n < one < 24 * n * n + 160 * faces * 64 + 256 * n * ports + 1
+    constant = dense_chunk_bytes(faces, 8)
+    available = int((2 * one + constant) / .8) + 1
+    assert frequency_chunk_capacity(n, faces, ports, 1, available, wall_nodes=8) == 1
+    assert frequency_chunk_capacity(n, faces, ports, 50, available, wall_nodes=8) == 2
+    assert frequency_chunk_capacity(n, faces, ports, 50, available, wall_nodes=0) == 2
     with pytest.raises(RuntimeError, match="One dense layered frequency"):
-        frequency_chunk_capacity(n, faces, 50, one)
+        frequency_chunk_capacity(n, faces, ports, 50, int(one / .8), wall_nodes=8)

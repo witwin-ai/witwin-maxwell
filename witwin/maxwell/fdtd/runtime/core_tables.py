@@ -22,8 +22,63 @@ def source_tables_supported(solver):
     if any(term["delay_patch"] is not None and
            (term.get("source_time") or solver._source_time)["kind"] == "custom" for term in terms):
         return False
+    if getattr(solver, "complex_fields_enabled", False) and solver.tfsf_enabled and any(
+            term.get("delay_patch") is not None and (term.get("source_time") or solver._source_time)["kind"] == "custom"
+            for key in ("magnetic_terms", "electric_terms") for term in solver._tfsf_state.get(key, ())):
+        return False
     # Oblique auxiliary providers have not qualified for core graph replay.
     return not solver.tfsf_enabled or solver._tfsf_state["provider"] != "plane_wave_aux"
+
+
+def _bloch_source_launch(solver, extension, step, term, injection_kind, steps):
+    """One Bloch scatter launch with the eager per-step signal row on the device."""
+    from ..cuda.backend import _patch_source_gather
+    from ..excitation.temporal import _bloch_patch_common_kwargs, _resolve_term_source
+
+    source, omega = _resolve_term_source(term, solver._source_time, solver.source_omega)
+    times = [injection_time(injection_kind, n * solver.dt, solver.dt) for n in range(steps)]
+    kwargs = _bloch_patch_common_kwargs(solver, term["field_name"], term)
+    axis = kwargs["axisCode"]
+    empty = torch.empty(0, device=solver.device)
+    delays = activation = clock = empty
+    waveform = [0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    if term["cw_cos_patch"] is not None:
+        kind, patch, second = 1, term["cw_cos_patch"], term["cw_sin_patch"]
+        rows = [_resolve_cw_signal(omega, source, t) for t in times]
+    elif term["delay_patch"] is not None:
+        # temporal._launch_bloch_time_shifted_patch: the envelope at t - delay per cell, evaluated in
+        # the float32 order of evaluate_time_shifted_waveform_torch from the Python double operands.
+        kind, patch, second, rows = 2, term["patch"], term["patch"], None
+        delays, activation = term["delay_patch"], term.get("activation_delay_patch")
+        activation = empty if activation is None else activation
+        clock = torch.as_tensor(np.asarray(times, dtype=np.float32), device=solver.device)
+        frequency = float(source["frequency"])
+        two_pi = 2.0 * np.pi
+        waveform = [int(source["kind_code"]), float(source["amplitude"]), two_pi * frequency,
+                    float(source.get("phase", 0.0)), float(source.get("delay", 0.0)),
+                    max(two_pi * float(source.get("fwidth", 0.0)), 1.0e-30), float(source.get("pedestal", 0.0)),
+                    two_pi * float(source.get("pedestal_fwidth", 0.0)), np.pi * frequency]
+    else:
+        kind, patch, second = 0, term["patch"], term["patch"]
+        phase_real, phase_imag = float(term["phase_real"]), float(term["phase_imag"])
+        rows = []
+        for t in times:
+            signal = float(evaluate_source_time(source, t))
+            signal_sin = float(_resolve_cw_signal(omega, source, t)[1]) if source["kind"] == "cw" else 0.0
+            rows.append((signal * phase_real + signal_sin * phase_imag,
+                         signal * phase_imag - signal_sin * phase_real))
+    signals = (clock if rows is None else
+               torch.as_tensor(np.asarray(rows, dtype=np.float32).reshape(steps, 2), device=solver.device))
+    real = getattr(solver, term["field_name"])
+    gather = _patch_source_gather(real, patch, term["offsets"], axis, kwargs["wrapAxisA"], kwargs["wrapAxisB"],
+                                  kwargs["sourceGather"])
+    launch = extension.CoreStepLaunch(
+        7, [step, real, getattr(solver, term["field_name"] + "_imag"), patch, second, signals, *gather,
+            delays, activation, clock],
+        [*term["offsets"], 1 if axis == 0 else 0, 1 if axis == 2 else 2, kind, waveform[0],
+         int(activation.numel() > 0)],
+        [kwargs["phaseCosA"], kwargs["phaseSinA"], kwargs["phaseCosB"], kwargs["phaseSinB"], *waveform[1:]])
+    return launch, signals, gather
 
 
 def compile_source_tables(solver, extension, step, steps):
@@ -39,10 +94,19 @@ def compile_source_tables(solver, extension, step, steps):
     rows = {"time_h": times[0], "time_e": times[1]}
     budget = DELAYED_TABLE_BYTES
 
+    bloch = bool(getattr(solver, "complex_fields_enabled", False))
+
     def compile_terms(name, terms, injection_kind, generic):
         nonlocal budget
         launches = []
         for ordinal, term in enumerate(terms):
+            if bloch:
+                launch, signals, gather = _bloch_source_launch(solver, extension, step, term, injection_kind, steps)
+                rows[f"{name}/{ordinal}/signals"] = signals
+                for key, tensor in zip(("gather_rows", "gather_targets", "gather_entries"), gather):
+                    rows[f"{name}/{ordinal}/{key}"] = tensor
+                launches.append(launch)
+                continue
             source = term.get("source_time") or solver._source_time
             omega = solver.source_omega if term.get("omega") is None else term["omega"]
             values = [float(source.get(key, 0.0)) for key in
@@ -75,14 +139,14 @@ def compile_source_tables(solver, extension, step, steps):
             else:
                 kind = 0
                 phase = float(term["phase_real"]) if not generic else 1.0
-                if generic and solver.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
+                if generic and solver.scene.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
                     phase = float(term["phase_real"])
                 signals = upload([float(evaluate_source_time(source, t)) * phase for t in time_values])
             wrap = 0
-            if kind == 0 and solver.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
+            if kind == 0 and solver.scene.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
                 component = "xyz".index(term["field_name"][-1].lower())
                 wrap = sum(1 << a for a, axis in enumerate("xyz")
-                           if a != component and solver.scene.boundary.axis_kind(axis) == "periodic")
+                           if a != component and solver.scene.scene.boundary.axis_kind(axis) == "periodic")
             tensors = [step, getattr(solver, term["field_name"]), patch, second, signals,
                        rows["time_h" if injection_kind == "magnetic_current" else "time_e"],
                        delays, activation, delay_indices]
@@ -108,7 +172,10 @@ def compile_source_tables(solver, extension, step, steps):
     compile_terms("electric", solver._electric_source_terms, "equivalent_electric_current", True)
     auxiliary = None
     aux = solver._tfsf_state.get("auxiliary_grid") if solver.tfsf_enabled else None
-    if aux is not None:
+    if aux is not None and solver._tfsf_state.get("provider") == "plane_wave_fixed_k":
+        # The complex fixed-k line reads its device drive rows by its own clock (fixed_k.py).
+        auxiliary = SimpleNamespace(launch=aux.advance_electric)
+    elif aux is not None:
         # Row n of the boundary table reads steps n..n+source_index-1: evaluate each
         # step once and gather, so every entry is the same scalar as before.
         width = aux.source_index if aux.incident_reference is not None else 1
@@ -128,15 +195,27 @@ def compile_source_tables(solver, extension, step, steps):
 
 
 def compile_spectral_tables(solver, extension, step):
-    """Reuse the existing exact phase recurrence tables without row gathers."""
+    """Reuse the existing exact phase recurrence tables without row gathers.
+
+    Complex (Bloch split) fields add a second launch: the imaginary field into the
+    auxiliary accumulators with the same rows, after the real one (accumulate_dft_gpu).
+    """
     if not solver.dft_enabled:
-        return None
-    tensors = [step, solver._dft_weighted_cos_table, solver._dft_weighted_sin_table]
-    for component in ("Ex", "Ey", "Ez"):
-        buffers = solver._dft_batched_fields.get(component)
-        tensors.extend([getattr(solver, component), buffers["real"], buffers["imag"]] if buffers is not None
-                       else [solver._dft_empty_field, solver._dft_empty_accum, solver._dft_empty_accum])
-    return extension.CoreStepLaunch(2, tensors, [], [])
+        return ()
+    from .spectral import dft_families
+
+    parts = (("", "real", "imag"), ("_imag", "aux_real", "aux_imag"))
+    launches = []
+    for suffix, real, imag in parts[:2 if getattr(solver, "complex_fields_enabled", False) else 1]:
+        # One launch per recorded family (E, then H when requested), as accumulate_dft_gpu.
+        for family in dft_families(solver):
+            tensors = [step, solver._dft_weighted_cos_table, solver._dft_weighted_sin_table]
+            for component in family:
+                buffers = solver._dft_batched_fields.get(component)
+                tensors.extend([getattr(solver, component + suffix), buffers[real], buffers[imag]] if buffers is not None
+                               else [solver._dft_empty_field, solver._dft_empty_accum, solver._dft_empty_accum])
+            launches.append(extension.CoreStepLaunch(2, tensors, [], []))
+    return tuple(launches)
 
 
 def auxiliary_boundary_fold_plan(aux, batch):
@@ -232,10 +311,26 @@ def compile_monitor_routes(solver):
     return solver._single_observer_engine
 
 
-class NativePointObserverTables:
-    """Exact eager weights and metadata, indexed by the core device step."""
+def _plane_point_indices(group, field, device):
+    """Enumerate a plane group's cells in its accumulator order as point indices."""
+    axis, index = int(group["axis_code"]), int(group["plane_index"])
+    sizes = [size for a, size in enumerate(field.shape) if a != axis]
+    first, second = torch.meshgrid(torch.arange(sizes[0]), torch.arange(sizes[1]), indexing="ij")
+    planes = [first.reshape(-1), second.reshape(-1)]
+    planes.insert(axis, torch.full_like(planes[0], index))
+    return [coordinate.to(device=device, dtype=torch.int32) for coordinate in planes]
 
-    def __init__(self, solver, step, time_steps):
+
+class IndexedObserverTables:
+    """Exact eager observer weights and metadata, indexed by the core device step.
+
+    Every point and plane group of the eager ``accumulate_observers`` loop gets one
+    indexed point launch per local frequency (plane cells enumerated in accumulator
+    order), and complex (Bloch split) fields a second launch on the imaginary field
+    into the auxiliary accumulators, in the eager order.
+    """
+
+    def __init__(self, solver, step, time_steps, start_step=0):
         from copy import copy
         from ..observers import observer_step_weights
         from .spectral import observer_stagger_weights
@@ -251,22 +346,39 @@ class NativePointObserverTables:
             self.metadata[n] = [[entry[key] for key in self.metadata_keys]
                                 for entry in staged._observer_spectral_entries]
 
-        save_metadata(0)
-        group = next(iter(solver._point_observer_groups.values()))
-        rows = np.zeros((len(group["global_freq_indices"]), time_steps, 3), dtype=np.float64)
-        for n in range(time_steps):
+        groups = list(solver._point_observer_groups.values()) + list(solver._plane_observer_groups.values())
+        rows = [np.zeros((len(group["global_freq_indices"]), time_steps, 3), dtype=np.float64) for group in groups]
+        # A resumed run starts from the restored entries; rows before start_step are never read.
+        save_metadata(start_step)
+        for n in range(start_step, time_steps):
             for index, entry, cosine, sine in observer_step_weights(staged, n):
-                local = group["freq_local_lookup"].get(index)
-                if local is not None:
-                    c, s = observer_stagger_weights(entry, group["field_name"], cosine, sine)
-                    rows[local, n] = (1, c, s)
+                for group, table in zip(groups, rows):
+                    local = group["freq_local_lookup"].get(index)
+                    if local is not None:
+                        c, s = observer_stagger_weights(entry, group["field_name"], cosine, sine)
+                        table[local, n] = (1, c, s)
             save_metadata(n + 1)
-        weights = torch.as_tensor(rows, dtype=group["real"].dtype, device=solver.device)
         self.native = get_compiled_extension()
-        self.routes = [(getattr(solver, group["field_name"]), group["point_i"], group["point_j"],
-                        group["point_k"], group["real"][local], group["imag"][local], weights[local], step)
-                       for local in range(len(group["global_freq_indices"]))]
-        self.state_tensors = (group["real"], group["imag"])
+        self.routes = []
+        state = []
+        parts = (("", "real", "imag"), ("_imag", "aux_real", "aux_imag"))
+        for group, table in zip(groups, rows):
+            field = getattr(solver, group["field_name"])
+            if "point_i" in group:
+                points = [group["point_" + label] for label in "ijk"]
+            elif "sample_points" in group:
+                points = [group["sample_" + label].to(torch.int32) for label in "ijk"]
+            else:
+                points = _plane_point_indices(group, field, solver.device)
+            weights = torch.as_tensor(table, dtype=group["real"].dtype, device=solver.device)
+            for local in range(len(group["global_freq_indices"])):
+                for suffix, real, imag in parts:
+                    if real in group:
+                        self.routes.append((getattr(solver, group["field_name"] + suffix), *points,
+                                            group[real][local].reshape(-1), group[imag][local].reshape(-1),
+                                            weights[local], step))
+            state.extend(group[name] for _, real, imag in parts for name in (real, imag) if name in group)
+        self.state_tensors = tuple(state)
 
     def launch(self):
         for args in self.routes:

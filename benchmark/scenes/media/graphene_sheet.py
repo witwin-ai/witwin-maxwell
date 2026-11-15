@@ -19,64 +19,61 @@ def build_scene() -> mw.Scene:
     # a few thousand steps; the old metre/GHz scene forced more than four million
     # unnecessarily small steps and probed a nearly static sheet.
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (-HALF_WIDTH, HALF_WIDTH),
                 (-HALF_WIDTH, HALF_WIDTH),
                 (-HALF_LENGTH, HALF_LENGTH),
             )
-        ),
-        grid=mw.GridSpec.uniform(DL),
-        boundary=mw.BoundarySpec.pml(num_layers=12).with_faces(
+            ),
+                grid=mw.GridSpec.uniform(DL),
+                boundary=mw.BoundarySpec.pml(num_layers=12).with_faces(
             x_low="periodic",
             x_high="periodic",
             y_low="periodic",
             y_high="periodic",
-        ),
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(
-                position=(0.0, 0.0, 0.0),
-                size=(2.0 * HALF_WIDTH, 2.0 * HALF_WIDTH, 0.0),
             ),
-            material=mw.Graphene(
-                chemical_potential=0.4,
-                scattering_time=1.0e-13,
-                name="graphene",
+                subpixel=mw.SubpixelSpec(samples=3, averaging="polarized"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(
+                    position=(0.0, 0.0, 0.0),
+                    size=(2.0 * HALF_WIDTH, 2.0 * HALF_WIDTH, 0.0),
+                ),
+                material=mw.media.Graphene(
+                    chemical_potential=0.4,
+                    scattering_time=1.0e-13,
+                    name="graphene",
+                ),
+                name="graphene_sheet",
             ),
-            name="graphene_sheet",
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization="Ex",
-            source_time=mw.GaussianPulse(
-                frequency=FREQUENCY,
-                fwidth=0.2e12,
             ),
-        )
-    )
-    scene.add_monitor(
-        mw.FluxMonitor(
-            name="reflected",
-            axis="z",
-            position=-200.0e-6,
-            frequencies=FREQUENCIES,
-            normal_direction="-",
-        )
-    )
-    scene.add_monitor(
-        mw.FluxMonitor(
-            name="transmitted",
-            axis="z",
-            position=200.0e-6,
-            frequencies=FREQUENCIES,
-        )
-    )
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization="Ex",
+                source_time=mw.GaussianPulse(
+                    frequency=FREQUENCY,
+                    fwidth=0.2e12,
+                ),
+            ),
+            ),
+                monitors=(
+            mw.FluxMonitor(
+                name="reflected",
+                axis="z",
+                position=-200.0e-6,
+                frequencies=FREQUENCIES,
+                normal_direction="-",
+            ),
+            mw.FluxMonitor(
+                name="transmitted",
+                axis="z",
+                position=200.0e-6,
+                frequencies=FREQUENCIES,
+            ),
+            ),
+            )
     return with_plot_monitors(scene, frequencies=FREQUENCIES)
 
 

@@ -177,26 +177,23 @@ _HAS_CUDA = torch.cuda.is_available()
 def _vacuum_planewave_scene(frequency, position):
     half = 0.4
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=8),
-        device="cuda" if _HAS_CUDA else "cpu",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=mw.GaussianPulse(frequency=frequency, fwidth=0.5 * frequency),
-        )
-    )
-    scene.add_monitor(
-        mw.IncidentPowerDensityMonitor(
-            name="exposure", axis="z", position=position, frequencies=(frequency,)
-        )
-    )
-    scene.add_monitor(
-        mw.FluxMonitor(name="flux", axis="z", position=position, frequencies=(frequency,))
-    )
+                domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=8),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization=(1.0, 0.0, 0.0),
+                source_time=mw.GaussianPulse(frequency=frequency, fwidth=0.5 * frequency),
+            ),
+            ),
+                monitors=(
+            mw.sar.IncidentPowerDensityMonitor(
+                name="exposure", axis="z", position=position, frequencies=(frequency,)
+            ),
+            mw.FluxMonitor(name="flux", axis="z", position=position, frequencies=(frequency,)),
+            ),
+            )
     return scene
 
 
@@ -208,11 +205,13 @@ def test_incident_power_flux_matches_fluxmonitor_end_to_end():
     result = mw.Simulation.fdtd(
         scene=scene,
         frequencies=[frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=20),
-        spectral_sampler=mw.SpectralSampler(normalize_source=True),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=20),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True),
+        ),
     ).run()
 
-    ipd = result.incident_power_density("exposure")
+    ipd = mw.sar.incident_power_density(result, "exposure")
     flux_payload = result.raw_monitor("flux")
     monitor_flux = float(flux_payload["flux"])
 

@@ -33,24 +33,23 @@ def _magnetic_lorentz():
 
 def _dispersive_dipole_scene(material_factory):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.1, 0.1), (-0.1, 0.1), (-0.1, 0.1))),
-        grid=mw.GridSpec.uniform(0.008),
-        boundary=mw.BoundarySpec.pml(num_layers=8),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.04, 0.04, 0.04)),
-            material=material_factory(),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.02, 0.0, -0.02),
-            polarization="Ez",
-            source_time=mw.GaussianPulse(frequency=_FREQ, fwidth=0.7e9),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.1, 0.1), (-0.1, 0.1), (-0.1, 0.1))),
+                grid=mw.GridSpec.uniform(0.008),
+                boundary=mw.BoundarySpec.pml(num_layers=8),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.04, 0.04, 0.04)),
+                material=material_factory(),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(-0.02, 0.0, -0.02),
+                polarization="Ez",
+                source_time=mw.GaussianPulse(frequency=_FREQ, fwidth=0.7e9),
+            ),
+            ),
+            )
     return scene
 
 
@@ -58,12 +57,14 @@ def _run(material_factory, *, cuda_graph):
     result = mw.Simulation.fdtd(
         _dispersive_dipole_scene(material_factory),
         frequencies=(_FREQ,),
-        full_field_dft=True,
-        run_time=mw.TimeConfig(time_steps=300),
-        cuda_graph=cuda_graph,
+        config=mw.FDTDConfig(
+            full_field_dft=True,
+            run_time=mw.TimeConfig(time_steps=300),
+            cuda_graph=cuda_graph,
+        ),
     ).run()
     view = result.at(frequency=_FREQ)
-    fields = {a: np.asarray(getattr(view.E, a).detach().cpu()) for a in ("x", "y", "z")}
+    fields = {a: np.asarray(getattr(view.E, a).values.detach().cpu()) for a in ("x", "y", "z")}
     return fields, result.stats()
 
 

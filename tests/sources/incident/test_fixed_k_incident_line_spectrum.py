@@ -10,7 +10,7 @@ import torch
 import witwin.maxwell as mw
 from scripts.dev.fdtd.bloch_floquet_acceptance import common
 from witwin.maxwell.constants import EPSILON_0, MU_0
-from witwin.maxwell.fdtd.boundary.cpml import DEFAULT_CPML_CONFIG
+from witwin.maxwell.fdtd.boundary.cpml import DEFAULT_CPML_GRADING
 from witwin.maxwell.fdtd.excitation.fixed_k import FixedKIncidentLine
 from witwin.maxwell.fdtd.excitation.incident_line_spectrum import (
     check_incident_line_spectrum, check_prepared_source_spectra, incident_line_band_edge,
@@ -26,7 +26,7 @@ def _line(resolution, fraction):
         device="cpu", dt=dt, c=common.C_0, eps0=EPSILON_0, mu0=MU_0,
         _requested_port_frequencies=(common.F0,),
         resolved_bloch_wavevector=(fraction * common.K0, 0., 0.),
-        cpml_config=dict(DEFAULT_CPML_CONFIG))
+        cpml_grading=DEFAULT_CPML_GRADING)
     source = dict(injection=dict(axis="z"), direction=(0., 0., 1.), polarization=(0., 1., 0.),
         source_time=dict(kind="cw", frequency=common.F0, amplitude=0., phase=0., delay=0.))
     return FixedKIncidentLine(solver, source, dict.fromkeys("xyz", ds), (0, 0, 0))
@@ -87,15 +87,10 @@ def test_axial_formula_is_bitwise_unchanged_and_clips_to_nyquist(courant):
 def host_preparation(monkeypatch):
     # Native Bloch admission/loading is CUDA-only; setup and the real incident
     # line allocate CPU tensors here, with no solver stepping or GPU access.
-    for name in ("witwin.maxwell.simulation._require_cuda_scene",
-                 "witwin.maxwell.fdtd.solver._require_cuda_scene",
-                 "witwin.maxwell.fdtd.runtime.initialization.require_cuda_scene"):
-        monkeypatch.setattr(name, lambda *args, **kwargs: None)
-    for name in ("witwin.maxwell.fdtd.solver._get_fdtd_module",
-                 "witwin.maxwell.fdtd.runtime.initialization.get_fdtd_module"):
-        monkeypatch.setattr(name, lambda: object())
-    scene_type = mw.Scene
-    monkeypatch.setattr(common.mw, "Scene", lambda **kwargs: scene_type(**dict(kwargs, device="cpu")))
+    from tests.support.host_preparation import stub_cuda_preparation
+    stub_cuda_preparation(monkeypatch)
+    config_type = mw.FDTDConfig
+    monkeypatch.setattr(common.mw, "FDTDConfig", lambda **kwargs: config_type(**dict(kwargs, device="cpu")))
 
 
 def _prepare(waveform=None, polarization="TE", steps=4096):
@@ -150,6 +145,8 @@ def test_tm_dc_clock_matches_drive_and_exported_reference(host_preparation, monk
     diagnostic_samples = sampled.copy()
     sampled.clear()
     monkeypatch.setattr("witwin.maxwell.fdtd.excitation.fixed_k.evaluate_source_time", record)
+    # The drive rows are staged once at solve entry, sampling the same integer-step times.
+    line.prepare_tables(96)
     reference = torch.zeros_like(line.spectrum)
     for step in range(96):
         line.advance_magnetic()

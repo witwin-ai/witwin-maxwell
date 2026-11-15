@@ -19,6 +19,7 @@ from ..circuits import (
 )
 from ..lumped import Inductor, Resistor
 from ..circuit_devices import Diode, PiecewiseLinearIV, PolynomialIV
+from ..errors import UnsupportedFeatureError
 
 
 _BRANCH_TYPES = (
@@ -272,21 +273,23 @@ def reject_nonlinear_devices(circuit) -> None:
         if isinstance(device, NONLINEAR_DEVICE_TYPES)
     )
     if offenders:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             f"Circuit {circuit.name!r} contains nonlinear devices {offenders} whose "
             "nonlinear terminal law cannot be assembled into the constant-conductance "
             "stamp of the linear MNA / FDTD Norton-companion runtime; that path has no "
             "Newton iteration and would solve the network with the device absent. This "
-            "fails closed until the nonlinear device-runtime integration lands."
+            "fails closed until the nonlinear device-runtime integration lands.",
+            feature="circuit", method="fdtd"
         )
 
 
-def compile_circuits(scene) -> tuple[CircuitGraph, ...]:
-    circuits = tuple(getattr(scene, "circuits", ()))
+def compile_circuits(prepared) -> tuple[CircuitGraph, ...]:
+    """Compile the circuit topology of a prepared scene."""
+    circuits = tuple(prepared.scene.circuits)
     circuit_names = [circuit.name.casefold() for circuit in circuits]
     if len(set(circuit_names)) != len(circuit_names):
         raise ValueError("Scene circuit names must be unique.")
-    ports = tuple(getattr(scene, "ports", ()))
+    ports = tuple(prepared.scene.ports)
     allowed_ports = {
         port.name: port
         for port in ports

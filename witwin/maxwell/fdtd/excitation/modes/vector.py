@@ -23,6 +23,7 @@ from .common import (
     _VECTOR_EIGS_MAX_ITER,
     _VECTOR_EIGS_TOL,
 )
+from ....errors import UnsupportedFeatureError
 
 
 def _build_staggered_first_differences_sparse(count: int, spacing: float):
@@ -223,9 +224,10 @@ def _pec_vector_operator_torch(
     if any(tensor.device != device for tensor in tensors):
         raise ValueError("PEC mode material and occupancy tensors must share one device.")
     if pec_occupancy.requires_grad:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Differentiable PEC geometry requires a mode-shape eigen-adjoint; "
-            "the PEC-aware forward mode solve uses a hard conductor boundary."
+            "the PEC-aware forward mode solve uses a hard conductor boundary.",
+            feature="guard:df1121e3", method="fdtd"
         )
 
     nu, nv = (int(value) for value in eps_uu.shape)
@@ -1194,9 +1196,10 @@ class _IsolatedVectorEigenpair(torch.autograd.Function):
     @staticmethod
     def forward(ctx, operator, value, vector, source_name):
         if bool(value.imag.abs() > torch.finfo(torch.float64).eps**0.5 * value.abs()):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"ModeSource/ModePort {source_name!r} selected vector eigenvalue is complex: "
-                "|Im lambda| > sqrt(eps64) * |lambda| requires a complex mode-shape adjoint.")
+                "|Im lambda| > sqrt(eps64) * |lambda| requires a complex mode-shape adjoint.",
+                feature="source.ModeSource", method="fdtd")
         # Internal conditioning only; _gauge_vector_profiles defines the gauge contract.
         pivot = vector[vector.abs().argmax()]
         vector = (vector * pivot.conj() / pivot.abs()).real

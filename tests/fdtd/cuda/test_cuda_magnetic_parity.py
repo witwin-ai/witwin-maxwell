@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.fdtd.runtime.materials import _store_coefficient_uniformity
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for native FDTD backend tests.")
@@ -24,7 +21,6 @@ def _standard_scene() -> mw.Scene:
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.3),
         boundary=mw.BoundarySpec(kind="none"),
-        device="cuda",
     )
 
 
@@ -33,7 +29,6 @@ def _graded_scene() -> mw.Scene:
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.custom(_GRADED_X, _GRADED_Y, _GRADED_Z),
         boundary=mw.BoundarySpec(kind="none"),
-        device="cuda",
     )
 
 
@@ -57,33 +52,29 @@ def _independent_inv_spacing(nodes: np.ndarray) -> tuple[torch.Tensor, torch.Ten
     return to_device(dual), to_device(primal)
 
 
-def _prepared_solver(monkeypatch, backend: str, scene: mw.Scene, core_path=False):
-    # The existing-runner kernels are under test: the core runtime compiles its
-    # coefficient tables at preparation, so it never sees the in-place reseeding.
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", backend)
+def _prepared_solver(scene: mw.Scene):
     return mw.Simulation.fdtd(
         scene,
-        frequency=1.0e9,
-        run_time=mw.TimeConfig(time_steps=1),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        fdtd_core_path=core_path,
+        frequencies=1.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).prepare().solver
 
 
-def _seed_standard_state(solver):
+def _seed_fields(solver):
+    # The core path reads the coefficient tables built at preparation, so only the
+    # fields are reseeded (W7 row 16e deleted the per-component kernels).
     generator = torch.Generator(device="cuda")
     generator.manual_seed(1234)
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         getattr(solver, name).copy_(torch.randn(getattr(solver, name).shape, device="cuda", generator=generator))
-    for name in ("cex_decay", "cey_decay", "cez_decay", "chx_decay", "chy_decay", "chz_decay"):
-        getattr(solver, name).copy_(0.91 + 0.08 * torch.rand(getattr(solver, name).shape, device="cuda", generator=generator))
-    for name in ("cex_curl", "cey_curl", "cez_curl", "chx_curl", "chy_curl", "chz_curl"):
-        getattr(solver, name).copy_(1.0e-4 * torch.rand(getattr(solver, name).shape, device="cuda", generator=generator))
-    # The coefficient tensors were rewritten in place, so refresh the cached
-    # per-tensor uniformity exactly as any in-run coefficient mutator must
-    # (see ports/breakdown invalidation); otherwise the field kernels would
-    # legally take the uniform-scalar fast path with stale values.
-    _store_coefficient_uniformity(solver)
+
+
+def _core_step(solver):
+    solver._core_runtime.magnetic()
+    solver._core_runtime.electric()
 
 
 def _standard_python_reference(solver, spacing=None):
@@ -146,72 +137,28 @@ def _standard_python_reference(solver, spacing=None):
     }
 
 
-def test_native_cuda_standard_eh_one_step_matches_python_reference(monkeypatch):
-    scene = _standard_scene()
-    native_solver = _prepared_solver(monkeypatch, "cuda", scene)
-    _seed_standard_state(native_solver)
-    expected = _standard_python_reference(native_solver)
-
-    native_solver._update_magnetic_fields(
-        native_solver.Hx,
-        native_solver.Hy,
-        native_solver.Hz,
-        native_solver.Ex,
-        native_solver.Ey,
-        native_solver.Ez,
-    )
-    native_solver._update_electric_fields(
-        native_solver.Ex,
-        native_solver.Ey,
-        native_solver.Ez,
-        native_solver.Hx,
-        native_solver.Hy,
-        native_solver.Hz,
-    )
-    torch.cuda.synchronize()
-
-    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-        torch.testing.assert_close(
-            getattr(native_solver, name),
-            expected[name],
-            rtol=2.0e-6,
-            atol=2.0e-7,
-        )
-
-
-def test_core_standard_eh_one_step_matches_python_reference_with_prepared_coefficients(monkeypatch):
+def test_core_standard_eh_one_step_matches_python_reference_with_prepared_coefficients():
     # The core path reads the coefficient tables built at preparation, so only
     # the fields are reseeded here.
-    native_solver = _prepared_solver(monkeypatch, "cuda", _standard_scene(), core_path=True)
+    native_solver = _prepared_solver(_standard_scene())
     assert native_solver._core_runtime is not None
-    generator = torch.Generator(device="cuda")
-    generator.manual_seed(1234)
-    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-        getattr(native_solver, name).copy_(torch.randn(getattr(native_solver, name).shape, device="cuda", generator=generator))
+    _seed_fields(native_solver)
     expected = _standard_python_reference(native_solver)
-
-    native_solver._update_magnetic_fields(
-        native_solver.Hx, native_solver.Hy, native_solver.Hz,
-        native_solver.Ex, native_solver.Ey, native_solver.Ez,
-    )
-    native_solver._update_electric_fields(
-        native_solver.Ex, native_solver.Ey, native_solver.Ez,
-        native_solver.Hx, native_solver.Hy, native_solver.Hz,
-    )
+    _core_step(native_solver)
     torch.cuda.synchronize()
 
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         torch.testing.assert_close(getattr(native_solver, name), expected[name], rtol=2.0e-6, atol=2.0e-7)
 
 
-def test_native_cuda_standard_eh_one_step_matches_independent_reference_on_graded_grid(monkeypatch):
+def test_core_standard_eh_one_step_matches_independent_reference_on_graded_grid():
     # Graded per-axis-distinct custom grid; the reference spacing arrays are
     # recomputed from the raw node coordinates so a per-element indexing
     # regression in the forward kernels (or in the solver's inv_d*_e/_h
     # construction) fails this test instead of cancelling out.
     scene = _graded_scene()
-    native_solver = _prepared_solver(monkeypatch, "cuda", scene)
-    _seed_standard_state(native_solver)
+    native_solver = _prepared_solver(scene)
+    _seed_fields(native_solver)
     inv_dx_e, inv_dx_h = _independent_inv_spacing(_GRADED_X)
     inv_dy_e, inv_dy_h = _independent_inv_spacing(_GRADED_Y)
     inv_dz_e, inv_dz_h = _independent_inv_spacing(_GRADED_Z)
@@ -227,58 +174,7 @@ def test_native_cuda_standard_eh_one_step_matches_independent_reference_on_grade
         },
     )
 
-    native_solver._update_magnetic_fields(
-        native_solver.Hx,
-        native_solver.Hy,
-        native_solver.Hz,
-        native_solver.Ex,
-        native_solver.Ey,
-        native_solver.Ez,
-    )
-    native_solver._update_electric_fields(
-        native_solver.Ex,
-        native_solver.Ey,
-        native_solver.Ez,
-        native_solver.Hx,
-        native_solver.Hy,
-        native_solver.Hz,
-    )
-    torch.cuda.synchronize()
-
-    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-        torch.testing.assert_close(
-            getattr(native_solver, name),
-            expected[name],
-            rtol=2.0e-6,
-            atol=2.0e-7,
-        )
-
-
-def test_compiled_cuda_extension_standard_eh_one_step_matches_python_reference(monkeypatch):
-    if os.environ.get("WITWIN_RUN_CUDA_EXTENSION_BUILD") != "1":
-        pytest.skip("Set WITWIN_RUN_CUDA_EXTENSION_BUILD=1 to compile and run native CUDA field kernels.")
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
-    scene = _standard_scene()
-    native_solver = _prepared_solver(monkeypatch, "cuda", scene)
-    _seed_standard_state(native_solver)
-    expected = _standard_python_reference(native_solver)
-
-    native_solver._update_magnetic_fields(
-        native_solver.Hx,
-        native_solver.Hy,
-        native_solver.Hz,
-        native_solver.Ex,
-        native_solver.Ey,
-        native_solver.Ez,
-    )
-    native_solver._update_electric_fields(
-        native_solver.Ex,
-        native_solver.Ey,
-        native_solver.Ez,
-        native_solver.Hx,
-        native_solver.Hy,
-        native_solver.Hz,
-    )
+    _core_step(native_solver)
     torch.cuda.synchronize()
 
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):

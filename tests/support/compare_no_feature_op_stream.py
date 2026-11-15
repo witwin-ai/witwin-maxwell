@@ -93,11 +93,13 @@ def _root_build_scene(root: Path) -> Callable[..., Any]:
 def _make_simulation(mw: Any, scene: Any, *, time_steps: int) -> Any:
     return mw.Simulation.fdtd(
         scene,
-        frequency=FREQUENCY_HZ,
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
-        cuda_graph=False,
+        frequencies=FREQUENCY_HZ,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+            cuda_graph=False,
+        ),
     )
 
 
@@ -185,7 +187,6 @@ def _run_profile(args: argparse.Namespace) -> dict[str, Any]:
             "cuda_runtime": torch.version.cuda,
             "device_name": properties.name,
             "compute_capability": f"{properties.major}.{properties.minor}",
-            "fdtd_backend": os.environ.get("WITWIN_MAXWELL_FDTD_BACKEND", "cuda"),
             "cuda_extension": os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0"),
         },
         "op_stream": {

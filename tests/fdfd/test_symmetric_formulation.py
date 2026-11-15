@@ -15,26 +15,25 @@ RES = 0.02
 def _vacuum_scene(cells_half, strength=4.0):
     half = cells_half * RES
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
-        grid=mw.GridSpec.uniform(RES),
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=strength),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization=(0.0, 0.0, 1.0),
-            width=0.05,
-            source_time=mw.CW(frequency=FREQ, amplitude=100.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
+                grid=mw.GridSpec.uniform(RES),
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=strength),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization=(0.0, 0.0, 1.0),
+                width=0.05,
+                source_time=mw.CW(frequency=FREQ, amplitude=100.0),
+                name="src",
+            ),
+            ),
+            )
     return scene
 
 
 def _direct_solver(scene, precision="single"):
     return mw.Simulation.fdfd(
-        scene, frequency=FREQ, solver=mw.GMRES(solver_type="direct", precision=precision)
+        scene, frequencies=FREQ, config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type="direct", precision=precision))
     ).prepare().solver
 
 
@@ -105,14 +104,14 @@ def test_default_pml_absorbs_short_dipole_radiation(layers):
     # discretization) for 8-14 layers; the former reflecting default gave
     # 4e-4 to 1.4e-3 Ohm.
     dx, dom = 0.01, 0.12
-    scene = mw.Scene(domain=mw.Domain(bounds=((-dom, dom),) * 3), grid=mw.GridSpec.uniform(dx),
-                     boundary=mw.BoundarySpec.pml(num_layers=layers), device="cuda")
     start, end = (0.0, 0.0, 0.0), (dx, 0.0, 0.0)
-    scene.add_source(mw.LumpedCurrentSource(start=start, end=end, current=1.0))
+    scene = mw.Scene(domain=mw.Domain(bounds=((-dom, dom),) * 3), grid=mw.GridSpec.uniform(dx),
+                     boundary=mw.BoundarySpec.pml(num_layers=layers),
+                     sources=(mw.fdfd.LumpedCurrentSource(start=start, end=end, current=1.0),))
     result = mw.Simulation.fdfd(
-        scene, frequency=FREQ, solver=mw.GMRES(solver_type="direct", precision="double"),
-        observations=(mw.FieldProjection.voltage("feed", start, end),),
+        scene, frequencies=FREQ, config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type="direct", precision="double"),
+        observations=(mw.fdfd.FieldProjection.voltage("feed", start, end),)),
     ).run()
-    resistance = complex(result.monitor("feed")["value"]).real
+    resistance = complex(result.monitor("feed").isel(f=0).values).real
     hertzian = 80.0 * math.pi**2 * (dx * FREQ / 299792458.0) ** 2
     assert abs(resistance - hertzian) / hertzian < 0.01, resistance

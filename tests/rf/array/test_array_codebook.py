@@ -14,7 +14,7 @@ def _basis(*, device="cpu", dtype=torch.complex128, port_count=2):
     for index in range(port_count):
         scattering[:, index, index] = 0.08 - 0.03j
     z0 = torch.full((port_count,), 50.0, device=device, dtype=dtype)
-    network = mw.NetworkData(
+    network = mw.rf.NetworkData(
         frequencies=frequencies, s=scattering, z0=z0,
         port_names=tuple(f"p{index + 1}" for index in range(port_count)),
     )
@@ -27,13 +27,13 @@ def _basis(*, device="cpu", dtype=torch.complex128, port_count=2):
         dim=0,
     )[None].expand(2, -1, -1, -1).clone()
     e_phi = 0.2j * e_theta
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies, port_names=network.port_names, theta=theta, phi=phi,
         e_theta=e_theta, e_phi=e_phi,
         phase_center=torch.zeros(3, device=device, dtype=real_dtype),
         frame=torch.eye(3, device=device, dtype=real_dtype),
     )
-    return mw.ArrayBasisData(network=network, embedded_patterns=patterns, fingerprint="codebook-basis")
+    return mw.antenna.ArrayBasisData(network=network, embedded_patterns=patterns, fingerprint="codebook-basis")
 
 
 def test_codebook_combine_matches_per_beam_combine():
@@ -44,7 +44,7 @@ def test_codebook_combine_matches_per_beam_combine():
             torch.tensor([[0.3 - 0.2j, 0.7 + 0.1j], [-0.4 + 0.6j, 0.2 + 0.2j]], dtype=torch.complex128),
         ]
     )
-    codebook = mw.BeamCodebook(weights=weights, names=("main", "steered"))
+    codebook = mw.antenna.BeamCodebook(weights=weights, names=("main", "steered"))
 
     beams = basis.combine(codebook)
 
@@ -60,7 +60,7 @@ def test_codebook_combine_matches_per_beam_combine():
 def test_frequency_flat_codebook_broadcasts_over_frequency():
     basis = _basis()
     flat = torch.tensor([[1.0 + 0.0j, 1.0 + 0.0j], [1.0 + 0.0j, -1.0 + 0.0j]], dtype=torch.complex128)
-    codebook = mw.BeamCodebook(weights=flat, names=("b0", "b1"))
+    codebook = mw.antenna.BeamCodebook(weights=flat, names=("b0", "b1"))
 
     beams = basis.combine(codebook)
 
@@ -72,12 +72,12 @@ def test_frequency_flat_codebook_broadcasts_over_frequency():
 def test_codebook_rejects_bad_shape_and_duplicate_names():
     basis = _basis()
     with pytest.raises(ValueError, match="one non-empty name per beam"):
-        mw.BeamCodebook(weights=torch.ones((3, 2), dtype=torch.complex128), names=("a", "b"))
+        mw.antenna.BeamCodebook(weights=torch.ones((3, 2), dtype=torch.complex128), names=("a", "b"))
     with pytest.raises(ValueError, match="unique"):
-        mw.BeamCodebook(weights=torch.ones((2, 2), dtype=torch.complex128), names=("a", "a"))
+        mw.antenna.BeamCodebook(weights=torch.ones((2, 2), dtype=torch.complex128), names=("a", "a"))
     with pytest.raises(TypeError, match="complex"):
-        mw.BeamCodebook(weights=torch.ones((2, 2), dtype=torch.float64), names=("a", "b"))
-    wrong_ports = mw.BeamCodebook(weights=torch.ones((2, 3), dtype=torch.complex128), names=("a", "b"))
+        mw.antenna.BeamCodebook(weights=torch.ones((2, 2), dtype=torch.float64), names=("a", "b"))
+    wrong_ports = mw.antenna.BeamCodebook(weights=torch.ones((2, 3), dtype=torch.complex128), names=("a", "b"))
     with pytest.raises(ValueError, match=r"\[B, N\] with N=2"):
         basis.combine(wrong_ports)
 
@@ -106,7 +106,7 @@ def test_combining_any_number_of_beams_executes_zero_fdtd_steps(beam_count, monk
 
     weights = torch.randn(beam_count, 2, 2, dtype=torch.complex128)
     weights = weights / torch.clamp(torch.abs(weights), min=1e-3)
-    codebook = mw.BeamCodebook(weights=weights, names=tuple(f"b{i}" for i in range(beam_count)))
+    codebook = mw.antenna.BeamCodebook(weights=weights, names=tuple(f"b{i}" for i in range(beam_count)))
     beams = basis.combine(codebook)
     envelope = beams.max_hold("realized_gain")
 
@@ -124,7 +124,7 @@ def test_max_hold_envelope_and_argmax_are_consistent():
             torch.tensor([[0.0 + 0.0j, 2.0 + 0.0j]] * 2, dtype=torch.complex128),
         ]
     )
-    beams = basis.combine(mw.BeamCodebook(weights=weights, names=("port1", "port2")))
+    beams = basis.combine(mw.antenna.BeamCodebook(weights=weights, names=("port1", "port2")))
 
     envelope = beams.max_hold("realized_gain")
 
@@ -141,16 +141,16 @@ def test_max_hold_requires_batch_and_rejects_masked_metric():
     with pytest.raises(ValueError, match="batched beam result"):
         basis.combine(torch.ones(2, dtype=torch.complex128)).max_hold("realized_gain")
     # A dark, fully reflected beam yields a NaN gain; max-hold must refuse it.
-    reflective = mw.NetworkData(
+    reflective = mw.rf.NetworkData(
         frequencies=basis.frequencies,
         s=torch.eye(2, dtype=torch.complex128)[None].expand(2, -1, -1).clone(),
         z0=basis.network.z0,
         port_names=basis.port_names,
     )
-    dark = mw.ArrayBasisData(
+    dark = mw.antenna.ArrayBasisData(
         network=reflective, embedded_patterns=basis.eep, fingerprint="dark"
     )
-    codebook = mw.BeamCodebook(
+    codebook = mw.antenna.BeamCodebook(
         weights=torch.ones((2, 2), dtype=torch.complex128), names=("a", "b")
     )
     with pytest.raises(ValueError, match="masked"):
@@ -164,7 +164,7 @@ def test_from_scan_angles_builds_progressive_phase_and_steers_broadside():
     theta = torch.tensor([math.pi / 2, math.pi / 3], dtype=torch.float64)
     phi = torch.tensor([0.0, math.pi / 4], dtype=torch.float64)
 
-    codebook = mw.BeamCodebook.from_scan_angles(
+    codebook = mw.antenna.BeamCodebook.from_scan_angles(
         element_positions=positions, frequencies=frequency, theta=theta, phi=phi
     )
 
@@ -179,14 +179,14 @@ def test_from_scan_angles_builds_progressive_phase_and_steers_broadside():
 def test_from_scan_angles_rejects_bad_positions_and_mismatched_angles():
     frequency = torch.tensor([1.0e9], dtype=torch.float64)
     with pytest.raises(ValueError, match=r"\[N, 3\]"):
-        mw.BeamCodebook.from_scan_angles(
+        mw.antenna.BeamCodebook.from_scan_angles(
             element_positions=torch.zeros((2, 2)),
             frequencies=frequency,
             theta=torch.tensor([0.0]),
             phi=torch.tensor([0.0]),
         )
     with pytest.raises(ValueError, match="equal length"):
-        mw.BeamCodebook.from_scan_angles(
+        mw.antenna.BeamCodebook.from_scan_angles(
             element_positions=torch.zeros((2, 3), dtype=torch.float64),
             frequencies=frequency,
             theta=torch.tensor([0.0, 1.0], dtype=torch.float64),
@@ -273,16 +273,16 @@ def _z_axis_isotropic_basis(*, spacing_wavelengths=0.25, port_count=4, points_th
     theta, phi = torch.meshgrid(theta_vector, phi_vector, indexing="ij")
     columns = [torch.exp(-1j * wave_number * z * torch.cos(theta)).to(cdtype) for z in offsets]
     e_theta = torch.stack(columns, dim=0)[None]
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequency, port_names=tuple(f"e{i}" for i in range(port_count)),
         theta=theta, phi=phi, e_theta=e_theta, e_phi=torch.zeros_like(e_theta),
         phase_center=torch.zeros(3, dtype=dtype), frame=torch.eye(3, dtype=dtype),
     )
-    network = mw.NetworkData(
+    network = mw.rf.NetworkData(
         frequencies=frequency, s=torch.zeros((1, port_count, port_count), dtype=cdtype),
         z0=50.0, port_names=patterns.port_names,
     )
-    basis = mw.ArrayBasisData(network=network, embedded_patterns=patterns, fingerprint="scan-peak")
+    basis = mw.antenna.ArrayBasisData(network=network, embedded_patterns=patterns, fingerprint="scan-peak")
     return basis, positions, theta_vector
 
 
@@ -300,7 +300,7 @@ def test_from_scan_angles_beam_peaks_at_the_commanded_direction():
     target_theta = theta_vector[target_theta_index][None]
     target_phi = torch.zeros(1, dtype=torch.float64)
 
-    codebook = mw.BeamCodebook.from_scan_angles(
+    codebook = mw.antenna.BeamCodebook.from_scan_angles(
         element_positions=positions,
         frequencies=basis.frequencies,
         theta=target_theta,
@@ -328,7 +328,7 @@ def test_codebook_weight_gradient_backprops_through_max_hold():
     weights = torch.randn(3, 2, 2, dtype=torch.complex128)
     weights = weights / torch.clamp(torch.abs(weights), min=0.5)
     weights = weights.requires_grad_(True)
-    codebook = mw.BeamCodebook(weights=weights, names=("b0", "b1", "b2"))
+    codebook = mw.antenna.BeamCodebook(weights=weights, names=("b0", "b1", "b2"))
 
     loss = basis.combine(codebook).max_hold("realized_gain").envelope.sum()
     loss.backward()
@@ -354,7 +354,7 @@ def test_codebook_weight_gradient_matches_high_precision_gradcheck():
     names = ("b0", "b1", "b2")
 
     def envelope_sum(value):
-        codebook = mw.BeamCodebook(weights=value, names=names)
+        codebook = mw.antenna.BeamCodebook(weights=value, names=names)
         return basis.combine(codebook).max_hold("realized_gain").envelope.sum()
 
     assert torch.autograd.gradcheck(

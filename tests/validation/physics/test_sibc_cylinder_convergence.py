@@ -89,7 +89,7 @@ def _flux_box():
     # A closed surface, not six standalone planes: its faces are snapped onto
     # one watertight Yee box on every grid tier, so the net flux is the
     # absorbed power wherever the declared 14 mm box lies within a cell.
-    return [mw.ClosedSurfaceMonitor.box("box", size=(2 * _BOX,) * 3, frequencies=(_F,))]
+    return [mw.monitors.ClosedSurfaceMonitor.box("box", size=(2 * _BOX,) * 3, frequencies=(_F,))]
 
 
 def _cylinder(material):
@@ -99,14 +99,13 @@ def _cylinder(material):
     )
 
 
-def _cylinder_scene(dx: float, material, *, subpixel_samples, device="cuda"):
+def _cylinder_scene(dx: float, material, *, subpixel_samples):
     """Shared physical fixture for the pinned gate and default-policy study."""
     return mw.Scene(
         domain=mw.Domain(bounds=((-_DOMAIN, _DOMAIN), (-_DOMAIN, _DOMAIN), (-_DOMAIN, _DOMAIN))),
         grid=mw.GridSpec.uniform(dx),
-        subpixel_samples=subpixel_samples,
+        subpixel=subpixel_samples,
         boundary=mw.BoundarySpec.faces(default="pml", num_layers=8, strength=1.0),
-        device=device,
         sources=[
             mw.PointDipole(
                 position=(-0.030, 0.0, 0.0),
@@ -122,20 +121,21 @@ def _cylinder_scene(dx: float, material, *, subpixel_samples, device="cuda"):
 
 
 def _absorbed_power(
-    dx: float, material, *, subpixel_samples, device="cuda", backend="native", run_time=None,
-    spectral_sampler=None,
+    dx: float, material, *, subpixel_samples, device="cuda", run_time=None,
+    spectral_sampler=mw.fdtd.SpectralSampler(),
 ) -> float:
     """Net power absorbed by the cylinder = net inward Poynting flux through the box."""
-    scene = _cylinder_scene(dx, material, subpixel_samples=subpixel_samples, device=device)
+    scene = _cylinder_scene(dx, material, subpixel_samples=subpixel_samples)
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_F],
-        run_time=run_time or mw.TimeConfig.auto(steady_cycles=14, transient_cycles=20),
-        full_field_dft=False,
-        backend=backend,
-        spectral_sampler=spectral_sampler,
+        config=mw.FDTDConfig(
+            run_time=run_time or mw.TimeConfig.auto(steady_cycles=14, transient_cycles=20),
+            full_field_dft=False,
+            spectral_sampler=spectral_sampler,
+        ),
     ).run()
-    flux = result.monitor("box")["flux"]
+    flux = result.monitor("box", freq_index=0).values
     flux = flux.detach().cpu().numpy() if hasattr(flux, "detach") else np.asarray(flux)
     outward = float(flux.reshape(-1)[0])
     del result, scene
@@ -149,7 +149,7 @@ def absorbed():
     if not torch.cuda.is_available():
         pytest.skip("needs CUDA for FDTD")
     resolved = mw.Material(eps_r=1.0, sigma_e=_SIGMA)
-    sibc = mw.LossyMetalMedium(conductivity=_SIGMA)
+    sibc = mw.media.LossyMetalMedium(conductivity=_SIGMA)
     return {
         "resolved_coarse": _absorbed_power(0.0006, resolved, subpixel_samples=_QUALIFIED_ARITHMETIC),
         "resolved_fine": _absorbed_power(0.0005, resolved, subpixel_samples=_QUALIFIED_ARITHMETIC),

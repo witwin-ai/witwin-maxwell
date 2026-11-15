@@ -11,9 +11,11 @@ def _build_mode_simulation(model, *, time_steps=32):
     return mw.Simulation.fdtd(
         model,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
 
 
@@ -25,44 +27,43 @@ class _DensityModeSourceScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.72, 0.72), (-0.60, 0.60), (-0.60, 0.60))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="waveguide",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.20, 0.36, 0.36)),
-                material=mw.Material(eps_r=8.0),
-            )
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(-0.12, 0.0, 0.0), size=(0.24, 0.12, 0.12)),
-                density=density,
-                eps_bounds=(8.0, 12.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.ModeSource(
-                position=(-0.36, 0.0, 0.0),
-                size=(0.0, 0.36, 0.36),
-                polarization="Ez",
-                source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
-                name="mode0",
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.24, 0.0, 0.0), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.72, 0.72), (-0.60, 0.60), (-0.60, 0.60))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    structures=(
+                mw.Structure(
+                    name="waveguide",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.20, 0.36, 0.36)),
+                    material=mw.Material(eps_r=8.0),
+                ),
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(-0.12, 0.0, 0.0), size=(0.24, 0.12, 0.12)),
+                    density=density,
+                    eps_bounds=(8.0, 12.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.ModeSource(
+                    position=(-0.36, 0.0, 0.0),
+                    size=(0.0, 0.36, 0.36),
+                    polarization="Ez",
+                    source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
+                    name="mode0",
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.24, 0.0, 0.0), fields=("Ez",)),),
+                )
         return scene
 
 
 def _mode_probe_loss(model):
     result = _build_mode_simulation(model).run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).sel(component="Ez").values
     loss = torch.abs(data) ** 2
     return result, data, loss
 
@@ -82,7 +83,7 @@ def test_fdtd_gradient_bridge_mode_source_backpropagates_to_material_density():
     assert model.logits.grad.shape == model.logits.shape
     assert torch.isfinite(model.logits.grad).all()
     assert float(torch.max(torch.abs(model.logits.grad)).item()) > 0.0
-    assert result.monitor("probe")["data"].grad_fn is not None
+    assert result.monitor("probe", freq_index=0).sel(component="Ez").values.grad_fn is not None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -138,7 +139,7 @@ def test_fdtd_gradient_bridge_mode_source_supports_sparse_implicit_mode_solver(m
     assert torch.is_tensor(sparse_data)
     assert sparse_data.is_cuda
     assert sparse_data.requires_grad
-    assert sparse_result.monitor("probe")["data"].grad_fn is not None
+    assert sparse_result.monitor("probe", freq_index=0).sel(component="Ez").values.grad_fn is not None
     assert torch.allclose(model.logits.grad, dense_grad, rtol=2.5e-2, atol=1e-5)
     assert abs(complex(sparse_data.detach().cpu().item())) == pytest.approx(
         abs(complex(dense_data.detach().cpu().item())),

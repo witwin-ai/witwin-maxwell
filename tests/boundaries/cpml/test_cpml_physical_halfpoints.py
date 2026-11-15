@@ -6,7 +6,8 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.scene import PreparedScene
 from witwin.maxwell.constants import EPSILON_0,MU_0
-from witwin.maxwell.fdtd.boundary.cpml import build_cpml_profiles,DEFAULT_CPML_CONFIG,_cpml_profile_1d
+from dataclasses import replace
+from witwin.maxwell.fdtd.boundary.cpml import build_cpml_profiles,DEFAULT_CPML_GRADING,_cpml_profile_1d
 from witwin.maxwell.fdtd.boundary.common import BOUNDARY_PML
 
 
@@ -14,10 +15,10 @@ def compile_coefficients(nodes,thickness,config=None,shift_rate=None,shift_floor
     # Genuine Scene metadata and a coefficient-only compilation context. The
     # zero-length Ex carries dtype only; this object has no field/solve API.
     scene=PreparedScene(mw.Scene(domain=mw.Domain(bounds=((-0.2,.2),)*3),
-      grid=mw.GridSpec.custom(nodes,nodes,nodes),boundary=mw.BoundarySpec.pml(num_layers=thickness),device='cpu'),lazy_meshgrid=True)
+      grid=mw.GridSpec.custom(nodes,nodes,nodes),boundary=mw.BoundarySpec.pml(num_layers=thickness)),lazy_meshgrid=True, device="cpu")
     context=SimpleNamespace(scene=scene,device='cpu',Ex=torch.empty(0,dtype=torch.float32),
       dt=8.666249213476036e-12,eps0=EPSILON_0,mu0=MU_0,
-      cpml_config=dict(DEFAULT_CPML_CONFIG) if config is None else config,boundary_code=BOUNDARY_PML)
+      cpml_grading=DEFAULT_CPML_GRADING if config is None else config,boundary_code=BOUNDARY_PML)
     build_cpml_profiles(context,magnetic_alpha_scale=1. if shift_rate is None else MU_0/EPSILON_0,
                         shift_rate=shift_rate,shift_floor=shift_floor)
     return scene,context
@@ -36,7 +37,7 @@ def test_real_builder_uses_mirror_symmetric_physical_H_halfpoints(axis,thickness
 def test_nonuniform_actual_halfpoint_depth_matches_independent_conductivity():
     nodes=np.array([-.2,-.16,-.125,-.10,-.07,-.04,0.,.025,.06,.105,.15,.2])
     scene,context=compile_coefficients(nodes,3)
-    x=scene.x_nodes64;half=scene.x_half64;dt=context.dt;m=DEFAULT_CPML_CONFIG['grading_order']
+    x=scene.x_nodes64;half=scene.x_half64;dt=context.dt;m=DEFAULT_CPML_GRADING.grading_order
     # Reference physical depth and impedance matching are independent of the
     # builder's optional high-side sampling argument.
     for high in(False,True):
@@ -51,8 +52,8 @@ def test_nonuniform_actual_halfpoint_depth_matches_independent_conductivity():
 def test_low_only_and_high_only_reverse_under_physical_mirroring():
     nodes=np.r_[-.26,-.24,-.23,-.215,-.2,-.18,-.12,0.,.12,.18,.2,.215,.23,.24,.26]
     half=(nodes[:-1]+nodes[1:])/2;scale=torch.tensor(MU_0/EPSILON_0,dtype=torch.float32)
-    a=_cpml_profile_1d(half,nodes,4,8e-12,MU_0,scale,np.sqrt(MU_0/EPSILON_0),DEFAULT_CPML_CONFIG,apply_low=True,apply_high=False)
-    b=_cpml_profile_1d(half,nodes,4,8e-12,MU_0,scale,np.sqrt(MU_0/EPSILON_0),DEFAULT_CPML_CONFIG,apply_low=False,apply_high=True)
+    a=_cpml_profile_1d(half,nodes,4,8e-12,MU_0,scale,np.sqrt(MU_0/EPSILON_0),DEFAULT_CPML_GRADING,apply_low=True,apply_high=False)
+    b=_cpml_profile_1d(half,nodes,4,8e-12,MU_0,scale,np.sqrt(MU_0/EPSILON_0),DEFAULT_CPML_GRADING,apply_low=False,apply_high=True)
     for left,right in zip(a,b):torch.testing.assert_close(left,right.flip(0),rtol=0,atol=0)
 
 
@@ -63,7 +64,7 @@ def test_shifted_alpha_sigma_kappa_share_actual_Yee_coordinates(uniform,letter,h
     nodes=np.linspace(-.2,.2,13) if uniform else np.array(
         [-.2,-.16,-.125,-.10,-.07,-.04,0.,.025,.06,.105,.15,.2])
     rate=2*np.pi*2.7e9
-    config=dict(DEFAULT_CPML_CONFIG,alpha_max=EPSILON_0*rate,grading_order=2.,kappa_max=1.5)
+    config=replace(DEFAULT_CPML_GRADING,alpha_max=EPSILON_0*rate,grading_order=2.,kappa_max=1.5)
     scene,context=compile_coefficients(nodes,3,config,rate,.25)
     x=scene.x_nodes64;positions=x if letter=='e' else scene.x_half64
     vacuum=EPSILON_0 if letter=='e' else MU_0
@@ -72,7 +73,7 @@ def test_shifted_alpha_sigma_kappa_share_actual_Yee_coordinates(uniform,letter,h
     length=x[-1]-interface if high else interface-x[0]
     depth=np.clip((positions-interface)/length if high else (interface-positions)/length,0,1)
     select=depth>0;graded=depth[select]**2
-    sigma_peak=-3*np.log(config['reflection'])*strength/(2*np.sqrt(MU_0/EPSILON_0)*length)
+    sigma_peak=-3*np.log(config.reflection)*strength/(2*np.sqrt(MU_0/EPSILON_0)*length)
     sigma=2*sigma_peak*graded
     alpha=vacuum*rate*(.25+.75*(1-graded))
     kappa=1+.5*graded

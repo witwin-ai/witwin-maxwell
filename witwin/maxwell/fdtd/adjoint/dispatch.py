@@ -37,9 +37,9 @@ class _ReverseBackend(Enum):
 # variants one-for-one. Each label is the value recorded into
 # ``_BackwardProfiler.reverse_backend_counts`` so a native reverse step stays
 # attributable per configuration (``native_standard`` mirrors
-# ``native_standard`` and so on). The runner registry is populated by
-# later P6 items as the fused CUDA reverse kernels land; until an entry exists
-# ``auto`` mode never selects native and an explicit ``native`` override raises.
+# ``native_standard`` and so on). Importing the adjoint package registers every
+# native runner; a selected variant without a registered, qualifying runner
+# fails preparation and backward (there is no other reverse implementation).
 _NATIVE_REVERSE_LABELS: dict[_ReverseBackend, str] = {
     _ReverseBackend.GENERAL_NONLINEAR: "native_general_nonlinear",
     _ReverseBackend.MIXED_BLOCH_CPML: "native_mixed_bloch_cpml",
@@ -68,9 +68,9 @@ _NATIVE_REVERSE_RUNNERS: dict[_ReverseBackend, _NativeReverseRunner] = {}
 # A runner may carry a ``(solver, forward_state) -> bool`` qualifier stashed on
 # the callable itself (``_native_reverse_qualifier``). The real native runners
 # require a CUDA scene with the compiled extension present, so on CPU or a
-# missing-extension host ``auto`` mode falls back to the native implementation and a
-# forced ``native`` override raises. The qualifier travels with the runner so a
-# test that swaps in its own runner (no qualifier attribute) qualifies anywhere.
+# missing-extension host the variant is unavailable and preparation raises. The
+# qualifier travels with the runner so a test that swaps in its own runner (no
+# qualifier attribute) qualifies anywhere.
 _NATIVE_QUALIFIER_ATTR = "_native_reverse_qualifier"
 
 
@@ -86,11 +86,6 @@ def register_native_reverse_backend(
     if qualifier is not None:
         setattr(runner, _NATIVE_QUALIFIER_ATTR, qualifier)
     _NATIVE_REVERSE_RUNNERS[backend] = runner
-
-
-def unregister_native_reverse_backend(backend: _ReverseBackend) -> None:
-    """Drop a previously registered native runner (primarily for tests)."""
-    _NATIVE_REVERSE_RUNNERS.pop(backend, None)
 
 
 def _native_backend_available(backend: _ReverseBackend, solver=None, forward_state=None) -> bool:

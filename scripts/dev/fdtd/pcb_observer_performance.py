@@ -1,5 +1,6 @@
 """Interleave equal-physics spectral observer timings and verify every monitor tensor."""
 from __future__ import annotations
+from dataclasses import replace
 import argparse
 from contextlib import contextmanager
 import gc
@@ -59,15 +60,15 @@ def run(grouped, duration):
     frequencies = tuple(float(f) for f in np.linspace(2.9e9, 3.5e9, 31))
     scene = printed_patch_scene(frequencies=frequencies, radiation_monitor=True)
     simulation = mw.Simulation.fdtd(scene, frequencies=frequencies,
-        excitations=mw.PortExcitation("feed", source_time=mw.GaussianPulse(frequency=3.2e9, fwidth=2.2e9)),
-        run_time=mw.TimeConfig(time_steps=1), spectral_sampler=mw.SpectralSampler(window="none"), full_field_dft=False)
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.GaussianPulse(frequency=3.2e9, fwidth=2.2e9)),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1), spectral_sampler=mw.fdtd.SpectralSampler(window="none"), full_field_dft=False))
     start = time.perf_counter()
     prepared = simulation.prepare()
     torch.cuda.synchronize()
     prepare_seconds = time.perf_counter() - start
     solver = prepared.solver
     steps = math.ceil(duration / solver.dt)
-    simulation.config.run_time = mw.TimeConfig(time_steps=steps)
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=steps))
     before = processes()
     torch.cuda.synchronize()
     start = time.perf_counter()
@@ -85,7 +86,7 @@ def run(grouped, duration):
             "steps": steps, "dt_s": solver.dt, "grid_shape": [solver.Nx, solver.Ny, solver.Nz],
             "prepare_seconds": prepare_seconds, "run_seconds": elapsed,
             "steps_per_second": steps / elapsed, "peak_allocated_bytes": peak,
-            "observer_cuda_graph_active": result.solver_stats["observer_cuda_graph_active"],
+            "observer_cuda_graph_active": result.stats()["observer_cuda_graph_active"],
             "digests": digests, "processes_before": before, "processes_after": after}
 
 

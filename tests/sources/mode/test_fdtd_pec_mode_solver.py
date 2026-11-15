@@ -9,25 +9,26 @@ import witwin.maxwell.fdtd.excitation.modes as mode_solver
 from witwin.maxwell.compiler.sources import _compile_mode_source
 from witwin.maxwell.fdtd.excitation.modes import solve_mode_source_profile
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 _C0 = 299792458.0
 
 
-def _mode_context(scene):
-    prepared = prepare_scene(scene)
+def _mode_context(scene, device):
+    prepared = prepare_scene(scene, device=device)
     return SimpleNamespace(
         scene=prepared,
         Ex=torch.empty((1,), device=prepared.device, dtype=torch.float32),
         c=_C0,
-        boundary_kind=prepared.boundary.kind,
-        _compiled_material_model=prepared.compile_materials(),
+        boundary_kind=prepared.scene.boundary.kind,
+        _compiled_material_model=compile_materials(prepared),
         _mode_source_rebuild_from_fields=False,
     )
 
 
-def _solve(scene, source):
-    context = _mode_context(scene)
+def _solve(scene, source, *, device="cpu"):
+    context = _mode_context(scene, device)
     compiled = _compile_mode_source(
         source,
         default_frequency=float(source.source_time.frequency),
@@ -35,21 +36,21 @@ def _solve(scene, source):
     return solve_mode_source_profile(context, compiled), context
 
 
-def _square_aperture_scene(*, device, with_pec):
+def _square_aperture_scene(*, with_pec):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.4, 0.4), (-0.4, 0.4))),
         grid=mw.GridSpec.uniform(0.08),
         boundary=mw.BoundarySpec.none(),
-        device=device,
     )
     if with_pec:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=mw.Cylinder(position=(0.0, 0.0, 0.0), radius=0.13, height=0.8, axis='x'),
                 material=mw.Material.pec(),
                 name='inner_conductor',
-            )
-        )
+            ),
+        ))
     return scene
 
 
@@ -67,7 +68,7 @@ def test_pec_mask_changes_mode_operator_and_profile_without_scipy_material_conve
     monkeypatch,
 ):
     source = _square_aperture_source()
-    baseline, _ = _solve(_square_aperture_scene(device="cpu", with_pec=False), source)
+    baseline, _ = _solve(_square_aperture_scene(with_pec=False), source)
 
     def reject_cpu_conversion(_component):
         raise AssertionError(
@@ -75,7 +76,7 @@ def test_pec_mask_changes_mode_operator_and_profile_without_scipy_material_conve
         )
 
     monkeypatch.setattr(mode_solver, "_real_plane_numpy", reject_cpu_conversion)
-    pec, context = _solve(_square_aperture_scene(device="cpu", with_pec=True), source)
+    pec, context = _solve(_square_aperture_scene(with_pec=True), source)
 
     assert pec["mode_solver_kind"] == "vector_pec_dense_torch"
     assert pec["pec_node_count"] > 0
@@ -96,8 +97,9 @@ def test_pec_mask_changes_mode_operator_and_profile_without_scipy_material_conve
 )
 def test_pec_mode_solver_keeps_profiles_on_cuda():
     result, context = _solve(
-        _square_aperture_scene(device="cuda", with_pec=True),
+        _square_aperture_scene(with_pec=True),
         _square_aperture_source(),
+        device="cuda",
     )
 
     assert result["mode_solver_kind"] == "vector_pec_dense_torch"
@@ -116,7 +118,6 @@ def test_rectangular_pec_waveguide_te10_cutoff_beta_and_power_are_physical():
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.4, 0.4), (-0.25, 0.25))),
         grid=mw.GridSpec.uniform(0.02),
         boundary=mw.BoundarySpec.none(),
-        device="cpu",
     )
     source = mw.ModeSource(
         position=(0.0, 0.0, 0.0),

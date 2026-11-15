@@ -14,19 +14,25 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires 
 def test_patch_updates_match_independent_native_arithmetic(cw, boundary, position):
     sims = []
     for index in range(3):
-        scene = simulation(index, boundary=boundary).scene_input.clone()
-        scene.sources[0] = mw.PointDipole(name="drive", position=position, polarization="Ez",
-                                         source_time=scene.sources[0].source_time)
+        scene = simulation(index, boundary=boundary).scene_input
+        scene = scene.updated(sources=(mw.PointDipole(name="drive", position=position, polarization="Ez",
+                                         source_time=scene.sources[0].source_time), *scene.sources[1:]))
         if cw:
-            scene.sources.clear()
-            scene.add_source(mw.PointDipole(name="drive", position=position, polarization="Ez",
-                source_time=mw.CW(frequency=1e9, amplitude=1.+index, phase=.4)))
-        scene.add_source(mw.PointDipole(name="overlap", position=position, polarization="Ez",
-            source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9, amplitude=.3)))
-        sims.append(mw.Simulation.fdtd(scene, frequency=1e9,
-            run_time=mw.TimeConfig(time_steps=120, dt=2e-11), cuda_graph=False))
-    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=3))
+            scene = scene.updated(sources=())
+            scene = scene.updated(sources=(
+                *scene.sources,
+                mw.PointDipole(name="drive", position=position, polarization="Ez",
+                    source_time=mw.CW(frequency=1e9, amplitude=1.+index, phase=.4)),
+            ))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PointDipole(name="overlap", position=position, polarization="Ez",
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9, amplitude=.3)),
+        ))
+        sims.append(mw.Simulation.fdtd(scene, frequencies=1e9,
+            config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=120, dt=2e-11), cuda_graph=False)))
+    batch = mw.Simulation.batch(sims, variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=3))
     with batch.prepare() as prepared, torch.cuda.stream(prepared._stream):
         slot = prepared._slot
         source = BatchSourceEngine(slot, 120)

@@ -13,16 +13,20 @@ from witwin.maxwell.mom.fields import FieldQueryConfig
 from witwin.maxwell.mom.dyadic_green import DyadicIntegrationConfig
 from witwin.maxwell.mom.harmonic_material import compile_harmonic_material,compile_tensor_harmonic_material
 from witwin.maxwell.mom.tensor_harmonic_preparation import prepare_mixed_tensor_harmonic_balance
-from witwin.maxwell.mom.harmonic_state import recover_harmonic_state
+from witwin.maxwell.mom.harmonic_recovery import recover_harmonic_state
 from witwin.maxwell.mom.harmonic_fields import HarmonicFieldDecoder
 from witwin.maxwell.mom.tensor_harmonic_bundle import snapshot_mixed_tensor_harmonic_bundle,restore_mixed_tensor_harmonic_bundle
 
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
 
 
+# Milestone only, no regression twin: one tetrahedron already; the cost is the
+# adaptive tensor source/field order refinement to max_order 64 for two harmonics,
+# which cannot shrink without changing quadrature budgets or tolerances.
+@pytest.mark.mom_milestone
 def test_actual_tensor_source_harmonic_bundle(monkeypatch,tmp_path):
     _,binding=setup();volume=binding.volume
-    nonlinear=mw.NonlinearSusceptibility(chi2=.002,chi3=.001)
+    nonlinear=mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001)
     # Sample one identical declaration through the scalar and tensor compilers
     # to isolate regional tensor dispatch in this scalar-limit control. Public
     # tensor-source runtime admission remains independently guarded.
@@ -33,7 +37,7 @@ def test_actual_tensor_source_harmonic_bundle(monkeypatch,tmp_path):
     query=FieldQueryConfig(relative_tolerance=1e-4,absolute_tolerance=1e-10,max_order=48)
     states=[]
     for material,tensor in ((scalar_material,False),(tensor_material,True)):
-        config=mw.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),
+        config=mw.mom.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),
             dyadic_integration=DyadicIntegrationConfig() if tensor else None,riesz_storage='compact_rwg_v1')
         operators=tuple(SystemOperator(SurfaceSystem.create([
             (0,'nonlinear',RWGBasis(volume.boundary),material.linear_samples[n])]),
@@ -107,7 +111,7 @@ def test_internal_tensor_ac_admission_and_public_guard():
     with pytest.raises(NotImplementedError,match='definite real or strictly lossy'):
         prepare_mixed_tensor_harmonic_balance((SimpleNamespace(system=op.system),),
             (binding.volume,),(changed,),exterior)
-    config=mw.MoMConfig(dyadic_integration=DyadicIntegrationConfig(),
+    config=mw.mom.MoMConfig(dyadic_integration=DyadicIntegrationConfig(),
         harmonic_balance=HarmonicBalanceConfig(volumes=(binding.volume,),harmonics=1,branch_id="tensor-volume-admission"))
     with pytest.raises(NotImplementedError,match='scalar regional AC kernels'):
         _admit(config,(tensor,),exterior)

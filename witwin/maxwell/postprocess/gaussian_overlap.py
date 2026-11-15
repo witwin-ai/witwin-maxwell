@@ -25,6 +25,7 @@ from .modal import (
     _surface_normal,
 )
 from .stratton_chu import _as_1d_coords, _resolve_tensor_device, _trapz_weights_1d, build_plane_points
+from ..compiler.materials import compile_relative_materials
 
 _ETA_0 = math.sqrt(MU_0 / EPSILON_0)
 # Pre-scale-guard absolute power floor, restored verbatim (scale-relative guard is post-release backlog).
@@ -50,7 +51,7 @@ def _background_medium(result, monitor, frequency: float) -> tuple[float, float]
     prepared = getattr(result, "prepared_scene", None)
     if prepared is None:
         return 1.0, 1.0
-    eps_r, mu_r = prepared.compile_relative_materials(frequency=frequency)
+    eps_r, mu_r = compile_relative_materials(prepared, frequency=frequency)
     index = []
     for axis_index, axis in enumerate("xyz"):
         coords = torch.as_tensor(getattr(prepared, axis), device=eps_r.device)

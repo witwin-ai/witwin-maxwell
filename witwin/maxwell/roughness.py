@@ -40,12 +40,19 @@ from dataclasses import dataclass
 import math
 
 import torch
+from ._stability import experimental
 
 
 def _positive_finite(value, *, name: str) -> float:
-    number = float(value)
+    number = float(value.detach() if isinstance(value, torch.Tensor) else value)
     if not math.isfinite(number) or number <= 0.0:
         raise ValueError(f"{name} must be finite and > 0.")
+    # A trainable scalar tensor stays a tensor (layered MoM loss gradients);
+    # every other value is stored as a Python float, as before.
+    if isinstance(value, torch.Tensor) and value.requires_grad:
+        if value.numel() != 1 or value.is_complex():
+            raise ValueError(f"A trainable {name} must be one real tensor value.")
+        return value.reshape(())
     return number
 
 
@@ -62,6 +69,7 @@ def _skin_depth_tensor(skin_depth) -> torch.Tensor:
     return tensor
 
 
+@experimental("roughness")
 class SurfaceRoughness(ABC):
     """Contract for a multiplicative conductor-roughness correction ``K(delta)``.
 
@@ -94,6 +102,7 @@ class SurfaceRoughness(ABC):
         return ratio
 
 
+@experimental("roughness")
 @dataclass(frozen=True)
 class HammerstadRoughness(SurfaceRoughness):
     """Modified Hammerstad roughness in its causal complex form.
@@ -116,10 +125,11 @@ class HammerstadRoughness(SurfaceRoughness):
 
     def __post_init__(self):
         object.__setattr__(self, "rms_height", _positive_finite(self.rms_height, name="rms_height"))
-        factor = float(self.roughness_factor)
-        if not math.isfinite(factor) or factor <= 1.0:
+        factor = self.roughness_factor
+        number = float(factor.detach() if isinstance(factor, torch.Tensor) else factor)
+        if not math.isfinite(number) or number <= 1.0:
             raise ValueError("roughness_factor must be finite and > 1.")
-        object.__setattr__(self, "roughness_factor", factor)
+        object.__setattr__(self, "roughness_factor", _positive_finite(factor, name="roughness_factor"))
 
     def _factor(self, skin_depth: torch.Tensor) -> torch.Tensor:
         ratio_sq = (self.rms_height / skin_depth) ** 2
@@ -129,6 +139,7 @@ class HammerstadRoughness(SurfaceRoughness):
         return 1.0 + (self.roughness_factor - 1.0) / math.pi * response
 
 
+@experimental("roughness")
 @dataclass(frozen=True)
 class HurayRoughness(SurfaceRoughness):
     """Huray "snowball" roughness in its causal complex form (one sphere population).
@@ -198,6 +209,7 @@ class HurayRoughness(SurfaceRoughness):
         return self.relative_area + 1.5 * self.surface_ratio / denominator
 
 
+@experimental("roughness")
 @dataclass(frozen=True)
 class GroisseRoughness(SurfaceRoughness):
     """Groisse roughness ``K = 1 + exp(-(delta / (2 Rq))^1.6)`` (real, non-causal).

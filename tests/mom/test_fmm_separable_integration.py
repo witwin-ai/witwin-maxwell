@@ -24,23 +24,23 @@ def provider(*,absorbing=False):
 def test_separable_config_identity_defaults_and_strict_binding():
     from witwin.maxwell.mom.runtime import _numerical_identity
     from witwin.maxwell.mom.linalg import StoppingRule
-    default=mw.FMMConfig()
+    default=mw.mom.FMMConfig()
     assert default.payload()['version']=='cartesian_fmm_shared_compact_config_v1'
     assert default.payload()['parameters']['shift_storage']=='separable_v1'
-    selected=mw.FMMConfig(table_storage='compact',near_storage='full_matrix',shift_storage='separable_v1')
+    selected=mw.mom.FMMConfig(table_storage='compact',near_storage='full_matrix',shift_storage='separable_v1')
     assert selected.payload()['version']=='cartesian_fmm_separable_config_v1'
-    assert mw.FMMConfig.restore(default.payload())==default
-    assert mw.FMMConfig.restore(selected.payload())==selected
+    assert mw.mom.FMMConfig.restore(default.payload())==default
+    assert mw.mom.FMMConfig.restore(selected.payload())==selected
     assert selected.construction()['shift_storage']=='separable_v1'
     options=dict(operator_backend='fmm',riesz_storage='local_rwg_v1',stopping=StoppingRule(rtol=1e-9, preconditioner='rwg_diagonal'))
-    assert _numerical_identity(mw.MoMConfig(fmm=default,**options))!=_numerical_identity(mw.MoMConfig(fmm=selected,**options))
+    assert _numerical_identity(mw.mom.MoMConfig(fmm=default,**options))!=_numerical_identity(mw.mom.MoMConfig(fmm=selected,**options))
     for version in ('cartesian_fmm_config_v7','unknown'):
         bad=copy.deepcopy(selected.payload());bad['version']=version
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     for field in selected.payload()['parameters']:
         bad=copy.deepcopy(selected.payload());del bad['parameters'][field]
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
-    with pytest.raises(ValueError):mw.FMMConfig(shift_storage='unknown')
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
+    with pytest.raises(ValueError):mw.mom.FMMConfig(shift_storage='unknown')
 
 
 def test_separable_full_free_action_original_matrix_and_capacity():

@@ -49,7 +49,7 @@ def graded_axis(core, extent, maximum=150., ratio=1.3):
 
 def write_model(directory, variant, resolution, driven, *, max_time=3e-10, extent=1500., lossy=True,
                 z_refinement=1,port_gap_um=5.):
-    fixture = fixture_fa(shield=variant, device="cpu",lossy=lossy)
+    fixture = fixture_fa(shield=variant,lossy=lossy)
     stack, rectangles, ports, materials, _, vias, via_materials = compile_layered_scene(fixture.scene)
     root = ET.Element("openEMS")
     fdtd = ET.SubElement(root, "FDTD", NumberOfTimesteps="2000000", endCriteria="1e-6",

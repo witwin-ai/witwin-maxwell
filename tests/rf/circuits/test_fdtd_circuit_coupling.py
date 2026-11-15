@@ -40,7 +40,6 @@ def _scene(port, *, circuits=()):
         boundary=mw.BoundarySpec.none(),
         ports=(port,),
         circuits=circuits,
-        device="cuda",
     )
 
 
@@ -58,7 +57,6 @@ def _driven_scene(port, dx, *, circuits=()):
         ),
         ports=(port,),
         circuits=circuits,
-        device="cuda",
     )
 
 
@@ -77,9 +75,11 @@ def test_mna_coupled_interface_stays_finite_under_grid_refinement(dx):
             circuits=(_series_circuit(),),
         ),
         frequencies=(2.75e9, 3.0e9),
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).run()
     voltage = result.port("feed").voltage
     assert bool(torch.all(torch.isfinite(voltage)))
@@ -87,13 +87,13 @@ def test_mna_coupled_interface_stays_finite_under_grid_refinement(dx):
 
 
 def _series_circuit(*, resistance=25.0, inductance=0.5e-9, capacitance=1.0e-12):
-    circuit = mw.Circuit("load")
+    circuit = mw.circuits.Circuit("load")
     input_node = circuit.node("input")
     middle = circuit.node("middle")
     output = circuit.node("output")
-    circuit.add(mw.Resistor("R1", input_node, middle, resistance))
-    circuit.add(mw.Inductor("L1", middle, output, inductance))
-    circuit.add(mw.Capacitor("C1", output, circuit.ground, capacitance))
+    circuit.add(mw.rf.Resistor("R1", input_node, middle, resistance))
+    circuit.add(mw.rf.Inductor("L1", middle, output, inductance))
+    circuit.add(mw.rf.Capacitor("C1", output, circuit.ground, capacitance))
     circuit.bind_port("feed", positive=input_node, negative=circuit.ground)
     return circuit
 
@@ -116,24 +116,23 @@ def _two_port_scene(*, circuit_load: bool):
     load = None
     circuits = ()
     if circuit_load:
-        network = mw.Circuit("network")
+        network = mw.circuits.Circuit("network")
         input_node = network.node("input")
         middle = network.node("middle")
         output = network.node("output")
-        network.add(mw.Resistor("R1", input_node, middle, 40.0))
-        network.add(mw.Inductor("L1", middle, output, 0.4e-9))
-        network.add(mw.Capacitor("C1", output, network.ground, 0.8e-12))
+        network.add(mw.rf.Resistor("R1", input_node, middle, 40.0))
+        network.add(mw.rf.Inductor("L1", middle, output, 0.4e-9))
+        network.add(mw.rf.Capacitor("C1", output, network.ground, 0.8e-12))
         network.bind_port("load", positive=input_node, negative=network.ground)
         circuits = (network,)
     else:
-        load = mw.SeriesRLC(r=40.0, l=0.4e-9, c=0.8e-12)
+        load = mw.rf.SeriesRLC(r=40.0, l=0.4e-9, c=0.8e-12)
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.024, 0.024),) * 3),
         grid=mw.GridSpec.uniform(0.004),
         boundary=mw.BoundarySpec.pml(num_layers=3),
         ports=(port("feed", -0.008), port("load", 0.008, load)),
         circuits=circuits,
-        device="cuda",
     )
 
 
@@ -144,14 +143,14 @@ def test_coupled_mna_matches_native_series_rlc_without_a_delayed_step():
     native = mw.Simulation.fdtd(
         _scene(
             _port(
-                termination=mw.SeriesRLC(
+                termination=mw.rf.SeriesRLC(
                     r=resistance,
                     l=inductance,
                     c=capacitance,
                 )
             )
         ),
-        frequency=3.0e9,
+        frequencies=3.0e9,
     ).prepare().solver
     coupled = mw.Simulation.fdtd(
         _scene(
@@ -164,7 +163,7 @@ def test_coupled_mna_matches_native_series_rlc_without_a_delayed_step():
                 ),
             ),
         ),
-        frequency=3.0e9,
+        frequencies=3.0e9,
     ).prepare().solver
     samples = (0.1, -0.2, 0.3, -0.4, 0.2, 0.0, -0.1, 0.05)
     prepare_circuit_time_series(coupled, len(samples))
@@ -242,7 +241,7 @@ def test_coupled_mna_matches_native_series_rlc_without_a_delayed_step():
 def test_passive_rlc_coupling_conserves_field_circuit_energy_and_decays():
     solver = mw.Simulation.fdtd(
         _scene(_port(), circuits=(_series_circuit(),)),
-        frequency=3.0e9,
+        frequencies=3.0e9,
     ).prepare().solver
     steps = 2048
     prepare_circuit_time_series(solver, steps)
@@ -300,26 +299,28 @@ def test_passive_rlc_coupling_conserves_field_circuit_energy_and_decays():
 
 
 def test_circuit_run_returns_cuda_data_and_checkpointed_companion_history():
-    circuit = mw.Circuit("driven")
+    circuit = mw.circuits.Circuit("driven")
     node = circuit.node("input")
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 50.0))
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 50.0))
     circuit.add(
-        mw.CurrentSource(
+        mw.circuits.CurrentSource(
             "I1",
             circuit.ground,
             node,
-            waveform=mw.SineWaveform(0.0, 0.01, 3.0e9),
+            waveform=mw.circuits.SineWaveform(0.0, 0.01, 3.0e9),
         )
     )
     circuit.bind_port("feed", positive=node, negative=circuit.ground)
     result = mw.Simulation.fdtd(
         _scene(_port(), circuits=(circuit,)),
-        frequency=3.0e9,
-        run_time=mw.TimeConfig(time_steps=16),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        frequencies=3.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=16),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
 
-    data = result.circuit("driven")
+    data = mw.circuits.circuit(result, "driven")
     checkpoint = capture_checkpoint_state(result.solver, step=16)
 
     assert data.times.shape == (17,)
@@ -355,12 +356,14 @@ def test_two_port_fdtd_s11_matches_native_series_rlc_load():
         return mw.Simulation.fdtd(
             _two_port_scene(circuit_load=circuit_load),
             frequencies=(2.5e9, 3.0e9),
-            excitations=mw.PortExcitation(
+            excitations=mw.rf.PortExcitation(
                 "feed",
                 source_time=mw.GaussianPulse(frequency=2.75e9, fwidth=1.5e9),
             ),
-            run_time=mw.TimeConfig(time_steps=128),
-            spectral_sampler=mw.SpectralSampler(window="none"),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=128),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            ),
         ).run()
 
     native = run(False).port("feed")
@@ -375,13 +378,13 @@ def test_two_port_fdtd_s11_matches_native_series_rlc_load():
 
 
 def test_circuit_step_reuses_factors_without_scalar_sync_or_host_copy():
-    circuit = mw.Circuit("profile")
+    circuit = mw.circuits.Circuit("profile")
     node = circuit.node("input")
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 50.0))
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 50.0))
     circuit.bind_port("feed", positive=node, negative=circuit.ground)
     solver = mw.Simulation.fdtd(
         _scene(_port(), circuits=(circuit,)),
-        frequency=3.0e9,
+        frequencies=3.0e9,
     ).prepare().solver
     prepare_circuit_time_series(solver, 80)
     prepare_port_spectral_accumulators(solver, 80, "none")
@@ -422,28 +425,28 @@ def test_circuit_step_reuses_factors_without_scalar_sync_or_host_copy():
 
 
 def test_circuit_bound_port_rejects_direct_excitation():
-    circuit = mw.Circuit("load")
+    circuit = mw.circuits.Circuit("load")
     node = circuit.node("input")
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 50.0))
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 50.0))
     circuit.bind_port("feed", positive=node, negative=circuit.ground)
     scene = _scene(_port(), circuits=(circuit,))
 
     with pytest.raises(ValueError, match="Circuit-bound port.*PortExcitation"):
         mw.Simulation.fdtd(
             scene,
-            frequency=3.0e9,
-            excitations=mw.PortExcitation("feed"),
+            frequencies=3.0e9,
+            excitations=mw.rf.PortExcitation("feed"),
         ).prepare()
 
 def test_nonzero_coupled_dc_current_rejects_an_inconsistent_zero_field_start():
-    circuit = mw.Circuit("dc_driven")
+    circuit = mw.circuits.Circuit("dc_driven")
     node = circuit.node("input")
-    circuit.add(mw.VoltageSource("V1", node, circuit.ground, 1.0))
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 50.0))
+    circuit.add(mw.circuits.VoltageSource("V1", node, circuit.ground, 1.0))
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 50.0))
     circuit.bind_port("feed", positive=node, negative=circuit.ground)
 
     with pytest.raises(ValueError, match="nonzero DC port current.*zero initial Yee field"):
         mw.Simulation.fdtd(
             _scene(_port(), circuits=(circuit,)),
-            frequency=3.0e9,
+            frequencies=3.0e9,
         ).prepare()

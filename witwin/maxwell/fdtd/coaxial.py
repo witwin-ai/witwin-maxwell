@@ -20,6 +20,7 @@ from .lumped import (
     _termination_components,
     prepare_lumped_runtime,
 )
+from ..errors import UnsupportedFeatureError
 
 
 @dataclass(frozen=True)
@@ -246,9 +247,10 @@ def prepare_coaxial_runtime(
             weights.to(device=solver.device)[active],
         )
         if history_currents(solver, row):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"Coaxial lumped object {geometry.port_name!r} overlaps dispersive media; "
-                "the annular branch does not forecast multi-component polarization currents."
+                "the annular branch does not forecast multi-component polarization currents.",
+                feature="port.CoaxialLumpedPort", method="fdtd"
             )
         part = prepare_lumped_runtime(
             row,

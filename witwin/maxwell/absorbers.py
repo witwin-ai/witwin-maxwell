@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from ._enums import Direction, ModePolarization, parse_enum
 from ._fixed_inputs import require_fixed_input
 
 _AXES = ("x", "y", "z")
@@ -62,7 +63,7 @@ class ModeABC:
     """
 
     mode_index: int = 0
-    polarization: str = "auto"
+    polarization: ModePolarization = ModePolarization.AUTO
     frequency: float | None = None
     frequency_range: tuple[float, float] | None = None
     order: int = 2
@@ -75,7 +76,7 @@ class ModeABC:
         if isinstance(self.mode_index, bool) or int(self.mode_index) != self.mode_index or int(self.mode_index) < 0:
             raise ValueError("ModeABC.mode_index must be a non-negative integer.")
         object.__setattr__(self, "mode_index", int(self.mode_index))
-        object.__setattr__(self, "polarization", str(self.polarization))
+        object.__setattr__(self, "polarization", parse_enum(ModePolarization, self.polarization, name="ModeABC.polarization"))
         if self.frequency is not None:
             frequency = float(self.frequency)
             if not math.isfinite(frequency) or frequency <= 0.0:
@@ -118,12 +119,12 @@ class InternalAbsorber:
 
     position: tuple[float, float, float]
     size: tuple[float, float, float]
-    direction: str = "+"
+    direction: Direction = Direction.PLUS
     boundary: MurABC | ModeABC = MurABC()
     grid_shift: int = 0
     name: str | None = None
 
-    def __init__(self, position, size, direction="+", boundary=None, grid_shift=0, name=None):
+    def __init__(self, position, size, direction=Direction.PLUS, boundary=None, grid_shift=0, name=None):
         require_fixed_input((position, size, grid_shift), name="InternalAbsorber geometry")
         resolved_position = tuple(float(value) for value in position)
         resolved_size = tuple(float(value) for value in size)
@@ -136,9 +137,7 @@ class InternalAbsorber:
         zero_axes = [axis for axis, value in zip(_AXES, resolved_size) if value == 0.0]
         if len(zero_axes) != 1:
             raise ValueError("InternalAbsorber size must contain exactly one zero component (the plane normal).")
-        resolved_direction = str(direction)
-        if resolved_direction not in ("+", "-"):
-            raise ValueError("InternalAbsorber.direction must be '+' or '-'.")
+        resolved_direction = parse_enum(Direction, direction, name="InternalAbsorber.direction")
         resolved_boundary = MurABC() if boundary is None else boundary
         if not isinstance(resolved_boundary, (MurABC, ModeABC)):
             raise TypeError("InternalAbsorber.boundary must be a MurABC or ModeABC.")
@@ -157,7 +156,7 @@ class InternalAbsorber:
 
     @property
     def direction_sign(self) -> int:
-        return 1 if self.direction == "+" else -1
+        return 1 if self.direction is Direction.PLUS else -1
 
 
 __all__ = ["InternalAbsorber", "ModeABC", "MurABC"]

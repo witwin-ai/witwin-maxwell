@@ -1,0 +1,7350 @@
+{
+ "$defs": {
+  "AngleProjectionMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.AngleProjectionMonitor",
+   "properties": {
+    "exclude_surfaces": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "far_field_approx": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction | None"
+    },
+    "origin": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "phi": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...]"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "radius": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "sample_spacing": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "theta": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...]"
+    },
+    "type": {
+     "const": "AngleProjectionMonitor"
+    },
+    "window_size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float] | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ArrayRef": {
+   "additionalProperties": false,
+   "description": "a tensor of more than 4096 elements in the caller's arrays table, named by its document path",
+   "properties": {
+    "array": {
+     "type": "string"
+    },
+    "ndarray": {
+     "const": true
+    },
+    "requires_grad": {
+     "const": true
+    }
+   },
+   "required": [
+    "array"
+   ],
+   "type": "object"
+  },
+  "AstigmaticGaussianBeam": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.AstigmaticGaussianBeam",
+   "properties": {
+    "beam_waist": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float]"
+    },
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "focus": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "focus_u": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "focus_v": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "injection": {
+     "$ref": "#/$defs/value",
+     "description": "Injection"
+    },
+    "injection_axis": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "source_time": {
+     "$ref": "#/$defs/value",
+     "description": "SourceTime | None"
+    },
+    "type": {
+     "const": "AstigmaticGaussianBeam"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "AstigmaticGaussianOverlapMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.AstigmaticGaussianOverlapMonitor",
+   "properties": {
+    "beam_waist": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float]"
+    },
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "focus": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "focus_u": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "focus_v": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "AstigmaticGaussianOverlapMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "AuxFieldTimeMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.AuxFieldTimeMonitor",
+   "properties": {
+    "components": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[FieldComponent, ...]"
+    },
+    "interval": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "start": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "stop": {
+     "$ref": "#/$defs/value",
+     "description": "int | None"
+    },
+    "type": {
+     "const": "AuxFieldTimeMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "AxisPath": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.AxisPath",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "type": {
+     "const": "AxisPath"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "AxisSegment": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.path_integrals.AxisSegment",
+   "properties": {
+    "end": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "start": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "AxisSegment"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "BasebandGaussianPulse": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.BasebandGaussianPulse",
+   "properties": {
+    "amplitude": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "offset": {
+     "$ref": "#/$defs/value"
+    },
+    "twidth": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "BasebandGaussianPulse"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "BasebandRectangularPulse": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.BasebandRectangularPulse",
+   "properties": {
+    "amplitude": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "offset": {
+     "$ref": "#/$defs/value"
+    },
+    "rise_time": {
+     "$ref": "#/$defs/value"
+    },
+    "twidth": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "BasebandRectangularPulse"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "BendCoordinates": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.coordinates.BendCoordinates",
+   "properties": {
+    "curvature": {
+     "$ref": "#/$defs/value"
+    },
+    "frame": {
+     "$ref": "#/$defs/value"
+    },
+    "origin": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "BendCoordinates"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "BoundarySpec": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.scene.BoundarySpec",
+   "properties": {
+    "bloch_wavevector": {
+     "$ref": "#/$defs/value",
+     "description": "BlochWavevector"
+    },
+    "kind": {
+     "$ref": "#/$defs/value",
+     "description": "BoundaryKind"
+    },
+    "mode_abc": {
+     "$ref": "#/$defs/value",
+     "description": "ModeABC | None"
+    },
+    "mur_abc": {
+     "$ref": "#/$defs/value",
+     "description": "MurABC"
+    },
+    "num_layers": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "strength": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "BoundarySpec"
+    },
+    "x": {
+     "$ref": "#/$defs/value",
+     "description": "BoundaryAxisOverride | None"
+    },
+    "x_high": {
+     "$ref": "#/$defs/value",
+     "description": "BoundaryKind | None"
+    },
+    "x_low": {
+     "$ref": "#/$defs/value",
+     "description": "BoundaryKind | None"
+    },
+    "y": {
+     "$ref": "#/$defs/value",
+     "description": "BoundaryAxisOverride | None"
+    },
+    "y_high": {
+     "$ref": "#/$defs/value",
+     "description": "BoundaryKind | None"
+    },
+    "y_low": {
+     "$ref": "#/$defs/value",
+     "description": "BoundaryKind | None"
+    },
+    "z": {
+     "$ref": "#/$defs/value",
+     "description": "BoundaryAxisOverride | None"
+    },
+    "z_high": {
+     "$ref": "#/$defs/value",
+     "description": "BoundaryKind | None"
+    },
+    "z_low": {
+     "$ref": "#/$defs/value",
+     "description": "BoundaryKind | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Box": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.primitives.Box",
+   "properties": {
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "size": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Box"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "BreakdownMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.BreakdownMonitor",
+   "properties": {
+    "critical_field": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "damage_exponent": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "minimum_duration": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "quantities": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "region": {
+     "$ref": "#/$defs/value"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "BreakdownMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "BroadbandPulse": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.BroadbandPulse",
+   "properties": {
+    "amplitude": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "freq_range": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float]"
+    },
+    "kind": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "minimum_amplitude": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "offset": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "phase": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "BroadbandPulse"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CW": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.CW",
+   "properties": {
+    "amplitude": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "frequency": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "kind": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "phase": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "CW"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Capacitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.lumped.Capacitor",
+   "properties": {
+    "capacitance": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float] | CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float] | CircuitNode"
+    },
+    "type": {
+     "const": "Capacitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CartesianProjectionMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.CartesianProjectionMonitor",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "distance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "exclude_surfaces": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "far_field_approx": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction | None"
+    },
+    "origin": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "sample_spacing": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "CartesianProjectionMonitor"
+    },
+    "window_size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float] | None"
+    },
+    "x": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...]"
+    },
+    "y": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...]"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ChargeDensity": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.electrostatic.api.ChargeDensity",
+   "properties": {
+    "density": {
+     "$ref": "#/$defs/value",
+     "description": "float | torch.Tensor"
+    },
+    "geometry": {
+     "$ref": "#/$defs/value",
+     "description": "Any"
+    },
+    "type": {
+     "const": "ChargeDensity"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CircleLoop": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.path_integrals.CircleLoop",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "center": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "radius": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "segments": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "type": {
+     "const": "CircleLoop"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Circuit": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.Circuit",
+   "properties": {
+    "bindings": {
+     "$ref": "#/$defs/value"
+    },
+    "config": {
+     "$ref": "#/$defs/value",
+     "description": "MNAConfig | None"
+    },
+    "devices": {
+     "$ref": "#/$defs/value"
+    },
+    "generated_nodes": {
+     "$ref": "#/$defs/value"
+    },
+    "initial_conditions": {
+     "$ref": "#/$defs/value"
+    },
+    "metadata": {
+     "$ref": "#/$defs/value"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "nodes": {
+     "$ref": "#/$defs/value"
+    },
+    "parameters": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Circuit"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CircuitNode": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.CircuitNode",
+   "properties": {
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "type": {
+     "const": "CircuitNode"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ClosedSurfaceMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.ClosedSurfaceMonitor",
+   "properties": {
+    "faces": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[FinitePlaneMonitor, ...]"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "type": {
+     "const": "ClosedSurfaceMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CoaxialLumpedPort": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.CoaxialLumpedPort",
+   "properties": {
+    "center": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "inner_diameter": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_axis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "outer_diameter": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "reference_impedance": {
+     "$ref": "#/$defs/value",
+     "description": "complex | float | torch.Tensor"
+    },
+    "reference_plane": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "termination": {
+     "$ref": "#/$defs/value",
+     "description": "SeriesRLC | None"
+    },
+    "type": {
+     "const": "CoaxialLumpedPort"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CoaxialLumpedResistor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.lumped.CoaxialLumpedResistor",
+   "properties": {
+    "center": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "inner_diameter": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_axis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "outer_diameter": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "resistance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "CoaxialLumpedResistor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Complex": {
+   "additionalProperties": false,
+   "properties": {
+    "imag": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "$ref": "#/$defs/Float"
+      }
+     ]
+    },
+    "real": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "$ref": "#/$defs/Float"
+      }
+     ]
+    },
+    "type": {
+     "const": "Complex"
+    }
+   },
+   "required": [
+    "type",
+    "real",
+    "imag"
+   ],
+   "type": "object"
+  },
+  "ComplexPolySlab": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.geometry.polyslab.ComplexPolySlab",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value"
+    },
+    "bounds": {
+     "$ref": "#/$defs/value"
+    },
+    "loops": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "reference_plane": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "sidewall_angle": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "ComplexPolySlab"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ComplexTensor3x3": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.ComplexTensor3x3",
+   "properties": {
+    "reciprocal": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "rows": {
+     "$ref": "#/$defs/value",
+     "description": "tuple"
+    },
+    "type": {
+     "const": "ComplexTensor3x3"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ComponentRating": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.breakdown_stress.ComponentRating",
+   "properties": {
+    "current": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "energy": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "model": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "pulse_width": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "type": {
+     "const": "ComponentRating"
+    },
+    "voltage": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ComponentStressMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.ComponentStressMonitor",
+   "properties": {
+    "current_series": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "port": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "rating": {
+     "$ref": "#/$defs/value",
+     "description": "object"
+    },
+    "type": {
+     "const": "ComponentStressMonitor"
+    },
+    "voltage_series": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CompositeCurrentIntegral": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.path_integrals.CompositeCurrentIntegral",
+   "properties": {
+    "terms": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, CustomCurrentIntegral], ...]"
+    },
+    "type": {
+     "const": "CompositeCurrentIntegral"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CompositeVoltageIntegral": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.path_integrals.CompositeVoltageIntegral",
+   "properties": {
+    "terms": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, CustomVoltageIntegral], ...]"
+    },
+    "type": {
+     "const": "CompositeVoltageIntegral"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Cone": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.primitives.Cone",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value"
+    },
+    "height": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "radius": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Cone"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CopperFoil": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.copper_foil.CopperFoil",
+   "properties": {
+    "conductivity": {
+     "$ref": "#/$defs/value"
+    },
+    "edge_model": {
+     "$ref": "#/$defs/value"
+    },
+    "frequency_range": {
+     "$ref": "#/$defs/value"
+    },
+    "mode_count": {
+     "$ref": "#/$defs/value"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "thickness": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "CopperFoil"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CornerFinderSpec": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.scene.CornerFinderSpec",
+   "properties": {
+    "angle_threshold": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "concave_resolution": {
+     "$ref": "#/$defs/value",
+     "description": "int | None"
+    },
+    "convex_resolution": {
+     "$ref": "#/$defs/value",
+     "description": "int | None"
+    },
+    "distance_threshold": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "medium": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['metal', 'dielectric', 'all']"
+    },
+    "mixed_resolution": {
+     "$ref": "#/$defs/value",
+     "description": "int | None"
+    },
+    "type": {
+     "const": "CornerFinderSpec"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CurrentControlledCurrentSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.CurrentControlledCurrentSource",
+   "properties": {
+    "control_source": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "gain": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "type": {
+     "const": "CurrentControlledCurrentSource"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CurrentControlledVoltageSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.CurrentControlledVoltageSource",
+   "properties": {
+    "control_source": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "transresistance": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "CurrentControlledVoltageSource"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CurrentDataset": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.CurrentDataset",
+   "properties": {
+    "components": {
+     "$ref": "#/$defs/value",
+     "description": "dict"
+    },
+    "coords": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]"
+    },
+    "type": {
+     "const": "CurrentDataset"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CurrentSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.CurrentSource",
+   "properties": {
+    "current": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "type": {
+     "const": "CurrentSource"
+    },
+    "waveform": {
+     "$ref": "#/$defs/value",
+     "description": "SourceWaveform | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CustomCurrentIntegral": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.path_integrals.CustomCurrentIntegral",
+   "properties": {
+    "loop": {
+     "$ref": "#/$defs/value",
+     "description": "RectangleLoop | PolygonLoop | CircleLoop"
+    },
+    "type": {
+     "const": "CustomCurrentIntegral"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CustomCurrentSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.CustomCurrentSource",
+   "properties": {
+    "current_dataset": {
+     "$ref": "#/$defs/value",
+     "description": "CurrentDataset"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "source_time": {
+     "$ref": "#/$defs/value",
+     "description": "SourceTime | None"
+    },
+    "type": {
+     "const": "CustomCurrentSource"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CustomDebyePole": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.CustomDebyePole",
+   "properties": {
+    "delta_eps": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "tau": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "CustomDebyePole"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CustomDrudePole": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.CustomDrudePole",
+   "properties": {
+    "gamma": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "plasma_frequency": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "CustomDrudePole"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CustomFieldSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.CustomFieldSource",
+   "properties": {
+    "field_dataset": {
+     "$ref": "#/$defs/value",
+     "description": "FieldDataset"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "source_time": {
+     "$ref": "#/$defs/value",
+     "description": "SourceTime | None"
+    },
+    "type": {
+     "const": "CustomFieldSource"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CustomLorentzPole": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.CustomLorentzPole",
+   "properties": {
+    "delta_eps": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "gamma": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "resonance_frequency": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "CustomLorentzPole"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CustomSourceTime": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.CustomSourceTime",
+   "properties": {
+    "amplitude": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "amplitudes": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "characteristic_frequency": {
+     "$ref": "#/$defs/value"
+    },
+    "frequency": {
+     "$ref": "#/$defs/value"
+    },
+    "interpolation": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "times": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "type": {
+     "const": "CustomSourceTime"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "CustomVoltageIntegral": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.path_integrals.CustomVoltageIntegral",
+   "properties": {
+    "path": {
+     "$ref": "#/$defs/value",
+     "description": "AxisSegment | PolylinePath"
+    },
+    "type": {
+     "const": "CustomVoltageIntegral"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Cylinder": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.primitives.Cylinder",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value"
+    },
+    "height": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "radius": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Cylinder"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "DType": {
+   "additionalProperties": false,
+   "properties": {
+    "type": {
+     "const": "DType"
+    },
+    "value": {
+     "enum": [
+      "bool",
+      "uint8",
+      "int8",
+      "int16",
+      "int32",
+      "int64",
+      "float16",
+      "bfloat16",
+      "float32",
+      "float64",
+      "complex64",
+      "complex128",
+      "uint16",
+      "uint32",
+      "uint64"
+     ]
+    }
+   },
+   "required": [
+    "type",
+    "value"
+   ],
+   "type": "object"
+  },
+  "DebyePole": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.DebyePole",
+   "properties": {
+    "delta_eps": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "tau": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "DebyePole"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "DiagonalTensor3": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.DiagonalTensor3",
+   "properties": {
+    "type": {
+     "const": "DiagonalTensor3"
+    },
+    "xx": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "yy": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "zz": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "DielectricBreakdown": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.DielectricBreakdown",
+   "properties": {
+    "critical_field": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "damage_parameters": {
+     "$ref": "#/$defs/value",
+     "description": "object | None"
+    },
+    "default_ramp_steps": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "minimum_duration": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "model": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "post_breakdown_conductivity": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "ramp_time": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "recovery": {
+     "$ref": "#/$defs/value",
+     "description": "object | None"
+    },
+    "state": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "type": {
+     "const": "DielectricBreakdown"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Difference": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.boolean.Difference",
+   "properties": {
+    "base": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "smoothness": {
+     "$ref": "#/$defs/value"
+    },
+    "tools": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Difference"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "DiffractionMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.DiffractionMonitor",
+   "properties": {
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "orders": {
+     "$ref": "#/$defs/value",
+     "description": "int | None"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "DiffractionMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Diode": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuit_devices.Diode",
+   "properties": {
+    "ideality": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "junction_capacitance": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "saturation_current": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "series_resistance": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "temperature": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "Diode"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "DipoleEmissionMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.DipoleEmissionMonitor",
+   "properties": {
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "source_name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "type": {
+     "const": "DipoleEmissionMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Domain": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.scene.Domain",
+   "properties": {
+    "bounds": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, float], tuple[float, float], tuple[float, float]]"
+    },
+    "type": {
+     "const": "Domain"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "DrudePole": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.DrudePole",
+   "properties": {
+    "gamma": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "plasma_frequency": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "DrudePole"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ESDCurrentSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.esd.ESDCurrentSource",
+   "properties": {
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "port": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "ESDCurrentSource"
+    },
+    "waveform": {
+     "$ref": "#/$defs/value",
+     "description": "Waveform"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ESDVoltageSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.esd.ESDVoltageSource",
+   "properties": {
+    "discharge_resistance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "port": {
+     "$ref": "#/$defs/value"
+    },
+    "storage_capacitance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "ESDVoltageSource"
+    },
+    "waveform": {
+     "$ref": "#/$defs/value",
+     "description": "Waveform"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ESDWaveform": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.esd.ESDWaveform",
+   "properties": {
+    "discharge": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "level_voltage": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "standard_revision": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "type": {
+     "const": "ESDWaveform"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ElectrostaticTerminal": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.electrostatic.api.ElectrostaticTerminal",
+   "properties": {
+    "charge": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "geometry": {
+     "$ref": "#/$defs/value",
+     "description": "Any"
+    },
+    "grounded": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "potential": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "structure": {
+     "$ref": "#/$defs/value",
+     "description": "Any"
+    },
+    "type": {
+     "const": "ElectrostaticTerminal"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Ellipsoid": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.primitives.Ellipsoid",
+   "properties": {
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "radii": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Ellipsoid"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ExtrudedPolygon": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.primitives.ExtrudedPolygon",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value"
+    },
+    "height": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "ExtrudedPolygon"
+    },
+    "vertices": {
+     "$ref": "#/$defs/value"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "FieldDataset": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.FieldDataset",
+   "properties": {
+    "components": {
+     "$ref": "#/$defs/value",
+     "description": "dict"
+    },
+    "coords": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]"
+    },
+    "type": {
+     "const": "FieldDataset"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "FieldTimeMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.FieldTimeMonitor",
+   "properties": {
+    "components": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[FieldComponent, ...]"
+    },
+    "interval": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "start": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "stop": {
+     "$ref": "#/$defs/value",
+     "description": "int | None"
+    },
+    "type": {
+     "const": "FieldTimeMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "FinitePlaneMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.FinitePlaneMonitor",
+   "properties": {
+    "closure_planes": {
+     "$ref": "#/$defs/value",
+     "description": "dict[str, tuple[float, float]] | None"
+    },
+    "compute_flux": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "face_label": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "fields": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[FieldComponent, ...]"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "sample_spacing": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "surface_name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "type": {
+     "const": "FinitePlaneMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "FitReport": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.rational.FitReport",
+   "properties": {
+    "condition_numbers": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...]"
+    },
+    "differentiable_parameters": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "enforcement_change": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "frequency_band": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float]"
+    },
+    "iterations": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "max_error": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "max_passivity_violation": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "order": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "passivity_enforced": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "passivity_margin": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "relative_max_error": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "relative_rms_error": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "rms_error": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "FitReport"
+    },
+    "unstable_poles": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "warnings": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Float": {
+   "additionalProperties": false,
+   "properties": {
+    "type": {
+     "const": "Float"
+    },
+    "value": {
+     "enum": [
+      "inf",
+      "-inf",
+      "nan"
+     ]
+    }
+   },
+   "required": [
+    "type",
+    "value"
+   ],
+   "type": "object"
+  },
+  "FluxMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.FluxMonitor",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "FluxMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "FluxTimeMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.FluxTimeMonitor",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "interval": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "start": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "stop": {
+     "$ref": "#/$defs/value",
+     "description": "int | None"
+    },
+    "type": {
+     "const": "FluxTimeMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "GaussianBeam": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.GaussianBeam",
+   "properties": {
+    "beam_waist": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "focus": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "injection": {
+     "$ref": "#/$defs/value",
+     "description": "Injection"
+    },
+    "injection_axis": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "source_time": {
+     "$ref": "#/$defs/value",
+     "description": "SourceTime | None"
+    },
+    "type": {
+     "const": "GaussianBeam"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "GaussianOverlapMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.GaussianOverlapMonitor",
+   "properties": {
+    "beam_waist": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "focus": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "GaussianOverlapMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "GaussianPulse": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.GaussianPulse",
+   "properties": {
+    "amplitude": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "delay": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "frequency": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "fwidth": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "kind": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "phase": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "GaussianPulse"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Graphene": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.Graphene",
+   "properties": {
+    "chemical_potential": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "include_interband": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "scattering_time": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "temperature": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "Graphene"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "GridRefinement": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.scene.GridRefinement",
+   "properties": {
+    "dl": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "num_cells": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "refinement_factor": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "type": {
+     "const": "GridRefinement"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "GridSpec": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.scene.GridSpec",
+   "properties": {
+    "dx": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "dy": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "dz": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "layer_refinement": {
+     "$ref": "#/$defs/value",
+     "description": "LayerRefinementSpec | tuple[LayerRefinementSpec, ...] | None"
+    },
+    "max_ratio": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "min_steps_per_wavelength": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "override_structures": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[MeshOverrideStructure, ...]"
+    },
+    "type": {
+     "const": "GridSpec"
+    },
+    "wavelength": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "x_coords": {
+     "$ref": "#/$defs/value",
+     "description": "np.ndarray | None"
+    },
+    "y_coords": {
+     "$ref": "#/$defs/value",
+     "description": "np.ndarray | None"
+    },
+    "z_coords": {
+     "$ref": "#/$defs/value",
+     "description": "np.ndarray | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "GroisseRoughness": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.roughness.GroisseRoughness",
+   "properties": {
+    "rms_height": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "GroisseRoughness"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "GyromagneticFerrite": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.GyromagneticFerrite",
+   "properties": {
+    "bias_field": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "cgs_conversion": {
+     "$ref": "#/$defs/value",
+     "description": "tuple"
+    },
+    "eps_r": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "gilbert_damping": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "gyromagnetic_ratio": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "mu_infinity": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "saturation_magnetization": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "sigma_e": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "type": {
+     "const": "GyromagneticFerrite"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "HalfSpace": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.layers.HalfSpace",
+   "properties": {
+    "eps_r": {
+     "$ref": "#/$defs/value",
+     "description": "complex | witwin.maxwell.layers.WidebandDebye | witwin.maxwell.layers.PolePermittivity"
+    },
+    "mu_r": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "sigma": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "HalfSpace"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "HammerstadRoughness": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.roughness.HammerstadRoughness",
+   "properties": {
+    "rms_height": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "roughness_factor": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "HammerstadRoughness"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "HollowBox": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.primitives.HollowBox",
+   "properties": {
+    "inner_size": {
+     "$ref": "#/$defs/value"
+    },
+    "outer_size": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "HollowBox"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "HurayRoughness": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.roughness.HurayRoughness",
+   "properties": {
+    "relative_area": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "sphere_density": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "sphere_radius": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "HurayRoughness"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "IncidentPowerDensityMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.IncidentPowerDensityMonitor",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "spatial_average": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "IncidentPowerDensityMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Inductor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.lumped.Inductor",
+   "properties": {
+    "inductance": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float] | CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float] | CircuitNode"
+    },
+    "type": {
+     "const": "Inductor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "InternalAbsorber": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.absorbers.InternalAbsorber",
+   "properties": {
+    "boundary": {
+     "$ref": "#/$defs/value",
+     "description": "MurABC | ModeABC"
+    },
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "grid_shift": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "InternalAbsorber"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Intersection": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.boolean.Intersection",
+   "properties": {
+    "geometries": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "smoothness": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Intersection"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "KSpaceProjectionMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.KSpaceProjectionMonitor",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "exclude_surfaces": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "hemisphere": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction | None"
+    },
+    "origin": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "radius": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "sample_spacing": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "KSpaceProjectionMonitor"
+    },
+    "ux": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...]"
+    },
+    "uy": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...]"
+    },
+    "window_size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float] | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Layer": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.layers.Layer",
+   "properties": {
+    "eps_r": {
+     "$ref": "#/$defs/value",
+     "description": "complex | witwin.maxwell.layers.WidebandDebye | witwin.maxwell.layers.PolePermittivity"
+    },
+    "mu_r": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "sigma": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "thickness": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "Layer"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "LayerRefinementSpec": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.scene.LayerRefinementSpec",
+   "properties": {
+    "axes": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...] | None"
+    },
+    "axis": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "bounds": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float] | None"
+    },
+    "bounds_refinement": {
+     "$ref": "#/$defs/value",
+     "description": "GridRefinement | None"
+    },
+    "bounds_snapping": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['bounds', 'lower', 'upper', 'center'] | None"
+    },
+    "corner_finder": {
+     "$ref": "#/$defs/value",
+     "description": "CornerFinderSpec | None"
+    },
+    "corner_refinement": {
+     "$ref": "#/$defs/value",
+     "description": "GridRefinement | None"
+    },
+    "corner_snapping": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "dl_min_from_gap_width": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "min_cells": {
+     "$ref": "#/$defs/value",
+     "description": "int | None"
+    },
+    "min_steps_along_axis": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "refinement_inside_sim_only": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "type": {
+     "const": "LayerRefinementSpec"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "LayerStack": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.layers.LayerStack",
+   "properties": {
+    "bottom": {
+     "$ref": "#/$defs/value",
+     "description": "witwin.maxwell.layers.HalfSpace | str"
+    },
+    "layers": {
+     "$ref": "#/$defs/value",
+     "description": "tuple"
+    },
+    "top": {
+     "$ref": "#/$defs/value",
+     "description": "witwin.maxwell.layers.HalfSpace | str"
+    },
+    "type": {
+     "const": "LayerStack"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "List": {
+   "additionalProperties": false,
+   "properties": {
+    "items": {
+     "items": {
+      "$ref": "#/$defs/value"
+     },
+     "type": "array"
+    },
+    "type": {
+     "const": "List"
+    }
+   },
+   "required": [
+    "type",
+    "items"
+   ],
+   "type": "object"
+  },
+  "LorentzPole": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.LorentzPole",
+   "properties": {
+    "allow_gain": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "delta_eps": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "gamma": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "resonance_frequency": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "LorentzPole"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "LossyMetalMedium": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.LossyMetalMedium",
+   "properties": {
+    "conductivity": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "roughness": {
+     "$ref": "#/$defs/value",
+     "description": "'SurfaceRoughness | None'"
+    },
+    "type": {
+     "const": "LossyMetalMedium"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "LumpedPort": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.LumpedPort",
+   "properties": {
+    "current_surface": {
+     "$ref": "#/$defs/value",
+     "description": "Box | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float] | None"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float] | None"
+    },
+    "reference_impedance": {
+     "$ref": "#/$defs/value",
+     "description": "complex | float | torch.Tensor"
+    },
+    "reference_plane": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "termination": {
+     "$ref": "#/$defs/value",
+     "description": "SeriesRLC | ParallelRLC | None"
+    },
+    "type": {
+     "const": "LumpedPort"
+    },
+    "voltage_aperture": {
+     "$ref": "#/$defs/value",
+     "description": "Box | None"
+    },
+    "voltage_path": {
+     "$ref": "#/$defs/value",
+     "description": "AxisPath | None"
+    },
+    "wire_binding": {
+     "$ref": "#/$defs/value",
+     "description": "WirePortBinding | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "MNAConfig": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.MNAConfig",
+   "properties": {
+    "dense_unknown_limit": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "diagnostics": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['basic', 'full']"
+    },
+    "initialization": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['dc', 'zero']"
+    },
+    "integration": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['trapezoidal', 'backward_euler']"
+    },
+    "pivot_tolerance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "regularization": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['error']"
+    },
+    "type": {
+     "const": "MNAConfig"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Mapping": {
+   "additionalProperties": false,
+   "properties": {
+    "items": {
+     "items": {
+      "items": false,
+      "minItems": 2,
+      "prefixItems": [
+       {
+        "$ref": "#/$defs/value"
+       },
+       {
+        "$ref": "#/$defs/value"
+       }
+      ],
+      "type": "array"
+     },
+     "type": "array"
+    },
+    "type": {
+     "const": "Mapping"
+    }
+   },
+   "required": [
+    "type",
+    "items"
+   ],
+   "type": "object"
+  },
+  "Material": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.Material",
+   "properties": {
+    "breakdown": {
+     "$ref": "#/$defs/value",
+     "description": "DielectricBreakdown | None"
+    },
+    "debye_poles": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[DebyePole, ...]"
+    },
+    "drude_poles": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[DrudePole, ...]"
+    },
+    "eps_r": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "epsilon_tensor": {
+     "$ref": "#/$defs/value",
+     "description": "DiagonalTensor3 | Tensor3x3 | ComplexTensor3x3 | None"
+    },
+    "kerr_chi3": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "lorentz_poles": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[LorentzPole, ...]"
+    },
+    "mass_density": {
+     "$ref": "#/$defs/value",
+     "description": "float | torch.Tensor | None"
+    },
+    "modulation": {
+     "$ref": "#/$defs/value",
+     "description": "ModulationSpec | None"
+    },
+    "mu_debye_poles": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[DebyePole, ...]"
+    },
+    "mu_drude_poles": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[DrudePole, ...]"
+    },
+    "mu_lorentz_poles": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[LorentzPole, ...]"
+    },
+    "mu_r": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "mu_tensor": {
+     "$ref": "#/$defs/value",
+     "description": "DiagonalTensor3 | Tensor3x3 | ComplexTensor3x3 | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "nonlinearity": {
+     "$ref": "#/$defs/value",
+     "description": "tuple"
+    },
+    "orientation": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] | None"
+    },
+    "pec": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "pmc": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "sigma_e": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "sigma_e_tensor": {
+     "$ref": "#/$defs/value",
+     "description": "DiagonalTensor3 | Tensor3x3 | None"
+    },
+    "sigma_m": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "Material"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "MaterialLayer": {
+   "additionalProperties": false,
+   "description": "witwin.core.material.MaterialLayer",
+   "properties": {
+    "dispersion": {
+     "$ref": "#/$defs/value",
+     "description": "DispersionSpec | None"
+    },
+    "eps_r": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "mu_r": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "sigma_e": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "thickness_m": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "type": {
+     "const": "MaterialLayer"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "MaterialRef": {
+   "additionalProperties": false,
+   "properties": {
+    "key": {
+     "pattern": "^m[0-9]+$",
+     "type": "string"
+    },
+    "type": {
+     "const": "MaterialRef"
+    }
+   },
+   "required": [
+    "type",
+    "key"
+   ],
+   "type": "object"
+  },
+  "MaterialRegion": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.scene.MaterialRegion",
+   "properties": {
+    "basis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "bounds": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float]"
+    },
+    "density": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "eps_bounds": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float]"
+    },
+    "filter_radius": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "geometry": {
+     "$ref": "#/$defs/value",
+     "description": "Any"
+    },
+    "mu_bounds": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float]"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "projection_beta": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "symmetry": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "type": {
+     "const": "MaterialRegion"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "MaxwellPlaneModes": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.MaxwellPlaneModes",
+   "properties": {
+    "electric": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "frequency": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "kind": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "magnetic": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "origin": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    },
+    "type": {
+     "const": "MaxwellPlaneModes"
+    },
+    "wavevectors": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "MeasuredWaveform": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.esd.MeasuredWaveform",
+   "properties": {
+    "bandwidth": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "provenance": {
+     "$ref": "#/$defs/value"
+    },
+    "time": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "MeasuredWaveform"
+    },
+    "units": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "values": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Medium2D": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.Medium2D",
+   "properties": {
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "sigma_s": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "Medium2D"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "MediumMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.MediumMonitor",
+   "properties": {
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "MediumMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Mesh": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.mesh.Mesh",
+   "properties": {
+    "faces": {
+     "$ref": "#/$defs/value"
+    },
+    "fill_mode": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "recenter": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "scale": {
+     "$ref": "#/$defs/value"
+    },
+    "source_path": {
+     "$ref": "#/$defs/value",
+     "description": "str | PathLike[str] | None"
+    },
+    "surface_thickness": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "topology_diagnostics": {
+     "$ref": "#/$defs/value",
+     "description": "bool | None"
+    },
+    "type": {
+     "const": "Mesh"
+    },
+    "vertices": {
+     "$ref": "#/$defs/value"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "MeshOverrideStructure": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.scene.MeshOverrideStructure",
+   "properties": {
+    "dl": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "geometry": {
+     "$ref": "#/$defs/value",
+     "description": "Any"
+    },
+    "type": {
+     "const": "MeshOverrideStructure"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ModeABC": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.absorbers.ModeABC",
+   "properties": {
+    "frequency": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "frequency_range": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float] | None"
+    },
+    "mode_index": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "order": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "ModePolarization"
+    },
+    "type": {
+     "const": "ModeABC"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ModeMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.ModeMonitor",
+   "properties": {
+    "bend_axis": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "bend_radius": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "mode_index": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "ModeMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ModePort": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.ModePort",
+   "properties": {
+    "bend_axis": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "bend_radius": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "mode_index": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "monitor_offset": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "source_time": {
+     "$ref": "#/$defs/value",
+     "description": "SourceTime | None"
+    },
+    "type": {
+     "const": "ModePort"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ModeSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.ModeSource",
+   "properties": {
+    "bend_axis": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "bend_radius": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "injection": {
+     "$ref": "#/$defs/value",
+     "description": "Injection"
+    },
+    "mode_index": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "source_time": {
+     "$ref": "#/$defs/value",
+     "description": "SourceTime | None"
+    },
+    "type": {
+     "const": "ModeSource"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ModulationSpec": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.ModulationSpec",
+   "properties": {
+    "amplitude": {
+     "$ref": "#/$defs/value",
+     "description": "float | torch.Tensor"
+    },
+    "frequency": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "phase": {
+     "$ref": "#/$defs/value",
+     "description": "float | torch.Tensor"
+    },
+    "type": {
+     "const": "ModulationSpec"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "MurABC": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.absorbers.MurABC",
+   "properties": {
+    "order": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "permittivity": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "type": {
+     "const": "MurABC"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "MutualInductor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.MutualInductor",
+   "properties": {
+    "coupling": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "first_inductor": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "second_inductor": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "type": {
+     "const": "MutualInductor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "NDArray": {
+   "additionalProperties": false,
+   "properties": {
+    "dtype": {
+     "type": "string"
+    },
+    "shape": {
+     "items": {
+      "minimum": 0,
+      "type": "integer"
+     },
+     "type": "array"
+    },
+    "type": {
+     "const": "NDArray"
+    },
+    "values": {
+     "$ref": "#/$defs/elements"
+    }
+   },
+   "required": [
+    "type",
+    "dtype",
+    "shape",
+    "values"
+   ],
+   "type": "object"
+  },
+  "NetworkBlock": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.network.NetworkBlock",
+   "properties": {
+    "connections": {
+     "$ref": "#/$defs/value",
+     "description": "Mapping[str | int, str]"
+    },
+    "delay_seconds": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['auto'] | tuple[float, ...] | None"
+    },
+    "extrapolation": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['reject']"
+    },
+    "fit": {
+     "$ref": "#/$defs/value",
+     "description": "RationalFitConfig | Literal[False]"
+    },
+    "max_delay_steps": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "model": {
+     "$ref": "#/$defs/value",
+     "description": "RationalModel | StateSpaceNetwork | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "network": {
+     "$ref": "#/$defs/value",
+     "description": "NetworkData"
+    },
+    "type": {
+     "const": "NetworkBlock"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "NetworkData": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.network.NetworkData",
+   "properties": {
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "metadata": {
+     "$ref": "#/$defs/value",
+     "description": "Mapping[str, Any]"
+    },
+    "phasor_convention": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "port_names": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "power_wave_convention": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "reference_matrix": {
+     "$ref": "#/$defs/value",
+     "description": "Any"
+    },
+    "s": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "NetworkData"
+    },
+    "valid_columns": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    },
+    "z0": {
+     "$ref": "#/$defs/value",
+     "description": "Any"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "NetworkFitReport": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.rational.NetworkFitReport",
+   "properties": {
+    "condition_numbers": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...]"
+    },
+    "delay_equation_count": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "delay_estimation_rank": {
+     "$ref": "#/$defs/value",
+     "description": "int | None"
+    },
+    "delay_phase_error_degrees": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "delay_reembedding_max_error": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "delay_residual_seconds": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "delay_seconds": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...]"
+    },
+    "differentiable_parameters": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "enforcement_change": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "frequency_band": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float]"
+    },
+    "iterations": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "max_error": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "max_passivity_violation": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "order": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "passivity_enforced": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "passivity_margin": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "port_count": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "relative_max_error": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "relative_rms_error": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "rms_error": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "NetworkFitReport"
+    },
+    "unstable_poles": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "warnings": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "NonlinearSolveConfig": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuit_devices.NonlinearSolveConfig",
+   "properties": {
+    "absolute_tolerance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "failure": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['raise', 'record_and_stop']"
+    },
+    "gmin_start": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "gmin_steps": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "line_search": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['backtracking', 'none']"
+    },
+    "max_iterations": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "max_line_search_steps": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "relative_tolerance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "NonlinearSolveConfig"
+    },
+    "update_absolute_tolerance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "update_relative_tolerance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "NonlinearSusceptibility": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.NonlinearSusceptibility",
+   "properties": {
+    "chi2": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "chi3": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "NonlinearSusceptibility"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PECFrame": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.PECFrame",
+   "properties": {
+    "length": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "type": {
+     "const": "PECFrame"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ParallelRLC": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.lumped.ParallelRLC",
+   "properties": {
+    "c": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    },
+    "l": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    },
+    "r": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    },
+    "type": {
+     "const": "ParallelRLC"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PermittivityMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.PermittivityMonitor",
+   "properties": {
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "PermittivityMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PerturbationMedium": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.PerturbationMedium",
+   "properties": {
+    "base": {
+     "$ref": "#/$defs/value",
+     "description": "Material"
+    },
+    "debye_sensitivities": {
+     "$ref": "#/$defs/value"
+    },
+    "drude_sensitivities": {
+     "$ref": "#/$defs/value"
+    },
+    "eps_sensitivity": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "lorentz_sensitivities": {
+     "$ref": "#/$defs/value"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "perturbation": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "PerturbationMedium"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PhaseScreen": {
+   "additionalProperties": false,
+   "description": "witwin.core.material.PhaseScreen",
+   "properties": {
+    "correlation": {
+     "$ref": "#/$defs/value",
+     "description": "SurfaceRoughness | None"
+    },
+    "height": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "height_offset_m": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "height_scale_m": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "mode": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "quadrature_tolerance": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "realization_id": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "type": {
+     "const": "PhaseScreen"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PhysicalMaterial": {
+   "additionalProperties": false,
+   "description": "witwin.core.material.PhysicalMaterial",
+   "properties": {
+    "conductor_model": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['finite', 'perfect']"
+    },
+    "dispersion": {
+     "$ref": "#/$defs/value",
+     "description": "DispersionSpec | PowerLawDispersion | None"
+    },
+    "eps_r": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "gain": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "geometry_mode": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "layers": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[MaterialLayer, ...]"
+    },
+    "material_id": {
+     "$ref": "#/$defs/value",
+     "description": "MaterialId"
+    },
+    "mu_r": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "roughness_back": {
+     "$ref": "#/$defs/value",
+     "description": "SurfaceRoughness | None"
+    },
+    "roughness_front": {
+     "$ref": "#/$defs/value",
+     "description": "SurfaceRoughness | None"
+    },
+    "scattering_coefficient": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "sigma_e": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "thickness_m": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "type": {
+     "const": "PhysicalMaterial"
+    },
+    "version": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "xpd_coefficient": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PiecewiseLinearIV": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuit_devices.PiecewiseLinearIV",
+   "properties": {
+    "currents": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "type": {
+     "const": "PiecewiseLinearIV"
+    },
+    "voltages": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PiecewiseLinearWaveform": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.PiecewiseLinearWaveform",
+   "properties": {
+    "times": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "PiecewiseLinearWaveform"
+    },
+    "values": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PlanarPEC": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.geometry.planar_pec.PlanarPEC",
+   "properties": {
+    "coordinate": {
+     "$ref": "#/$defs/value"
+    },
+    "holes": {
+     "$ref": "#/$defs/value"
+    },
+    "normal_axis": {
+     "$ref": "#/$defs/value"
+    },
+    "physical_thickness": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "PlanarPEC"
+    },
+    "vertices": {
+     "$ref": "#/$defs/value"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PlaneMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.PlaneMonitor",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "compute_flux": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "fields": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[FieldComponent, ...]"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "normal_direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "PlaneMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PlaneWave": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.PlaneWave",
+   "properties": {
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "injection": {
+     "$ref": "#/$defs/value",
+     "description": "Injection"
+    },
+    "injection_axis": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "source_time": {
+     "$ref": "#/$defs/value",
+     "description": "SourceTime | None"
+    },
+    "type": {
+     "const": "PlaneWave"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PointDipole": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.PointDipole",
+   "properties": {
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "profile": {
+     "$ref": "#/$defs/value",
+     "description": "DipoleProfile"
+    },
+    "source_time": {
+     "$ref": "#/$defs/value",
+     "description": "SourceTime | None"
+    },
+    "type": {
+     "const": "PointDipole"
+    },
+    "width": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PointMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.PointMonitor",
+   "properties": {
+    "fields": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[FieldComponent, ...]"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "PointMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PolePermittivity": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.layers.PolePermittivity",
+   "properties": {
+    "eps_inf": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "poles": {
+     "$ref": "#/$defs/value",
+     "description": "tuple"
+    },
+    "type": {
+     "const": "PolePermittivity"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PolySlab": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.geometry.polyslab.PolySlab",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value"
+    },
+    "bounds": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "reference_plane": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "sidewall_angle": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "PolySlab"
+    },
+    "vertices": {
+     "$ref": "#/$defs/value"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PolygonLoop": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.path_integrals.PolygonLoop",
+   "properties": {
+    "points": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, float, float], ...]"
+    },
+    "type": {
+     "const": "PolygonLoop"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PolylinePath": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.path_integrals.PolylinePath",
+   "properties": {
+    "points": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, float, float], ...]"
+    },
+    "type": {
+     "const": "PolylinePath"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PolynomialIV": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuit_devices.PolynomialIV",
+   "properties": {
+    "coefficients": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "type": {
+     "const": "PolynomialIV"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PortBinding": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.PortBinding",
+   "properties": {
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "port_name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "type": {
+     "const": "PortBinding"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PowerLawDispersion": {
+   "additionalProperties": false,
+   "description": "witwin.core.material.PowerLawDispersion",
+   "properties": {
+    "eps_r_exponent": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "reference_frequency_hz": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "sigma_e_exponent": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "type": {
+     "const": "PowerLawDispersion"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PowerLossMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.PowerLossMonitor",
+   "properties": {
+    "channels": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...] | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "quadrature": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "PowerLossMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Prism": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.primitives.Prism",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value"
+    },
+    "height": {
+     "$ref": "#/$defs/value"
+    },
+    "num_sides": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "radius": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Prism"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "PulseWaveform": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.PulseWaveform",
+   "properties": {
+    "delay": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "fall": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "initial": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "period": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "pulsed": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "rise": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "PulseWaveform"
+    },
+    "width": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Pyramid": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.primitives.Pyramid",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value"
+    },
+    "base_size": {
+     "$ref": "#/$defs/value"
+    },
+    "height": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Pyramid"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "RationalFitConfig": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.rational.RationalFitConfig",
+   "properties": {
+    "band": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float] | None"
+    },
+    "diagnostic_only": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "enforce_passivity": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "enforce_stability": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "enforcement_tolerance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "iterations": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "order": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "passivity_tolerance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "proportional": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "relative_tolerance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "RationalFitConfig"
+    },
+    "weights": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "RationalModel": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.rational.RationalModel",
+   "properties": {
+    "direct": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | float | complex"
+    },
+    "poles": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "proportional": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | float | complex | None"
+    },
+    "report": {
+     "$ref": "#/$defs/value",
+     "description": "FitReport | None"
+    },
+    "representation": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "residues": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "RationalModel"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "RationalSurfaceImpedance": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.RationalSurfaceImpedance",
+   "properties": {
+    "certificate_samples": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "direct": {
+     "$ref": "#/$defs/value"
+    },
+    "fit_report": {
+     "$ref": "#/$defs/value",
+     "description": "FitReport | None"
+    },
+    "frequency_range": {
+     "$ref": "#/$defs/value"
+    },
+    "passivity_tolerance": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "poles": {
+     "$ref": "#/$defs/value"
+    },
+    "representation": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "residues": {
+     "$ref": "#/$defs/value"
+    },
+    "sample_frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    },
+    "type": {
+     "const": "RationalSurfaceImpedance"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Records": {
+   "additionalProperties": false,
+   "description": "a run of 64 or more same-type records, one column per field",
+   "properties": {
+    "columns": {
+     "additionalProperties": {
+      "$ref": "#/$defs/column"
+     },
+     "type": "object"
+    },
+    "count": {
+     "minimum": 64,
+     "type": "integer"
+    },
+    "of": {
+     "enum": [
+      "AngleProjectionMonitor",
+      "AstigmaticGaussianBeam",
+      "AstigmaticGaussianOverlapMonitor",
+      "AuxFieldTimeMonitor",
+      "AxisPath",
+      "AxisSegment",
+      "BasebandGaussianPulse",
+      "BasebandRectangularPulse",
+      "BendCoordinates",
+      "BoundarySpec",
+      "Box",
+      "BreakdownMonitor",
+      "BroadbandPulse",
+      "CW",
+      "Capacitor",
+      "CartesianProjectionMonitor",
+      "ChargeDensity",
+      "CircleLoop",
+      "Circuit",
+      "CircuitNode",
+      "ClosedSurfaceMonitor",
+      "CoaxialLumpedPort",
+      "CoaxialLumpedResistor",
+      "ComplexPolySlab",
+      "ComplexTensor3x3",
+      "ComponentRating",
+      "ComponentStressMonitor",
+      "CompositeCurrentIntegral",
+      "CompositeVoltageIntegral",
+      "Cone",
+      "CopperFoil",
+      "CornerFinderSpec",
+      "CurrentControlledCurrentSource",
+      "CurrentControlledVoltageSource",
+      "CurrentDataset",
+      "CurrentSource",
+      "CustomCurrentIntegral",
+      "CustomCurrentSource",
+      "CustomDebyePole",
+      "CustomDrudePole",
+      "CustomFieldSource",
+      "CustomLorentzPole",
+      "CustomSourceTime",
+      "CustomVoltageIntegral",
+      "Cylinder",
+      "DebyePole",
+      "DiagonalTensor3",
+      "DielectricBreakdown",
+      "Difference",
+      "DiffractionMonitor",
+      "Diode",
+      "DipoleEmissionMonitor",
+      "Domain",
+      "DrudePole",
+      "ESDCurrentSource",
+      "ESDVoltageSource",
+      "ESDWaveform",
+      "ElectrostaticTerminal",
+      "Ellipsoid",
+      "ExtrudedPolygon",
+      "FieldDataset",
+      "FieldTimeMonitor",
+      "FinitePlaneMonitor",
+      "FitReport",
+      "FluxMonitor",
+      "FluxTimeMonitor",
+      "GaussianBeam",
+      "GaussianOverlapMonitor",
+      "GaussianPulse",
+      "Graphene",
+      "GridRefinement",
+      "GridSpec",
+      "GroisseRoughness",
+      "GyromagneticFerrite",
+      "HalfSpace",
+      "HammerstadRoughness",
+      "HollowBox",
+      "HurayRoughness",
+      "IncidentPowerDensityMonitor",
+      "Inductor",
+      "InternalAbsorber",
+      "Intersection",
+      "KSpaceProjectionMonitor",
+      "Layer",
+      "LayerRefinementSpec",
+      "LayerStack",
+      "LorentzPole",
+      "LossyMetalMedium",
+      "LumpedPort",
+      "MNAConfig",
+      "Material",
+      "MaterialLayer",
+      "MaterialRegion",
+      "MaxwellPlaneModes",
+      "MeasuredWaveform",
+      "Medium2D",
+      "MediumMonitor",
+      "Mesh",
+      "MeshOverrideStructure",
+      "ModeABC",
+      "ModeMonitor",
+      "ModePort",
+      "ModeSource",
+      "ModulationSpec",
+      "MurABC",
+      "MutualInductor",
+      "NetworkBlock",
+      "NetworkData",
+      "NetworkFitReport",
+      "NonlinearSolveConfig",
+      "NonlinearSusceptibility",
+      "PECFrame",
+      "ParallelRLC",
+      "PermittivityMonitor",
+      "PerturbationMedium",
+      "PhaseScreen",
+      "PhysicalMaterial",
+      "PiecewiseLinearIV",
+      "PiecewiseLinearWaveform",
+      "PlanarPEC",
+      "PlaneMonitor",
+      "PlaneWave",
+      "PointDipole",
+      "PointMonitor",
+      "PolePermittivity",
+      "PolySlab",
+      "PolygonLoop",
+      "PolylinePath",
+      "PolynomialIV",
+      "PortBinding",
+      "PowerLawDispersion",
+      "PowerLossMonitor",
+      "Prism",
+      "PulseWaveform",
+      "Pyramid",
+      "RationalFitConfig",
+      "RationalModel",
+      "RationalSurfaceImpedance",
+      "RectangleLoop",
+      "Resistor",
+      "RickerWavelet",
+      "SeriesRLC",
+      "SineWaveform",
+      "SmoothBreakdownRisk",
+      "Sphere",
+      "StateSpaceNetwork",
+      "Structure",
+      "SubpixelSpec",
+      "SurfaceFieldTimeMonitor",
+      "SurfaceImpedanceMedium",
+      "SurfaceMesh",
+      "SurfaceRoughness",
+      "TFSF",
+      "Tensor3x3",
+      "TensorNonlinearSusceptibility",
+      "TerminalPort",
+      "TerminalRef",
+      "TerminalWavePort",
+      "ThinWire",
+      "TimedSwitch",
+      "Torus",
+      "TouchstoneNetwork",
+      "TwoPhotonAbsorption",
+      "UniformCurrentSource",
+      "Union",
+      "VoltageControlledCurrentSource",
+      "VoltageControlledVoltageSource",
+      "VoltageDependentCapacitor",
+      "VoltageSource",
+      "WaveModeSpec",
+      "WavePort",
+      "WidebandDebye",
+      "WireConductor",
+      "WireEnd",
+      "WireMonitor",
+      "WireNodeRef",
+      "WirePortBinding"
+     ]
+    },
+    "type": {
+     "const": "Records"
+    }
+   },
+   "required": [
+    "type",
+    "of",
+    "count",
+    "columns"
+   ],
+   "type": "object"
+  },
+  "RectangleLoop": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.path_integrals.RectangleLoop",
+   "properties": {
+    "center": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "RectangleLoop"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Resistor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.lumped.Resistor",
+   "properties": {
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float] | CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float] | CircuitNode"
+    },
+    "resistance": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "Resistor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "RickerWavelet": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.RickerWavelet",
+   "properties": {
+    "amplitude": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "delay": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "frequency": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "kind": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "type": {
+     "const": "RickerWavelet"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "SeriesRLC": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.lumped.SeriesRLC",
+   "properties": {
+    "c": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    },
+    "l": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    },
+    "r": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    },
+    "type": {
+     "const": "SeriesRLC"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "SineWaveform": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.SineWaveform",
+   "properties": {
+    "amplitude": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "damping": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "delay": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "frequency": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "offset": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "phase_degrees": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "SineWaveform"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "SmoothBreakdownRisk": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.breakdown_risk.SmoothBreakdownRisk",
+   "properties": {
+    "critical_field": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "damage_exponent": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "reduction": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "temperature": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "type": {
+     "const": "SmoothBreakdownRisk"
+    },
+    "width": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Sphere": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.primitives.Sphere",
+   "properties": {
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "radius": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Sphere"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "StateSpaceNetwork": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.rational.StateSpaceNetwork",
+   "properties": {
+    "A": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "B": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "C": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "D": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "passivity_margin": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "port_order": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "report": {
+     "$ref": "#/$defs/value",
+     "description": "FitReport | None"
+    },
+    "representation": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "type": {
+     "const": "StateSpaceNetwork"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Structure": {
+   "additionalProperties": false,
+   "description": "witwin.core.structure.Structure",
+   "properties": {
+    "assignment_id": {
+     "$ref": "#/$defs/value",
+     "description": "AssignmentId | None"
+    },
+    "enabled": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "face_uv": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    },
+    "geometry": {
+     "$ref": "#/$defs/value",
+     "description": "GeometrySpec"
+    },
+    "material": {
+     "$ref": "#/$defs/value",
+     "description": "MaterialSpec"
+    },
+    "material_id": {
+     "$ref": "#/$defs/value",
+     "description": "MaterialId | None"
+    },
+    "metadata": {
+     "$ref": "#/$defs/value",
+     "description": "Mapping[str, Any]"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "phase_screen": {
+     "$ref": "#/$defs/value",
+     "description": "PhaseScreen | None"
+    },
+    "primitive_ids": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[PrimitiveId, ...] | None"
+    },
+    "priority": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "structure_id": {
+     "$ref": "#/$defs/value",
+     "description": "StructureId | None"
+    },
+    "surface_id": {
+     "$ref": "#/$defs/value",
+     "description": "SurfaceId"
+    },
+    "tags": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "type": {
+     "const": "Structure"
+    },
+    "uv": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "SubpixelSpec": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.scene.SubpixelSpec",
+   "properties": {
+    "averaging": {
+     "$ref": "#/$defs/value",
+     "description": "SubpixelAveraging"
+    },
+    "pec": {
+     "$ref": "#/$defs/value",
+     "description": "PECTreatment"
+    },
+    "samples": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[int, int, int]"
+    },
+    "type": {
+     "const": "SubpixelSpec"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "SurfaceFieldTimeMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.SurfaceFieldTimeMonitor",
+   "properties": {
+    "components": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[FieldComponent, ...]"
+    },
+    "exclude_surfaces": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "interval": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "start": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "stop": {
+     "$ref": "#/$defs/value",
+     "description": "int | None"
+    },
+    "type": {
+     "const": "SurfaceFieldTimeMonitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "SurfaceImpedanceMedium": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.SurfaceImpedanceMedium",
+   "properties": {
+    "impedance": {
+     "$ref": "#/$defs/value",
+     "description": "SurfaceImpedanceModel"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "type": {
+     "const": "SurfaceImpedanceMedium"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "SurfaceMesh": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.geometry.surface_mesh.SurfaceMesh",
+   "properties": {
+    "physical_thickness": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "sheet_model": {
+     "$ref": "#/$defs/value"
+    },
+    "triangles": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "SurfaceMesh"
+    },
+    "vertices": {
+     "$ref": "#/$defs/value"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "SurfaceRoughness": {
+   "additionalProperties": false,
+   "description": "witwin.core.material.SurfaceRoughness",
+   "properties": {
+    "correlation": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "correlation_length_x_m": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "correlation_length_y_m": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "principal_axis_rad": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "rms_height_m": {
+     "$ref": "#/$defs/value",
+     "description": "ScalarLike"
+    },
+    "type": {
+     "const": "SurfaceRoughness"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "TFSF": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.TFSF",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "axis_bounds": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float] | None"
+    },
+    "bounds": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None"
+    },
+    "mode": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "type": {
+     "const": "TFSF"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Tensor": {
+   "additionalProperties": false,
+   "properties": {
+    "dtype": {
+     "enum": [
+      "bool",
+      "uint8",
+      "int8",
+      "int16",
+      "int32",
+      "int64",
+      "float16",
+      "bfloat16",
+      "float32",
+      "float64",
+      "complex64",
+      "complex128",
+      "uint16",
+      "uint32",
+      "uint64"
+     ]
+    },
+    "requires_grad": {
+     "const": true
+    },
+    "shape": {
+     "items": {
+      "minimum": 0,
+      "type": "integer"
+     },
+     "type": "array"
+    },
+    "type": {
+     "const": "Tensor"
+    },
+    "values": {
+     "$ref": "#/$defs/elements"
+    }
+   },
+   "required": [
+    "type",
+    "dtype",
+    "shape",
+    "values"
+   ],
+   "type": "object"
+  },
+  "Tensor3x3": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.Tensor3x3",
+   "properties": {
+    "rows": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]"
+    },
+    "type": {
+     "const": "Tensor3x3"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "TensorNonlinearSusceptibility": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.TensorNonlinearSusceptibility",
+   "properties": {
+    "chi2": {
+     "$ref": "#/$defs/value",
+     "description": "object"
+    },
+    "chi3": {
+     "$ref": "#/$defs/value",
+     "description": "object"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value",
+     "description": "object"
+    },
+    "type": {
+     "const": "TensorNonlinearSusceptibility"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "TensorRef": {
+   "additionalProperties": false,
+   "properties": {
+    "key": {
+     "pattern": "^t[0-9]+$",
+     "type": "string"
+    },
+    "type": {
+     "const": "TensorRef"
+    }
+   },
+   "required": [
+    "type",
+    "key"
+   ],
+   "type": "object"
+  },
+  "TerminalPort": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.TerminalPort",
+   "properties": {
+    "current_surface": {
+     "$ref": "#/$defs/value"
+    },
+    "integration_path": {
+     "$ref": "#/$defs/value",
+     "description": "AxisPath | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative_terminal": {
+     "$ref": "#/$defs/value",
+     "description": "TerminalRef | None"
+    },
+    "positive_terminal": {
+     "$ref": "#/$defs/value",
+     "description": "TerminalRef | None"
+    },
+    "reference_impedance": {
+     "$ref": "#/$defs/value",
+     "description": "complex | float | torch.Tensor"
+    },
+    "reference_plane": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "termination": {
+     "$ref": "#/$defs/value",
+     "description": "SeriesRLC | ParallelRLC | None"
+    },
+    "type": {
+     "const": "TerminalPort"
+    },
+    "voltage_aperture": {
+     "$ref": "#/$defs/value",
+     "description": "Box | None"
+    },
+    "wire_binding": {
+     "$ref": "#/$defs/value",
+     "description": "WirePortBinding | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "TerminalRef": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.TerminalRef",
+   "properties": {
+    "structure_name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "type": {
+     "const": "TerminalRef"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "TerminalWavePort": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.TerminalWavePort",
+   "properties": {
+    "basis": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "conductor_model": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "current_integrals": {
+     "$ref": "#/$defs/value",
+     "description": "tuple | None"
+    },
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "impedance_definition": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "reference": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[TerminalRef, ...]"
+    },
+    "reference_impedance": {
+     "$ref": "#/$defs/value",
+     "description": "tuple | None"
+    },
+    "reference_plane": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "terminals": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[TerminalRef, ...]"
+    },
+    "type": {
+     "const": "TerminalWavePort"
+    },
+    "voltage_integrals": {
+     "$ref": "#/$defs/value",
+     "description": "tuple | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "ThinWire": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.thin_wire.ThinWire",
+   "properties": {
+    "conductor": {
+     "$ref": "#/$defs/value",
+     "description": "WireConductor"
+    },
+    "endpoints": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[WireEnd, ...]"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "points": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, float, float], ...] | torch.Tensor"
+    },
+    "radius": {
+     "$ref": "#/$defs/value",
+     "description": "float | tuple[float, ...] | torch.Tensor"
+    },
+    "snap": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['continuous', 'nearest', 'strict']"
+    },
+    "type": {
+     "const": "ThinWire"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "TimedSwitch": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.TimedSwitch",
+   "properties": {
+    "initially_closed": {
+     "$ref": "#/$defs/value",
+     "description": "bool"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "off_resistance": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "on_resistance": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "transition_times": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "TimedSwitch"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Torus": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.primitives.Torus",
+   "properties": {
+    "axis": {
+     "$ref": "#/$defs/value"
+    },
+    "major_radius": {
+     "$ref": "#/$defs/value"
+    },
+    "minor_radius": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Torus"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "TouchstoneNetwork": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.network.TouchstoneNetwork",
+   "properties": {
+    "connections": {
+     "$ref": "#/$defs/value",
+     "description": "Mapping[str | int, str]"
+    },
+    "delay_seconds": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['auto'] | tuple[float, ...] | None"
+    },
+    "extrapolation": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['reject']"
+    },
+    "fit": {
+     "$ref": "#/$defs/value",
+     "description": "RationalFitConfig | Literal[False]"
+    },
+    "max_delay_steps": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "model": {
+     "$ref": "#/$defs/value",
+     "description": "RationalModel | StateSpaceNetwork | None"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "network": {
+     "$ref": "#/$defs/value",
+     "description": "NetworkData"
+    },
+    "type": {
+     "const": "TouchstoneNetwork"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "TwoPhotonAbsorption": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.media.TwoPhotonAbsorption",
+   "properties": {
+    "beta": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "n0": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "type": {
+     "const": "TwoPhotonAbsorption"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "UniformCurrentSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.sources.UniformCurrentSource",
+   "properties": {
+    "center": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "source_time": {
+     "$ref": "#/$defs/value",
+     "description": "SourceTime | None"
+    },
+    "type": {
+     "const": "UniformCurrentSource"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "Union": {
+   "additionalProperties": false,
+   "description": "witwin.core.geometry.boolean.Union",
+   "properties": {
+    "geometries": {
+     "$ref": "#/$defs/value"
+    },
+    "position": {
+     "$ref": "#/$defs/value"
+    },
+    "rotation": {
+     "$ref": "#/$defs/value"
+    },
+    "smoothness": {
+     "$ref": "#/$defs/value"
+    },
+    "type": {
+     "const": "Union"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "VoltageControlledCurrentSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.VoltageControlledCurrentSource",
+   "properties": {
+    "control_negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "control_positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "transconductance": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "VoltageControlledCurrentSource"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "VoltageControlledVoltageSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.VoltageControlledVoltageSource",
+   "properties": {
+    "control_negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "control_positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "gain": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "type": {
+     "const": "VoltageControlledVoltageSource"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "VoltageDependentCapacitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuit_devices.VoltageDependentCapacitor",
+   "properties": {
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "q_coefficients": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "type": {
+     "const": "VoltageDependentCapacitor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "VoltageSource": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.circuits.VoltageSource",
+   "properties": {
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "CircuitNode"
+    },
+    "type": {
+     "const": "VoltageSource"
+    },
+    "voltage": {
+     "$ref": "#/$defs/value",
+     "description": "torch.Tensor"
+    },
+    "waveform": {
+     "$ref": "#/$defs/value",
+     "description": "SourceWaveform | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "WaveModeSpec": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.WaveModeSpec",
+   "properties": {
+    "conductor_model": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "current_contour": {
+     "$ref": "#/$defs/value",
+     "description": "Box | None"
+    },
+    "family": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "impedance_definition": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "mode_index": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "polarization": {
+     "$ref": "#/$defs/value",
+     "description": "ModePolarization | tuple[float, float, float]"
+    },
+    "type": {
+     "const": "WaveModeSpec"
+    },
+    "voltage_path": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[tuple[float, float, float], tuple[float, float, float]] | None"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "WavePort": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.WavePort",
+   "properties": {
+    "direction": {
+     "$ref": "#/$defs/value",
+     "description": "Direction"
+    },
+    "modes": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[WaveModeSpec, ...]"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "position": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "reference_plane": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "size": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, float, float]"
+    },
+    "type": {
+     "const": "WavePort"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "WidebandDebye": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.layers.WidebandDebye",
+   "properties": {
+    "delta_eps": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "eps_inf": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "f1": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "f2": {
+     "$ref": "#/$defs/value",
+     "description": "float"
+    },
+    "type": {
+     "const": "WidebandDebye"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "WireConductor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.thin_wire.WireConductor",
+   "properties": {
+    "conductivity": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "kind": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['pec', 'finite']"
+    },
+    "permeability": {
+     "$ref": "#/$defs/value",
+     "description": "float | None"
+    },
+    "type": {
+     "const": "WireConductor"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "WireEnd": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.thin_wire.WireEnd",
+   "properties": {
+    "kind": {
+     "$ref": "#/$defs/value",
+     "description": "Literal['open', 'grounded', 'node']"
+    },
+    "node_name": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "structure": {
+     "$ref": "#/$defs/value",
+     "description": "str | None"
+    },
+    "type": {
+     "const": "WireEnd"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "WireMonitor": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.monitors.WireMonitor",
+   "properties": {
+    "frequencies": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[float, ...]"
+    },
+    "name": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "quantities": {
+     "$ref": "#/$defs/value",
+     "description": "tuple[str, ...]"
+    },
+    "type": {
+     "const": "WireMonitor"
+    },
+    "wire": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "WireNodeRef": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.WireNodeRef",
+   "properties": {
+    "point": {
+     "$ref": "#/$defs/value",
+     "description": "int"
+    },
+    "type": {
+     "const": "WireNodeRef"
+    },
+    "wire": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "WirePortBinding": {
+   "additionalProperties": false,
+   "description": "witwin.maxwell.ports.WirePortBinding",
+   "properties": {
+    "kind": {
+     "$ref": "#/$defs/value",
+     "description": "str"
+    },
+    "negative": {
+     "$ref": "#/$defs/value",
+     "description": "WireNodeRef"
+    },
+    "positive": {
+     "$ref": "#/$defs/value",
+     "description": "WireNodeRef"
+    },
+    "type": {
+     "const": "WirePortBinding"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "column": {
+   "anyOf": [
+    {
+     "additionalProperties": false,
+     "properties": {
+      "constant": {
+       "$ref": "#/$defs/value"
+      }
+     },
+     "required": [
+      "constant"
+     ],
+     "type": "object"
+    },
+    {
+     "additionalProperties": false,
+     "properties": {
+      "digits": {
+       "type": "integer"
+      },
+      "prefix": {
+       "type": "string"
+      },
+      "start": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "prefix",
+      "digits",
+      "start"
+     ],
+     "type": "object"
+    },
+    {
+     "additionalProperties": false,
+     "properties": {
+      "array": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "array"
+     ],
+     "type": "object"
+    },
+    {
+     "additionalProperties": false,
+     "properties": {
+      "values": {
+       "items": {
+        "$ref": "#/$defs/value"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "values"
+     ],
+     "type": "object"
+    }
+   ]
+  },
+  "elements": {
+   "anyOf": [
+    {
+     "items": {
+      "$ref": "#/$defs/elements"
+     },
+     "type": "array"
+    },
+    {
+     "type": "number"
+    },
+    {
+     "type": "boolean"
+    },
+    {
+     "$ref": "#/$defs/Float"
+    }
+   ]
+  },
+  "record": {
+   "anyOf": [
+    {
+     "$ref": "#/$defs/AngleProjectionMonitor"
+    },
+    {
+     "$ref": "#/$defs/AstigmaticGaussianBeam"
+    },
+    {
+     "$ref": "#/$defs/AstigmaticGaussianOverlapMonitor"
+    },
+    {
+     "$ref": "#/$defs/AuxFieldTimeMonitor"
+    },
+    {
+     "$ref": "#/$defs/AxisPath"
+    },
+    {
+     "$ref": "#/$defs/AxisSegment"
+    },
+    {
+     "$ref": "#/$defs/BasebandGaussianPulse"
+    },
+    {
+     "$ref": "#/$defs/BasebandRectangularPulse"
+    },
+    {
+     "$ref": "#/$defs/BendCoordinates"
+    },
+    {
+     "$ref": "#/$defs/BoundarySpec"
+    },
+    {
+     "$ref": "#/$defs/Box"
+    },
+    {
+     "$ref": "#/$defs/BreakdownMonitor"
+    },
+    {
+     "$ref": "#/$defs/BroadbandPulse"
+    },
+    {
+     "$ref": "#/$defs/CW"
+    },
+    {
+     "$ref": "#/$defs/Capacitor"
+    },
+    {
+     "$ref": "#/$defs/CartesianProjectionMonitor"
+    },
+    {
+     "$ref": "#/$defs/ChargeDensity"
+    },
+    {
+     "$ref": "#/$defs/CircleLoop"
+    },
+    {
+     "$ref": "#/$defs/Circuit"
+    },
+    {
+     "$ref": "#/$defs/CircuitNode"
+    },
+    {
+     "$ref": "#/$defs/ClosedSurfaceMonitor"
+    },
+    {
+     "$ref": "#/$defs/CoaxialLumpedPort"
+    },
+    {
+     "$ref": "#/$defs/CoaxialLumpedResistor"
+    },
+    {
+     "$ref": "#/$defs/ComplexPolySlab"
+    },
+    {
+     "$ref": "#/$defs/ComplexTensor3x3"
+    },
+    {
+     "$ref": "#/$defs/ComponentRating"
+    },
+    {
+     "$ref": "#/$defs/ComponentStressMonitor"
+    },
+    {
+     "$ref": "#/$defs/CompositeCurrentIntegral"
+    },
+    {
+     "$ref": "#/$defs/CompositeVoltageIntegral"
+    },
+    {
+     "$ref": "#/$defs/Cone"
+    },
+    {
+     "$ref": "#/$defs/CopperFoil"
+    },
+    {
+     "$ref": "#/$defs/CornerFinderSpec"
+    },
+    {
+     "$ref": "#/$defs/CurrentControlledCurrentSource"
+    },
+    {
+     "$ref": "#/$defs/CurrentControlledVoltageSource"
+    },
+    {
+     "$ref": "#/$defs/CurrentDataset"
+    },
+    {
+     "$ref": "#/$defs/CurrentSource"
+    },
+    {
+     "$ref": "#/$defs/CustomCurrentIntegral"
+    },
+    {
+     "$ref": "#/$defs/CustomCurrentSource"
+    },
+    {
+     "$ref": "#/$defs/CustomDebyePole"
+    },
+    {
+     "$ref": "#/$defs/CustomDrudePole"
+    },
+    {
+     "$ref": "#/$defs/CustomFieldSource"
+    },
+    {
+     "$ref": "#/$defs/CustomLorentzPole"
+    },
+    {
+     "$ref": "#/$defs/CustomSourceTime"
+    },
+    {
+     "$ref": "#/$defs/CustomVoltageIntegral"
+    },
+    {
+     "$ref": "#/$defs/Cylinder"
+    },
+    {
+     "$ref": "#/$defs/DebyePole"
+    },
+    {
+     "$ref": "#/$defs/DiagonalTensor3"
+    },
+    {
+     "$ref": "#/$defs/DielectricBreakdown"
+    },
+    {
+     "$ref": "#/$defs/Difference"
+    },
+    {
+     "$ref": "#/$defs/DiffractionMonitor"
+    },
+    {
+     "$ref": "#/$defs/Diode"
+    },
+    {
+     "$ref": "#/$defs/DipoleEmissionMonitor"
+    },
+    {
+     "$ref": "#/$defs/Domain"
+    },
+    {
+     "$ref": "#/$defs/DrudePole"
+    },
+    {
+     "$ref": "#/$defs/ESDCurrentSource"
+    },
+    {
+     "$ref": "#/$defs/ESDVoltageSource"
+    },
+    {
+     "$ref": "#/$defs/ESDWaveform"
+    },
+    {
+     "$ref": "#/$defs/ElectrostaticTerminal"
+    },
+    {
+     "$ref": "#/$defs/Ellipsoid"
+    },
+    {
+     "$ref": "#/$defs/ExtrudedPolygon"
+    },
+    {
+     "$ref": "#/$defs/FieldDataset"
+    },
+    {
+     "$ref": "#/$defs/FieldTimeMonitor"
+    },
+    {
+     "$ref": "#/$defs/FinitePlaneMonitor"
+    },
+    {
+     "$ref": "#/$defs/FitReport"
+    },
+    {
+     "$ref": "#/$defs/FluxMonitor"
+    },
+    {
+     "$ref": "#/$defs/FluxTimeMonitor"
+    },
+    {
+     "$ref": "#/$defs/GaussianBeam"
+    },
+    {
+     "$ref": "#/$defs/GaussianOverlapMonitor"
+    },
+    {
+     "$ref": "#/$defs/GaussianPulse"
+    },
+    {
+     "$ref": "#/$defs/Graphene"
+    },
+    {
+     "$ref": "#/$defs/GridRefinement"
+    },
+    {
+     "$ref": "#/$defs/GridSpec"
+    },
+    {
+     "$ref": "#/$defs/GroisseRoughness"
+    },
+    {
+     "$ref": "#/$defs/GyromagneticFerrite"
+    },
+    {
+     "$ref": "#/$defs/HalfSpace"
+    },
+    {
+     "$ref": "#/$defs/HammerstadRoughness"
+    },
+    {
+     "$ref": "#/$defs/HollowBox"
+    },
+    {
+     "$ref": "#/$defs/HurayRoughness"
+    },
+    {
+     "$ref": "#/$defs/IncidentPowerDensityMonitor"
+    },
+    {
+     "$ref": "#/$defs/Inductor"
+    },
+    {
+     "$ref": "#/$defs/InternalAbsorber"
+    },
+    {
+     "$ref": "#/$defs/Intersection"
+    },
+    {
+     "$ref": "#/$defs/KSpaceProjectionMonitor"
+    },
+    {
+     "$ref": "#/$defs/Layer"
+    },
+    {
+     "$ref": "#/$defs/LayerRefinementSpec"
+    },
+    {
+     "$ref": "#/$defs/LayerStack"
+    },
+    {
+     "$ref": "#/$defs/LorentzPole"
+    },
+    {
+     "$ref": "#/$defs/LossyMetalMedium"
+    },
+    {
+     "$ref": "#/$defs/LumpedPort"
+    },
+    {
+     "$ref": "#/$defs/MNAConfig"
+    },
+    {
+     "$ref": "#/$defs/Material"
+    },
+    {
+     "$ref": "#/$defs/MaterialLayer"
+    },
+    {
+     "$ref": "#/$defs/MaterialRegion"
+    },
+    {
+     "$ref": "#/$defs/MaxwellPlaneModes"
+    },
+    {
+     "$ref": "#/$defs/MeasuredWaveform"
+    },
+    {
+     "$ref": "#/$defs/Medium2D"
+    },
+    {
+     "$ref": "#/$defs/MediumMonitor"
+    },
+    {
+     "$ref": "#/$defs/Mesh"
+    },
+    {
+     "$ref": "#/$defs/MeshOverrideStructure"
+    },
+    {
+     "$ref": "#/$defs/ModeABC"
+    },
+    {
+     "$ref": "#/$defs/ModeMonitor"
+    },
+    {
+     "$ref": "#/$defs/ModePort"
+    },
+    {
+     "$ref": "#/$defs/ModeSource"
+    },
+    {
+     "$ref": "#/$defs/ModulationSpec"
+    },
+    {
+     "$ref": "#/$defs/MurABC"
+    },
+    {
+     "$ref": "#/$defs/MutualInductor"
+    },
+    {
+     "$ref": "#/$defs/NetworkBlock"
+    },
+    {
+     "$ref": "#/$defs/NetworkData"
+    },
+    {
+     "$ref": "#/$defs/NetworkFitReport"
+    },
+    {
+     "$ref": "#/$defs/NonlinearSolveConfig"
+    },
+    {
+     "$ref": "#/$defs/NonlinearSusceptibility"
+    },
+    {
+     "$ref": "#/$defs/PECFrame"
+    },
+    {
+     "$ref": "#/$defs/ParallelRLC"
+    },
+    {
+     "$ref": "#/$defs/PermittivityMonitor"
+    },
+    {
+     "$ref": "#/$defs/PerturbationMedium"
+    },
+    {
+     "$ref": "#/$defs/PhaseScreen"
+    },
+    {
+     "$ref": "#/$defs/PhysicalMaterial"
+    },
+    {
+     "$ref": "#/$defs/PiecewiseLinearIV"
+    },
+    {
+     "$ref": "#/$defs/PiecewiseLinearWaveform"
+    },
+    {
+     "$ref": "#/$defs/PlanarPEC"
+    },
+    {
+     "$ref": "#/$defs/PlaneMonitor"
+    },
+    {
+     "$ref": "#/$defs/PlaneWave"
+    },
+    {
+     "$ref": "#/$defs/PointDipole"
+    },
+    {
+     "$ref": "#/$defs/PointMonitor"
+    },
+    {
+     "$ref": "#/$defs/PolePermittivity"
+    },
+    {
+     "$ref": "#/$defs/PolySlab"
+    },
+    {
+     "$ref": "#/$defs/PolygonLoop"
+    },
+    {
+     "$ref": "#/$defs/PolylinePath"
+    },
+    {
+     "$ref": "#/$defs/PolynomialIV"
+    },
+    {
+     "$ref": "#/$defs/PortBinding"
+    },
+    {
+     "$ref": "#/$defs/PowerLawDispersion"
+    },
+    {
+     "$ref": "#/$defs/PowerLossMonitor"
+    },
+    {
+     "$ref": "#/$defs/Prism"
+    },
+    {
+     "$ref": "#/$defs/PulseWaveform"
+    },
+    {
+     "$ref": "#/$defs/Pyramid"
+    },
+    {
+     "$ref": "#/$defs/RationalFitConfig"
+    },
+    {
+     "$ref": "#/$defs/RationalModel"
+    },
+    {
+     "$ref": "#/$defs/RationalSurfaceImpedance"
+    },
+    {
+     "$ref": "#/$defs/RectangleLoop"
+    },
+    {
+     "$ref": "#/$defs/Resistor"
+    },
+    {
+     "$ref": "#/$defs/RickerWavelet"
+    },
+    {
+     "$ref": "#/$defs/SeriesRLC"
+    },
+    {
+     "$ref": "#/$defs/SineWaveform"
+    },
+    {
+     "$ref": "#/$defs/SmoothBreakdownRisk"
+    },
+    {
+     "$ref": "#/$defs/Sphere"
+    },
+    {
+     "$ref": "#/$defs/StateSpaceNetwork"
+    },
+    {
+     "$ref": "#/$defs/Structure"
+    },
+    {
+     "$ref": "#/$defs/SubpixelSpec"
+    },
+    {
+     "$ref": "#/$defs/SurfaceFieldTimeMonitor"
+    },
+    {
+     "$ref": "#/$defs/SurfaceImpedanceMedium"
+    },
+    {
+     "$ref": "#/$defs/SurfaceMesh"
+    },
+    {
+     "$ref": "#/$defs/SurfaceRoughness"
+    },
+    {
+     "$ref": "#/$defs/TFSF"
+    },
+    {
+     "$ref": "#/$defs/Tensor3x3"
+    },
+    {
+     "$ref": "#/$defs/TensorNonlinearSusceptibility"
+    },
+    {
+     "$ref": "#/$defs/TerminalPort"
+    },
+    {
+     "$ref": "#/$defs/TerminalRef"
+    },
+    {
+     "$ref": "#/$defs/TerminalWavePort"
+    },
+    {
+     "$ref": "#/$defs/ThinWire"
+    },
+    {
+     "$ref": "#/$defs/TimedSwitch"
+    },
+    {
+     "$ref": "#/$defs/Torus"
+    },
+    {
+     "$ref": "#/$defs/TouchstoneNetwork"
+    },
+    {
+     "$ref": "#/$defs/TwoPhotonAbsorption"
+    },
+    {
+     "$ref": "#/$defs/UniformCurrentSource"
+    },
+    {
+     "$ref": "#/$defs/Union"
+    },
+    {
+     "$ref": "#/$defs/VoltageControlledCurrentSource"
+    },
+    {
+     "$ref": "#/$defs/VoltageControlledVoltageSource"
+    },
+    {
+     "$ref": "#/$defs/VoltageDependentCapacitor"
+    },
+    {
+     "$ref": "#/$defs/VoltageSource"
+    },
+    {
+     "$ref": "#/$defs/WaveModeSpec"
+    },
+    {
+     "$ref": "#/$defs/WavePort"
+    },
+    {
+     "$ref": "#/$defs/WidebandDebye"
+    },
+    {
+     "$ref": "#/$defs/WireConductor"
+    },
+    {
+     "$ref": "#/$defs/WireEnd"
+    },
+    {
+     "$ref": "#/$defs/WireMonitor"
+    },
+    {
+     "$ref": "#/$defs/WireNodeRef"
+    },
+    {
+     "$ref": "#/$defs/WirePortBinding"
+    }
+   ]
+  },
+  "value": {
+   "anyOf": [
+    {
+     "type": "null"
+    },
+    {
+     "type": "boolean"
+    },
+    {
+     "type": "number"
+    },
+    {
+     "type": "string"
+    },
+    {
+     "items": {
+      "$ref": "#/$defs/value"
+     },
+     "type": "array"
+    },
+    {
+     "$ref": "#/$defs/Float"
+    },
+    {
+     "$ref": "#/$defs/Complex"
+    },
+    {
+     "$ref": "#/$defs/Tensor"
+    },
+    {
+     "$ref": "#/$defs/NDArray"
+    },
+    {
+     "$ref": "#/$defs/ArrayRef"
+    },
+    {
+     "$ref": "#/$defs/DType"
+    },
+    {
+     "$ref": "#/$defs/List"
+    },
+    {
+     "$ref": "#/$defs/Mapping"
+    },
+    {
+     "$ref": "#/$defs/MaterialRef"
+    },
+    {
+     "$ref": "#/$defs/TensorRef"
+    },
+    {
+     "$ref": "#/$defs/Records"
+    },
+    {
+     "$ref": "#/$defs/record"
+    }
+   ]
+  }
+ },
+ "$id": "witwin.scene-2.json",
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "additionalProperties": false,
+ "description": "WiTwin Maxwell scene dictionary (Scene.to_dict / Scene.from_dict). Lengths in meters, frequencies in hertz.",
+ "properties": {
+  "background": {
+   "$ref": "#/$defs/value"
+  },
+  "boundary": {
+   "$ref": "#/$defs/value"
+  },
+  "charge_densities": {
+   "$ref": "#/$defs/value"
+  },
+  "circuits": {
+   "$ref": "#/$defs/value"
+  },
+  "coordinates": {
+   "$ref": "#/$defs/value"
+  },
+  "domain": {
+   "$ref": "#/$defs/value"
+  },
+  "electrostatic_terminals": {
+   "$ref": "#/$defs/value"
+  },
+  "grid": {
+   "$ref": "#/$defs/value"
+  },
+  "internal_absorbers": {
+   "$ref": "#/$defs/value"
+  },
+  "lumped_elements": {
+   "$ref": "#/$defs/value"
+  },
+  "material_regions": {
+   "$ref": "#/$defs/value"
+  },
+  "materials": {
+   "additionalProperties": {
+    "$ref": "#/$defs/record"
+   },
+   "propertyNames": {
+    "pattern": "^m[0-9]+$"
+   },
+   "type": "object"
+  },
+  "metadata": {
+   "$ref": "#/$defs/value"
+  },
+  "monitors": {
+   "$ref": "#/$defs/value"
+  },
+  "networks": {
+   "$ref": "#/$defs/value"
+  },
+  "package_version": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "ports": {
+   "$ref": "#/$defs/value"
+  },
+  "schema": {
+   "const": "witwin.scene/2"
+  },
+  "sources": {
+   "$ref": "#/$defs/value"
+  },
+  "structures": {
+   "$ref": "#/$defs/value"
+  },
+  "subpixel": {
+   "$ref": "#/$defs/value"
+  },
+  "symmetry": {
+   "$ref": "#/$defs/value"
+  },
+  "tensors": {
+   "additionalProperties": {
+    "anyOf": [
+     {
+      "$ref": "#/$defs/Tensor"
+     },
+     {
+      "$ref": "#/$defs/ArrayRef"
+     }
+    ]
+   },
+   "propertyNames": {
+    "pattern": "^t[0-9]+$"
+   },
+   "type": "object"
+  },
+  "thin_wires": {
+   "$ref": "#/$defs/value"
+  },
+  "unit": {
+   "const": {
+    "frequency": "Hz",
+    "length": "m"
+   }
+  }
+ },
+ "required": [
+  "schema"
+ ],
+ "title": "witwin.scene/2",
+ "type": "object"
+}

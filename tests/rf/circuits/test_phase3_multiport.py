@@ -36,7 +36,6 @@ def _two_port_scene(circuit):
         boundary=mw.BoundarySpec.none(),
         ports=(_port("input", -0.008), _port("output", 0.008)),
         circuits=(circuit,),
-        device="cuda",
     )
 
 
@@ -52,13 +51,13 @@ def test_two_bound_ports_solve_once_and_cross_port_vccs_preserves_polarity_and_k
     input_resistance = 80.0
     output_resistance = 65.0
     transconductance = 0.012
-    circuit = mw.Circuit("controlled_multiport")
+    circuit = mw.circuits.Circuit("controlled_multiport")
     input_node = circuit.node("input_node")
     output_node = circuit.node("output_node")
-    circuit.add(mw.Resistor("Rin", input_node, circuit.ground, input_resistance))
-    circuit.add(mw.Resistor("Rout", output_node, circuit.ground, output_resistance))
+    circuit.add(mw.rf.Resistor("Rin", input_node, circuit.ground, input_resistance))
+    circuit.add(mw.rf.Resistor("Rout", output_node, circuit.ground, output_resistance))
     circuit.add(
-        mw.VoltageControlledCurrentSource(
+        mw.circuits.VoltageControlledCurrentSource(
             "Gcross",
             output_node,
             circuit.ground,
@@ -72,7 +71,7 @@ def test_two_bound_ports_solve_once_and_cross_port_vccs_preserves_polarity_and_k
 
     solver = mw.Simulation.fdtd(
         _two_port_scene(circuit),
-        frequency=3.0e9,
+        frequencies=3.0e9,
     ).prepare().solver
     prepare_circuit_time_series(solver, 1)
     runtime = solver._circuit_runtimes[0]
@@ -128,7 +127,7 @@ def test_two_bound_ports_solve_once_and_cross_port_vccs_preserves_polarity_and_k
 
 
 def _spice_transient(source, *, dt, steps):
-    circuit = mw.parse_spice(
+    circuit = mw.circuits.parse_spice(
         f"{source}\nRload out 0 1k\n.end",
         name="waveform",
     )
@@ -184,23 +183,23 @@ def _matching_filter_column(active_port, frequencies, *, dt, steps, sample_start
     cutoff = 3.0e9
     inductance = z0 / (2.0 * math.pi * cutoff)
     capacitance = 2.0 / (z0 * 2.0 * math.pi * cutoff)
-    circuit = mw.Circuit(f"matching_{active_port}")
+    circuit = mw.circuits.Circuit(f"matching_{active_port}")
     port1 = circuit.node("port1")
     middle = circuit.node("middle")
     port2 = circuit.node("port2")
-    circuit.add(mw.Resistor("Rport1", port1, circuit.ground, z0))
-    circuit.add(mw.Resistor("Rport2", port2, circuit.ground, z0))
-    circuit.add(mw.Inductor("L1", port1, middle, inductance))
-    circuit.add(mw.Capacitor("C1", middle, circuit.ground, capacitance))
-    circuit.add(mw.Inductor("L2", middle, port2, inductance))
+    circuit.add(mw.rf.Resistor("Rport1", port1, circuit.ground, z0))
+    circuit.add(mw.rf.Resistor("Rport2", port2, circuit.ground, z0))
+    circuit.add(mw.rf.Inductor("L1", port1, middle, inductance))
+    circuit.add(mw.rf.Capacitor("C1", middle, circuit.ground, capacitance))
+    circuit.add(mw.rf.Inductor("L2", middle, port2, inductance))
     source_node = port1 if active_port == 0 else port2
     for index, frequency in enumerate(frequencies):
         circuit.add(
-            mw.CurrentSource(
+            mw.circuits.CurrentSource(
                 f"I{index}",
                 circuit.ground,
                 source_node,
-                waveform=mw.SineWaveform(0.0, 2.0 / z0, frequency),
+                waveform=mw.circuits.SineWaveform(0.0, 2.0 / z0, frequency),
             )
         )
     data = compile_mna_system(
@@ -289,7 +288,6 @@ def _three_port_scene(*, circuit=None):
             _port("load2", 0.008),
         ),
         circuits=() if circuit is None else (circuit,),
-        device="cuda",
     )
 
 
@@ -298,31 +296,35 @@ def test_two_bound_port_fdtd_frequency_response_matches_loaded_em_reference():
     steps = 128
     source_time = mw.GaussianPulse(frequency=frequency, fwidth=1.0e9)
     run_time = mw.TimeConfig(time_steps=steps)
-    sampler = mw.SpectralSampler(window="none")
+    sampler = mw.fdtd.SpectralSampler(window="none")
     bare = mw.Simulation.fdtd(
         _three_port_scene(),
-        frequency=frequency,
-        excitations=mw.PortSweep(source_time=source_time),
-        run_time=run_time,
-        spectral_sampler=sampler,
+        frequencies=frequency,
+        excitations=mw.rf.PortSweep(source_time=source_time),
+        config=mw.FDTDConfig(
+            run_time=run_time,
+            spectral_sampler=sampler,
+        ),
     ).run()
     em_impedance = bare.network.to_z()[0]
 
     first_resistance = 75.0
     second_resistance = 100.0
-    circuit = mw.Circuit("two_port_load")
+    circuit = mw.circuits.Circuit("two_port_load")
     first = circuit.node("first")
     second = circuit.node("second")
-    circuit.add(mw.Resistor("R1", first, circuit.ground, first_resistance))
-    circuit.add(mw.Resistor("R2", second, circuit.ground, second_resistance))
+    circuit.add(mw.rf.Resistor("R1", first, circuit.ground, first_resistance))
+    circuit.add(mw.rf.Resistor("R2", second, circuit.ground, second_resistance))
     circuit.bind_port("load1", positive=first, negative=circuit.ground)
     circuit.bind_port("load2", positive=second, negative=circuit.ground)
     coupled = mw.Simulation.fdtd(
         _three_port_scene(circuit=circuit),
-        frequency=frequency,
-        excitations=mw.PortExcitation("feed", source_time=source_time),
-        run_time=run_time,
-        spectral_sampler=sampler,
+        frequencies=frequency,
+        excitations=mw.rf.PortExcitation("feed", source_time=source_time),
+        config=mw.FDTDConfig(
+            run_time=run_time,
+            spectral_sampler=sampler,
+        ),
     ).run()
 
     load_admittance = torch.diag(
@@ -345,7 +347,7 @@ def test_two_bound_port_fdtd_frequency_response_matches_loaded_em_reference():
     expected_s11 = (input_impedance - 50.0) / (input_impedance + 50.0)
     actual_s11 = (coupled.port("feed").b / coupled.port("feed").a)[0]
 
-    assert coupled.circuit("two_port_load").diagnostics["bound_ports"] == (
+    assert mw.circuits.circuit(coupled, "two_port_load").diagnostics["bound_ports"] == (
         "load1",
         "load2",
     )
@@ -366,15 +368,15 @@ def _orientation_result(*, reversed_orientation):
         ),
         reference_impedance=50.0,
     )
-    circuit = mw.Circuit("orientation")
+    circuit = mw.circuits.Circuit("orientation")
     node = circuit.node("node")
-    circuit.add(mw.Resistor("R1", node, circuit.ground, 50.0))
+    circuit.add(mw.rf.Resistor("R1", node, circuit.ground, 50.0))
     circuit.add(
-        mw.CurrentSource(
+        mw.circuits.CurrentSource(
             "I1",
             circuit.ground,
             node,
-            waveform=mw.SineWaveform(0.0, 0.01, 3.0e9),
+            waveform=mw.circuits.SineWaveform(0.0, 0.01, 3.0e9),
         )
     )
     circuit.bind_port(
@@ -388,13 +390,14 @@ def _orientation_result(*, reversed_orientation):
         boundary=mw.BoundarySpec.none(),
         ports=(port,),
         circuits=(circuit,),
-        device="cuda",
     )
     return mw.Simulation.fdtd(
         scene,
-        frequency=3.0e9,
-        run_time=mw.TimeConfig(time_steps=16),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        frequencies=3.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=16),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
 
 
@@ -403,7 +406,7 @@ def test_reversing_em_and_circuit_terminals_flips_vi_but_preserves_power_and_s()
     reverse = _orientation_result(reversed_orientation=True)
     forward_port = forward.port("feed")
     reverse_port = reverse.port("feed")
-    data = forward.circuit("orientation")
+    data = mw.circuits.circuit(forward, "orientation")
     # Circuit traces retain their integration clock. Public port spectra use
     # physical Yee labels (post-update sample after step n at (n+1)*dt), which
     # coincide with these midpoint sample times.

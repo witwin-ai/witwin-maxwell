@@ -10,20 +10,19 @@ pytestmark = pytest.mark.skipif(
 
 def _vacuum_scene(*, source_time):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.04),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=source_time,
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.04),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=source_time,
+                name="src",
+            ),
+            ),
+            )
     return scene
 
 
@@ -36,11 +35,13 @@ def test_ring_down_stops_early():
     )
     result = mw.Simulation.fdtd(
         scene,
-        frequency=1.0e9,
-        run_time=mw.TimeConfig(time_steps=3000),
-        full_field_dft=True,
-        shutoff=5e-2,
-        shutoff_check_interval=50,
+        frequencies=1.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=3000),
+            full_field_dft=True,
+            shutoff=5e-2,
+            shutoff_check_interval=50,
+        ),
     ).run()
 
     stats = result.stats()
@@ -60,10 +61,12 @@ def test_cw_parity_between_shutoff_and_disabled():
         scene = _vacuum_scene(source_time=source_time)
         return mw.Simulation.fdtd(
             scene,
-            frequency=1e9,
-            run_time=mw.TimeConfig(time_steps=1300),
-            full_field_dft=True,
-            shutoff=shutoff,
+            frequencies=1e9,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=1300),
+                full_field_dft=True,
+                shutoff=shutoff,
+            ),
         ).run()
 
     result_default = _run(1e-5)
@@ -76,8 +79,8 @@ def test_cw_parity_between_shutoff_and_disabled():
     fields_disabled = result_disabled.fields
     assert set(fields_default) == {"EX", "EY", "EZ"}
 
-    stacked_default = torch.cat([fields_default[name].reshape(-1) for name in ("EX", "EY", "EZ")])
-    stacked_disabled = torch.cat([fields_disabled[name].reshape(-1) for name in ("EX", "EY", "EZ")])
+    stacked_default = torch.cat([fields_default[name].values.reshape(-1) for name in ("EX", "EY", "EZ")])
+    stacked_disabled = torch.cat([fields_disabled[name].values.reshape(-1) for name in ("EX", "EY", "EZ")])
 
     rel_error = torch.linalg.vector_norm(stacked_default - stacked_disabled) / torch.linalg.vector_norm(
         stacked_disabled
@@ -96,11 +99,13 @@ def test_broadband_early_stop_matches_full_run():
         )
         return mw.Simulation.fdtd(
             scene,
-            frequency=1.0e9,
-            run_time=mw.TimeConfig(time_steps=3000),
-            full_field_dft=True,
-            shutoff=shutoff,
-            shutoff_check_interval=50,
+            frequencies=1.0e9,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=3000),
+                full_field_dft=True,
+                shutoff=shutoff,
+                shutoff_check_interval=50,
+            ),
         ).run()
 
     result_shutoff = _run(5e-2)
@@ -110,10 +115,10 @@ def test_broadband_early_stop_matches_full_run():
     assert result_shutoff.stats()["shutoff_step"] < result_shutoff.stats()["time_steps"]
 
     stacked_shutoff = torch.cat(
-        [result_shutoff.fields[name].reshape(-1) for name in ("EX", "EY", "EZ")]
+        [result_shutoff.fields[name].values.reshape(-1) for name in ("EX", "EY", "EZ")]
     )
     stacked_full = torch.cat(
-        [result_full.fields[name].reshape(-1) for name in ("EX", "EY", "EZ")]
+        [result_full.fields[name].values.reshape(-1) for name in ("EX", "EY", "EZ")]
     )
     rel_error = torch.linalg.vector_norm(stacked_shutoff - stacked_full) / torch.linalg.vector_norm(
         stacked_full

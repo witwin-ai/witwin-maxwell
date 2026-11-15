@@ -15,6 +15,7 @@ from witwin.maxwell.fdtd.distributed.solver import DistributedFDTD
 from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd_parallel import FDTDParallelConfig, FDTDPartitionPlan
 from witwin.maxwell.scene import prepare_scene
+from tests.support.core_solver import bind_core
 
 
 def _geometry(name: str, component: str, indices) -> CompiledPortGeometry:
@@ -32,11 +33,11 @@ def _geometry(name: str, component: str, indices) -> CompiledPortGeometry:
     )
 
 
-def _circuit_with_bindings(names) -> mw.Circuit:
-    circuit = mw.Circuit("distributed")
+def _circuit_with_bindings(names) -> mw.circuits.Circuit:
+    circuit = mw.circuits.Circuit("distributed")
     for name in names:
         node = circuit.node(f"{name}_node")
-        circuit.add(mw.Resistor(f"R_{name}", node, circuit.ground, 50.0))
+        circuit.add(mw.rf.Resistor(f"R_{name}", node, circuit.ground, 50.0))
         circuit.bind_port(name, positive=node, negative=circuit.ground)
     return circuit
 
@@ -46,7 +47,7 @@ def _structural_plan(circuit, geometries):
         global_shape=(9, 5, 5),
         devices=("cuda:0", "cuda:1"),
     )
-    scene = SimpleNamespace(circuits=(circuit,))
+    scene = SimpleNamespace(scene=SimpleNamespace(circuits=(circuit,)))
     return compile_distributed_circuit_plan(
         scene,
         partition,
@@ -146,20 +147,20 @@ def _port(name: str, x: float) -> mw.LumpedPort:
 
 
 def _two_shard_circuit_scene() -> mw.Scene:
-    circuit = mw.Circuit("two_shard")
+    circuit = mw.circuits.Circuit("two_shard")
     left = circuit.node("left")
     right = circuit.node("right")
     circuit.add(
-        mw.CurrentSource(
+        mw.circuits.CurrentSource(
             "Iexcite",
             left,
             circuit.ground,
             0.0,
-            waveform=mw.SineWaveform(0.0, 1.0e-3, _FREQUENCY),
+            waveform=mw.circuits.SineWaveform(0.0, 1.0e-3, _FREQUENCY),
         )
     )
-    circuit.add(mw.Resistor("Rlink", left, right, 75.0))
-    circuit.add(mw.Resistor("Rload", right, circuit.ground, 50.0))
+    circuit.add(mw.rf.Resistor("Rlink", left, right, 75.0))
+    circuit.add(mw.rf.Resistor("Rload", right, circuit.ground, 50.0))
     circuit.bind_port("left_port", positive=left, negative=circuit.ground)
     circuit.bind_port("right_port", positive=right, negative=circuit.ground)
     return mw.Scene(
@@ -168,15 +169,15 @@ def _two_shard_circuit_scene() -> mw.Scene:
         boundary=mw.BoundarySpec.none(),
         ports=(_port("left_port", -0.008), _port("right_port", 0.008)),
         circuits=(circuit,),
-        device="cuda:0",
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="The validation prepares the scene on the configured CUDA devices.")
 def test_public_simulation_validation_accepts_distributed_circuit_scene():
     simulation = mw.Simulation.fdtd(
         _two_shard_circuit_scene(),
-        frequency=_FREQUENCY,
-        parallel=mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1")),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(parallel=mw.fdtd.FDTDParallelConfig(devices=("cuda:0", "cuda:1"))),
     )
 
     simulation._validate_circuit_execution()
@@ -185,6 +186,7 @@ def test_public_simulation_validation_accepts_distributed_circuit_scene():
 def _run_single(scene):
     solver = FDTD(prepare_scene(scene), frequency=_FREQUENCY)
     solver.init_field()
+    bind_core(solver)
     output = solver.solve(
         time_steps=_TIME_STEPS,
         dft_frequency=_FREQUENCY,

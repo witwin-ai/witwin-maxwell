@@ -8,8 +8,8 @@ from benchmark.scenes.rf.printed_lines import printed_line_scene,analytic_homoge
 @pytest.mark.parametrize("kind",KINDS)
 @pytest.mark.parametrize("dx",[.0025,.00125,.000625])
 def test_printed_line_refinement_keeps_physical_conductors_and_layers_fixed(kind,dx):
-    baseline=printed_line_scene(kind,device="cpu")
-    actual=printed_line_scene(kind,dx=dx,device="cpu")
+    baseline=printed_line_scene(kind)
+    actual=printed_line_scene(kind,dx=dx)
     assert actual.domain.bounds==baseline.domain.bounds
     assert actual.metadata["pml_physical_thickness_m"]==baseline.metadata["pml_physical_thickness_m"]
     for a,b in zip(actual.structures,baseline.structures):
@@ -42,13 +42,13 @@ def test_independent_homogeneous_reference_has_exact_tem_speed_and_passive_loss(
 def test_layered_transverse_refinement_retains_axial_source_and_physical_pml(dx):
     from witwin.maxwell.scene import prepare_scene
     from witwin.maxwell.compiler.ports import compile_port_geometry
-    scene=printed_line_scene("cpw",dx=dx,longitudinal_dl=.0025,device="cpu")
-    reference=printed_line_scene("cpw",device="cpu")
+    scene=printed_line_scene("cpw",dx=dx,longitudinal_dl=.0025)
+    reference=printed_line_scene("cpw")
     for a,b in zip(scene.structures,reference.structures):
         for name in ("position","size","vertices"):
             if hasattr(a.geometry,name):
                 assert torch.equal(getattr(a.geometry,name),getattr(b.geometry,name))
-    prepared=prepare_scene(scene)
+    prepared=prepare_scene(scene,device='cpu')
     assert prepared.Nx < 190
     for axis,half in (("x",.060),("y",.060),("z",.050)):
         values=getattr(prepared,axis+"_nodes64")
@@ -61,8 +61,8 @@ def test_layered_transverse_refinement_retains_axial_source_and_physical_pml(dx)
 
 
 def test_asymmetric_pair_paddle_leaves_both_modal_reference_cross_sections_fixed():
-    symmetric=printed_line_scene("differential_pair",device="cpu")
-    asymmetric=printed_line_scene("differential_pair",pair_perturbation=True,device="cpu")
+    symmetric=printed_line_scene("differential_pair")
+    asymmetric=printed_line_scene("differential_pair",pair_perturbation=True)
     assert len(asymmetric.structures)==len(symmetric.structures)+1
     paddle=asymmetric.structures[-1]
     assert paddle.name=="positive_signal_paddle"
@@ -79,10 +79,10 @@ def test_asymmetric_pair_paddle_leaves_both_modal_reference_cross_sections_fixed
 def test_graded_outer_mesh_keeps_physical_geometry_native_paths_and_pml_fixed(kind):
     from witwin.maxwell.scene import prepare_scene
     from witwin.maxwell.compiler.waveports import compile_waveport_cross_section
-    uniform=printed_line_scene(kind,dx=.000625,longitudinal_dl=.0025,device="cpu")
+    uniform=printed_line_scene(kind,dx=.000625,longitudinal_dl=.0025)
     graded=printed_line_scene(kind,dx=.000625,longitudinal_dl=.0025,
-                              transverse_refinement_radius=.020,device="cpu")
-    a,b=prepare_scene(uniform),prepare_scene(graded)
+                              transverse_refinement_radius=.020)
+    a,b=prepare_scene(uniform,device='cpu'),prepare_scene(graded,device='cpu')
     np.testing.assert_array_equal(a.x_nodes64,b.x_nodes64)
     for axis in "yz":
         fine,coarse=[np.asarray(getattr(v,axis+"_nodes64")) for v in (a,b)]
@@ -105,14 +105,14 @@ def test_graded_outer_mesh_keeps_physical_geometry_native_paths_and_pml_fixed(ki
 def test_invalid_graded_transverse_radius_is_explicit(radius):
     with pytest.raises(ValueError,match="transverse_refinement_radius"):
         printed_line_scene("cpw",dx=.000625,longitudinal_dl=.0025,
-                           transverse_refinement_radius=radius,device="cpu")
+                           transverse_refinement_radius=radius)
 
 
 @pytest.mark.parametrize("separation",[.40,.48])
 def test_long_line_two_length_control_preserves_cross_section_and_pml_continuation(separation):
     from witwin.maxwell.scene import prepare_scene
-    scene=printed_line_scene("cpw",port_separation=separation,axial_half_length=.30,device="cpu")
-    prepared=prepare_scene(scene)
+    scene=printed_line_scene("cpw",port_separation=separation,axial_half_length=.30)
+    prepared=prepare_scene(scene,device='cpu')
     assert np.isclose(prepared.x_nodes64[0],-.320,atol=1e-12)
     assert np.isclose(prepared.x_nodes64[-1],.320,atol=1e-12)
     assert scene.ports[0].reference_plane==-separation/2
@@ -126,8 +126,8 @@ def test_long_line_two_length_control_preserves_cross_section_and_pml_continuati
 
 @pytest.mark.parametrize("kind",KINDS)
 def test_finite_copper_line_keeps_the_actual_foil_and_explicit_approximate_launch(kind):
-    scene=printed_line_scene(kind,metal="copper",device="cpu")
-    reference=printed_line_scene(kind,device="cpu")
+    scene=printed_line_scene(kind,metal="copper")
+    reference=printed_line_scene(kind)
     for foil,ideal in zip(scene.structures[1:],reference.structures[1:]):
         assert foil.material.is_copper_foil
         assert foil.material.thickness==35e-6

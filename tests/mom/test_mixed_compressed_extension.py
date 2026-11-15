@@ -7,7 +7,7 @@ from witwin.maxwell.mom.harmonic_material import compile_harmonic_material
 from witwin.maxwell.mom.tensor_harmonic_preparation import prepare_mixed_tensor_harmonic_balance
 from witwin.maxwell.mom.tensor_harmonic_bundle import (
     snapshot_mixed_tensor_harmonic_bundle,restore_mixed_tensor_harmonic_bundle)
-from witwin.maxwell.mom.harmonic_state import recover_harmonic_state
+from witwin.maxwell.mom.harmonic_recovery import recover_harmonic_state
 from witwin.maxwell.mom.mesh import SurfaceSystem,RWGBasis
 from witwin.maxwell.mom.hierarchical_runtime import HierarchicalH2SystemOperator
 
@@ -16,7 +16,7 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 
 def material(count):
     return compile_harmonic_material(mw.Material(eps_r=2.,
-        nonlinearity=mw.NonlinearSusceptibility(chi2=.002,chi3=.001)),3e8,count)
+        nonlinearity=mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001)),3e8,count)
 
 
 def prefix_bundle():
@@ -31,7 +31,7 @@ def prefix_bundle():
     vertices=torch.tensor([[0.,0.,0.],[.07,0.,0.],[0.,.07,0.],[0.,0.,.07]],device='cuda',dtype=torch.float64)
     volume=TetrahedralVolumeMesh(vertices,torch.tensor([[0,1,2,3]],device='cuda'),region_id=1)
     sample=material(1);exterior=compile_harmonic_material(mw.Material(),3e8,1)
-    config=mw.MoMConfig(operator_backend='h2',integration=IntegrationConfig(order=3,singular_order=3),
+    config=mw.mom.MoMConfig(operator_backend='h2',integration=IntegrationConfig(order=3,singular_order=3),
         hierarchical=HMatrixConfig(leaf_size=64),riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='block_gmres',preconditioner='row_column_norm'))
     operator=HierarchicalH2SystemOperator(SurfaceSystem.create([(0,'body',RWGBasis(volume.boundary),sample.linear_samples[0])]),

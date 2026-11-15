@@ -1,4 +1,4 @@
-"""CPU spectrum diagnostics and unchanged prepared source terms."""
+"""Spectrum diagnostics and unchanged prepared source terms."""
 import math
 import struct
 from types import SimpleNamespace
@@ -129,7 +129,7 @@ def test_zero_cw_and_pole_attenuation():
         fractions, caught = _check(waveform, f_edge=3.8e9)
         assert fractions == dict(edge_fraction=0.0, dc_fraction=0.0)
         assert not caught
-    waveform = mw.RickerWavelet(frequency=3.8e9)
+    waveform = mw.sources.RickerWavelet(frequency=3.8e9)
     assert any("axial band edge" in str(w.message) for w in _check(waveform, f_edge=3.8e9)[1])
     assert not _check(waveform, f_edge=3.8e9, modulus=.5)[1]
 
@@ -147,6 +147,9 @@ def test_fp32_floor(steps, ratio, expected):
     assert bool(caught) is expected
 
 
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+
+
 def _simulation(waveform, *, direction=None, slab=False, source=None):
     if source is None:
         source = mw.PointDipole(position=(0., 0., 0.), polarization="Ez", source_time=waveform, name="drive")
@@ -157,15 +160,18 @@ def _simulation(waveform, *, direction=None, slab=False, source=None):
                               source_time=waveform, injection=injection, name="drive")
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.15, .15),) * 3),
         grid=mw.GridSpec.uniform(.025), boundary=mw.BoundarySpec.pml(num_layers=3),
-        sources=[source], device="cpu")
-    return mw.Simulation.fdtd(scene, frequency=2.4e9, backend="cpu_reference",
-        run_time=mw.TimeConfig(time_steps=4096), full_field_dft=False,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False))
+        sources=[source])
+    return mw.Simulation.fdtd(scene, frequencies=2.4e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=4096), full_field_dft=False,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+        ))
 
 
+@requires_cuda
 @pytest.mark.parametrize("waveform,expect_dc", [
     (mw.GaussianPulse(frequency=2.4e9, fwidth=.8 * 2.4e9), True),
-    (mw.RickerWavelet(frequency=2.4e9), False),
+    (mw.sources.RickerWavelet(frequency=2.4e9), False),
     (mw.GaussianPulse(frequency=2.4e9, fwidth=.1 * 2.4e9), False),
 ])
 def test_point_dipole_dc_at_prepare(waveform, expect_dc):
@@ -177,6 +183,7 @@ def test_point_dipole_dc_at_prepare(waveform, expect_dc):
     assert not any("axial band edge" in str(w.message) for w in caught)
 
 
+@requires_cuda
 @pytest.mark.parametrize("kind", ["uniform", "custom_J", "custom_M", "custom_JM", "plane", "beam"])
 def test_other_current_and_soft_sources_receive_dc_only(kind):
     waveform = mw.GaussianPulse(frequency=2.4e9, fwidth=1.92e9)
@@ -189,7 +196,7 @@ def test_other_current_and_soft_sources_receive_dc_only(kind):
             components["Jz"] = np.ones((3, 3, 3))
         if "M" in kind:
             components["My"] = np.ones((3, 3, 3))
-        source = mw.CustomCurrentSource(mw.CurrentDataset((axis, axis, axis), components), source_time=waveform)
+        source = mw.sources.CustomCurrentSource(mw.sources.CurrentDataset((axis, axis, axis), components), source_time=waveform)
     elif kind == "plane":
         source = mw.PlaneWave(direction=(0., 0., 1.), polarization="Ex", source_time=waveform)
     else:
@@ -201,6 +208,7 @@ def test_other_current_and_soft_sources_receive_dc_only(kind):
     assert not any("axial band edge" in str(w.message) for w in caught)
 
 
+@requires_cuda
 @pytest.mark.parametrize("direction,slab", [((0., 0., 1.), False), ((1., 0., 0.), False),
                                            ((.6, 0., .8), False), ((0., 0., 1.), True)])
 @pytest.mark.parametrize("broad", [True, False])
@@ -222,6 +230,7 @@ def test_actual_auxiliary_line_edge_and_reprepare(direction, slab, broad):
         assert "edge_fraction=" in str(edges[0].message)
 
 
+@requires_cuda
 @pytest.mark.parametrize("direction", [None, (0., 0., 1.)])
 def test_warning_filters_never_change_compiled_terms(direction):
     waveform = mw.GaussianPulse(frequency=2.4e9, fwidth=1.92e9)

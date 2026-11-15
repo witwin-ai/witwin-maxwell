@@ -41,7 +41,8 @@ def _domain():
 
 def _populate(scene, *, with_slab):
     if with_slab:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=mw.Box(
                     position=(0.0, 0.0, 0.0),
@@ -49,26 +50,28 @@ def _populate(scene, *, with_slab):
                 ),
                 material=mw.Material(eps_r=_SLAB_EPS),
                 name="slab",
-            )
-        )
-    scene.add_source(
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(0.0, 0.0, 1.0),
             polarization=(1.0, 0.0, 0.0),
             source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=0.5e9),
-        )
-    )
-    for index, position in enumerate(_REFLECTED_PLANES):
-        scene.add_monitor(
-            mw.FluxMonitor(
-                name=f"upstream_{index}", axis="z", position=position, frequencies=(_FREQUENCY,)
-            )
-        )
-    scene.add_monitor(
+        ),
+    ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.FluxMonitor(
+              name=f"upstream_{index}", axis="z", position=position, frequencies=(_FREQUENCY,)
+          ) for index, position in enumerate(_REFLECTED_PLANES)),
+    ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
         mw.FluxMonitor(
             name="transmitted", axis="z", position=_TRANSMITTED_PLANE, frequencies=(_FREQUENCY,)
-        )
-    )
+        ),
+    ))
     return scene
 
 
@@ -77,7 +80,6 @@ def _build_scene(grid, *, with_slab):
         domain=_domain(),
         grid=grid,
         boundary=mw.BoundarySpec.pml(num_layers=_PML_LAYERS),
-        device="cuda",
     )
     return _populate(scene, with_slab=with_slab)
 
@@ -88,13 +90,15 @@ def _run_fluxes(scene):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(normalize_source=True),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True),
+        ),
     ).run()
     names = tuple(f"upstream_{index}" for index in range(len(_REFLECTED_PLANES)))
     names += ("transmitted",)
     fluxes = {
-        name: float(np.asarray(result.monitor(name)["flux"].detach().cpu()).reshape(-1)[0])
+        name: float(np.asarray(result.monitor(name, freq_index=0).values.detach().cpu()).reshape(-1)[0])
         for name in names
     }
     del result
@@ -129,8 +133,8 @@ def _auto_and_uniform_coefficients():
     prepared = prepare_scene(auto_slab_scene)
     physical_nodes = []
     for axis, nodes in zip("xyz", (prepared.x_nodes64, prepared.y_nodes64, prepared.z_nodes64)):
-        low = prepared.pml_thickness_for_face(axis, "low")
-        high = prepared.pml_thickness_for_face(axis, "high")
+        low = prepared.scene.pml_thickness_for_face(axis, "low")
+        high = prepared.scene.pml_thickness_for_face(axis, "high")
         stop = len(nodes) - high if high else len(nodes)
         physical_nodes.append(nodes[low:stop])
     same_mesh = mw.GridSpec.custom(*physical_nodes)
@@ -144,8 +148,8 @@ def _auto_and_uniform_coefficients():
     )
     physical_shape = tuple(
         size
-        - prepared.pml_thickness_for_face(axis, "low")
-        - prepared.pml_thickness_for_face(axis, "high")
+        - prepared.scene.pml_thickness_for_face(axis, "low")
+        - prepared.scene.pml_thickness_for_face(axis, "high")
         for axis, size in zip("xyz", (prepared.Nx, prepared.Ny, prepared.Nz))
     )
     return auto, uniform, int(np.prod(physical_shape))

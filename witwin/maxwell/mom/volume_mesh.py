@@ -3,6 +3,8 @@ from dataclasses import dataclass
 import torch
 from .mesh import SurfaceMesh
 from .quadrature import gauss_rule
+from ..errors import UnsupportedFeatureError
+from .._stability import experimental
 
 
 @dataclass(frozen=True)
@@ -14,6 +16,7 @@ class VolumeMeshReport:
     surface_operator_bound: bool = False
 
 
+@experimental("mom")
 class TetrahedralVolumeMesh:
     """Positive tetrahedral complex with a validated closed embedded boundary.
 
@@ -29,7 +32,8 @@ class TetrahedralVolumeMesh:
                 or vertices.shape[1] != 3 or not bool(torch.isfinite(vertices).all())):
             raise ValueError('Volume vertices require finite real CUDA [V,3] coordinates')
         if vertices.requires_grad:
-            raise NotImplementedError('Volume geometry gradients are outside the MoM contract')
+            raise UnsupportedFeatureError('Volume geometry gradients are outside the MoM contract',
+                                          feature="guard:31265675", method="mom")
         if (not isinstance(cells, torch.Tensor) or cells.device != vertices.device
                 or cells.dtype != torch.int64 or cells.ndim != 2 or cells.shape[1] != 4 or not len(cells)):
             raise ValueError('Volume cells require matching CUDA int64 [T,4] indices')

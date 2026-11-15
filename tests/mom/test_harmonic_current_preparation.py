@@ -17,13 +17,13 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA requi
 
 def test_conductive_tpa_material_prepares_actual_ac_and_dc_channels_once(monkeypatch,tmp_path):
     vertices = torch.tensor([[0.,0.,0.],[.07,0.,0.],[0.,.07,0.],[0.,0.,.07]],device='cuda',dtype=torch.float64)
-    volume = mw.TetrahedralVolumeMesh(vertices,torch.tensor([[0,1,2,3]],device='cuda'),region_id=1)
+    volume = mw.mom.TetrahedralVolumeMesh(vertices,torch.tensor([[0,1,2,3]],device='cuda'),region_id=1)
     basis = RWGBasis(volume.boundary)
     physical = mw.Material(eps_r=2.,sigma_e=.001,nonlinearity=(
-        mw.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.TwoPhotonAbsorption(beta=5.)))
+        mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.media.TwoPhotonAbsorption(beta=5.)))
     material = compile_harmonic_material(physical,3e8,2)
     exterior = compile_harmonic_material(mw.Material(),3e8,2)
-    config = mw.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),riesz_storage='compact_rwg_v1')
+    config = mw.mom.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),riesz_storage='compact_rwg_v1')
     operators = tuple(SystemOperator(SurfaceSystem.create([(0,'body',basis,sample)]),exterior.linear_samples[n],
         [mw.PlaneWave()] if n == 0 else [],config) for n,sample in enumerate(material.linear_samples))
     for n,operator in enumerate(operators,1):
@@ -48,7 +48,7 @@ def test_conductive_tpa_material_prepares_actual_ac_and_dc_channels_once(monkeyp
     assert result.receipt['converged']
     assert result.electric[2].norm() > 0
     assert not prepared['receipt']['physical_qualification']
-    from witwin.maxwell.mom.harmonic_state import recover_harmonic_state
+    from witwin.maxwell.mom.harmonic_recovery import recover_harmonic_state
     from witwin.maxwell.mom.harmonic_fields import HarmonicFieldDecoder
     state = recover_harmonic_state(model,prepared,result)
     torch.testing.assert_close(state.total_volume_current[0].real,current,rtol=0,atol=0)
@@ -86,7 +86,7 @@ def test_conductive_tpa_material_prepares_actual_ac_and_dc_channels_once(monkeyp
         volume.boundary.faces,recenter=False,fill_mode='solid'),material=physical)],sources=[mw.PlaneWave()])
     signature = (_signature(scene,exterior.linear_samples[0],(material.linear_samples[0],)),
                  tuple(material_signature(s.material) for s in scene.structures if s.enabled),3e8)
-    saved_config = replace(config,harmonic_balance=mw.HarmonicBalanceConfig(
+    saved_config = replace(config,harmonic_balance=mw.mom.HarmonicBalanceConfig(
         harmonics=2,volumes=(volume,),branch_id='current'))
     data = HarmonicData(prepared,state,saved_config,signature)
     monitors = (mw.PointMonitor('mixed',tuple(outside[0].tolist()),fields=('Ex','Hx','Hy','Hz')),
@@ -101,12 +101,12 @@ def test_conductive_tpa_material_prepares_actual_ac_and_dc_channels_once(monkeyp
         monitor_values,monitor_receipt = data.sample_point_monitors(monitors)
     assert magnetic_calls == [(1,0)]
     assert monitor_receipt['unique_monitor_positions'] == 1
-    assert monitor_values['magnetic_copy']['dc']['potential_V'] is None
-    assert monitor_values['magnetic_copy']['dc']['magnetic_available']
+    assert monitor_values['magnetic_copy'].attrs['dc']['potential_V'] is None
+    assert monitor_values['magnetic_copy'].attrs['dc']['magnetic_available']
     reference_h,_ = original_query(outside,0)
     for index,name in enumerate(('Hx','Hy','Hz')):
         for monitor in monitor_values.values():
-            torch.testing.assert_close(monitor['dc']['components'][name],reference_h[0,index],rtol=0,atol=0)
+            torch.testing.assert_close(monitor.attrs['dc']['components'][name],reference_h[0,index],rtol=0,atol=0)
     payload = snapshot(data)
     torch.save(payload,tmp_path/'current.pt')
     assert payload['schema_version'] == 5 and payload['payload_kind'] == 'coupled_sie_vie_hb_current'
@@ -119,7 +119,7 @@ def test_conductive_tpa_material_prepares_actual_ac_and_dc_channels_once(monkeyp
         patch.setattr(FaceCurrentBalance,'__init__',forbidden)
         patch.setattr(FloatingPotentialOperator,'__init__',forbidden)
         patch.setattr(MagnetostaticInterfaceResponse,'__init__',forbidden)
-        restored = restore(torch.load(tmp_path/'current.pt',weights_only=False),scene)
+        restored = restore(torch.load(tmp_path/'current.pt',weights_only=False),scene,'cuda')
         for query,region,expected in zip((inside,outside),(1,0),reference):
             for actual,value in zip(restored.decoder.query_dc(query,region),expected):
                 torch.testing.assert_close(actual,value,rtol=0,atol=0)
@@ -132,11 +132,11 @@ def test_conductive_tpa_material_prepares_actual_ac_and_dc_channels_once(monkeyp
     damaged = copy.deepcopy(payload)
     damaged['state']['dc_potential_offsets'].add_(.1)
     with pytest.raises(ValueError,match='floating state'):
-        restore(damaged,scene)
+        restore(damaged,scene,'cuda')
     damaged = copy.deepcopy(payload)
     damaged['state']['dc_magnetic_density'].add_(.1)
     with pytest.raises(ValueError,match='magnetic density'):
-        restore(damaged,scene)
+        restore(damaged,scene,'cuda')
     state.dc_face_potentials[0].add_(1)
     with pytest.raises(RuntimeError,match='mutated'):
         decoder.query_dc(inside,1)

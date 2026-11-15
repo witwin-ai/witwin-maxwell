@@ -64,7 +64,7 @@ def _rotated_uniaxial(exx, eo, ee):
     """A full off-diagonal Tensor3x3 (uniaxial rotated 45 deg about x)."""
     mean = 0.5 * (eo + ee)
     delta = 0.5 * (ee - eo)
-    return mw.Tensor3x3(((exx, 0.0, 0.0), (0.0, mean, delta), (0.0, delta, mean)))
+    return mw.media.Tensor3x3(((exx, 0.0, 0.0), (0.0, mean, delta), (0.0, delta, mean)))
 
 
 def _set_eps_tensor(kw, tensor):
@@ -93,7 +93,7 @@ def _apply_nonlinear(kw):
 
 
 def _apply_modulated(kw):
-    kw["modulation"] = mw.ModulationSpec(frequency=2.0e8, amplitude=0.1)
+    kw["modulation"] = mw.media.ModulationSpec(frequency=2.0e8, amplitude=0.1)
 
 
 def _apply_sigma_e(kw):
@@ -135,31 +135,32 @@ def _build_and_run(axes):
     else:
         boundary = mw.BoundarySpec.pml(num_layers=5, strength=1.0)
 
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(0.06),
-        boundary=boundary,
-        device="cuda",
-    )
     # A structure overlapping the absorber when the pml axis is active, else a
     # compact interior box. When the pair is env-only, use a plain dielectric so
     # the run still has a material interface to propagate through.
     box_size = 0.5 if pml_overlap else 0.28
     material = mw.Material(**kw) if mat_axes else mw.Material(eps_r=4.0)
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(box_size,) * 3),
-                     material=material)
-    )
-    scene.add_source(
-        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez", width=0.06,
-                       source_time=mw.CW(frequency=_FREQ, amplitude=20.0), name="src")
-    )
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(0.06),
+                boundary=boundary,
+                structures=(
+            mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(box_size,) * 3),
+                         material=material),
+            ),
+                sources=(
+            mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez", width=0.06,
+                           source_time=mw.CW(frequency=_FREQ, amplitude=20.0), name="src"),
+            ),
+            )
     result = mw.Simulation.fdtd(
         scene, frequencies=[_FREQ],
-        run_time=mw.TimeConfig.auto(steady_cycles=1, transient_cycles=2),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=1, transient_cycles=2),
+            full_field_dft=True,
+        ),
     ).run()
-    ez = result.field("Ez")
+    ez = result.field("Ez").isel(f=0).values
     return (ez["data"] if isinstance(ez, dict) else ez).detach().cpu().numpy()
 
 
@@ -223,34 +224,35 @@ def test_combination_matrix(a, b):
 def _nonlinear_material(flavor, partner_kw):
     kw = dict(partner_kw)
     if flavor == "chi2":
-        kw["nonlinearity"] = mw.NonlinearSusceptibility(chi2=1.0e-12)
+        kw["nonlinearity"] = mw.media.NonlinearSusceptibility(chi2=1.0e-12)
     elif flavor == "chi3":
         kw["kerr_chi3"] = 1.0e-18
     elif flavor == "tpa":
-        kw["nonlinearity"] = mw.TwoPhotonAbsorption(beta=1.0e-11, n0=1.5)
+        kw["nonlinearity"] = mw.media.TwoPhotonAbsorption(beta=1.0e-11, n0=1.5)
     return mw.Material(**kw)
 
 
 def _run_material(material):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3),) * 3),
-        grid=mw.GridSpec.uniform(0.06),
-        boundary=mw.BoundarySpec.pml(num_layers=5, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(0.28,) * 3), material=material)
-    )
-    scene.add_source(
-        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez", width=0.06,
-                       source_time=mw.CW(frequency=_FREQ, amplitude=20.0), name="src")
-    )
+                domain=mw.Domain(bounds=((-0.3, 0.3),) * 3),
+                grid=mw.GridSpec.uniform(0.06),
+                boundary=mw.BoundarySpec.pml(num_layers=5, strength=1.0),
+                structures=(
+            mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(0.28,) * 3), material=material),
+            ),
+                sources=(
+            mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez", width=0.06,
+                           source_time=mw.CW(frequency=_FREQ, amplitude=20.0), name="src"),
+            ),
+            )
     result = mw.Simulation.fdtd(
         scene, frequencies=[_FREQ],
-        run_time=mw.TimeConfig.auto(steady_cycles=1, transient_cycles=2),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=1, transient_cycles=2),
+            full_field_dft=True,
+        ),
     ).run()
-    ez = result.field("Ez")
+    ez = result.field("Ez").isel(f=0).values
     return (ez["data"] if isinstance(ez, dict) else ez).detach().cpu().numpy()
 
 
@@ -259,7 +261,7 @@ def _run_material(material):
     "partner",
     [
         ({"lorentz_poles": (mw.LorentzPole(delta_eps=1.0, resonance_frequency=3.0e9, gamma=2.0e8),)}, "dispersive"),
-        ({"modulation": mw.ModulationSpec(frequency=2.0e8, amplitude=0.1)}, "modulated"),
+        ({"modulation": mw.media.ModulationSpec(frequency=2.0e8, amplitude=0.1)}, "modulated"),
         ({"sigma_e": 0.02}, "sigma_e"),
     ],
     ids=lambda p: p[1],

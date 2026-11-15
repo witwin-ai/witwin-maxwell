@@ -42,6 +42,7 @@ from .tfsf_specs import (
     magnetic_unit_vector,
     make_reference_term,
 )
+from ...errors import UnsupportedFeatureError
 
 
 ABSORBER_CELLS = 320
@@ -247,8 +248,8 @@ def resolve_tfsf_region_indices(solver, injection):
             upper.append(nearest_index(axis_coords, axis_bounds[1]))
             bounds.append((float(axis_bounds[0]), float(axis_bounds[1])))
         else:
-            lo = int(solver.scene.pml_thickness_for_face(current_axis, "low"))
-            hi = int(size - solver.scene.pml_thickness_for_face(current_axis, "high") - 1)
+            lo = int(solver.scene.scene.pml_thickness_for_face(current_axis, "low"))
+            hi = int(size - solver.scene.scene.pml_thickness_for_face(current_axis, "high") - 1)
             lower.append(lo)
             upper.append(hi)
             bounds.append((float(axis_coords[lo].item()), float(axis_coords[hi].item())))
@@ -284,8 +285,8 @@ def _validate_slab_normal_bounds(solver, lower, upper, axis: str):
     size = (solver.Nx, solver.Ny, solver.Nz)[axis_index]
     lo = lower[axis_index]
     hi = upper[axis_index]
-    low_margin = solver.scene.pml_thickness_for_face(axis, "low")
-    high_margin = solver.scene.pml_thickness_for_face(axis, "high")
+    low_margin = solver.scene.scene.pml_thickness_for_face(axis, "low")
+    high_margin = solver.scene.scene.pml_thickness_for_face(axis, "high")
     if hi <= lo + 1:
         raise ValueError(f"TFSF slab bounds must span at least two cells along {axis}.")
     if lo < low_margin or hi > size - high_margin - 1:
@@ -842,14 +843,14 @@ def initialize_tfsf_state(solver):
             "TFSF injection currently supports PlaneWave, GaussianBeam, and AstigmaticGaussianBeam only."
         )
     if source["injection"].get("mode", "box") == "slab":
-        if solver.scene.boundary.uses_kind("bloch"):
+        if solver.scene.scene.boundary.uses_kind("bloch"):
             validate_grating_tfsf_slab_topology(solver)
             lower, upper, bounds = resolve_tfsf_region_indices(solver, source["injection"])
             deltas = _validate_locally_uniform_region(solver, lower, upper)
             _validate_slab_normal_bounds(solver, lower, upper, source["injection"]["axis"])
             _validate_slab_interfaces_are_vacuum(solver, lower, upper, source["injection"]["axis"])
             if source["source_time"]["kind"] != "cw" and any(
-                k != 0.0 and solver.scene.boundary.axis_kind(axis) == "bloch"
+                k != 0.0 and solver.scene.scene.boundary.axis_kind(axis) == "bloch"
                 for axis, k in zip("xyz", solver.resolved_bloch_wavevector)
             ):
                 from .fixed_k import initialize_fixed_k_slab
@@ -865,10 +866,12 @@ def initialize_tfsf_state(solver):
         _validate_slab_interfaces_are_vacuum(solver, lower, upper, axis)
         _initialize_nonperiodic_slab_state(solver, source, lower, upper, deltas)
         return
-    if solver.scene.boundary.uses_kind("bloch"):
-        raise NotImplementedError("TFSF slab mode is required for Bloch-boundary TFSF injection.")
-    if solver.scene.boundary.uses_kind("periodic"):
-        raise NotImplementedError("TFSF injection currently supports only none, pml, pec, or pmc boundaries.")
+    if solver.scene.scene.boundary.uses_kind("bloch"):
+        raise UnsupportedFeatureError("TFSF slab mode is required for Bloch-boundary TFSF injection.",
+                                      feature="source.injection_tfsf", method="fdtd")
+    if solver.scene.scene.boundary.uses_kind("periodic"):
+        raise UnsupportedFeatureError("TFSF injection currently supports only none, pml, pec, or pmc boundaries.",
+                                      feature="source.injection_tfsf", method="fdtd")
 
     lower, upper, _ = resolve_tfsf_region_indices(solver, source["injection"])
     deltas = _validate_locally_uniform_region(solver, lower, upper)

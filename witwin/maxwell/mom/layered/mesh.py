@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from ..open_surface import OpenRWGBasis, OpenSurfaceMesh
+from ...errors import UnsupportedFeatureError
 
 
 @dataclass
@@ -159,7 +160,8 @@ def validate_vias(rectangles, vias):
         if z0 not in planes or z1 not in planes:
             raise ValueError("Via endpoints must coincide with declared metal planes")
         if planes.index(z1) != planes.index(z0) + 1:
-            raise NotImplementedError("Vias must join consecutive metal planes")
+            raise UnsupportedFeatureError("Vias must join consecutive metal planes",
+                                          feature="guard:b8999e5e", method="mom.layered")
         for z in (z0, z1):
             rect = [r for r in rectangles if r[4] == z]
             xs = sorted({x0, x1, *(x for r in rect for x in r[:2] if x0 < x < x1)})
@@ -183,7 +185,8 @@ def validate_vias(rectangles, vias):
             if (max(z0, other[4]) < min(z1, other[5]) and
                     max(x0, other[0]) <= min(x1, other[1]) and
                     max(y0, other[2]) <= min(y1, other[3])):
-                raise NotImplementedError("Touching or overlapping vias require junction geometry")
+                raise UnsupportedFeatureError("Touching or overlapping vias require junction geometry",
+                                              feature="guard:d29a28f9", method="mom.layered")
 
 
 def _ground_basis(mesh, grounds):
@@ -290,9 +293,107 @@ def mesh_conductors(rectangles, planes, h, *, vias=(), bridges=(), cut_lines=Non
     triangles = inverse[torch.cat(faces)]
     topology = classify_surface(triangles, len(points))
     if topology.junction_edges:
-        raise NotImplementedError("Geometry needs junction RWGs (three or more faces on an edge)")
+        raise UnsupportedFeatureError("Geometry needs junction RWGs (three or more faces on an edge)",
+                                      feature="guard:08c522b5", method="mom.layered")
     oriented = build_extension().orient(triangles, topology.incidence_faces, topology.face_edges,
                                          topology.face_edge_signs)
     mesh = OpenSurfaceMesh(points, oriented, validate=False)
     basis, slots = _ground_basis(mesh, grounds) if grounds else (OpenRWGBasis(mesh), None)
     return LayeredMesh(mesh, basis, torch.cat(ids), slots, bool(grounds))
+
+
+class ClosedConductorMesh(OpenSurfaceMesh):
+    """Generated union boundary with exact fixed-coordinate centroids."""
+
+    @property
+    def centroids(self):
+        from .build import build_extension
+        # A direct mean can move a constant z outside a vertical Green segment.
+        build_extension()
+        return torch.ops.witwin_maxwell_mom_layered.closed_centroids(self.triangles.contiguous())
+
+
+class JunctionRWGBasis(OpenRWGBasis):
+    """Pairwise RWGs spanning sum-zero flux at every multi-face edge.
+
+    face_edges/signs/local_slots are padded face incidence lists; local_slots
+    identifies the geometric vertex opposite each RWG edge. Padding has sign 0.
+    Every function has exactly two support triangles even at a junction.
+    """
+
+    def __init__(self, mesh):
+        from .build import build_extension
+        self.mesh = mesh
+        self._mesh_version = (id(mesh.vertices), mesh.vertices._version, id(mesh.faces), mesh.faces._version)
+        topology = mesh.topology
+        build_extension()
+        (self.edges, supports, slots, self.face_edges, self.face_signs,
+         self.local_slots, self.support_positions) = torch.ops.witwin_maxwell_mom_layered.junction_basis(
+             topology.edges, topology.face_edges, topology.face_count)
+        self.plus_faces, self.minus_faces = supports[:, 0].contiguous(), supports[:, 1].contiguous()
+        self.support_slots = slots
+        self.plus_vertices = mesh.faces[self.plus_faces, slots[:, 0]]
+        self.minus_vertices = mesh.faces[self.minus_faces, slots[:, 1]]
+        self.edge_lengths = torch.linalg.vector_norm(
+            mesh.vertices[self.edges[:, 1]] - mesh.vertices[self.edges[:, 0]], dim=-1)
+        self.boundary_edges = topology.edges[topology.face_count == 1]
+        self.boundary_half_functions = False
+        self.metadata = dict(basis="junction_RWG", test_space="RWG",
+                             junction_constraint="sum_zero_integrated_edge_flux",
+                             basis_units="1", J_coefficient_units="A/m")
+
+    def local_values(self, points):
+        factors = self.face_signs * self.edge_lengths[self.face_edges] / (2 * self.mesh.areas[:, None])
+        vertices = self.mesh.triangles.gather(1, self.local_slots[..., None].expand(-1, -1, 3))
+        return factors[:, None, :, None] * (points[:, :, None] - vertices[:, None])
+
+    def mass_blocks(self):
+        from .build import build_extension
+        build_extension()
+        return torch.ops.witwin_maxwell_mom_layered.junction_gram(
+            self.mesh.triangles.contiguous(), self.mesh.areas.contiguous(), self.edge_lengths.contiguous(),
+            self.face_edges, self.face_signs, self.local_slots)
+
+
+def mesh_closed_conductors(boxes, bridges, planes, h, *, cuts, h_edge, growth_ratio, interfaces, groups=None):
+    """Native exposed-boundary mesh of a solid union plus ideal top-face bridges.
+
+    All rectangle, via and interface breakpoints share exact Cartesian axes.
+    Thus top/wall and via/body rims weld, including hole boundaries. The native
+    pair basis admits arbitrary edge valence, including the three-face bridge rim.
+    """
+    from ..topology import classify_surface
+    from .build import build_extension
+    def tensor(values):
+        return torch.tensor(values, device=planes.device, dtype=torch.float64)
+    endpoints = [[v for r in boxes for v in r[2*a:2*a+2]] for a in range(3)]
+    for bridge in bridges:
+        endpoints[0].extend(bridge[:2])
+        endpoints[1].extend(bridge[2:4])
+        endpoints[2].append(bridge[4])
+    for xc, yc in cuts:
+        endpoints[0].extend(xc)
+        endpoints[1].extend(yc)
+    endpoints[2].extend(z for z in interfaces if min(endpoints[2]) < z < max(endpoints[2]))
+    axes = [_axis_points(tensor(e), h, h_edge, growth_ratio) for e in endpoints]
+    build_extension()
+    if groups is None:
+        faces, ids, kinds, owners = torch.ops.witwin_maxwell_mom_layered.closed_mesh(
+            *axes, tensor(boxes).reshape(-1, 6), tensor(bridges).reshape(-1, 5), planes)
+    else:
+        # surface_admittance: also one contact face per material-group interface (kind 3).
+        faces, ids, kinds, owners = torch.ops.witwin_maxwell_mom_layered.contact_mesh(
+            *axes, tensor(boxes).reshape(-1, 6), tensor(bridges).reshape(-1, 5), planes,
+            torch.tensor(groups, device=planes.device, dtype=torch.int64))
+    used, inverse = torch.unique(faces, sorted=True, return_inverse=True)
+    ny, nz = len(axes[1]), len(axes[2])
+    vertices = torch.stack((axes[0][used // (ny*nz)], axes[1][(used // nz) % ny], axes[2][used % nz]), -1)
+    mesh = ClosedConductorMesh.__new__(ClosedConductorMesh)
+    mesh.vertices, mesh.faces = vertices, inverse.reshape(-1, 3)
+    mesh.topology = classify_surface(mesh.faces, len(vertices))
+    mesh._topology_version = (id(mesh.faces), mesh.faces._version)
+    mesh.validation_report = None
+    basis = JunctionRWGBasis(mesh)
+    layout = LayeredMesh(mesh, basis, ids, basis.support_slots)
+    layout.face_owners, layout.face_kinds = owners, kinds
+    return layout

@@ -67,17 +67,21 @@ the complex Bloch phase).
 
 Every entry point is gated by ``solver.gyromagnetic_enabled``; a ferrite-free
 scene allocates no state and issues no operations. The persistent state
-(magnetization, dense coefficient fields, per-step scratch) is preallocated once
-at build time and the hot path performs no host synchronization (no ``.item()`` /
-device-to-host transfer) and no per-step allocation (all updates are in-place
-``copy_``/``mul(out=)``/``addcmul_``/``add_``/``sub_``), so the magnetic block
-stays CUDA-graph capturable and its captured kernels advance the same persistent
-buffers on every replay.
+(magnetization, drive snapshot, dense coefficient fields) is preallocated once at
+build time. Each hook is one CUDA kernel (``kernels/gyromagnetic.cu``) launched over
+the active ferrite cells only, with no host synchronization and no allocation, so
+the magnetic block stays CUDA-graph capturable on the existing and the core path.
+The Torch form of both hooks is the test oracle in
+``tests/oracles/gyromagnetic_recurrence.py``.
 """
 
 from __future__ import annotations
 
 import torch
+
+from ...errors import UnsupportedFeatureError
+from ..cuda.backend import get_compiled_extension
+from ...compiler.gyromagnetic import compile_gyromagnetic_materials
 
 # Overlap slice for each magnetic component: the sub-block of the Yee H tensor
 # that co-locates with the shared (Nx-1, Ny-1, Nz-1) cell overlap.
@@ -112,18 +116,19 @@ def build_gyromagnetic(solver, scene, *, force_general=False):
     bit-for-bit for an axis-aligned bias); it exists so the rotation-equivalence
     gate can drive both code paths on one physical scene.
     """
-    layout = scene.compile_gyromagnetic_materials(dt=solver.dt, device=solver.device)
+    layout = compile_gyromagnetic_materials(scene, dt=solver.dt, device=solver.device)
     solver._gyromagnetic_layout = layout
     solver.gyromagnetic_enabled = bool(layout.enabled)
     if not layout.enabled:
         return
 
-    if scene.boundary.uses_kind("bloch"):
-        raise NotImplementedError(
+    if scene.scene.boundary.uses_kind("bloch"):
+        raise UnsupportedFeatureError(
             "FDTD gyromagnetic ferrite requires the real-valued magnetic update: a "
             "Bloch-periodic run carries complex phase-shifted fields, and the real "
             "magnetization-ADE correction would break the Bloch phase relation. Use a "
-            "real-field boundary (PML/PEC/PMC/periodic) with the ferrite."
+            "real-field boundary (PML/PEC/PMC/periodic) with the ferrite.",
+            feature="material.gyromagnetic", method="fdtd"
         )
 
     nx, ny, nz = solver.Nx, solver.Ny, solver.Nz
@@ -166,9 +171,18 @@ def build_gyromagnetic(solver, scene, *, force_general=False):
     mask_flat = torch.zeros(nx * ny * nz, dtype=torch.bool, device=device)
     mask_flat[layout.active_index] = True
     active = mask_flat.reshape(nx, ny, nz)[overlap].contiguous()
+    # The coupled blocks are packed into one (8, Nx-1, Ny-1, Nz-1) tensor for the kernel;
+    # the named entries are views of its planes.
+    coupled = torch.stack([
+        _dense_from(matrix[:, row, column])[overlap]
+        for matrix in (b_matrix, c_matrix) for row in (0, 1) for column in (0, 1)
+    ])
 
     state = {
         "active": active,
+        # Overlap offsets of the active cells: the kernels' launch domain.
+        "cells": active.flatten().nonzero().flatten(),
+        "coupled": coupled,
         # Material ADE propagator (used by the pure-recurrence primitives / oracle
         # parity tests).
         "phi00": _dense_from(phi[:, 0, 0])[overlap].contiguous(),
@@ -180,30 +194,17 @@ def build_gyromagnetic(solver, scene, *, force_general=False):
         "gamma10": _dense_from(gamma[:, 1, 0])[overlap].contiguous(),
         "gamma11": _dense_from(gamma[:, 1, 1])[overlap].contiguous(),
         # Coupled implicit-midpoint blocks (the real field-coupled forward path).
-        "b00": _dense_from(b_matrix[:, 0, 0])[overlap].contiguous(),
-        "b01": _dense_from(b_matrix[:, 0, 1])[overlap].contiguous(),
-        "b10": _dense_from(b_matrix[:, 1, 0])[overlap].contiguous(),
-        "b11": _dense_from(b_matrix[:, 1, 1])[overlap].contiguous(),
-        "c00": _dense_from(c_matrix[:, 0, 0])[overlap].contiguous(),
-        "c01": _dense_from(c_matrix[:, 0, 1])[overlap].contiguous(),
-        "c10": _dense_from(c_matrix[:, 1, 0])[overlap].contiguous(),
-        "c11": _dense_from(c_matrix[:, 1, 1])[overlap].contiguous(),
+        **{name: coupled[index] for index, name in enumerate(
+            ("b00", "b01", "b10", "b11", "c00", "c01", "c10", "c11"))},
         # 1/mu_inf where active, 0 elsewhere: keeps the correction masked.
         "inv_mu_inf": _dense_from(1.0 / layout.mu_infinity)[overlap].contiguous(),
     }
     overlap_shape = state["active"].shape
-    state["active_f"] = state["active"].to(dtype=field_dtype)
 
-    # Persistent magnetization state (m) plus per-step scratch (drive gather hu/hv,
-    # pre-update snapshot h_pre_*, staged propagator output new_u/new_v, staged
-    # increment dm_*). Preallocated once; the hot path only writes into these
-    # buffers in place, so it performs zero per-step allocation and the pointers
-    # stay fixed under CUDA-graph replay.
-    for name in (
-        "m_u", "m_v", "dm_u", "dm_v",
-        "hu", "hv", "new_u", "new_v",
-        "h_pre_u", "h_pre_v",
-    ):
+    # Persistent magnetization state (m), its last increment (dm) and the pre-update
+    # drive snapshot (h_pre_*). Preallocated once; the kernels write them in place, so
+    # the pointers stay fixed under CUDA-graph replay.
+    for name in ("m_u", "m_v", "dm_u", "dm_v", "h_pre_u", "h_pre_v"):
         state[name] = torch.zeros(overlap_shape, dtype=field_dtype, device=device)
 
     # The axis-aligned fast path assumes ONE signed Cartesian bias for the whole
@@ -220,14 +221,14 @@ def build_gyromagnetic(solver, scene, *, force_general=False):
     uniform_bias = bool(torch.allclose(bias, bias[:1], atol=1.0e-9))
     fast_axis = int(layout.fast_axis[0])
     if uniform_bias and fast_axis >= 0 and not force_general:
-        _build_fast_axis_state(solver, layout, state, overlap_shape, field_dtype)
+        _build_fast_axis_state(solver, layout, state)
     else:
-        _build_general_state(solver, layout, state, overlap_shape, field_dtype, _dense_from)
+        _build_general_state(solver, layout, state, _dense_from)
 
     solver._gyromagnetic_state = state
 
 
-def _build_fast_axis_state(solver, layout, state, overlap_shape, field_dtype):
+def _build_fast_axis_state(solver, layout, state):
     """Axis-aligned fast path: a single signed lab component drives each of m_u/m_v."""
     nx, ny, nz = solver.Nx, solver.Ny, solver.Nz
     basis = layout.local_basis[0]  # columns [u | v | w], w == bias
@@ -235,7 +236,10 @@ def _build_fast_axis_state(solver, layout, state, overlap_shape, field_dtype):
     v_axis = int(torch.argmax(torch.abs(basis[:, 1])))
     state.update(
         general=False,
+        frame=None,
         axis=int(layout.fast_axis[0]),
+        u_axis=u_axis,
+        v_axis=v_axis,
         u_attr=_COMPONENT_ATTR[u_axis],
         v_attr=_COMPONENT_ATTR[v_axis],
         u_slice=_overlap_slice(u_axis, nx, ny, nz),
@@ -243,11 +247,9 @@ def _build_fast_axis_state(solver, layout, state, overlap_shape, field_dtype):
         sign_u=float(torch.sign(basis[u_axis, 0])),
         sign_v=float(torch.sign(basis[v_axis, 1])),
     )
-    for name in ("corr_u", "corr_v"):
-        state[name] = torch.zeros(overlap_shape, dtype=field_dtype, device=solver.device)
 
 
-def _build_general_state(solver, layout, state, overlap_shape, field_dtype, dense_from):
+def _build_general_state(solver, layout, state, dense_from):
     """General-bias path: dense u/v projection fields gather from / scatter to all H.
 
     ``u``/``v`` are the first two columns of the per-cell local basis (lab frame),
@@ -259,22 +261,25 @@ def _build_general_state(solver, layout, state, overlap_shape, field_dtype, dens
     """
     nx, ny, nz = solver.Nx, solver.Ny, solver.Nz
     basis = layout.local_basis  # (N, 3, 3), columns [u | v | w]
-    state["general"] = True
-    # Fixed overlap slices for each lab H component (identity collocation, C = I).
-    state["hx_slice"] = _overlap_slice(0, nx, ny, nz)
-    state["hy_slice"] = _overlap_slice(1, nx, ny, nz)
-    state["hz_slice"] = _overlap_slice(2, nx, ny, nz)
-    # Dense per-cell projection fields u = basis[:, :, 0], v = basis[:, :, 1].
-    for comp, attr in ((0, "ux"), (1, "uy"), (2, "uz")):
-        state[attr] = dense_from(basis[:, comp, 0])[
-            (slice(0, nx - 1), slice(0, ny - 1), slice(0, nz - 1))
-        ].contiguous()
-    for comp, attr in ((0, "vx"), (1, "vy"), (2, "vz")):
-        state[attr] = dense_from(basis[:, comp, 1])[
-            (slice(0, nx - 1), slice(0, ny - 1), slice(0, nz - 1))
-        ].contiguous()
-    for name in ("corr_x", "corr_y", "corr_z"):
-        state[name] = torch.zeros(overlap_shape, dtype=field_dtype, device=solver.device)
+    overlap = (slice(0, nx - 1), slice(0, ny - 1), slice(0, nz - 1))
+    # Dense per-cell projection fields u = basis[:, :, 0], v = basis[:, :, 1], packed
+    # as (6, Nx-1, Ny-1, Nz-1) planes ux, uy, uz, vx, vy, vz; the named entries are views.
+    frame = torch.stack([dense_from(basis[:, comp, column])[overlap]
+                         for column in (0, 1) for comp in (0, 1, 2)])
+    state.update(
+        general=True,
+        frame=frame,
+        # The kernels read the frame planes on this path; the fast-path drive axes are unused.
+        u_axis=0,
+        v_axis=0,
+        sign_u=1.0,
+        sign_v=1.0,
+        # Fixed overlap slices for each lab H component (identity collocation, C = I).
+        hx_slice=_overlap_slice(0, nx, ny, nz),
+        hy_slice=_overlap_slice(1, nx, ny, nz),
+        hz_slice=_overlap_slice(2, nx, ny, nz),
+        **{name: frame[index] for index, name in enumerate(("ux", "uy", "uz", "vx", "vy", "vz"))},
+    )
 
 
 def initialize_gyromagnetic_state(solver):
@@ -286,139 +291,27 @@ def initialize_gyromagnetic_state(solver):
         state[name].zero_()
 
 
-# --- transverse RF drive gather ----------------------------------------------
-
-
-def _gather_drive(solver, state, hu, hv):
-    """Fill ``hu``/``hv`` with the transverse RF drive from the current lab ``H``.
-
-    Fast path: a single signed component per transverse axis. General path: the
-    projection ``h_u = u . H`` / ``h_v = v . H`` over all three lab components,
-    each truncated to the cell overlap (identity collocation).
-    """
-    if not state["general"]:
-        torch.mul(getattr(solver, state["u_attr"])[state["u_slice"]], state["sign_u"], out=hu)
-        torch.mul(getattr(solver, state["v_attr"])[state["v_slice"]], state["sign_v"], out=hv)
-        return
-    hx = solver.Hx[state["hx_slice"]]
-    hy = solver.Hy[state["hy_slice"]]
-    hz = solver.Hz[state["hz_slice"]]
-    torch.mul(state["ux"], hx, out=hu)
-    hu.addcmul_(state["uy"], hy)
-    hu.addcmul_(state["uz"], hz)
-    torch.mul(state["vx"], hx, out=hv)
-    hv.addcmul_(state["vy"], hy)
-    hv.addcmul_(state["vz"], hz)
-
-
-def _scatter_correction(solver, state):
-    """Apply ``H -= dM/mu_inf`` with the staged ``dm_u``/``dm_v``.
-
-    Fast path: subtract the signed increment from the two driven lab components.
-    General path: scatter ``dM = dm_u u + dm_v v`` onto all three lab components.
-    """
-    inv_mu = state["inv_mu_inf"]
-    dm_u = state["dm_u"]
-    dm_v = state["dm_v"]
-    if not state["general"]:
-        corr_u = state["corr_u"]
-        corr_v = state["corr_v"]
-        torch.mul(dm_u, inv_mu, out=corr_u)
-        torch.mul(dm_v, inv_mu, out=corr_v)
-        corr_u.mul_(state["sign_u"])
-        corr_v.mul_(state["sign_v"])
-        getattr(solver, state["u_attr"])[state["u_slice"]].sub_(corr_u)
-        getattr(solver, state["v_attr"])[state["v_slice"]].sub_(corr_v)
-        return
-    corr_x = state["corr_x"]
-    corr_y = state["corr_y"]
-    corr_z = state["corr_z"]
-    torch.mul(dm_u, state["ux"], out=corr_x)
-    corr_x.addcmul_(dm_v, state["vx"])
-    corr_x.mul_(inv_mu)
-    torch.mul(dm_u, state["uy"], out=corr_y)
-    corr_y.addcmul_(dm_v, state["vy"])
-    corr_y.mul_(inv_mu)
-    torch.mul(dm_u, state["uz"], out=corr_z)
-    corr_z.addcmul_(dm_v, state["vz"])
-    corr_z.mul_(inv_mu)
-    solver.Hx[state["hx_slice"]].sub_(corr_x)
-    solver.Hy[state["hy_slice"]].sub_(corr_y)
-    solver.Hz[state["hz_slice"]].sub_(corr_z)
-
-
-# --- material ADE primitives (pure recurrence, oracle-parity path) -----------
-
-
-def advance_gyromagnetic_state(solver):
-    """Advance the magnetization ADE one step by the pure Cayley recurrence.
-
-    ``m <- Phi m + Gamma h`` at every active cell, with ``h`` the current transverse
-    RF drive (single signed component per axis on the fast path, ``u . H`` / ``v . H``
-    on the general path), then stages ``dm = m_new - m_old``. This is the *material*
-    ADE model, validated against the Phase-0 oracle by the CW-parity gates; the
-    field-coupled forward path uses the passive coupling in
-    :func:`step_gyromagnetic_coupled`, not this explicit recurrence. No host
-    synchronization and no per-step allocation.
-    """
-    if not getattr(solver, "gyromagnetic_enabled", False):
-        return
-    state = solver._gyromagnetic_state
-    hu = state["hu"]
-    hv = state["hv"]
-    _gather_drive(solver, state, hu, hv)
-
-    m_u = state["m_u"]
-    m_v = state["m_v"]
-    new_u = state["new_u"]
-    new_v = state["new_v"]
-    torch.mul(state["phi00"], m_u, out=new_u)
-    new_u.addcmul_(state["phi01"], m_v)
-    new_u.addcmul_(state["gamma00"], hu)
-    new_u.addcmul_(state["gamma01"], hv)
-    torch.mul(state["phi10"], m_u, out=new_v)
-    new_v.addcmul_(state["phi11"], m_v)
-    new_v.addcmul_(state["gamma10"], hu)
-    new_v.addcmul_(state["gamma11"], hv)
-    dm_u = state["dm_u"]
-    dm_v = state["dm_v"]
-    active_f = state["active_f"]
-    torch.sub(new_u, m_u, out=dm_u)
-    torch.sub(new_v, m_v, out=dm_v)
-    dm_u.mul_(active_f)
-    dm_v.mul_(active_f)
-    m_u.add_(dm_u)
-    m_v.add_(dm_v)
-
-
-def apply_gyromagnetic_correction(solver):
-    """Subtract the staged magnetization increment from the field (pure form).
-
-    ``H^{n+1} = H_tmp - dM/mu_inf`` using the ``dm`` staged by
-    :func:`advance_gyromagnetic_state`. Kept as the material-primitive counterpart
-    of the pure recurrence; the real forward path uses
-    :func:`step_gyromagnetic_coupled`. No per-step allocation.
-    """
-    if not getattr(solver, "gyromagnetic_enabled", False):
-        return
-    _scatter_correction(solver, solver._gyromagnetic_state)
-
-
 # --- coupled implicit-midpoint forward path (passive) ------------------------
+
+
+def _drive_frame(state):
+    return state["u_axis"], state["v_axis"], state["sign_u"], state["sign_v"]
 
 
 def snapshot_gyromagnetic_drive(solver):
     """Record the pre-update transverse RF drive (one half of the midpoint average).
 
-    Called before the plain Yee magnetic update overwrites ``H``. Stores the
-    ``H^{n-1/2}`` transverse drive into persistent buffers so the post-update
-    coupled step can form the time-centred drive ``(H_pre + H_tmp)/2``. No per-step
-    allocation.
+    Called before the plain Yee magnetic update overwrites ``H``: stores the
+    ``H^{n-1/2}`` transverse drive (a signed lab component per axis on the fast path,
+    ``u . H`` / ``v . H`` on the general path) of every active cell, so the
+    post-update coupled step can form the time-centred drive ``(H_pre + H_tmp)/2``.
     """
     if not getattr(solver, "gyromagnetic_enabled", False):
         return
     state = solver._gyromagnetic_state
-    _gather_drive(solver, state, state["h_pre_u"], state["h_pre_v"])
+    get_compiled_extension().gyromagnetic_snapshot(
+        solver.Hx, solver.Hy, solver.Hz, state["cells"], state["frame"],
+        state["h_pre_u"], state["h_pre_v"], *_drive_frame(state))
 
 
 def step_gyromagnetic_coupled(solver):
@@ -427,43 +320,13 @@ def step_gyromagnetic_coupled(solver):
     Called after the plain Yee magnetic update (so ``H`` now holds the
     background-only ``H_tmp``). Forms the time-centred drive ``h_pre + h_tmp``,
     solves the coupled system in closed form ``m_new = B m_old + C (h_pre + h_tmp)``,
-    then applies ``H^{n+1} = H_tmp - dM/mu_inf``. Discretely non-growing at zero
-    damping. All updates are in place; no host synchronization, no per-step
-    allocation.
+    stages ``dm = m_new - m_old`` and applies ``H^{n+1} = H_tmp - dM/mu_inf``
+    (``dM = dm_u u + dm_v v``). Discretely non-growing at zero damping.
     """
     if not getattr(solver, "gyromagnetic_enabled", False):
         return
     state = solver._gyromagnetic_state
-    # Time-centred drive sum: h_pre + h_tmp (post-update H), gathered into scratch.
-    hu = state["hu"]
-    hv = state["hv"]
-    _gather_drive(solver, state, hu, hv)
-    hu.add_(state["h_pre_u"])
-    hv.add_(state["h_pre_v"])
-
-    m_u = state["m_u"]
-    m_v = state["m_v"]
-    new_u = state["new_u"]
-    new_v = state["new_v"]
-    # m_new = B @ m_old + C @ (h_pre + h_tmp), staged into scratch in place.
-    torch.mul(state["b00"], m_u, out=new_u)
-    new_u.addcmul_(state["b01"], m_v)
-    new_u.addcmul_(state["c00"], hu)
-    new_u.addcmul_(state["c01"], hv)
-    torch.mul(state["b10"], m_u, out=new_v)
-    new_v.addcmul_(state["b11"], m_v)
-    new_v.addcmul_(state["c10"], hu)
-    new_v.addcmul_(state["c11"], hv)
-
-    dm_u = state["dm_u"]
-    dm_v = state["dm_v"]
-    active_f = state["active_f"]
-    torch.sub(new_u, m_u, out=dm_u)
-    torch.sub(new_v, m_v, out=dm_v)
-    dm_u.mul_(active_f)
-    dm_v.mul_(active_f)
-    m_u.add_(dm_u)
-    m_v.add_(dm_v)
-
-    # Non-reciprocal correction: H^{n+1} = H_tmp - dM/mu_inf.
-    _scatter_correction(solver, state)
+    get_compiled_extension().gyromagnetic_step(
+        solver.Hx, solver.Hy, solver.Hz, state["cells"], state["frame"], state["coupled"],
+        state["inv_mu_inf"], state["h_pre_u"], state["h_pre_v"], state["m_u"], state["m_v"],
+        state["dm_u"], state["dm_v"], *_drive_frame(state))

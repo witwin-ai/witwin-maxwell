@@ -34,31 +34,30 @@ def _build_modulated_slab_scene(*, carrier_frequency, modulation_frequency, ampl
     # (16 cells), so the compact psi layout carries distinct low/high segments on
     # all three axes and the narrow()/offset bookkeeping is genuinely exercised.
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.16, 0.16), (-0.16, 0.16))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.16, 0.16), (-0.16, 0.16))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=(0.0, 0.0, 1.0),
                 source_time=mw.CW(frequency=carrier_frequency, amplitude=amplitude),
                 name="pw",
             )
-        ],
-        structures=[
+            ],
+                structures=[
             mw.Structure(
                 geometry=Box(position=(0.0, 0.0, 0.0), size=(0.24, 0.64, 0.64)),
                 material=mw.Material(
                     eps_r=4.0,
-                    modulation=mw.ModulationSpec(frequency=modulation_frequency, amplitude=0.25),
+                    modulation=mw.media.ModulationSpec(frequency=modulation_frequency, amplitude=0.25),
                 ),
             )
-        ],
-    )
-    scene.add_monitor(
-        mw.FieldTimeMonitor("probe", components=("Ez",), position=(0.42, 0.0, 0.0), interval=1)
-    )
+            ],
+                monitors=(
+            mw.monitors.FieldTimeMonitor("probe", components=("Ez",), position=(0.42, 0.0, 0.0), interval=1),
+            ),
+            )
     return scene
 
 
@@ -66,12 +65,14 @@ def _run(scene, *, memory_mode, time_steps):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        absorber="cpml",
-        cpml_config={"memory_mode": memory_mode},
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            absorber="cpml",
+            cpml=mw.fdtd.CPMLConfig(memory_mode=memory_mode),
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            full_field_dft=False,
+        ),
     ).run()
-    trace = _to_numpy(result.monitor("probe")["field"]).astype(np.float64)
+    trace = _to_numpy(result.monitor("probe").sel(component="Ez").values).astype(np.float64)
     memory = result.solver._cpml_memory_mode
     dt = float(result.solver.dt)
     del result

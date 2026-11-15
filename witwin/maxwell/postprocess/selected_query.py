@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import torch
 
+from ..errors import UnsupportedFeatureError
+
 _COMPONENTS = ('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz')
 
 
@@ -70,7 +72,8 @@ def validate_sampling(result, face, frequency_index):
         or not bool((support[:,face['axis']]==face['normal']).all())):
         raise ValueError('Copper query indices must retain actual integer edge ownership and normal.')
     from ..fdtd.coords import component_coords
-    shape=tuple(len(axis) for axis in component_coords(result.prepared_scene,'E'+'xyz'[face['component']]))
+    shape=tuple(len(axis) for axis in component_coords(result.prepared_scene,'E'+'xyz'[face['component']],
+                                                         device=result.prepared_scene.device))
     if any(bool(((support[:,axis]<0)|(support[:,axis]>=shape[axis])).any()) for axis in range(3)):
         raise ValueError('Copper query support lies outside actual component coordinates.')
     flatten=lambda index:(index[:,0]*shape[1]+index[:,1])*shape[2]+index[:,2]
@@ -211,7 +214,8 @@ def query_selected(result, points, *, components, frequencies, trace_side, owner
     from .yee_interpolation import copper_query_faces, interpolation_stencil
     from ..result import _interpolate_fdtd_component
     if points.requires_grad:
-        raise NotImplementedError('Selected native coordinate or shape gradients are not yet qualified; use fixed query geometry for field/head VJPs.')
+        raise UnsupportedFeatureError('Selected native coordinate or shape gradients are not yet qualified; use fixed query geometry for field/head VJPs.',
+                                      feature="guard:c91a1706", method=None)
     if points.dtype != torch.float64:
         raise ValueError('Selected native geometry currently requires float64 points; default six-field queries retain their existing dtype support.')
     components, indices = selections(result, components, frequencies)
@@ -222,19 +226,24 @@ def query_selected(result, points, *, components, frequencies, trace_side, owner
     stats = result.stats()
     source_representation = stats.get('time_plan', {}).get('source_representation')
     if source_representation == 'analytic_cw':
-        raise NotImplementedError('Selected native analytic complex time-bank queries need separately qualified bank clocks.')
+        raise UnsupportedFeatureError('Selected native analytic complex time-bank queries need separately qualified bank clocks.',
+                                      feature="guard:23391b0c", method=None)
     if source_representation != 'real_projected':
         raise ValueError('Selected native queries require an explicit retained real_projected time representation.')
     if getattr(result.scene, 'coordinates', None) is not None:
-        raise NotImplementedError('Selected native queries in mapped coordinates are not yet qualified.')
+        raise UnsupportedFeatureError('Selected native queries in mapped coordinates are not yet qualified.',
+                                      feature="coordinates", method=None)
     if any(result.scene.boundary.axis_kind(a) in ('periodic','bloch') for a in 'xyz'):
-        raise NotImplementedError('Selected native periodic or Bloch seam queries are not yet qualified.')
+        raise UnsupportedFeatureError('Selected native periodic or Bloch seam queries are not yet qualified.',
+                                      feature="boundary.bloch", method=None)
     if stats.get('normalize_source') is True:
-        raise NotImplementedError('Selected native physical queries do not yet undo recorded source normalization.')
+        raise UnsupportedFeatureError('Selected native physical queries do not yet undo recorded source normalization.',
+                                      feature="guard:fd09347f", method=None)
     if stats.get('normalize_source') is not False:
         raise ValueError('Selected native queries require an explicit retained source-normalization flag.')
     if stats.get('dft_window') in ('hanning','ramp'):
-        raise NotImplementedError('Selected native weighted-window queries need qualified common observer and copper clock records.')
+        raise UnsupportedFeatureError('Selected native weighted-window queries need qualified common observer and copper clock records.',
+                                      feature="guard:12083d9b", method=None)
     if stats.get('dft_window') != 'none':
         raise ValueError('Selected native queries require an explicit recognized retained spectral window.')
     if representation == 'published_native' and (owner is None or trace_side != 'negative'):
@@ -245,7 +254,7 @@ def query_selected(result, points, *, components, frequencies, trace_side, owner
         for component in components:
             if owner is not None and len([face for face in faces if face['name']==owner and component=='E'+'xyz'[face['component']]])!=1:
                 raise ValueError('Each requested copper owner/component must have one unique retained tangential trace.')
-            axes = [torch.as_tensor(axis, device=points.device, dtype=points.dtype) for axis in component_coords(result.prepared_scene, component)]
+            axes = [torch.as_tensor(axis, device=points.device, dtype=points.dtype) for axis in component_coords(result.prepared_scene, component, device=result.prepared_scene.device)]
             stencil = interpolation_stencil(result, points, component, axes, trace_side=trace_side, point_roundoff=point_roundoff, faces=faces)
             owned = torch.zeros(len(points), dtype=torch.bool, device=points.device)
             for locations, weights, overrides in stencil:

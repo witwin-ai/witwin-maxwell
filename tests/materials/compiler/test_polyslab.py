@@ -5,13 +5,13 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_tensors
 
 
-def _build_scene(device="cpu"):
+def _build_scene():
     return mw.Scene(
         domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
         grid=mw.GridSpec.uniform(0.1),
-        device=device,
     )
 
 
@@ -26,16 +26,18 @@ def test_rectangular_polyslab_matches_equivalent_box():
     bounds = (-0.2, 0.2)
 
     box_scene = _build_scene()
-    box_scene.add_structure(
+    box_scene = box_scene.updated(structures=(
+        *box_scene.structures,
         mw.Structure(
             name="box",
             geometry=mw.Box(position=(center[0], center[1], 0.0), size=(2 * half[0], 2 * half[1], bounds[1] - bounds[0])),
             material=mw.Material(eps_r=4.0),
-        )
-    )
+        ),
+    ))
 
     poly_scene = _build_scene()
-    poly_scene.add_structure(
+    poly_scene = poly_scene.updated(structures=(
+        *poly_scene.structures,
         mw.Structure(
             name="poly",
             geometry=mw.PolySlab(
@@ -49,11 +51,11 @@ def test_rectangular_polyslab_matches_equivalent_box():
                 axis="z",
             ),
             material=mw.Material(eps_r=4.0),
-        )
-    )
+        ),
+    ))
 
-    eps_box = prepare_scene(box_scene).permittivity
-    eps_poly = prepare_scene(poly_scene).permittivity
+    eps_box = prepare_scene(box_scene, device="cpu").permittivity
+    eps_poly = prepare_scene(poly_scene, device="cpu").permittivity
 
     assert torch.allclose(eps_poly, eps_box, atol=1.0e-5)
 
@@ -109,7 +111,7 @@ def test_polyslab_axis_permutations_are_consistent():
 
 
 def test_complex_polyslab_bowtie_fills_two_triangles():
-    bowtie = mw.ComplexPolySlab(
+    bowtie = mw.geometry.ComplexPolySlab(
         loops=[[(-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)]],
         bounds=(-0.5, 0.5),
     )
@@ -123,7 +125,7 @@ def test_complex_polyslab_bowtie_fills_two_triangles():
 def test_complex_polyslab_hole_leaves_interior_empty():
     outer = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
     hole = [(-0.4, -0.4), (0.4, -0.4), (0.4, 0.4), (-0.4, 0.4)]
-    slab = mw.ComplexPolySlab(loops=[outer, hole], bounds=(-0.5, 0.5))
+    slab = mw.geometry.ComplexPolySlab(loops=[outer, hole], bounds=(-0.5, 0.5))
 
     assert _scalar_sd(slab, (0.0, 0.0, 0.0)) > 0.0
     assert _scalar_sd(slab, (0.7, 0.0, 0.0)) < 0.0
@@ -131,10 +133,11 @@ def test_complex_polyslab_hole_leaves_interior_empty():
     assert abs(_scalar_sd(slab, (0.4, 0.0, 0.0))) < 1.0e-5
 
     scene = _build_scene()
-    scene.add_structure(
-        mw.Structure(name="ring", geometry=slab, material=mw.Material(eps_r=6.0))
-    )
-    prepared = prepare_scene(scene)
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(name="ring", geometry=slab, material=mw.Material(eps_r=6.0)),
+    ))
+    prepared = prepare_scene(scene, device="cpu")
     x_coords = prepared.X[:, 0, 0]
     hole_i = torch.argmin(x_coords.abs()).item()
     ring_i = torch.argmin((x_coords - 0.7).abs()).item()
@@ -146,24 +149,23 @@ def test_complex_polyslab_hole_leaves_interior_empty():
 
 
 def test_polyslab_compiled_occupancy_propagates_gradients_through_vertices():
-    scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.2),
-        device="cpu",
-    )
     vertices = torch.nn.Parameter(
         torch.tensor([[-0.31, -0.24], [0.29, -0.24], [0.29, 0.26], [-0.31, 0.26]], dtype=torch.float32)
     )
-    scene.add_structure(
-        mw.Structure(
-            name="trainable_slab",
-            geometry=mw.PolySlab(vertices, bounds=(-0.29, 0.28), axis="z"),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
+    scene = mw.Scene(
+                subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.2),
+                structures=(
+            mw.Structure(
+                name="trainable_slab",
+                geometry=mw.PolySlab(vertices, bounds=(-0.29, 0.28), axis="z"),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+            )
 
-    eps_r, mu_r = prepare_scene(scene).compile_material_tensors()
+    eps_r, mu_r = compile_material_tensors(prepare_scene(scene, device="cpu"))
     loss = eps_r.sum() + mu_r.sum()
     loss.backward()
 
@@ -174,8 +176,9 @@ def test_polyslab_compiled_occupancy_propagates_gradients_through_vertices():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the GPU compile smoke test.")
 def test_polyslab_scene_compiles_material_tensors_on_gpu():
-    scene = _build_scene(device="cuda")
-    scene.add_structure(
+    scene = _build_scene()
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="slab",
             geometry=mw.PolySlab(
@@ -185,11 +188,11 @@ def test_polyslab_scene_compiles_material_tensors_on_gpu():
                 sidewall_angle=0.1,
             ),
             material=mw.Material(eps_r=3.0),
-        )
-    )
+        ),
+    ))
 
-    prepared = prepare_scene(scene)
-    eps_r, mu_r = prepared.compile_material_tensors()
+    prepared = prepare_scene(scene, device="cuda")
+    eps_r, mu_r = compile_material_tensors(prepared)
 
     assert eps_r.device.type == "cuda"
     assert mu_r.device.type == "cuda"

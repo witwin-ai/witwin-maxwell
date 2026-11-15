@@ -6,12 +6,14 @@ import math
 import torch
 
 from .media import Material, _coerce_frequency_range
+from ._stability import experimental
 
 
 MU_0 = 1.25663706212e-6
 EPSILON_0 = 8.8541878128e-12
 
 
+@experimental("pcb")
 class CopperFoil(Material):
     """A finite conductive thickness represented on a zero-thickness support.
 

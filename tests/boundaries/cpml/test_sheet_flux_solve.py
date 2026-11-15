@@ -26,42 +26,43 @@ def _incidence(runtime, solver):
 
 
 def _check_flux(B, plan, forcing):
-    reference = lsqr(B, forcing.numpy(), atol=1e-15, btol=1e-15, iter_lim=4*B.shape[1])[0]
+    host = forcing.cpu().numpy()
+    reference = lsqr(B, host, atol=1e-15, btol=1e-15, iter_lim=4*B.shape[1])[0]
     actual = _sheet_flux(plan, forcing)
-    error = np.max(np.abs(actual.numpy()-reference))
+    error = np.max(np.abs(actual.cpu().numpy()-reference))
     scale = np.max(np.abs(reference))
     assert error <= 1e-12*scale
     assert all(torch.equal(actual, _sheet_flux(plan, forcing)) for _ in range(3))
-    residual = np.linalg.norm(B@reference-forcing.numpy())/np.linalg.norm(forcing.numpy())
+    residual = np.linalg.norm(B@reference-host)/np.linalg.norm(host)
     return residual, error/scale
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("case", ["patch", "cavity", "mixed", "closed"])
 def test_midrun_flux_and_energy_match_lsqr(case):
     if case == "patch":
         spec = {**SCENARIOS["copper_patch"], "cell": .004}
-        scene = _scene(spec, True, device="cpu").clone(boundary=mw.BoundarySpec.pec())
+        scene = _scene(spec, True).updated(boundary=mw.BoundarySpec.pec())
     elif case == "cavity":
-        scene = cavity._cavity(cavity._plate(mw.CopperFoil(
+        scene = cavity._cavity(cavity._plate(mw.media.CopperFoil(
             thickness=2e-6, frequency_range=(.5e9, 4e9))))
     elif case == "closed":
-        scene = prism_scene(mw.CopperFoil(thickness=2e-6, frequency_range=(.5e9, 4e9)),
+        scene = prism_scene(mw.media.CopperFoil(thickness=2e-6, frequency_range=(.5e9, 4e9)),
                             side_cells=6)
     else:
         scene = _mixed_copper_scene(mw.BoundarySpec.pec())
-    solver = mw.Simulation.fdtd(scene, frequency=2e9, backend="cpu_reference",
-                                run_time=mw.TimeConfig(time_steps=80)).prepare().solver
+    solver = mw.Simulation.fdtd(scene, frequencies=2e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=80))).prepare().solver
     runtime = solver._thin_sheets[0]
     runtime.ensure_energy(solver)
     p = runtime.energy
     B = _incidence(runtime, solver)
     factor = _sheet_flux_factor(B)
     assert factor["rank"] == np.linalg.matrix_rank(B.toarray())
-    generator = torch.Generator().manual_seed(901)
+    generator = torch.Generator(device=solver.device).manual_seed(901)
     for name in ("Ex", "Ey", "Ez"):
         getattr(solver, name).normal_(generator=generator)
     runtime.scatter(solver, runtime.plan_all_e, runtime.e_extra,
-                    torch.zeros(runtime.plan_all_e["size"], dtype=torch.float64))
+                    torch.zeros(runtime.plan_all_e["size"], dtype=torch.float64, device=solver.device))
     enforce_pec_boundaries(solver)
     for entry in solver._copper_foils:
         entry["right_e"].copy_(getattr(solver, entry["electric_name"])[entry["index"]])

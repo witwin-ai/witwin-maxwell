@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+import fcntl
+import subprocess
 
 from benchmark.models import ScenarioMetrics
-from benchmark.paths import RESULTS_MD, scenario_path_parts
+from benchmark.paths import ROOT, RESULTS_MD, scenario_path_parts
+from benchmark.status import STATUS_CLASSES, classify_row, load_suite_limits
 
 
 TABLE_HEADER = (
@@ -13,6 +16,15 @@ TABLE_HEADER = (
     "Flux 2x-runtime change | "
     "Maxwell time (s) [smaller] | ms/step | steps/s | DFT samples | "
     "Peak GPU (MiB) | Reference cache | Updated |"
+)
+STATUS_HEADER = "## Row status"
+STATUS_TABLE_HEADER = "| Scenario | Status | Scorer outcome | Commit | Basis |"
+# Sections other writers own (RF, antenna and SAR harnesses); kept verbatim on rewrite.
+FOREIGN_SECTION_HEADERS = (
+    "## RF wave-level validation",
+    "## Antenna wave-level validation",
+    "## RF / antenna external reference generation",
+    "## SAR exposure validation",
 )
 TABLE_SEPARATOR = (
     "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | "
@@ -29,19 +41,24 @@ def _display_path(path):
 
 def _parse_existing_results():
     if not RESULTS_MD.exists():
-        return {}, {}, {}, {}
+        return {}, {}, {}, {}, {}
 
     rows = {}
     plots = {}
     scalar_rows = {}
     frequency_rows = {}
+    row_commits = {}
     lines = RESULTS_MD.read_text(encoding="utf-8").splitlines()
     in_table = False
     in_plots = False
     in_scalars = False
     in_frequencies = False
+    in_status = False
     for line in lines:
         stripped = line.strip()
+        if stripped.startswith("## "):
+            in_table = in_plots = in_scalars = in_frequencies = False
+            in_status = stripped == STATUS_HEADER
         if stripped.startswith("| Scenario | Description | Field monitor | Component |"):
             in_table = True
             in_plots = False
@@ -66,6 +83,11 @@ def _parse_existing_results():
             in_scalars = False
             in_frequencies = True
             continue
+        if in_status and stripped.startswith("|") and not stripped.startswith(("| ---", "| Scenario")):
+            parts = [part.strip() for part in stripped.strip("|").split("|")]
+            if len(parts) >= 5:
+                row_commits[parts[0]] = parts[3]
+            continue
         if in_table:
             if not stripped.startswith("|") or stripped.startswith("| ---"):
                 continue
@@ -89,7 +111,70 @@ def _parse_existing_results():
                 parts.append("-")
             if len(parts) == 7 and parts[0] != "Scenario":
                 frequency_rows[(parts[0], parts[1])] = parts
-    return rows, plots, scalar_rows, frequency_rows
+    return rows, plots, scalar_rows, frequency_rows, row_commits
+
+
+def _source_commit() -> str:
+    """The witwin-maxwell commit that produced a row; ``+dirty`` marks tracked edits."""
+    try:
+        sha = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"], cwd=ROOT, capture_output=True,
+                             text=True, check=True).stdout.strip()
+        # Generated outputs (this file and the plots) do not make the producing code dirty.
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no", "--", "witwin", "benchmark",
+                                ":(exclude)benchmark/RESULTS.md", ":(exclude)benchmark/plots"],
+                               cwd=ROOT.parent, capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return sha + ("+dirty" if dirty else "")
+
+
+def _foreign_sections(previous: str) -> list[str]:
+    sections = []
+    for header in FOREIGN_SECTION_HEADERS:
+        start = previous.find("\n" + header + "\n")
+        if start == -1:
+            continue
+        body = previous[start + 1:]
+        ends = [index for index in (body.find("\n## ", 1), body.find("\n<!-- batch-", 1)) if index != -1]
+        sections.append(body[:min(ends)] if ends else body)
+    return [section.rstrip() + "\n" for section in sections]
+
+
+def _status_lines(merged_rows: dict, row_commits: dict, scalar_rows: dict) -> list[str]:
+    limits = load_suite_limits()
+    classified = {
+        name: classify_row(row, limits, [scalar for key, scalar in scalar_rows.items() if key[0] == name])
+        for name, row in merged_rows.items()
+    }
+    counts = {status: 0 for status in STATUS_CLASSES}
+    for status, _, _ in classified.values():
+        counts[status] = counts.get(status, 0) + 1
+    lines = [
+        STATUS_HEADER,
+        "",
+        "Each row is classified against the benchmark suite of `scripts/dev/integration_suites.toml` "
+        "(global limits, scenario sentinel limits, investigation and quarantine tables); the classes "
+        "never change a limit. `Scorer outcome` is the integration-batch verdict for the aggregate row "
+        "(PASS, FAIL, or SKIP when a metric is unconverged or quarantined). (i) passes every global "
+        "limit; (ii) passes only through a scenario-specific sentinel limit, named with its reason; "
+        "(iii) has an unconverged or quarantined metric, which is not scored; (iv) is a known-open "
+        "residual under investigation; (v) differs from the reference by a documented reference "
+        "convention. `fail, no waiver` rows fail a converged metric with none of these reasons. "
+        "`Commit` is the witwin-maxwell commit that produced the row.",
+        "",
+        "| Status | Rows |",
+        "| --- | ---: |",
+        *(f"| {status} | {count} |" for status, count in counts.items()),
+        "",
+        STATUS_TABLE_HEADER,
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for name in sorted(classified):
+        status, outcome, basis = classified[name]
+        basis = basis.replace("|", "\\|") or "-"
+        lines.append(f"| {name} | {status} | {outcome} | {row_commits.get(name, 'unknown')} | {basis} |")
+    lines.append("")
+    return lines
 
 
 def _format_complex(value: object) -> str:
@@ -147,21 +232,32 @@ def _missing_scenario_lines(merged_rows: dict) -> list[str]:
 
 
 def write_results_markdown(results: list[ScenarioMetrics]) -> None:
+    """Merge ``results`` into RESULTS.md; concurrent benchmark processes serialize on a lock file."""
+    lock_path = RESULTS_MD.with_name(RESULTS_MD.name + ".lock")
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _write_results_markdown(results)
+
+
+def _write_results_markdown(results: list[ScenarioMetrics]) -> None:
     import re
 
     previous = RESULTS_MD.read_text(encoding="utf-8") if RESULTS_MD.exists() else ""
     batch_sections = [match.group(0) for match in re.finditer(
         r"<!-- (batch-[\w-]+):begin -->.*?<!-- \1:end -->", previous, flags=re.DOTALL
     )]
-    existing_rows, existing_plots, existing_scalar_rows, existing_frequency_rows = (
+    existing_rows, existing_plots, existing_scalar_rows, existing_frequency_rows, row_commits = (
         _parse_existing_results()
     )
+    foreign_sections = _foreign_sections(previous)
+    commit = _source_commit()
     merged_rows = dict(existing_rows)
     merged_plots = dict(existing_plots)
     merged_scalar_rows = dict(existing_scalar_rows)
     merged_frequency_rows = dict(existing_frequency_rows)
 
     for result in results:
+        row_commits[result.name] = commit
         merged_scalar_rows = {
             key: row for key, row in merged_scalar_rows.items() if key[0] != result.name
         }
@@ -174,7 +270,10 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
         flux_change_text = (
             "-" if result.flux_runtime_change is None else f"{result.flux_runtime_change:.4e}"
         )
-        field_status = " (unconverged)" if result.field_converged is False else ""
+        field_status = (
+            " (not scored)" if not result.fields_scored
+            else " (unconverged)" if result.field_converged is False else ""
+        )
         field_change_text = (
             "-" if result.field_runtime_change is None else f"{result.field_runtime_change:.4e}"
         )
@@ -258,7 +357,8 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
     lines = [
         "# Benchmark Results",
         "",
-        "This file is auto-generated by `python -m benchmark`.",
+        "This file is auto-generated by `python -m benchmark`. Last written at witwin-maxwell "
+        f"commit `{commit}`; the `Row status` section records the commit of every row.",
         "",
         "## Metric Guide",
         "",
@@ -269,7 +369,8 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
         "- `Field 2x-runtime change`: `||F_2x - F_1x||_2 / ||F_1x||_2` for the complex display monitor/component across all frequencies, without phase or amplitude alignment. Changes above `1e-2` (1%) mark field metrics `unconverged`, excluded from field pass/fail counts and summaries (including per-frequency metrics).",
         "- `Energy ratio`: weighted Maxwell/reference electric-field norm ratio for vector comparisons; unity is ideal.",
         "- `Flux err [smaller, <5e-2]`: smaller is better; below `5e-2` is a strong flux match. Flux metrics marked `unconverged` are excluded from flux pass/fail independently of field convergence.",
-        "- `Flux 2x-runtime change`: maximum `abs(P_2x - P_1x) / abs(P_1x)` over flux monitors and frequencies; changes above `1e-2` (1%) are unconverged.",
+        "- `Flux 2x-runtime change`: maximum `abs(P_2x - P_1x) / abs(P_1x)` over flux monitors and frequencies; changes above `1e-2` (1%) are unconverged. Rows whose monitored flux is null by construction (`tfsf_vacuum`, `pml_slab_through`, `pec_box`) divide by the incident power instead, the scale of their flux error.",
+        "- `(not scored)`: the display field of an undamped closed cavity never settles, so its field metrics are diagnostics only. Those rows are scored on the resonance frequency, fitted with the finite-record DFT kernel: `resonance_frequency` against the reference, `resonance_frequency_discrete_analytic` against the discrete Yee eigenfrequency (the reference column holds the analytic value) and `resonance_frequency_runtime` for the 2T against the T estimate (the reference column holds the T estimate).",
         "- Both runtime checks share one doubled-duration FDTD rerun. `-` means no applicable comparison or no convergence measurement; `WITWIN_BENCHMARK_SKIP_CONVERGENCE=1` skips both checks.",
         "- `Complex err`: symmetric complex relative error; it remains finite for near-zero S-parameters.",
         "- `Phase err`: wrapped phase difference in radians; omitted when either magnitude is numerically zero.",
@@ -292,6 +393,8 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
         for _, row in group_rows:
             lines.append("| " + " | ".join(row) + " |")
         lines.append("")
+
+    lines.extend(_status_lines(merged_rows, row_commits, merged_scalar_rows))
 
     lines.extend(["## Plot Files", ""])
     for group_name, group_plots in _grouped_items(merged_plots).items():
@@ -339,6 +442,8 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
     )
     if batch_sections:
         lines.extend(["", *batch_sections, ""])
+    if foreign_sections:
+        lines.extend(["", *foreign_sections])
     RESULTS_MD.write_text("\n".join(lines), encoding="utf-8")
 
 

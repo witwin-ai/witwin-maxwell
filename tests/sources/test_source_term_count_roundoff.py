@@ -16,7 +16,7 @@ def _scene(length, source):
     return mw.Scene(
         domain=mw.Domain(bounds=((-length, length),) * 3),
         grid=mw.GridSpec.uniform(.1 * length), boundary=mw.BoundarySpec.none(),
-        sources=[source], device="cuda",
+        sources=[source],
     )
 
 
@@ -45,7 +45,7 @@ def test_plane_wave_tfsf_term_counts(length, case, expected):
         source_time=mw.CW(frequency=C_0 / (1.55 * length)),
         injection=mw.TFSF(bounds=((- .4 * length, .4 * length),) * 3), name="incident",
     )
-    solver = mw.Simulation.fdtd(_scene(length, source), frequency=source.source_time.frequency).prepare().solver
+    solver = mw.Simulation.fdtd(_scene(length, source), frequencies=source.source_time.frequency).prepare().solver
     state = solver._tfsf_state
     # Each nonzero incident component contributes on four faces: H_z, and E_x/E_y
     # for oblique incidence; H_z and E_y for its axis-aligned twin.
@@ -76,11 +76,14 @@ def test_mode_source_cross_product_term_counts(length, residual, expected, monke
         source_time=mw.CW(frequency=C_0 / (1.55 * length)), name="guided",
     )
     scene = _scene(length, source)
-    scene.add_structure(mw.Structure(
-        mw.Box(position=(0., 0., 0.), size=(2 * length, .45 * length, .25 * length)),
-        mw.Material(eps_r=12.11), name="guide",
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(
+            mw.Box(position=(0., 0., 0.), size=(2 * length, .45 * length, .25 * length)),
+            mw.Material(eps_r=12.11), name="guide",
+        ),
     ))
-    solver = mw.Simulation.fdtd(scene, frequency=source.source_time.frequency).prepare().solver
+    solver = mw.Simulation.fdtd(scene, frequencies=source.source_time.frequency).prepare().solver
     assert str(solver._compiled_sources[0]["mode_solver_kind"]).startswith("scalar")
     # The original 1e-12 floors keep H_z -> E_y and E_y -> H_z, plus
     # H_y -> E_z and E_z -> H_y only for deliberate weak polarization.
@@ -105,11 +108,11 @@ def test_custom_current_keeps_weak_component_and_baseline_patches(length):
     coords = [-.4 * length, 0., .4 * length]
     components = {name: torch.full((3, 3, 3), value, dtype=torch.float64).numpy()
                   for name, value in {"Jx": 1., "Jy": 1e-6, "Jz": 0.}.items()}
-    source = mw.CustomCurrentSource(
-        mw.CurrentDataset((coords,) * 3, components),
+    source = mw.sources.CustomCurrentSource(
+        mw.sources.CurrentDataset((coords,) * 3, components),
         source_time=mw.CW(frequency=C_0 / (1.55 * length)), name="currents",
     )
-    solver = mw.Simulation.fdtd(_scene(length, source), frequency=source.source_time.frequency).prepare().solver
+    solver = mw.Simulation.fdtd(_scene(length, source), frequencies=source.source_time.frequency).prepare().solver
     # The original 1e-30 floor retains Jx and Jy, with no magnetic current.
     assert (len(solver._source_terms), len(solver._magnetic_source_terms)) == (2, 0)
     assert [term["field_name"] for term in solver._source_terms] == ["Ex", "Ey"]

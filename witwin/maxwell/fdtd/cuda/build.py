@@ -6,11 +6,12 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 import torch
 from torch.utils.cpp_extension import load
 
-STABLE_ABI_VERSION = "stable_abi_v13"
+STABLE_ABI_VERSION = "stable_abi_v17"
 _REQUIRED_STABLE_OPS = (
     "trilinear_border_forward",
     "trilinear_border_entries",
@@ -19,12 +20,6 @@ _REQUIRED_STABLE_OPS = (
     "accumulate_point_observers_indexed",
     "seed_inject_point",
     "accumulate_tfsf_sample_adjoint",
-    "update_magnetic_hx_standard_bounded",
-    "update_magnetic_hy_standard_bounded",
-    "update_magnetic_hz_standard_bounded",
-    "update_electric_ex_standard_bounded",
-    "update_electric_ey_standard_bounded",
-    "update_electric_ez_standard_bounded",
     "sample_wire_emf",
     "update_wire_state",
     "deposit_wire_current",
@@ -43,6 +38,8 @@ _REQUIRED_STABLE_OPS = (
     "thin_sheet_chord_initialize",
     "thin_sheet_chord_matvec",
     "thin_sheet_chord_direction",
+    "gyromagnetic_snapshot",
+    "gyromagnetic_step",
 )
 
 
@@ -202,25 +199,15 @@ def extension_suffix() -> str:
     return ".pyd" if os.name == "nt" else ".so"
 
 
-def prebuilt_extension_path() -> Path:
-    return prebuilt_root() / f"witwin_maxwell_fdtd_cuda{extension_suffix()}"
-
-
-def prebuilt_abi_marker_path(library_path: Path | None = None) -> Path:
-    selected = prebuilt_extension_path() if library_path is None else Path(library_path)
-    return selected.with_suffix(f"{selected.suffix}.abi")
-
-
 def extension_sources() -> list[Path]:
     root = source_root()
     return [
         root / "extension.cpp",
         root / "kernels" / "common.cu",
-        root / "kernels" / "magnetic.cu",
         root / "kernels" / "electric.cu",
         root / "kernels" / "boundary.cu",
-        root / "kernels" / "projection.cu",
         root / "kernels" / "aniso.cu",
+        root / "kernels" / "gyromagnetic.cu",
         root / "kernels" / "dispersive.cu",
         root / "kernels" / "sources.cu",
         root / "kernels" / "spectral.cu",
@@ -231,6 +218,49 @@ def extension_sources() -> list[Path]:
         root / "kernels" / "adjoint.cu",
         root / "kernels" / "trilinear.cu",
     ]
+
+
+class NativeLibrary(NamedTuple):
+    """One packaged native library: file stem and torch.ops namespace, ABI marker, sources."""
+
+    name: str
+    abi: str
+    root: Path
+    sources: tuple[str, ...]
+    required_ops: tuple[str, ...]
+    subdirectory: str = ""
+    cuda_flags: tuple[str, ...] = ()
+
+
+MAIN = NativeLibrary(
+    "witwin_maxwell_fdtd_cuda", STABLE_ABI_VERSION, source_root(),
+    tuple(str(path.relative_to(source_root())) for path in extension_sources()),
+    _REQUIRED_STABLE_OPS,
+)
+CORE = NativeLibrary(
+    "witwin_maxwell_fdtd_core", "core_abi_v15", source_root() / "core",
+    ("binding.cpp", "yee.cu", "step.cu", "observers.cu"),
+    ("core_launch", "core_step_launch", "core_observer_gather", "launch", "compile_delayed", "release"),
+    subdirectory="core",
+)
+SETUP = NativeLibrary(
+    "witwin_maxwell_setup", "setup_abi_v7", source_root().parents[1] / "compiler" / "accel" / "cuda",
+    ("binding.cpp", "setup.cu", "poles.cu", "subpixel.cu", "coefficients.cu", "tables.cu", "mesh.cu", "bvh.cu"),
+    ("sample", "poles", "distance", "polygon_distance", "coverage", "conductor_edges",
+     "bulk", "window", "reconstruct", "coefficients", "hash", "gather", "remap",
+     "mesh_keys", "mesh_topology", "mesh_bounds", "mesh_distance"),
+    subdirectory="setup", cuda_flags=("--fmad=false",),
+)
+LIBRARIES = (MAIN, CORE, SETUP)
+
+
+def prebuilt_extension_path(library=MAIN) -> Path:
+    return prebuilt_root() / f"{library.name}{extension_suffix()}"
+
+
+def prebuilt_abi_marker_path(library_path: Path | None = None, library=MAIN) -> Path:
+    selected = prebuilt_extension_path(library) if library_path is None else Path(library_path)
+    return selected.with_suffix(f"{selected.suffix}.abi")
 
 
 def _cuda_gencode_flags() -> list[str]:
@@ -267,46 +297,49 @@ def _conda_torch_ldflags() -> list[str]:
 class _StableOpsModule:
     """Attribute-compatible view of the dispatcher operators."""
 
-    def __init__(self, library_path: Path) -> None:
+    def __init__(self, library_path: Path, namespace: str) -> None:
+        # Only strings live on the instance, so copy/deepcopy of solvers that hold
+        # this view behave as plain-attribute copies.
         self.__file__ = str(library_path)
+        self._namespace = namespace
 
     def is_available(self) -> bool:
         return bool(torch.cuda.is_available())
 
-    def debug_linear_indices(self, shape):
-        size_x, size_y, size_z = (int(value) for value in shape)
-        return torch.ops.witwin_maxwell_fdtd_cuda.debug_linear_indices(size_x, size_y, size_z)
-
     def __getattr__(self, name: str):
-        return getattr(torch.ops.witwin_maxwell_fdtd_cuda, name)
+        # copy.copy builds the instance without __init__ and probes dunders before
+        # restoring __dict__; resolving them would recurse through _namespace.
+        if name.startswith("__") or "_namespace" not in self.__dict__:
+            raise AttributeError(name)
+        return getattr(getattr(torch.ops, self._namespace), name)
 
 
-def _load_extension_file(library_path: Path) -> _StableOpsModule:
+def _load_extension_file(library_path: Path, library=MAIN) -> _StableOpsModule:
     torch.ops.load_library(str(library_path))
-    namespace = torch.ops.witwin_maxwell_fdtd_cuda
-    if any(not hasattr(namespace, name) for name in _REQUIRED_STABLE_OPS):
+    namespace = getattr(torch.ops, library.name)
+    if any(not hasattr(namespace, name) for name in library.required_ops):
         raise ImportError(f"{library_path} does not register the Stable ABI Maxwell operators.")
-    return _StableOpsModule(library_path)
+    return _StableOpsModule(library_path, library.name)
 
 
-def _load_packaged_prebuilt_extension():
-    module_path = prebuilt_extension_path()
+def _load_packaged_prebuilt_extension(library=MAIN):
+    module_path = prebuilt_extension_path(library)
     if not module_path.exists():
         return None
-    marker_path = prebuilt_abi_marker_path(module_path)
+    marker_path = prebuilt_abi_marker_path(module_path, library)
     if not marker_path.exists():
         return None
-    if marker_path.read_text(encoding="utf-8").strip() != STABLE_ABI_VERSION:
+    if marker_path.read_text(encoding="utf-8").strip() != library.abi:
         return None
-    return _load_extension_file(module_path)
+    return _load_extension_file(module_path, library)
 
 
-def _load_prebuilt_extension(build_directory: Path):
+def _load_prebuilt_extension(build_directory: Path, library=MAIN):
     # Profilers such as Nsight Systems break torch's MSVC detection in child
     # processes, which rewrites build.ninja and forces a rebuild that then
     # fails under the profiler. Loading the already-built module directly
     # avoids invoking the build toolchain entirely.
-    module_path = build_directory / f"witwin_maxwell_fdtd_cuda{extension_suffix()}"
+    module_path = build_directory / f"{library.name}{extension_suffix()}"
     if not module_path.exists():
         raise FileNotFoundError(
             f"WITWIN_MAXWELL_FDTD_CUDA_PREBUILT=1 but {module_path} does not exist; "
@@ -314,49 +347,50 @@ def _load_prebuilt_extension(build_directory: Path):
         )
     # A binary from another ABI registers operators with mismatched schemas;
     # loading it would silently pair stale kernels with current Python bindings.
-    marker_path = prebuilt_abi_marker_path(module_path)
+    marker_path = prebuilt_abi_marker_path(module_path, library)
     found = marker_path.read_text(encoding="utf-8").strip() if marker_path.exists() else None
-    if found != STABLE_ABI_VERSION:
+    if found != library.abi:
         raise ImportError(
             f"WITWIN_MAXWELL_FDTD_CUDA_PREBUILT=1 but {module_path} has ABI marker "
-            f"{found!r} at {marker_path}, expected {STABLE_ABI_VERSION!r}; rebuild it with "
+            f"{found!r} at {marker_path}, expected {library.abi!r}; rebuild it with "
             "a normal (non-prebuilt) run of this source tree."
         )
-    return _load_extension_file(module_path)
+    return _load_extension_file(module_path, library)
 
 
-def build_extension(*, verbose: bool = False):
+def build_extension(*, verbose: bool = False, library=MAIN):
     root = source_root()
-    default_build_directory = Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda" / STABLE_ABI_VERSION
-    build_directory = Path(os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR", default_build_directory))
+    default_build_directory = Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda" / library.abi
+    build_directory = Path(os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR", default_build_directory)) / library.subdirectory
     if os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_SKIP_PREBUILT") != "1":
         # Missing or stale markers are rejected before loading the library so a
         # JIT rebuild remains safe. A matching marker is an ABI promise: if
         # loading or probing that binary fails, propagate the error instead of
         # trying to register the same dispatcher namespace again in-process.
-        module = _load_packaged_prebuilt_extension()
+        module = _load_packaged_prebuilt_extension(library)
         if module is not None:
             return module
     if os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_PREBUILT") == "1":
-        return _load_prebuilt_extension(build_directory)
+        return _load_prebuilt_extension(build_directory, library)
     _ensure_windows_build_tools_on_path()
     _ensure_cuda_home_from_nvcc()
     build_directory.mkdir(parents=True, exist_ok=True)
     library_path = load(
-        name="witwin_maxwell_fdtd_cuda",
-        sources=[str(path) for path in extension_sources()],
+        name=library.name,
+        sources=[str(library.root / name) for name in library.sources],
         build_directory=str(build_directory),
-        extra_include_paths=[str(root), str(root / "kernels")],
+        extra_include_paths=[str(library.root), str(root), str(root / "kernels")],
         extra_cflags=(
-            ["/O2", "/DTORCH_TARGET_VERSION=0x020a000000000000"]
+            ["/O2", "/DTORCH_TARGET_VERSION=0x020a000000000000", "/DUSE_CUDA"]
             if os.name == "nt"
-            else ["-O3", "-DTORCH_TARGET_VERSION=0x020a000000000000"]
+            else ["-O3", "-DTORCH_TARGET_VERSION=0x020a000000000000", "-DUSE_CUDA"]
         ),
         extra_cuda_cflags=[
             "-O3",
             "-DTORCH_TARGET_VERSION=0x020a000000000000",
             "-DUSE_CUDA",
             *_cuda_gencode_flags(),
+            *library.cuda_flags,
         ],
         extra_ldflags=_conda_torch_ldflags(),
         is_python_module=False,
@@ -364,5 +398,5 @@ def build_extension(*, verbose: bool = False):
     )
     # Mark every JIT build directory, including an overridden one, so a later
     # prebuilt load can verify which ABI produced the library.
-    prebuilt_abi_marker_path(Path(library_path)).write_text(f"{STABLE_ABI_VERSION}\n", encoding="utf-8")
-    return _StableOpsModule(Path(library_path))
+    prebuilt_abi_marker_path(Path(library_path), library).write_text(f"{library.abi}\n", encoding="utf-8")
+    return _StableOpsModule(Path(library_path), library.name)

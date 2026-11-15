@@ -7,6 +7,7 @@ import witwin.maxwell as mw
 from witwin.maxwell.compiler.array import validate_array_superposition
 from witwin.maxwell.array import ARRAY_ACCEPTANCE_BUDGET
 from witwin.maxwell.network_sweep import resolve_network_run_manifest
+from witwin.maxwell.compiler import compile_array_monitors
 
 
 def _basis(*, device="cpu", complex_z0=False, dtype=torch.complex128):
@@ -25,7 +26,7 @@ def _basis(*, device="cpu", complex_z0=False, dtype=torch.complex128):
         device=device,
         dtype=dtype,
     )
-    network = mw.NetworkData(
+    network = mw.rf.NetworkData(
         frequencies=frequencies,
         s=scattering,
         z0=z0,
@@ -39,7 +40,7 @@ def _basis(*, device="cpu", complex_z0=False, dtype=torch.complex128):
     e_theta = torch.stack((element_1, element_2), dim=0)[None].expand(2, -1, -1, -1).clone()
     e_theta[1] *= torch.exp(torch.tensor(0.15j, device=device, dtype=dtype))
     e_phi = 0.25j * torch.flip(e_theta, dims=(-1,))
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies,
         port_names=("p1", "p2"),
         theta=theta,
@@ -50,7 +51,7 @@ def _basis(*, device="cpu", complex_z0=False, dtype=torch.complex128):
         frame=torch.eye(3, device=device, dtype=real_dtype),
         phase_center_source="array_aabb",
     )
-    return mw.ArrayBasisData(
+    return mw.antenna.ArrayBasisData(
         network=network,
         embedded_patterns=patterns,
         fingerprint="analytic-two-port",
@@ -125,7 +126,7 @@ def test_radiated_power_operator_rejects_non_hermitian_matrix():
     hermitian = torch.eye(port_count, dtype=basis.dtype).expand(
         frequency_count, port_count, port_count
     ).clone()
-    mw.ArrayBasisData(
+    mw.antenna.ArrayBasisData(
         network=basis.network,
         embedded_patterns=basis.eep,
         fingerprint="hermitian-q-rad",
@@ -135,7 +136,7 @@ def test_radiated_power_operator_rejects_non_hermitian_matrix():
     skewed = hermitian.clone()
     skewed[0, 0, 1] = skewed[0, 0, 1] + 0.5j
     with pytest.raises(ValueError, match="Hermitian"):
-        mw.ArrayBasisData(
+        mw.antenna.ArrayBasisData(
             network=basis.network,
             embedded_patterns=basis.eep,
             fingerprint="non-hermitian-q-rad",
@@ -192,7 +193,7 @@ def test_closed_surface_power_operator_controls_absolute_radiated_power():
         ],
         dtype=torch.complex128,
     )
-    basis = mw.ArrayBasisData(
+    basis = mw.antenna.ArrayBasisData(
         network=base.network,
         embedded_patterns=base.eep,
         fingerprint=base.fingerprint,
@@ -232,14 +233,14 @@ def test_two_hertzian_dipoles_match_pointwise_array_formula():
     ]
     e_theta = torch.stack(columns, dim=0)[None]
     e_phi = torch.zeros_like(e_theta)
-    basis = mw.ArrayBasisData(
-        network=mw.NetworkData(
+    basis = mw.antenna.ArrayBasisData(
+        network=mw.rf.NetworkData(
             frequencies=frequency,
             s=torch.zeros((1, 2, 2), dtype=torch.complex128, device=device),
             z0=50.0,
             port_names=("left", "right"),
         ),
-        embedded_patterns=mw.EmbeddedElementPatternData(
+        embedded_patterns=mw.antenna.EmbeddedElementPatternData(
             frequencies=frequency,
             port_names=("left", "right"),
             theta=theta,
@@ -294,13 +295,13 @@ def test_zero_incident_port_returns_mask_and_nan_active_quantities():
 
 def test_dark_fully_reflected_beam_preserves_defined_results_and_masks_metrics():
     basis = _basis()
-    reflective_network = mw.NetworkData(
+    reflective_network = mw.rf.NetworkData(
         frequencies=basis.frequencies,
         s=torch.eye(2, dtype=torch.complex128)[None].expand(2, -1, -1).clone(),
         z0=basis.network.z0,
         port_names=basis.port_names,
     )
-    zero_patterns = mw.EmbeddedElementPatternData(
+    zero_patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=basis.frequencies,
         port_names=basis.port_names,
         theta=basis.eep.theta,
@@ -310,7 +311,7 @@ def test_dark_fully_reflected_beam_preserves_defined_results_and_masks_metrics()
         phase_center=basis.eep.phase_center,
         frame=basis.eep.frame,
     )
-    dark_basis = mw.ArrayBasisData(
+    dark_basis = mw.antenna.ArrayBasisData(
         network=reflective_network,
         embedded_patterns=zero_patterns,
         fingerprint="dark-reflective",
@@ -409,7 +410,7 @@ def _port(name, *, x=0.0, reference_impedance=50.0):
 
 
 def test_scene_compile_array_monitors_freezes_port_order_grid_and_phase_center():
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(0.8, 0.8, 0.8),
@@ -427,12 +428,11 @@ def test_scene_compile_array_monitors_freezes_port_order_grid_and_phase_center()
                 material=mw.Material(eps_r=2.0),
             ),
         ),
-        device="cpu",
     )
     theta = torch.linspace(0.0, math.pi, 7)
     phi = torch.linspace(0.0, 2.0 * math.pi, 11)
 
-    (request,) = scene.compile_array_monitors(monitor="nf2ff", theta=theta, phi=phi)
+    (request,) = compile_array_monitors(scene, monitor="nf2ff", theta=theta, phi=phi, device="cpu")
 
     assert request.port_names == ("p1", "p2")
     assert request.phase_center_source == "array_aabb"
@@ -440,18 +440,18 @@ def test_scene_compile_array_monitors_freezes_port_order_grid_and_phase_center()
     assert request.theta.shape == (7, 11)
     assert len(request.monitor_faces) == 6
     with pytest.raises(ValueError, match="exactly match"):
-        scene.compile_array_monitors(monitor="nf2ff", frequencies=(1.1e9,))
+        compile_array_monitors(scene, monitor="nf2ff", frequencies=(1.1e9,), device="cpu")
     with pytest.raises(TypeError, match="configuration tensors must use dtype"):
-        scene.compile_array_monitors(
+        compile_array_monitors(scene,
             monitor="nf2ff",
             theta=theta,
             phi=phi,
-            dtype=torch.float64,
+            dtype=torch.float64, device="cpu",
         )
 
 
 def test_compile_array_request_consumes_selected_network_manifest_order():
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(0.8, 0.8, 0.8),
@@ -462,19 +462,18 @@ def test_compile_array_request_consumes_selected_network_manifest_order():
         grid=mw.GridSpec.uniform(0.1),
         ports=(_port("p1"), _port("p2")),
         monitors=(surface,),
-        device="cpu",
     )
     manifest = resolve_network_run_manifest(
         scene,
-        mw.PortSweep(ports=("p2",)),
+        mw.rf.PortSweep(ports=("p2",)),
         (1.0e9,),
     )
 
-    (request,) = scene.compile_array_monitors(
+    (request,) = compile_array_monitors(scene,
         monitor="nf2ff",
         run_manifest=manifest,
         theta=torch.linspace(0.0, math.pi, 5),
-        phi=torch.linspace(0.0, 2.0 * math.pi, 7),
+        phi=torch.linspace(0.0, 2.0 * math.pi, 7), device="cpu",
     )
 
     assert request.port_names == ("p2",)
@@ -485,7 +484,7 @@ def test_compile_array_request_consumes_selected_network_manifest_order():
 
 
 def test_compile_array_request_rejects_manifest_from_different_scene_contract():
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(0.8, 0.8, 0.8),
@@ -494,24 +493,23 @@ def test_compile_array_request_rejects_manifest_from_different_scene_contract():
     current = mw.Scene(
         ports=(_port("p1"),),
         monitors=(surface,),
-        device="cpu",
     )
     foreign_port = _port("p1", reference_impedance=75.0)
-    foreign = mw.Scene(ports=(foreign_port,), device="cpu")
-    manifest = resolve_network_run_manifest(foreign, mw.PortSweep(), (1.0e9,))
+    foreign = mw.Scene(ports=(foreign_port,))
+    manifest = resolve_network_run_manifest(foreign, mw.rf.PortSweep(), (1.0e9,))
 
     with pytest.raises(ValueError, match="does not match this Scene"):
-        current.compile_array_monitors(
+        compile_array_monitors(current,
             monitor="nf2ff",
             run_manifest=manifest,
             phase_center=(0.0, 0.0, 0.0),
             theta=torch.linspace(0.0, math.pi, 5),
-            phi=torch.linspace(0.0, 2.0 * math.pi, 7),
+            phi=torch.linspace(0.0, 2.0 * math.pi, 7), device="cpu",
         )
 
 
 def test_default_phase_center_is_invariant_to_selected_basis_subset():
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(0.8, 0.8, 0.8),
@@ -520,19 +518,18 @@ def test_default_phase_center_is_invariant_to_selected_basis_subset():
     scene = mw.Scene(
         ports=(_port("left", x=-0.2), _port("right", x=0.2)),
         monitors=(surface,),
-        device="cpu",
     )
     manifest = resolve_network_run_manifest(
         scene,
-        mw.PortSweep(ports=("right",)),
+        mw.rf.PortSweep(ports=("right",)),
         (1.0e9,),
     )
 
-    (request,) = scene.compile_array_monitors(
+    (request,) = compile_array_monitors(scene,
         monitor="nf2ff",
         run_manifest=manifest,
         theta=torch.linspace(0.0, math.pi, 5),
-        phi=torch.linspace(0.0, 2.0 * math.pi, 7),
+        phi=torch.linspace(0.0, 2.0 * math.pi, 7), device="cpu",
     )
 
     assert request.port_names == ("right",)
@@ -545,29 +542,28 @@ def test_compile_array_request_rejects_missing_monitor_port_and_invalid_angles()
         domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
         grid=mw.GridSpec.uniform(0.1),
         ports=(_port("p1"),),
-        device="cpu",
     )
     with pytest.raises(ValueError, match="no ClosedSurfaceMonitor"):
-        scene.compile_array_monitors()
-    surface = mw.ClosedSurfaceMonitor.box(
+        compile_array_monitors(scene, device="cpu")
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(0.8, 0.8, 0.8),
         frequencies=(1.0e9,),
     )
-    scene.add_monitor(surface)
+    scene = scene.updated(monitors=(*scene.monitors, surface))
     with pytest.raises(ValueError, match="non-RF or missing"):
-        scene.compile_array_monitors(monitor="nf2ff", ports=("missing",))
+        compile_array_monitors(scene, monitor="nf2ff", ports=("missing",), device="cpu")
     with pytest.raises(ValueError, match="theta must span"):
-        scene.compile_array_monitors(
+        compile_array_monitors(scene,
             monitor="nf2ff",
             theta=torch.linspace(0.1, math.pi, 5),
-            phi=torch.linspace(0.0, 2.0 * math.pi, 7),
+            phi=torch.linspace(0.0, 2.0 * math.pi, 7), device="cpu",
         )
 
 
 def test_source_bearing_mode_port_is_rejected_before_basis_compilation():
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(0.8, 0.8, 0.8),
@@ -579,10 +575,10 @@ def test_source_bearing_mode_port_is_rejected_before_basis_compilation():
         size=(0.2, 0.2, 0.0),
         source_time=mw.CW(frequency=1.0e9),
     )
-    scene = mw.Scene(ports=(mode_port,), monitors=(surface,), device="cpu")
+    scene = mw.Scene(ports=(mode_port,), monitors=(surface,))
 
     with pytest.raises(ValueError, match="driven_mode::source.*independent field source"):
-        scene.compile_array_monitors(monitor="nf2ff")
+        compile_array_monitors(scene, monitor="nf2ff", device="cpu")
 
 
 def test_linearity_guard_reports_named_nonlinear_and_time_varying_objects():
@@ -596,10 +592,10 @@ def test_linearity_guard_reports_named_nonlinear_and_time_varying_objects():
         geometry=mw.Box(position=(0.2, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
         material=mw.Material(
             eps_r=2.0,
-            modulation=mw.ModulationSpec(frequency=1.0e8, amplitude=0.05),
+            modulation=mw.media.ModulationSpec(frequency=1.0e8, amplitude=0.05),
         ),
     )
-    scene = mw.Scene(structures=(nonlinear, modulated), device="cpu")
+    scene = mw.Scene(structures=(nonlinear, modulated))
 
     with pytest.raises(ValueError, match="nonlinear_insert.*modulated_insert"):
         validate_array_superposition(scene)
@@ -607,7 +603,7 @@ def test_linearity_guard_reports_named_nonlinear_and_time_varying_objects():
 
 def test_array_basis_rejects_mismatched_port_frequency_and_wave_conventions():
     basis = _basis()
-    reversed_patterns = mw.EmbeddedElementPatternData(
+    reversed_patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=basis.frequencies,
         port_names=tuple(reversed(basis.port_names)),
         theta=basis.eep.theta,
@@ -618,12 +614,12 @@ def test_array_basis_rejects_mismatched_port_frequency_and_wave_conventions():
         frame=basis.eep.frame,
     )
     with pytest.raises(ValueError, match="identical port order"):
-        mw.ArrayBasisData(
+        mw.antenna.ArrayBasisData(
             network=basis.network,
             embedded_patterns=reversed_patterns,
             fingerprint="bad-order",
         )
-    bad_network = mw.NetworkData(
+    bad_network = mw.rf.NetworkData(
         frequencies=basis.frequencies,
         s=basis.network.s,
         z0=basis.network.z0,
@@ -631,13 +627,13 @@ def test_array_basis_rejects_mismatched_port_frequency_and_wave_conventions():
         power_wave_convention="voltage waves",
     )
     with pytest.raises(ValueError, match="power-wave convention"):
-        mw.ArrayBasisData(
+        mw.antenna.ArrayBasisData(
             network=bad_network,
             embedded_patterns=basis.eep,
             fingerprint="bad-wave-convention",
         )
     with pytest.raises(ValueError, match="power_normalization"):
-        mw.EmbeddedElementPatternData(
+        mw.antenna.EmbeddedElementPatternData(
             frequencies=basis.frequencies,
             port_names=basis.port_names,
             theta=basis.eep.theta,
@@ -663,13 +659,13 @@ def test_embedded_pattern_rejects_invalid_metadata_and_nonmonotonic_frequency():
         frame=basis.eep.frame,
     )
     with pytest.raises(TypeError, match="wave_impedance must be real"):
-        mw.EmbeddedElementPatternData(**kwargs, wave_impedance=377.0 + 1.0j)
+        mw.antenna.EmbeddedElementPatternData(**kwargs, wave_impedance=377.0 + 1.0j)
     with pytest.raises(ValueError, match="phase_center and frame must contain"):
-        mw.EmbeddedElementPatternData(
+        mw.antenna.EmbeddedElementPatternData(
             **{**kwargs, "phase_center": torch.tensor([float("nan"), 0.0, 0.0])}
         )
     with pytest.raises(ValueError, match="strictly increasing"):
-        mw.EmbeddedElementPatternData(
+        mw.antenna.EmbeddedElementPatternData(
             **{
                 **kwargs,
                 "frequencies": torch.flip(basis.frequencies, dims=(0,)),
@@ -678,7 +674,7 @@ def test_embedded_pattern_rejects_invalid_metadata_and_nonmonotonic_frequency():
             }
         )
     with pytest.raises(ValueError, match="non-empty frequency and port axes"):
-        mw.EmbeddedElementPatternData(
+        mw.antenna.EmbeddedElementPatternData(
             frequencies=torch.empty(0, dtype=torch.float64),
             port_names=(),
             theta=basis.eep.theta[:3, :2],
@@ -691,6 +687,6 @@ def test_embedded_pattern_rejects_invalid_metadata_and_nonmonotonic_frequency():
 
 
 def test_array_types_are_top_level_public_api():
-    assert mw.ArrayBasisData.__module__ == "witwin.maxwell.array"
-    assert mw.EmbeddedElementPatternData.__module__ == "witwin.maxwell.array"
-    assert mw.BeamWeights.__module__ == "witwin.maxwell.array"
+    assert mw.antenna.ArrayBasisData.__module__ == "witwin.maxwell.array"
+    assert mw.antenna.EmbeddedElementPatternData.__module__ == "witwin.maxwell.array"
+    assert mw.antenna.BeamWeights.__module__ == "witwin.maxwell.array"

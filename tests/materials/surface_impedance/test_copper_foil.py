@@ -47,7 +47,7 @@ def _response_from_z(z, zi, zt):
 @pytest.mark.parametrize("incident_eps,outgoing_eps", [(1., 1.), (1., 4.), (4., 4.)])
 @pytest.mark.parametrize("angle,polarization", [(0., "te"), (math.radians(35), "te"), (math.radians(35), "tm")])
 def test_two_sided_diffusion_response_matches_independent_full_maxwell_film(ratio, incident_eps, outgoing_eps, angle, polarization):
-    foil = mw.CopperFoil(thickness=ratio * DELTA, frequency_range=(.5e9, 2e9))
+    foil = mw.media.CopperFoil(thickness=ratio * DELTA, frequency_range=(.5e9, 2e9))
     reflection, transmission, zi, zt = _film_transfer(foil.thickness, incident_eps=incident_eps,
         outgoing_eps=outgoing_eps, angle=angle, polarization=polarization)
     z = foil.surface_impedance([FREQUENCY])[0].numpy()
@@ -67,7 +67,7 @@ def test_two_sided_diffusion_response_matches_independent_full_maxwell_film(rati
 
 @pytest.mark.parametrize("ratio", [.01, .1, 1., 3., 10., 30.])
 def test_analytic_rational_realization_is_globally_passive_and_band_accurate(ratio):
-    foil = mw.CopperFoil(thickness=ratio * DELTA, frequency_range=(.5e9, 2e9))
+    foil = mw.media.CopperFoil(thickness=ratio * DELTA, frequency_range=(.5e9, 2e9))
     response = compile_copper_response(foil)
     f = torch.linspace(.5e9, 2e9, 401, dtype=torch.float64)
     actual = response.rational.evaluate(f)
@@ -87,26 +87,26 @@ def test_analytic_rational_realization_is_globally_passive_and_band_accurate(rat
 
 
 def test_unresolved_modal_order_and_out_of_band_use_are_rejected():
-    foil = mw.CopperFoil(thickness=30 * DELTA, frequency_range=(.5e9, 2e9))
+    foil = mw.media.CopperFoil(thickness=30 * DELTA, frequency_range=(.5e9, 2e9))
     with pytest.raises(ValueError, match="exceeds.*modes"):
         compile_copper_response(foil, max_modes=2)
     with pytest.raises(ValueError, match="frequency_range"):
         foil.surface_impedance([3e9])
     with pytest.raises(ValueError, match="diffusion requires"):
-        mw.CopperFoil(thickness=1e-6, conductivity=1., frequency_range=(.5e9, 2e9))
+        mw.media.CopperFoil(thickness=1e-6, conductivity=1., frequency_range=(.5e9, 2e9))
 
 
 @pytest.mark.parametrize("thickness,conductivity", [(0., SIGMA), (-1., SIGMA), (float("nan"), SIGMA), (DELTA, 0.), (DELTA, float("inf"))])
 def test_nonphysical_parameters_are_rejected(thickness, conductivity):
     with pytest.raises(ValueError, match="finite and positive"):
-        mw.CopperFoil(thickness=thickness, conductivity=conductivity, frequency_range=(.5e9, 2e9))
+        mw.media.CopperFoil(thickness=thickness, conductivity=conductivity, frequency_range=(.5e9, 2e9))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CopperFoil forward fields require CUDA.")
 @pytest.mark.parametrize("ratio", [.01, .1, 1., 3., 10., 30.])
 def test_gpu_two_sided_scattering_matches_finite_layer_including_small_absorption(ratio):
     from tests.materials.sheet.sheet_measurement import measure_sheet_scattering
-    foil = mw.CopperFoil(thickness=ratio * DELTA, frequency_range=(.5e9, 2e9))
+    foil = mw.media.CopperFoil(thickness=ratio * DELTA, frequency_range=(.5e9, 2e9))
     actual_t, actual_r = measure_sheet_scattering(foil, FREQUENCY, absorber="cpml", dl=.005,
         half_length=.30, half_width=.01, fit_gap=.025, fit_extent=.15,
         steady_cycles=20, transient_cycles=24)
@@ -129,7 +129,7 @@ def test_gpu_two_sided_scattering_matches_finite_layer_including_small_absorptio
 def test_fixed_modal_topology_preserves_native_parameter_gradients():
     thickness = torch.tensor(DELTA, dtype=torch.float64, requires_grad=True)
     conductivity = torch.tensor(SIGMA, dtype=torch.float64, requires_grad=True)
-    foil = mw.CopperFoil(thickness=thickness, conductivity=conductivity,
+    foil = mw.media.CopperFoil(thickness=thickness, conductivity=conductivity,
                          frequency_range=(.5e9, 2e9), mode_count=16)
     assert foil.thickness is thickness
     assert foil.conductivity is conductivity
@@ -139,14 +139,14 @@ def test_fixed_modal_topology_preserves_native_parameter_gradients():
     for index, (parameter, step) in enumerate(((DELTA, DELTA * 1e-4), (SIGMA, SIGMA * 1e-4))):
         evaluated = []
         for sign in (-1, 1):
-            candidate = mw.CopperFoil(thickness=DELTA + sign * step if index == 0 else DELTA,
+            candidate = mw.media.CopperFoil(thickness=DELTA + sign * step if index == 0 else DELTA,
                 conductivity=SIGMA + sign * step if index == 1 else SIGMA,
                 frequency_range=(.5e9, 2e9), mode_count=16)
             evaluated.append(compile_copper_response(candidate).state_space.evaluate([FREQUENCY])[0, 0, 0].real)
         expected = (evaluated[1] - evaluated[0]) / (2 * step)
         torch.testing.assert_close(actual[index], expected, rtol=1e-6, atol=1e-12)
     with pytest.raises(ValueError, match="explicit mode_count"):
-        mw.CopperFoil(thickness=thickness, frequency_range=(.5e9, 2e9))
+        mw.media.CopperFoil(thickness=thickness, frequency_range=(.5e9, 2e9))
 
 
 def test_thin_resistive_film_is_admitted_by_extended_band_floor():
@@ -155,7 +155,7 @@ def test_thin_resistive_film_is_admitted_by_extended_band_floor():
     from witwin.maxwell.compiler.copper_foil import _truncated_copper_response
 
     eta0 = math.sqrt(MU / EPS)
-    foil = mw.CopperFoil(thickness=(0.5 / eta0) / 1e5, conductivity=1e5,
+    foil = mw.media.CopperFoil(thickness=(0.5 / eta0) / 1e5, conductivity=1e5,
                          frequency_range=(.3e9, 4e9))
     response = compile_copper_response(foil)
     vectors = torch.tensor([[1., 1.], [1., -1.]], dtype=torch.float64) / math.sqrt(2)
@@ -202,9 +202,9 @@ def test_thin_resistive_film_is_admitted_by_extended_band_floor():
                                                           (2, 4), (1, 7), (2.4, 2.5)))))
 def test_passive_compression_case_table_against_exact_diffusion(thickness, old_counts, band_index, band):
     band = tuple(value * 1e9 for value in band)
-    foil = mw.CopperFoil(thickness=thickness, frequency_range=band, edge_model="none")
+    foil = mw.media.CopperFoil(thickness=thickness, frequency_range=band, edge_model="none")
     new = compile_copper_response(foil)
-    old = compile_copper_response(mw.CopperFoil(thickness=thickness, frequency_range=band,
+    old = compile_copper_response(mw.media.CopperFoil(thickness=thickness, frequency_range=band,
         edge_model="none", mode_count=old_counts[band_index]))
     # Twice the certificate grid density, independently offset between its nodes.
     frequencies = torch.from_numpy(np.geomspace(*band, 8193))
@@ -237,7 +237,7 @@ def test_passive_compression_case_table_against_exact_diffusion(thickness, old_c
                                rtol=2e-14, atol=0)
     extended_band = (band[0] / 10, band[1] * 10)
     extended_f = torch.from_numpy(np.geomspace(*extended_band, 8193))
-    extended_exact = mw.CopperFoil(thickness=thickness, frequency_range=extended_band,
+    extended_exact = mw.media.CopperFoil(thickness=thickness, frequency_range=extended_band,
                                   edge_model="none").modal_admittance(extended_f)
     old_extended_error = float(((modal(old, extended_f) - extended_exact).abs() / extended_exact.abs()).max())
     new_extended_error = float(((modal(new, extended_f) - extended_exact).abs() / extended_exact.abs()).max())

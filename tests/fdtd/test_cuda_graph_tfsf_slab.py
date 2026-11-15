@@ -29,26 +29,25 @@ def _nonperiodic_slab_scene():
     # stay clear of the two injection faces) so the captured block exercises the
     # static material curl/decay coefficients, not just vacuum.
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.96, 0.96), (-0.96, 0.96), (-0.96, 0.96))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.2, 1.2, 0.16)),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=_pulse(),
-            injection=mw.TFSF.slab(axis="z", bounds=_SLAB_BOUNDS),
-            name="tfsf_slab_axis_aligned",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.96, 0.96), (-0.96, 0.96), (-0.96, 0.96))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.2, 1.2, 0.16)),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization=(1.0, 0.0, 0.0),
+                source_time=_pulse(),
+                injection=mw.TFSF.slab(axis="z", bounds=_SLAB_BOUNDS),
+                name="tfsf_slab_axis_aligned",
+            ),
+            ),
+            )
     return scene
 
 
@@ -69,21 +68,20 @@ def _grating_slab_scene():
         bloch_wavevector=(math.pi, 0.5 * math.pi, 0.0),
     )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=boundary,
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.2, 0.1, 0.9746794344808963),
-            polarization=(1.0, 0.0, -0.20519567041703082),
-            source_time=mw.CW(frequency=_FREQ, amplitude=20.0),
-            injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
-            name="grating_tfsf_slab",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=boundary,
+                sources=(
+            mw.PlaneWave(
+                direction=(0.2, 0.1, 0.9746794344808963),
+                polarization=(1.0, 0.0, -0.20519567041703082),
+                source_time=mw.CW(frequency=_FREQ, amplitude=20.0),
+                injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
+                name="grating_tfsf_slab",
+            ),
+            ),
+                monitors=(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")),),
+            )
     return scene
 
 
@@ -91,12 +89,14 @@ def _run(scene_factory, *, cuda_graph):
     result = mw.Simulation.fdtd(
         scene_factory(),
         frequencies=(_FREQ,),
-        full_field_dft=True,
-        run_time=mw.TimeConfig(time_steps=220),
-        cuda_graph=cuda_graph,
+        config=mw.FDTDConfig(
+            full_field_dft=True,
+            run_time=mw.TimeConfig(time_steps=220),
+            cuda_graph=cuda_graph,
+        ),
     ).run()
     view = result.at(frequency=_FREQ)
-    fields = {a: np.asarray(getattr(view.E, a).detach().cpu()) for a in ("x", "y", "z")}
+    fields = {a: np.asarray(getattr(view.E, a).values.detach().cpu()) for a in ("x", "y", "z")}
     provider = result.solver._tfsf_state["provider"]
     return fields, result.stats(), provider
 
@@ -128,10 +128,12 @@ def test_cuda_graph_tfsf_slab_matches_non_graph_bitexact():
 def test_cuda_graph_tfsf_grating_slab_declines():
     solver = mw.Simulation.fdtd(
         _grating_slab_scene(),
-        frequency=_FREQ,
-        full_field_dft=True,
-        run_time=mw.TimeConfig(time_steps=60),
-        cuda_graph=True,
+        frequencies=_FREQ,
+        config=mw.FDTDConfig(
+            full_field_dft=True,
+            run_time=mw.TimeConfig(time_steps=60),
+            cuda_graph=True,
+        ),
     ).prepare().solver
     assert solver._tfsf_state["provider"] == "plane_wave_grating_slab_cw"
     # The graphable predicate declines the grating-slab-CW provider ...

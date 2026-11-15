@@ -44,7 +44,7 @@ def _rotated_uniaxial_tensor(eps_xx, eps_ordinary, eps_extraordinary):
     """
     mean = 0.5 * (eps_ordinary + eps_extraordinary)
     delta = 0.5 * (eps_extraordinary - eps_ordinary)
-    return mw.Tensor3x3(((eps_xx, 0.0, 0.0), (0.0, mean, delta), (0.0, delta, mean)))
+    return mw.media.Tensor3x3(((eps_xx, 0.0, 0.0), (0.0, mean, delta), (0.0, delta, mean)))
 
 
 # ---------------------------------------------------------------------------
@@ -61,20 +61,19 @@ def test_lossy_anisotropic_material_constructs():
 
 def _build_uniform_solver(eps_o, eps_e, eps_xx, sigma, *, spacing=0.03):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=Box(position=(0.0, 0.0, 0.0), size=(2.0, 2.0, 2.0)),
-            material=mw.Material(
-                epsilon_tensor=_rotated_uniaxial_tensor(eps_xx, eps_o, eps_e), sigma_e=sigma
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
+            mw.Structure(
+                geometry=Box(position=(0.0, 0.0, 0.0), size=(2.0, 2.0, 2.0)),
+                material=mw.Material(
+                    epsilon_tensor=_rotated_uniaxial_tensor(eps_xx, eps_o, eps_e), sigma_e=sigma
+                ),
             ),
-        )
-    )
-    return mw.Simulation.fdtd(scene, frequency=1.0e9).prepare().solver
+            ),
+            )
+    return mw.Simulation.fdtd(scene, frequencies=1.0e9).prepare().solver
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -139,7 +138,7 @@ def test_lossy_anisotropic_uniform_conduction_decay_matches_analytic():
     solver.Ez.fill_(1.0)
     for _ in range(steps):
         capture_aniso_conduction_currents(solver)
-        update_electric_fields(solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+        update_electric_fields(solver)
         apply_full_aniso_corrections(solver)
         apply_full_aniso_conduction(solver)
     torch.cuda.synchronize()
@@ -183,11 +182,10 @@ _FIT_LO, _FIT_HI = 0.20, 0.55
 
 def _run_slab(frequency, sigma):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.75, 0.75), (-0.03, 0.03), (-0.03, 0.03))),
-        grid=mw.GridSpec.uniform(_SPACING),
-        boundary=mw.BoundarySpec.faces(default="periodic", num_layers=10, strength=1.0, x=("pml", "pml")),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-0.75, 0.75), (-0.03, 0.03), (-0.03, 0.03))),
+                grid=mw.GridSpec.uniform(_SPACING),
+                boundary=mw.BoundarySpec.faces(default="periodic", num_layers=10, strength=1.0, x=("pml", "pml")),
+                sources=[
             mw.PointDipole(
                 position=(-0.5, 0.0, 0.0),
                 polarization=_EXTRAORDINARY_POL,
@@ -195,27 +193,26 @@ def _run_slab(frequency, sigma):
                 source_time=mw.CW(frequency=frequency, amplitude=40.0),
                 name="dip",
             )
-        ],
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=Box(position=(0.0, 0.0, 0.0), size=(_SLAB, 0.2, 0.2)),
-            material=mw.Material(
-                epsilon_tensor=_rotated_uniaxial_tensor(_EPS_XX, _EPS_O, _EPS_E), sigma_e=sigma
+            ],
+                structures=(
+            mw.Structure(
+                geometry=Box(position=(0.0, 0.0, 0.0), size=(_SLAB, 0.2, 0.2)),
+                material=mw.Material(
+                    epsilon_tensor=_rotated_uniaxial_tensor(_EPS_XX, _EPS_O, _EPS_E), sigma_e=sigma
+                ),
             ),
-        )
-    )
+            ),
+            )
     return mw.Simulation.fdtd(
-        scene, absorber="cpml",
-        frequencies=[frequency],
+        scene, frequencies=[frequency], config=mw.FDTDConfig(absorber="cpml",
         run_time=mw.TimeConfig.auto(steady_cycles=12, transient_cycles=26),
-        full_field_dft=True,
+        full_field_dft=True),
     ).run()
 
 
 def _projected_line(result):
-    ey = result.field("Ey")
-    ez = result.field("Ez")
+    ey = result.field("Ey").isel(f=0).values
+    ez = result.field("Ez").isel(f=0).values
     ey = (ey["data"] if isinstance(ey, dict) else ey).detach().cpu().numpy()
     ez = (ez["data"] if isinstance(ez, dict) else ez).detach().cpu().numpy()
 
@@ -274,17 +271,16 @@ def test_lossy_anisotropic_adjoint_is_rejected():
     from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=2),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
-            material=mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0), sigma_e=0.5),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.pml(num_layers=2),
+                structures=(
+            mw.Structure(
+                geometry=Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+                material=mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0), sigma_e=0.5),
+            ),
+            ),
+            )
     message = _unsupported_adjoint_medium(scene)
     assert message is not None
     assert "conductivity" in message

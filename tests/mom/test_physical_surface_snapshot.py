@@ -35,7 +35,7 @@ def test_physical_carrier_inverse_and_decoder_restore(backend,kind,monkeypatch):
     dense,_=build((2.,3.));fresh_dense,_=build((2.,3.))
     sources=(mw.PlaneWave(source_time=mw.CW(3e8,amplitude=1.2,phase=.2)),
         mw.PlaneWave(direction=(1,0,0),polarization=(0,1,0),source_time=mw.CW(3e8,amplitude=.8,phase=-.3)))
-    config=mw.MoMConfig(operator_backend=backend,integration=dense.integration,
+    config=mw.mom.MoMConfig(operator_backend=backend,integration=dense.integration,
         hierarchical=HMatrixConfig(leaf_size=64),riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='block_gmres',preconditioner='row_column_norm'))
     original=kind(dense.system,dense.exterior,sources,config)
@@ -84,7 +84,8 @@ def test_physical_carrier_inverse_and_decoder_restore(backend,kind,monkeypatch):
         bad['sha256']=_digest({k:v for k,v in bad.items() if k!='sha256'})
         with pytest.raises(ValueError,match='identity|metadata'):restore(bad,fresh,sources=sources)
     old=original._public_config
-    original._public_config=replace(config,stopping=replace(config.stopping,rtol=2e-7))
+    # Any admissible rtol other than the resolved 0.1*solve_dual_tolerance changes the numerical binding.
+    original._public_config=replace(config,stopping=replace(config.stopping,rtol=1e-10))
     with pytest.raises(ValueError,match='numerical binding'):encode(original)
     original._public_config=old
     delayed=loaded.apply(x)
@@ -97,7 +98,7 @@ def test_physical_carrier_inverse_and_decoder_restore(backend,kind,monkeypatch):
 
 def test_empty_carrier_snapshot_rejects_pumped_sources():
     dense,_=runpy.run_path('tests/mom/test_surface_volume.py')['problem']((2.,3.))
-    config=mw.MoMConfig(operator_backend='h2',integration=dense.integration,
+    config=mw.mom.MoMConfig(operator_backend='h2',integration=dense.integration,
         hierarchical=HMatrixConfig(leaf_size=64),riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='block_gmres',preconditioner='row_column_norm'))
     operator=HierarchicalH2SystemOperator(dense.system,dense.exterior,(),config)

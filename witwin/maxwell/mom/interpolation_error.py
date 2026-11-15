@@ -8,8 +8,11 @@ from dataclasses import dataclass, asdict
 import math
 import torch
 from .interpolation import InterpolationBox
+from ..errors import SetupError
+from .._stability import experimental
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class KernelErrorBudget:
     green_absolute: float
@@ -21,13 +24,13 @@ class KernelErrorBudget:
                 raise ValueError('Absolute kernel truncation budgets must be positive finite scalars')
 
 
-class KernelInterpolationError(ValueError):
+class KernelInterpolationError(SetupError):
     def __init__(self, receipt):
         super().__init__('Analytic kernel interpolation truncation bound exceeds its budget')
         self.receipt = receipt
 
 
-class KernelBoundUnavailable(ValueError):
+class KernelBoundUnavailable(SetupError):
     """The chosen order's analytic bound exceeds finite native representation."""
 
 

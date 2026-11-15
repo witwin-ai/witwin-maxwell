@@ -11,7 +11,7 @@ from witwin.maxwell.fdtd.runtime.stepping import _field_update_block, update_mag
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
-def _tensor_scene(*, nonuniform=False, conductive=False, device="cuda"):
+def _tensor_scene(*, nonuniform=False, conductive=False):
     generator = np.random.default_rng(6193)
     for _ in range(3):
         angle = generator.uniform(-np.pi, np.pi, (4, 4))
@@ -20,7 +20,7 @@ def _tensor_scene(*, nonuniform=False, conductive=False, device="cuda"):
     y = np.array([0., .04, .14, .25, .4]) if nonuniform else np.linspace(0., .4, 5)
     scene = mw.Scene(domain=mw.Domain(bounds=((0., .4), (0., .4), (0., .2))),
         grid=mw.GridSpec.custom(x_coords=x, y_coords=y, z_coords=(0., .1, .2)),
-        boundary=mw.BoundarySpec.periodic(), device=device)
+        boundary=mw.BoundarySpec.periodic())
     for i in range(5):
         for j in range(5):
             a, s = angle[i % 4, j % 4], strength[i % 4, j % 4]
@@ -28,17 +28,20 @@ def _tensor_scene(*, nonuniform=False, conductive=False, device="cuda"):
             tensor = ((c*c*s+t*t, c*t*(s-1), 0.),
                       (c*t*(s-1), t*t*s+c*c, 0.), (0., 0., 1.))
             sigma = .01 * s if conductive else 0.
-            scene.add_structure(mw.Structure(
-                geometry=mw.Box(position=(float(x[i]), float(y[j]), .1), size=(.01, .01, .6)),
-                material=mw.Material(epsilon_tensor=mw.Tensor3x3(tensor), sigma_e=sigma)))
+            scene = scene.updated(structures=(
+                *scene.structures,
+                mw.Structure(
+                    geometry=mw.Box(position=(float(x[i]), float(y[j]), .1), size=(.01, .01, .6)),
+                    material=mw.Material(epsilon_tensor=mw.media.Tensor3x3(tensor), sigma_e=sigma)),
+            ))
     return scene
 
 
 @pytest.mark.parametrize("nonuniform", [False, True])
 @requires_cuda
 def test_variable_tensor_native_curl_operator_is_self_adjoint_and_positive(nonuniform):
-    solver = mw.Simulation.fdtd(_tensor_scene(nonuniform=nonuniform), frequency=.7e9,
-        run_time=mw.TimeConfig(time_steps=600), cuda_graph=False).prepare().solver
+    solver = mw.Simulation.fdtd(_tensor_scene(nonuniform=nonuniform), frequencies=.7e9,
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=600), cuda_graph=False)).prepare().solver
     columns = []
     for position in range(16):
         for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
@@ -46,7 +49,7 @@ def test_variable_tensor_native_curl_operator_is_self_adjoint_and_positive(nonun
         i, j = divmod(position, 4)
         solver.Hz[i, j, :].fill_(1.)
         _field_update_block(solver, 0.)
-        update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
+        update_magnetic_fields(solver)
         columns.append(solver.Hz[:, :, 0].cpu().numpy().reshape(-1).copy())
     operator = (np.eye(16) - np.stack(columns, axis=1)) / (solver.c * solver.dt)**2
     volume = np.outer(solver.scene.dx_primal64, solver.scene.dy_primal64).reshape(-1)
@@ -68,8 +71,8 @@ def test_variable_tensor_native_curl_operator_is_self_adjoint_and_positive(nonun
 
 @requires_cuda
 def test_variable_conductive_tensor_native_joint_step_is_passive():
-    solver = mw.Simulation.fdtd(_tensor_scene(nonuniform=True, conductive=True), frequency=.7e9,
-        run_time=mw.TimeConfig(time_steps=100), cuda_graph=False).prepare().solver
+    solver = mw.Simulation.fdtd(_tensor_scene(nonuniform=True, conductive=True), frequencies=.7e9,
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=100), cuda_graph=False)).prepare().solver
     assert solver._time_step_metadata["material_rate_bound"] > 0
     impedance = np.sqrt(solver.mu0 / solver.eps0)
     columns = []
@@ -129,9 +132,9 @@ def test_compiled_tensor_cpu_pair_reciprocity_and_positive_curl(nonuniform, poli
     from witwin.maxwell.scene import prepare_scene
     from witwin.maxwell.fdtd.runtime.materials import build_full_anisotropy, _aniso_cross_weights
 
-    scene = _tensor_scene(nonuniform=nonuniform, device="cpu")
-    scene.subpixel = mw.SubpixelSpec(samples=1 if policy == "arithmetic" else 4, averaging=policy)
-    prepared = prepare_scene(scene)
+    scene = _tensor_scene(nonuniform=nonuniform)
+    scene = scene.updated(subpixel=mw.SubpixelSpec(samples=1 if policy == "arithmetic" else 4, averaging=policy))
+    prepared = prepare_scene(scene, device="cpu")
     # The full-tensor runtime assembles from nodes; unused scalar edge sampling
     # is particularly expensive for the many periodic boxes in this fixture.
     model = compile_material_model(prepared, include_edges=False)

@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from witwin.maxwell.fdtd.runtime import core_path
+from witwin.maxwell.scene import place_scene
 
 
 L2_6_MIB = 6 * 1024 * 1024
@@ -129,7 +130,7 @@ def test_observer_shared_storage_invariant(monkeypatch, mismatch):
     monkeypatch.setattr(core_tables, "compile_monitor_routes", lambda solver: engine)
     monkeypatch.setattr(observers, "uses_native_point_observers", lambda solver: False)
     runtime = core_path.CorePathRuntime.__new__(core_path.CorePathRuntime)
-    solver = SimpleNamespace(scene=SimpleNamespace())
+    solver = SimpleNamespace(scene=SimpleNamespace(scene=SimpleNamespace()))
     with pytest.raises(RuntimeError, match="must share weights and active tensors"):
         runtime.prepare_step(solver, use_gpu_dft=False, time_steps=1)
 
@@ -138,12 +139,15 @@ def _simulation(shape, memory_mode="slab", steps=1):
     import witwin.maxwell as mw
     from benchmark.core_path.scenes import _grid_scene, FREQUENCY
 
+    scene = _grid_scene(shape)
+    probe = mw.PointMonitor("probe", position=(0.0, 0.0, 0.0), fields=("Ez",))
     return mw.Simulation.fdtd(
-        _grid_scene(shape).add_monitor(mw.PointMonitor("probe", position=(0.0, 0.0, 0.0), fields=("Ez",)))
-        .clone(device="cuda"), frequency=FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=steps), full_field_dft=False,
-        cpml_config={"memory_mode": memory_mode}, fdtd_core_path=True, cuda_graph=True,
-        shutoff=0.0,
+        place_scene(scene.updated(monitors=(*scene.monitors, probe)), "cuda"), frequencies=FREQUENCY,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps), full_field_dft=False,
+            cpml=mw.fdtd.CPMLConfig(memory_mode=memory_mode), cuda_graph=True,
+            shutoff=0.0,
+        ),
     )
 
 

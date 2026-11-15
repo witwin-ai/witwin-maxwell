@@ -153,7 +153,8 @@ def test_scenario_units_and_cache_precheck(monkeypatch, tmp_path):
     args = SimpleNamespace(commit="fixture", shard="0/1", out=str(tmp_path / "out"),
                            since=None, tier="integration", two_gpu=False, exclude_component=[], changed_files=None,
                            in_place=True, lock=None, lock_for=[], label="0", units_from=None, claim_dir=None,
-                           min_free_mib=0, stop_on_fail=None, no_start_after=[])
+                           min_free_mib=0, stop_on_fail=None, no_start_after=[], history=[], procs=1,
+                           group_light=None, group_budget=600)
     status = runner.run_main(args)
     plan = json.loads((tmp_path / "out/shard-0/plan.json").read_text())
     report_status = runner.report_main(SimpleNamespace(directories=[args.out]))
@@ -321,12 +322,14 @@ def test_selection_and_balanced_shards(monkeypatch, tmp_path, capsys):
     with pytest.raises(RuntimeError, match="collection sentinel"):
         runner.build_plan(runner.ROOT, "HEAD", manifest, runner.ROOT)
 
-    schedule = [dict(id=name, seconds=seconds, suites=dict.fromkeys(suites)) for name, seconds, suites in (
+    schedule = [dict(id=name, seconds=seconds, suites=dict.fromkeys(suites), kind="command" if name == "benchmark" else "pytest")
+                for name, seconds, suites in (
         ("long", 100, ["pytest-fdtd"]), ("short", 1, ["pytest-compiler"]),
         ("benchmark", 50, ["benchmark"]), ("thin", 10, ["thin-sheet-112"]),
         ("smoke", 2, ["mom-public-smoke"]), ("pcb", 5, ["pcb-44"]),
         ("baseline", 8, ["fdtd-baselines"]), ("resident", 3, ["resident-bitid", "pcb-44"]))]
-    order = ["resident", "baseline", "pcb", "smoke", "thin", "benchmark", "long", "short"]
+    # Phase 1 keeps its stage order; phase 2 starts the longest units first.
+    order = ["resident", "baseline", "pcb", "long", "benchmark", "thin", "smoke", "short"]
     assert [u["id"] for u in sorted(schedule, key=runner.unit_order)] == order
     lane = tmp_path / "lane.lock"
     exclusive = tmp_path / "exclusive.lock"
@@ -339,7 +342,7 @@ def test_selection_and_balanced_shards(monkeypatch, tmp_path, capsys):
     for name, policy, failing, expected in (("default", None, "resident", order[:1]),
                                           ("continue", False, "resident", order),
                                           ("phase2", None, "smoke", order),
-                                          ("stop", True, "smoke", order[:4]),
+                                          ("stop", True, "smoke", order[:7]),
                                           ("known", None, "resident", order)):
         calls = []
 
@@ -353,7 +356,8 @@ def test_selection_and_balanced_shards(monkeypatch, tmp_path, capsys):
         args = SimpleNamespace(commit="HEAD", shard="0/1", since=None, out=str(tmp_path / name),
                                in_place=False, changed_files=None,
                                lock=str(lane), lock_for=[f"benchmark={exclusive}"], stop_on_fail=policy, no_start_after=[],
-                               tier="integration", two_gpu=False, exclude_component=[], label=None, units_from=None, claim_dir=None, min_free_mib=0)
+                               tier="integration", two_gpu=False, exclude_component=[], label=None, units_from=None, claim_dir=None, min_free_mib=0,
+                               history=[], procs=1, group_light=None, group_budget=600)
         assert runner.run_main(args) == 1
         assert [unit for unit, _ in calls] == expected
         assert all(lock == (exclusive if unit == "benchmark" else lane) for unit, lock in calls)
@@ -492,7 +496,7 @@ def test_selection_and_balanced_shards(monkeypatch, tmp_path, capsys):
         patch.setattr(runner, "MANIFEST", tmp_path / "manifest.toml")
         runner.MANIFEST.write_text("")
         patch.setattr(runner.tomllib, "loads", lambda text: data)
-        assert runner.plan_main(SimpleNamespace(commit="fixture", since="base", tier="integration",
+        assert runner.plan_main(SimpleNamespace(commit="fixture", since="base", tier="integration", history=[],
                                                in_place=False, changed_files=None,
                                                two_gpu=False, exclude_component=["mom"], shards=1)) == 0
         assert "mom | EXCLUDED by operator |" in capsys.readouterr().out
@@ -545,7 +549,7 @@ def test_milestone_selections_are_excluded_from_component_units(monkeypatch, tmp
     assert milestone["milestone_only"] == []
     monkeypatch.setattr(runner, "source_tree", lambda args: ("fixture", tmp_path))
     monkeypatch.setattr(runner, "build_plan", lambda *args: integration)
-    assert runner.plan_main(SimpleNamespace(two_gpu=False, since=None, tier="integration",
+    assert runner.plan_main(SimpleNamespace(two_gpu=False, since=None, tier="integration", history=[],
                                            exclude_component=[], changed_files=None, shards=1)) == 0
     assert f"milestone-only: {selector}" in capsys.readouterr().out
 
@@ -616,7 +620,8 @@ estimated_seconds = 1
                                tier="integration", two_gpu=False, exclude_component=[], shard="0/1",
                                out=str(tmp_path / str(policy)), lock=None, lock_for=[],
                                stop_on_fail=policy, no_start_after=[],
-                               label=None, units_from=None, claim_dir=None, min_free_mib=0)
+                               label=None, units_from=None, claim_dir=None, min_free_mib=0,
+                               history=[], procs=1, group_light=None, group_budget=600)
         assert runner.run_main(args) == 1
         assert calls == ["tests/sample/test_staged.py"]
         assert runner.report_main(SimpleNamespace(directories=[args.out])) == 1
@@ -693,7 +698,8 @@ estimated_seconds = 1
                            tier="integration", two_gpu=False, exclude_component=[], shards=1,
                            shard="0/1", out=str(tmp_path / "results"), lock=None, lock_for=[],
                            stop_on_fail=None, no_start_after=[],
-                           label=None, units_from=None, claim_dir=None, min_free_mib=0)
+                           label=None, units_from=None, claim_dir=None, min_free_mib=0,
+                               history=[], procs=1, group_light=None, group_budget=600)
     with pytest.raises(FileNotFoundError):
         runner.source_tree(args)
     provenance = tmp_path / ".wcloud-source.json"
@@ -973,6 +979,7 @@ def test_pin_tier_shards_execute_and_report(monkeypatch, tmp_path, tier, rc, fla
 
     def child(command, *, env, **kwargs):
         index = int(Path(command[3]).stem[-1])
+        assert "--run-slow" in command  # Batch units include the slow tier.
         log = Path(env["WITWIN_PIN_TIER_LOG"])
         logs.append(log)
         assert log.read_text() == ""  # A retry cannot inherit the previous attempt's receipts.
@@ -1064,6 +1071,211 @@ def test_environment_keeps_operator_pythonpath_after_the_batch_tree(monkeypatch)
     assert runner.environment(Path("/tree"))["PYTHONPATH"] == "/tree"
 
 
+def test_history_replaces_guesses_and_phase_one_reports_bitid8(tier_runner, monkeypatch, tmp_path):
+    runner = tier_runner
+    old, new = tmp_path / "old", tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    # Older logs have no measured= field: END minus START, lock waits happen before START.
+    (old / "progress.log").write_text(
+        "2026-11-07T08:00:00Z phase=2 unit=pytest:tests/a/test_a.py START pass=0 fail=0 elapsed=0.000s\n"
+        "2026-11-07T08:00:30Z phase=2 unit=pytest:tests/b/test_b.py START pass=0 fail=0 elapsed=0.000s\n"
+        "2026-11-07T08:01:40Z phase=2 unit=pytest:tests/a/test_a.py END status=PASS pass=1 fail=0 elapsed=900.000s\n"
+        "2026-11-07T08:02:00Z phase=2 unit=pytest:tests/b/test_b.py DEFER until=x pass=1 fail=0 elapsed=1.000s\n"
+        "2026-11-07T08:02:30Z phase=2 unit=pytest:tests/b/test_b.py END status=FAIL pass=1 fail=1 elapsed=120.000s\n"
+        "2026-11-07T08:03:00Z phase=2 unit=benchmark:stale START pass=1 fail=1 elapsed=0.000s\n"
+        "2026-11-07T08:03:00Z phase=2 unit=benchmark:stale END status=INFRA pass=1 fail=1 elapsed=0.000s\n")
+    (new / "progress.log").write_text(
+        "2026-11-08T08:00:00Z phase=2 unit=pytest:tests/a/test_a.py START pass=0 fail=0 elapsed=0.000s\n"
+        "2026-11-08T08:09:00Z phase=2 unit=pytest:tests/a/test_a.py END status=PASS pass=1 fail=0 elapsed=540.000s "
+        "measured=200.000s\n")
+    history = runner.read_history([old, new / "progress.log"])
+    assert history == dict(units={"pytest:tests/a/test_a.py": 150.0, "pytest:tests/b/test_b.py": 120.0}, nodes={}, overhead={})
+    manifest = dict(unit_seconds={"tests/b/test_b.py": 7}, pin_files=["tests/a/test_a.py"])
+    assert runner.planned_seconds("pytest:tests/a/test_a.py", 4.3, manifest, history) == (150.0, "history", 0)
+    # Measured history beats a stale manifest pin; the pin beats the guess.
+    assert runner.planned_seconds("pytest:tests/b/test_b.py", 4.3, manifest, history) == (120.0, "history", 0)
+    assert runner.planned_seconds("pytest:tests/d/test_d.py", 4.3, dict(unit_seconds={"tests/d/test_d.py": 7}),
+                                  history) == (7, "manifest", 0)
+    assert runner.planned_seconds("pytest:tests/c/test_c.py", 4.3, manifest, history, ["n"]) == (4.3, "guess", 1)
+    measured = [dict(id=f"u{index}", timing="history", kind="pytest", component=component, seconds=seconds, nodes=["n"] * nodes)
+                for index, (component, seconds, nodes) in enumerate((("x", 10, 10), ("x", 30, 10), ("x", 9000, 10), ("y", 4, 2)))]
+    assert runner.history_rates(measured + [dict(id="g", timing="guess", kind="pytest", component="x", seconds=1, nodes=["n"])],
+                                dict(overhead={"u3": 2.0})) == {"x": 3.0, "y": 1.0, None: 2.0}
+
+    # Node history from a batch directory's per-unit JUnit: a unit is priced as its current nodes'
+    # measured seconds plus its measured overhead, so a milestone original that left the unit no
+    # longer counts and a new regression twin is priced at the component rate.
+    batch = tmp_path / "batch"
+    (batch / "shard-g0").mkdir(parents=True)
+    (batch / "progress.log").write_text(
+        "2026-11-07T08:00:00Z phase=2 unit=pytest:tests/a/test_a.py START pass=0 fail=0 elapsed=0.000s\n"
+        "2026-11-07T09:00:00Z phase=2 unit=pytest:tests/a/test_a.py END status=PASS pass=3 fail=0 elapsed=3600.000s "
+        "measured=3606.000s\n")
+    (batch / "shard-g0" / "unit-0.xml").write_text(
+        '<testsuites><testsuite><testcase classname="tests.a.test_a" name="test_x" time="1.0"/>'
+        '<testcase classname="tests.a.test_a" name="test_y" time="2.0"/>'
+        '<testcase classname="tests.a.test_a" name="test_original" time="3600.0"/></testsuite></testsuites>')
+    (batch / "shard-g0" / "group-0.xml").write_text(
+        '<testsuites><testsuite><testcase classname="tests.a.test_a" name="test_x" time="500"/></testsuite></testsuites>')
+    batch_history = runner.read_history([batch])
+    assert batch_history == dict(units={"pytest:tests/a/test_a.py": 3606.0}, overhead={"pytest:tests/a/test_a.py": 3.0},
+                                 nodes={"tests/a/test_a.py::test_x": 1.0, "tests/a/test_a.py::test_y": 2.0,
+                                        "tests/a/test_a.py::test_original": 3600.0})
+    current = ["tests/a/test_a.py::test_x", "tests/a/test_a.py::test_y", "tests/a/test_a.py::test_twin"]
+    assert runner.planned_seconds("pytest:tests/a/test_a.py", 4.3, {}, batch_history, current) == (6.0, "history-partial", 1)
+
+    # build_plan: measured files take their history (over a stale pin); an unmeasured file of a
+    # measured component is priced at that component's median measured seconds per test.
+    for name in ("test_a.py", "test_b.py", "test_new.py"):
+        (tmp_path / "tests/a" / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "tests/a" / name).write_text("")
+    nodes = [f"tests/a/{name}::test_{case}" for name in ("test_a.py", "test_b.py", "test_new.py") for case in "xyz"]
+    data = dict(pytest_seconds_per_test=4.3, known_failures=[], expected_movers=[], suites=[], pin_files=[],
+                unit_seconds={"tests/a/test_b.py": 7}, components={"a": dict(sources=[], tests=["tests/a"])})
+    monkeypatch.setattr(runner, "collect", lambda *args: dict(nodes=nodes, exit_code=0, errors=[], two_device={}))
+    planned = {u["id"]: (u["seconds"], u["timing"]) for u in runner.build_plan(
+        tmp_path, "fixture", data, tmp_path,
+        history=dict(units={"pytest:tests/a/test_a.py": 30.0, "pytest:tests/a/test_b.py": 90.0}, nodes={}, overhead={}))["units"]}
+    assert planned == {"pytest:tests/a/test_a.py": (30.0, "history"), "pytest:tests/a/test_b.py": (90.0, "history"),
+                       "pytest:tests/a/test_new.py": (60.0, "history-rate")}
+    unmeasured = {u["id"]: (u["seconds"], u["timing"]) for u in runner.build_plan(tmp_path, "fixture", data, tmp_path)["units"]}
+    assert unmeasured["pytest:tests/a/test_b.py"] == (7, "manifest")
+    assert unmeasured["pytest:tests/a/test_new.py"] == (pytest.approx(12.9), "guess")
+    units = [dict(id="pytest:tests/a/test_a.py", seconds=150.0, timing="history", suites={"fdtd-baselines": []}),
+             dict(id="pytest:tests/c/test_c.py", seconds=4.3, timing="guess", suites={})]
+    lines = runner.timing_summary(units, manifest)
+    assert lines[:2] == ["Timing history: 1 units, ~0.04 h", "Timing guess: 1 units, ~0.00 h"]
+    assert "runs 1/1 pin_files (BITID-8)" in lines[2] and "duplicates phase 1" in lines[2]
+
+
+def _light_units(source, names, **extra):
+    units = []
+    for name in names:
+        path = f"tests/light/test_{name}.py"
+        (source / path).parent.mkdir(parents=True, exist_ok=True)
+        (source / path).write_text("def test_one():\n    pass\n" if name != "state" else "import os\nos.environ['X'] = '1'\n")
+        units.append(dict(dict(id=f"pytest:{path}", kind="pytest", selectors=[path], nodes=[f"{path}::test_one"],
+                               suites={"pytest-light": [f"{path}::test_one"]}, classification="TOLERANCE",
+                               component="light", seconds=5.0), **extra.get(name, {})))
+    return units
+
+
+def test_light_files_share_an_interpreter_and_failures_rerun_alone(tier_runner, monkeypatch, tmp_path):
+    runner = tier_runner
+    source = tmp_path / "tree"
+    units = _light_units(source, ["a", "b", "state", "c", "heavy", "d"],
+                         heavy=dict(seconds=900.0), d=dict(classification="BITID"))
+    can_group = lambda unit: runner.groupable(source, unit, 60)
+    assert [can_group(u) for u in units] == [True, True, False, True, False, False]
+    jobs = runner.pack_jobs(units, can_group, lambda unit: None, budget=600)
+    assert [[u["id"][-9:] for u in job] for job in jobs] == [
+        ["test_a.py", "test_b.py"], ["_state.py"], ["test_c.py"], ["_heavy.py"], ["test_d.py"]]
+    assert len(runner.pack_jobs(units[:2], can_group, lambda unit: None, budget=8)) == 2
+    assert len(runner.pack_jobs(units[:2], can_group, lambda unit: unit["id"], budget=600)) == 2
+
+    commands = []
+
+    def child(command, **kwargs):
+        commands.append(command)
+        xml = Path(next(arg.split("=", 1)[1] for arg in command if arg.startswith("--junitxml=")))
+        cases = []
+        selectors = command[3:command.index("--gpu")]
+        for selector in selectors:
+            module = selector.removesuffix(".py").replace("/", ".")
+            # test_b fails only when it shares an interpreter.
+            failure = "<failure message='boom'>boom</failure>" if selector.endswith("test_b.py") and len(selectors) > 1 else ""
+            cases.append(f'<testcase classname="{module}" name="test_one" time="1.5">{failure}</testcase>')
+        xml.write_text("<testsuites><testsuite>" + "".join(cases) + "</testsuite></testsuites>")
+        return SimpleNamespace(returncode=1 if "boom" in "".join(cases) else 0)
+
+    monkeypatch.setattr(runner.subprocess, "run", child)
+    out = tmp_path / "out"
+    out.mkdir()
+    group, records = runner.execute_group(source, "sha", units[:2], out, None)
+    assert records["pytest:tests/light/test_b.py"] is None
+    record = records["pytest:tests/light/test_a.py"]
+    assert (record["status"], record["returncode"], [c["nodeid"] for c in record["cases"]], record["group"]["units"]) == (
+        "PASS", 0, ["tests/light/test_a.py::test_one"], [u["id"] for u in units[:2]])
+    assert record["seconds"] >= 1.5 and record["junit"].endswith(runner.unit_name(units[0]["id"]) + ".xml")
+    assert [c["nodeid"] for c in runner.junit_cases(Path(record["junit"]))] == ["tests/light/test_a.py::test_one"]
+    # A crashed or interrupted group accepts no in-group outcome.
+    monkeypatch.setattr(runner.subprocess, "run", lambda command, **kwargs: SimpleNamespace(returncode=2))
+    assert set(runner.execute_group(source, "sha", units[:2], out, None)[1].values()) == {None}
+
+    # Through run_main: the member that failed in the group re-runs alone and that outcome is recorded.
+    monkeypatch.setattr(runner.subprocess, "run", child)
+    plan = dict(units=units[:2] + units[3:4], not_run=[], disabled_suites=[], suites=[])
+    monkeypatch.setattr(runner, "source_tree", lambda args: ("sha", source))
+    monkeypatch.setattr(runner, "build_plan", lambda *args: plan)
+    monkeypatch.setattr(runner, "load_manifest", lambda: dict(pin_files=[], known_failures=[]))
+    commands.clear()
+    args = SimpleNamespace(commit="sha", shard="0/1", since=None, out=str(tmp_path / "run"), in_place=False,
+                           changed_files=None, lock=None, lock_for=[], stop_on_fail=None, no_start_after=[],
+                           tier="integration", two_gpu=False, exclude_component=[], label=None, units_from=None,
+                           claim_dir=None, min_free_mib=0, history=[], procs=1, group_light=60, group_budget=600)
+    monkeypatch.setattr(runner, "pin_changes", lambda sha, manifest: [])
+    monkeypatch.setattr(runner, "git", lambda root, *a: "")
+    assert runner.run_main(args) == 0
+    selectors = [command[3:command.index("--gpu")] for command in commands]
+    assert selectors == [["tests/light/test_a.py", "tests/light/test_b.py", "tests/light/test_c.py"],
+                         ["tests/light/test_b.py"]]
+    shard = tmp_path / "run/shard-0"
+    rerun = json.loads((shard / f"{runner.unit_name(units[1]['id'])}.json").read_text())
+    assert rerun["status"] == "PASS" and rerun["group"]["rerun_alone"] is True
+    assert rerun["command"][3:4] == ["tests/light/test_b.py"] and rerun["group"]["returncode"] == 1
+    # A grouped run passes exactly the flags of a unit's own run (execute and group_command must agree).
+    flags = [[arg for arg in command[command.index("--gpu"):] if not arg.startswith(("--junitxml=", "--basetemp="))]
+             for command in commands]
+    assert commands[0][:3] == commands[1][:3] and flags[0] == flags[1]
+    progress = (tmp_path / "run/progress.log").read_text().splitlines()
+    assert sum(" END " in line for line in progress) == 3 and all("measured=" in line for line in progress if " END " in line)
+    replay = runner.read_history([tmp_path / "run"])
+    assert set(replay["units"]) == {u["id"] for u in plan["units"]}
+    # Grouped units keep their own JUnit, so node history covers them; group-*.xml is not read twice.
+    assert replay["nodes"] == {f"tests/light/test_{name}.py::test_one": 1.5 for name in "abc"}
+
+
+def test_procs_run_phase_two_concurrently_and_commands_alone(tier_runner, monkeypatch, tmp_path):
+    runner = tier_runner
+    units = [dict(id="phase1", seconds=1, suites={"fdtd-baselines": []}, kind="pytest"),
+             *(dict(id=f"p{i}", seconds=10 - i, suites={}, kind="pytest") for i in range(4)),
+             dict(id="bench", seconds=5.5, suites={"benchmark": []}, kind="command")]
+    plan = dict(units=units, not_run=[], disabled_suites=[], suites=[])
+    monkeypatch.setattr(runner, "source_tree", lambda args: ("sha", tmp_path))
+    monkeypatch.setattr(runner, "build_plan", lambda *args: plan)
+    monkeypatch.setattr(runner, "load_manifest", lambda: dict(pin_files=[], known_failures=[]))
+    monkeypatch.setattr(runner, "pin_changes", lambda sha, manifest: [])
+    monkeypatch.setattr(runner, "wait_for_free_memory", lambda mib: None)
+    running, peak, log, guard = set(), [0], [], runner.threading.Lock()
+    both = runner.threading.Barrier(2, timeout=5)
+
+    def execute(source, sha, unit, directory, lock):
+        with guard:
+            running.add(unit["id"])
+            peak[0] = max(peak[0], len(running))
+            log.append((unit["id"], sorted(running)))
+        if unit["id"] in ("p0", "p1"):
+            both.wait()  # the two longest phase-2 units overlap
+        with guard:
+            running.discard(unit["id"])
+        return dict(status="PASS", seconds=1, cases=[dict(status="PASS", nodeid=unit["id"])])
+
+    monkeypatch.setattr(runner, "execute", execute)
+    args = SimpleNamespace(commit="sha", shard="0/1", since=None, out=str(tmp_path / "run"), in_place=False,
+                           changed_files=None, lock=None, lock_for=[], stop_on_fail=None, no_start_after=[],
+                           tier="integration", two_gpu=False, exclude_component=[], label=None, units_from=None,
+                           claim_dir=None, min_free_mib=1024, history=[], procs=2, group_light=None, group_budget=600)
+    assert runner.run_main(args) == 0
+    assert log[0] == ("phase1", ["phase1"]) and peak[0] == 2
+    assert {unit for unit, _ in log} == {u["id"] for u in units}
+    assert next(seen for unit, seen in log if unit == "bench") == ["bench"]
+    for change, message in ((dict(min_free_mib=0), "--min-free-mib"), (dict(lock="lane.lock"), "no lane --lock"),
+                            (dict(procs=0), "positive")):
+        with pytest.raises(ValueError, match=message):
+            runner.run_main(SimpleNamespace(**dict(vars(args), out=str(tmp_path / "bad"), **change)))
+
+
 @pytest.fixture
 def tier_runner():
     path = Path(__file__).resolve().parents[3] / "scripts/dev/integration_batch.py"
@@ -1131,6 +1343,18 @@ def test_manifest_unknown_entry_keys(tier_runner, tmp_path, manifest_root, table
     value = value.strip('"')
     assert f"{key}={value}" in message
     assert "stray_key" in message and "another_stray" in message
+
+
+def test_manifest_accepts_consumer_group_receipt(tier_runner, tmp_path, manifest_root, monkeypatch):
+    receipt = "docs/assessments/consumer-feature-groups/layered/0001.json@" + "a" * 64
+    path = tmp_path / "integration_suites.toml"
+    path.write_text(manifest_root + '[[merge_declarations]]\nbranch = "mom/feature"\npytest = "none"\n'
+                    f'benchmark = "none"\nnote = "layered change"\nconsumer_group_receipt = "{receipt}"\n')
+    manifest = tier_runner.load_manifest(path)
+    assert manifest["merge_declarations"][0]["consumer_group_receipt"] == receipt
+    monkeypatch.setattr(tier_runner, "git", lambda *args: "")
+    assert tier_runner.declared_pytest_movers(manifest) == []
+    assert tier_runner.undeclared_merges(tmp_path, "head", "base", manifest) == []
 
 
 def test_manifest_defaulted_root_keys_are_optional(tier_runner, tmp_path, manifest_root):
@@ -1248,3 +1472,165 @@ def test_plan_classifies_from_declaration_flags(tier_runner, monkeypatch, tmp_pa
     monkeypatch.setattr(runner, "collect", lambda *args: dict(nodes=[], exit_code=0, errors=[], two_device={}, benchmark_scenarios=[]))
     plan = runner.build_plan(tmp_path, "head", manifest, tmp_path)
     assert plan["expected_movers"][0]["tier"] == "T2"
+
+
+def _load_runner():
+    path = Path(__file__).resolve().parents[3] / "scripts/dev/integration_batch.py"
+    spec = importlib.util.spec_from_file_location("integration_batch", path)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    return runner
+
+
+def _trace_lines(nodes):
+    return "".join(json.dumps(dict(nodeid=nodeid, lines=lines)) + "\n" for nodeid, lines in nodes.items())
+
+
+def test_executed_sources_manifest_and_per_file_trigger(tmp_path):
+    runner = _load_runner()
+    traces = tmp_path / "trace.json"
+    traces.write_text(_trace_lines({
+        "tests/mom/test_dense.py::test_a": {"witwin/maxwell/mom/operator.py": [3], "witwin/maxwell/media.py": [9]},
+        "tests/mom/test_dense.py::test_b[1]": {"tests/mom/helper.py": [1]},
+        "tests/mom/layered/test_port.py::test_c": {"witwin/maxwell/mom/layered/build.py": [5]},
+    }))
+    output = tmp_path / "executed.json"
+    assert runner.executed_sources_main(SimpleNamespace(commit="abc", output=output, traces=[traces])) == 0
+    manifest = json.loads(output.read_text())
+    assert manifest["paths"] == sorted(["tests/mom/helper.py", "witwin/maxwell/media.py", "witwin/maxwell/mom/layered/build.py",
+                                        "witwin/maxwell/mom/operator.py"])
+    files = ["tests/mom/test_dense.py", "tests/mom/layered/test_port.py", "tests/mom/test_new.py"]
+
+    def select(changed, fallback=False):
+        return runner.executed_triggered(changed, ["tests/mom"], files, manifest, fallback)
+
+    # Imported-only modules do not trigger; executed ones trigger only the files that ran them.
+    assert select(["witwin/maxwell/fdtd/observers.py", "witwin/maxwell/scene.py"]) == []
+    assert select(["witwin/maxwell/media.py"]) == ["tests/mom/test_dense.py"]
+    assert select(["tests/mom/helper.py"]) == ["tests/mom/test_dense.py"]
+    assert select(["witwin/maxwell/mom/layered/cuda/kernel.cu"]) == ["tests/mom/layered/test_port.py"]
+    assert select(["witwin/maxwell/mom/layered/build.py", "docs/x.md"]) == ["tests/mom/layered/test_port.py"]
+    assert select(["tests/mom/layered/test_port.py"]) == ["tests/mom/layered/test_port.py"]
+    # Untraced test files follow the component-level rule; dependencies and fixtures select everything.
+    assert select(["witwin/maxwell/mom/new.py"], fallback=True) == ["tests/mom/test_new.py"]
+    for changed in ("pyproject.toml", "witwin/core/geometry.py", "tests/mom/fixtures/payload.json"):
+        assert select([changed]) == sorted(files)
+    assert select(["tests/slow_tests.txt"]) == []
+
+
+def test_plan_selects_executed_trigger_files_and_lists_triggered_milestones(monkeypatch, tmp_path, capsys):
+    runner = _load_runner()
+    files = ["tests/mom/test_dense.py", "tests/mom/test_layered.py", "tests/other/test_x.py"]
+    for name in files:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("")
+    (tmp_path / "tests/mom/executed.json").write_text(json.dumps(dict(
+        commit="abc", traces=[], paths=["witwin/maxwell/media.py", "witwin/maxwell/mom/layered/build.py"],
+        tests={"tests/mom/test_dense.py": [0], "tests/mom/test_layered.py": [1]})))
+    nodes = [f"{name}::test_{case}" for name in files for case in ("small", "large")]
+    milestone = "tests/mom/test_dense.py::test_large"
+    manifest = dict(pytest_seconds_per_test=1, known_failures=[], expected_movers=[],
+                    components={"other": dict(sources=["witwin/maxwell/other/**"], tests=["tests/other"]),
+                                "mom": dict(sources=["witwin/maxwell/mom/**"], tests=["tests/mom"], trigger="executed",
+                                            executed_sources="tests/mom/executed.json")},
+                    suites=[dict(id="mom-milestone", tier="milestone", kind="pytest", status="READY",
+                                 selectors=[milestone], classification="TOLERANCE", estimated_seconds=10)])
+    monkeypatch.setattr(runner, "collect", lambda *args: dict(nodes=nodes, exit_code=0, errors=[], two_device={}))
+
+    def plan(changed):
+        listing = tmp_path / "changed.txt"
+        listing.write_text("\n".join(changed))
+        return runner.build_plan(tmp_path, "fixture", manifest, tmp_path, changed_files=listing)
+
+    # A shared file selects every broad component, but MoM only through its executed sources.
+    shared = plan(["witwin/maxwell/scene.py"])
+    assert shared["selected_components"] == ["other"] and shared["executed_triggered"] == {"mom": []}
+    assert shared["milestone_triggered"] == []
+    media = plan(["witwin/maxwell/media.py"])
+    assert media["selected_components"] == ["other", "mom"]
+    assert media["executed_triggered"] == {"mom": ["tests/mom/test_dense.py"]}
+    assert {n for u in media["units"] if u["component"] == "mom" for n in u["nodes"]} == {"tests/mom/test_dense.py::test_small"}
+    assert media["milestone_triggered"] == [milestone]
+    layered = plan(["witwin/maxwell/mom/layered/build.py"])
+    assert layered["selected_components"] == ["mom"]
+    assert {n for u in layered["units"] for n in u["nodes"]} == {"tests/mom/test_layered.py::test_small",
+                                                                 "tests/mom/test_layered.py::test_large"}
+    assert layered["milestone_triggered"] == []
+    monkeypatch.setattr(runner, "source_tree", lambda args: ("fixture", tmp_path))
+    monkeypatch.setattr(runner, "build_plan", lambda *args: media)
+    assert runner.plan_main(SimpleNamespace(two_gpu=False, since=None, tier="integration", history=[],
+                                           exclude_component=[], changed_files=None, shards=1)) == 0
+    out = capsys.readouterr().out
+    assert "mom: executed-source-triggered test files: 1\n  tests/mom/test_dense.py" in out
+    assert f"milestone run triggered (needs --tier milestone): {milestone}" in out
+
+
+def test_mom_milestone_suite_names_exactly_the_marked_originals():
+    import subprocess
+    import sys
+
+    runner = _load_runner()
+    root = runner.ROOT
+    suite = next(s for s in runner.load_manifest()["suites"] if s["id"] == "mom-milestone")
+    assert suite["tier"] == "milestone" and suite["kind"] == "pytest"
+    files = sorted(p.relative_to(root).as_posix() for p in (root / "tests/mom").rglob("test_*.py")
+                   if "mom_milestone" in p.read_text())
+
+    def collect(*args):
+        child = subprocess.run([sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-p", "no:xdist", "--collect-only",
+                                "-q", "-o", "addopts=", "--run-slow", "--run-mom-milestone", *args, *files],
+                               cwd=root, capture_output=True, text=True,
+                               env={**os.environ, "PYTHONPATH": str(root), "CUDA_VISIBLE_DEVICES": ""})
+        assert child.returncode == 0, child.stdout + child.stderr
+        return {line for line in child.stdout.splitlines() if "::" in line}
+
+    marked = collect("-m", "mom_milestone")
+    claimed = {node for node in collect() if any(runner.matches(node, s) for s in suite["selectors"])}
+    assert marked and claimed == marked
+    assert len(marked) == suite["expected_tests"]
+    assert all(any(runner.matches(node, s) for node in marked) for s in suite["selectors"])
+
+
+def test_every_regression_tier_mom_file_has_an_executed_sources_entry():
+    """Fails until tests/mom/executed_sources.json covers every MoM test file with a regression-tier node
+    (except the declared ``executed_untraced`` files, which keep the component rule).
+
+    Regenerate it from a traced run (docs/plans/integration_batch.md, "MoM milestone tier and
+    executed-source trigger"); files whose nodes are all mom_milestone are not in the integration tier.
+    """
+    import subprocess
+    import sys
+
+    runner = _load_runner()
+    root = runner.ROOT
+    component = runner.load_manifest()["components"]["mom"]
+    assert component["trigger"] == "executed"
+    manifest_path = root / component["executed_sources"]
+    assert manifest_path.is_file(), f"missing {component['executed_sources']}: regenerate it from a traced tests/mom run"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["paths"] == sorted(set(manifest["paths"])) and manifest["traces"] == sorted(manifest["traces"])
+    assert all(0 <= i < len(manifest["paths"]) for indices in manifest["tests"].values() for i in indices)
+    child = subprocess.run([sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-p", "no:xdist", "--collect-only",
+                            "-q", "-o", "addopts=", "--run-slow", "tests/mom"], cwd=root, capture_output=True, text=True,
+                           env={**os.environ, "PYTHONPATH": str(root), "CUDA_VISIBLE_DEVICES": ""})
+    files = {line.split("::")[0] for line in child.stdout.splitlines() if "::" in line}
+    assert files
+    untraced = set(component.get("executed_untraced", []))
+    assert not untraced & manifest["tests"].keys(), "traced files must leave executed_untraced"
+    missing = sorted(files - manifest["tests"].keys() - untraced)
+    assert not missing, "MoM test files without an executed-sources entry: " + ", ".join(missing)
+
+
+def test_executed_sources_manifest_is_independent_of_trace_order(tmp_path):
+    runner = _load_runner()
+    first, second = tmp_path / "a.json", tmp_path / "b.json"
+    first.write_text(_trace_lines({"tests/mom/test_x.py::t": {"witwin/maxwell/mom/b.py": [1]}}))
+    second.write_text(_trace_lines({"tests/mom/test_x.py::u": {"witwin/maxwell/mom/a.py": [2]},
+                                    "tests/mom/test_y.py::t": {}}))
+    outputs = []
+    for order in ((first, second), (second, first)):
+        output = tmp_path / f"out{len(outputs)}.json"
+        runner.executed_sources_main(SimpleNamespace(commit="abc", output=output, traces=list(order)))
+        outputs.append(output.read_bytes())
+    assert outputs[0] == outputs[1]
+    assert json.loads(outputs[0])["tests"] == {"tests/mom/test_x.py": [0, 1], "tests/mom/test_y.py": []}

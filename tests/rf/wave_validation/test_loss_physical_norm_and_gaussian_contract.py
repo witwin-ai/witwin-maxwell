@@ -21,11 +21,11 @@ def prescribed_field(copper=False):
     if copper:
         structures.append(mw.Structure(mw.Box(position=torch.zeros(3, dtype=torch.float64),
             size=torch.tensor([.01, .01, 0.], dtype=torch.float64)),
-            mw.CopperFoil(thickness=35e-6, frequency_range=(.1e9, 4e9)), name='foil'))
+            mw.media.CopperFoil(thickness=35e-6, frequency_range=(.1e9, 4e9)), name='foil'))
     scene = mw.Scene(domain=mw.Domain(bounds=((- .01, .01),) * 3), grid=grid,
-        structures=structures, boundary=mw.BoundarySpec.none(), device='cpu')
+        structures=structures, boundary=mw.BoundarySpec.none())
     monitors, schema = regional_monitors(scene, scene.domain.bounds, (1e9,), observation='planes', include_flux=False)
-    scene = scene.clone(monitors=monitors); prepared = prepare_scene(scene)
+    scene = scene.updated(monitors=monitors); prepared = prepare_scene(scene, device='cpu')
     fields = {name: torch.ones(selection['full_shape'], dtype=torch.complex128) for name, selection in schema.items()}
     records = {}; extra_norm = 0.
     if copper:
@@ -45,7 +45,7 @@ def prescribed_field(copper=False):
             extra_norm += float((area * (.0015 * (2 ** 2 - 1) + .002 * (7 ** 2 - 1))).sum())
     payloads = {}
     for comp, selection in schema.items():
-        axes = component_coords(prepared, comp)
+        axes = component_coords(prepared, comp, device=prepared.device)
         for plane in selection['planes']:
             payloads[plane['name']] = dict(kind='plane', monitor_type='plane', axis='z',
                 frequency=1e9, frequencies=(1e9,), components={comp: dict(data=fields[comp][:, :, plane['normal_index']],

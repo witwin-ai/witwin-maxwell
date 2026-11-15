@@ -24,25 +24,24 @@ def _build(*, amp, sigma=0.5, rho=1000.0, freq=1.0e9):
     3D grid over the box.
     """
     material = mw.Material(sigma_e=sigma, mass_density=rho, name="tissue")
+    monitor = mw.monitors.PowerLossMonitor(
+        "loss", position=(1.0, 1.0, 1.0), size=(1.0, 1.0, 1.0),
+        frequencies=(freq,), channels=("conduction",),
+    )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 2.0),) * 3),
-        grid=mw.GridSpec.uniform(_DX),
-        boundary=mw.BoundarySpec.none(),
-        structures=(
+                domain=mw.Domain(bounds=((0.0, 2.0),) * 3),
+                grid=mw.GridSpec.uniform(_DX),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
             mw.Structure(
                 name="bulk",
                 geometry=mw.Box(position=(1.0, 1.0, 1.0), size=(8.0, 8.0, 8.0)),
                 material=material,
             ),
-        ),
-        device="cpu",
-    )
-    monitor = mw.PowerLossMonitor(
-        "loss", position=(1.0, 1.0, 1.0), size=(1.0, 1.0, 1.0),
-        frequencies=(freq,), channels=("conduction",),
-    )
-    scene.add_monitor(monitor)
-    prepared = prepare_scene(scene)
+            ),
+                monitors=(monitor,),
+            )
+    prepared = prepare_scene(scene, device="cpu")
     compiled = compile_power_loss_monitor(prepared, monitor)
     amp_t = amp if torch.is_tensor(amp) else torch.tensor(amp, dtype=torch.float64)
     fields = {}
@@ -75,30 +74,30 @@ def _averaged_objective(sar, m0):
 
 def test_point_sar_field_gradient_matches_central_difference():
     amp = torch.tensor(1.7, dtype=torch.float64, requires_grad=True)
-    sar = _build(amp=amp).sar("loss")
+    sar = mw.sar.sar(_build(amp=amp), "loss")
     obj = _point_objective(sar)
     (grad,) = torch.autograd.grad(obj, amp)
 
     # The GPU-first reducer runs in float32, so autograd/FD agree to float32
     # precision (~1e-3), not float64. That still pins the gradient's value.
     eps = 1e-4
-    plus = _point_objective(_build(amp=1.7 + eps).sar("loss")).item()
-    minus = _point_objective(_build(amp=1.7 - eps).sar("loss")).item()
+    plus = _point_objective(mw.sar.sar(_build(amp=1.7 + eps), "loss")).item()
+    minus = _point_objective(mw.sar.sar(_build(amp=1.7 - eps), "loss")).item()
     fd = (plus - minus) / (2 * eps)
     np.testing.assert_allclose(float(grad), fd, rtol=2e-3, atol=1e-8)
 
 
 def test_averaged_sar_field_gradient_matches_central_difference():
     m0 = 1000.0 * (3 * _DX) ** 3
-    averaging = mw.SARAveraging(mass=(m0,))
+    averaging = mw.sar.SARAveraging(mass=(m0,))
     amp = torch.tensor(1.3, dtype=torch.float64, requires_grad=True)
-    sar = _build(amp=amp).sar("loss", averaging=averaging)
+    sar = mw.sar.sar(_build(amp=amp), "loss", averaging=averaging)
     obj = _averaged_objective(sar, m0)
     (grad,) = torch.autograd.grad(obj, amp)
 
     eps = 1e-4
-    plus = _averaged_objective(_build(amp=1.3 + eps).sar("loss", averaging=averaging), m0).item()
-    minus = _averaged_objective(_build(amp=1.3 - eps).sar("loss", averaging=averaging), m0).item()
+    plus = _averaged_objective(mw.sar.sar(_build(amp=1.3 + eps), "loss", averaging=averaging), m0).item()
+    minus = _averaged_objective(mw.sar.sar(_build(amp=1.3 - eps), "loss", averaging=averaging), m0).item()
     fd = (plus - minus) / (2 * eps)
     np.testing.assert_allclose(float(grad), fd, rtol=2e-3, atol=1e-8)
 
@@ -107,7 +106,7 @@ def test_point_sar_density_grid_gradient_matches_central_difference():
     shape = _grid_shape()
     rho0 = 1000.0
     rho_grid = torch.full(shape, rho0, dtype=torch.float32, requires_grad=True)
-    sar = _build(amp=2.0, rho=rho_grid).sar("loss")
+    sar = mw.sar.sar(_build(amp=2.0, rho=rho_grid), "loss")
     obj = _point_objective(sar)
     (grad,) = torch.autograd.grad(obj, rho_grid)
 
@@ -118,8 +117,8 @@ def test_point_sar_density_grid_gradient_matches_central_difference():
     grid_plus[idx] += eps
     grid_minus = torch.full(shape, rho0, dtype=torch.float32)
     grid_minus[idx] -= eps
-    plus = _point_objective(_build(amp=2.0, rho=grid_plus).sar("loss")).item()
-    minus = _point_objective(_build(amp=2.0, rho=grid_minus).sar("loss")).item()
+    plus = _point_objective(mw.sar.sar(_build(amp=2.0, rho=grid_plus), "loss")).item()
+    minus = _point_objective(mw.sar.sar(_build(amp=2.0, rho=grid_minus), "loss")).item()
     fd = (plus - minus) / (2 * eps)
     np.testing.assert_allclose(float(grad[idx]), fd, rtol=2e-3, atol=1e-9)
 
@@ -127,14 +126,14 @@ def test_point_sar_density_grid_gradient_matches_central_difference():
 def test_point_sar_conductivity_central_difference_matches_analytic():
     """SAR is linear in conductivity: d(sum SAR)/d(sigma) == sum(SAR)/sigma."""
     sigma0 = 0.6
-    sar = _build(amp=2.0, sigma=sigma0).sar("loss")
+    sar = mw.sar.sar(_build(amp=2.0, sigma=sigma0), "loss")
     base = float(_point_objective(sar))
 
     # A wide step beats float32 catastrophic cancellation; SAR is exactly linear
     # in sigma, so truncation error is zero regardless of step.
     eps = 0.05
-    plus = float(_point_objective(_build(amp=2.0, sigma=sigma0 + eps).sar("loss")))
-    minus = float(_point_objective(_build(amp=2.0, sigma=sigma0 - eps).sar("loss")))
+    plus = float(_point_objective(mw.sar.sar(_build(amp=2.0, sigma=sigma0 + eps), "loss")))
+    minus = float(_point_objective(mw.sar.sar(_build(amp=2.0, sigma=sigma0 - eps), "loss")))
     fd = (plus - minus) / (2 * eps)
     analytic = base / sigma0
     np.testing.assert_allclose(fd, analytic, rtol=1e-4, atol=1e-9)
@@ -143,12 +142,12 @@ def test_point_sar_conductivity_central_difference_matches_analytic():
 def test_point_sar_density_central_difference_matches_analytic():
     """Point SAR ~ 1/rho, so d(sum SAR)/d(rho) == -sum(SAR)/rho for a uniform density."""
     rho0 = 950.0
-    sar = _build(amp=2.0, rho=rho0).sar("loss")
+    sar = mw.sar.sar(_build(amp=2.0, rho=rho0), "loss")
     base = float(_point_objective(sar))
 
     eps = 1.0
-    plus = float(_point_objective(_build(amp=2.0, rho=rho0 + eps).sar("loss")))
-    minus = float(_point_objective(_build(amp=2.0, rho=rho0 - eps).sar("loss")))
+    plus = float(_point_objective(mw.sar.sar(_build(amp=2.0, rho=rho0 + eps), "loss")))
+    minus = float(_point_objective(mw.sar.sar(_build(amp=2.0, rho=rho0 - eps), "loss")))
     fd = (plus - minus) / (2 * eps)
     analytic = -base / rho0
     np.testing.assert_allclose(fd, analytic, rtol=1e-3, atol=1e-9)

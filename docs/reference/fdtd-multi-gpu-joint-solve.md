@@ -21,25 +21,22 @@ import witwin.maxwell as mw
 # Construct the scene on a participating CUDA device. PointDipole sources must use
 # profile="ideal" in the current multi-GPU runtime.
 scene = mw.Scene(
-    domain=mw.Domain(bounds=((-1.0, 1.0), (-0.5, 0.5), (-0.5, 0.5))),
-    grid=mw.GridSpec.uniform(0.02),
-    boundary=mw.BoundarySpec.pml(num_layers=8),
-    device="cuda:0",
-)
-scene.add_source(
-    mw.PointDipole(
-        position=(0.0, 0.0, 0.0),
-        polarization="Ez",
-        profile="ideal",
-        source_time=mw.CW(frequency=1.0e9),
-        name="source",
-    )
-)
-scene.add_monitor(
-    mw.PointMonitor("probe", (0.2, 0.0, 0.0), fields=("Ez",))
-)
+            domain=mw.Domain(bounds=((-1.0, 1.0), (-0.5, 0.5), (-0.5, 0.5))),
+            grid=mw.GridSpec.uniform(0.02),
+            boundary=mw.BoundarySpec.pml(num_layers=8),
+            sources=(
+        mw.PointDipole(
+            position=(0.0, 0.0, 0.0),
+            polarization="Ez",
+            profile="ideal",
+            source_time=mw.CW(frequency=1.0e9),
+            name="source",
+        ),
+        ),
+            monitors=(mw.PointMonitor("probe", (0.2, 0.0, 0.0), fields=("Ez",)),),
+        )
 
-parallel = mw.FDTDParallelConfig(
+parallel = mw.fdtd.FDTDParallelConfig(
     devices=("cuda:0", "cuda:1"),
     decomposition_axis="x",
     transport="auto",       # "auto" and "cuda_p2p" use the same-process P2P path
@@ -51,9 +48,11 @@ parallel = mw.FDTDParallelConfig(
 simulation = mw.Simulation.fdtd(
     scene,
     frequencies=(1.0e9,),
-    run_time=mw.TimeConfig(time_steps=1000),
-    parallel=parallel,
-    cuda_graph=False,
+    config=mw.FDTDConfig(
+        run_time=mw.TimeConfig(time_steps=1000),
+        parallel=parallel,
+        cuda_graph=False, device="cuda:0",
+    ),
 )
 
 # prepare() performs topology, homogeneity, and partition checks. run() performs the
@@ -61,8 +60,8 @@ simulation = mw.Simulation.fdtd(
 prepared = simulation.prepare()
 result = prepared.run()
 
-probe = result.monitor("probe")
-parallel_stats = result.solver_stats["parallel_stats"]
+probe = result.raw_monitor("probe")
+parallel_stats = Result.stats()["parallel_stats"]
 print(parallel_stats["partitions"])
 print(parallel_stats["peak_memory_bytes"])
 ```
@@ -169,7 +168,7 @@ snapshot semantics: fields, monitors, metadata, and solver statistics are serial
 but live solvers, CUDA streams, peer transport state, and prepared-scene runtime state
 are not.
 
-For a distributed result, `Result.save_sharded(directory)` asks the coordinator for
+For a distributed result, `mw.execution.save_sharded(result, directory)` asks the coordinator for
 owned electric field shards and writes a manifest plus one detached CPU tensor payload
 per rank. It does not assemble a global field first. The manifest records component
 global x intervals, tensor shapes/dtypes, frequency metadata, and rank files; monitor
@@ -198,20 +197,20 @@ This is spatial domain decomposition, not replicated data parallelism:
    independent distributed coordinator with its own shard orchestration, halo exchange,
    event ordering, and distributed time loop. This is not a claim that the Python loops
    are the same.
-4. The numerical core is shared. Every shard calls the same native CUDA Yee, boundary,
-   CPML, conductivity, and ADE kernels as the single-GPU solver. The standard real-field
-   path exposes six bounded native operations for `Hx/Hy/Hz` and `Ex/Ey/Ez`; the
-   legacy full-domain standard wrappers invoke those same implementations with the full
-   x range. There is no second Python or Torch field-update implementation.
+4. The numerical core is shared. Every shard runs the single-GPU CUDA core path's fused
+   Yee update (one `CorePathRuntime` per shard, bound to the shard's local storage) and the
+   same native boundary, CPML, conductivity, and ADE kernels as the single-GPU solver. Its
+   full-field DFT accumulates from the same precomputed device weight table. There is no
+   second Python or Torch field-update implementation.
 5. One-plane asymmetric halos carry only the tangential components required by the
    second-order stencil. `Ey/Ez` move from the right shard to the left shard before
    the magnetic update. `Hy/Hz` move from the left shard to the right shard before
    the electric update.
 6. A dedicated communication stream and CUDA events order each peer copy against both
-   producer and destination use. With `overlap=True`, eligible standard real-field
-   runs compute interior regions while halos are in flight and wait only for the
-   boundary strip. CPML and modulation currently use the serialized-safe schedule;
-   inspect `overlap_active` instead of assuming a request was activated.
+   producer and destination use. The fused core launch covers the whole shard, so every
+   run uses the serialized schedule (halo copy, then the shard update); `overlap=True` is
+   accepted and reported as `overlap_active=False`. An interior/halo split of the fused
+   launch is a planned follow-up.
 7. Only the first and last slabs apply physical x-face boundary behavior. Internal
    interfaces never apply PML, PEC, PMC, Mur, periodic, or symmetry boundary rules.
    Every shard still owns the global y/z faces.
@@ -319,7 +318,7 @@ scene locally is not enough.
 
 ## Diagnostics and solver statistics
 
-Use either `result.solver_stats["parallel_stats"]` or
+Use either `Result.stats()["parallel_stats"]` or
 `result.stats()["parallel_stats"]`. The nested record includes:
 
 - `devices`, `decomposition_axis`, `transport`, and the peer `topology` snapshot;

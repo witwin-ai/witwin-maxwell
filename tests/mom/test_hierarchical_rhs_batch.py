@@ -24,21 +24,21 @@ def prepared(backend):
     if backend == 'hmatrix':
         bodies = [mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=2.))]
     scene = mw.Scene(structures=bodies, sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=2 if backend == 'hmatrix' else 3, singular_order=3),
+    config = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=2 if backend == 'hmatrix' else 3, singular_order=3),
         stopping=StoppingRule(method='gmres', preconditioner='row_column_norm' if backend in ('hmatrix', 'h2') else 'rwg_diagonal',
                               rtol=1e-12, atol=0, maxiter=240, restart=120),
         query_config=FieldQueryConfig(adaptive=False), riesz_storage='local_rwg_v1',
         operator_backend='fmm' if backend == 'directional' else backend,
-        hierarchical=mw.HMatrixConfig(pivoting='adaptive') if backend in ('hmatrix', 'h2') else None)
+        hierarchical=mw.mom.HMatrixConfig(pivoting='adaptive') if backend in ('hmatrix', 'h2') else None)
     if backend == 'fmm':
-        config = replace(config, fmm=mw.FMMConfig())
+        config = replace(config, fmm=mw.mom.FMMConfig())
     if backend == 'directional':
         config = replace(config, integration=IntegrationConfig(order=6, singular_order=3, pair_batch=4,
                                                                far_pair_batch=16, near_max_order=32),
                          fmm=DirectionalFMMConfig(leaf_size=4, separation_ratio=.15, cone_subdivisions=(2**20,),
                                                   max_contexts=4096, tensor_workspace_budget_bytes=512*1024**2,
                                                   leaf_factor_kernel='original', leaf_factor_max_edges=16))
-    return scene, config, mw.Simulation.mom(scene, frequency=3e8, config=config).prepare()
+    return scene, config, mw.Simulation.mom(scene, frequencies=3e8, config=config).prepare()
 
 
 @pytest.mark.parametrize('backend', BACKENDS)
@@ -88,11 +88,11 @@ def test_compressed_backend_prepare_solve_and_batched_rhs(backend):
 
 
 def test_batched_rhs_fails_closed_on_periodic_lattices():
-    lattice = mw.MoMPeriodicConfig(vectors_m=((1., 0., 0.),), reciprocal_shells=4, quadrature_order=128)
+    lattice = mw.mom.MoMPeriodicConfig(vectors_m=((1., 0., 0.),), reciprocal_shells=4, quadrature_order=128)
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=2.))],
                      sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(subdivisions=0, periodic=lattice, integration=IntegrationConfig(order=2, singular_order=3),
+    config = mw.mom.MoMConfig(subdivisions=0, periodic=lattice, integration=IntegrationConfig(order=2, singular_order=3),
                           query_config=FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1')
-    handle = mw.Simulation.mom(scene, frequency=3e8, config=config).prepare().solver.handle
+    handle = mw.Simulation.mom(scene, frequencies=3e8, config=config).prepare().solver.handle
     with pytest.raises(NotImplementedError, match='periodic'):
         handle.build_rhs_batch(((scene.sources[0],),))

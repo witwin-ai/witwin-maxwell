@@ -6,6 +6,15 @@ from torch.utils import cpp_extension
 from witwin.maxwell.fdtd.cuda import build
 
 
+@pytest.fixture(autouse=True)
+def restore_toolkit_environment(monkeypatch):
+    # _ensure_cuda_home_from_nvcc writes CUDA_HOME (and CUDA_PATH on Windows) into the
+    # process environment; record both so teardown removes the fake toolkit again.
+    for name in ("CUDA_HOME", "CUDA_PATH"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+
+
 @pytest.mark.parametrize("source", ["CUDA_HOME", "CUDA_PATH", "nvcc"])
 def test_late_toolkit_discovery_updates_extension_cache(monkeypatch, tmp_path, source):
     monkeypatch.delenv("CUDA_HOME", raising=False)

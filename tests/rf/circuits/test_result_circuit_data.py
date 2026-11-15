@@ -19,7 +19,7 @@ def _iter_tensors(value):
 
 
 def _data(name="network", *, requires_grad=False):
-    return mw.CircuitData(
+    return mw.circuits.CircuitData(
         circuit_name=name,
         times=torch.tensor([0.0, 1.0], dtype=torch.float64),
         node_names=("0", "signal"),
@@ -61,7 +61,7 @@ def _data(name="network", *, requires_grad=False):
 def _result(*, circuits=None):
     return mw.Result(
         method="fdtd",
-        scene=mw.Scene(device="cpu"),
+        scene=mw.Scene(),
         frequency=1.0e9,
         circuits=circuits,
     )
@@ -88,11 +88,11 @@ def test_result_circuit_accessor_preserves_identity_and_reports_stats():
     data = _data()
     result = _result(circuits={"network": data})
 
-    assert result.circuit("network") is data
-    assert result.circuits == {"network": data}
+    assert mw.circuits.circuit(result, "network") is data
+    assert mw.circuits.circuits(result) == {"network": data}
     assert result.stats()["num_circuits"] == 1
     with pytest.raises(KeyError, match="Choices:.*network"):
-        result.circuit("missing")
+        mw.circuits.circuit(result, "missing")
 
 
 def test_result_rejects_invalid_circuit_mappings():
@@ -132,7 +132,7 @@ def test_circuit_data_v1_round_trip_is_detached_and_cpu_resident(tmp_path):
     assert all(tensor.device.type == "cpu" for tensor in _iter_tensors(payload))
     assert all(not tensor.requires_grad for tensor in _iter_tensors(payload))
 
-    loaded = mw.CircuitData.load(path, map_location="cpu")
+    loaded = mw.circuits.CircuitData.load(path, map_location="cpu")
     _assert_circuit_data_equal(loaded, data)
     assert all(not tensor.requires_grad for tensor in _iter_tensors(loaded.diagnostics))
     assert data.node_voltages.requires_grad
@@ -154,7 +154,7 @@ def test_circuit_data_load_rejects_malformed_v1_payloads(tmp_path, mutation, mes
     torch.save(payload, path)
 
     with pytest.raises(ValueError, match=message):
-        mw.CircuitData.load(path)
+        mw.circuits.CircuitData.load(path)
 
 
 def test_circuit_data_save_prevalidates_diagnostics_before_filesystem_side_effects(
@@ -170,7 +170,7 @@ def test_circuit_data_save_prevalidates_diagnostics_before_filesystem_side_effec
     assert path.parent.exists() is False
 
 
-def test_result_v2_round_trip_embeds_circuit_data(tmp_path):
+def test_result_v3_round_trip_embeds_circuit_data(tmp_path):
     data = _data(requires_grad=True)
     result = _result(circuits={"network": data})
     path = tmp_path / "result.pt"
@@ -178,34 +178,34 @@ def test_result_v2_round_trip_embeds_circuit_data(tmp_path):
     result.save(path)
     payload = torch.load(path, map_location="cpu", weights_only=True)
 
-    assert payload["schema_version"] == RESULT_SNAPSHOT_SCHEMA_VERSION == 2
+    assert payload["schema_version"] == RESULT_SNAPSHOT_SCHEMA_VERSION == 3
     assert tuple(payload["circuits"]) == ("network",)
     assert payload["circuits"]["network"]["schema_version"] == 1
     assert payload["circuits"]["network"]["data_type"] == "CircuitData"
     assert all(tensor.device.type == "cpu" for tensor in _iter_tensors(payload["circuits"]))
     assert all(not tensor.requires_grad for tensor in _iter_tensors(payload["circuits"]))
 
-    loaded = mw.Result.load(path, scene=mw.Scene(device="cpu"))
-    _assert_circuit_data_equal(loaded.circuit("network"), data)
+    loaded = mw.Result.load(path, scene=mw.Scene())
+    _assert_circuit_data_equal(mw.circuits.circuit(loaded, "network"), data)
     assert data.node_voltages.requires_grad
 
 
-def test_result_rejects_superseded_v1_and_v2_without_circuits(tmp_path):
+def test_result_rejects_superseded_v2_and_v3_without_circuits(tmp_path):
     path = tmp_path / "result.pt"
     _result(circuits={"network": _data()}).save(path)
     payload = torch.load(path, weights_only=True)
 
-    # v1 is superseded, not supported alongside v2: there is no backward-support path.
-    payload["schema_version"] = 1
-    torch.save(payload, path)
-    with pytest.raises(ValueError, match="Unsupported result checkpoint schema_version=1"):
-        mw.Result.load(path, scene=mw.Scene(device="cpu"))
-
+    # Older schemas are refused with SchemaError: there is no backward-support path.
     payload["schema_version"] = 2
+    torch.save(payload, path)
+    with pytest.raises(mw.SchemaError, match="Unsupported result checkpoint schema_version=2"):
+        mw.Result.load(path, scene=mw.Scene())
+
+    payload["schema_version"] = 3
     payload.pop("circuits")
     torch.save(payload, path)
-    with pytest.raises(ValueError, match="schema v2 is missing required key: circuits"):
-        mw.Result.load(path, scene=mw.Scene(device="cpu"))
+    with pytest.raises(mw.SchemaError, match="schema v3 is missing required key: circuits"):
+        mw.Result.load(path, scene=mw.Scene())
 
 
 def test_result_save_prevalidates_circuits_before_filesystem_side_effects(tmp_path):

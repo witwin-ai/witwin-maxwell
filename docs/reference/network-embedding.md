@@ -32,11 +32,11 @@ ports = (
     ),
 )
 
-network = mw.TouchstoneNetwork(
+network = mw.rf.TouchstoneNetwork(
     name="filter",
     path=Path("filter.s2p"),
     connections={1: "input", 2: "output"},
-    fit=mw.RationalFitConfig(order=16),
+    fit=mw.rf.rational.RationalFitConfig(order=16),
     device="cuda",
 )
 
@@ -53,19 +53,20 @@ scene = mw.Scene(
     ),
     ports=ports,
     networks=(network,),
-    device="cuda",
 )
 
 result = mw.Simulation.fdtd(
     scene,
     frequencies=(2.0e9, 2.5e9, 3.0e9),
-    run_time=mw.TimeConfig(time_steps=2000),
-    spectral_sampler=mw.SpectralSampler(window="none"),
-    cuda_graph=True,
+    config=mw.FDTDConfig(
+        run_time=mw.TimeConfig(time_steps=2000),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        cuda_graph=True,
+    ),
 ).run()
 
 input_data = result.port("input")
-filter_data = result.embedded_network("filter")
+filter_data = mw.rf.embedded_network(result, "filter")
 result.save("embedded-result.pt")
 ```
 

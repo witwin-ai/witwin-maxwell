@@ -20,7 +20,7 @@ def test_new_binary_current_config_union_identity_without_numeric_replay(tmp_pat
     original=raw['fmm_config']
     assert original['version']=='cartesian_fmm_binary_lattice_config_v1'
     assert 'near_coefficient_workspace_budget_bytes' not in original['parameters']
-    cfg=mw.FMMConfig.restore(original)
+    cfg=mw.mom.FMMConfig.restore(original)
     assert cfg.payload()==original
     assert cfg.expansion_center_policy=='binary_lattice_v1'
     assert cfg.near_storage=='scalar_reciprocal_dk_v1'
@@ -29,22 +29,22 @@ def test_new_binary_current_config_union_identity_without_numeric_replay(tmp_pat
     combined=copy.deepcopy(original['parameters'])
     combined.update(near_storage='scalar_reciprocal_streamed_dk_v1',
         near_coefficient_workspace_budget_bytes=6144)
-    streamed=mw.FMMConfig.restore(dict(version='cartesian_fmm_streamed_reciprocal_dk_config_v1',parameters=combined))
+    streamed=mw.mom.FMMConfig.restore(dict(version='cartesian_fmm_streamed_reciprocal_dk_config_v1',parameters=combined))
     payload=streamed.payload()
     assert payload['version']=='cartesian_fmm_streamed_reciprocal_dk_config_v1'
     assert payload['parameters']['expansion_center_policy']=='binary_lattice_v1'
-    assert mw.FMMConfig.restore(json.loads(json.dumps(payload)))==streamed
+    assert mw.mom.FMMConfig.restore(json.loads(json.dumps(payload)))==streamed
     assert streamed.construction()['near_coefficient_workspace_budget_bytes']==6144
     for version in ('cartesian_fmm_binary_lattice_config_v1','cartesian_fmm_dyadic_centers_config_v1'):
         bad=copy.deepcopy(payload);bad['version']=version
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     bad=copy.deepcopy(original);bad['parameters']['near_coefficient_workspace_budget_bytes']=6144
-    with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+    with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     bad=copy.deepcopy(original);bad['parameters']['expansion_center_policy']='dyadic_cell_v1'
-    with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
-    directional=mw.DirectionalFMMConfig(near_storage='scalar_reciprocal_streamed_dk_v1',
+    with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
+    directional=mw.mom.DirectionalFMMConfig(near_storage='scalar_reciprocal_streamed_dk_v1',
         near_coefficient_workspace_budget_bytes=7168)
-    assert mw.FMMConfig.restore(json.loads(json.dumps(directional.payload())))==directional
+    assert mw.mom.FMMConfig.restore(json.loads(json.dumps(directional.payload())))==directional
     assert hashlib.sha256(Path(source).read_bytes()).hexdigest()==digest
     (tmp_path/'binary-current-config-union.json').write_text(json.dumps(dict(
         closed_binary_receipt_sha256=digest,closed_binary_payload_exact=True,

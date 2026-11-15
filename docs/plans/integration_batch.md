@@ -79,8 +79,9 @@ indexed `name`, `dtype`, `shape`, `max_abs`, `max_ref`, `max_rel`, `bound`,
 `ratio_to_bound`, `tier` and `level`, with ordinary Python values. Small leaves
 are packed for on-device per-tensor reductions; metrics and exact-mismatch flags
 transfer to the host once per device/dtype group, including discrete tensors.
-The CPU and CUDA-marked performance tests cover 85,000 small continuous leaves
-plus bool masks, check the transfer count and require comparison within five seconds.
+`test_85000_leaves` (CPU and CUDA) covers 85,000 small continuous leaves plus bool
+masks and checks the transfer count; the five-second limit is the perf test
+`tests/perf/test_numerical_equivalence_wall_time.py`.
 
 `assert_numerically_equivalent(ref, new, *, level, discrete=False, name=None)`
 applies setup/step bounds of `64*eps32*max_ref` in fp32 and `1e-12*max_ref` in
@@ -167,6 +168,97 @@ flux error <0.05 targets from the manifest; unconverged/missing cases are incomp
 Scalar errors are retained without inventing an additional scalar threshold.
 
 Development scripts that keep run evidence outside the repository read its location from `WITWIN_EVIDENCE_ROOT`; without it they write to `evidence/` under the current directory, which is gitignored. `WITWIN_BENCHMARK_CACHE` overrides the reference-cache location that `benchmark/core_path/gates.py` otherwise resolves to the main checkout's `benchmark/cache`.
+
+## Test tiers and parallel runs
+
+Two tiers split the pytest tree; the integration batch runs both, a per-branch gate
+runs the fast tier only.
+
+- **Fast tier**: plain `pytest` (or `pytest tests`). It deselects every test marked
+  `slow`. A test file or node named on the command line still runs its slow tests,
+  so explicit gate commands (BITID-8, `pin_files`, touched files) are unchanged;
+  add `-m "not slow"` to drop them there too.
+- **Slow tier**: tests measured over 60 s on CPU or GPU. They carry `@pytest.mark.slow`
+  or are listed by node id (or node-id prefix) in `tests/slow_tests.txt`, with the
+  measured seconds as a comment. `--run-slow` adds them to a directory-level run;
+  `-m slow` selects only them.
+- **Perf**: `perf` tests in `tests/perf/` check wall-clock budgets and need an otherwise
+  idle host or device. They run only with `--run-perf` (or `-m perf`), even when their
+  file is named, and never in the batch. Schedule them with the coordinator.
+
+- **MoM milestone**: the large MoM dense-oracle originals carry `@pytest.mark.mom_milestone`.
+  Each has a regression twin (`test_<original>_regression`, same assertions on a smaller case)
+  that runs in the slow or fast tier. Originals run only with `--run-mom-milestone`,
+  `-m mom_milestone`, or when the node itself is named (naming the file is not enough). See
+  "MoM milestone tier and executed-source trigger" below.
+
+Harnesses that build a node catalog from directory selectors must pass `--run-slow`
+(`scripts/dev/integration_batch.py` and `benchmark/sie_successor_preflight.py` do; the
+regression-shard controller takes `--pytest-arg=--run-slow`).
+
+The batch runner passes `--run-slow` to collection and to every unit, so a batch covers
+both tiers; perf stays out. `tests/support/slow_tier.py` implements the selection.
+
+**New slow tests are noticed** through `--slow-budget SECONDS`: a passing test without
+the `slow` marker whose setup plus call time exceeds the budget is reported as a
+failure of that node ("slow-tier budget ..."). The batch's CPU fast-tier pass uses
+`--slow-budget 120` (twice the marking threshold, for host contention). A failure
+means: list the node in `tests/slow_tests.txt` or make it faster.
+`tests/support/test_slow_tier.py` checks the selection rules, the budget guard, and that
+every list entry names an existing file and still collects.
+
+**Rebuilding the list** uses `scripts/dev/build_slow_list.py`. Sources are timing JSONs or
+JUnit XML (a file or a directory, such as an integration batch output, whose GPU-only
+nodes a CPU run cannot time). `--base tests/slow_tests.txt` keeps the existing entries, so
+a new GPU source is added without the receipts the list was first built from; an entry whose
+file collects but which no collected node matches is dropped. Collect without
+`--run-mom-milestone`, so milestone originals stay off the list (their regression twins
+qualify like any other node):
+
+```bash
+CUDA_VISIBLE_DEVICES= python -m pytest tests --collect-only -q --run-slow --gpu \
+  --continue-on-collection-errors -o addopts= > collect.txt
+python scripts/dev/build_slow_list.py tests/slow_tests.txt --collect collect.txt \
+  --base tests/slow_tests.txt gpu-batch5=<evidence-root>/integration-batch-5-b6d9e1aa
+```
+
+**Parallel CPU runs** use `pytest-xdist` (`pip install -e .[test]`):
+
+```bash
+CUDA_VISIBLE_DEVICES= python -m pytest tests -n 24 --dist worksteal \
+  --continue-on-collection-errors --slow-budget 120          # fast tier
+CUDA_VISIBLE_DEVICES= python -m pytest tests -n 24 --dist worksteal \
+  --continue-on-collection-errors --run-slow                  # both tiers
+```
+
+`--continue-on-collection-errors` is needed with CUDA hidden: two network test modules
+allocate CUDA tensors at import. Tests that need CUDA fail or skip on CPU by design.
+
+Tier timings (CPU, CUDA hidden, 2026-11-10, shared 112-core host at load 60-190):
+
+| Run | Wall time |
+| --- | ---: |
+| fast tier, serial | 58:21 |
+| fast tier, `-n 8 --dist worksteal` | 8:40 to 9:05 |
+| fast tier, `-n 24 --dist worksteal` (six runs) | 3:15 to 7:06 |
+| both tiers, `-n 24 --run-slow` | 2:38:21 |
+| sum of per-test times in the two-tier run (a serial lower bound at this load) | 14.0 h |
+
+Node outcomes of the serial, `-n 8` and `-n 24` fast-tier runs of one commit are identical
+(14,450 nodes).
+
+The two-tier wall time is set by single-threaded printed-dipole refinement tests in
+`test_printed_dipole_fixed_normal.py` (`[0.000125-32-pec|copper]` about 2.5 h each,
+`[0.00025-16-pec|copper]` about 1 h each in the two-tier run); they bound any parallel CPU run.
+
+**GPU runs stay serial per slot**: one pytest process per slot and no `-n`, because a
+slot admits one process under its memory cap and xdist workers are separate processes.
+Parallelism on GPUs comes from slots or batch shards, not from workers (the batch
+runner's opt-in `--procs N` is N capped processes on one device; see Operation). Give every
+GPU run private build directories: `WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR` and
+`WITWIN_MAXWELL_MOM_LAYERED_BUILD_DIR` (the latter otherwise defaults to a shared
+build directory under the system temp directory). Workers of one run share these directories safely: the
+JIT loader serializes builds with a file lock in the build directory.
 
 ## Operation
 
@@ -264,6 +356,50 @@ acquiring the unit lock. If the margin is lost, the lock is released and a `DEFE
 line records the wait until the window end. The same unit is then retried. Running
 units are never killed; the bound is based on estimates. Waiting does not hold a
 lane lock, and elapsed progress includes lock/window waits.
+
+### Measured estimates and lane efficiency
+
+`plan` and `run` take `--history BATCH_DIR` (repeatable, median over batches; give every
+shard and the plan the same list). From a batch directory the planner reads each unit's
+measured execution seconds (the `measured=` field of END lines, else END minus START, so
+lock waits do not count) and each node's seconds from the per-unit JUnit. A pytest unit
+is priced as its current nodes' measured seconds plus its measured overhead (interpreter
+start, collection, teardown), so a node that left the unit (a `mom_milestone` original,
+a deleted test) no longer counts and a new node (a regression twin, a new parameter) is
+priced at its component's median measured seconds per test (`history-partial`). A new
+file gets that rate plus the median overhead (`history-rate`). Measured history replaces
+manifest `unit_seconds` pins (batch 5 measured 4.5 s for the file pinned at 10,180.63 s
+and 48 s for the one pinned at 500 s); a pin applies only without history, and the
+per-test guess only when no history is given. `plan` prints the hours from each source and
+what phase 1 covers:
+phase 1 runs all eight `pin_files` (BITID-8), so a release estimate adds no separate
+BITID-8 run of the batch commit. The core-path gates (G1/G4 in
+`benchmark/core_path/gates.py`) compare against the frozen oracle store and run one
+candidate arm, so their estimate is one arm, not two.
+
+Lanes run phase 1 in stage order, then phase-2 units longest first (LPT), so the
+multi-hour units start early and claiming lanes finish together; with `--history` the
+order follows measured times. Two opt-in run options change packing only, never the
+selected nodes:
+
+- `--procs N` runs phase-2 units in N concurrent pytest processes on the lane's device.
+  It requires `--min-free-mib` (checked before each start, one process at a time) and a
+  per-process memory cap such as the agent-rules memcap plugin (N x cap must fit the
+  device); a lane `--lock` is refused because it would serialize every unit. Command
+  units (benchmark scenarios carry no pytest memcap) run alone. Phase 1 stays serial.
+- `--group-light SECONDS` runs consecutive phase-2 pytest files planned at or under
+  SECONDS in one interpreter, up to `--group-budget` (default 600) planned seconds per
+  group, removing per-file interpreter start-up. BITID files, units with an environment,
+  INFRA units and files that touch process-global state or measure memory or time
+  (environment writes, `sys.modules`, default dtype, backend flags, peak-memory or
+  `perf_counter` reads, fresh-interpreter tests) stay alone. Each grouped unit keeps its
+  own JUnit and record; a unit that fails or loses nodes in a group, or every unit of a
+  group that crashes or is interrupted, re-runs alone and that outcome is recorded (with
+  the group outcome under `group`).
+
+Not implemented: running G1 at K=32/16/1 in one process (instead of a fresh process
+per scene and K) would save about 0.8 h, but it changes the gate's fresh-process
+definition and needs the gate owner's sign-off.
 
 Manifest `known_failures` entries retain selector, reason, breaking commit and
 owner. A phase-1 failure whose failing nodes all match these entries does not stop
@@ -379,6 +515,69 @@ probe and a separate bisection-control worktree. Skips, collection errors and
 infrastructure failures cannot label a commit bad. Probe exceptions abort; incomplete
 probes use git's skip status. Original logs and `bisect.json` retain the culprit;
 including that directory in `report` attaches it to matching BITID failures.
+
+## MoM milestone tier and executed-source trigger
+
+Integration batch 5 spent 19.7 of its 33.9 lane-hours in about 20 MoM dense-oracle nodes,
+with an empty MoM diff (`regression-cost-20261112/REPORT.md`). Two mechanisms address that.
+
+**Milestone originals.** The `mom-milestone` suite (`tier="milestone"`) names the
+`mom_milestone` originals in `integration_suites.toml`. The integration tier keeps them out
+of the component units; `--tier milestone` runs them. `tests/validation/benchmark/
+test_integration_batch.py` checks that the suite selectors and the markers agree. Where a
+regression twin exists (`test_<original>_regression`), it keeps the original assertions and
+thresholds on a smaller case that still reaches the same branches. Where it does not, the
+marker carries a comment that names the regression-tier tests covering the same paths and
+says why a smaller case would not compare anything (for example structural zeros on one or
+two cells). Evidence (coverage-equivalence, timing, mutation checks) is in
+`rfic-mom-20261106/test-tiering/report.md`. A MoM node measured over the 120 s slow budget
+that is not a dense-oracle original goes to `tests/slow_tests.txt` instead; the batch runs
+the slow tier, so that only removes it from directory-level fast runs. Run the milestone set on a
+rented A100/H100 (FP64-bound) through `wcloud`, with the lead's approval:
+
+```bash
+python -m pytest tests/mom --run-mom-milestone -m mom_milestone -v
+```
+
+**Executed-source trigger.** The `mom` component is `trigger = "executed"`: with
+`--since`/`--changed-files`, each MoM test file is selected on its own, only when a changed
+path is among the repository files its function bodies executed in a traced run, or is a
+non-Python file in or one level below such a file's directory (CUDA sources). Dependency
+changes (`pyproject.toml`, `witwin-core`) and changed non-Python files under `tests/mom`
+select every file; a test file missing from the manifest falls back to the component-level
+source-glob/shared rule. A static import closure does not work here: `mom/runtime.py`
+imports `result.py`, which imports the FDTD observers, so every MoM file reaches about
+540 modules and any shared change would select all of MoM. The plan prints the selected
+files and the triggered milestone nodes (`milestone run triggered (needs --tier milestone)`).
+
+The manifest `tests/mom/executed_sources.json` is built from a traced run and refreshed at
+each milestone run:
+
+```bash
+python -m pytest tests/mom --run-slow -p tests.support.line_trace --line-trace=trace.jsonl
+python scripts/dev/integration_batch.py executed-sources --commit <sha> \
+    --output tests/mom/executed_sources.json trace.jsonl
+```
+
+Pass every trace of the run (shards, local reruns) to one `executed-sources` call; the
+manifest is independent of their order. Refresh it at each milestone run and whenever
+`test_every_regression_tier_mom_file_has_an_executed_sources_entry` fails:
+
+1. Trace the whole regression tier (`--run-slow`, no `--run-mom-milestone`; milestone-only
+   nodes need no entry) on the tree you will commit, or, for an incremental refresh, trace the
+   new or renamed test files and rebuild from the previous traces plus the new ones.
+2. Check that every manifest path exists on the tree. A renamed source is remapped only by an
+   exact git rename (`git log --follow -M`); otherwise retrace the tests that named it.
+3. List the source files added under `witwin/maxwell/` since the trace commit that no entry
+   names. Until a refresh, a change that touches only such a file selects no MoM test file
+   through the manifest (the component rule still applies to untraced test files), so retrace
+   the tests that import them before relying on the trigger for those files.
+
+A change that adds a dependency usually also edits a file the test already executes, so a
+stale manifest still selects the test once; the next refresh records the new file.
+`executed_untraced` in `[components.mom]` lists files a traced run could not cover; they keep
+the component rule, and `test_every_regression_tier_mom_file_has_an_executed_sources_entry`
+fails for any other regression-tier file missing from the manifest.
 
 ## Capacity estimates and open items
 

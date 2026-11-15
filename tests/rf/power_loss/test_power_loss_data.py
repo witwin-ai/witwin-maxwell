@@ -34,7 +34,6 @@ def _compiled_monitor(
                 material=material,
             ),
         ),
-        device=device,
     )
     monitor = PowerLossMonitor(
         "loss",
@@ -43,7 +42,7 @@ def _compiled_monitor(
         frequencies=frequencies,
         channels=channels,
     )
-    return compile_power_loss_monitor(prepare_scene(scene), monitor)
+    return compile_power_loss_monitor(prepare_scene(scene, device=device), monitor)
 
 
 def _constant_fields(compiled, *, values=(1.0, 2.0, 3.0), requires_grad=False):
@@ -330,7 +329,7 @@ def test_missing_shape_and_frequency_contracts_fail_early():
 
 
 def test_automatic_conduction_rejects_loss_mechanisms_it_cannot_classify():
-    sheet = mw.Medium2D(sigma_s=1.0e-3)
+    sheet = mw.media.Medium2D(sigma_s=1.0e-3)
     with pytest.raises(NotImplementedError, match="2D sheet"):
         _compiled_monitor(material=sheet)
 
@@ -380,27 +379,26 @@ def test_surface_and_line_densities_use_explicit_area_and_length_measures():
 
 def test_result_power_loss_is_typed_and_loss_monitor_adds_no_runtime_observer():
     frequencies = (1.0e9, 2.0e9)
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 1.0),) * 3),
-        grid=mw.GridSpec.uniform(0.5),
-        boundary=mw.BoundarySpec.none(),
-        structures=(
-            mw.Structure(
-                name="bulk",
-                geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(4.0, 4.0, 4.0)),
-                material=mw.Material(sigma_e=2.0),
-            ),
-        ),
-        device="cpu",
-    )
-    monitor = mw.PowerLossMonitor(
+    monitor = mw.monitors.PowerLossMonitor(
         "loss",
         position=(0.5, 0.5, 0.5),
         size=(1.0, 1.0, 1.0),
         frequencies=frequencies,
     )
-    scene.add_monitor(monitor)
-    prepared = prepare_scene(scene)
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((0.0, 1.0),) * 3),
+                grid=mw.GridSpec.uniform(0.5),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
+            mw.Structure(
+                name="bulk",
+                geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(4.0, 4.0, 4.0)),
+                material=mw.Material(sigma_e=2.0),
+            ),
+            ),
+                monitors=(monitor,),
+            )
+    prepared = prepare_scene(scene, device="cpu")
     compiled = compile_power_loss_monitor(prepared, monitor)
     fields = _constant_fields(compiled)
     result = mw.Result(
@@ -413,9 +411,9 @@ def test_result_power_loss_is_typed_and_loss_monitor_adds_no_runtime_observer():
 
     assert compile_fdtd_observers(scene) == []
     data = result.monitor("loss")
-    assert isinstance(data, mw.PowerLossData)
+    assert isinstance(data, mw.monitors.PowerLossData)
     assert data.source_result_fingerprint.startswith("runtime-result:")
-    torch.testing.assert_close(data.total, result.power_loss("loss").total)
+    torch.testing.assert_close(data.total, result.monitor("loss").total)
     with pytest.raises(ValueError, match="explicit frequency axis"):
         result.monitor("loss", freq_index=0)
 
@@ -429,7 +427,7 @@ def test_radiated_plus_loss_power_balance_exit_gate_is_below_three_percent():
         0.7 / (4.0 * math.pi),
         dtype=torch.float64,
     )
-    port = mw.PortData.from_power_waves(
+    port = mw.rf.PortData.from_power_waves(
         port_name="feed",
         frequencies=frequencies,
         a=torch.tensor([math.sqrt(1.25)], dtype=torch.complex128),

@@ -7,6 +7,23 @@ from .floquet import floquet_orders, reflection_transmission, resample_fixed_ang
 from .modal import compute_mode_overlap
 from .nfft import NearFieldFarFieldTransformer
 from .power_loss import compute_power_loss_data
+
+
+def power_loss(result, name: str, *, electric_fields=None, volume_channels=None, integrated_channels=None,
+               surface_channels=None, face_areas=None, line_channels=None, line_lengths=None, occupancy=None,
+               material_ids=None, geometry_ids=None):
+    """``PowerLossData`` of the ``PowerLossMonitor`` ``name`` from explicitly supplied density inputs.
+
+    ``result.monitor(name)`` returns the same data with every channel colocated from the
+    recorded fields; this entry takes caller-supplied ``electric_fields`` and channel
+    densities instead (for example coherently combined fields).
+    """
+    return result._power_loss(
+        name, electric_fields=electric_fields, volume_channels=volume_channels,
+        integrated_channels=integrated_channels, surface_channels=surface_channels, face_areas=face_areas,
+        line_channels=line_channels, line_lengths=line_lengths, occupancy=occupancy, material_ids=material_ids,
+        geometry_ids=geometry_ids,
+    )
 from .resonance import ResonanceModes, find_resonances, harmonic_inversion
 from .scattering_parameters import compute_s_parameters
 from .stratton_chu import (
@@ -31,6 +48,7 @@ __all__ = [
     "compute_directivity",
     "compute_mode_overlap",
     "compute_power_loss_data",
+    "power_loss",
     "enumerate_diffraction_orders",
     "compute_s_parameters",
     "infer_incident_plane_wave_amplitude",

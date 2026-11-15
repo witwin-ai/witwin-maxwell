@@ -206,46 +206,48 @@ def test_gridspec_auto_validation():
 
 def test_mesh_override_and_layer_refinement_spec_validation():
     box = mw.Box(position=(0.0, 0.0, 0.0), size=(0.1, 0.1, 0.1))
-    override = mw.MeshOverrideStructure(geometry=box, dl=0.01)
+    override = mw.grid.MeshOverrideStructure(geometry=box, dl=0.01)
     assert override.dl == (0.01, 0.01, 0.01)
-    assert mw.MeshOverrideStructure(geometry=box, dl=(0.01, 0.02, 0.03)).dl == (0.01, 0.02, 0.03)
+    assert mw.grid.MeshOverrideStructure(geometry=box, dl=(0.01, 0.02, 0.03)).dl == (0.01, 0.02, 0.03)
     with pytest.raises(ValueError, match="> 0"):
-        mw.MeshOverrideStructure(geometry=box, dl=-0.01)
+        mw.grid.MeshOverrideStructure(geometry=box, dl=-0.01)
     with pytest.raises(ValueError, match="scalar or"):
-        mw.MeshOverrideStructure(geometry=box, dl=(0.01, 0.02))
+        mw.grid.MeshOverrideStructure(geometry=box, dl=(0.01, 0.02))
 
-    layer = mw.LayerRefinementSpec(min_cells=3)
+    layer = mw.grid.LayerRefinementSpec(min_cells=3)
     assert layer.covers("x") and layer.covers("z")
-    layer_xy = mw.LayerRefinementSpec(min_cells=2, axes=("x", "y"))
+    layer_xy = mw.grid.LayerRefinementSpec(min_cells=2, axes=("x", "y"))
     assert layer_xy.covers("y") and not layer_xy.covers("z")
     with pytest.raises(ValueError, match="min_cells"):
-        mw.LayerRefinementSpec(min_cells=0)
+        mw.grid.LayerRefinementSpec(min_cells=0)
     with pytest.raises(ValueError, match="axes"):
-        mw.LayerRefinementSpec(min_cells=2, axes=("w",))
+        mw.grid.LayerRefinementSpec(min_cells=2, axes=("w",))
 
 
-def _auto_scene(grid=None, device="cpu"):
+def _auto_scene(grid=None):
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
         grid=grid or mw.GridSpec.auto(),
-        device=device,
     )
 
 
-def test_scene_scalar_spacing_raises_on_auto_grid():
+def test_auto_grid_declares_no_scalar_spacing():
+    # Scene.dx is removed; an auto grid carries no declared scalar spacing.
     scene = _auto_scene()
-    with pytest.raises(ValueError, match="scalar spacing undefined"):
-        _ = scene.dx
+    assert scene.grid.dx is None and not hasattr(scene, "dx")
 
 
 def test_wavelength_derived_from_highest_source_frequency():
     scene = _auto_scene()
-    scene.add_source(mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez",
-                                    source_time=mw.CW(frequency=1e9)))
-    scene.add_source(mw.PointDipole(position=(0.1, 0.0, 0.0), polarization="Ez",
-                                    source_time=mw.CW(frequency=2e9)))
-    prepared = prepare_scene(scene)
-    assert prepared.grid.is_custom is True
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez",
+                       source_time=mw.CW(frequency=1e9)),
+        mw.PointDipole(position=(0.1, 0.0, 0.0), polarization="Ez",
+                       source_time=mw.CW(frequency=2e9)),
+    ))
+    prepared = prepare_scene(scene, device="cpu")
+    assert prepared.scene.grid.is_custom is True
     # Highest frequency (2 GHz) sets the meshing wavelength.
     assert prepared.dx_primal64.max() <= _C0 / 2e9 / _MSW * _TOL
     # The public scene keeps its unresolved auto grid.
@@ -256,11 +258,14 @@ def test_broadband_source_meshes_for_characteristic_frequency():
     """A broadband pulse must mesh for its characteristic (upper spectral)
     frequency, not just its center frequency, matching FDTD's auto_dt."""
     scene = _auto_scene()
-    scene.add_source(mw.PointDipole(
-        position=(0.0, 0.0, 0.0), polarization="Ez",
-        source_time=mw.GaussianPulse(frequency=2e9, fwidth=0.5e9),
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(
+            position=(0.0, 0.0, 0.0), polarization="Ez",
+            source_time=mw.GaussianPulse(frequency=2e9, fwidth=0.5e9),
+        ),
     ))
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     # GaussianPulse content extends to frequency + 3 * fwidth = 3.5 GHz.
     assert prepared.dx_primal64.max() <= _C0 / 3.5e9 / _MSW * _TOL
 
@@ -280,23 +285,26 @@ def test_far_offset_domain_keeps_face_snap_and_refinement():
 
 def test_explicit_wavelength_overrides_source_derivation():
     scene = _auto_scene(grid=mw.GridSpec.auto(wavelength=0.3))
-    scene.add_source(mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez",
-                                    source_time=mw.CW(frequency=20e9)))
-    prepared = prepare_scene(scene)
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez",
+                       source_time=mw.CW(frequency=20e9)),
+    ))
+    prepared = prepare_scene(scene, device="cpu")
     assert prepared.dx_primal64.max() > 0.02  # 0.3 / 10, not C0/20e9/10
 
 
 def test_auto_grid_without_frequency_source_raises():
     with pytest.raises(ValueError, match="wavelength"):
-        prepare_scene(_auto_scene())
+        prepare_scene(_auto_scene(), device="cpu")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fdfd_accepts_auto_grid():
-    scene = _auto_scene(grid=mw.GridSpec.auto(wavelength=0.3), device="cuda")
-    solver = mw.Simulation.fdfd(scene, frequency=1e9).prepare().solver
+    scene = _auto_scene(grid=mw.GridSpec.auto(wavelength=0.3))
+    solver = mw.Simulation.fdfd(scene, frequencies=1e9).prepare().solver
     solver._ensure_system_matrix()
-    assert solver.scene.grid.is_custom
+    assert solver.scene.scene.grid.is_custom
 
 
 def test_auto_scene_layer_refinement_and_override_resolution():
@@ -304,15 +312,15 @@ def test_auto_scene_layer_refinement_and_override_resolution():
         grid=mw.GridSpec.auto(
             wavelength=0.3,
             override_structures=(
-                mw.MeshOverrideStructure(
+                mw.grid.MeshOverrideStructure(
                     geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2)),
                     dl=0.005,
                 ),
             ),
-            layer_refinement=mw.LayerRefinementSpec(min_cells=2),
+            layer_refinement=mw.grid.LayerRefinementSpec(min_cells=2),
         )
     )
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     x = prepared.x_nodes64
     sizes = np.diff(x)
     inside = (x[:-1] >= -0.1 - 1e-6) & (x[1:] <= 0.1 + 1e-6)
@@ -322,15 +330,16 @@ def test_auto_scene_layer_refinement_and_override_resolution():
 
 def test_material_region_refines_and_snaps_auto_grid():
     scene = _auto_scene(grid=mw.GridSpec.auto(wavelength=_WAVELENGTH))
-    scene.add_material_region(
+    scene = scene.updated(material_regions=(
+        *scene.material_regions,
         mw.MaterialRegion(
             name="design",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2)),
             density=torch.rand(8, 8, 8),
             eps_bounds=(1.0, 12.25),
-        )
-    )
-    prepared = prepare_scene(scene)
+        ),
+    ))
+    prepared = prepare_scene(scene, device="cpu")
     x = prepared.x_nodes64
     dx = np.diff(x)
     inside = (x[:-1] >= -0.1 - 1e-7) & (x[1:] <= 0.1 + 1e-7)
@@ -346,20 +355,21 @@ def test_high_index_waveguide_uses_substantially_fewer_cells():
     wavelength = _C0 / 2e9
     core_dl = wavelength / (3.5 * _MSW)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.3, 0.3), (-0.3, 0.3))),
-        grid=mw.GridSpec.auto(min_steps_per_wavelength=_MSW),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.2, 0.06, 0.06)),
-            material=mw.Material(eps_r=3.5**2),
-            name="core",
-        )
-    )
-    scene.add_source(mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez",
-                                    source_time=mw.CW(frequency=2e9)))
-    prepared = prepare_scene(scene)
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.3, 0.3), (-0.3, 0.3))),
+                grid=mw.GridSpec.auto(min_steps_per_wavelength=_MSW),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.2, 0.06, 0.06)),
+                material=mw.Material(eps_r=3.5**2),
+                name="core",
+            ),
+            ),
+                sources=(
+            mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez",
+                           source_time=mw.CW(frequency=2e9)),
+            ),
+            )
+    prepared = prepare_scene(scene, device="cpu")
 
     # Core cells honor the high-index target along the transverse axes.
     y = prepared.y_nodes64
@@ -417,17 +427,16 @@ def test_full_span_slab_scene_has_healthy_transverse_mesh():
     slab spanning the full transverse extent (its x/y faces coincide with the
     domain boundary) must mesh cleanly, not explode into near-zero cells."""
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.16, 0.16), (-0.03, 0.03), (-0.16, 0.16))),
-        grid=mw.GridSpec.auto(min_steps_per_wavelength=_MSW, wavelength=0.15),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.32, 0.06, 0.12)),
-            material=mw.Material(eps_r=12.0),
-        )
-    )
-    prepared = prepare_scene(scene)
+                domain=mw.Domain(bounds=((-0.16, 0.16), (-0.03, 0.03), (-0.16, 0.16))),
+                grid=mw.GridSpec.auto(min_steps_per_wavelength=_MSW, wavelength=0.15),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.32, 0.06, 0.12)),
+                material=mw.Material(eps_r=12.0),
+            ),
+            ),
+            )
+    prepared = prepare_scene(scene, device="cpu")
     fine_dl = 0.15 / (np.sqrt(12.0) * _MSW)
     # x and y span the full domain -> uniformly at the box target, no slivers.
     for nodes in (prepared.x_nodes64, prepared.y_nodes64):
@@ -467,18 +476,20 @@ def test_uniformize_boundary_band_preserves_hard_faces():
 def test_autogrid_uniform_cells_under_pml_faces():
     """External PML copies the physical auto-grid edge step on every face."""
     NL = 8
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.auto(min_steps_per_wavelength=_MSW, wavelength=_WAVELENGTH),
-        boundary=mw.BoundarySpec.pml(num_layers=NL), device="cpu",
-    )
     # High-index block hugging the physical high-z edge; its face remains part of
     # the physical auto mesh while PML is appended beyond z=0.5.
-    scene.add_structure(mw.Structure(
-        geometry=mw.Box(position=(0.0, 0.0, 0.32), size=(0.2, 0.2, 0.26)),
-        material=mw.Material(eps_r=12.0),
-    ))
-    prepared = prepare_scene(scene)
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.auto(min_steps_per_wavelength=_MSW, wavelength=_WAVELENGTH),
+                boundary=mw.BoundarySpec.pml(num_layers=NL),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.32), size=(0.2, 0.2, 0.26)),
+                material=mw.Material(eps_r=12.0),
+            ),
+            ),
+            )
+    prepared = prepare_scene(scene, device="cpu")
     # Every external absorber band is uniform at the adjacent physical edge step.
     for nodes in (prepared.x_nodes64, prepared.y_nodes64):
         dl = np.diff(nodes)
@@ -503,27 +514,26 @@ def test_autogrid_uniform_cells_under_pml_faces():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
 def test_autogrid_fdtd_smoke():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.35, 0.35), (-0.35, 0.35), (-0.35, 0.35))),
-        grid=mw.GridSpec.auto(),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.1, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1e9),
-            name="src",
-        )
-    )
-    solver = mw.Simulation.fdtd(scene, frequency=1e9).prepare().solver
+                domain=mw.Domain(bounds=((-0.35, 0.35), (-0.35, 0.35), (-0.35, 0.35))),
+                grid=mw.GridSpec.auto(),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.1, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1e9),
+                name="src",
+            ),
+            ),
+            )
+    solver = mw.Simulation.fdtd(scene, frequencies=1e9).prepare().solver
     solver.solve(time_steps=40, dft_frequency=None, dft_window="none", full_field_dft=False)
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         field = getattr(solver, name)

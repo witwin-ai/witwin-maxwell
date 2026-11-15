@@ -18,6 +18,7 @@ from .quadrature import (
     _plane_coord_names,
     _to_torch_scalar_or_tensor,
     plane_normal_poynting,
+    symmetry_image_planes,
 )
 from .runtime.spectral import (
     advance_observer_entry_phases,
@@ -256,35 +257,8 @@ def _spectral_scale(solver, entry):
     ) if denominator > 0 else 0.0
 
 
-def clear_observers(solver):
-    solver.observers = []
-    solver.observers_enabled = False
-    solver.observer_frequency = None
-    solver.observer_frequencies = ()
-    solver.observer_start_step = None
-    solver.observer_start_steps = ()
-    solver.observer_end_step = None
-    solver.observer_end_steps = ()
-    solver.observer_window_normalization = 0.0
-    solver.observer_sample_count = 0
-    solver.observer_sample_counts = ()
-    solver._point_observer_groups = {}
-    solver._plane_observer_groups = {}
-    solver._observer_spectral_entries = []
-    solver._observer_point_groups_by_frequency = []
-    solver._observer_plane_groups_by_frequency = []
-
-
-def add_point_observer(solver, name, position, component="Ez"):
-    solver.observers.append(_point_observer_record(name, position, component=component))
-
-
-def add_plane_observer(solver, name, axis="z", position=0.0, component="Ez"):
-    solver.observers.append(_plane_observer_record(name, axis=axis, position=position, component=component))
-
-
 def get_component_coords(prepared_scene, component):
-    return component_coords(prepared_scene, component)
+    return component_coords(prepared_scene, component, device=prepared_scene.device)
 
 
 def resolve_point_observer(solver, observer):
@@ -299,7 +273,7 @@ def resolve_point_observer(solver, observer):
 
 def _resolve_point_observers(solver, component, positions, *, max_bytes=32 * 1024 * 1024):
     """Resolve one component with scalar-equivalent fp64 queries and first ties."""
-    coords = component_coords(solver.scene, component)
+    coords = component_coords(solver.scene, component, device=solver.scene.device)
     # Records already contain exactly the Python floats used by the scalar path.
     positions = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
     indices = np.empty(positions.shape, dtype=np.int64)
@@ -970,18 +944,22 @@ class BatchObserverEngine:
 def uses_native_point_observers(solver):
     """Small real-field spectra that retain the native per-frequency point kernel."""
     return (solver.observers_enabled and not has_complex_fields(solver)
-            and solver.Ex.dtype == torch.float32 and not getattr(solver, "cpu_reference", False)
             and not solver._plane_observer_groups
             and len(solver._point_observer_groups) == 1
             and len(solver._observer_spectral_entries) <= 2)
+
+
+def uses_indexed_observers(solver):
+    """Core replay uses exact host weight tables: small real spectra and every complex run."""
+    return uses_native_point_observers(solver) or (getattr(solver, "observers_enabled", False)
+                                                     and has_complex_fields(solver))
 
 
 def make_single_observer_engine(solver, *, enabled):
     """Reuse native grouped frequency sampling for one ordinary real-field run."""
     solver._single_observer_engine = None
     solver._observer_cuda_graph_active = False
-    if (not enabled or not solver.observers_enabled or has_complex_fields(solver)
-            or solver.Ex.dtype != torch.float32 or getattr(solver, "cpu_reference", False)):
+    if not enabled or not solver.observers_enabled or has_complex_fields(solver):
         return None
     # A grouped recurrence adds a kernel and a graph launch. One field group
     # at one or two frequencies is cheaper through the existing native point
@@ -1088,11 +1066,6 @@ def _resolve_time_volume_box(solver, component, position, size):
         slices.append(slice(lower, upper))
         coords_out.append(coords[lower:upper])
     return tuple(slices), tuple(coords_out)
-
-
-def clear_time_observers(solver):
-    solver.time_observers = []
-    solver.time_observers_enabled = False
 
 
 def prepare_time_observers(solver, time_steps):
@@ -1260,12 +1233,12 @@ def get_time_observer_results(solver):
             first_meta = record["component_meta"][first_component]
             if record["region_kind"] == "plane":
                 payload["coords"] = first_meta["plane_coords"]
+                payload["component_coords"] = {
+                    name: record["component_meta"][name]["plane_coords"] for name in record["components"]}
             elif record["region_kind"] == "volume":
                 payload["coords"] = first_meta["coords"]
-            if len(record["components"]) == 1:
-                buffer = components[first_component]
-                payload["data"] = buffer
-                payload["field"] = buffer
+                payload["component_coords"] = {
+                    name: record["component_meta"][name]["coords"] for name in record["components"]}
             results[record["name"]] = payload
         elif record["kind"] == "surface_field_time":
             from .time_traces import surface_field_time_payload
@@ -1435,12 +1408,6 @@ def _normalize_monitor_result_inplace(result, spectrum):
             if isinstance(payload, dict) and "data" in payload:
                 payload["data"] = _safe_divide_source_spectrum(payload["data"], spectrum)
 
-    primary_component = result.get("component")
-    if primary_component and primary_component in result:
-        result["data"] = result[primary_component]
-    elif "data" in result:
-        result["data"] = _safe_divide_source_spectrum(result["data"], spectrum)
-
     if "flux" in result:
         result["flux"] = _normalize_flux_by_source_spectrum(result["flux"], spectrum)
     if "power" in result:
@@ -1495,7 +1462,6 @@ def _assemble_plane_monitor_payload(prepared_scene, component_samples, *, sample
     if len(result["components"]) == 1:
         payload = result["components"][primary_component]
         result["component"] = normalize_component(primary_component)
-        result["data"] = payload["data"]
         result["coords"] = payload["coords"]
         result["plane_index"] = payload["plane_index"]
         result["plane_sample_indices"] = payload.get("plane_indices", (payload["plane_index"],))
@@ -1515,6 +1481,12 @@ def _assemble_plane_monitor_payload(prepared_scene, component_samples, *, sample
         return result
     if result.get("compute_flux"):
         aligned = _crop_aligned_plane_to_physical_bounds(prepared_scene, axis, aligned)
+        if result["monitor_type"] == "plane":
+            # A domain-spanning plane stands for itself and its mirror images.
+            # Axis names only, so the payload keeps its numerical leaves.
+            images = tuple(symmetry_image_planes(prepared_scene.scene, axis))
+            if images:
+                result["symmetry_image_planes"] = images
     result[coord_names[0]] = aligned[coord_names[0]]
     result[coord_names[1]] = aligned[coord_names[1]]
     result["coords"] = (aligned[coord_names[0]], aligned[coord_names[1]])
@@ -1680,7 +1652,6 @@ def get_observer_results(solver):
                         component = normalize_component(primary_component)
                         normalized_components[primary_component] = component
                     result["component"] = component
-                    result["data"] = result["components"][primary_component]
                     result["field_index"] = result["field_indices"][primary_component]
                 continue
 
@@ -1750,11 +1721,6 @@ def get_observer_results(solver):
 # --------------------------------------------------------------------------- #
 # Breakdown (non-feedback dielectric-stress) observers                        #
 # --------------------------------------------------------------------------- #
-
-
-def clear_breakdown_observers(solver):
-    solver.breakdown_observers = []
-    solver.breakdown_observers_enabled = False
 
 
 def _region_cell_slice(centers, lower, upper):

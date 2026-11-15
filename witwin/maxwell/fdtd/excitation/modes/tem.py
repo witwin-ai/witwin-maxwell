@@ -15,6 +15,7 @@ from .common import (
     _boundary_connected_conductor,
     _label_connected_components,
 )
+from ....errors import UnsupportedFeatureError
 
 
 def _quasistatic_laplace_energy(
@@ -387,7 +388,8 @@ def _solve_pec_tem_mode_torch(
             *((value, mu_values[0]) for value in mu_planes),
         ):
             if not torch.allclose(component[dielectric],reference.expand_as(component[dielectric]),rtol=1e-4,atol=1e-6):
-                raise NotImplementedError("Lossy TEM requires a homogeneous isotropic cross-section.")
+                raise UnsupportedFeatureError("Lossy TEM requires a homogeneous isotropic cross-section.",
+                                              feature="guard:4cc80c33", method="fdtd")
         if bool(eps_values[0].real <= 0) or bool(mu_values[0].real <= 0):
             raise ValueError("Lossy TEM requires positive real epsilon and mu.")
     if not torch.allclose(
@@ -401,9 +403,10 @@ def _solve_pec_tem_mode_torch(
         rtol=1.0e-4,
         atol=1.0e-6,
     ):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "TEM WavePort electrostatic normalization requires a uniformly filled "
-            "cross-section; use a hybrid mode for inhomogeneous transmission lines."
+            "cross-section; use a hybrid mode for inhomogeneous transmission lines.",
+            feature="port.WavePort", method="fdtd"
         )
 
     potentials = _tem_signal_potentials(pec_occupancy, int(mode_index))

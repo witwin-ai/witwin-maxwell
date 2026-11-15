@@ -19,7 +19,7 @@ def test_automatic_order_actual_tables_and_preallocation_rejection(monkeypatch, 
     system = SurfaceSystem.create([(i, str(i), RWGBasis(sphere_mesh(radius=.01,
         center=(x, 0., 0.), subdivisions=0, device='cuda')), interior) for i, x in enumerate((-.5, .5))])
     provider = ScalarSystemBlocks(system, exterior, IntegrationConfig(order=2, singular_order=3))
-    budget = mw.KernelErrorBudget(1e-6, 1e-5)
+    budget = mw.mom.KernelErrorBudget(1e-6, 1e-5)
     op = MultipoleSystemActions(provider, order=2, max_order=10, kernel_error_budget=budget, leaf_size=30, table_storage=storage)
     plan = op.order_plan
     print('selected FMM order', plan)
@@ -47,10 +47,10 @@ def test_automatic_order_actual_tables_and_preallocation_rejection(monkeypatch, 
 
 
 def test_nested_budget_config_roundtrip():
-    config = mw.FMMConfig(order=2, max_order=10, kernel_error_budget=mw.KernelErrorBudget(1e-6, 1e-5))
-    assert mw.FMMConfig.restore(config.payload()) == config
+    config = mw.mom.FMMConfig(order=2, max_order=10, kernel_error_budget=mw.mom.KernelErrorBudget(1e-6, 1e-5))
+    assert mw.mom.FMMConfig.restore(config.payload()) == config
     with pytest.raises(ValueError, match='Automatic'):
-        mw.FMMConfig(order=2, max_order=10)
+        mw.mom.FMMConfig(order=2, max_order=10)
 
 
 def test_planner_tracks_frequency_and_unavailable_contours():
@@ -58,7 +58,7 @@ def test_planner_tracks_frequency_and_unavailable_contours():
     from witwin.maxwell.mom.fmm_order import plan_multipole_order
     lower = torch.tensor([[0., 0., 0.], [1., 0., 0.]], device='cuda', dtype=torch.float64)
     tree = build_support_octree(lower, lower+.02, leaf_size=1)
-    budget = mw.KernelErrorBudget(1e-6, 1e-5)
+    budget = mw.mom.KernelErrorBudget(1e-6, 1e-5)
     low = plan_multipole_order(((tree, compile_medium(mw.Material(), 3e8)),), budget, max_order=14)
     high = plan_multipole_order(((tree, compile_medium(mw.Material(), 9e8)),), budget, max_order=14)
     assert high['selected_order'] > low['selected_order']

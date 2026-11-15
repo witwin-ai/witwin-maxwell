@@ -7,9 +7,11 @@ import torch
 
 from witwin.core.material import VACUUM_PERMITTIVITY
 
+from ..capability import check_scene
 from ..electrostatic.api import ChargeDensity, ElectrostaticBoundarySpec, ElectrostaticTerminal
 from ..media import DiagonalTensor3, Tensor3x3
 from ..scene import prepare_scene
+from ..errors import UnsupportedFeatureError
 
 _AXES = ("x", "y", "z")
 
@@ -92,17 +94,6 @@ class CompiledElectrostatics:
     eps0: float = VACUUM_PERMITTIVITY
 
 
-def _require_electrostatic_boundary(scene) -> None:
-    """Electrostatics owns its own BCs; reject grid-extending Scene boundaries."""
-    boundary = scene.boundary
-    if boundary.kind != "none":
-        raise NotImplementedError(
-            "The electrostatic solver uses ElectrostaticBoundarySpec for its boundary "
-            "conditions and requires Scene.boundary = BoundarySpec.none() so the grid is "
-            f"not extended by PML/periodic padding (got Scene boundary kind {boundary.kind!r})."
-        )
-
-
 def _reject_material_regions(scene) -> None:
     """Fail closed on RF ``MaterialRegion`` design regions.
 
@@ -113,19 +104,23 @@ def _reject_material_regions(scene) -> None:
     """
     regions = list(getattr(scene, "material_regions", ()))
     if regions:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "The electrostatic solver does not support Scene.material_regions "
             f"(found {len(regions)}); MaterialRegion design regions are an RF-path "
             "feature and are not rasterized into the electrostatic permittivity. "
             "Represent static dielectrics with Structure(material=Material(...)) bulk "
-            "media instead."
+            "media instead.",
+            feature="guard:2702b619", method="electrostatic"
         )
 
 
-def _material_static_matrix(material) -> np.ndarray:
+def _material_static_matrix(material) -> tuple[np.ndarray, torch.Tensor | None]:
     """Extract a real, symmetric-positive-definite DC permittivity 3x3 matrix.
 
-    Returns the relative-permittivity tensor as a ``(3, 3)`` float64 array. An
+    Returns ``(matrix, trainable)``: the relative-permittivity tensor as a
+    ``(3, 3)`` float64 array and, for a trainable scalar permittivity, the live
+    real 0-d tensor that the rasterizer blends in place of ``matrix[0, 0]`` so
+    the gradient reaches it (``None`` otherwise; the values are identical). An
     isotropic scalar material maps to ``eps * I``; a ``DiagonalTensor3`` maps to
     the axis-aligned diagonal; a ``Tensor3x3`` maps to its symmetric rows. The
     diagonal-only cases still round-trip exactly through the isotropic/diagonal
@@ -138,22 +133,26 @@ def _material_static_matrix(material) -> np.ndarray:
     permittivity and fails with a ValueError.
     """
     if bool(getattr(material, "is_pec", False)):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "A PEC-material structure has no dielectric permittivity for the electrostatic "
-            "solver; represent conductors with ElectrostaticTerminal (equipotential) instead."
+            "solver; represent conductors with ElectrostaticTerminal (equipotential) instead.",
+            feature="guard:31cb1411", method="electrostatic"
         )
     if bool(getattr(material, "is_pmc", False)):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "A PMC-material structure has no dielectric permittivity for the electrostatic "
-            "solver; a perfect magnetic conductor has no electrostatic counterpart."
+            "solver; a perfect magnetic conductor has no electrostatic counterpart.",
+            feature="material.pmc", method="electrostatic"
         )
     if bool(getattr(material, "is_dispersive", False)):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Dispersive materials do not define a zero-frequency permittivity; the "
             "electrostatic solver refuses to guess a DC limit. Supply a non-dispersive "
-            "Material with an explicit real static permittivity."
+            "Material with an explicit real static permittivity.",
+            feature="guard:8b572c1d", method="electrostatic"
         )
     value = material.evaluate_static().eps_r
+    trainable = None
     if isinstance(value, DiagonalTensor3):
         matrix = np.diag(np.asarray(value.as_tuple(), dtype=np.float64))
     elif isinstance(value, Tensor3x3):
@@ -161,19 +160,23 @@ def _material_static_matrix(material) -> np.ndarray:
     else:
         if isinstance(value, torch.Tensor):
             if value.numel() != 1:
-                raise NotImplementedError(
-                    "Per-cell tensor permittivity is not supported by the electrostatic compiler."
+                raise UnsupportedFeatureError(
+                    "Per-cell tensor permittivity is not supported by the electrostatic compiler.",
+                    feature="guard:450ae5ca", method="electrostatic"
                 )
             scalar_t = value.reshape(())
         else:
             scalar_t = torch.as_tensor(value)
         if torch.is_complex(scalar_t):
             if float(scalar_t.imag.abs()) > 0.0:
-                raise NotImplementedError(
-                    "Complex permittivity is not a valid DC static permittivity for electrostatics."
+                raise UnsupportedFeatureError(
+                    "Complex permittivity is not a valid DC static permittivity for electrostatics.",
+                    feature="guard:ddd0fe58", method="electrostatic"
                 )
             scalar_t = scalar_t.real
-        matrix = float(scalar_t) * np.eye(3, dtype=np.float64)
+        if scalar_t.requires_grad:
+            trainable = scalar_t
+        matrix = float(scalar_t.detach()) * np.eye(3, dtype=np.float64)
 
     scale = max(float(np.abs(matrix).max()), 1.0)
     if not np.allclose(matrix, matrix.T, rtol=0.0, atol=1.0e-9 * scale):
@@ -188,7 +191,7 @@ def _material_static_matrix(material) -> np.ndarray:
             "Electrostatic static permittivity must be positive-definite (> 0); got "
             f"eigenvalues {tuple(float(v) for v in eigvals)}."
         )
-    return matrix
+    return matrix, trainable
 
 
 def _is_isotropic_matrix(matrix: np.ndarray) -> bool:
@@ -255,14 +258,21 @@ def _rasterize_epsilon(scene, xx, yy, zz, dtype, device, beta):
         material = getattr(structure, "material", None)
         if material is None:
             continue
-        entries.append((structure, _material_static_matrix(material)))
+        entries.append((structure, *_material_static_matrix(material)))
 
-    anisotropic = any(not _is_isotropic_matrix(matrix) for _, matrix in entries)
+    anisotropic = any(not _is_isotropic_matrix(matrix) for _, matrix, _ in entries)
+
+    def diagonal(matrix, trainable, i):
+        # A trainable isotropic permittivity enters as its live tensor, upcast
+        # exactly to the compile dtype; fixed values stay Python floats.
+        if trainable is None:
+            return float(matrix[i, i])
+        return trainable.to(device=device, dtype=dtype)
 
     if not anisotropic:
         eps = torch.ones(xx.shape, dtype=dtype, device=device)
-        for structure, matrix in entries:
-            eps_value = float(matrix[0, 0])
+        for structure, matrix, trainable in entries:
+            eps_value = diagonal(matrix, trainable, 0)
             occupancy = _geometry_occupancy(structure.geometry, xx, yy, zz, beta)
             eps = (1.0 - occupancy) * eps + occupancy * eps_value
         return eps, None
@@ -275,10 +285,10 @@ def _rasterize_epsilon(scene, xx, yy, zz, dtype, device, beta):
              "xy": zeros.clone(), "xz": zeros.clone(), "yz": zeros.clone()}
     index = {"xx": (0, 0), "yy": (1, 1), "zz": (2, 2),
              "xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}
-    for structure, matrix in entries:
+    for structure, matrix, trainable in entries:
         occupancy = _geometry_occupancy(structure.geometry, xx, yy, zz, beta)
         for key, (i, j) in index.items():
-            value = float(matrix[i, j])
+            value = diagonal(matrix, trainable, i) if i == j else float(matrix[i, j])
             comps[key] = (1.0 - occupancy) * comps[key] + occupancy * value
     tensor = TensorEpsilon(**comps)
     epsilon_r = (comps["xx"] + comps["yy"] + comps["zz"]) / 3.0
@@ -310,10 +320,11 @@ def compile_electrostatics(
     boundary: ElectrostaticBoundarySpec | None = None,
     *,
     dtype: torch.dtype = torch.float64,
+    device=None,
 ) -> CompiledElectrostatics:
-    prepared = prepare_scene(scene)
-    _require_electrostatic_boundary(prepared)
+    prepared = prepare_scene(scene, device=device)
     _reject_material_regions(scene)
+    check_scene(scene, "electrostatic").raise_if_unsupported()
     if boundary is None:
         boundary = ElectrostaticBoundarySpec.grounded_box()
     if not isinstance(boundary, ElectrostaticBoundarySpec):

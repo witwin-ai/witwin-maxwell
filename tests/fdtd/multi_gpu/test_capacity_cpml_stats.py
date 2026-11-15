@@ -99,29 +99,26 @@ def _cpml_scene() -> mw.Scene:
     y = np.linspace(-0.4, 0.4, 9, dtype=np.float64)
     z = np.linspace(-0.4, 0.4, 9, dtype=np.float64)
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (float(x[0]), float(x[-1])),
                 (float(y[0]), float(y[-1])),
                 (float(z[0]), float(z[-1])),
             )
-        ),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0e6),
-        device="cuda:0",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.2, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
-            name="source",
-        )
-    )
-    scene.add_monitor(
-        mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=_FIELD_NAMES)
-    )
+            ),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0e6),
+                sources=(
+            mw.PointDipole(
+                position=(-0.2, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
+                name="source",
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=_FIELD_NAMES),),
+            )
     return scene
 
 
@@ -129,19 +126,21 @@ def _run_cpml(*, parallel=None):
     return mw.Simulation.fdtd(
         _cpml_scene(),
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=24),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        absorber="cpml",
-        cpml_config={"memory_mode": "slab"},
-        full_field_dft=False,
-        cuda_graph=False,
-        parallel=parallel,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=24),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            absorber="cpml",
+            cpml=mw.fdtd.CPMLConfig(memory_mode="slab"),
+            full_field_dft=False,
+            cuda_graph=False,
+            parallel=parallel,
+        ),
     ).run()
 
 
 def _multi_component(result, name: str) -> torch.Tensor:
-    if name in result.raw_output:
-        return result.raw_output[name]
+    if name in result._raw_output:
+        return result._raw_output[name]
     solver = result.solver
     local = tuple(getattr(shard.solver, name) for shard in solver.shards)
     return solver._gather_component(name, local)
@@ -170,7 +169,7 @@ def test_multi_gpu_slab_cpml_preserves_config_and_six_field_parity(slab_cpml_res
     single, multi = slab_cpml_results
     distributed = multi.solver
 
-    assert distributed.cpml_config["memory_mode"] == "slab"
+    assert distributed.cpml.memory_mode is mw.fdtd.CPMLMemoryMode.SLAB
     assert distributed._cpml_memory_mode_requested == "slab"
     assert distributed._cpml_memory_mode == "slab"
     assert all(
@@ -235,3 +234,65 @@ def test_parallel_phase_timings_are_explicitly_unavailable_with_explanation(
     assert parallel_stats["exposed_communication_time_s"] is None
     assert "external CUDA profiler" in parallel_stats["timing_note"]
     assert "not inserted" in parallel_stats["timing_note"]
+
+
+def _uniform_cpml_scene(cells_x: int) -> mw.Scene:
+    half_x = 0.06 * cells_x
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-half_x, half_x), (-7.2, 7.2), (-7.2, 7.2))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(-0.3, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
+                name="source",
+            ),
+            ),
+            )
+    return scene
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+@pytest.mark.parametrize(("cells_x", "expected"), [(16, "dense"), (240, "slab")])
+def test_shard_cpml_auto_memory_mode_ignores_free_memory(monkeypatch, cells_x, expected):
+    """A rank builds its CPML storage from its layout alone, like a single-device run."""
+    from witwin.maxwell.fdtd.distributed.shard_engine import ShardEngine
+    from witwin.maxwell.fdtd.solver import FDTD
+    from witwin.maxwell.fdtd_parallel import FDTDPartitionPlan
+    from witwin.maxwell.scene import prepare_scene
+
+    calls = []
+
+    def nearly_full(device=None):
+        calls.append(device)
+        return 1 << 20, 48 << 30
+
+    monkeypatch.setattr(torch.cuda, "mem_get_info", nearly_full)
+    logical = _uniform_cpml_scene(cells_x)
+    prepared = prepare_scene(logical)
+    plan = FDTDPartitionPlan(
+        global_shape=(prepared.Nx, prepared.Ny, prepared.Nz),
+        devices=("cuda:0", "cuda:1"),
+        decomposition_axis="x",
+        halo_width=1,
+        low_pml_cells=int(prepared.scene.pml_thickness_for_face("x", "low")),
+        high_pml_cells=int(prepared.scene.pml_thickness_for_face("x", "high")),
+    )
+    dt = float(FDTD(prepared, frequency=_FREQUENCY, absorber_type="cpml").dt)
+    shard = ShardEngine.build(
+        logical,
+        prepared,
+        plan.shard_layouts[0],
+        frequency=_FREQUENCY,
+        absorber_type="cpml",
+        cpml=mw.fdtd.CPMLConfig(),
+        dt=dt,
+    ).solver
+
+    assert shard._cpml_memory_mode_requested == "auto"
+    assert (shard._cpml_dense_memory_bytes <= 64 << 20) == (expected == "dense")
+    assert shard._cpml_memory_mode == expected
+    assert calls == []

@@ -35,10 +35,10 @@ def _write(path, value):
 def cached_config(**changes):
     options = dict(near_storage='scalar_reciprocal_cached_dk_v1',
         near_coefficient_workspace_budget_bytes=4096, leaf_size=3, separation_ratio=.15,
-        kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5),
+        kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5),
         regional_near_budget_bytes=1024**3, tensor_workspace_budget_bytes=512*1024**2)
     options.update(changes)
-    return mw.DirectionalFMMConfig(**options)
+    return mw.mom.DirectionalFMMConfig(**options)
 
 
 def declare_scene():
@@ -62,39 +62,39 @@ def test_new_directional_cached_schema_and_affected_existing_payloads(tmp_path):
     spec.loader.exec_module(old)
     for policy in ('scalar_dk_v1','scalar_reciprocal_dk_v1','scalar_reciprocal_streamed_dk_v1'):
         original = old.DirectionalFMMConfig(near_storage=policy)
-        current = mw.DirectionalFMMConfig(near_storage=policy)
+        current = mw.mom.DirectionalFMMConfig(near_storage=policy)
         assert current.payload()==original.payload()
         assert 'near_coefficient_cache_budget_bytes' not in current.payload()['parameters']
-        assert mw.FMMConfig.restore(original.payload())==current
+        assert mw.mom.FMMConfig.restore(original.payload())==current
     cfg = cached_config()
     payload = cfg.payload()
     assert payload['version']=='automatic_directional_cached_reciprocal_dag_fmm_config_v1'
-    assert mw.FMMConfig.restore(json.loads(json.dumps(payload)))==cfg
-    assert mw.FMMConfig.restore(cached_config(near_coefficient_cache_budget_bytes=0).payload()).near_coefficient_cache_budget_bytes==0
+    assert mw.mom.FMMConfig.restore(json.loads(json.dumps(payload)))==cfg
+    assert mw.mom.FMMConfig.restore(cached_config(near_coefficient_cache_budget_bytes=0).payload()).near_coefficient_cache_budget_bytes==0
     for field in payload['parameters']:
         bad = copy.deepcopy(payload)
         bad['parameters'].pop(field)
-        with pytest.raises(ValueError): mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError): mw.mom.FMMConfig.restore(bad)
     for value in (False,-1,4096.):
         bad = copy.deepcopy(payload)
         bad['parameters']['near_coefficient_cache_budget_bytes'] = value
-        with pytest.raises(ValueError): mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError): mw.mom.FMMConfig.restore(bad)
     for version in ('automatic_directional_dag_fmm_config_v1',
                     'automatic_directional_streamed_reciprocal_dag_fmm_config_v1',
                     'cartesian_fmm_cached_reciprocal_dk_config_v1'):
         bad = copy.deepcopy(payload)
         bad['version'] = version
-        with pytest.raises(ValueError): mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError): mw.mom.FMMConfig.restore(bad)
     bad = copy.deepcopy(payload)
     bad['parameters']['near_storage'] = 'scalar_reciprocal_streamed_dk_v1'
-    with pytest.raises(ValueError): mw.FMMConfig.restore(bad)
+    with pytest.raises(ValueError): mw.mom.FMMConfig.restore(bad)
     with pytest.raises(ValueError, match='requires cached'):
-        mw.DirectionalFMMConfig(near_coefficient_cache_budget_bytes=0)
+        mw.mom.DirectionalFMMConfig(near_coefficient_cache_budget_bytes=0)
     options = dict(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',
         stopping=StoppingRule(preconditioner='none'))
-    with pytest.raises(ValueError, match='complex128'): mw.MoMConfig(**options,dtype=torch.complex64)
+    with pytest.raises(ValueError, match='complex128'): mw.mom.MoMConfig(**options,dtype=torch.complex64)
     with pytest.raises(NotImplementedError, match='free space'):
-        mw.MoMConfig(**options,periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)))
+        mw.mom.MoMConfig(**options,periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)))
     _write(tmp_path/'directional-cached-config.json',dict(completed=True,payload=payload,
         old_three_payloads_exact=True,production_qualification=False))
 
@@ -157,7 +157,7 @@ def prepared_case(tmp_path_factory):
     reference_path = Path(location)
     assert reference_path.is_file()
     scene, fmm = declare_scene(), cached_config()
-    config = mw.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3,
+    config = mw.mom.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3,
         pair_batch=4,far_pair_batch=16),operator_backend='fmm',fmm=fmm,riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='gmres',preconditioner='rwg_diagonal',fallback='none',
             rtol=1e-12,atol=0.,maxiter=240,restart=120))
@@ -180,7 +180,7 @@ def prepared_case(tmp_path_factory):
     patch.setattr(ScalarSystemBlocks,'exterior_channels',counted_exterior)
     patch.setattr(regional,'scalar_regional_channels',counted_interior)
     try:
-        prepared = mw.Simulation.mom(scene,frequency=1.73e8,config=config).prepare()
+        prepared = mw.Simulation.mom(scene,frequencies=1.73e8,config=config).prepare()
         op = prepared.solver.handle.actions
         raw.update(fmm_config=fmm.payload(),constructor_factory_calls=len(calls),physical_currents=op.shape[0],
             FAR_counts=[len(r.far.rectangles) for r in (op.exterior,*op.interiors)],
@@ -279,7 +279,7 @@ def test_new_public_directional_cached_native_solve_sparse_and_exact_restore(pre
                 with pytest.raises(ValueError,match='budgets changed'): region.assert_current()
             receipts.append(receipt)
         result = prepared.run()
-        current, stats = result.surface_currents.scattered_coefficients, result.stats()
+        current, stats = mw.mom.surface_currents(result).scattered_coefficients, result.stats()
         residual = relative(current@reference.mT,prepared.solver.rhs)
         state = folder/'directional-cached-solver-state.pt'
         torch.save(dict(current=current.detach(),rhs=prepared.solver.rhs.detach(),stats=stats),state)
@@ -301,11 +301,11 @@ def test_new_public_directional_cached_native_solve_sparse_and_exact_restore(pre
                 patch.setattr(cls,'__init__',forbidden)
             patch.setattr(torch.linalg,'solve',forbidden)
             restored = mw.Result.load(artifact,scene=scene)
-            assert restored.surface_currents.config.fmm==fmm
-            torch.testing.assert_close(restored.surface_currents.scattered_coefficients,current,rtol=0,atol=0)
-            bad = copy.deepcopy(result.surface_currents.snapshot())
+            assert mw.mom.surface_currents(restored).config.fmm==fmm
+            torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,current,rtol=0,atol=0)
+            bad = copy.deepcopy(mw.mom.surface_currents(result).snapshot())
             bad['fmm_config']['parameters']['near_coefficient_cache_budget_bytes']-=1
-            with pytest.raises(ValueError): SurfaceData.restore(bad,scene,1.73e8)
+            with pytest.raises(ValueError): SurfaceData.restore(bad,scene,1.73e8,'cuda')
         # Reuse the new cached public root plan; build sparse maps once with zero
         # retained cache. No second automatic selection, reference or solve.
         sparse = op.exterior.test.plan_guard.region_plan.build_region(integration=op.provider.config,

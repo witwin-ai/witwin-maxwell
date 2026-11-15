@@ -1,15 +1,13 @@
-"""Elementwise, accumulator and dispatch gates for native copper updates."""
-import os
-from unittest.mock import patch
-
+"""Elementwise and accumulator gates for native copper updates against the Torch sheet oracle."""
 import pytest
 import torch
 
-from witwin.maxwell.fdtd import thin_sheet
 from witwin.maxwell.fdtd.runtime.stepping import _field_update_block, _port_step_block
 from witwin.maxwell.fdtd.ports import prepare_port_spectral_accumulators, prepare_port_drive_tables
 
-from .test_thin_sheet_fused_copies import FIELDS, SELECTOR, _prepare, _seed_identical
+from tests.oracles import thin_sheet_torch
+
+from .test_thin_sheet_fused_copies import FIELDS, _prepare, _seed_identical
 from . import test_thin_sheet_feeds as feeds
 
 
@@ -71,23 +69,22 @@ def assert_step_budget(metrics):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("fed,tilted", [(False, True), (True, True), (True, False)])
-def test_one_copper_step_elementwise_and_accumulators(fed, tilted):
+def test_one_copper_step_elementwise_and_accumulators(fed, tilted, monkeypatch):
     if fed:
-        solvers = []
-        for kernel in ("fused", "torch"):
-            with patch.dict(os.environ, {SELECTOR: kernel}):
-                solvers.append(feeds._simulation(device="cuda", tilted=tilted, steps=1).prepare().solver)
-        fused, reference = solvers
+        fused, reference = (feeds._simulation(tilted=tilted, steps=1).prepare().solver for _ in range(2))
     else:
-        fused, reference = _prepare(), _prepare(kernel="torch")
+        fused, reference = _prepare(), _prepare()
     _seed_identical(fused, reference)
     # Loss starts at zero so a prior accumulator cannot mask this step's error.
     for solver in (fused, reference):
-        sheet = solver._thin_sheets[0]
-        sheet.loss.zero_()
-        sheet.begin(solver)
-        sheet.magnetic(solver)
-        sheet.electric(solver)
+        with monkeypatch.context() as patch:
+            if solver is reference:
+                thin_sheet_torch.install(patch)
+            sheet = solver._thin_sheets[0]
+            sheet.loss.zero_()
+            sheet.begin(solver)
+            sheet.magnetic(solver)
+            sheet.electric(solver)
     metrics = compare_step(fused, reference)
     print(dict(E1="copper", fed=fed, tilted=tilted, chords=fused._thin_sheets[0].copper["count"],
                pairs=fused._thin_sheets[0].copper["pair_position"].shape[0], **metrics), flush=True)
@@ -95,21 +92,23 @@ def test_one_copper_step_elementwise_and_accumulators(fed, tilted):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_one_fed_step_spectral_accumulators():
+def test_one_fed_step_spectral_accumulators(monkeypatch):
     solvers = []
-    for kernel in ("fused", "torch"):
-        with patch.dict(os.environ, {SELECTOR: kernel}):
-            solver = feeds._simulation(device="cuda", tilted=True, steps=20).prepare().solver
+    for _ in ("fused", "torch"):
+        solver = feeds._simulation(tilted=True, steps=20).prepare().solver
         prepare_port_spectral_accumulators(solver, 20, "none")
         prepare_port_drive_tables(solver, 20)
         solvers.append(solver)
     _seed_identical(*solvers)
     for solver in solvers:
-        solver._thin_sheets[0].loss.zero_()
-        solver._thin_sheets[0].feeds[0]["binding"].column_sum.zero_()
-        solver._port_observer_step.fill_(10)
-        _field_update_block(solver, 10*solver.dt)
-        _port_step_block(solver, solver._port_observer_step, post_source=lambda: None)
+        with monkeypatch.context() as patch:
+            if solver is solvers[1]:
+                thin_sheet_torch.install(patch)
+            solver._thin_sheets[0].loss.zero_()
+            solver._thin_sheets[0].feeds[0]["binding"].column_sum.zero_()
+            solver._port_observer_step.fill_(10)
+            _field_update_block(solver, 10*solver.dt)
+            _port_step_block(solver, solver._port_observer_step, post_source=lambda: None)
     metrics = compare_step(*solvers)
     assert bool(solvers[0]._thin_sheets[0].feeds[0]["binding"].column_sum.abs().any())
     print(dict(E1b="fed_spectra", **metrics), flush=True)
@@ -118,7 +117,7 @@ def test_one_fed_step_spectral_accumulators():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_fused_copper_repeat_run_is_bitwise_deterministic():
-    first, second = _prepare(kernel="fused"), _prepare(kernel="fused")
+    first, second = _prepare(), _prepare()
     _seed_identical(first, second)
     for solver in (first, second):
         assert "fused" in solver._thin_sheets[0].copper
@@ -133,26 +132,3 @@ def test_fused_copper_repeat_run_is_bitwise_deterministic():
                        ("state", left.copper["state"], right.copper["state"])):
         assert a.dtype == b.dtype == torch.float64
         assert torch.equal(a, b), name
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("kernel", [None, "fused", "torch"], ids=["default", "fused", "torch"])
-def test_copper_dispatch(device, kernel, monkeypatch):
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("requires CUDA")
-    solver = _prepare(device=device, kernel=kernel)
-    calls = {name: 0 for part in ("_copper_rhs", "_chord_forcing", "_copper_state")
-             for name in (part+"_fused", part+"_torch")}
-    for name in calls:
-        original = getattr(thin_sheet, name)
-
-        def counted(*args, _name=name, _original=original):
-            calls[_name] += 1
-            return _original(*args)
-
-        monkeypatch.setattr(thin_sheet, name, counted)
-    _field_update_block(solver, 0.)
-    fused = device == "cuda" and kernel != "torch"
-    for name, count in calls.items():
-        assert count == int(name.endswith("fused") == fused)
-    print(dict(dispatch=device, selector=kernel or "default", **calls), flush=True)

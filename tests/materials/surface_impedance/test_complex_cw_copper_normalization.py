@@ -9,19 +9,20 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='Requires CUD
 
 def run_film(*,bloch):
     transverse='bloch' if bloch else 'periodic'
-    material=mw.CopperFoil(thickness=2e-6,conductivity=1e4,frequency_range=(.5e9,1.5e9))
+    material=mw.media.CopperFoil(thickness=2e-6,conductivity=1e4,frequency_range=(.5e9,1.5e9))
     scene=mw.Scene(domain=mw.Domain(bounds=((- .12,.12),(-.01,.01),(-.015,.015))),
-        grid=mw.GridSpec.uniform(.005),device='cuda',
-        boundary=mw.BoundarySpec.faces(default='none',x='pml',y=transverse,z=transverse,
+              grid=mw.GridSpec.uniform(.005),boundary=mw.BoundarySpec.faces(default='none',x='pml',y=transverse,z=transverse,
             bloch_wavevector=(0.,0.,0.),num_layers=12),
-        structures=(mw.Structure(name='foil',geometry=mw.Box(position=(0.,0.,0.),size=(0.,.02,.03)),material=material),),
-        monitors=(mw.PointMonitor('probe',(.025,0.,0.),fields=('Ey','Ez','Hy','Hz')),))
-    scene.add_source(mw.PlaneWave(direction=(1.,0.,0.),polarization=(0.,.6,.8),
-        injection=mw.TFSF.slab(axis='x',bounds=(-.08,.08)),
-        source_time=mw.CW(1e9,amplitude=3.,phase=.47)))
-    result=mw.Simulation.fdtd(scene, absorber="cpml",frequency=1e9,full_field_dft=True,
+              structures=(mw.Structure(name='foil',geometry=mw.Box(position=(0.,0.,0.),size=(0.,.02,.03)),material=material),),
+              monitors=(mw.PointMonitor('probe',(.025,0.,0.),fields=('Ey','Ez','Hy','Hz')),),
+                   sources=(
+                       mw.PlaneWave(direction=(1.,0.,0.),polarization=(0.,.6,.8),
+                           injection=mw.TFSF.slab(axis='x',bounds=(-.08,.08)),
+                           source_time=mw.CW(1e9,amplitude=3.,phase=.47)),
+                   ))
+    result=mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(absorber="cpml",full_field_dft=True,
         run_time=mw.TimeConfig.auto(transient_cycles=16,steady_cycles=12),
-        spectral_sampler=mw.SpectralSampler(window='hanning',normalize_source=True)).run()
+        spectral_sampler=mw.fdtd.SpectralSampler(window='hanning',normalize_source=True))).run()
     return result,material
 
 
@@ -29,10 +30,10 @@ def test_two_polarization_copper_phasors_and_absolute_work_match_real_periodic(t
     periodic,_=run_film(bloch=False)
     actual,material=run_film(bloch=True)
     for component in ('Ey','Ez','Hy','Hz'):
-        torch.testing.assert_close(torch.as_tensor(actual.monitor('probe')[component]),
-            torch.as_tensor(periodic.monitor('probe')[component]),rtol=3e-4,atol=1e-9)
-    record=actual.conductor_losses['foil']
-    expected=periodic.conductor_losses['foil']
+        torch.testing.assert_close(torch.as_tensor(actual.raw_monitor('probe')[component]),
+            torch.as_tensor(periodic.raw_monitor('probe')[component]),rtol=3e-4,atol=1e-9)
+    record=mw.rf.conductor_losses(actual)['foil']
+    expected=mw.rf.conductor_losses(periodic)['foil']
     torch.testing.assert_close(record['surface_power'],expected['surface_power'],rtol=6e-4,atol=1e-15)
     assert record['energy_representation']=='combined_real_imaginary_algorithmic_state'
     assert expected['energy_representation']=='physical_real_field'
@@ -57,5 +58,5 @@ def test_two_polarization_copper_phasors_and_absolute_work_match_real_periodic(t
     path=tmp_path/'analytic-film.pt'
     actual.save(path)
     loaded=mw.Result.load(path,scene=actual.scene,map_location='cuda:0')
-    assert loaded.conductor_losses['foil']['energy_representation']==record['energy_representation']
-    torch.testing.assert_close(loaded.conductor_losses['foil']['surface_power'].cpu(),record['surface_power'])
+    assert mw.rf.conductor_losses(loaded)['foil']['energy_representation']==record['energy_representation']
+    torch.testing.assert_close(mw.rf.conductor_losses(loaded)['foil']['surface_power'].cpu(),record['surface_power'])

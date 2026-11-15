@@ -1,0 +1,668 @@
+{
+ "schema": "witwin.scene/1",
+ "unit": {
+  "length": "m",
+  "frequency": "Hz"
+ },
+ "background": {
+  "material": null
+ },
+ "materials": {
+  "m0": {
+   "type": "Material",
+   "eps_r": 2.5,
+   "mu_r": 1.0,
+   "sigma_e": 0.0,
+   "name": null,
+   "sigma_m": 0.0,
+   "debye_poles": [],
+   "drude_poles": [],
+   "lorentz_poles": [],
+   "mu_debye_poles": [],
+   "mu_drude_poles": [],
+   "mu_lorentz_poles": [],
+   "epsilon_tensor": null,
+   "mu_tensor": null,
+   "sigma_e_tensor": null,
+   "orientation": null,
+   "kerr_chi3": null,
+   "nonlinearity": [],
+   "modulation": null,
+   "pec": false,
+   "pmc": false,
+   "breakdown": null,
+   "mass_density": null,
+   "kind": "medium"
+  },
+  "m1": {
+   "type": "WireConductor",
+   "kind": "pec",
+   "conductivity": null,
+   "permeability": null
+  },
+  "m2": {
+   "type": "WireConductor",
+   "kind": "finite",
+   "conductivity": 58000000.0,
+   "permeability": 1.25663706212e-06
+  }
+ },
+ "domain": {
+  "type": "Domain",
+  "bounds": [
+   [
+    -0.03,
+    0.03
+   ],
+   [
+    -0.03,
+    0.03
+   ],
+   [
+    -0.03,
+    0.03
+   ]
+  ]
+ },
+ "grid": {
+  "type": "GridSpec",
+  "dx": 0.005,
+  "dy": 0.005,
+  "dz": 0.005,
+  "x_coords": null,
+  "y_coords": null,
+  "z_coords": null,
+  "min_steps_per_wavelength": null,
+  "wavelength": null,
+  "max_ratio": null,
+  "override_structures": [],
+  "layer_refinement": null,
+  "kind": "uniform"
+ },
+ "boundary": {
+  "type": "BoundarySpec",
+  "kind": "none",
+  "num_layers": 0,
+  "strength": 0.0,
+  "bloch_wavevector": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "x": [
+   "pec",
+   "pec"
+  ],
+  "y": [
+   "pmc",
+   "pmc"
+  ],
+  "z": null,
+  "x_low": "pec",
+  "x_high": "pec",
+  "y_low": "pmc",
+  "y_high": "pmc",
+  "z_low": "pec",
+  "z_high": "pmc",
+  "mur_abc": {
+   "type": "MurABC",
+   "order": 1,
+   "permittivity": null
+  },
+  "mode_abc": null
+ },
+ "structures": [
+  {
+   "type": "Structure",
+   "geometry": {
+    "type": "difference",
+    "base": {
+     "type": "box",
+     "position": {
+      "type": "Tensor",
+      "dtype": "float32",
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "size": {
+      "type": "Tensor",
+      "dtype": "float32",
+      "values": [
+       0.009999999776482582,
+       0.009999999776482582,
+       0.009999999776482582
+      ]
+     },
+     "rotation": {
+      "type": "Tensor",
+      "dtype": "float32",
+      "values": [
+       1.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     }
+    },
+    "tools": [
+     {
+      "type": "sphere",
+      "position": {
+       "type": "Tensor",
+       "dtype": "float32",
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "radius": {
+       "type": "Tensor",
+       "dtype": "float32",
+       "values": 0.003000000026077032
+      },
+      "rotation": {
+       "type": "Tensor",
+       "dtype": "float32",
+       "values": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+       ]
+      }
+     }
+    ],
+    "smoothness": 0.0,
+    "position": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    },
+    "rotation": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   },
+   "material": "m0",
+   "name": null,
+   "priority": 0,
+   "enabled": true,
+   "tags": [],
+   "metadata": {},
+   "structure_id": 8,
+   "material_id": 7,
+   "assignment_id": 8,
+   "surface_id": 8,
+   "primitive_ids": null,
+   "phase_screen": null,
+   "uv": null,
+   "face_uv": null
+  }
+ ],
+ "thin_wires": [
+  {
+   "type": "ThinWire",
+   "name": "dipole",
+   "points": [
+    [
+     -0.015,
+     0.0,
+     -0.01
+    ],
+    [
+     -0.015,
+     0.0,
+     0.01
+    ]
+   ],
+   "radius": 0.0001,
+   "conductor": "m1",
+   "endpoints": [
+    {
+     "type": "WireEnd",
+     "kind": "open",
+     "structure": null,
+     "node_name": null
+    },
+    {
+     "type": "WireEnd",
+     "kind": "open",
+     "structure": null,
+     "node_name": null
+    }
+   ],
+   "snap": "nearest"
+  },
+  {
+   "type": "ThinWire",
+   "name": "loop",
+   "points": [
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.01,
+     0.0,
+     0.0
+    ],
+    [
+     0.01,
+     0.01,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "radius": 0.0001,
+   "conductor": "m2",
+   "endpoints": [],
+   "snap": "strict"
+  }
+ ],
+ "sources": [
+  {
+   "type": "PointDipole",
+   "position": [
+    0.015,
+    0.0,
+    0.0
+   ],
+   "polarization": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "width": 0.005,
+   "profile": "gaussian",
+   "source_time": {
+    "type": "GaussianPulse",
+    "frequency": 1000000000.0,
+    "fwidth": 200000000.0,
+    "amplitude": 1.0,
+    "phase": 0.0,
+    "delay": 4.774648292756861e-09,
+    "kind": "gaussian_pulse"
+   },
+   "name": null
+  }
+ ],
+ "ports": [],
+ "lumped_elements": [],
+ "monitors": [
+  {
+   "type": "PointMonitor",
+   "name": "point",
+   "position": [
+    0.0,
+    0.0,
+    0.01
+   ],
+   "fields": [
+    "Ez"
+   ]
+  },
+  {
+   "type": "PlaneMonitor",
+   "name": "plane",
+   "axis": "x",
+   "position": 0.01,
+   "fields": [
+    "Ey",
+    "Hz"
+   ],
+   "frequencies": null,
+   "compute_flux": false,
+   "normal_direction": "+"
+  },
+  {
+   "type": "FinitePlaneMonitor",
+   "name": "finite",
+   "position": [
+    0.0,
+    0.0,
+    0.01
+   ],
+   "size": [
+    0.02,
+    0.02,
+    0.0
+   ],
+   "fields": [
+    "Ez"
+   ],
+   "frequencies": null,
+   "compute_flux": false,
+   "normal_direction": "+",
+   "face_label": null,
+   "surface_name": null,
+   "sample_spacing": null,
+   "closure_planes": null
+  },
+  {
+   "type": "FluxMonitor",
+   "name": "flux",
+   "axis": "z",
+   "position": 0.015,
+   "frequencies": null,
+   "normal_direction": "+"
+  },
+  {
+   "type": "ClosedSurfaceMonitor",
+   "name": "closed",
+   "faces": [
+    {
+     "type": "FinitePlaneMonitor",
+     "name": "closed::x_neg",
+     "position": [
+      -0.02,
+      0.0,
+      0.0
+     ],
+     "size": [
+      0.0,
+      0.04,
+      0.04
+     ],
+     "fields": [
+      "Ey",
+      "Ez",
+      "Hy",
+      "Hz"
+     ],
+     "frequencies": null,
+     "compute_flux": false,
+     "normal_direction": "-",
+     "face_label": "x_neg",
+     "surface_name": "closed",
+     "sample_spacing": null,
+     "closure_planes": {
+      "y": [
+       -0.02,
+       0.02
+      ],
+      "z": [
+       -0.02,
+       0.02
+      ]
+     }
+    },
+    {
+     "type": "FinitePlaneMonitor",
+     "name": "closed::x_pos",
+     "position": [
+      0.02,
+      0.0,
+      0.0
+     ],
+     "size": [
+      0.0,
+      0.04,
+      0.04
+     ],
+     "fields": [
+      "Ey",
+      "Ez",
+      "Hy",
+      "Hz"
+     ],
+     "frequencies": null,
+     "compute_flux": false,
+     "normal_direction": "+",
+     "face_label": "x_pos",
+     "surface_name": "closed",
+     "sample_spacing": null,
+     "closure_planes": {
+      "y": [
+       -0.02,
+       0.02
+      ],
+      "z": [
+       -0.02,
+       0.02
+      ]
+     }
+    },
+    {
+     "type": "FinitePlaneMonitor",
+     "name": "closed::y_neg",
+     "position": [
+      0.0,
+      -0.02,
+      0.0
+     ],
+     "size": [
+      0.04,
+      0.0,
+      0.04
+     ],
+     "fields": [
+      "Ex",
+      "Ez",
+      "Hx",
+      "Hz"
+     ],
+     "frequencies": null,
+     "compute_flux": false,
+     "normal_direction": "-",
+     "face_label": "y_neg",
+     "surface_name": "closed",
+     "sample_spacing": null,
+     "closure_planes": {
+      "x": [
+       -0.02,
+       0.02
+      ],
+      "z": [
+       -0.02,
+       0.02
+      ]
+     }
+    },
+    {
+     "type": "FinitePlaneMonitor",
+     "name": "closed::y_pos",
+     "position": [
+      0.0,
+      0.02,
+      0.0
+     ],
+     "size": [
+      0.04,
+      0.0,
+      0.04
+     ],
+     "fields": [
+      "Ex",
+      "Ez",
+      "Hx",
+      "Hz"
+     ],
+     "frequencies": null,
+     "compute_flux": false,
+     "normal_direction": "+",
+     "face_label": "y_pos",
+     "surface_name": "closed",
+     "sample_spacing": null,
+     "closure_planes": {
+      "x": [
+       -0.02,
+       0.02
+      ],
+      "z": [
+       -0.02,
+       0.02
+      ]
+     }
+    },
+    {
+     "type": "FinitePlaneMonitor",
+     "name": "closed::z_neg",
+     "position": [
+      0.0,
+      0.0,
+      -0.02
+     ],
+     "size": [
+      0.04,
+      0.04,
+      0.0
+     ],
+     "fields": [
+      "Ex",
+      "Ey",
+      "Hx",
+      "Hy"
+     ],
+     "frequencies": null,
+     "compute_flux": false,
+     "normal_direction": "-",
+     "face_label": "z_neg",
+     "surface_name": "closed",
+     "sample_spacing": null,
+     "closure_planes": {
+      "x": [
+       -0.02,
+       0.02
+      ],
+      "y": [
+       -0.02,
+       0.02
+      ]
+     }
+    },
+    {
+     "type": "FinitePlaneMonitor",
+     "name": "closed::z_pos",
+     "position": [
+      0.0,
+      0.0,
+      0.02
+     ],
+     "size": [
+      0.04,
+      0.04,
+      0.0
+     ],
+     "fields": [
+      "Ex",
+      "Ey",
+      "Hx",
+      "Hy"
+     ],
+     "frequencies": null,
+     "compute_flux": false,
+     "normal_direction": "+",
+     "face_label": "z_pos",
+     "surface_name": "closed",
+     "sample_spacing": null,
+     "closure_planes": {
+      "x": [
+       -0.02,
+       0.02
+      ],
+      "y": [
+       -0.02,
+       0.02
+      ]
+     }
+    }
+   ],
+   "frequencies": null
+  },
+  {
+   "type": "AngleProjectionMonitor",
+   "name": "angle",
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "size": [
+    0.04,
+    0.04,
+    0.04
+   ],
+   "theta": [
+    0.4
+   ],
+   "phi": [
+    0.2
+   ],
+   "frequencies": null,
+   "radius": 1.0,
+   "far_field_approx": true,
+   "origin": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_direction": null,
+   "exclude_surfaces": [],
+   "window_size": null,
+   "sample_spacing": null
+  },
+  {
+   "type": "KSpaceProjectionMonitor",
+   "name": "kspace",
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "size": [
+    0.04,
+    0.04,
+    0.04
+   ],
+   "ux": [
+    0.0
+   ],
+   "uy": [
+    0.0
+   ],
+   "axis": "z",
+   "hemisphere": "+",
+   "radius": 1.0,
+   "frequencies": null,
+   "origin": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_direction": null,
+   "exclude_surfaces": [],
+   "window_size": null,
+   "sample_spacing": null
+  }
+ ],
+ "subpixel": {
+  "type": "SubpixelSpec",
+  "samples": [
+   4,
+   4,
+   4
+  ],
+  "averaging": "kottke_edge",
+  "pec": "staircase"
+ },
+ "metadata": {}
+}

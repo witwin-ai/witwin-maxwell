@@ -15,11 +15,11 @@ def test_preparation_audit_records_actual_grid_bottleneck_and_does_not_qualify()
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.01, .01),) * 3),
                      grid=mw.GridSpec.custom(*axes), boundary=mw.BoundarySpec.none(),
                      sources=[mw.PointDipole(position=(0, 0, 0), polarization="Ex",
-                                             source_time=mw.CW(frequency=2.45e9))], device="cuda")
+                                             source_time=mw.CW(frequency=2.45e9))])
     prepared = mw.Simulation.fdtd(
-        scene, frequency=2.45e9, full_field_dft=True,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
-        run_time=mw.TimeConfig(time_steps=16, transient_cycles=0, steady_cycles=1),
+        scene, frequencies=2.45e9, config=mw.FDTDConfig(full_field_dft=True,
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+        run_time=mw.TimeConfig(time_steps=16, transient_cycles=0, steady_cycles=1)),
     ).prepare()
     report = prepared.diagnostics
     assert report["status"] == "prepared_execution_not_qualified"
@@ -29,7 +29,7 @@ def test_preparation_audit_records_actual_grid_bottleneck_and_does_not_qualify()
     assert report["pec_constraints"] == {}
     json.dumps(report, allow_nan=False)
     result = prepared.run()
-    assert result.solver_stats["steps_run"] == 16
+    assert result.stats()["steps_run"] == 16
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")
@@ -37,9 +37,12 @@ def test_audit_reports_actual_grid_quality_and_layer_resolution():
     import numpy as np
     from tests.fdtd.test_pcb_execution_state import simulation
 
-    config = simulation()
-    config.scene.add_structure(mw.Structure(mw.Box(position=(0, 0, .005), size=(.03, .03, .01)),
-                                            mw.Material(eps_r=2.2), name="layer"))
+    base = simulation()
+    config = mw.Simulation.fdtd(base.scene.updated(structures=(
+        *base.scene.structures,
+        mw.Structure(mw.Box(position=(0, 0, .005), size=(.03, .03, .01)),
+                     mw.Material(eps_r=2.2), name="layer"),
+    )), frequencies=base.frequencies, excitations=base.excitations, config=base.config)
     prepared = config.prepare()
     report = prepared.diagnostics
     assert sum(report["grid"][axis]["vacuum_cfl_inverse_square_fraction"] for axis in "xyz") == pytest.approx(1.)

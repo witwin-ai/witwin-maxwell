@@ -17,12 +17,11 @@ def _cpu_scene():
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.1),
-        device="cpu",
     )
 
 
 def test_astigmatic_gaussian_beam_stores_per_axis_waist_and_focus():
-    source = mw.AstigmaticGaussianBeam(
+    source = mw.sources.AstigmaticGaussianBeam(
         direction=(2.0, 0.0, 0.0),
         polarization=(0.0, 0.0, 5.0),
         beam_waist=(0.3, 0.18),
@@ -43,11 +42,11 @@ def test_astigmatic_gaussian_beam_stores_per_axis_waist_and_focus():
 
 def test_astigmatic_gaussian_beam_rejects_bad_waist_and_polarization():
     with pytest.raises(ValueError):
-        mw.AstigmaticGaussianBeam(beam_waist=(0.2,))
+        mw.sources.AstigmaticGaussianBeam(beam_waist=(0.2,))
     with pytest.raises(ValueError):
-        mw.AstigmaticGaussianBeam(beam_waist=(0.2, -0.1))
+        mw.sources.AstigmaticGaussianBeam(beam_waist=(0.2, -0.1))
     with pytest.raises(ValueError):
-        mw.AstigmaticGaussianBeam(
+        mw.sources.AstigmaticGaussianBeam(
             direction=(1.0, 0.0, 0.0),
             polarization=(1.0, 0.0, 0.0),
         )
@@ -55,8 +54,9 @@ def test_astigmatic_gaussian_beam_rejects_bad_waist_and_polarization():
 
 def test_astigmatic_gaussian_beam_compiles_per_axis_fields():
     scene = _cpu_scene()
-    scene.add_source(
-        mw.AstigmaticGaussianBeam(
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.AstigmaticGaussianBeam(
             direction=(1.0, 0.0, 0.0),
             polarization=(0.0, 0.0, 1.0),
             beam_waist=(0.3, 0.18),
@@ -64,8 +64,8 @@ def test_astigmatic_gaussian_beam_compiles_per_axis_fields():
             focus_u=0.04,
             focus_v=-0.02,
             source_time=mw.CW(frequency=2.5e9),
-        )
-    )
+        ),
+    ))
 
     compiled = compile_fdtd_sources(scene, default_frequency=2.5e9)
 
@@ -89,12 +89,11 @@ def test_astigmatic_gaussian_beam_compiles_per_axis_fields():
 
 def _build_scene(source, *, grid_step=0.08):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(grid_step),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(source)
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(grid_step),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(source,),
+            )
     return scene
 
 
@@ -132,7 +131,7 @@ def test_fdtd_astigmatic_beam_reproduces_per_axis_waists_at_focus():
     waist_u = 0.36  # along polarization (z axis on an x-plane monitor)
     waist_v = 0.24  # along binormal (y axis on an x-plane monitor)
     scene = _build_scene(
-        mw.AstigmaticGaussianBeam(
+        mw.sources.AstigmaticGaussianBeam(
             direction=(1.0, 0.0, 0.0),
             polarization=(0.0, 0.0, 1.0),
             beam_waist=(waist_u, waist_v),
@@ -142,17 +141,22 @@ def test_fdtd_astigmatic_beam_reproduces_per_axis_waists_at_focus():
         ),
         grid_step=dx,
     )
-    scene.add_monitor(mw.PlaneMonitor("focus_ez", axis="x", position=0.0, fields=("Ez",)))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PlaneMonitor("focus_ez", axis="x", position=0.0, fields=("Ez",)),
+    ))
 
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).run()
 
-    field = np.abs(_to_cpu_numpy(result.monitor("focus_ez")["data"]))
+    field = np.abs(_to_cpu_numpy(result.monitor("focus_ez", freq_index=0).sel(component="Ez").values))
     field = np.squeeze(field)
     assert field.ndim == 2
 
@@ -179,19 +183,24 @@ def test_isotropic_astigmatic_beam_matches_gaussian_beam():
 
     def run(source):
         scene = _build_scene(source)
-        scene.add_monitor(mw.PlaneMonitor("plane_ez", axis="x", position=0.0, fields=("Ez",)))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.PlaneMonitor("plane_ez", axis="x", position=0.0, fields=("Ez",)),
+        ))
         result = mw.Simulation.fdtd(
             scene,
             frequencies=[1.0e9],
-            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False,
+            ),
         ).run()
-        return _to_cpu_numpy(result.monitor("plane_ez")["data"])
+        return _to_cpu_numpy(result.monitor("plane_ez", freq_index=0).sel(component="Ez").values)
 
     reference = run(mw.GaussianBeam(beam_waist=waist, name="beam", **common))
     astigmatic = run(
-        mw.AstigmaticGaussianBeam(
+        mw.sources.AstigmaticGaussianBeam(
             beam_waist=(waist, waist),
             focus_u=0.0,
             focus_v=0.0,

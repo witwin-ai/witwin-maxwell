@@ -9,6 +9,7 @@ from .fmm_directional_rwg import DirectionalRWGProjection
 from .fmm_fft import _rhs_chunks
 from .nearfield import ScalarSystemBlocks
 from .operator import PreparedRWGGeometry
+from ..errors import UnsupportedFeatureError
 
 
 class _UpwardCurrent(torch.autograd.Function):
@@ -59,7 +60,8 @@ class NestedDirectionalRWGProjection:
             raise TypeError('Directional nesting requires a support octree')
         tree.assert_current()
         if tree.expansion_centers is not None:
-            raise NotImplementedError('Directional projections require original support-box centers')
+            raise UnsupportedFeatureError('Directional projections require original support-box centers',
+                                          feature="guard:250c76f0", method="mom")
         if type(order) is not int or not 0 <= order <= 12:
             raise ValueError('Directional nested order must lie between zero and twelve')
         if any(type(v) is not int or v < 1 for v in
@@ -549,7 +551,8 @@ class SparseDirectionalRWGProjection:
             raise TypeError('Sparse directional contexts require a physical support octree')
         tree.assert_current()
         if tree.expansion_centers is not None:
-            raise NotImplementedError('Directional projections require original support-box centers')
+            raise UnsupportedFeatureError('Directional projections require original support-box centers',
+                                          feature="guard:5709be99", method="mom")
         if (carriers.ndim != 2 or carriers.shape[1] != 3
                 or carriers.device != tree.device or carriers.dtype != torch.float64
                 or not bool(((carriers.norm(dim=-1)-1).abs() <= 512*torch.finfo(torch.float64).eps).all())):

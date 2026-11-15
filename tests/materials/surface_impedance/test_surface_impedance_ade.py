@@ -18,7 +18,7 @@ import torch
 
 from witwin.maxwell.compiler.surface_impedance import fit_surface_impedance
 from witwin.maxwell.fdtd.runtime.stepping import surface_ade_step
-from witwin.maxwell.fdtd.surface_impedance_reference import good_conductor_surface_impedance
+from tests.oracles.surface_impedance_reference import good_conductor_surface_impedance
 from witwin.maxwell.media import RationalSurfaceImpedance
 
 

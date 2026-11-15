@@ -56,8 +56,8 @@ def main(argv=None):
     scene=mw.Scene(structures=[mw.Structure(mw.Sphere(radius=radius),mw.Material(eps_r=2.25,sigma_e=sigma))],
                    sources=[mw.PlaneWave(direction=(0,0,1),polarization=(1,0,0),source_time=mw.CW(frequency=FREQUENCY,amplitude=1.,phase=phase))])
     integration=replace(INTEGRATION,far_pair_batch=4096)
-    config=mw.MoMConfig(subdivisions=args.subdivision,integration=integration,
-                        query_config=mw.FieldQueryConfig(relative_tolerance=1e-5,max_order=128))
+    config=mw.mom.MoMConfig(subdivisions=args.subdivision,integration=integration,
+                        query_config=mw.mom.FieldQueryConfig(relative_tolerance=1e-5,max_order=128))
     report={'scope':'Independent physical volume loss on the solved polyhedron and analytic exact sphere; balance loss retained only as a separate diagnostic.',
             'complete_G0':False,'provenance_segments':[PROCESS_PROVENANCE],
             'source_sha256':{str(Path(__file__).resolve().relative_to(Path(__file__).resolve().parents[1])):hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -68,8 +68,8 @@ def main(argv=None):
     args.output.parent.mkdir(parents=True,exist_ok=True)
     def checkpoint():args.output.write_text(json.dumps(report,indent=2))
     torch.cuda.reset_peak_memory_stats();start=time.perf_counter()
-    result=mw.Simulation.mom(scene,frequency=FREQUENCY,config=config).run()
-    data=result.surface_currents;handle=data.handle
+    result=mw.Simulation.mom(scene,frequencies=FREQUENCY,config=config).run()
+    data=mw.mom.surface_currents(result);handle=data.handle
     report.update(edges=handle.basis.n_edges,solve=result.stats(),assembly=handle.metadata,
                   epsilon_r=[handle.interior.epsilon_r.real,handle.interior.epsilon_r.imag])
     native=args.output.with_suffix('.surface.pt')
@@ -96,7 +96,7 @@ def main(argv=None):
     _,directions,_,weights=control_sphere(order=12)
     cross=data.plane_wave_cross_sections(directions,weights)
     reference=sphere_cross_sections(radius,handle.exterior.k.real,handle.interior.epsilon_r,cutoff=24)
-    far,_=result.far_field(directions)
+    far=mw.mom.far_field(result, directions)[0].values[0]
     exact=torch.as_tensor(sphere_far_field(radius,handle.exterior.k.real,handle.interior.epsilon_r,directions.cpu().numpy(),cutoff=24)*np.exp(-1j*phase),device=far.device)
     far_error=float(((weights*(far-exact).abs().square().sum(-1)).sum()/(weights*exact.abs().square().sum(-1)).sum()).sqrt())
     report['cross_sections']={key:float(value) for key,value in cross.items()}

@@ -30,20 +30,19 @@ def _scene() -> mw.Scene:
     y = np.linspace(-0.2, 0.2, 5, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 5, dtype=np.float64)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.2, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=0.4e9),
-            name="drive",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.4, 0.4), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.none(),
+                sources=(
+            mw.PointDipole(
+                position=(-0.2, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=0.4e9),
+                name="drive",
+            ),
+            ),
+            )
     return scene
 
 

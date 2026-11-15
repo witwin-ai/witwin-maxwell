@@ -35,10 +35,10 @@ def source_groups():
 def prepared(groups, eps_r=3.5, sigma_e=0.02, subdivisions=2):
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=eps_r, sigma_e=sigma_e))],
                      sources=list(groups[0]))
-    config = mw.MoMConfig(subdivisions=subdivisions, riesz_storage='dense', integration=INTEGRATION,
+    config = mw.mom.MoMConfig(subdivisions=subdivisions, riesz_storage='dense', integration=INTEGRATION,
                           stopping=StoppingRule(method='direct', rtol=1e-10),
                           query_config=FieldQueryConfig(relative_tolerance=1e-5, max_order=32))
-    solver = mw.Simulation.mom(scene, frequency=FREQUENCY, config=config).prepare().solver
+    solver = mw.Simulation.mom(scene, frequencies=FREQUENCY, config=config).prepare().solver
     return scene, config, solver
 
 

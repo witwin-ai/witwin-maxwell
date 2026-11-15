@@ -31,8 +31,8 @@ def _mesh_fill_cache(scene, samples, include_edges):
     from .materials import _axis_sample_offsets, _edge_axis_base_1d, _edge_axis_offsets
 
     axes = None
-    if (samples != (1, 1, 1) and not (scene.grid.is_custom or scene.grid.is_auto)
-            and all(scene.boundary.axis_kind(a) not in ("periodic", "bloch") for a in _AXES)):
+    if (samples != (1, 1, 1) and not (scene.scene.grid.is_custom or scene.scene.grid.is_auto)
+            and all(scene.scene.boundary.axis_kind(a) not in ("periodic", "bloch") for a in _AXES)):
         axes = []
         for axis, count in zip(_AXES, samples):
             values = [getattr(scene, axis) + offset
@@ -109,7 +109,7 @@ def _field_gradients(scene, field, coords=None, *, periodic_nodes=False):
             grads.append(torch.zeros_like(field))
         else:
             gradient = torch.gradient(field, spacing=(coord,), dim=dim)[0]
-            if periodic_nodes and scene.boundary.axis_kind(_AXES[dim]) in ("periodic", "bloch"):
+            if periodic_nodes and scene.scene.boundary.axis_kind(_AXES[dim]) in ("periodic", "bloch"):
                 # Endpoint nodes denote the same physical point. One-sided
                 # normals would give that shared material tensor two values and
                 # break reciprocity of the volume-weighted Yee couplings.
@@ -343,9 +343,9 @@ class SubsampleFillGeometry:
 
 def _uniform_axis_spacing(scene, axis):
     """Resolved Yee spacing, including for cropped material evaluations."""
-    lo, hi = scene.domain.bounds[_AXES.index(axis)]
+    lo, hi = scene.scene.domain.bounds[_AXES.index(axis)]
     span = float(hi) - float(lo)
-    count = max(1, math.ceil(span / float(getattr(scene.grid, f"d{axis}"))))
+    count = max(1, math.ceil(span / float(getattr(scene.scene.grid, f"d{axis}"))))
     return span / count
 
 
@@ -360,7 +360,7 @@ def _subsample_spacing(scene, samples, staggered_axes=None):
     counts = tuple(int(value) for value in samples)
     if counts == (1, 1, 1):
         return None
-    grid = scene.grid
+    grid = scene.scene.grid
     spacing = []
     for index, (axis, count) in enumerate(zip(_AXES, counts)):
         if not (grid.is_custom or grid.is_auto):
@@ -371,7 +371,7 @@ def _subsample_spacing(scene, samples, staggered_axes=None):
         width64 = torch.as_tensor(width64, dtype=torch.float64)
         if float(width64.max() - width64.min()) <= 1.0e-12 * float(width64.max()):
             # A uniformly spaced custom axis keeps the scalar path bit for bit.
-            spacing.append(float(scene.grid.min_spacing[index]) / count)
+            spacing.append(float(scene.scene.grid.min_spacing[index]) / count)
             continue
         if staggered:
             coord = getattr(scene, axis)

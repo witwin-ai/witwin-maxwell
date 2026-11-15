@@ -6,7 +6,7 @@ import pytest
 import torch
 import witwin.maxwell as mw
 
-from tests.fdtd.cuda.test_batch_runtime import simulation
+from tests.fdtd.cuda.test_batch_runtime import simulation, with_scene
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Batch audit requires CUDA")
 
@@ -14,8 +14,8 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Batch aud
 def submission(scales=None):
     scales = torch.ones(1, device="cuda:0") if scales is None else scales
     return mw.Simulation.batch(simulation(steps=8),
-        parameters=mw.BatchParameters(source_scales={"drive": scales}),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1))
+        parameters=mw.execution.BatchParameters(source_scales={"drive": scales}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=1))
 
 
 def probe(results):
@@ -29,7 +29,7 @@ def test_temporary_source_parameters_are_anchored_until_cache_replaced():
         for value in (2., 3., 5., 7., 11.):
             scales = torch.tensor([value], device="cuda:0")
             current = weakref.ref(scales)
-            result = prepared.run(parameters=mw.BatchParameters(source_scales={"drive": scales}))
+            result = prepared.run(parameters=mw.execution.BatchParameters(source_scales={"drive": scales}))
             del scales
             assert current() is not None, "Cache identity must stay alive after temporary inputs disappear."
             if previous is not None:
@@ -116,8 +116,8 @@ def test_close_during_validation_cannot_revive_prepared_context(monkeypatch):
 
 def test_structure_outside_its_envelope_fails_before_execution():
     sim = simulation(steps=8)
-    batch = mw.Simulation.batch([sim], execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1),
-        variation=mw.BatchVariation(structures={"design": mw.Box(
+    batch = mw.Simulation.batch([sim], execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=1),
+        variation=mw.execution.BatchVariation(structures={"design": mw.Box(
             position=(-.15, 0, 0), size=(.001, .001, .001), device="cuda:0")}))
     with pytest.raises(ValueError, match="influence envelope"):
         batch.prepare()
@@ -125,14 +125,17 @@ def test_structure_outside_its_envelope_fails_before_execution():
 
 def test_parameter_cache_keeps_target_names_when_mapping_order_changes():
     sim = simulation(steps=35)
-    sim.scene.add_source(mw.PointDipole(name="second", position=(0., -.05, 0.), polarization="Ez",
-        source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9)))
+    sim = with_scene(sim, sources=(
+        *sim.scene.sources,
+        mw.PointDipole(name="second", position=(0., -.05, 0.), polarization="Ez",
+            source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9)),
+    ))
     first = torch.tensor([.3], device="cuda:0")
     second = torch.tensor([1.2], device="cuda:0")
     batch = mw.Simulation.batch(sim,
-        parameters=mw.BatchParameters(source_scales={"drive": first, "second": second}),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1, graph="required"))
-    updated = mw.BatchParameters(source_scales={"second": first, "drive": second})
+        parameters=mw.execution.BatchParameters(source_scales={"drive": first, "second": second}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=1, graph="required"))
+    updated = mw.execution.BatchParameters(source_scales={"second": first, "drive": second})
     with batch.prepare() as prepared:
         original = prepared.run()
         original.results()

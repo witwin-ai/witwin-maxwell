@@ -18,35 +18,34 @@ def _kerr_chi3():
 def _chi2():
     # Second-order (chi2) nonlinearity: routes through the general nonlinear
     # coefficient kernel that rewrites both decay and curl every step.
-    return mw.Material(eps_r=4.0, nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-12))
+    return mw.Material(eps_r=4.0, nonlinearity=mw.media.NonlinearSusceptibility(chi2=1.0e-12))
 
 
 def _tpa():
     # Two-photon absorption: the field-dependent conductivity channel of the
     # general nonlinear kernel (sigma_NL = tpa_sigma * |E|^2).
-    return mw.Material(eps_r=4.0, nonlinearity=mw.TwoPhotonAbsorption(beta=1.0e-11, n0=1.5))
+    return mw.Material(eps_r=4.0, nonlinearity=mw.media.TwoPhotonAbsorption(beta=1.0e-11, n0=1.5))
 
 
 def _nonlinear_dipole_scene(material_factory):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.1, 0.1), (-0.1, 0.1), (-0.1, 0.1))),
-        grid=mw.GridSpec.uniform(0.008),
-        boundary=mw.BoundarySpec.pml(num_layers=8),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.04, 0.04, 0.04)),
-            material=material_factory(),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.02, 0.0, -0.02),
-            polarization="Ez",
-            source_time=mw.GaussianPulse(frequency=_FREQ, fwidth=0.7e9),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.1, 0.1), (-0.1, 0.1), (-0.1, 0.1))),
+                grid=mw.GridSpec.uniform(0.008),
+                boundary=mw.BoundarySpec.pml(num_layers=8),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.04, 0.04, 0.04)),
+                material=material_factory(),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(-0.02, 0.0, -0.02),
+                polarization="Ez",
+                source_time=mw.GaussianPulse(frequency=_FREQ, fwidth=0.7e9),
+            ),
+            ),
+            )
     return scene
 
 
@@ -54,12 +53,14 @@ def _run(material_factory, *, cuda_graph):
     result = mw.Simulation.fdtd(
         _nonlinear_dipole_scene(material_factory),
         frequencies=(_FREQ,),
-        full_field_dft=True,
-        run_time=mw.TimeConfig(time_steps=300),
-        cuda_graph=cuda_graph,
+        config=mw.FDTDConfig(
+            full_field_dft=True,
+            run_time=mw.TimeConfig(time_steps=300),
+            cuda_graph=cuda_graph,
+        ),
     ).run()
     view = result.at(frequency=_FREQ)
-    fields = {a: np.asarray(getattr(view.E, a).detach().cpu()) for a in ("x", "y", "z")}
+    fields = {a: np.asarray(getattr(view.E, a).values.detach().cpu()) for a in ("x", "y", "z")}
     return fields, result.stats()
 
 

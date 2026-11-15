@@ -1,11 +1,12 @@
 #include "green_eval.cuh"
 using namespace layered;
 
-__global__ void vertical_coeff_kernel(const C* raw,const C* media,const double* sigma,
+__global__ void vertical_coeff_kernel(const C* raw,const C* media,int64_t stride,const double* sigma,
     const double* f,const int64_t* a,const int64_t* b,const double* geometry,C* out,int F,int I) {
   int t=blockIdx.x*blockDim.x+threadIdx.x;if(t>=F*I) return;
   int fi=t/I,i=t%I;double w=2*pi*f[fi],ds=geometry[3*i],dz=geometry[3*i+1];
   C h=raw[fi*2*I+i],d=raw[(fi*2+1)*I+i];
+  media+=fi*stride;
   C ea=eps(media,sigma,a[i],w),eb=eps(media,sigma,b[i],w);
   out[(fi*4)*I+i]=ds*dz*(h-(ea+eb)*d);
   out[(fi*4+1)*I+i]=dz*(eb*d-h);
@@ -17,7 +18,7 @@ at::Tensor layered_vertical_coeff(at::Tensor raw,at::Tensor media,at::Tensor sig
   c10::cuda::CUDAGuard guard(f.device());int F=f.numel(),I=a.numel();
   auto out=at::empty({F,4,I},raw.options());
   vertical_coeff_kernel<<<(F*I+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
-      raw.data_ptr<C>(),media.data_ptr<C>(),sigma.data_ptr<double>(),f.data_ptr<double>(),
+      raw.data_ptr<C>(),media.data_ptr<C>(),media_stride(media),sigma.data_ptr<double>(),f.data_ptr<double>(),
       a.data_ptr<int64_t>(),b.data_ptr<int64_t>(),geometry.data_ptr<double>(),out.data_ptr<C>(),F,I);
   C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
@@ -30,6 +31,7 @@ __global__ void vertical_subtract_kernel(C* spectrum,const C* q,const double* f,
   int c=t%components,p=(t/components)%P,j=(t/(components*P))%Q,fi=t/(components*P*Q);
   C kr=q[fi*Q+j],value(0),correction(0);
   double source=zs[p],observer=zo[p],w=2*pi*f[fi];
+  stack=stack.at(fi);
   int segment=pair_segment[p];
   for(int i=offsets[segment];i<offsets[segment+1];++i) {
     C term;
@@ -53,7 +55,8 @@ void layered_vertical_subtract(at::Tensor spectrum,at::Tensor q,at::Tensor f,
     at::Tensor media,at::Tensor sigma,at::Tensor edges,at::Tensor zs,at::Tensor zo,
     at::Tensor pair_segment,at::Tensor offsets,at::Tensor geometry,at::Tensor direct,at::Tensor coeff) {
   c10::cuda::CUDAGuard guard(f.device());int count=spectrum.numel();
-  Stack stack{media.data_ptr<C>(),sigma.data_ptr<double>(),edges.data_ptr<double>(),int(media.numel()),0,0};
+  Stack stack{media.data_ptr<C>(),sigma.data_ptr<double>(),edges.data_ptr<double>(),media_layers(media),0,0,
+              media_stride(media)};
   vertical_subtract_kernel<<<(count+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
       spectrum.data_ptr<C>(),q.data_ptr<C>(),f.data_ptr<double>(),stack,zs.data_ptr<double>(),
       zo.data_ptr<double>(),pair_segment.data_ptr<int64_t>(),offsets.data_ptr<int64_t>(),
@@ -81,7 +84,8 @@ VerticalGreenTableView vertical_view(const std::vector<at::Tensor>& t,double lim
   v.geometry=t[6].data_ptr<double>();v.direct=t[7].data_ptr<int64_t>();v.offsets=t[8].data_ptr<int64_t>();
   v.epsilon=t[9].data_ptr<C>();v.sigma=t[10].data_ptr<double>();v.frequencies=t[11].data_ptr<double>();
   v.edges=t[12].data_ptr<double>();v.N=t[0].numel();v.Z=t[1].numel();v.S=t[2].size(0);
-  v.K=v.Z/v.S;v.I=t[7].numel();v.L=t[9].numel();v.F=t[11].numel();v.rho_max=limit;
+  v.K=v.Z/v.S;v.I=t[7].numel();v.L=media_layers(t[9]);v.epsilon_stride=media_stride(t[9]);
+  v.F=t[11].numel();v.rho_max=limit;
   v.boundaries=t[13].data_ptr<double>();
   if(t.size()>14) {
     v.horizontal_values=t[14].data_ptr<C>();v.horizontal_slopes=t[15].data_ptr<C>();
@@ -210,6 +214,20 @@ at::Tensor layered_vertical_rho_error(std::vector<at::Tensor> tensors,at::Tensor
 
 // Admission is diagnostic setup, with one fixed-order owner per checked row.
 // At most 17*K*K Hermite evaluations/row; no atomics or host point loops.
+// Horizontal admission rows store (max error, max |expected|). The relative
+// error divides by max(row scale, 1e-6 * per-frequency family max), the rule of
+// vertical_error_kernel. Without the floor a row whose source or observer lies on
+// a PEC plane, where the tangential kernel cancels against its image to denormal
+// noise (~1e-321 beside a 1e-2 family), reads as relative error 1 and refuses an
+// accurate table. The floor changes only the verdict, never the table values.
+at::Tensor horizontal_admission(at::Tensor rows,int F,int P) {
+  auto pairs=rows.view({F,P,2});
+  auto error=pairs.select(2,0),scale=pairs.select(2,1);
+  auto floored=at::maximum(scale,scale.amax({1},true)*1e-6);
+  auto relative=at::where(floored==0,at::where(error==0,at::zeros_like(error),at::full_like(error,INFINITY)),
+                          error/floored);
+  return relative.max();
+}
 __global__ void horizontal_z_error_kernel(VerticalGreenTableView v,const C* ref,const double* zs,
     const double* zo,const double* rho,double* out,int P,int R) {
   int row=blockIdx.x*blockDim.x+threadIdx.x;if(row>=v.F*P) return;
@@ -221,17 +239,17 @@ __global__ void horizontal_z_error_kernel(VerticalGreenTableView v,const C* ref,
     C actual=horizontal_vertical_remainder(v,f,rho[q],zs[q],zo[q])+image;
     scale=fmax(scale,abs(expected));error=fmax(error,abs(actual-expected));
   }
-  out[row]=scale==0 ? (error==0?0:INFINITY):error/scale;
+  out[2*row]=error;out[2*row+1]=scale;
 }
 at::Tensor layered_horizontal_z_error(std::vector<at::Tensor> t,at::Tensor ref,at::Tensor zs,
     at::Tensor zo,at::Tensor rho) {
   c10::cuda::CUDAGuard guard(ref.device());auto v=vertical_view(t,0);
   int P=ref.size(1),R=ref.size(2);
-  auto out=at::empty({v.F*P},rho.options());
+  auto out=at::empty({v.F*P*2},rho.options());
   horizontal_z_error_kernel<<<(v.F*P+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
       v,ref.data_ptr<C>(),zs.data_ptr<double>(),zo.data_ptr<double>(),rho.data_ptr<double>(),
       out.data_ptr<double>(),P,R);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();return out.max();
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return horizontal_admission(out,v.F,P);
 }
 __global__ void horizontal_rho_error_kernel(VerticalGreenTableView v,const C* ref,const double* zs,
     const double* zo,double* out,int P) {
@@ -247,13 +265,13 @@ __global__ void horizontal_rho_error_kernel(VerticalGreenTableView v,const C* re
     scale=fmax(scale,abs(expected));error=fmax(error,abs(sample-ref[row*(v.N-1)+r]));
   }
   scale=admission_warp_max(scale);error=admission_warp_max(error);
-  if(lane==0) out[row]=scale==0 ? (error==0?0:INFINITY):error/scale;
+  if(lane==0) {out[2*row]=error;out[2*row+1]=scale;}
 }
 at::Tensor layered_horizontal_rho_error(std::vector<at::Tensor> t,at::Tensor ref,
     at::Tensor zs,at::Tensor zo) {
   c10::cuda::CUDAGuard guard(ref.device());auto v=vertical_view(t,0);
-  int P=zs.numel();auto out=at::empty({v.F*P},zs.options());
+  int P=zs.numel();auto out=at::empty({v.F*P*2},zs.options());
   horizontal_rho_error_kernel<<<(v.F*P*32+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
       v,ref.data_ptr<C>(),zs.data_ptr<double>(),zo.data_ptr<double>(),out.data_ptr<double>(),P);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();return out.max();
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return horizontal_admission(out,v.F,P);
 }

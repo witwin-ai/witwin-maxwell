@@ -74,18 +74,17 @@ def _closed_box_solver(circuit):
         boundary=mw.BoundarySpec.none(),
         ports=(_port(),),
         circuits=(circuit,),
-        device="cuda",
     )
-    return mw.Simulation.fdtd(scene, frequency=3.0e9).prepare().solver
+    return mw.Simulation.fdtd(scene, frequencies=3.0e9).prepare().solver
 
 
 def _esd_circuit(*, t_end):
-    generator = mw.ESDVoltageSource(
-        "gun", port="feed", waveform=mw.ESDWaveform.iec_61000_4_2(_LEVEL_VOLTAGE),
+    generator = mw.esd.ESDVoltageSource(
+        "gun", port="feed", waveform=mw.esd.ESDWaveform.iec_61000_4_2(_LEVEL_VOLTAGE),
         discharge_resistance=_RD, storage_capacitance=_CS,
     )
     circuit = generator.build_circuit(t_end=t_end)
-    circuit.add(mw.Resistor("Rload", circuit.node("tip"), circuit.ground, _RLOAD))
+    circuit.add(mw.rf.Resistor("Rload", circuit.node("tip"), circuit.ground, _RLOAD))
     return circuit
 
 
@@ -161,12 +160,10 @@ def _run_balance(circuit, *, resistor_names, source_names, steps=_STEPS):
     source_energy = 0.0
     for step in range(steps):
         half_previous = {name: getattr(solver, name).clone() for name in ("Hx", "Hy", "Hz")}
-        update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
+        update_magnetic_fields(solver)
         u_field[step] = float(_electric_energy(solver, cvE) + _magnetic_energy(solver, cvH, half_previous))
         u_circuit[step] = float(runtime._stored_energy(runtime.state))
-        update_electric_fields(
-            solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz, time_value=step * dt
-        )
+        update_electric_fields(solver)
         apply_port_runtimes(solver)
         enforce_pec_boundaries(solver)
         sample = step + 1

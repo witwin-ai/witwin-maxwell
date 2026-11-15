@@ -26,27 +26,27 @@ def _source_time():
 def _simulation(scene, excitations):
     return mw.Simulation.fdtd(
         scene,
-        frequency=ARRAY_BENCHMARK_FREQUENCY,
+        frequencies=ARRAY_BENCHMARK_FREQUENCY,
         excitations=excitations,
-        run_time=mw.TimeConfig(time_steps=ARRAY_ACCEPTANCE_BUDGET.phase1_steps),
-        absorber="stablepml",
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=ARRAY_ACCEPTANCE_BUDGET.phase1_steps),
+            absorber="stablepml",
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     )
 
 
 def _build_basis(scene):
     result = _simulation(
         scene,
-        mw.PortSweep(source_time=_source_time()),
+        mw.rf.PortSweep(source_time=_source_time()),
     ).run()
-    basis = result.array_basis(
-        monitor="array_nf2ff",
+    basis = mw.antenna.array_basis(result, monitor="array_nf2ff",
         theta_points=ARRAY_ACCEPTANCE_BUDGET.phase1_angular_shape[0],
         phi_points=ARRAY_ACCEPTANCE_BUDGET.phase1_angular_shape[1],
         radius=1.0,
-        batch_size=1024,
-    )
+        batch_size=1024,)
     return result, basis
 
 
@@ -54,7 +54,7 @@ def _direct_beam(scene, basis, weights):
     calibration = basis.metadata["measured_incident_waves"][0]
     amplitudes = weights / calibration
     excitations = tuple(
-        mw.PortExcitation(
+        mw.rf.PortExcitation(
             name,
             amplitude=amplitude.detach().cpu(),
             source_impedance="matched",

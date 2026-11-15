@@ -21,12 +21,12 @@ def test_coherent_view_owns_caller_values_and_does_not_warn_for_readonly_broadca
     with warnings.catch_warnings():
         warnings.simplefilter('error', UserWarning)
         view = CoherentObservations([result, result], [basis, basis], supplied)
-    before = view.monitor('plane', frequency=1e9)['components']['Ex']['data'].clone()
+    before = view.raw_monitor('plane', frequency=1e9)['components']['Ex']['data'].clone()
     original[:] = 9.
     if kind == 'nested_sequence':
         supplied[0][:] = [9., 9.]
     torch.testing.assert_close(view.coefficients, torch.tensor([[1., .5]], dtype=torch.complex128), rtol=0, atol=0)
-    torch.testing.assert_close(view.monitor('plane', frequency=1e9)['components']['Ex']['data'], before, rtol=0, atol=0)
+    torch.testing.assert_close(view.raw_monitor('plane', frequency=1e9)['components']['Ex']['data'], before, rtol=0, atol=0)
     if kind != 'nested_sequence':
         assert not np.shares_memory(view.coefficients.numpy(), supplied)
 
@@ -40,7 +40,7 @@ def test_owned_tensor_coefficients_retain_gradient_and_do_not_alias_mutated_call
     assert view.coefficients.requires_grad
     with torch.no_grad():
         supplied.fill_(9.)
-    actual = view.monitor('plane', frequency=1e9)['components']['Ex']['data']
+    actual = view.raw_monitor('plane', frequency=1e9)['components']['Ex']['data']
     torch.testing.assert_close(actual, torch.full((2, 2), 1.5, dtype=torch.complex128), rtol=0, atol=0)
     actual.abs().square().sum().backward()
     torch.testing.assert_close(supplied.grad, torch.full((1, 2), 12., dtype=dtype), rtol=1e-14, atol=0)

@@ -1,9 +1,8 @@
-"""CPU-only trigger census; construct/prepare scenes without time stepping.
+"""CPU-only trigger census; construct scenes without preparation or time stepping.
 
-Run with the project interpreter and CUDA_VISIBLE_DEVICES=''. JSON records actual
-prepared timing where CPU preparation is supported. Otherwise diagnostics use
-the source-resolution and vacuum Courant/grid rule, explicitly labelled as an
-estimate (material/wire bounds can further shorten dt). Benchmark records use
+Run with the project interpreter and CUDA_VISIBLE_DEVICES=''. FDTD runs on CUDA
+only, so diagnostics use the source-resolution and vacuum Courant/grid rule,
+explicitly labelled as an estimate (material/wire bounds can further shorten dt). Benchmark records use
 their declared run_time_factor * longest_domain_side / c observation horizon.
 No reference backend, fixed-k provider, solve, or optimization is invoked.
 """
@@ -43,6 +42,7 @@ from witwin.maxwell.fdtd.excitation.tfsf_common import solve_auxiliary_step, sol
 from witwin.maxwell.fdtd.runtime.initialization import maximum_declared_frequency, _scene_material_characteristic_frequency
 from witwin.maxwell.fdtd.runtime.timeplan import source_time_offset
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.scene import place_scene
 
 
 def _estimated_inputs(scene, frequencies):
@@ -60,32 +60,14 @@ def _estimated_inputs(scene, frequencies):
 
 def inspect_scene(scene, *, frequencies, run_time_factor=8.0, simulation=None, solver_kind="fdtd"):
     """Return a serializable record, retaining a reason for every fallback."""
-    scene = scene.clone(device="cpu")
+    scene = place_scene(scene, "cpu")
     row = dict(solver=solver_kind, preparation="direct_estimate", checks=[], warnings=[],
         skipped_sources=[dict(source=getattr(source, "name", None), kind=type(source).__name__,
                               reason="Source has no declared temporal waveform.")
                          for source in scene.resolved_sources() if not hasattr(source, "source_time")])
-    prepared = None
-    if solver_kind == "fdtd":
-        try:
-            if simulation is None:
-                simulation = mw.Simulation.fdtd(scene, frequencies=frequencies, backend="cpu_reference",
-                    run_time=mw.TimeConfig(time_steps=1), full_field_dft=False,
-                    spectral_sampler=mw.SpectralSampler(normalize_source=False))
-            # Prepare only; suppress unrelated warnings and the one-step probe's
-            # deliberately truncated spectrum. Diagnose the full record below.
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                prepared = simulation.prepare()
-            dt = prepared.solver.dt
-            sources = prepared.solver._compiled_sources
-            row["preparation"] = "cpu_reference"
-        except Exception as exc:
-            row["prepare_error"] = f"{type(exc).__name__}: {exc}"
-    else:
+    if solver_kind != "fdtd":
         row["prepare_error"] = "Frequency-domain scene: temporal diagnostic evaluated directly."
-    if prepared is None:
-        dt, spacings, sources = _estimated_inputs(scene, frequencies)
+    dt, spacings, sources = _estimated_inputs(scene, frequencies)
     if simulation is not None and simulation.config.run_time.time_steps not in (None, 1):
         steps = simulation.config.run_time.time_steps
     else:
@@ -100,11 +82,7 @@ def inspect_scene(scene, *, frequencies, run_time_factor=8.0, simulation=None, s
         ds, f_edge = None, None
         offset = source_time_offset(source)
         if is_tfsf and waveform["kind"] != "cw" and source["kind"] == "plane_wave":
-            if prepared is not None:
-                aux = (prepared.solver._tfsf_state or {}).get("auxiliary_grid")
-                if aux is not None:
-                    ds = float(aux.ds)
-            elif not scene.boundary.uses_kind("bloch"):
+            if not scene.boundary.uses_kind("bloch"):
                 direction = source["direction"]
                 axis = int(np.argmax(np.abs(direction)))
                 ds = spacings["xyz"[axis]]
@@ -175,7 +153,7 @@ def _benchmark_entry(name):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("/tmp/incident-census/census.json"))
-    parser.add_argument("--workers", type=int, default=4, help="Independent CPU preparation processes.")
+    parser.add_argument("--workers", type=int, default=4, help="Independent census processes.")
     args = parser.parse_args()
     torch.set_num_threads(1)
     report = dict(scenes={}, skipped_examples=[])

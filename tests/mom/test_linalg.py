@@ -249,7 +249,7 @@ def test_recycled_initial_augmentation_spans_rhs_and_preserves_true_residual():
     assert log['residual_history'][0]['phase'] == 'before_recycle_projection'
     assert log['residual_checks'] == len(log['residual_history'])
     torch.testing.assert_close(solution, coefficients@solutions, atol=1e-11, rtol=1e-10)
-    assert torch.linalg.vector_norm(op.matrix@solution-combined)/torch.linalg.vector_norm(combined) <= rule.rtol
+    assert torch.linalg.vector_norm(op.matrix@solution-combined)/torch.linalg.vector_norm(combined) <= rule.resolved().rtol
     # A new arbitrary residual outside the retained span still receives GMRES.
     fresh = torch.randn_like(combined)
     initial = 5*torch.randn_like(combined)
@@ -316,7 +316,7 @@ def test_explicit_direct_fallback_retains_failed_attempt_and_full_cost(batch):
     if not batch:
         assert len(log['residual_history']) == log['residual_checks']
         assert log['residual_history'][-1]['solver_phase'] == 'direct_fallback'
-        assert log['relative_residual'] <= rule.rtol
+        assert log['relative_residual'] <= rule.resolved().rtol
 
 
 def test_singular_fallback_preserves_failure_and_has_no_success_claim():

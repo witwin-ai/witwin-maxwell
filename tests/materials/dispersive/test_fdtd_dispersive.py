@@ -57,9 +57,11 @@ def _run_fdtd(scene, frequency, *, steady_cycles=8, transient_cycles=18):
     return mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
 
@@ -68,7 +70,6 @@ def _build_plane_wave_scene(frequency, *, polarization=(0.0, 0.0, 1.0), amplitud
         domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
         grid=mw.GridSpec.uniform(0.04),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
         sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
@@ -85,12 +86,13 @@ def test_fdtd_dispersive_poles_tighten_auto_dt():
     frequency = 1.0e9
     vacuum_scene = _build_plane_wave_scene(frequency)
     metal_scene = _build_plane_wave_scene(frequency)
-    metal_scene.add_structure(
+    metal_scene = metal_scene.updated(structures=(
+        *metal_scene.structures,
         mw.Structure(
             geometry=Box(position=(0.1, 0.0, 0.0), size=(0.24, 0.8, 0.8)),
             material=mw.Material.drude(eps_inf=1.0, plasma_frequency=2.0e9, gamma=1.0e8),
-        )
-    )
+        ),
+    ))
 
     vacuum_dt = mw.Simulation.fdtd(vacuum_scene, frequencies=[frequency]).prepare().solver.dt
     metal_dt = mw.Simulation.fdtd(metal_scene, frequencies=[frequency]).prepare().solver.dt
@@ -103,7 +105,8 @@ def test_fdtd_magnetic_dispersive_poles_tighten_auto_dt():
     frequency = 1.0e9
     vacuum_scene = _build_plane_wave_scene(frequency)
     magnetic_scene = _build_plane_wave_scene(frequency)
-    magnetic_scene.add_structure(
+    magnetic_scene = magnetic_scene.updated(structures=(
+        *magnetic_scene.structures,
         mw.Structure(
             geometry=Box(position=(0.1, 0.0, 0.0), size=(0.24, 0.8, 0.8)),
             material=mw.Material(
@@ -111,8 +114,8 @@ def test_fdtd_magnetic_dispersive_poles_tighten_auto_dt():
                     mw.LorentzPole(delta_eps=4.0, resonance_frequency=2.0e9, gamma=1.0e8),
                 ),
             ),
-        )
-    )
+        ),
+    ))
 
     vacuum_dt = mw.Simulation.fdtd(vacuum_scene, frequencies=[frequency]).prepare().solver.dt
     magnetic_dt = mw.Simulation.fdtd(magnetic_scene, frequencies=[frequency]).prepare().solver.dt
@@ -125,26 +128,32 @@ def test_fdtd_drude_slab_reflects_below_plasma_frequency():
     frequency = 5.0e8
 
     vacuum_scene = _build_plane_wave_scene(frequency)
-    vacuum_scene.add_monitor(mw.PlaneMonitor("pre", axis="x", position=-0.28, fields=("Ez",)))
-    vacuum_scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.32, fields=("Ez",)))
+    vacuum_scene = vacuum_scene.updated(monitors=(
+        *vacuum_scene.monitors,
+        mw.PlaneMonitor("pre", axis="x", position=-0.28, fields=("Ez",)),
+        mw.PlaneMonitor("post", axis="x", position=0.32, fields=("Ez",)),
+    ))
 
     metal_scene = _build_plane_wave_scene(frequency)
-    metal_scene.add_structure(
+    metal_scene = metal_scene.updated(structures=(
+        *metal_scene.structures,
         mw.Structure(
             geometry=Box(position=(0.1, 0.0, 0.0), size=(0.24, 0.8, 0.8)),
             material=mw.Material.drude(eps_inf=1.0, plasma_frequency=2.0e9, gamma=1.0e8),
-        )
-    )
-    metal_scene.add_monitor(mw.PlaneMonitor("pre", axis="x", position=-0.28, fields=("Ez",)))
-    metal_scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.32, fields=("Ez",)))
+        ),
+    ), monitors=(
+        *metal_scene.monitors,
+        mw.PlaneMonitor("pre", axis="x", position=-0.28, fields=("Ez",)),
+        mw.PlaneMonitor("post", axis="x", position=0.32, fields=("Ez",)),
+    ))
 
     vacuum_result = _run_fdtd(vacuum_scene, frequency)
     metal_result = _run_fdtd(metal_scene, frequency)
 
-    incident_pre = vacuum_result.monitor("pre")["data"]
-    incident_post = vacuum_result.monitor("post")["data"]
-    total_pre = metal_result.monitor("pre")["data"]
-    transmitted_post = metal_result.monitor("post")["data"]
+    incident_pre = vacuum_result.monitor("pre", freq_index=0).sel(component="Ez").values
+    incident_post = vacuum_result.monitor("post", freq_index=0).sel(component="Ez").values
+    total_pre = metal_result.monitor("pre", freq_index=0).sel(component="Ez").values
+    transmitted_post = metal_result.monitor("post", freq_index=0).sel(component="Ez").values
     assert torch.is_tensor(incident_pre)
     assert torch.is_tensor(incident_post)
     assert torch.is_tensor(total_pre)
@@ -160,10 +169,14 @@ def test_fdtd_drude_slab_reflects_below_plasma_frequency():
 
 def _normalized_lorentz_transmission(frequency):
     vacuum_scene = _build_plane_wave_scene(frequency)
-    vacuum_scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.28, fields=("Ez",)))
+    vacuum_scene = vacuum_scene.updated(monitors=(
+        *vacuum_scene.monitors,
+        mw.PlaneMonitor("post", axis="x", position=0.28, fields=("Ez",)),
+    ))
 
     lorentz_scene = _build_plane_wave_scene(frequency)
-    lorentz_scene.add_structure(
+    lorentz_scene = lorentz_scene.updated(structures=(
+        *lorentz_scene.structures,
         mw.Structure(
             geometry=Box(position=(0.1, 0.0, 0.0), size=(0.16, 0.8, 0.8)),
             material=mw.Material.lorentz(
@@ -172,15 +185,17 @@ def _normalized_lorentz_transmission(frequency):
                 resonance_frequency=1.0e9,
                 gamma=1.5e8,
             ),
-        )
-    )
-    lorentz_scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.28, fields=("Ez",)))
+        ),
+    ), monitors=(
+        *lorentz_scene.monitors,
+        mw.PlaneMonitor("post", axis="x", position=0.28, fields=("Ez",)),
+    ))
 
     vacuum_result = _run_fdtd(vacuum_scene, frequency)
     lorentz_result = _run_fdtd(lorentz_scene, frequency)
 
-    vacuum_post_data = vacuum_result.monitor("post")["data"]
-    lorentz_post_data = lorentz_result.monitor("post")["data"]
+    vacuum_post_data = vacuum_result.monitor("post", freq_index=0).sel(component="Ez").values
+    lorentz_post_data = lorentz_result.monitor("post", freq_index=0).sel(component="Ez").values
     assert torch.is_tensor(vacuum_post_data)
     assert torch.is_tensor(lorentz_post_data)
     vacuum_post = _plane_field_mean(vacuum_post_data)
@@ -200,12 +215,12 @@ def test_fdtd_lorentz_resonance_reduces_transmission():
 
 def _advance_solver_one_step(solver, *, time_value):
     solver._advance_magnetic_dispersive_state()
-    solver._update_magnetic_fields(solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
+    solver._core_runtime.magnetic()
     solver._apply_magnetic_dispersive_corrections()
     solver._advance_dispersive_state()
     if getattr(solver, "kerr_enabled", False):
         solver._update_kerr_electric_curls()
-    solver._update_electric_fields(solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+    solver._core_runtime.electric()
     # Mirror production stepping: additive electric current is injected at (n + 1/2) dt.
     solver.add_source(time_value=injection_time("electric_current", time_value, solver.dt))
     solver._apply_dispersive_corrections()
@@ -221,7 +236,6 @@ def test_fdtd_debye_polarization_dft_matches_analytic_permittivity():
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.14, 0.14), (-0.14, 0.14))),
         grid=mw.GridSpec.uniform(0.02),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
         structures=[
             mw.Structure(
                 geometry=Box(position=(0.0, 0.0, 0.0), size=(1.0, 0.28, 0.28)),
@@ -243,8 +257,10 @@ def test_fdtd_debye_polarization_dft_matches_analytic_permittivity():
     solver = mw.Simulation.fdtd(
         scene,
         frequencies=[frequency],
-        run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=24),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=24),
+            full_field_dft=False,
+        ),
     ).prepare().solver
 
     entry = solver._dispersive_templates["Ez"]["debye"][0]
@@ -284,15 +300,19 @@ def test_fdtd_anisotropic_slab_is_polarization_selective():
 
     ey_scene = _build_plane_wave_scene(frequency, polarization=(0.0, 1.0, 0.0))
     ez_scene = _build_plane_wave_scene(frequency, polarization=(0.0, 0.0, 1.0))
-    for scene in (ey_scene, ez_scene):
-        scene.add_structure(
+    def _with_slab(scene):
+        return scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=Box(position=(0.1, 0.0, 0.0), size=(0.20, 0.8, 0.8)),
                 material=material,
-            )
-        )
-        scene.add_monitor(mw.FluxMonitor("post", axis="x", position=0.30, frequencies=(frequency,)))
+            ),
+        ), monitors=(
+            *scene.monitors,
+            mw.FluxMonitor("post", axis="x", position=0.30, frequencies=(frequency,)),
+        ))
 
+    ey_scene, ez_scene = _with_slab(ey_scene), _with_slab(ez_scene)
     ey_result = _run_fdtd(ey_scene, frequency)
     ez_result = _run_fdtd(ez_scene, frequency)
 
@@ -300,8 +320,8 @@ def test_fdtd_anisotropic_slab_is_polarization_selective():
     # is exactly one wavelength thick (T ~ 1.0) while eps_zz = 7.0 sits near its
     # reflection maximum (T ~ 0.44), so the transmitted-power contrast is ~2.3.
     # Field amplitude would only give ~1.5, too tight against discretization.
-    ey_transmission = float(_to_cpu_numpy(ey_result.monitor("post")["flux"]).reshape(-1)[0])
-    ez_transmission = float(_to_cpu_numpy(ez_result.monitor("post")["flux"]).reshape(-1)[0])
+    ey_transmission = float(_to_cpu_numpy(ey_result.monitor("post", freq_index=0).values).reshape(-1)[0])
+    ez_transmission = float(_to_cpu_numpy(ez_result.monitor("post", freq_index=0).values).reshape(-1)[0])
 
     assert ey_transmission > ez_transmission * 1.8
 
@@ -311,11 +331,15 @@ def test_fdtd_magnetic_lorentz_slab_reflects_near_resonance():
     frequency = 1.0e9
 
     vacuum_scene = _build_plane_wave_scene(frequency)
-    vacuum_scene.add_monitor(mw.PlaneMonitor("pre", axis="x", position=-0.28, fields=("Ez",)))
-    vacuum_scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.32, fields=("Ez",)))
+    vacuum_scene = vacuum_scene.updated(monitors=(
+        *vacuum_scene.monitors,
+        mw.PlaneMonitor("pre", axis="x", position=-0.28, fields=("Ez",)),
+        mw.PlaneMonitor("post", axis="x", position=0.32, fields=("Ez",)),
+    ))
 
     magnetic_scene = _build_plane_wave_scene(frequency)
-    magnetic_scene.add_structure(
+    magnetic_scene = magnetic_scene.updated(structures=(
+        *magnetic_scene.structures,
         mw.Structure(
             geometry=Box(position=(0.1, 0.0, 0.0), size=(0.24, 0.8, 0.8)),
             material=mw.Material(
@@ -323,26 +347,28 @@ def test_fdtd_magnetic_lorentz_slab_reflects_near_resonance():
                     mw.LorentzPole(delta_eps=4.0, resonance_frequency=1.0e9, gamma=1.0e8),
                 ),
             ),
-        )
-    )
-    magnetic_scene.add_monitor(mw.PlaneMonitor("pre", axis="x", position=-0.28, fields=("Ez",)))
-    magnetic_scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.32, fields=("Ez",)))
+        ),
+    ), monitors=(
+        *magnetic_scene.monitors,
+        mw.PlaneMonitor("pre", axis="x", position=-0.28, fields=("Ez",)),
+        mw.PlaneMonitor("post", axis="x", position=0.32, fields=("Ez",)),
+    ))
 
     vacuum_result = _run_fdtd(vacuum_scene, frequency)
     magnetic_result = _run_fdtd(magnetic_scene, frequency)
 
-    incident_pre = vacuum_result.monitor("pre")["components"]["Ez"]["data"]
-    incident_post = vacuum_result.monitor("post")["components"]["Ez"]["data"]
-    total_pre = magnetic_result.monitor("pre")["components"]["Ez"]["data"]
-    transmitted_post = magnetic_result.monitor("post")["components"]["Ez"]["data"]
+    incident_pre = vacuum_result.monitor("pre", freq_index=0).sel(component="Ez").values
+    incident_post = vacuum_result.monitor("post", freq_index=0).sel(component="Ez").values
+    total_pre = magnetic_result.monitor("pre", freq_index=0).sel(component="Ez").values
+    transmitted_post = magnetic_result.monitor("post", freq_index=0).sel(component="Ez").values
 
     # PlaneMonitor includes the exterior PML grid; the slab occupies only the
     # physical transverse domain. Use that declared aperture for both runs.
-    bounds = vacuum_result.solver.scene.domain.bounds[1:]
-    pre_coords = vacuum_result.monitor("pre")["components"]["Ez"]["coords"]
-    post_coords = vacuum_result.monitor("post")["components"]["Ez"]["coords"]
+    bounds = vacuum_result.solver.scene.scene.domain.bounds[1:]
+    pre_coords = vacuum_result.raw_monitor("pre")["components"]["Ez"]["coords"]
+    post_coords = vacuum_result.raw_monitor("post")["components"]["Ez"]["coords"]
     for name, coords in (("pre", pre_coords), ("post", post_coords)):
-        actual_coords = magnetic_result.monitor(name)["components"]["Ez"]["coords"]
+        actual_coords = magnetic_result.raw_monitor(name)["components"]["Ez"]["coords"]
         assert all(np.array_equal(a, b) for a, b in zip(coords, actual_coords))
     incident_pre_mean = _physical_plane_field_mean(incident_pre, pre_coords, bounds)
     incident_post_mean = _physical_plane_field_mean(incident_post, post_coords, bounds)
@@ -378,26 +404,31 @@ def test_fdtd_kerr_slab_phase_depends_on_source_amplitude():
         options = {}
         if periodic:
             scene = mw.Scene(
-                domain=scene.domain, grid=scene.grid, device="cuda", sources=list(scene.sources),
+                domain=scene.domain, grid=scene.grid, sources=list(scene.sources),
                 boundary=mw.BoundarySpec.faces(default="periodic", num_layers=6, strength=1.0, x=("pml", "pml")),
             )
             options["absorber"] = "cpml"
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=Box(position=(0.0, 0.0, 0.0), size=(0.8, 0.8, 0.8)),
                 material=mw.Material(eps_r=2.25, kerr_chi3=chi3),
-            )
-        )
-        scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.34, fields=("Ez",)))
+            ),
+        ), monitors=(
+            *scene.monitors,
+            mw.PlaneMonitor("post", axis="x", position=0.34, fields=("Ez",)),
+        ))
         result = mw.Simulation.fdtd(
             scene,
             frequencies=[frequency],
-            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-            spectral_sampler=mw.SpectralSampler(window="hanning"),
-            full_field_dft=False,
-            **options,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                full_field_dft=False,
+                **options,
+            ),
         ).run()
-        field = result.monitor("post")["components"]["Ez"]
+        field = result.raw_monitor("post")["components"]["Ez"]
         return np.angle(_plane_complex_mean(field)), _plane_field_mean(field)
 
     def _shift(**kwargs):

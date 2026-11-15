@@ -12,10 +12,10 @@ DX = 0.01
 
 
 def _framed(device, length=2):
-    scene = coax_thru_scene(dx=DX, device=device)
+    scene = coax_thru_scene(dx=DX)
     for port in scene.ports:
-        for structure in mw.PECFrame(length).structures(port, scene):
-            scene.add_structure(structure)
+        for structure in mw.rf.PECFrame(length).structures(port, scene, device=device):
+            scene = scene.updated(structures=(*scene.structures, structure))
     return scene
 
 
@@ -26,7 +26,7 @@ def test_pec_frame_builds_four_planar_walls_toward_the_injection_direction():
     left = {s.name: s for s in frames if s.metadata["pec_frame"]["port"] == "left"}
     assert set(left) == {f"left::pec_frame::{axis}{side}" for axis in "yz" for side in "-+"}
     wall = left["left::pec_frame::y-"].geometry
-    assert isinstance(wall, mw.PlanarPEC) and wall.normal_axis == "y"
+    assert isinstance(wall, mw.geometry.PlanarPEC) and wall.normal_axis == "y"
     assert wall.coordinate == pytest.approx(-0.20)
     vertices = wall.vertices.numpy()  # y-normal plane: (x, z) coordinates
     assert vertices[:, 0].min() == pytest.approx(-0.02) and vertices[:, 0].max() == pytest.approx(0.0)
@@ -40,15 +40,15 @@ def test_pec_frame_builds_four_planar_walls_toward_the_injection_direction():
 @pytest.mark.parametrize("length, error", [(0, ValueError), (1.5, TypeError), (True, TypeError)])
 def test_pec_frame_rejects_invalid_lengths(length, error):
     with pytest.raises(error):
-        mw.PECFrame(length)
+        mw.rf.PECFrame(length)
 
 
 def test_pec_frame_rejects_non_aperture_targets_and_frames_leaving_the_grid():
-    scene = coax_thru_scene(dx=DX, device="cpu")
+    scene = coax_thru_scene(dx=DX)
     with pytest.raises(TypeError, match="WavePort, ModePort or ModeSource"):
-        mw.PECFrame().structures(mw.Box(position=(0, 0, 0), size=(1, 1, 1)), scene)
+        mw.rf.PECFrame().structures(mw.Box(position=(0, 0, 0), size=(1, 1, 1)), scene, device="cpu")
     with pytest.raises(ValueError, match="leaves the grid"):
-        mw.PECFrame(500).structures(scene.ports[0], scene)
+        mw.rf.PECFrame(500).structures(scene.ports[0], scene, device="cpu")
 
 
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="PEC frame FDTD checks require CUDA")
@@ -58,10 +58,10 @@ cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="PEC frame FDTD 
 def test_pec_frame_shorts_exactly_its_wall_edges_on_the_yee_grid():
     def solver(scene):
         # Port-free clone: the frame is ordinary scene geometry once materialized.
-        return mw.Simulation.fdtd(scene.clone(ports=()), frequencies=(1.0e9,),
-                                  run_time=mw.TimeConfig(time_steps=10)).prepare().solver
+        return mw.Simulation.fdtd(scene.updated(ports=()), frequencies=(1.0e9,),
+                                  config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=10))).prepare().solver
 
-    plain = solver(coax_thru_scene(dx=DX, device="cuda"))
+    plain = solver(coax_thru_scene(dx=DX))
     framed = solver(_framed("cuda"))
     scene = framed.scene
     x, y, z = scene.x_nodes64, scene.y_nodes64, scene.z_nodes64
@@ -82,12 +82,14 @@ def test_pec_frame_shorts_exactly_its_wall_edges_on_the_yee_grid():
 @cuda
 def test_pec_frame_preserves_the_shielded_coax_thru_response():
     def transmission(scene):
-        result = mw.Simulation.fdtd(scene, frequencies=(1.0e9,), excitations=mw.PortSweep(),
-                                    run_time=mw.TimeConfig(time_steps=1500),
-                                    spectral_sampler=mw.SpectralSampler(window="hanning"), full_field_dft=False).run()
+        result = mw.Simulation.fdtd(scene, frequencies=(1.0e9,), excitations=mw.rf.PortSweep(),
+                                    config=mw.FDTDConfig(
+                                        run_time=mw.TimeConfig(time_steps=1500),
+                                        spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"), full_field_dft=False,
+                                    )).run()
         return result.network.s[:, 1, 0].cpu().numpy()
 
-    plain = transmission(coax_thru_scene(dx=DX, device="cuda"))
+    plain = transmission(coax_thru_scene(dx=DX))
     framed = transmission(_framed("cuda"))
     # The frame walls sit at the shielded aperture edge: |S21| changes by < 1e-3.
     assert abs(plain[0]) > 0.9

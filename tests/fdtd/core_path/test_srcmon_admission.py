@@ -4,9 +4,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from benchmark.core_path.scenes import CORE_SCENES, SRCMON_REFUSED_SCENES, SRCMON_SCENES, build_core_case
+from benchmark.core_path.scenes import CORE_SCENES, SRCMON_SCENES, build_core_case
 from benchmark.scenes import SCENARIOS
-from witwin.maxwell.fdtd.runtime.core_path import CorePathRuntime, core_path_blockers
+from witwin.maxwell.compiler.monitors import compile_fdtd_observers
+from witwin.maxwell.compiler.sources import compile_fdtd_sources
+from witwin.maxwell.fdtd.runtime.core_path import CorePathRuntime
+from witwin.maxwell.scene import prepare_scene
 
 
 pytestmark = pytest.mark.host_validation
@@ -22,28 +25,27 @@ def forbid_cuda_init(monkeypatch):
 @pytest.mark.parametrize("name", SRCMON_SCENES)
 def test_benchmark_admission(name):
     case = build_core_case(name)
-    # The refused PMC cavity and the closed-transverse CPML gratings stay out of the default gate list.
-    assert (name in CORE_SCENES) == (name not in SRCMON_REFUSED_SCENES)
+    assert name in CORE_SCENES
     assert case.frequencies == SCENARIOS[name].frequencies
-    assert str(case.scene.device) == "cpu"
-    expected = ["PMC boundaries", "non-CUDA execution"] if name == "pmc_cavity" else ["non-CUDA execution"]
-    assert core_path_blockers(SimpleNamespace(scene=case.scene)) == expected
+    grid = prepare_scene(case.scene, device="cpu", lazy_meshgrid=True)
+    assert grid.Nx > 0
 
 
 @pytest.mark.parametrize("name", ["grating_diffraction", "diffraction_normal_orders"])
-def test_closed_transverse_cpml_gratings_are_refused(name):
+def test_closed_transverse_cpml_gratings_are_admitted(name):
     case = build_core_case(name)
     assert case.absorber == "cpml"
-    # The blocker reads the resolved absorber, which exists only after solver preparation.
-    solver = SimpleNamespace(scene=case.scene, active_absorber_type=case.absorber)
-    assert "closed-transverse CPML (passivity guard)" in core_path_blockers(solver)
+    # The passivity guard samples these closed-transverse CPML cells at K-chunk boundaries.
+    assert prepare_scene(case.scene, device="cpu", lazy_meshgrid=True).Nx > 0
 
 
 @pytest.mark.parametrize("attribute,label", [("sources", "source"), ("monitors", "monitor")])
 def test_unknown_types_stay_refused(attribute, label):
+    # No admission list remains (W7 row 16c): the FDTD compilers refuse unknown objects on every path.
     scene = build_core_case("uniform_current").scene
-    setattr(scene, attribute, [object()])
-    assert f"unsupported {label} type" in core_path_blockers(SimpleNamespace(scene=scene))
+    object.__setattr__(scene, attribute, (object(),))  # bypasses the constructor on purpose
+    with pytest.raises(ValueError, match=f"^Unsupported (FDTD )?{label} type: object$"):
+        compile_fdtd_sources(scene, default_frequency=1e9) if label == "source" else compile_fdtd_observers(scene)
 
 
 @pytest.mark.parametrize("observer", ["time", "host_spectral"])
@@ -51,14 +53,14 @@ def test_observer_tail_prevents_chunks(observer):
     runtime = CorePathRuntime.__new__(CorePathRuntime)
     runtime.sources = SimpleNamespace(steps=64)
     solver = SimpleNamespace(
-        scene=SimpleNamespace(), time_observers_enabled=observer == "time", observers_enabled=True,
+        scene=SimpleNamespace(scene=SimpleNamespace()), time_observers_enabled=observer == "time", observers_enabled=True,
         _single_observer_engine=object() if observer == "time" else None,
         dft_enabled=True, Ex=torch.empty(0), _plane_observer_groups={"plane": object()},
     )
     result = runtime.run_chunks(
         solver, time_steps=64, start_step=0, end_step=64,
         use_cuda_graph=True, use_gpu_dft=True, cooperative=False,
-        cooperative_driver=False, cooperative_observer=None, resume_from=None,
+        cooperative_driver=False, cooperative_observer=None,
         shutoff=0.0, shutoff_check_interval=100, shutoff_min_step=0,
         enable_plot=False, pbar=None,
     )
@@ -79,7 +81,7 @@ def test_surface_current_rows_preserve_injection_clocks():
                                    patch=torch.ones(1, 1, 1), source_time=source)
              for name in fields}
     solver = SimpleNamespace(
-        scene=build_core_case("uniform_current").scene, device="cpu", dt=0.07,
+        scene=SimpleNamespace(scene=build_core_case("uniform_current").scene), device="cpu", dt=0.07,
         _source_time=source, source_omega=4.0 * torch.pi, tfsf_enabled=False,
         _source_terms=[terms["Ex"]], _electric_source_terms=[terms["Ey"]],
         _magnetic_source_terms=[terms["Hz"]], **fields,

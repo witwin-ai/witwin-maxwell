@@ -29,7 +29,7 @@ def test_fixture_dimensions_match_scene():
     import benchmark.scenes.rf.printed_lines as scene
     for name in ("WIDTH", "HEIGHT", "GAP", "PAIR_WIDTH", "PAIR_OFFSET"):
         assert getattr(R, name) == getattr(scene, name)
-    material = scene.mw.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9))
+    material = scene.mw.media.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9))
     assert material.thickness == R.COPPER_THICKNESS and material.conductivity == R.COPPER_CONDUCTIVITY
     # Same diffusion two-port per face (scene uses exp(-i w t): conjugate).
     z = material.surface_impedance([1e9]).numpy()[0]

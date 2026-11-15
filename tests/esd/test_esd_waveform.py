@@ -29,11 +29,11 @@ def _numpy_current(waveform, t):
 
 def test_factory_requires_explicit_construction():
     with pytest.raises(TypeError):
-        mw.ESDWaveform(8000.0)
+        mw.esd.ESDWaveform(8000.0)
 
 
 def test_factory_records_default_revision_in_provenance():
-    waveform = mw.ESDWaveform.iec_61000_4_2(8000.0)
+    waveform = mw.esd.ESDWaveform.iec_61000_4_2(8000.0)
     assert waveform.standard_revision == "ed2-contact"
     assert waveform.discharge == "contact"
     provenance = waveform.provenance
@@ -47,11 +47,11 @@ def test_factory_records_default_revision_in_provenance():
 
 def test_unsupported_revision_and_discharge_fail_closed():
     with pytest.raises(ValueError):
-        mw.ESDWaveform.iec_61000_4_2(8000.0, standard_revision="ed9-imaginary")
+        mw.esd.ESDWaveform.iec_61000_4_2(8000.0, standard_revision="ed9-imaginary")
     with pytest.raises(ValueError):
-        mw.ESDWaveform.iec_61000_4_2(8000.0, discharge="air")
+        mw.esd.ESDWaveform.iec_61000_4_2(8000.0, discharge="air")
     with pytest.raises(ValueError):
-        mw.ESDWaveform.iec_61000_4_2(-1.0)
+        mw.esd.ESDWaveform.iec_61000_4_2(-1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ def test_unsupported_revision_and_discharge_fail_closed():
 
 
 def test_charge_and_action_match_scipy_quadrature():
-    waveform = mw.ESDWaveform.iec_61000_4_2(8000.0)
+    waveform = mw.esd.ESDWaveform.iec_61000_4_2(8000.0)
     diagnostics = waveform.diagnostics()
     upper = waveform.support[1]
 
@@ -72,7 +72,7 @@ def test_charge_and_action_match_scipy_quadrature():
 
 
 def test_peak_matches_independent_dense_argmax():
-    waveform = mw.ESDWaveform.iec_61000_4_2(8000.0)
+    waveform = mw.esd.ESDWaveform.iec_61000_4_2(8000.0)
     diagnostics = waveform.diagnostics()
 
     grid = np.linspace(0.0, 6.0e-9, 2_000_001)
@@ -85,15 +85,15 @@ def test_peak_matches_independent_dense_argmax():
 
 
 def test_specified_time_samples_are_exact_analytic_values():
-    waveform = mw.ESDWaveform.iec_61000_4_2(8000.0)
+    waveform = mw.esd.ESDWaveform.iec_61000_4_2(8000.0)
     diagnostics = waveform.diagnostics()
     assert diagnostics.current_at_30ns == pytest.approx(float(_numpy_current(waveform, 30.0e-9)), rel=1e-9)
     assert diagnostics.current_at_60ns == pytest.approx(float(_numpy_current(waveform, 60.0e-9)), rel=1e-9)
 
 
 def test_level_voltage_scales_current_linearly():
-    low = mw.ESDWaveform.iec_61000_4_2(4000.0).diagnostics()
-    high = mw.ESDWaveform.iec_61000_4_2(8000.0).diagnostics()
+    low = mw.esd.ESDWaveform.iec_61000_4_2(4000.0).diagnostics()
+    high = mw.esd.ESDWaveform.iec_61000_4_2(8000.0).diagnostics()
     assert high.peak_current == pytest.approx(2.0 * low.peak_current, rel=1e-9)
     assert high.charge == pytest.approx(2.0 * low.charge, rel=1e-9)
     # Action integral is quadratic in amplitude.
@@ -105,7 +105,7 @@ def test_contact_diagnostics_sit_in_the_iec_first_transient_band():
     # contact set reproduces the IEC 61000-4-2 first-transient key points to
     # within model tolerance. Peak overshoots the 30 A nominal (~14%) because the
     # two Heidler terms superpose; i(30 ns) and i(60 ns) match closely.
-    diagnostics = mw.ESDWaveform.iec_61000_4_2(8000.0).diagnostics()
+    diagnostics = mw.esd.ESDWaveform.iec_61000_4_2(8000.0).diagnostics()
     assert diagnostics.current_at_30ns == pytest.approx(16.0, rel=0.15)
     assert diagnostics.current_at_60ns == pytest.approx(8.0, rel=0.15)
     assert 0.7e-9 <= diagnostics.rise_time_10_90 <= 1.0e-9
@@ -117,7 +117,7 @@ def test_contact_diagnostics_sit_in_the_iec_first_transient_band():
 
 
 def test_rise_time_matches_independent_crossing_reconstruction():
-    waveform = mw.ESDWaveform.iec_61000_4_2(8000.0)
+    waveform = mw.esd.ESDWaveform.iec_61000_4_2(8000.0)
     diagnostics = waveform.diagnostics()
 
     grid = np.linspace(0.0, 6.0e-9, 4_000_001)
@@ -143,7 +143,7 @@ def test_rise_time_matches_independent_crossing_reconstruction():
 
 
 def test_resampling_conserves_charge_across_three_dt():
-    waveform = mw.ESDWaveform.iec_61000_4_2(8000.0)
+    waveform = mw.esd.ESDWaveform.iec_61000_4_2(8000.0)
     for dt in (2.0e-9, 1.0e-9, 0.5e-9):
         resampled = waveform.resample_to_grid(dt, t_end=waveform.support[1])
         # Charge is conserved exactly (to quadrature precision) at every dt.
@@ -151,7 +151,7 @@ def test_resampling_conserves_charge_across_three_dt():
 
 
 def test_resampled_action_converges_as_dt_refines():
-    waveform = mw.ESDWaveform.iec_61000_4_2(8000.0)
+    waveform = mw.esd.ESDWaveform.iec_61000_4_2(8000.0)
     errors = [
         waveform.resample_to_grid(dt, t_end=waveform.support[1]).aliasing_metric
         for dt in (2.0e-9, 1.0e-9, 0.5e-9)
@@ -164,7 +164,7 @@ def test_resampled_action_converges_as_dt_refines():
 
 
 def test_resample_rejects_invalid_grid():
-    waveform = mw.ESDWaveform.iec_61000_4_2(8000.0)
+    waveform = mw.esd.ESDWaveform.iec_61000_4_2(8000.0)
     with pytest.raises(ValueError):
         waveform.resample_to_grid(0.0)
     with pytest.raises(ValueError):
@@ -177,10 +177,10 @@ def test_resample_rejects_invalid_grid():
 
 
 def test_measured_waveform_reproduces_sampled_diagnostics():
-    source = mw.ESDWaveform.iec_61000_4_2(8000.0)
+    source = mw.esd.ESDWaveform.iec_61000_4_2(8000.0)
     times = torch.linspace(0.0, source.support[1], 20001, dtype=torch.float64)
     values = source.current(times)
-    measured = mw.MeasuredWaveform(times, values, units="A", bandwidth=1e9, provenance={"probe": "unit-test"})
+    measured = mw.esd.MeasuredWaveform(times, values, units="A", bandwidth=1e9, provenance={"probe": "unit-test"})
 
     analytic = source.diagnostics()
     sampled = measured.diagnostics()
@@ -193,16 +193,16 @@ def test_measured_waveform_reproduces_sampled_diagnostics():
 
 def test_measured_waveform_validates_inputs():
     with pytest.raises(ValueError):
-        mw.MeasuredWaveform([0.0], [1.0])
+        mw.esd.MeasuredWaveform([0.0], [1.0])
     with pytest.raises(ValueError):
-        mw.MeasuredWaveform([0.0, 0.0, 1e-9], [1.0, 2.0, 3.0])  # non-increasing
+        mw.esd.MeasuredWaveform([0.0, 0.0, 1e-9], [1.0, 2.0, 3.0])  # non-increasing
     with pytest.raises(ValueError):
-        mw.MeasuredWaveform([0.0, 1e-9], [1.0, 2.0], units="V")
+        mw.esd.MeasuredWaveform([0.0, 1e-9], [1.0, 2.0], units="V")
 
 
 def test_measured_waveform_charge_conserving_resampling():
-    source = mw.ESDWaveform.iec_61000_4_2(8000.0)
+    source = mw.esd.ESDWaveform.iec_61000_4_2(8000.0)
     times = torch.linspace(0.0, source.support[1], 40001, dtype=torch.float64)
-    measured = mw.MeasuredWaveform(times, source.current(times))
+    measured = mw.esd.MeasuredWaveform(times, source.current(times))
     resampled = measured.resample_to_grid(1.0e-9, t_end=source.support[1])
     assert resampled.charge_ratio == pytest.approx(1.0, rel=1e-3)

@@ -1,6 +1,7 @@
 """Setup stage wall times and warmed, graph-enabled whole-step CUDA event timing.
 
-Dry runs construct CPU Scene objects only. Actual timing requires a coordinator's
+Times the default FDTD execution of the working tree; existing-path timings are
+historical evidence and are not re-measured. Dry runs construct CPU Scene objects only. Actual timing requires a coordinator's
 exclusive GPU window. Each selected scene executes in a fresh interpreter.
 """
 
@@ -106,8 +107,7 @@ def run_case(args):
 
     case = build_case(args.scene)
     # The extra step supplies an end boundary before finalization/field export.
-    simulation = make_simulation(case, arm=args.arm, steps=args.warmup + args.steps + 1,
-                                 full_field_dft=False)
+    simulation = make_simulation(case, steps=args.warmup + args.steps + 1, full_field_dft=False)
     prepared, setup = timed_prepare(simulation)
     begin = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
@@ -140,7 +140,7 @@ def run_case(args):
     shape = (prepared.solver.Nx, prepared.solver.Ny, prepared.solver.Nz)
     elapsed_ms = begin.elapsed_time(end)
     payload = {
-        "scene": case.plan(), "arm": args.arm, "setup": setup,
+        "scene": case.plan(), "core_runtime": result.solver._core_runtime is not None, "setup": setup,
         "computational_primal_shape": shape, "warmup_steps": args.warmup,
         "measured_steps": args.steps, "cuda_graph_active": True,
         "elapsed_ms": elapsed_ms, "ms_per_step": elapsed_ms / args.steps,
@@ -148,13 +148,13 @@ def run_case(args):
         "scope": "whole steps including source, boundary, DFT and host launch gaps; excludes setup, graph capture, warmup and finalization",
     }
     args.output.mkdir(parents=True, exist_ok=True)
-    (args.output / f"{args.scene}-{args.arm}.json").write_text(json.dumps(payload, indent=2) + "\n")
+    (args.output / f"{args.scene}.json").write_text(json.dumps(payload, indent=2) + "\n")
     print(json.dumps(payload, indent=2))
 
 
 def profiler_commands(args, name):
     command = [sys.executable, "-m", "benchmark.core_path.timing", "--worker", "--scene", name,
-               "--steps", str(args.steps), "--warmup", str(args.warmup), "--arm", args.arm,
+               "--steps", str(args.steps), "--warmup", str(args.warmup),
                "--output", str(args.output), "--profile-range"]
     environment = [f"{key}={value}" for key, value in THREAD_ENV.items()]
     for profiler in (
@@ -175,7 +175,6 @@ def main():
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--arm", choices=("baseline", "candidate"), default="baseline")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--emit-profiler-commands", action="store_true")
     parser.add_argument("--profile-range", action="store_true")
@@ -199,7 +198,7 @@ def main():
         for name in names:
             subprocess.run([sys.executable, "-m", "benchmark.core_path.timing", "--worker",
                             "--scene", name, "--steps", str(args.steps), "--warmup", str(args.warmup),
-                            "--arm", args.arm, "--output", str(args.output)],
+                            "--output", str(args.output)],
                            check=True, env=os.environ | THREAD_ENV)
 
 

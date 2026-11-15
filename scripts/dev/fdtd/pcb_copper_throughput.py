@@ -29,7 +29,7 @@ def physical_snapshot(scene,frequency):
     for structure in scene.structures:
         material = structure.material
         physical = {"type":type(material).__name__}
-        if isinstance(material,mw.CopperFoil):
+        if isinstance(material,mw.media.CopperFoil):
             physical.update(thickness=float(material.thickness),conductivity=float(material.conductivity),
                 frequency_range=list(material.frequency_range),mode_count=material.mode_count)
         else:
@@ -78,7 +78,7 @@ def main():
     if free < args.minimum_free_gib*2**30:
         raise SystemExit("Resource hold: less than required shared-GPU free headroom; no preparation started.")
     scene,_ = scene_control(args.family,args.kind,args.frequency,args.normal_cells_per_skin)
-    scene = refine_pcb_edges(scene,args.frequency,args.edge_cells_per_skin).clone(monitors=())
+    scene = refine_pcb_edges(scene,args.frequency,args.edge_cells_per_skin).updated(monitors=())
     identity = validation_identity()
     identity[str(Path(__file__).resolve())] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     report = {"schema":"pcb-copper-field-pilot/1","source":package_identity(mw,"witwin-maxwell"),
@@ -90,12 +90,12 @@ def main():
         "scope":"short native field/RF pilot; no field/face DFT; excludes digests and persistence from run timing; extrapolation is conditional on the observed shared-device rate, not an exclusive forecast or rigorous lower bound"}
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,indent=2)+"\n")
-    simulation = mw.Simulation.fdtd(scene,frequency=args.frequency,
-        excitations=mw.PortExcitation(scene.ports[0].name,
+    simulation = mw.Simulation.fdtd(scene,frequencies=args.frequency,
+        excitations=mw.rf.PortExcitation(scene.ports[0].name,
             source_time=mw.GaussianPulse(args.frequency,fwidth=args.frequency)),
-        run_time=mw.TimeConfig(time_steps=args.steps,transient_cycles=0),full_field_dft=False)
-    batch = mw.Simulation.batch([simulation],outputs=mw.BatchOutput(),
-        execution=mw.BatchExecution(devices=("cuda:0",),batch_size=1,graph="required",graph_steps=256))
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=args.steps,transient_cycles=0),full_field_dft=False))
+    batch = mw.Simulation.batch([simulation],outputs=mw.execution.BatchOutput(),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",),batch_size=1,graph="required",graph_steps=256))
     gc.collect()
     torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()

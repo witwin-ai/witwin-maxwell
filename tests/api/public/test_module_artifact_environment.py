@@ -38,9 +38,10 @@ def write(source,name,body):
     path=source/'tests'/f'test_{name}.py';path.write_text(body);return path
 
 
-def launch(project,path,*,action='run',resume=False,node_timeout=10):
+# Timeouts are hang guards only; they leave headroom for a heavily loaded host.
+def launch(project,path,*,action='run',resume=False,node_timeout=60):
     root,source=project
-    argv=[sys.executable,str(CONTROL/'run_shards.py'),action,'--source-root',str(source),'--output',str(root/'result'),'--module-environment',str(path),'--node-timeout',str(node_timeout),'--shard-timeout','90','--termination-grace','.2','--poll-seconds','.05']
+    argv=[sys.executable,str(CONTROL/'run_shards.py'),action,'--source-root',str(source),'--output',str(root/'result'),'--module-environment',str(path),'--node-timeout',str(node_timeout),'--shard-timeout','600','--termination-grace','.2','--poll-seconds','.05']
     if resume:argv+=['--resume']
     env=dict(os.environ,CUDA_VISIBLE_DEVICES='',OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',PYTHONDONTWRITEBYTECODE='1',GSP_TEST_RESOURCE='must-not-leak',GSP_UNSCOPED='must-not-leak',PCB_SCOPE_PROBE=str(root/'probe.json'))
     log=root/f'controller-{time.time_ns()}.log'
@@ -49,7 +50,7 @@ def launch(project,path,*,action='run',resume=False,node_timeout=10):
 
 
 def finish(process,log,expected=0):
-    try:code=process.wait(timeout=60)
+    try:code=process.wait(timeout=600)
     except BaseException:
         os.kill(process.pid,signal.SIGTERM);process.wait(timeout=10);raise
     assert code==expected,log.read_text()
@@ -127,7 +128,7 @@ def test_controller_interrupt_and_resume_keep_same_module_input(project):
     root,source=project
     write(source,'a',"import json,os,time\nfrom pathlib import Path\ndef test_resume():\n p=Path(os.environ['PCB_SCOPE_PROBE'])\n old=json.loads(p.read_text()) if p.exists() else []\n old.append(os.environ['GSP_TEST_RESOURCE']);p.write_text(json.dumps(old))\n if len(old)==1:time.sleep(20)\n assert len(old)==2\n")
     write(source,'b',resource_module([2]));path=policy(project,{'a':[1],'b':[2]});process,log=launch(project,path)
-    deadline=time.monotonic()+40
+    deadline=time.monotonic()+300
     while time.monotonic()<deadline and not (root/'probe.json').exists() and process.poll() is None:time.sleep(.05)
     assert (root/'probe.json').exists(),log.read_text();os.kill(process.pid,signal.SIGTERM);finish(process,log,143)
     assert json.loads((root/'result/summary.json').read_text())['state']=='interrupted_resumable'

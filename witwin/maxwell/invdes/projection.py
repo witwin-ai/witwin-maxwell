@@ -15,6 +15,7 @@ from typing import NamedTuple
 import torch
 
 from .filters import _normalize_spacing
+from .._stability import experimental
 
 
 def _check_beta(beta) -> None:
@@ -25,6 +26,7 @@ def _check_beta(beta) -> None:
         raise ValueError("projection beta must be > 0 (math.inf selects the exact step).")
 
 
+@experimental("invdes")
 def tanh_projection(x: torch.Tensor, beta, eta=0.5) -> torch.Tensor:
     """Smoothed Heaviside projection.
 
@@ -45,6 +47,7 @@ def tanh_projection(x: torch.Tensor, beta, eta=0.5) -> torch.Tensor:
     return (low + torch.tanh(beta_t * (x - eta_t))) / (low + high)
 
 
+@experimental("invdes")
 class RobustProjections(NamedTuple):
     """Eroded, nominal and dilated projections of one filtered density."""
 
@@ -53,6 +56,7 @@ class RobustProjections(NamedTuple):
     dilated: torch.Tensor
 
 
+@experimental("invdes")
 def robust_projections(x: torch.Tensor, beta, eta: float = 0.5, delta: float = 0.1) -> RobustProjections:
     """Return threshold-shifted projections for robust (erode/dilate) design.
 
@@ -89,6 +93,7 @@ def _fill_fraction(t: torch.Tensor) -> torch.Tensor:
     return 0.5 - (15.0 / 16.0) * t + (5.0 / 8.0) * t**3 - (3.0 / 16.0) * t**5
 
 
+@experimental("invdes")
 def smoothed_projection(
     x: torch.Tensor,
     beta,
@@ -144,6 +149,7 @@ def smoothed_projection(
     return torch.where(smooth, blended, projected)
 
 
+@experimental("invdes")
 @dataclass(frozen=True)
 class BetaSchedule:
     """Deterministic geometric beta continuation.

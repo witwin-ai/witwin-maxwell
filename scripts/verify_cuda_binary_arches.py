@@ -53,8 +53,9 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="witwin_cuda_arch_verify_") as temp_dir:
         binaries = _collect_binaries(args.inputs, tuple(args.stem), Path(temp_dir))
-        if not binaries:
-            raise SystemExit(f"No native binaries matching {args.stem!r} were found.")
+        missing = [stem for stem in args.stem if not any(path.name.startswith(stem) for path in binaries)]
+        if missing:
+            raise SystemExit(f"No native binaries matching {missing!r} were found.")
 
         for binary in binaries:
             elf_listing = _cuobjdump("--list-elf", binary)

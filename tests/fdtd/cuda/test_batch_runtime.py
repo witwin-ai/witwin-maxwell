@@ -13,18 +13,29 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA batc
 
 def simulation(index=0, boundary=None, frequencies=(1e9,), steps=80, memory_mode="auto"):
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
-                     grid=mw.GridSpec.uniform(0.025), device="cuda:0",
-                     boundary=boundary or mw.BoundarySpec.pml(num_layers=3))
-    scene.add_structure(mw.Structure(name="design",
-        geometry=mw.Box(position=(0.05, 0., 0.), size=(0.07, 0.08, 0.09), device="cuda:0"),
-        material=mw.Material(eps_r=2.0 + 0.25 * index)))
-    scene.add_source(mw.PointDipole(name="drive", position=(-0.05, 0., 0.), polarization="Ez",
-        source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9, amplitude=1.0 + index)))
-    scene.add_monitor(mw.PointMonitor(name="probe", position=(0.1, 0., 0.), fields=("Ez",)))
+                     grid=mw.GridSpec.uniform(0.025), boundary=boundary or mw.BoundarySpec.pml(num_layers=3),
+                     structures=(
+                         mw.Structure(name="design",
+                             geometry=mw.Box(position=(0.05, 0., 0.), size=(0.07, 0.08, 0.09), device="cuda:0"),
+                             material=mw.Material(eps_r=2.0 + 0.25 * index)),
+                     ),
+                     sources=(
+                         mw.PointDipole(name="drive", position=(-0.05, 0., 0.), polarization="Ez",
+                             source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9, amplitude=1.0 + index)),
+                     ),
+                     monitors=(mw.PointMonitor(name="probe", position=(0.1, 0., 0.), fields=("Ez",)),))
     return mw.Simulation.fdtd(scene, frequencies=frequencies,
-        run_time=mw.TimeConfig(time_steps=steps, dt=2e-11),
-        spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False,
-        cpml_config={"memory_mode": memory_mode})
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps, dt=2e-11),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False,
+            cpml=mw.fdtd.CPMLConfig(memory_mode=memory_mode), device="cuda:0",
+        ))
+
+
+def with_scene(sim, **fields):
+    """The same run on ``sim.scene.updated(**fields)`` (scenes are immutable)."""
+    return mw.Simulation.fdtd(sim.scene.updated(**fields), frequencies=sim.frequencies,
+                              excitations=sim.excitations, config=sim.config)
 
 
 def run_cohort(slot, steps=80, frequencies=(1e9,)):

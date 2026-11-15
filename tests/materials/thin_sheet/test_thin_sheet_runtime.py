@@ -1,4 +1,4 @@
-"""Conformal two-sided thin sheets on the CPU reference backend: runtime contracts.
+"""Conformal two-sided thin sheets: runtime contracts (the CUDA tests in test_thin_sheet_cuda.py run the checks).
 
 Tolerances were fixed before the measurements:
 * PEC lossless cavity energy drift over 18000 source-free steps <= 1e-3 relative;
@@ -16,7 +16,7 @@ from witwin.maxwell.compiler import thin_sheet as sheet_compiler
 from witwin.core import Box
 from witwin.maxwell.fdtd.thin_sheet import thin_sheet_energy
 
-from .harness import backend_for, pec_material, rectangle_mesh
+from .harness import pec_material, rectangle_mesh
 
 NORMAL = np.array((1.0, 0.6, 0.35)) / np.linalg.norm((1.0, 0.6, 0.35))
 CENTER = np.array((0.001, 0.0013, -0.0007))
@@ -32,23 +32,20 @@ def newmark_phase_error(dt, frequency):
     return float(2*(np.arctan(angle)-np.arcsin(angle)))
 
 
-def _cavity(structure, *, source_position=(-0.03, 0.02, 0.01), frequency=2e9, fwidth=1.5e9, device="cpu"):
+def _cavity(structure, *, source_position=(-0.03, 0.02, 0.01), frequency=2e9, fwidth=1.5e9):
     return mw.Scene(
         domain=mw.Domain(bounds=((-.05, .05), (-.05, .05), (-.05, .05))), grid=mw.GridSpec.uniform(0.005),
-        boundary=mw.BoundarySpec.faces(default="pec"), device=device,
-        sources=[mw.PointDipole(position=source_position, polarization=(0.3, 0.5, 0.8), profile="ideal",
+        boundary=mw.BoundarySpec.faces(default="pec"), sources=[mw.PointDipole(position=source_position, polarization=(0.3, 0.5, 0.8), profile="ideal",
                                 source_time=mw.GaussianPulse(frequency=frequency, fwidth=fwidth))],
         structures=[structure], monitors=[mw.PointMonitor("p", (0.03, -0.02, 0.01), fields=("Ez",))])
 
 
 def _run(scene, steps, *, dt=None, **kwargs):
-    return mw.Simulation.fdtd(scene, frequencies=[2e9], run_time=mw.TimeConfig(time_steps=steps, dt=dt),
-                              backend=backend_for(scene), **kwargs).run()
+    return mw.Simulation.fdtd(scene, frequencies=[2e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps, dt=dt), **kwargs)).run()
 
 
 def pec_bound_dt(scene):
-    probe = mw.Simulation.fdtd(scene, frequencies=[2e9], run_time=mw.TimeConfig(time_steps=1),
-                               backend=backend_for(scene)).prepare().solver
+    probe = mw.Simulation.fdtd(scene, frequencies=[2e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare().solver
     return .985 * probe._thin_sheet_cfl_limit
 
 
@@ -56,8 +53,8 @@ def _plate(material, **kwargs):
     return mw.Structure(geometry=rectangle_mesh(CENTER, NORMAL, 0.03, 0.025, **kwargs), material=material)
 
 
-def check_pec_cavity_energy(device="cpu"):
-    scene = _cavity(_plate(pec_material(), sheet_model="conformal_two_sided"), device=device)
+def check_pec_cavity_energy():
+    scene = _cavity(_plate(pec_material(), sheet_model="conformal_two_sided"))
     dt = pec_bound_dt(scene)
     early = _run(scene, 2000, dt=dt)
     late = _run(scene, 20000, dt=dt)
@@ -69,13 +66,9 @@ def check_pec_cavity_energy(device="cpu"):
     assert abs(e1 - e0) / e0 <= 1e-3
 
 
-def test_tilted_pec_sheet_conserves_cavity_energy_for_twenty_thousand_steps():
-    check_pec_cavity_energy()
-
-
-def check_copper_cavity_passivity(device="cpu"):
-    foil = mw.CopperFoil(thickness=2e-6, frequency_range=(0.5e9, 4e9))
-    scene = _cavity(_plate(foil), device=device)
+def check_copper_cavity_passivity():
+    foil = mw.media.CopperFoil(thickness=2e-6, frequency_range=(0.5e9, 4e9))
+    scene = _cavity(_plate(foil))
     dt = pec_bound_dt(scene)
     early = _run(scene, 2000, dt=dt)
     late = _run(scene, 20000, dt=dt)
@@ -94,15 +87,10 @@ def check_copper_cavity_passivity(device="cpu"):
     assert float(late.solver.Ez.abs().max()) < float(early.solver.Ez.abs().max()) * 10
 
 
-def test_tilted_copper_foil_sheet_is_passive_for_twenty_thousand_steps():
-    check_copper_cavity_passivity()
-
-
-def _far_near(structure, device="cpu"):
+def _far_near(structure):
     # A 3 GHz +- 0.6 GHz pulse keeps the physical copper transmission
     # (exp(-t/skin depth) <= 1e-10 for 35 um across the band) negligible.
-    result = _run(_cavity(structure, source_position=tuple(CENTER - 0.03 * NORMAL), frequency=3e9, fwidth=0.6e9,
-                          device=device), 600)
+    result = _run(_cavity(structure, source_position=tuple(CENTER - 0.03 * NORMAL), frequency=3e9, fwidth=0.6e9), 600)
     solver = result.solver
     nodes = [torch.as_tensor(getattr(solver.scene, axis + "_nodes64"), device=solver.Ez.device) for axis in "xyz"]
     x, y, z = torch.meshgrid(nodes[0], nodes[1], 0.5 * (nodes[2][1:] + nodes[2][:-1]), indexing="ij")
@@ -110,23 +98,15 @@ def _far_near(structure, device="cpu"):
     return float(solver.Ez[phi > 0.012].abs().max()), float(solver.Ez[phi < -0.012].abs().max())
 
 
-def check_pec_watertight(device="cpu"):
+def check_pec_watertight(device="cuda"):
     structure = mw.Structure(geometry=rectangle_mesh(CENTER, NORMAL, 0.2, 0.2, sheet_model="conformal_two_sided"),
                              material=pec_material())
-    far, near = _far_near(structure, device)
+    far, near = _far_near(structure)
     print(dict(far=far, near=near))
     assert near > 1e3 and far == 0.0
 
 
-def test_cavity_spanning_tilted_pec_sheet_is_watertight():
-    check_pec_watertight()
-
-
-def test_cavity_spanning_tilted_copper_leaks_only_through_the_copper_model():
-    check_copper_leak()
-
-
-def check_copper_leak(device="cpu"):
+def check_copper_leak(device="cuda"):
     """Cross-side coupling is the reduced copper two-port only.
 
     The pre-registered 1e-8 far/near gate for 35 um copper failed (1.49e-8).
@@ -140,8 +120,8 @@ def check_copper_leak(device="cpu"):
     from witwin.maxwell.compiler.copper_foil import compile_copper_response
     ratios, floors = [], []
     for thickness in (35e-6, 70e-6):
-        foil = mw.CopperFoil(thickness=thickness, frequency_range=(0.5e9, 4e9))
-        far, near = _far_near(mw.Structure(geometry=rectangle_mesh(CENTER, NORMAL, 0.2, 0.2), material=foil), device)
+        foil = mw.media.CopperFoil(thickness=thickness, frequency_range=(0.5e9, 4e9))
+        far, near = _far_near(mw.Structure(geometry=rectangle_mesh(CENTER, NORMAL, 0.2, 0.2), material=foil))
         model = compile_copper_response(foil).state_space.evaluate(torch.tensor([3e9], dtype=torch.float64))[0]
         ratios.append(far / near)
         floors.append(float(model[0, 1].abs() / model[0, 0].abs()))
@@ -150,41 +130,35 @@ def check_copper_leak(device="cpu"):
     assert ratios[0] / ratios[1] >= 1.6
 
 
-def _aligned_scene(structure, device="cpu"):
+def _aligned_scene(structure):
     return mw.Scene(
         domain=mw.Domain(bounds=((-.06, .06), (-.06, .06), (-.06, .06))), grid=mw.GridSpec.uniform(0.006),
-        boundary=mw.BoundarySpec.faces(default="pml", num_layers=6), device=device,
-        sources=[mw.PointDipole(position=(0.003, -0.006, -0.03), polarization=(0.4, 0.3, 0.8), profile="ideal",
+        boundary=mw.BoundarySpec.faces(default="pml", num_layers=6), sources=[mw.PointDipole(position=(0.003, -0.006, -0.03), polarization=(0.4, 0.3, 0.8), profile="ideal",
                                 source_time=mw.GaussianPulse(frequency=2e9, fwidth=1.5e9))],
         structures=[structure],
-        monitors=[mw.FieldTimeMonitor(name, components=("Ex", "Ey", "Ez"), position=position)
+        monitors=[mw.monitors.FieldTimeMonitor(name, components=("Ex", "Ey", "Ez"), position=position)
                   for name, position in (("below", (0.012, 0.006, -0.018)), ("above", (-0.006, 0.012, 0.024)))])
 
 
 def _series(result):
-    return torch.cat([torch.as_tensor(result.monitors[name]["components"][component]).double().reshape(-1)
+    return torch.cat([torch.as_tensor(result.raw_monitor(name)["components"][component]).double().reshape(-1)
                       for name in ("below", "above") for component in ("Ex", "Ey", "Ez")])
 
 
-@pytest.mark.parametrize("material", ["copper", "pec"])
-def test_axis_aligned_mesh_reproduces_existing_planar_paths(material):
-    check_axis_aligned(material)
-
-
-def check_axis_aligned(material, device="cpu"):
+def check_axis_aligned(material, device="cuda"):
     half = 0.024
     corners = np.array([(-half, -half, 0.0), (half, -half, 0.0), (half, half, 0.0), (-half, half, 0.0)])
     if material == "copper":
-        foil = mw.CopperFoil(thickness=4e-6, frequency_range=(0.5e9, 4e9))
+        foil = mw.media.CopperFoil(thickness=4e-6, frequency_range=(0.5e9, 4e9))
         existing = mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(2 * half, 2 * half, 0.0)), material=foil)
-        conformal = mw.Structure(geometry=mw.SurfaceMesh(corners, [(0, 1, 2), (0, 2, 3)]), material=foil)
+        conformal = mw.Structure(geometry=mw.geometry.SurfaceMesh(corners, [(0, 1, 2), (0, 2, 3)]), material=foil)
     else:
-        existing = mw.Structure(geometry=mw.PlanarPEC(corners[:, :2], normal_axis="z", coordinate=0.0),
+        existing = mw.Structure(geometry=mw.geometry.PlanarPEC(corners[:, :2], normal_axis="z", coordinate=0.0),
                                 material=pec_material())
-        conformal = mw.Structure(geometry=mw.SurfaceMesh(corners, [(0, 1, 2), (0, 2, 3)],
+        conformal = mw.Structure(geometry=mw.geometry.SurfaceMesh(corners, [(0, 1, 2), (0, 2, 3)],
                                                          sheet_model="conformal_two_sided"), material=pec_material())
-    reference = _run(_aligned_scene(existing, device), 260)
-    candidate = _run(_aligned_scene(conformal, device), 260)
+    reference = _run(_aligned_scene(existing), 260)
+    candidate = _run(_aligned_scene(conformal), 260)
     assert not getattr(reference.solver, "_thin_sheets", ())
     statistics = candidate.solver._thin_sheets[0].complex.statistics
     assert statistics["on_sheet_traces"] > 0 and statistics["active_split_faces"] == 0
@@ -195,15 +169,16 @@ def check_axis_aligned(material, device="cpu"):
     assert scale > 0 and error <= 2e-5
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Native thin sheets require CUDA.")
 def test_axis_aligned_operators_match_foil():
     """V3 matches the common two-port, with the separate free-edge model disabled."""
     half = .024
     corners = np.array([(-half, -half, 0.), (half, -half, 0.), (half, half, 0.), (-half, half, 0.)])
-    material = mw.CopperFoil(thickness=4e-6, frequency_range=(.5e9, 4e9), edge_model="none")
+    material = mw.media.CopperFoil(thickness=4e-6, frequency_range=(.5e9, 4e9), edge_model="none")
     structures = [mw.Structure(geometry=Box(position=(0., 0., 0.), size=(2*half, 2*half, 0.)), material=material),
-                  mw.Structure(geometry=mw.SurfaceMesh(corners, [(0, 1, 2), (0, 2, 3)]), material=material)]
+                  mw.Structure(geometry=mw.geometry.SurfaceMesh(corners, [(0, 1, 2), (0, 2, 3)]), material=material)]
     solvers = [mw.Simulation.fdtd(_aligned_scene(structure), frequencies=[2e9],
-                                 run_time=mw.TimeConfig(time_steps=1), backend="cpu_reference").prepare().solver
+                                 config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare().solver
                for structure in structures]
     reference, candidate = solvers
     sheet = candidate._thin_sheets[0]
@@ -230,11 +205,11 @@ def test_compiled_complex_never_mixes_sides(kind):
     """Structural watertightness: no circulation row or chord reads both sides."""
     from witwin.maxwell.compiler.thin_sheet import compile_thin_sheet
     from witwin.maxwell.scene import prepare_scene
-    material = pec_material() if kind == "pec" else mw.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9))
+    material = pec_material() if kind == "pec" else mw.media.CopperFoil(thickness=35e-6, frequency_range=(0.5e9, 4e9))
     extra = dict(sheet_model="conformal_two_sided") if kind == "pec" else {}
     structure = mw.Structure(geometry=rectangle_mesh(CENTER, NORMAL, 0.2, 0.2, **extra), material=material)
-    scene = prepare_scene(_cavity(structure, source_position=tuple(CENTER - 0.03 * NORMAL)))
-    complex_ = compile_thin_sheet(scene, scene.structures[0])
+    scene = prepare_scene(_cavity(structure, source_position=tuple(CENTER - 0.03 * NORMAL)), device="cpu")
+    complex_ = compile_thin_sheet(scene, scene.scene.structures[0])
     sides = complex_.e_side
     for row in np.unique(complex_.k_rows):
         columns = complex_.k_cols[complex_.k_rows == row]
@@ -252,10 +227,10 @@ def test_subface_circulations_are_exact_for_linear_fields():
     """Faraday rows (cut segments and independent chords) integrate linear fields exactly."""
     from witwin.maxwell.compiler.thin_sheet import compile_thin_sheet
     from witwin.maxwell.scene import prepare_scene
-    foil = mw.CopperFoil(thickness=2e-6, frequency_range=(0.5e9, 4e9))
+    foil = mw.media.CopperFoil(thickness=2e-6, frequency_range=(0.5e9, 4e9))
     structure = mw.Structure(geometry=rectangle_mesh(CENTER, NORMAL, 0.03, 0.025), material=foil)
-    scene = prepare_scene(_cavity(structure))
-    complex_ = compile_thin_sheet(scene, scene.structures[0])
+    scene = prepare_scene(_cavity(structure), device="cpu")
+    complex_ = compile_thin_sheet(scene, scene.scene.structures[0])
     # Match the compiler's h/16 floor using node spacing, including roundoff.
     spacing = max(float(np.diff(getattr(scene, axis + "_nodes64")).max()) for axis in "xyz")
     _check_chord_structure_and_circulations(complex_, spacing)

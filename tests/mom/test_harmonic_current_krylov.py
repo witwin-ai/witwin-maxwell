@@ -61,7 +61,7 @@ def check_saved_current_policy_codec(result,scene,tmp_path,monkeypatch):
     raw=encode(dict(static,current_closure=closure))
     before=_digest(raw)
     hb=result._harmonic_data.config.harmonic_balance
-    frequency=float(result.harmonic_state.frequencies[1])
+    frequency=float(mw.mom.harmonic_state(result).frequencies[1])
     materials=tuple(compile_harmonic_material(s.material,frequency,hb.harmonics) for s in scene.structures)
     path=tmp_path/'source.pt';result.save(path)
     payload=torch.load(path,weights_only=True)

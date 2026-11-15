@@ -21,7 +21,7 @@ def plates(side, gap=None):
                                        mw.Material.pec(), name='b'))
     return mw.Scene(structures=structures,
                     sources=[mw.PlaneWave(direction=(0.0, 0.6, -0.8), polarization=(1.0, 0.0, 0.0),
-                                          source_time=mw.CW(frequency=FREQUENCY))], device='cuda')
+                                          source_time=mw.CW(frequency=FREQUENCY))])
 
 
 def gmres(rtol=1e-6, maxiter=1500):
@@ -33,13 +33,13 @@ def config(edge, backend, stopping, **kwargs):
     extra = {}
     if backend == 'pfft':
         extra = dict(operator_backend='pfft', riesz_storage='local_rwg_v1',
-                     pfft=kwargs.pop('pfft', mw.PFFTConfig(solve_dual_tolerance=1e-4)))
-    return mw.MoMConfig(open_surface=mw.OpenSurfaceConfig(max_edge_length_m=edge), stopping=stopping,
+                     pfft=kwargs.pop('pfft', mw.mom.PFFTConfig(solve_dual_tolerance=1e-4)))
+    return mw.mom.MoMConfig(open_surface=mw.mom.OpenSurfaceConfig(max_edge_length_m=edge), stopping=stopping,
                         **extra, **kwargs)
 
 
 def prepared(scene, edge, backend, stopping=None, **kwargs):
-    return mw.Simulation.mom(scene, frequency=FREQUENCY,
+    return mw.Simulation.mom(scene, frequencies=FREQUENCY,
                              config=config(edge, backend, stopping or gmres(), **kwargs)).prepare().solver
 
 
@@ -88,12 +88,12 @@ def test_public_plate_rcs_and_iterations_match_dense():
     records = {}
     for backend in ('dense', 'pfft'):
         for factory in (None, CalderonPreconditioner()):
-            result = mw.Simulation.mom(plates(side), frequency=FREQUENCY,
+            result = mw.Simulation.mom(plates(side), frequencies=FREQUENCY,
                                        config=config(side/12, backend, gmres(), right_preconditioner=factory)).run()
-            assert result.solver_stats['converged']
-            records[backend, factory is not None] = (result.solver_stats['iterations'],
-                                                    result.surface_currents.radar_cross_section(directions),
-                                                    result.surface_currents.J)
+            assert result.stats()['converged']
+            records[backend, factory is not None] = (result.stats()['iterations'],
+                                                    mw.mom.surface_currents(result).radar_cross_section(directions),
+                                                    mw.mom.surface_currents(result).J)
     for calderon in (False, True):
         (dense_it, dense_rcs, dense_j), (fast_it, fast_rcs, fast_j) = records['dense', calderon], records['pfft', calderon]
         assert float(((fast_rcs-dense_rcs).abs()/dense_rcs.abs().max()).max()) < 5e-3
@@ -109,7 +109,7 @@ def test_pfft_efie_fails_closed():
     from witwin.maxwell.mom.pfft_efie import edge_face_slots
     from witwin.maxwell.mom.open_surface import OpenRWGBasis, rectangular_plate_mesh
     with pytest.raises(ValueError, match='local_rwg_v1'):
-        mw.MoMConfig(operator_backend='pfft', stopping=gmres())
+        mw.mom.MoMConfig(operator_backend='pfft', stopping=gmres())
     validate_efie_config(config(0.1, 'pfft', gmres()))
     half = OpenRWGBasis(rectangular_plate_mesh((1., 1.), (3, 3)), boundary_half_functions=True)
     with pytest.raises(ValueError, match='two-face'):

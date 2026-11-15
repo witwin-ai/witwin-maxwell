@@ -54,12 +54,12 @@ def test_new_cached_schema_and_affected_existing_payloads(tmp_path):
         dict(near_storage='scalar_reciprocal_streamed_dk_v1'),
         dict(table_storage='compact',expansion_center_policy='binary_lattice_v1'))
     for options in choices:
-        original=old.FMMConfig(**options);current=mw.FMMConfig(**options)
+        original=old.FMMConfig(**options);current=mw.mom.FMMConfig(**options)
         assert current.payload()==original.payload() and current.construction()==original.construction()
-        assert mw.FMMConfig.restore(original.payload())==current
+        assert mw.mom.FMMConfig.restore(original.payload())==current
     _,cfg=_fixture();payload=cfg.payload()
     assert payload['version']=='cartesian_fmm_cached_reciprocal_dk_config_v1'
-    assert mw.FMMConfig.restore(json.loads(json.dumps(payload)))==cfg
+    assert mw.mom.FMMConfig.restore(json.loads(json.dumps(payload)))==cfg
     for kind in ('version','missing','extra','bool','negative','policy'):
         bad=copy.deepcopy(payload)
         if kind=='version':bad['version']='cartesian_fmm_signed_axis_config_v1'
@@ -68,15 +68,15 @@ def test_new_cached_schema_and_affected_existing_payloads(tmp_path):
         elif kind=='bool':bad['parameters']['near_coefficient_cache_budget_bytes']=True
         elif kind=='negative':bad['parameters']['near_coefficient_cache_budget_bytes']=-1
         else:bad['parameters']['near_storage']='scalar_reciprocal_streamed_dk_v1'
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     with pytest.raises(ValueError,match='requires cached'):
-        mw.FMMConfig(near_coefficient_cache_budget_bytes=1)
+        mw.mom.FMMConfig(near_coefficient_cache_budget_bytes=1)
     with pytest.raises(NotImplementedError,match='free space'):
-        mw.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',
+        mw.mom.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',
             stopping=StoppingRule(preconditioner='none',fallback='none'),
-            periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)))
+            periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)))
     with pytest.raises(ValueError,match='complex128'):
-        mw.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',
+        mw.mom.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',
             stopping=StoppingRule(preconditioner='none',fallback='none'),dtype=torch.complex64)
     _write(tmp_path/'cached-configuration.json',dict(completed=True,affected_old_payloads_exact=True,
         new_version_exact=True,old_planner_not_replayed=True,production_qualification=False))
@@ -137,10 +137,10 @@ def test_new_cached_payload_refuses_before_moments_when_maps_alone_would_fit(com
         1326624 if component=='action' else 12480)
     def forbidden(*a,**kw):pytest.fail('Refused cached capacity reached moment setup')
     monkeypatch.setattr(NestedRWGMultipoles,'__init__',forbidden)
-    config=mw.MoMConfig(integration=IntegrationConfig(order=4,singular_order=3),operator_backend='fmm',
-        fmm=mw.FMMConfig(**options),riesz_storage='local_rwg_v1',
+    config=mw.mom.MoMConfig(integration=IntegrationConfig(order=4,singular_order=3),operator_backend='fmm',
+        fmm=mw.mom.FMMConfig(**options),riesz_storage='local_rwg_v1',
         stopping=StoppingRule(preconditioner='rwg_diagonal',fallback='none'))
-    with pytest.raises(MemoryError):mw.Simulation.mom(declared,frequency=1.43e8,config=config).prepare()
+    with pytest.raises(MemoryError):mw.Simulation.mom(declared,frequencies=1.43e8,config=config).prepare()
 
 
 def test_new_public_cached_native_actions_solve_and_exact_restore(monkeypatch,tmp_path):
@@ -154,7 +154,7 @@ def test_new_public_cached_native_actions_solve_and_exact_restore(monkeypatch,tm
     reference_path=Path(location)
     assert reference_path.is_file(), 'Pinned original public weak reference is unavailable'
     declared,cfg=_fixture()
-    config=mw.MoMConfig(integration=IntegrationConfig(order=4,singular_order=3),operator_backend='fmm',
+    config=mw.mom.MoMConfig(integration=IntegrationConfig(order=4,singular_order=3),operator_backend='fmm',
         fmm=cfg,riesz_storage='local_rwg_v1',stopping=StoppingRule(method='gmres',
             preconditioner='rwg_diagonal',fallback='none',rtol=1e-12,atol=0.,maxiter=240,restart=120))
     # Physical Scene and numerical configuration are independently declared
@@ -175,7 +175,7 @@ def test_new_public_cached_native_actions_solve_and_exact_restore(monkeypatch,tm
     monkeypatch.setattr(regional,'scalar_regional_channels',counted_interior)
     relative=lambda a,b:float(((a-b).norm()/b.norm()).detach())
     try:
-        prepared=mw.Simulation.mom(declared,frequency=1.43e8,config=config).prepare()
+        prepared=mw.Simulation.mom(declared,frequencies=1.43e8,config=config).prepare()
         op=prepared.solver.handle.actions;regions=(op.exterior,*op.interiors)
         constructor_calls=len(calls)
         assert constructor_calls==0 and op.shape==(72,72)
@@ -220,7 +220,7 @@ def test_new_public_cached_native_actions_solve_and_exact_restore(monkeypatch,tm
         owned=storage_bytes(multipole_action_tensors(op))
         assert owned==op.capacity_plan['planned_bytes']
         result=prepared.run()
-        current=result.surface_currents.scattered_coefficients
+        current=mw.mom.surface_currents(result).scattered_coefficients
         stats=result.stats();residual=relative(current@reference.mT,prepared.solver.rhs)
         state=tmp_path/'cached-public-solver-state.pt'
         torch.save(dict(stats=stats,current=current.detach(),rhs=prepared.solver.rhs.detach()),state)
@@ -239,11 +239,11 @@ def test_new_public_cached_native_actions_solve_and_exact_restore(monkeypatch,tm
             for cls in (MultipoleOperator,MultipoleSystemActions,SystemOperator):patch.setattr(cls,'__init__',forbidden)
             patch.setattr(torch.linalg,'solve',forbidden)
             restored=mw.Result.load(artifact,scene=declared)
-            assert restored.surface_currents.config.fmm==cfg
-            torch.testing.assert_close(restored.surface_currents.scattered_coefficients,current,rtol=0,atol=0)
-            bad=copy.deepcopy(result.surface_currents.snapshot())
+            assert mw.mom.surface_currents(restored).config.fmm==cfg
+            torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,current,rtol=0,atol=0)
+            bad=copy.deepcopy(mw.mom.surface_currents(result).snapshot())
             bad['fmm_config']['parameters']['near_coefficient_cache_budget_bytes']-=1
-            with pytest.raises(ValueError):SurfaceData.restore(bad,declared,1.43e8)
+            with pytest.raises(ValueError):SurfaceData.restore(bad,declared,1.43e8,'cuda')
         raw.update(completed=True,artifact=str(artifact),artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
             exact_restore=True,whole_peak_qualified=False,independent_EM_reference=False)
         _write(path,raw)

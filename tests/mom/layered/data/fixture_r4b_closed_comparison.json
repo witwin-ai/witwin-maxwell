@@ -1,0 +1,367 @@
+{
+  "schema": "r4b-closed-conductor-comparison/1",
+  "qualification": "evidence_only",
+  "target_relative": 0.015,
+  "quasi_static_reference": [
+    {
+      "frequency_Hz": 100000000.0,
+      "y_real": [
+        [
+          0.238055
+        ],
+        [
+          -0.238055
+        ]
+      ],
+      "y_imag": [
+        [
+          0.215683
+        ],
+        [
+          -0.215683
+        ]
+      ],
+      "series_L_H": 3.326604836561825e-09,
+      "series_R_ohm": 2.306972804760538
+    },
+    {
+      "frequency_Hz": 1000000000.0,
+      "y_real": [
+        [
+          0.00701868
+        ],
+        [
+          -0.00701868
+        ]
+      ],
+      "y_imag": [
+        [
+          0.0495256
+        ],
+        [
+          -0.0495256
+        ]
+      ],
+      "series_L_H": 3.150318234654865e-09,
+      "series_R_ohm": 2.805175207478129
+    }
+  ],
+  "original_r6_targets": {
+    "L_1GHz_H": 0.03,
+    "Q_peak": 0.1,
+    "peak_frequency_Hz": 0.1,
+    "self_resonance_Hz": 0.05
+  },
+  "original_r6_metrics": {
+    "L_1GHz_H": 3.1217300968441403e-09,
+    "Q_peak": 12.683255073918753,
+    "peak_frequency_Hz": 3192230576.441103,
+    "self_resonance_Hz": 13813314385.164034
+  },
+  "cases": [
+    {
+      "name": "fa-vacuum-20-5.json",
+      "artifact_sha256": "cbdb4f2749a0fdba4a661db0cdb3fde686eb892d64f09b4bf016185488cd0cfa",
+      "unknowns": 10274,
+      "samples": [
+        {
+          "frequency_Hz": 100000000.0,
+          "L_H": 3.544079479603393e-09,
+          "R_ohm": 0.30160284339159005,
+          "L_relative": 0.06537435425192739,
+          "R_relative": -0.8692646732682676,
+          "L_pass": false,
+          "R_pass": false
+        },
+        {
+          "frequency_Hz": 1000000000.0,
+          "L_H": 3.18209669427208e-09,
+          "R_ohm": 1.105900618659433,
+          "L_relative": 0.010087380781927946,
+          "R_relative": -0.6057641548694405,
+          "L_pass": true,
+          "R_pass": false
+        }
+      ]
+    },
+    {
+      "name": "fa-vacuum-10-5-final.json",
+      "artifact_sha256": "0a9f9ddebf8a1797b57e8db2992dba926c819c835097dcf15526012330a3613c",
+      "unknowns": 11138,
+      "samples": [
+        {
+          "frequency_Hz": 100000000.0,
+          "L_H": 3.544150062276693e-09,
+          "R_ohm": 0.30159056263256273,
+          "L_relative": 0.06539557188274547,
+          "R_relative": -0.8692699965902426,
+          "L_pass": false,
+          "R_pass": false
+        },
+        {
+          "frequency_Hz": 1000000000.0,
+          "L_H": 3.1821744818940464e-09,
+          "R_ohm": 1.1059880320560367,
+          "L_relative": 0.010112072770537495,
+          "R_relative": -0.6057329933946168,
+          "L_pass": true,
+          "R_pass": false
+        }
+      ]
+    },
+    {
+      "name": "fa-substrate-20-5-final.json",
+      "artifact_sha256": "4b1729fb51dbaf3cb43fb3ac9ed75b421c8cc0e6c8f15d75e6e05f004d118633",
+      "unknowns": 10274,
+      "samples": [
+        {
+          "frequency_Hz": 100000000.0,
+          "L_H": 3.5441178514421907e-09,
+          "R_ohm": 0.30161915554537944,
+          "L_relative": 0.06538588908719722,
+          "R_relative": -0.8692576024637242,
+          "L_pass": false,
+          "R_pass": false
+        },
+        {
+          "frequency_Hz": 1000000000.0,
+          "L_H": 3.1854580939994334e-09,
+          "R_ohm": 1.1090040446929939,
+          "L_relative": 0.011154384010483298,
+          "R_relative": -0.6046578332303187,
+          "L_pass": true,
+          "R_pass": false
+        }
+      ]
+    },
+    {
+      "name": "fa-substrate-10-5.json",
+      "artifact_sha256": "f811cd63cdd2ec439cfb6bc67ead41c1f2452efce42104cbd8ae0a2911f06282",
+      "unknowns": 11138,
+      "samples": [
+        {
+          "frequency_Hz": 100000000.0,
+          "L_H": 3.544188434564233e-09,
+          "R_ohm": 0.3016068748648691,
+          "L_relative": 0.06540710685291051,
+          "R_relative": -0.8692629257516645,
+          "L_pass": false,
+          "R_pass": false
+        },
+        {
+          "frequency_Hz": 1000000000.0,
+          "L_H": 3.185535962991963e-09,
+          "R_ohm": 1.1090913002832588,
+          "L_relative": 0.0111791018284082,
+          "R_relative": -0.6046267280109255,
+          "L_pass": true,
+          "R_pass": false
+        }
+      ]
+    }
+  ],
+  "all_targets_met": false,
+  "closed_r6_spectral_comparison": [
+    {
+      "mesh": "20/5 um",
+      "measured": {
+        "L_1GHz_H": 3.18545809399947e-09,
+        "Q_peak": 20.578446832208805,
+        "peak_frequency_Hz": 2000000000.0,
+        "self_resonance_Hz": 13403381865.588245
+      },
+      "relative_errors": {
+        "L_1GHz_H": 0.020414320001512776,
+        "Q_peak": 0.6224893934779685,
+        "peak_frequency_Hz": -0.3734788411713905,
+        "self_resonance_Hz": -0.029676622723947443
+      },
+      "SRF_bracket_Hz": [
+        12000000000.0,
+        14000000000.0
+      ],
+      "qualification": "evidence_only",
+      "peak_is_sampled": true,
+      "SRF_is_linear_bracket_estimate": true
+    },
+    {
+      "mesh": "10/5 um",
+      "measured": {
+        "L_1GHz_H": 3.1855359629919693e-09,
+        "Q_peak": 20.57576900975656,
+        "peak_frequency_Hz": 2000000000.0,
+        "self_resonance_Hz": 13403152470.160175
+      },
+      "relative_errors": {
+        "L_1GHz_H": 0.020439264179927807,
+        "Q_peak": 0.6222782629411594,
+        "peak_frequency_Hz": -0.3734788411713905,
+        "self_resonance_Hz": -0.029693229558605205
+      },
+      "SRF_bracket_Hz": [
+        12000000000.0,
+        14000000000.0
+      ],
+      "qualification": "evidence_only",
+      "peak_is_sampled": true,
+      "SRF_is_linear_bracket_estimate": true
+    }
+  ],
+  "historical_pin_renewal": [
+    {
+      "files": [
+        "tests/sie/layered/data/fixture_r6_native_evidence.json",
+        "tests/sie/layered/data/fixture_r6b_shunt_evidence.json"
+      ],
+      "reason": "R6/R6b solver-source pins renewed after T0 bitwise re-acquisition (7614 numeric fields)",
+      "receipt": "<evidence-root>/rfic-mom-20261106/review/checkpoint/r4b-receipts/receipt.json"
+    },
+    {
+      "files": [
+        "tests/mom/layered/data/fixture_r6_native_evidence.json",
+        "tests/mom/layered/data/fixture_r6_reference.json"
+      ],
+      "reason": "unchanged_historical_sha256 renewed string-only after the 0.6.0 snapshot scrub (3da9da07) rewrote evidence path strings to <evidence-root>/: structure and every non-string leaf bitwise equal, only the scrub's path strings differ",
+      "receipt": "scripts/dev/rfic/mom_port_receipt_r4b_scrub.json"
+    },
+    {
+      "files": [
+        "tests/mom/layered/data/fixture_r6_native_evidence.json",
+        "tests/mom/layered/data/fixture_r6b_shunt_evidence.json"
+      ],
+      "reason": "unchanged_historical_sha256 renewed string-only after the R4b receipt-path scrub on mom/rfic-dev-v2: source_renewal_receipt rewritten to <evidence-root>/; structure and every non-string leaf bitwise equal, only that string differs",
+      "receipt": "scripts/dev/rfic/mom_port_receipt_r4b_scrub.json"
+    },
+    {
+      "files": [
+        "tests/mom/layered/data/fixture_r6_native_evidence.json",
+        "tests/mom/layered/data/fixture_r6b_shunt_evidence.json",
+        "tests/mom/layered/data/fixture_r4b_closed_comparison.json"
+      ],
+      "reason": "D-P1 (user decision 2026-11-09): every source-sha256 pin removed (solver/analysis/producer source hashes, unchanged_historical_sha256); the evidence values are locked numerically by scripts/dev/rfic/evidence_lock.py, recorded in each file's numerical_lock",
+      "receipt": "<evidence-root>/rfic-mom-20261106/round1/approvals.md"
+    }
+  ],
+  "numerical_lock": {
+    "rule": "D-P1 (user decision 2026-11-09): committed numeric evidence is locked by value with the tiers of numerical_equivalence_standard.md (T0 bitwise, T1 within the fp64 run-level bound, T2 only with a per-field user approval); source hashes are not gates. Harness: scripts/dev/rfic/evidence_lock.py.",
+    "renewals": [
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round1/evidence/acq-0770640a",
+        "acquisition_commit": "0770640a6fc11fae34e9b459db9ff1fe902c66eb",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round1/evidence/acq-0770640a/tier_table.json",
+        "tier_table_sha256": "b97ca3243b230d589974b79d70c067f3c93480a18a9e2ba8af4e160022d5ac5f",
+        "summary": {
+          "T0": 28,
+          "T1": 32,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [
+          "fixture_r4b_closed_comparison.json:cases/0/samples/0/L_H",
+          "fixture_r4b_closed_comparison.json:cases/0/samples/0/R_ohm",
+          "fixture_r4b_closed_comparison.json:cases/0/samples/0/L_relative",
+          "fixture_r4b_closed_comparison.json:cases/0/samples/0/R_relative",
+          "fixture_r4b_closed_comparison.json:cases/0/samples/1/L_H",
+          "fixture_r4b_closed_comparison.json:cases/0/samples/1/R_ohm",
+          "fixture_r4b_closed_comparison.json:cases/0/samples/1/L_relative",
+          "fixture_r4b_closed_comparison.json:cases/0/samples/1/R_relative",
+          "fixture_r4b_closed_comparison.json:cases/1/samples/0/L_H",
+          "fixture_r4b_closed_comparison.json:cases/1/samples/0/R_ohm",
+          "fixture_r4b_closed_comparison.json:cases/1/samples/0/L_relative",
+          "fixture_r4b_closed_comparison.json:cases/1/samples/0/R_relative",
+          "fixture_r4b_closed_comparison.json:cases/1/samples/1/L_H",
+          "fixture_r4b_closed_comparison.json:cases/1/samples/1/R_ohm",
+          "fixture_r4b_closed_comparison.json:cases/1/samples/1/L_relative",
+          "fixture_r4b_closed_comparison.json:cases/1/samples/1/R_relative",
+          "fixture_r4b_closed_comparison.json:cases/2/samples/0/L_H",
+          "fixture_r4b_closed_comparison.json:cases/2/samples/0/R_ohm",
+          "fixture_r4b_closed_comparison.json:cases/2/samples/0/L_relative",
+          "fixture_r4b_closed_comparison.json:cases/2/samples/0/R_relative",
+          "fixture_r4b_closed_comparison.json:cases/2/samples/1/L_H",
+          "fixture_r4b_closed_comparison.json:cases/2/samples/1/R_ohm",
+          "fixture_r4b_closed_comparison.json:cases/2/samples/1/L_relative",
+          "fixture_r4b_closed_comparison.json:cases/2/samples/1/R_relative",
+          "fixture_r4b_closed_comparison.json:cases/3/samples/0/L_H",
+          "fixture_r4b_closed_comparison.json:cases/3/samples/0/R_ohm",
+          "fixture_r4b_closed_comparison.json:cases/3/samples/0/L_relative",
+          "fixture_r4b_closed_comparison.json:cases/3/samples/0/R_relative",
+          "fixture_r4b_closed_comparison.json:cases/3/samples/1/L_H",
+          "fixture_r4b_closed_comparison.json:cases/3/samples/1/R_ohm",
+          "fixture_r4b_closed_comparison.json:cases/3/samples/1/L_relative",
+          "fixture_r4b_closed_comparison.json:cases/3/samples/1/R_relative"
+        ],
+        "accepted_t2": []
+      },
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round2/evidence/acq-064a22d4",
+        "acquisition_commit": "064a22d4bd82e2b2cd90acaca2e9bb8be7930b0a",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round2/evidence/acq-064a22d4/tier_table.json",
+        "tier_table_sha256": "f1ae75be5b54c5ddf0178264a0e83bda07bb48ecaa7b03816ef7a48396fc65c8",
+        "summary": {
+          "T0": 60,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      },
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round3/evidence/acq-5877b7e7",
+        "acquisition_commit": "5877b7e7d31cd55101ba6f75f6f8978932cf9a63",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round3/evidence/acq-5877b7e7/tier_table.json",
+        "tier_table_sha256": "4f2d185645d75a1c5efd24f92be1a33daa8eab7200d30bc6cf2940159bd36258",
+        "summary": {
+          "T0": 60,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      },
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round4/evidence/acq-538c3b40",
+        "acquisition_commit": "538c3b40ef8d2fe85e661afe6eae4e15dc2cc879",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round4/evidence/acq-538c3b40/tier_table.json",
+        "tier_table_sha256": "ae0de71e8b29e4dad1b25c1c93a10a6f231d15fd39aa6505d46f28b14a14577a",
+        "summary": {
+          "T0": 60,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      },
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round5/evidence/acq-1e9e6009",
+        "acquisition_commit": "1e9e60092d5b1f04d64a7376455ba6a48c373d51",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round5/evidence/acq-1e9e6009/tier_table.json",
+        "tier_table_sha256": "c0a7e0c0318194e80bebe74cdb05ee815b7fc5b774ea8d76581fe4a5c7c4f789",
+        "summary": {
+          "T0": 60,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      },
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round67/evidence/acq-b6b88dd2",
+        "acquisition_commit": "b6b88dd2b75302676b9caccb52ec62d3b094a67e",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round67/evidence/acq-b6b88dd2/tier_table.json",
+        "tier_table_sha256": "201eb02cad37159259e1f111c94ffab7109ebe62407730ff527fd006fa479045",
+        "summary": {
+          "T0": 60,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      }
+    ]
+  }
+}

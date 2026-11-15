@@ -1,4 +1,5 @@
 """A single, scoped compiler dispatch; ineligible scenes retain torch/autograd."""
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -31,13 +32,14 @@ def requires_grad_scope(*, reuse=False):
 
 
 def _same_children(value, original):
-    """Recognize the shallow declaration copies made by PreparedScene."""
+    """Recognize the declarations a PreparedScene shares with its public scene."""
     if value is original:
         return True
+    if isinstance(value, (list, tuple)) and isinstance(original, (list, tuple)):
+        # A replaced collection (PML extrusion) still shares its unchanged elements.
+        return len(value) == len(original) and all(a is b for a, b in zip(value, original))
     if type(value) is not type(original):
         return False
-    if isinstance(value, (list, tuple)):
-        return len(value) == len(original) and all(a is b for a, b in zip(value, original))
     if isinstance(value, dict):
         return value.keys() == original.keys() and all(value[k] is original[k] for k in value)
     return False
@@ -50,18 +52,18 @@ def requires_grad(value):
     # Cache only scene roots: small temporary compiler arguments may reuse ids.
     from ...scene import PreparedScene, Scene
 
-    if not isinstance(value, Scene):
-        return _walk_requires_grad(value)
     if isinstance(value, PreparedScene):
         original = value._public_scene
         declarations = vars(original)
-        # The wrapper keeps the public scene and shallow copies of declarations.
-        # Check new/replaced state too, without recursively revisiting monitors.
+        # The prepared declarations share the public scene's unchanged children. Check the
+        # replaced declarations and the grid state, without recursively revisiting monitors.
         return requires_grad(original) or _walk_requires_grad({
-            name: child for name, child in vars(value).items()
-            if name != "_public_scene" and (
-                name not in declarations or not _same_children(child, declarations[name]))
+            **{name: child for name, child in vars(value.scene).items()
+               if not _same_children(child, declarations[name])},
+            **{name: child for name, child in vars(value).items() if name not in ("scene", "_public_scene")},
         })
+    if not isinstance(value, Scene):
+        return _walk_requires_grad(value)
     # The entry holds the scene itself: a scene dropped inside the scope cannot
     # hand its id to a new scene and return a stale answer.
     entry = memo.get(id(value))
@@ -80,7 +82,7 @@ def _walk_requires_grad(value, seen=None):
     if id(value) in seen:
         return False
     seen.add(id(value))
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         children = value.values()
     elif isinstance(value, (list, tuple)):
         children = value
@@ -96,7 +98,7 @@ def eligible(scene, eps_background, mu_background, subpixel, *, coefficients=Fal
 
     if not setup_enabled.get() or torch.device(scene.device).type != "cuda":
         return False
-    if scene.coordinates is not None or m._material_dtype(scene) != torch.float32:
+    if scene.scene.coordinates is not None or m._material_dtype(scene) != torch.float32:
         return False
     if any(getattr(scene, axis).ndim != 1 for axis in "xyz") or scene.X.ndim != 3:
         return False
@@ -108,7 +110,7 @@ def eligible(scene, eps_background, mu_background, subpixel, *, coefficients=Fal
         return False
     if requires_grad(scene) or requires_grad((eps_background, mu_background, subpixel)):
         return False
-    if not coefficients and scene.material_regions:
+    if not coefficients and scene.scene.material_regions:
         return False
     samples, averaging, _ = m._resolve_subpixel(subpixel)
     if not coefficients and (samples, averaging) not in (((4, 4, 4), "kottke_edge"),
@@ -119,8 +121,8 @@ def eligible(scene, eps_background, mu_background, subpixel, *, coefficients=Fal
         return False
     if not all(isinstance(v, (int, float)) for v in (eps_background, mu_background)):
         return False
-    bulk = {id(s) for s in m._bulk_structures(scene)}
-    for structure in scene.structures:
+    bulk = {id(s) for s in m._bulk_structures(scene.scene)}
+    for structure in scene.scene.structures:
         material = structure.material
         if getattr(material, "modulation", None) is not None:
             return False

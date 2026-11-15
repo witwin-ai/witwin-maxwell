@@ -1,0 +1,282 @@
+# Slow tier: tests measured over 60 s on CPU or GPU (median of retained JUnit receipts, a
+# CPU -n 24 run or a GPU slot run on a shared host). Each line is a pytest node id, or a
+# node-id prefix (a file, or a test function covering all of its parameters), optionally
+# followed by " # comment".
+# tests/support/slow_tier.py adds the slow marker; directory-level runs deselect these
+# unless --run-slow is given. Keep the list sorted; tests/support/test_slow_tier.py checks it.
+tests/api/public/test_module_artifact_environment.py::test_actual_collection_and_execution_preserve_conflicting_module_parameters  # 64 s, gpu-b5 median of 1
+tests/api/public/test_module_artifact_environment.py::test_controller_interrupt_and_resume_keep_same_module_input  # 61 s, cpu-n24-r4 median of 1
+tests/boundaries/absorbers/test_boundary_bit_identity.py::test_existing_boundary_configuration_is_bit_identical[cpml_all]  # 169 s, gpu-b5 median of 1
+tests/boundaries/cpml/test_passivity_gpu.py::test_bloch_lc_60_degrees_default_profile_does_not_trip  # 64 s, hist median of 1
+tests/boundaries/cpml/test_passivity_gpu.py::test_complex_fixed_k_cw_eps4_slab_completes_with_warning_metadata  # 176 s, gpu-b5 median of 1
+tests/boundaries/cpml/test_passivity_gpu.py::test_complex_fixed_k_eps4_slab_growth_is_below_guard_resolution  # 71 s, gpu-b5 median of 1
+tests/boundaries/cpml/test_passivity_gpu.py::test_cw_modulated_slab_explicit_cpml_is_a_no_trip_control  # 150 s, gpu-b5 median of 1
+tests/core/geometry/test_mesh_geometry.py::test_teapot_auto_matches_solid_and_surface_is_thinner  # 2460 s, cpu-n24 median of 1
+tests/fdtd/core_path/test_w3_live_coefficients.py::test_modulated_phase_core_topology_admission[modulated_slab_phase-True]  # 95 s, hist median of 33
+tests/fdtd/test_batch_material_reuse.py::test_one_background_compilation_across_one_hundred_density_updates  # 246 s, hist median of 4
+tests/fdtd/test_bit_identity_baseline.py::test_resume_fingerprints_match_pre_pmc_baseline  # 146 s, gpu0 median of 1
+tests/fdtd/test_custom_current_volume_readers.py::test_volume_current_joint_material_gradients_match_finite_differences[Jx]  # 103 s, hist median of 3
+tests/fdtd/test_custom_current_volume_readers.py::test_volume_current_joint_material_gradients_match_finite_differences[My]  # 147 s, hist median of 3
+tests/gradients/e2e/test_fdtd_two_port_sparam_optimization.py::test_two_port_sparam_optimization_descends_monotonically  # 115 s, hist median of 2
+tests/gradients/test_complex_cw_spectral_adjoint.py::test_complex_cw_spectral_source_and_foil_vjp_matches_ordinary_forward[False-1-field]  # 151 s, hist median of 3
+tests/gradients/test_complex_cw_spectral_adjoint.py::test_complex_cw_spectral_source_and_foil_vjp_matches_ordinary_forward[False-1-surface_power]  # 136 s, hist median of 3
+tests/gradients/test_complex_cw_spectral_adjoint.py::test_complex_cw_spectral_source_and_foil_vjp_matches_ordinary_forward[True-13-field]  # 86 s, hist median of 3
+tests/gradients/test_complex_cw_spectral_adjoint.py::test_complex_cw_spectral_source_and_foil_vjp_matches_ordinary_forward[True-13-surface_power]  # 93 s, hist median of 3
+tests/gradients/test_complex_cw_spectral_adjoint.py::test_complex_cw_spectral_source_and_foil_vjp_matches_ordinary_forward[True-7-field]  # 89 s, hist median of 3
+tests/gradients/test_complex_cw_spectral_adjoint.py::test_complex_cw_spectral_source_and_foil_vjp_matches_ordinary_forward[True-7-surface_power]  # 92 s, hist median of 3
+tests/gradients/test_complex_cw_spectral_adjoint.py::test_tfsf_incident_phase_and_enclosure_polarity_replay_match_ordinary_fd[True-False]  # 142 s, hist median of 3
+tests/gradients/test_fdfd_adjoint.py::test_fdfd_gradient_matches_central_difference_for_geometry_position  # 110 s, hist median of 18
+tests/gradients/test_fdfd_adjoint.py::test_fdfd_lossy_geometry_gradient_uses_complex_material_pullback  # 115 s, hist median of 18
+tests/gradients/test_fdfd_gradient_routing.py::test_material_region_geometry_gradient_matches_central_difference  # 68 s, hist median of 13
+tests/gradients/test_fdtd_adjoint_bridge.py::test_fdtd_gradient_bridge_backpropagates_to_direct_scene_geometry_parameters  # 64 s, hist median of 2
+tests/gradients/test_fdtd_adjoint_bridge.py::test_fdtd_gradient_bridge_backpropagates_to_scene_module_geometry_parameters  # 61 s, hist median of 2
+tests/gradients/test_fdtd_adjoint_bridge.py::test_fdtd_gradient_bridge_matches_central_difference_for_scene_module_geometry_position  # 127 s, hist median of 2
+tests/gradients/test_fdtd_adjoint_bridge.py::test_fdtd_gradient_bridge_optimizer_step_reduces_geometry_target_loss  # 331 s, gpu-b5 median of 1
+tests/gradients/test_fdtd_conductive_port_adjoint.py::test_lossy_matching_optimization_improves_and_rechecks_forward  # 129 s, hist median of 3
+tests/gradients/test_fdtd_conductive_port_adjoint.py::test_sigma_eps_and_circuit_gradients_match_step_scan[True-False]  # 61 s, gpu-b5 median of 1
+tests/gradients/test_fdtd_conductive_port_adjoint.py::test_sigma_eps_and_circuit_gradients_match_step_scan[True-debye]  # 102 s, hist median of 3
+tests/gradients/test_fdtd_conductive_port_adjoint.py::test_sigma_eps_and_circuit_gradients_match_step_scan[True-lorentz]  # 90 s, hist median of 3
+tests/gradients/test_fdtd_copper_antenna_adjoint.py::test_foil_to_radiated_power_gradient_matches_normal_forward_step_scan[0.006]  # 71 s, rfic median of 32
+tests/gradients/test_fdtd_copper_antenna_adjoint.py::test_foil_to_radiated_power_gradient_matches_normal_forward_step_scan[None]  # 86 s, rfic median of 32
+tests/gradients/test_fdtd_copper_foil_adjoint.py::test_local_foil_material_history_and_parameter_gradients[debye]  # 103 s, hist median of 4
+tests/gradients/test_fdtd_copper_foil_adjoint.py::test_local_foil_material_history_and_parameter_gradients[drude]  # 94 s, hist median of 4
+tests/gradients/test_fdtd_copper_foil_adjoint.py::test_local_foil_material_history_and_parameter_gradients[lorentz]  # 114 s, hist median of 4
+tests/gradients/test_fdtd_copper_foil_adjoint.py::test_local_foil_material_history_and_parameter_gradients[magnetic]  # 114 s, hist median of 4
+tests/gradients/test_fdtd_copper_spectral_loss_adjoint.py::test_native_rf_batch_retains_side_loss_graph_after_reuse_and_close  # 126 s, hist median of 4
+tests/gradients/test_fdtd_copper_spectral_loss_adjoint.py::test_side_spectral_loss_graph_checkpoint_clock_and_normalization_parity[hanning-False]  # 124 s, hist median of 4
+tests/gradients/test_fdtd_copper_spectral_loss_adjoint.py::test_side_spectral_loss_graph_checkpoint_clock_and_normalization_parity[ramp-True]  # 150 s, hist median of 4
+tests/gradients/test_fdtd_copper_spectral_loss_adjoint.py::test_two_sided_spectral_loss_gradients_match_independent_forward_scan[combined-debye]  # 108 s, hist median of 4
+tests/gradients/test_fdtd_copper_spectral_loss_adjoint.py::test_two_sided_spectral_loss_gradients_match_independent_forward_scan[conduction-none]  # 91 s, hist median of 4
+tests/gradients/test_fdtd_copper_spectral_loss_adjoint.py::test_two_sided_spectral_loss_gradients_match_independent_forward_scan[electric_dispersion-drude]  # 100 s, hist median of 4
+tests/gradients/test_fdtd_copper_spectral_loss_adjoint.py::test_two_sided_spectral_loss_gradients_match_independent_forward_scan[electric_dispersion-lorentz]  # 96 s, hist median of 4
+tests/gradients/test_fdtd_copper_spectral_loss_adjoint.py::test_two_sided_spectral_loss_gradients_match_independent_forward_scan[surface-none]  # 89 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_cartesian_bulk_only_native_batch_reuse_keeps_direct_sigma_heads  # 78 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[bulk--3.0]  # 69 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[bulk-3.0]  # 75 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[energy--3.0]  # 72 s, rfic median of 16
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[energy-3.0]  # 64 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[query--3.0]  # 69 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[query-3.0]  # 73 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[radiated_power--3.0]  # 89 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[radiated_power-3.0]  # 147 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[radiation_complex--3.0]  # 72 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[radiation_complex-3.0]  # 67 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[reflection--3.0]  # 71 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[reflection-3.0]  # 72 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[stored--3.0]  # 74 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[stored-3.0]  # 73 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[surface--3.0]  # 67 s, rfic median of 16
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[surface-3.0]  # 72 s, rfic median of 16
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[voltage--3.0]  # 66 s, hist median of 4
+tests/gradients/test_mapped_electrical_material_adjoint_gpu.py::test_fixed_bend_materials_against_independent_ordinary_forward_fd[voltage-3.0]  # 74 s, hist median of 4
+tests/gradients/test_mode_source_replay_guard.py::test_rectangular_guide_replay_against_richardson_bound[source]  # 131 s, gpu-b5 median of 1
+tests/gradients/test_mode_source_vector_replay.py::test_metre_micrometre_gradient_scaling  # 224 s, hist median of 7
+tests/materials/anisotropic/test_fdtd_reciprocal_tensor_stability.py::test_compiled_tensor_cpu_pair_reciprocity_and_positive_curl[kottke_smooth-True]  # 61 s, cpu-n24-r4 median of 1
+tests/materials/anisotropic/test_fdtd_reciprocal_tensor_stability.py::test_compiled_tensor_cpu_pair_reciprocity_and_positive_curl[polarized_tensor-True]  # 60 s, cpu-n24 median of 1
+tests/materials/anisotropic/test_fdtd_reciprocal_tensor_stability.py::test_variable_conductive_tensor_native_joint_step_is_passive  # 484 s, gpu-b5 median of 1
+tests/materials/anisotropic/test_fdtd_reciprocal_tensor_stability.py::test_variable_tensor_native_curl_operator_is_self_adjoint_and_positive[False]  # 231 s, gpu-b5 median of 1
+tests/materials/anisotropic/test_fdtd_reciprocal_tensor_stability.py::test_variable_tensor_native_curl_operator_is_self_adjoint_and_positive[True]  # 458 s, gpu-b5 median of 1
+tests/materials/compiler/test_compile_scalar_cache.py::test_real_CPU_compiled_all_material_and_PEC_tensor_coefficients_bitwise[samples2-polarized]  # 76 s, cpu-n24 median of 1
+tests/materials/compiler/test_curved_subpixel_convergence.py::test_curved_primitive_volume_is_accurate_on_nonuniform_grid[cylinder]  # 76 s, hist median of 5
+tests/materials/compiler/test_curved_subpixel_convergence.py::test_fixed_sphere_mesh_volume_converges_across_three_yee_grids  # 212 s, rfic median of 8
+tests/materials/compiler/test_material_compiler.py::test_grid_aligned_interface_is_not_biased_by_odd_subpixel_counts  # 81 s, cpu-n24 median of 1
+tests/materials/compiler/test_pml_extrusion.py::test_dielectric_slab_matches_manual_extension  # 87 s, cpu-n24 median of 1
+tests/materials/compiler/test_pml_extrusion.py::test_drude_halfspace_matches_manual_extension  # 127 s, hist median of 10
+tests/materials/compiler/test_pml_extrusion.py::test_flagged_benchmark_census_is_clean_after_compile[mode_source_higher_order]  # 0 s, 594 s vs 204 s on master at host load ~200 (2.5x cells, bench-respec 2026-11-12)
+tests/materials/compiler/test_pml_extrusion.py::test_higher_order_mode_plane_eigenpair_and_profile_unchanged  # 95 s, cpu-n24 median of 1; 1188 s vs 412 s on master at host load ~200 (bench-respec 2026-11-12)
+tests/materials/compiler/test_pml_extrusion.py::test_mesh_volume_contact_warns_and_preserves_compilation[3-True]  # 67 s, cpu-n24 median of 1
+tests/materials/compiler/test_pml_extrusion.py::test_unflagged_benchmark_is_bitwise_unchanged[cylinder_scatter]  # 67 s, cpu-n24 median of 1
+tests/materials/ferrite/test_ferrite_reference.py::test_stepping_matches_discrete_transfer_function  # 103 s, hist median of 2
+tests/materials/modulation/test_modulation_clock_precision.py::test_graph_eager_and_disk_resume_are_bit_exact  # 62 s, gpu-b5 median of 1
+tests/materials/surface_impedance/test_copper_foil_material_batch.py::test_material_mna_native_batch_gradient_matches_independent  # 65 s, gpu-b5 median of 1
+tests/materials/surface_impedance/test_roughness_opt_in_bit_identity.py::test_smooth_surface_paths_are_bit_identical_to_pre_roughness_revision  # 233 s, hist median of 60
+tests/materials/thin_sheet/test_thin_sheet_chords.py::test_prism_held_chord_modes_equal_pec[30]  # 62 s, cpu-n24 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_bent_sheet_cavity_is_stable_for_twenty_thousand_steps[copper]  # 116 s, gpu-b5 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_bent_sheet_cavity_is_stable_for_twenty_thousand_steps[pec]  # 68 s, gpu-b5 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_chord_complex_preserves_pec_operator[prism]  # 72 s, gpu-b5 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_chord_complex_structure_and_linear_circulations[prism]  # 69 s, cpu-n24 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_faceted_circulations_are_exact_for_linear_fields[prism]  # 78 s, cpu-n24 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_faceted_copper_cylinder_matches_the_pec_sheet[te]  # 72 s, gpu-b5 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_faceted_copper_cylinder_matches_the_pec_sheet[tm]  # 87 s, gpu-b5 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_faceted_pec_cylinder_matches_the_bessel_series_and_converges[te]  # 185 s, gpu-b5 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_faceted_pec_cylinder_matches_the_bessel_series_and_converges[tm]  # 246 s, gpu-b5 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_fold_wedge_volumes_match_fine_quadrature  # 107 s, gpu-b5 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_spanning_faceted_complex_never_mixes_sides[copper-prism]  # 68 s, cpu-n24 median of 1
+tests/materials/thin_sheet/test_thin_sheet_faceted.py::test_spanning_faceted_complex_never_mixes_sides[pec-prism]  # 62 s, cpu-n24 median of 1
+tests/materials/thin_sheet/test_thin_sheet_feeds.py::test_f1_axis_aligned_feed_equivalence[4-copper]  # 104 s, gpu-b5 median of 1
+tests/materials/thin_sheet/test_thin_sheet_feeds.py::test_f1_axis_aligned_feed_equivalence[4-pec]  # 71 s, gpu-b5 median of 1
+tests/materials/thin_sheet/test_thin_sheet_feeds.py::test_f4_loaded_unexcited_feed_for_twenty_thousand_steps  # 97 s, gpu-b5 median of 1
+tests/materials/thin_sheet/test_thin_sheet_scattering.py::test_oblique_reflection_converges_with_observed_order[0.010617674911939972]  # 739 s, hist median of 3
+tests/materials/thin_sheet/test_thin_sheet_scattering.py::test_oblique_reflection_converges_with_observed_order[0]  # 125 s, hist median of 3
+tests/materials/thin_sheet/test_thin_sheet_scattering.py::test_oblique_transmission_error_decreases_with_refinement  # 428 s, hist median of 3
+tests/materials/thin_sheet/test_thin_sheet_scattering.py::test_tilted_copper_matches_pec_reflection[0.0075-te]  # 96 s, hist median of 3
+tests/materials/thin_sheet/test_thin_sheet_scattering.py::test_tilted_copper_matches_pec_reflection[0.0075-tm]  # 226 s, hist median of 3
+tests/mom/layered/test_layered_adaptive.py  # 187 s, gpu0 slot, first test carries the module-scoped adaptive solve
+tests/mom/layered/test_layered_admittance_fast.py::test_strip_agreement_with_dense  # 103 s, gpu0 slot median of 4 (both backends, round-3 and R4-1 runs)
+tests/mom/layered/test_layered_assembly.py::test_homogeneous_single_layer[1.0]  # 62 s, rfic median of 17
+tests/mom/layered/test_layered_body_preconditioner.py::test_closed_steps_drop_with_admittance_unchanged  # 114 s, gpu0 slot median of 3
+tests/mom/layered/test_layered_fixture_r6.py::test_r6_complete_repeat[pgs]  # 67 s, gpu0 median of 1
+tests/mom/layered/test_layered_fixture_r6.py::test_r6_complete_repeat[solid]  # 82 s, gpu0 median of 1
+tests/mom/layered/test_layered_frequency_groups.py::test_streamed_adaptive_sweep  # 385 s, gpu0 slot4 median of 1 (R6-3)
+tests/mom/layered/test_layered_green.py::test_rfic_envelope  # 67 s, rfic median of 19
+tests/mom/layered/test_layered_hmatrix.py::test_compressed_action_matches_exact_far_action  # 99 s, gpu0 slot median of 3
+tests/mom/layered/test_layered_hmatrix.py::test_fa_agreement_with_dense  # 150 s, gpu0 slot median of 3
+tests/mom/layered/test_layered_matrix_free.py::test_fa_agreement_and_error_history  # 163 s, gpu0 slot median of 3
+tests/mom/layered/test_layered_ports.py::test_coupled_microstrip_mixed_mode  # 121 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud L40S 44 s)
+tests/mom/layered/test_layered_ports.py::test_microstrip_edge_ports  # 125 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud L40S 46 s)
+tests/mom/layered/test_layered_vias_b2.py::test_l_shaped_via_bar_loop_kcl_and_inductance  # 169 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1
+tests/mom/test_anisotropic_operator.py::test_anisotropic_cross_region_obeys_reciprocal_current_exchange  # 67 s, rfic median of 1
+tests/mom/test_batched_near_assembly.py::test_public_fmm_near_storage_equals_per_block_assembly[scalar_dk_v1]  # 129 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud L40S 46 s)
+tests/mom/test_bounded_compact_original_full_resource.py  # 10181 s, integration_suites.toml unit_seconds
+tests/mom/test_compressed_harmonic_guards.py::test_actual_compressed_prefix_only_prepares_appended_harmonic  # 401 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud L40S 76 s)
+tests/mom/test_compressed_harmonic_preparation.py::test_actual_compressed_material_preparation_root_recovery_and_fields[tensor_dc_scalar_ac_limit]  # 143 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud L40S 25 s)
+tests/mom/test_compressed_harmonic_preparation.py::test_actual_compressed_material_preparation_root_recovery_and_fields[tensor_susceptibility]  # 122 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud L40S 25 s)
+tests/mom/test_compressed_hb_public.py::test_public_compressed_state_restore[current-hmatrix]  # 89 s, gpu-b5 median of 1
+tests/mom/test_compressed_hb_public.py::test_public_compressed_state_restore[dual-h2]  # 222 s, gpu-b5 median of 1
+tests/mom/test_compressed_hb_public.py::test_public_compressed_state_restore[mixed-h2]  # 262 s, gpu-b5 median of 1
+tests/mom/test_compressed_volume_preparation.py::test_actual_default_preparation_shared_eh_solves_and_dense_control  # 221 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud A6000 45 s)
+tests/mom/test_directional_action_validation.py::test_complete_actual_original_dispatch_columns_H_current_higher_and_Riesz  # 322 s, gpu-b5 median of 1
+tests/mom/test_directional_automatic_dag.py::test_selected_automatic_actual_far_original_q16_H_current_higher_all_root_MP100  # 149 s, gpu-b5 median of 1
+tests/mom/test_directional_automatic_dag_system.py::test_complete_automatic_DAG_actual_near_interiors_original_weak_H_current_and_Riesz  # 344 s, gpu-b5 median of 1
+tests/mom/test_directional_far_actions.py::test_multiple_carrier_global_original_far_weak_H_current_and_higher[False]  # 92 s, gpu-b5 median of 1
+tests/mom/test_directional_far_actions.py::test_multiple_carrier_global_original_far_weak_H_current_and_higher[True]  # 96 s, gpu-b5 median of 1
+tests/mom/test_directional_fmm_public.py::test_public_automatic_directional_three_body_solve_original_residual_and_exact_restore  # 503 s, rfic median of 1
+tests/mom/test_directional_reciprocal_near.py::test_directional_reciprocal_complete_columns_H_current_higher_and_inventory  # 270 s, rfic median of 1
+tests/mom/test_directional_reciprocal_near.py::test_public_directional_reciprocal_solve_exact_restore_and_policy_binding  # 241 s, gpu-b5 median of 1
+tests/mom/test_dual_action_snapshot.py::test_dual_preparation_decode_without_kernels_or_admission  # 211 s, gpu-b5 median of 1
+tests/mom/test_dual_current_action.py::test_streamed_dual_fields_potentials_and_source_gradients  # 189 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1
+tests/mom/test_dual_current_material.py::test_dual_material_inverse_and_response_second_derivatives  # 139 s, rfic median of 1
+tests/mom/test_ewald_refinement.py::test_resolved_ewald_correction_refinement_regression  # 119 s, gpu0 slot on a loaded host median of 1
+tests/mom/test_fmm_separable_public.py::test_public_separable_fmm_current_queries_and_exact_result_replay[ewald]  # 122 s, gpu-b5 median of 1
+tests/mom/test_generalized_system_blocks.py::test_mixed_tensor_provider_drives_actual_h_and_h2_far_actions  # 86 s, gpu-b5 median of 1
+tests/mom/test_harmonic_jacobian_action.py::test_compressed_tangent_finite_difference_and_transpose[dual-h2]  # 128 s, gpu-b5 median of 1
+tests/mom/test_harmonic_jacobian_action.py::test_compressed_tangent_finite_difference_and_transpose[mixed-h2]  # 95 s, rfic median of 1
+tests/mom/test_harmonic_krylov_public.py::test_public_krylov_policy_restore[h2-streamed_krylov]  # 91 s, gpu-b5 median of 1
+tests/mom/test_interior_volume_hmatrix.py::test_interior_cross_original_far_and_gradients[E]  # 140 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud L40S 53 s)
+tests/mom/test_interior_volume_hmatrix.py::test_interior_cross_original_far_and_gradients[H]  # 130 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud L40S 54 s)
+tests/mom/test_lattice_expansion_public.py::test_new_public_geometry_all_columns_native_gradients_solve_and_exact_restore  # 129 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud L40S 34 s)
+tests/mom/test_magnetic_volume_physical_control.py::test_tensor_sphere_multi_point_and_interface_evidence[0]  # 255 s, gpu-b5 median of 1
+tests/mom/test_magnetic_volume_physical_control.py::test_tensor_sphere_multi_point_and_interface_evidence_regression  # 126 s, gpu0 slot on a loaded host median of 2 (35 s, 126 s)
+tests/mom/test_mom_backend_determinism.py::test_directional_fmm_backend_replay_bitwise  # 189 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud L40S 142 s)
+tests/mom/test_mom_backend_determinism.py::test_pfft_backend_replay_bitwise  # 363 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud L40S 268 s)
+tests/mom/test_periodic_dyadic_hierarchy.py::test_tensor_exterior_h_and_h2_use_explicit_metric_for_actions_and_gradients[1]  # 125 s, mom GPU tier A6000 slot on a loaded host (load 200-340) median of 1 (cloud A6000 43 s)
+tests/mom/test_periodic_dyadic_nonreciprocal.py::test_actual_nonreciprocal_spatial_kernel_matches_independent_images[1]  # 88 s, gpu-b5 median of 1
+tests/mom/test_periodic_dyadic_nonreciprocal.py::test_actual_nonreciprocal_spatial_kernel_matches_independent_images[2]  # 201 s, rfic median of 1
+tests/mom/test_periodic_dyadic_plane_limit.py::test_actual_plane_limit_matches_independent_primary_excluded_images  # 281 s, gpu-b5 median of 1
+tests/mom/test_periodic_hierarchical_public.py::test_periodic_hierarchical_public_dense_oracle_and_restore[1-mixed-h2-2]  # 374 s, gpu-b5 median of 1
+tests/mom/test_periodic_hierarchical_public.py::test_periodic_hierarchical_public_dense_oracle_and_restore[2-mixed-hmatrix-2]  # 233 s, gpu-b5 median of 1
+tests/mom/test_periodic_stacked_plane.py::test_actual_stacked_plane_scalar_limit_matches_independent_images  # 103 s, gpu-b5 median of 1
+tests/mom/test_pfft_clusters.py::test_clustered_action_matches_single_grid_and_dense  # 85 s, rfic median of 1
+tests/mom/test_pfft_clusters.py::test_clustered_solve_matches_dense  # 107 s, rfic median of 1
+tests/mom/test_pfft_public.py::test_precorrection_follows_the_dense_rules_on_sliver_meshes[rounded_sliver_cube]  # 668 s, gpu-b5 median of 1
+tests/mom/test_pfft_public.py::test_precorrection_follows_the_dense_rules_on_sliver_meshes[thin_slab]  # 156 s, gpu-b5 median of 1
+tests/mom/test_public_signed_axis.py::test_new_public_signed_axis_original_columns_native_H_gradients_solve_and_restore  # 1417 s, gpu-b5 median of 1
+tests/mom/test_public_streamed_near.py::test_new_public_streamed_near_all_columns_native_H_gradients_and_solve  # 2035 s, gpu-b5 median of 1
+tests/mom/test_reciprocal_fmm_public.py::test_actual_full_cartesian_reciprocal_operator_original_columns_H_current_capacity  # 68 s, gpu-b5 median of 1
+tests/mom/test_refined_lossy_anisotropic_volume_reference.py::test_refined_lossy_anisotropic_volume_transform_reference  # 171 s, gpu-b5 median of 1
+tests/mom/test_shared_compact_fmm.py::test_shared_full_columns_H_current_higher_capacity_and_saved_owner  # 100 s, rfic median of 1
+tests/mom/test_surface_h_snapshot.py::test_actual_surface_h_h2_restore_actions_metric_and_implicit_solve  # 65 s, gpu-b5 median of 1
+tests/mom/test_surface_volume_hmatrix.py::test_rectangular_actual_far_compression_original_and_adjoint  # 903 s, gpu-b5 median of 1
+tests/mom/test_tensor_carrier.py::test_nonzero_tensor_background_carrier_pair_has_small_contrast_linear_limit  # 154 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_current_preparation.py::test_actual_ac_current_hb_preparation_and_ownership[True]  # 62 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_cutoff.py::test_mixed_cutoff_prefix_reuse_persistence_and_budget[linear_spd_success-h2]  # 76 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_cutoff.py::test_mixed_cutoff_prefix_reuse_persistence_and_budget[nonlinear_current_magnetic_budget-h2]  # 63 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_magnetic_recovery.py::test_mixed_hb_magnetic_volume_recovery_and_solve_free_queries[dense]  # 76 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_public.py::test_public_mixed_harmonics_result_save_load_and_scene_binding[h2-current]  # 76 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_public.py::test_public_mixed_harmonics_result_save_load_and_scene_binding[h2-current_krylov]  # 75 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_public.py::test_public_mixed_harmonics_result_save_load_and_scene_binding[h2-magnetic]  # 74 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_public.py::test_public_mixed_harmonics_result_save_load_and_scene_binding[h2-spd]  # 74 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_public.py::test_public_mixed_harmonics_result_save_load_and_scene_binding[hmatrix-current]  # 80 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_public.py::test_public_mixed_harmonics_result_save_load_and_scene_binding[hmatrix-current_krylov]  # 94 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_public.py::test_public_mixed_harmonics_result_save_load_and_scene_binding[hmatrix-magnetic]  # 74 s, gpu-b5 median of 1
+tests/mom/test_tensor_harmonic_public.py::test_public_mixed_harmonics_result_save_load_and_scene_binding[hmatrix-spd]  # 64 s, rfic median of 1
+tests/mom/test_tensor_harmonic_public_coefficient_guard.py::test_public_restore_rejects_extra_internal_tensor_coefficients  # 78 s, gpu-b5 median of 1
+tests/mom/test_tensor_sources_public.py::test_public_tensor_sources_exact_result_and_scene_binding[h2]  # 71 s, gpu-b5 median of 1
+tests/mom/test_tensor_sources_restored_cutoff.py::test_restored_tensor_sources_extend_only_h4_h5  # 63 s, rfic median of 1
+tests/mom/test_tensor_volume_hmatrix.py::test_tensor_volume_actions_and_exact_restore[E]  # 120 s, gpu-b5 median of 1
+tests/mom/test_tensor_volume_hmatrix.py::test_tensor_volume_actions_and_exact_restore[H]  # 116 s, gpu-b5 median of 1
+tests/mom/test_tensor_volume_source.py::test_scalar_limit_weak_source_refinement_and_selected_ownership  # 93 s, gpu-b5 median of 1
+tests/mom/test_volume_h2.py::test_actual_volume_h2_far_conversion_original_adjoint_gradient_and_release[E]  # 162 s, gpu-b5 median of 1
+tests/mom/test_volume_h2.py::test_actual_volume_h2_far_conversion_original_adjoint_gradient_and_release[H]  # 147 s, gpu-b5 median of 1
+tests/mom/test_volume_h2_snapshot.py::test_actual_volume_h2_exact_independent_restore_without_reconversion[True]  # 377 s, gpu-b5 median of 1
+tests/mom/test_volume_h_snapshot.py::test_actual_volume_far_and_near_snapshot  # 105 s, gpu-b5 median of 1
+tests/mom/test_volume_hmatrix.py::test_volume_h_original_actions_adjoint_gradients_and_partition[E]  # 95 s, gpu-b5 median of 1
+tests/mom/test_volume_hmatrix.py::test_volume_h_original_actions_adjoint_gradients_and_partition[H]  # 99 s, gpu-b5 median of 1
+tests/monitors/in_simulation/test_existing_monitor_bit_identity.py::test_existing_monitor_outputs_are_bit_identical_to_baseline  # 74 s, hist median of 60
+tests/postprocess/fields/test_copper_query_execution.py::test_oblique_copper_charge_continuity_converges_with_actual_native_grid  # 457 s, rfic median of 16
+tests/postprocess/scattering/test_ring_resonator_s21.py::test_all_pass_ring_s21_spectrum_matches_analytic_transfer_function  # 103 s, gpu-b5 median of 1
+tests/rf/antenna/test_printed_dipole_fixed_normal.py::test_combined_refinement_retains_exterior_native_node_half_support_and_real_feed[0.000125-32-copper]  # 1676 s, gpu-b5 median of 1
+tests/rf/antenna/test_printed_dipole_fixed_normal.py::test_combined_refinement_retains_exterior_native_node_half_support_and_real_feed[0.000125-32-pec]  # 1921 s, gpu-b5 median of 1
+tests/rf/antenna/test_printed_dipole_fixed_normal.py::test_combined_refinement_retains_exterior_native_node_half_support_and_real_feed[0.00025-16-copper]  # 3355 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_fixed_normal.py::test_combined_refinement_retains_exterior_native_node_half_support_and_real_feed[0.00025-16-pec]  # 3575 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_air_refinement_retains_actual_outer_pml_geometry_and_native_feed[0.0005]  # 247 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_air_refinement_retains_actual_outer_pml_geometry_and_native_feed[0.001]  # 143 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_air_refinement_retains_actual_outer_pml_geometry_and_native_feed[0.002]  # 128 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_boundary_reflection_control_retains_actual_pml_widths_feed_and_huygens[24-0.0]  # 278 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_boundary_reflection_control_retains_actual_pml_widths_feed_and_huygens[48-0.008]  # 1615 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_boundary_reflection_control_retains_actual_pml_widths_feed_and_huygens[48-0.0]  # 842 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_coupon_y_refinement_preserves_existing_interface_interval_endpoints_and_outer_air[0.00025]  # 361 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_coupon_y_refinement_preserves_existing_interface_interval_endpoints_and_outer_air[0.0005]  # 191 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_coupon_y_refinement_preserves_existing_interface_interval_endpoints_and_outer_air[0.001]  # 217 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_fixed_printed_dipole_native_named_feed_survives_refinement[0.00025-16-copper]  # 210 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_fixed_printed_dipole_native_named_feed_survives_refinement[0.00025-16-pec]  # 219 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_geometry.py::test_fixed_printed_dipole_native_named_feed_survives_refinement[0.0005-8-pec]  # 66 s, cpu-n24 median of 1
+tests/rf/antenna/test_printed_dipole_loss_observations.py::test_native_planes_retain_real_dipole_geometry_and_cover_all_compiled_sigma[copper]  # 175 s, cpu-n24-r4 median of 1
+tests/rf/antenna/test_printed_dipole_loss_observations.py::test_native_planes_retain_real_dipole_geometry_and_cover_all_compiled_sigma[pec]  # 62 s, cpu-n24-r4 median of 1
+tests/rf/lumped/test_pcb_campaign_declared_band.py::test_cli_schedules_every_original_frequency_in_separate_output  # 96 s, hist median of 2
+tests/rf/lumped/test_port_step_graph.py::test_drive_table_rows_equal_the_eager_per_step_drive[gaussian]  # 109 s, gpu-b5 median of 1
+tests/rf/lumped/test_port_step_graph_bit_identity.py::test_port_step_graph_is_bitwise_identical_to_the_frozen_source  # 151 s, hist median of 61
+tests/rf/terminal_wave/test_terminal_wave_bit_identity.py::test_existing_port_paths_and_two_mode_waveport_are_bitwise_identical  # 90 s, hist median of 60
+tests/rf/wave_validation/test_loss_dual_vi_execution.py::test_actual_dual_VI_preserves_source_fields_and_primary_samples[False]  # 163 s, gpu-b5 median of 1
+tests/rf/wave_validation/test_loss_dual_vi_execution.py::test_actual_dual_VI_preserves_source_fields_and_primary_samples[True]  # 94 s, gpu-b5 median of 1
+tests/rf/wave_validation/test_loss_dual_vi_observation.py::test_actual_compiled_grid_material_clock_and_all_Norton_stamp_fields_are_bitwise_equal  # 462 s, hist median of 2
+tests/rf/wave_validation/test_loss_dual_vi_observation.py::test_coarse_native_secondary_is_exactly_the_original_functional  # 71 s, hist median of 2
+tests/rf/wave_validation/test_loss_dual_vi_observation.py::test_secondary_names_rows_and_points_preserve_the_primary  # 189 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_alternative_actual_compiled_source_H_measurement_does_not_change_Norton_field_stamp  # 395 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_fixed_H_stencil_cannot_cross_conductor_interface[copper]  # 396 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_fixed_H_stencil_cannot_cross_conductor_interface[pec]  # 391 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_fixed_functional_coarse_mesh_is_exactly_the_original_native_integrals  # 267 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_fixed_mesh_material_controls_keep_actual_source_apertures_grid_exterior_and_VI[changes0]  # 151 s, hist median of 2
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_fixed_mesh_material_controls_keep_actual_source_apertures_grid_exterior_and_VI[changes1]  # 560 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_fixed_physical_curve_and_quadrature_reproduce_independent_constant_affine_fields[False-0.000625]  # 112 s, hist median of 2
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_fixed_physical_curve_and_quadrature_reproduce_independent_constant_affine_fields[False-0.00125]  # 73 s, hist median of 2
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_fixed_physical_curve_and_quadrature_reproduce_independent_constant_affine_fields[True-0.000625]  # 148 s, gpu-b5 median of 1
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_fixed_physical_curve_and_quadrature_reproduce_independent_constant_affine_fields[True-0.00125]  # 321 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_fixed_physical_stencil_cannot_cross_periodic_seam  # 415 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_transverse_refinement_holds_axial_source_aperture_and_exterior_nodes_exactly[0.000625]  # 107 s, gpu-b5 median of 1
+tests/rf/wave_validation/test_loss_material_control_preparation.py::test_transverse_refinement_holds_axial_source_aperture_and_exterior_nodes_exactly[0.00125]  # 715 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_printed_line_loss_bridge.py::test_balanced_group_requires_identical_signed_complex_drive[(-0-1j)]  # 76 s, cpu-n24-r4 median of 1
+tests/rf/wave_validation/test_printed_line_loss_bridge.py::test_balanced_group_requires_identical_signed_complex_drive[-1]  # 85 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_printed_line_loss_bridge.py::test_balanced_group_requires_identical_signed_complex_drive[1j]  # 68 s, cpu-n24-r2 median of 1
+tests/rf/wave_validation/test_printed_line_loss_bridge.py::test_capture_refuses_realization_not_matching_executed_signature  # 85 s, cpu-n24-r4 median of 1
+tests/rf/wave_validation/test_printed_line_loss_bridge.py::test_realization_digest_reproduces_executed_operator_copper_signature[False]  # 88 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_printed_line_loss_bridge.py::test_realization_digest_reproduces_executed_operator_copper_signature[True]  # 67 s, cpu-n24-r2 median of 1
+tests/rf/wave_validation/test_printed_line_loss_execution.py::test_actual_two_drive_spectra_and_shared_heat_match_direct_source_and_disk_resume[-1.0-False]  # 146 s, rfic median of 24
+tests/rf/wave_validation/test_printed_line_loss_execution.py::test_actual_two_drive_spectra_and_shared_heat_match_direct_source_and_disk_resume[-1.0-True]  # 75 s, rfic median of 24
+tests/rf/wave_validation/test_printed_line_loss_execution.py::test_actual_two_drive_spectra_and_shared_heat_match_direct_source_and_disk_resume[0.5-False]  # 170 s, rfic median of 16
+tests/rf/wave_validation/test_printed_line_loss_execution.py::test_actual_two_drive_spectra_and_shared_heat_match_direct_source_and_disk_resume[0.5-True]  # 76 s, rfic median of 16
+tests/rf/wave_validation/test_printed_line_loss_execution_contract.py::test_actual_pilot_cpu_scene_and_independent_nonzero_drives_keep_all_norton_resistors  # 419 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_printed_line_loss_execution_contract.py::test_zero_active_norton_spectrum_is_rejected_before_cuda_prepare  # 360 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_printed_line_loss_pilot.py::test_two_length_combined_pilot_preserves_grid_roi_and_drive_basis  # 266 s, gpu-b5 median of 1
+tests/rf/wave_validation/test_printed_line_public_execution_gpu.py::test_actual_public_complete_small_column_native_heads_and_disk[cpw-False-False]  # 63 s, gpu-b5 median of 1
+tests/rf/wave_validation/test_printed_line_public_workflow.py::test_fixed_physical_geometry_owner_rows_and_regions[cpw]  # 79 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_printed_line_public_workflow.py::test_fixed_physical_geometry_owner_rows_and_regions[differential_pair]  # 95 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_printed_line_public_workflow.py::test_public_requests_explicit_owner_side_and_frequency_axes[cpw]  # 72 s, cpu-n24-r2 median of 1
+tests/rf/wave_validation/test_printed_line_public_workflow.py::test_public_requests_explicit_owner_side_and_frequency_axes[differential_pair]  # 67 s, cpu-n24-r2 median of 1
+tests/rf/wave_validation/test_printed_line_public_workflow.py::test_runtime_closure_does_not_import_private_retained_field_builder[cpw]  # 77 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_printed_line_public_workflow.py::test_runtime_closure_does_not_import_private_retained_field_builder[differential_pair]  # 192 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_regional_line_observations.py::test_regional_observations_cover_exact_native_nonzero_sigma_and_split_trace_support[copper-0.01]  # 216 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_regional_line_observations.py::test_regional_observations_cover_exact_native_nonzero_sigma_and_split_trace_support[copper-0.0]  # 68 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_regional_line_observations.py::test_regional_observations_cover_exact_native_nonzero_sigma_and_split_trace_support[pec-0.01]  # 199 s, cpu-n24 median of 1
+tests/rf/wave_validation/test_regional_line_observations.py::test_regional_observations_cover_exact_native_nonzero_sigma_and_split_trace_support[pec-0.0]  # 70 s, cpu-n24-r4 median of 1
+tests/rf/wave_validation/test_regional_native_planes.py::test_native_plane_single_frequency_shared_loss_matches_full_prescribed_field[None]  # 200 s, cpu-n24-r4 median of 1
+tests/sources/current/test_full_tensor_current_contraction.py::test_current_source_matches_analytic_inverse_tensor[True-2-point]  # 66 s, gpu-b5 median of 1
+tests/sources/current/test_full_tensor_current_contraction.py::test_current_source_matches_analytic_inverse_tensor[True-2-uniform]  # 70 s, gpu-b5 median of 1
+tests/sources/mode/test_fdtd_unidirectional_launch.py::test_sparse_vector_mode_solve_returns_real_profile_and_stable_neff  # 61 s, cpu-n24 median of 1
+tests/sources/mode/test_mode_eigensolver_physics.py::test_higher_order_mode_converges_on_three_grids_without_index_changes  # 332 s, cpu-n24 median of 1
+tests/sources/mode/test_mode_eigensolver_physics.py::test_non_degenerate_mode_ordering_and_mode_index_are_physical  # 91 s, cpu-n24 median of 1
+tests/sources/mode/test_mode_eigensolver_physics.py::test_square_degenerate_subspace_rotates_to_stable_requested_polarizations  # 76 s, cpu-n24 median of 1
+tests/validation/benchmark/test_benchmark_system.py::test_benchmark_scene_material_slices_match_exactly[box]  # 91 s, hist median of 5
+tests/validation/benchmark/test_benchmark_system.py::test_benchmark_scene_material_slices_match_exactly[sphere]  # 382 s, cpu-n24 median of 1
+tests/validation/physics/test_surface_impedance_broadband.py::test_broadband_reflection_matches_leontovich  # 80 s, hist median of 2
+tests/validation/physics/test_surface_impedance_broadband.py::test_three_level_convergence_is_stable_and_in_budget  # 80 s, hist median of 2

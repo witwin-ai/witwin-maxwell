@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires 
 
 def _prepared_embedded_solver():
     frequencies = torch.tensor((2.5e9, 3.0e9), dtype=torch.float64)
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.tensor(((-1.0e12,),), dtype=torch.float64),
         B=torch.zeros((1, 1), dtype=torch.float64),
         C=torch.zeros((1, 1), dtype=torch.float64),
@@ -33,14 +33,14 @@ def _prepared_embedded_solver():
         port_order=("load",),
         passivity_margin=0.02,
     )
-    network = mw.NetworkData.from_y(
+    network = mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=model.evaluate(frequencies),
         z0=50.0,
         port_names=("load",),
         metadata={"model_id": "observer-profile"},
     )
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="load_network",
         network=network,
         connections={"load": "feed"},
@@ -66,13 +66,14 @@ def _prepared_embedded_solver():
         boundary=mw.BoundarySpec.none(),
         ports=(port,),
         networks=(block,),
-        device="cuda",
     )
     solver = mw.Simulation.fdtd(
         scene,
         frequencies=tuple(frequencies.tolist()),
-        run_time=mw.TimeConfig(time_steps=32),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=32),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).prepare().solver
     prepare_port_spectral_accumulators(solver, 32, "none")
     return solver

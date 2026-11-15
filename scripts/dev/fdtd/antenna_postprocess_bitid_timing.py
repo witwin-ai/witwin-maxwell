@@ -21,7 +21,7 @@ from __future__ import annotations
 import sysconfig
 import argparse
 import cProfile
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 import gc
 import math
 import os
@@ -47,18 +47,18 @@ from benchmark.scenes.antenna.half_wave_dipole import (
     default_frequencies,
     half_wave_dipole_scene,
 )
+from witwin.maxwell.compiler import compile_materials
 
 BASELINE = "042e0790c149301ba3b1a3a31a7d4472f5aa601a"
 SCENES = ("f3_medium_21f", "half_wave_dipole")
 PML = 8
 
 
-def _grid_scene(axes, *, device):
+def _grid_scene(axes):
     return mw.Scene(
         domain=mw.Domain(tuple((float(axis[0]), float(axis[-1])) for axis in axes)),
         grid=mw.GridSpec.custom(*axes),
         boundary=mw.BoundarySpec.pml(num_layers=PML),
-        device=device,
     )
 
 
@@ -97,29 +97,39 @@ def _printed_axes(lateral, air, finest, height):
     return x, y, z
 
 
-def printed(*, lateral, air, finest, height, count, lossy, device):
+def printed(*, lateral, air, finest, height, count, lossy):
     """90 x 11 mm copper printed dipole with an explicit finite-width LumpedPort."""
     frequencies = tuple(np.linspace(1.8e9, 3.0e9, count))
     axes = _printed_axes(lateral, air, finest, height)
-    scene = _grid_scene(axes, device=device)
-    scene.add_structure(mw.Structure(
-        _box((0., 0., -height / 2), (.090, .011, height)),
-        mw.Material(eps_r=3.5, sigma_e=.01 if lossy else 0.), name="substrate",
+    scene = _grid_scene(axes)
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(
+            _box((0., 0., -height / 2), (.090, .011, height)),
+            mw.Material(eps_r=3.5, sigma_e=.01 if lossy else 0.), name="substrate",
+        ),
     ))
-    for arm, lo, hi in (("negative", -.040, -.001), ("positive", .001, .040)):
-        scene.add_structure(mw.Structure(
-            _box(((lo + hi) / 2, 0., 0.), (hi - lo, .002, 0.)),
-            mw.CopperFoil(thickness=35e-6, frequency_range=(.1e9, 10e9)), name=arm,
-        ))
-    scene.add_port(mw.LumpedPort(
-        "feed", positive=(.001, 0., 0.), negative=(-.001, 0., 0.),
-        voltage_path=mw.AxisPath("x"), reference_impedance=50.,
-        current_surface=_box((axes[0][np.searchsorted(axes[0], 0.) + 1] / 2, 0., 0.),
-                             (0., .007, .005)),
-        voltage_aperture=_box((0., 0., 0.), (.002, .002, 0.)),
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(
+              _box(((lo + hi) / 2, 0., 0.), (hi - lo, .002, 0.)),
+              mw.media.CopperFoil(thickness=35e-6, frequency_range=(.1e9, 10e9)), name=arm,
+          ) for arm, lo, hi in (("negative", -.040, -.001), ("positive", .001, .040))),
     ))
-    scene.add_monitor(mw.ClosedSurfaceMonitor.box(
-        "radiation", size=(.110, .035, .035), frequencies=frequencies,
+    scene = scene.updated(ports=(
+        *scene.ports,
+        mw.LumpedPort(
+            "feed", positive=(.001, 0., 0.), negative=(-.001, 0., 0.),
+            voltage_path=mw.AxisPath("x"), reference_impedance=50.,
+            current_surface=_box((axes[0][np.searchsorted(axes[0], 0.) + 1] / 2, 0., 0.),
+                  (0., .007, .005)),
+            voltage_aperture=_box((0., 0., 0.), (.002, .002, 0.)),
+        ),
+    ), monitors=(
+        *scene.monitors,
+        mw.monitors.ClosedSurfaceMonitor.box(
+            "radiation", size=(.110, .035, .035), frequencies=frequencies,
+        ),
     ))
     return scene, frequencies
 
@@ -127,7 +137,7 @@ def printed(*, lateral, air, finest, height, count, lossy, device):
 def _scene(name):
     if name == "f3_medium_21f":
         return printed(lateral=.001, air=.002, finest=.0002, height=.0014,
-                       count=21, lossy=False, device="cuda")
+                       count=21, lossy=False)
     frequencies = default_frequencies(3.0e9)
     return half_wave_dipole_scene(frequencies=frequencies), frequencies
 
@@ -138,9 +148,11 @@ def _solve_once(name, destination):
         center = (frequencies[0] + frequencies[-1]) / 2
         result = mw.Simulation.fdtd(
             scene, frequencies=frequencies,
-            run_time=mw.TimeConfig.auto(steady_cycles=12, transient_cycles=8),
-            shutoff=0.0, full_field_dft=False,
-            excitations=(mw.PortExcitation(
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=12, transient_cycles=8),
+                shutoff=0.0, full_field_dft=False,
+            ),
+            excitations=(mw.rf.PortExcitation(
                 "feed", source_time=mw.GaussianPulse(frequency=center, fwidth=.8 * center),
             ),),
         ).run()
@@ -148,17 +160,19 @@ def _solve_once(name, destination):
         # Match the maintained half-wave antenna benchmark's 12 ns solve.
         simulation = mw.Simulation.fdtd(
             scene, frequencies=list(frequencies),
-            excitations=mw.PortExcitation(
+            excitations=mw.rf.PortExcitation(
                 "feed", source_time=mw.GaussianPulse(frequency=3.0e9, fwidth=1.5e9),
             ),
-            run_time=mw.TimeConfig(time_steps=1),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=1),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False,
+            ),
         )
         prepared = simulation.prepare()
-        simulation.config.run_time = mw.TimeConfig(
+        simulation.config = replace(simulation.config, run_time=mw.TimeConfig(
             time_steps=math.ceil(12.0e-9 / float(prepared.solver.dt))
-        )
+        ))
         result = prepared.run()
     result.save(destination)
     print(f"{name}: solved once; saved common observer tensors", flush=True)
@@ -199,13 +213,13 @@ def _worker(args):
     result = mw.Result.load(args.result, scene=scene, map_location="cuda")
     # Restore the prepared material state that the completed solve already had.
     # Do not retrieve a monitor or construct any surface currents before timing.
-    result.prepared_scene.compile_materials()
+    compile_materials(result.prepared_scene)
     torch.cuda.synchronize()
     if args.profile:
         profiler = cProfile.Profile()
         profiler.enable()
     start = time.perf_counter()
-    data = result.antenna(surface="radiation", driven_port="feed",
+    data = mw.antenna.antenna(result, surface="radiation", driven_port="feed",
                           theta_points=19, phi_points=37)
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - start
@@ -217,13 +231,13 @@ def _worker(args):
     for name in ("directivity_db", "gain_db", "realized_gain_db", "axial_ratio_db",
                  "directivity_max", "gain_max", "realized_gain_max"):
         antenna[name] = _snapshot(getattr(data, name))
-    monitor = _snapshot(result.monitor("radiation"))
-    selected = [_snapshot(result.monitor("radiation", freq_index=index))
+    monitor = _snapshot(result.raw_monitor("radiation"))
+    selected = [_snapshot(result.raw_monitor("radiation", freq_index=index))
                 for index in range(len(result.frequencies))]
-    repeated = result.antenna(surface="radiation", driven_port="feed",
+    repeated = mw.antenna.antenna(result, surface="radiation", driven_port="feed",
                               theta_points=19, phi_points=37)
     _assert_equal(_snapshot(data), _snapshot(repeated), "repeated antenna")
-    _assert_equal(monitor, _snapshot(result.monitor("radiation")), "repeated monitor")
+    _assert_equal(monitor, _snapshot(result.raw_monitor("radiation")), "repeated monitor")
     torch.save(dict(antenna=antenna, monitor=monitor, selected=selected,
                     closed_surface_flux=monitor["flux"], seconds=elapsed), args.output)
 

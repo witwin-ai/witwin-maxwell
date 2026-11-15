@@ -19,7 +19,7 @@ def test_rwg_admission_matches_constructed_bound_and_rejects_before_moments(monk
     system = SurfaceSystem.create([(i, str(i), RWGBasis(sphere_mesh(radius=.01,
         center=(x, 0., 0.), subdivisions=0, device='cuda')), interior) for i, x in enumerate((-.5, .5))])
     provider = ScalarSystemBlocks(system, exterior, IntegrationConfig(order=2, singular_order=3))
-    settings = dict(order=2, max_order=10, kernel_error_budget=mw.KernelErrorBudget(1., 10.),
+    settings = dict(order=2, max_order=10, kernel_error_budget=mw.mom.KernelErrorBudget(1., 10.),
                     rwg_absolute_budget=1e-6, leaf_size=30)
     op = MultipoleSystemActions(provider, **settings)
     plan = op.order_plan
@@ -30,8 +30,8 @@ def test_rwg_admission_matches_constructed_bound_and_rejects_before_moments(monk
     assert all(a['kernel_pass'] and not a['rwg_pass'] for a in plan['attempts'][:-1])
     assert not actual['implemented_operator_error_certified']
     assert actual['exterior']['polynomial_exact_in_exact_arithmetic']
-    config = mw.FMMConfig(**{k: v for k, v in settings.items() if k != 'leaf_size'})
-    assert mw.FMMConfig.restore(config.payload()) == config
+    config = mw.mom.FMMConfig(**{k: v for k, v in settings.items() if k != 'leaf_size'})
+    assert mw.mom.FMMConfig.restore(config.payload()) == config
     import witwin.maxwell.mom.fmm_system as construction
     def forbidden(*args, **kwargs):
         raise AssertionError('Failed RWG admission must precede moment construction')
@@ -49,7 +49,7 @@ def test_unavailable_kernel_does_not_report_partial_rwg_bound():
     tree = build_support_octree(lower, lower+.45/(3**.5), leaf_size=1)
     statistics = torch.zeros((tree.node_count, 3), device='cuda', dtype=torch.float64)
     with pytest.raises(MultipoleOrderError) as error:
-        plan_multipole_order(((tree, compile_medium(mw.Material(), 3e8)),), mw.KernelErrorBudget(1., 10.),
+        plan_multipole_order(((tree, compile_medium(mw.Material(), 3e8)),), mw.mom.KernelErrorBudget(1., 10.),
             max_order=1, rwg_statistics=(statistics,), rwg_absolute_budget=1., balancing_impedance=377.)
     assert all(a['unavailable_bounds'] == 2 and a['rwg_bound'] is None and not a['rwg_pass']
                for a in error.value.receipt['attempts'])

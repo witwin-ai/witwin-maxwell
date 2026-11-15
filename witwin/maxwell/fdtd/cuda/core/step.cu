@@ -73,6 +73,83 @@ __global__ void periodic_patch_kernel(CoreSource s) {
   s.field[dst] = value;
 }
 
+// The body of sources.cu add_bloch_source_patch_kernel and source_image_phase. Keep
+// their arithmetic: explicit roundings, the wrap-image rotation order and the
+// subnormal-flushing image sums.
+__device__ __forceinline__ float2 bloch_image_phase(
+    float c, float s, float2 value, bool positive, bool second_corner = false) {
+  const float cx = __fmul_rn(c, value.x), sy = __fmul_rn(s, value.y);
+  if (!positive) return make_float2(__fadd_rn(cx, sy),
+      __fsub_rn(__fmul_rn(c, value.y), __fmul_rn(s, value.x)));
+  const float imag = second_corner ? __fmaf_rn(c, value.y, __fmul_rn(s, value.x)) :
+      __fmaf_rn(s, value.x, __fmul_rn(c, value.y));
+  return make_float2(__fsub_rn(cx, sy), imag);
+}
+
+__device__ __forceinline__ float torch_square(float x) { return __fmul_rn(x, x); }
+
+__device__ __forceinline__ float torch_envelope(float sample_time, CoreTorchWaveform w) {
+  if (w.kind == 0)
+    return __fmul_rn(w.amplitude, cosf(__fadd_rn(__fmul_rn(w.two_pi_frequency, sample_time), w.phase)));
+  const float tau = __fsub_rn(sample_time, w.delay);
+  if (w.kind == 2) {
+    const float alpha_sq = torch_square(__fmul_rn(w.pi_frequency, tau));
+    return __fmul_rn(__fmul_rn(w.amplitude, __fsub_rn(1.0f, __fmul_rn(2.0f, alpha_sq))), expf(-alpha_sq));
+  }
+  const float envelope = expf(__fmul_rn(-0.5f, torch_square(__fmul_rn(tau, w.inv_sigma))));
+  const float carrier = cosf(__fadd_rn(__fmul_rn(w.two_pi_frequency, tau), w.phase));
+  if (w.kind == 1) return __fmul_rn(__fmul_rn(w.amplitude, envelope), carrier);
+  const float pedestal = expf(__fmul_rn(-0.5f, torch_square(__fmul_rn(tau, w.pedestal_inv_sigma))));
+  return __fmul_rn(w.amplitude, __fsub_rn(__fmul_rn(envelope, carrier), __fmul_rn(w.pedestal, pedestal)));
+}
+
+__device__ __forceinline__ void bloch_scatter(const CoreBlochSource& s, int64_t row, float sr, float si,
+    bool cw_pass, bool imaginary_pass, float sc, float ss, float& r, float& im) {
+  const auto g = s.gather;
+  for (int64_t e = g.rows[row]; e < g.rows[row+1]; ++e) {
+    const int64_t q = g.entries[2*e], subset = g.entries[2*e+1];
+    const int coords[3] = {int(q/(int64_t(s.patch_shape[1])*s.patch_shape[2]))+s.offsets[0],
+        int((q/s.patch_shape[2])%s.patch_shape[1])+s.offsets[1], int(q%s.patch_shape[2])+s.offsets[2]};
+    float value = s.patch[q];
+    if (s.kind == 2) {
+      // temporal._time_shifted_signal_patch: envelope(t - delay) * patch, zeroed before activation.
+      const float time = s.times[s.step[0]];
+      value = (s.causal && s.activation[q] > time) ? 0.0f
+          : __fmul_rn(torch_envelope(__fsub_rn(time, s.delays[q]), s.waveform), s.patch[q]);
+    } else if (cw_pass) {
+      // backend._add_cw_phased_source_patch_bloch's torch patches: cos*sc + sin*ss (real
+      // pass) and sin*sc - cos*ss (imaginary pass), each product and sum rounded once.
+      value = imaginary_pass ? __fsub_rn(__fmul_rn(s.second[q], sc), __fmul_rn(s.patch[q], ss))
+                             : __fadd_rn(__fmul_rn(s.patch[q], sc), __fmul_rn(s.second[q], ss));
+    }
+    float2 delta = make_float2(__fmul_rn(sr, value), __fmul_rn(si, value));
+    if (subset & (1 << s.axis_a))
+      delta = bloch_image_phase(s.ca, s.sa, delta, coords[s.axis_a] == 0);
+    if (subset & (1 << s.axis_b))
+      delta = bloch_image_phase(s.cb, s.sb, delta, coords[s.axis_b] == 0, subset & (1 << s.axis_a));
+    r = (subset & 8) ? source_atomic_sum(r, delta.x) : __fadd_rn(r, delta.x);
+    im = (subset & 8) ? source_atomic_sum(im, delta.y) : __fadd_rn(im, delta.y);
+  }
+}
+
+__global__ void bloch_patch_kernel(CoreBlochSource s) {
+  const int64_t row = int64_t(blockIdx.x)*blockDim.x + threadIdx.x;
+  if (row >= s.gather.count) return;
+  const int64_t dst = s.gather.targets[2*row+1];
+  const int64_t n = s.step[0];
+  const float first = s.kind == 2 ? 1.0f : s.signals[2*n], second = s.kind == 2 ? 0.0f : s.signals[2*n+1];
+  float r = s.real[dst], im = s.imag[dst];
+  if (s.kind == 1) {
+    // Two scatters of the CW quadratures, in the eager launch order.
+    bloch_scatter(s, row, 1.0f, 0.0f, true, false, first, second, r, im);
+    bloch_scatter(s, row, 0.0f, 1.0f, true, true, first, second, r, im);
+  } else {
+    bloch_scatter(s, row, first, second, false, false, 0.0f, 0.0f, r, im);
+  }
+  s.real[dst] = r;
+  s.imag[dst] = im;
+}
+
 __device__ __forceinline__ void auxiliary_electric_element(int64_t index, int64_t count,
     int source_index, float* electric, const float* magnetic, const float* decay,
     const float* curl, const float* signals, const int64_t* step) {
@@ -248,6 +325,11 @@ void dft_indexed(CoreDft dft, cudaStream_t stream) {
 }
 
 void commit_step(int64_t* step, cudaStream_t stream) { commit_kernel<<<1, 1, 0, stream>>>(step); }
+
+void bloch_source_indexed(CoreBlochSource source, cudaStream_t stream) {
+  if (source.gather.count)
+    bloch_patch_kernel<<<(source.gather.count+255)/256, 256, 0, stream>>>(source);
+}
 
 void auxiliary_boundary_indexed(CoreAuxiliary auxiliary, cudaStream_t stream) {
   auxiliary_boundary_kernel<<<1, 1, 0, stream>>>(auxiliary);

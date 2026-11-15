@@ -2,17 +2,23 @@
 
 Executed in a fresh interpreter by ``tests/rf/lumped/test_rf_port_bit_identity.py``
 once against a frozen source tree and once against the working tree; the two
-payloads must be bitwise equal. Only APIs present in both trees are used.
+payloads must be bitwise equal. Scenes, simulations and results go through
+``api_dialect.py`` beside this script.
 """
 from __future__ import annotations
 
 import math
 import sys
+from pathlib import Path
 
 import torch
 
-import witwin.maxwell as mw
 from witwin.core import GeometryBase
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import api_dialect as api  # noqa: E402
+
+mw = api.mw
 
 
 def _terminal_lumped_scene():
@@ -38,7 +44,7 @@ def _terminal_lumped_scene():
             reference_impedance=75.0,
         ),
     )
-    return mw.Scene(
+    return api.scene(
         domain=mw.Domain(bounds=((0.0, 1.6), (0.0, 1.0), (0.0, 1.0))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.pml(num_layers=6),
@@ -76,29 +82,31 @@ def _wave_scene(dx=0.01):
                            reference_plane=x, modes=(mode,))
 
     length = 2.0 * (0.12 + 6 * dx) + 8.0 * dx
-    scene = mw.Scene(
+    scene = api.scene(
         domain=mw.Domain(bounds=((-0.12, 0.12), (-0.21, 0.21), (-0.21, 0.21))),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.pml(num_layers=6),
         ports=(port("left", -0.02, "+"), port("right", 0.02, "-")),
         device="cuda",
     )
-    scene.add_structure(mw.Structure(mw.Cylinder(position=(0.0, 0.0, 0.0), radius=0.04, height=length, axis="x"),
-                                     mw.Material.pec(), name="inner_conductor"))
-    scene.add_structure(mw.Structure(_Tube(inner_radius=0.16, outer_radius=0.20, length=length),
-                                     mw.Material.pec(), name="outer_conductor"))
-    return scene
+    return api.add(scene, structures=[
+        mw.Structure(mw.Cylinder(position=(0.0, 0.0, 0.0), radius=0.04, height=length, axis="x"),
+                     mw.Material.pec(), name="inner_conductor"),
+        mw.Structure(_Tube(inner_radius=0.16, outer_radius=0.20, length=length),
+                     mw.Material.pec(), name="outer_conductor"),
+    ])
 
 
 def _record(prefix, result, payload):
-    for name, data in result.ports.items():
+    for name, data in api.ports(result).items():
         payload[f"{prefix}/{name}/voltage"] = data.voltage.detach().cpu()
         payload[f"{prefix}/{name}/current"] = data.current.detach().cpu()
         if data.available_power is not None:
             payload[f"{prefix}/{name}/available_power"] = data.available_power.detach().cpu()
-    if result.network is not None:
-        payload[f"{prefix}/network/s"] = result.network.s.detach().cpu()
-    solver = result.solver
+    network = api.network(result)
+    if network is not None:
+        payload[f"{prefix}/network/s"] = api.s_matrix(network).detach().cpu()
+    solver = api.solver(result)
     if solver is not None:
         for component in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
             payload[f"{prefix}/field/{component}"] = getattr(solver, component).detach().cpu()
@@ -108,7 +116,7 @@ def main(output):
     payload = {}
     frequencies = (0.4e9, 0.6e9)
     pulse = mw.GaussianPulse(frequency=0.5e9, fwidth=0.3e9)
-    direct = mw.Simulation.fdtd(
+    direct = api.fdtd(
         _terminal_lumped_scene(),
         frequencies=frequencies,
         excitations=mw.PortExcitation("terminal", source_time=pulse),
@@ -116,7 +124,7 @@ def main(output):
         spectral_sampler=mw.SpectralSampler(window="none"),
     ).run()
     _record("direct", direct, payload)
-    sweep = mw.Simulation.fdtd(
+    sweep = api.fdtd(
         _terminal_lumped_scene(),
         frequencies=frequencies,
         excitations=mw.PortSweep(source_time=pulse),
@@ -124,7 +132,7 @@ def main(output):
         spectral_sampler=mw.SpectralSampler(window="none"),
     ).run()
     _record("sweep", sweep, payload)
-    wave = mw.Simulation.fdtd(
+    wave = api.fdtd(
         _wave_scene(),
         frequencies=(1.0e9,),
         excitations=mw.PortExcitation("left"),

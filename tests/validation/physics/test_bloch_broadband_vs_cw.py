@@ -56,37 +56,37 @@ _SLAB_THICKNESS = 0.06
 
 def _normal_grating_scene(source_time, *, with_slab):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.06, 0.06), (-0.06, 0.06), (-0.9, 0.9))),
-        grid=mw.GridSpec.uniform(0.015),
-        boundary=mw.BoundarySpec.faces(
+                domain=mw.Domain(bounds=((-0.06, 0.06), (-0.06, 0.06), (-0.9, 0.9))),
+                grid=mw.GridSpec.uniform(0.015),
+                boundary=mw.BoundarySpec.faces(
             default="pml", num_layers=6, strength=1.0,
             x="periodic", y="periodic", z="pml",
-        ),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=source_time,
-            injection=mw.TFSF.slab(axis="z", bounds=_TFSF_BOUNDS),
-            name="incident",
-        )
-    )
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization=(1.0, 0.0, 0.0),
+                source_time=source_time,
+                injection=mw.TFSF.slab(axis="z", bounds=_TFSF_BOUNDS),
+                name="incident",
+            ),
+            ),
+            )
     if with_slab:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, _SLAB_THICKNESS)),
                 material=mw.Material(eps_r=_SLAB_EPS),
                 name="metasurface_layer",
-            )
-        )
-    scene.add_monitor(mw.PointMonitor("down", (0.0, 0.0, _DOWNSTREAM_Z), fields=("Ex",)))
+            ),
+        ))
+    scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("down", (0.0, 0.0, _DOWNSTREAM_Z), fields=("Ex",))))
     return scene
 
 
 def _downstream_phasor(result, frequency):
-    payload = result.monitor("down", frequency=frequency)["Ex"]
+    payload = result.monitor("down", frequency=frequency).sel(component="Ex").values
     return complex(torch.as_tensor(payload).detach().cpu().reshape(-1)[0])
 
 
@@ -94,9 +94,11 @@ def _run(source_time, frequencies, *, with_slab):
     return mw.Simulation.fdtd(
         _normal_grating_scene(source_time, with_slab=with_slab),
         frequencies=list(frequencies),
-        run_time=mw.TimeConfig(time_steps=_STEPS),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=_STEPS),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            absorber="cpml",
+        ),
     ).run()
 
 
@@ -149,24 +151,23 @@ _OBLIQUE_FREQS = (0.85e9, 1.0e9, 1.15e9)
 
 def _oblique_bloch_scene(source_time, wavevector):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.06),
-        boundary=mw.BoundarySpec.faces(
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.06),
+                boundary=mw.BoundarySpec.faces(
             default="pml", num_layers=6, strength=1.0,
             x="bloch", y="bloch", z="pml", bloch_wavevector=wavevector,
-        ),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=_OBLIQUE_DIR,
-            polarization=_OBLIQUE_POL,
-            source_time=source_time,
-            injection=mw.TFSF.slab(axis="z", bounds=_OBLIQUE_BOUNDS),
-            name="incident",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=_OBLIQUE_DIR,
+                polarization=_OBLIQUE_POL,
+                source_time=source_time,
+                injection=mw.TFSF.slab(axis="z", bounds=_OBLIQUE_BOUNDS),
+                name="incident",
+            ),
+            ),
+                monitors=(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")),),
+            )
     return scene
 
 
@@ -175,7 +176,7 @@ def test_broadband_bloch_injection_confines_total_field_per_frequency():
     # the broadband pulse with that explicit wavevector (auto resolution is CW-only).
     prepared = mw.Simulation.fdtd(
         _oblique_bloch_scene(mw.CW(frequency=1.0e9, amplitude=20.0), "auto"),
-        frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=1), absorber="cpml",
+        frequencies=[1.0e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1), absorber="cpml"),
     ).prepare()
     wavevector = tuple(float(v) for v in prepared.solver.resolved_bloch_wavevector)
     del prepared
@@ -186,10 +187,12 @@ def test_broadband_bloch_injection_confines_total_field_per_frequency():
             mw.GaussianPulse(frequency=1.0e9, fwidth=0.3e9, amplitude=20.0), wavevector
         ),
         frequencies=list(_OBLIQUE_FREQS),
-        run_time=mw.TimeConfig(time_steps=192),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=True,
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=192),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=True,
+            absorber="cpml",
+        ),
     ).run()
 
     # The broadband pulse drives the genuine complex-field Bloch grating path.
@@ -199,7 +202,7 @@ def test_broadband_bloch_injection_confines_total_field_per_frequency():
     dz = result.solver.scene.dz
     z_lo, z_hi = result.solver.scene.domain_range[4], result.solver.scene.domain_range[5]
     for frequency in _OBLIQUE_FREQS:
-        field = result.field("Ex", frequency=frequency)
+        field = result.field("Ex", frequency=frequency).values
         magnitude = np.abs((field["data"] if isinstance(field, dict) else field).detach().cpu().numpy())
         assert np.isfinite(magnitude).all()
         z = np.linspace(z_lo, z_hi, magnitude.shape[2])

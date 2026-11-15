@@ -11,7 +11,9 @@ import weakref
 
 import torch
 
+from .ordered_reduction import ordered_index_add_
 from .preconditioning import _Bound
+from .._stability import experimental
 
 
 def _body_pairs(context, pfft):
@@ -103,17 +105,18 @@ def _equilibrate(matrix):
     rows, cols = coo.indices()
     values = coo.values()
     left = torch.zeros(matrix.shape[0], device=values.device, dtype=values.real.dtype)
-    left.index_add_(0, rows, values.abs().square())
+    ordered_index_add_(left, 0, rows, values.abs().square())
     left = left.rsqrt()
     values = values*left[rows]
     right = torch.zeros_like(left)
-    right.index_add_(0, cols, values.abs().square())
+    ordered_index_add_(right, 0, cols, values.abs().square())
     right = right.rsqrt()
     balanced = torch.sparse_csr_tensor(matrix.crow_indices(), matrix.col_indices(),
                                        values*right[cols], size=matrix.shape)
     return balanced, left, right
 
 
+@experimental("mom")
 class NearFieldRightPreconditioner:
     """Sparse LU body-local PMCHWT right inverse.
 

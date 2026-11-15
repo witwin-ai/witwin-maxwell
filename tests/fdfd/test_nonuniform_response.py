@@ -12,13 +12,15 @@ def make_solver(pec=False, pml=False):
             [-.1, -.065, -.02, .01, .05, .1],
             [-.09, -.055, -.015, .02, .045, .09])
     scene = mw.Scene(domain=mw.Domain(bounds=tuple((a[0], a[-1]) for a in axes)),
-                     grid=mw.GridSpec.custom(*axes), device="cuda",
-                     boundary=mw.BoundarySpec.pml(num_layers=2, strength=3.) if pml else mw.BoundarySpec.none())
+                     grid=mw.GridSpec.custom(*axes), boundary=mw.BoundarySpec.pml(num_layers=2, strength=3.) if pml else mw.BoundarySpec.none())
     if pec:
-        scene.add_structure(mw.Structure(name="metal", geometry=mw.Box(size=(.06, .06, .06)),
-                                         material=mw.Material(pec=True)))
-    return mw.Simulation.fdfd(scene, frequency=1e9,
-                             solver=mw.GMRES(solver_type="direct", precision="double")).prepare().solver
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(name="metal", geometry=mw.Box(size=(.06, .06, .06)),
+                         material=mw.Material(pec=True)),
+        ))
+    return mw.Simulation.fdfd(scene, frequencies=1e9,
+                             config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type="direct", precision="double"))).prepare().solver
 
 
 def test_nonuniform_manufactured_curl_curl_and_reciprocity():
@@ -75,9 +77,9 @@ def test_physical_block_rhs_pec_and_owned_storage(pml):
 def test_multi_rhs_preserves_selected_iterative_engine(engine,monkeypatch):
     from witwin.maxwell.fdfd import krylov
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.1,.1),)*3),grid=mw.GridSpec.uniform(.1),
-                     boundary=mw.BoundarySpec.none(),device='cuda')
-    solver = mw.Simulation.fdfd(scene,frequency=1e10,
-        solver=mw.GMRES(solver_type=engine,precision='double')).prepare().solver
+                     boundary=mw.BoundarySpec.none())
+    solver = mw.Simulation.fdfd(scene,frequencies=1e10,
+        config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type=engine,precision='double'))).prepare().solver
     solver._ensure_system_matrix()
     called = []
     original = krylov.solve

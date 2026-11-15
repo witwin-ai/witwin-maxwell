@@ -72,7 +72,7 @@ def _lorentz_eps_at(frequency):
 
 
 def test_single_material_modulation_composes_dispersion_and_nonlinearity():
-    modulation = mw.ModulationSpec(frequency=_FMOD, amplitude=0.25)
+    modulation = mw.media.ModulationSpec(frequency=_FMOD, amplitude=0.25)
 
     electric = mw.Material(eps_r=_EPS_INF, modulation=modulation, lorentz_poles=_lorentz_poles())
     assert electric.is_modulated and electric.is_electric_dispersive
@@ -93,13 +93,13 @@ def test_single_material_modulation_composes_dispersion_and_nonlinearity():
     assert kerr.is_modulated and kerr.is_nonlinear
 
     chi2 = mw.Material(
-        eps_r=_EPS_INF, modulation=modulation, nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-9)
+        eps_r=_EPS_INF, modulation=modulation, nonlinearity=mw.media.NonlinearSusceptibility(chi2=1.0e-9)
     )
     assert chi2.is_modulated and chi2.is_nonlinear
 
 
 def test_single_material_modulation_still_rejects_anisotropy_and_conductivity():
-    modulation = mw.ModulationSpec(frequency=_FMOD, amplitude=0.25)
+    modulation = mw.media.ModulationSpec(frequency=_FMOD, amplitude=0.25)
 
     with pytest.raises(NotImplementedError, match="anisotropic"):
         mw.Material(eps_r=_EPS_INF, modulation=modulation, epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0))
@@ -111,8 +111,10 @@ def _prepare(scene):
     return mw.Simulation.fdtd(
         scene,
         frequencies=[_CARRIER],
-        run_time=mw.TimeConfig(time_steps=8),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=8),
+            full_field_dft=False,
+        ),
     ).prepare().solver
 
 
@@ -120,12 +122,11 @@ def _prepare(scene):
 def test_scene_modulation_plus_dispersive_material_prepares():
     """The cross-material runtime guard is lifted: a modulated slab may share a Scene
     with a (disjoint) dispersive material and both feature flags stay enabled."""
-    modulation = mw.ModulationSpec(frequency=_FMOD, amplitude=0.25)
+    modulation = mw.media.ModulationSpec(frequency=_FMOD, amplitude=0.25)
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.16, 0.16), (-0.16, 0.16))),
         grid=mw.GridSpec.uniform(0.02),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
         sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
@@ -157,28 +158,27 @@ def test_scene_modulation_plus_dispersive_material_prepares():
 
 def _slab_scene(*, material, amplitude=80.0, time_steps):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.16, 0.16), (-0.16, 0.16))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.16, 0.16), (-0.16, 0.16))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=(0.0, 0.0, 1.0),
                 source_time=mw.CW(frequency=_CARRIER, amplitude=amplitude),
                 name="pw",
             )
-        ],
-        structures=[
+            ],
+                structures=[
             mw.Structure(
                 geometry=Box(position=(0.0, 0.0, 0.0), size=(0.24, 0.64, 0.64)),
                 material=material,
             )
-        ],
-    )
-    scene.add_monitor(
-        mw.FieldTimeMonitor("probe", components=("Ez",), position=(0.42, 0.0, 0.0), interval=1)
-    )
+            ],
+                monitors=(
+            mw.monitors.FieldTimeMonitor("probe", components=("Ez",), position=(0.42, 0.0, 0.0), interval=1),
+            ),
+            )
     return scene
 
 
@@ -187,10 +187,12 @@ def _run(material, *, amplitude=80.0, time_steps, dt=None):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_CARRIER],
-        run_time=mw.TimeConfig(time_steps=time_steps, dt=dt),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps, dt=dt),
+            full_field_dft=False,
+        ),
     ).run()
-    trace = _to_numpy(result.monitor("probe")["field"]).astype(np.float64)
+    trace = _to_numpy(result.monitor("probe").sel(component="Ez").values).astype(np.float64)
     dt = float(result.solver.dt)
     del result
     torch.cuda.empty_cache()
@@ -225,7 +227,7 @@ def test_modulated_dispersive_reduces_to_pure_dispersive_at_zero_depth():
     modulated, dt_m = _run(
         mw.Material(
             eps_r=_EPS_INF,
-            modulation=mw.ModulationSpec(frequency=_FMOD, amplitude=depth),
+            modulation=mw.media.ModulationSpec(frequency=_FMOD, amplitude=depth),
             lorentz_poles=_lorentz_poles(),
         ),
         time_steps=time_steps,
@@ -254,7 +256,7 @@ def test_modulated_dispersive_slab_generates_sidebands():
     modulated, dt = _run(
         mw.Material(
             eps_r=_EPS_INF,
-            modulation=mw.ModulationSpec(frequency=_FMOD, amplitude=0.25),
+            modulation=mw.media.ModulationSpec(frequency=_FMOD, amplitude=0.25),
             lorentz_poles=_lorentz_poles(),
         ),
         time_steps=time_steps,
@@ -302,7 +304,7 @@ def test_modulation_acts_on_eps_inf_only_not_the_dispersive_poles():
     lorentz, dt_l = _run(
         mw.Material(
             eps_r=_EPS_INF,
-            modulation=mw.ModulationSpec(frequency=_FMOD, amplitude=0.25),
+            modulation=mw.media.ModulationSpec(frequency=_FMOD, amplitude=0.25),
             lorentz_poles=_lorentz_poles(),
         ),
         time_steps=time_steps,
@@ -311,7 +313,7 @@ def test_modulation_acts_on_eps_inf_only_not_the_dispersive_poles():
     nondispersive, dt_n = _run(
         mw.Material(
             eps_r=_EPS_INF + eps_pole,
-            modulation=mw.ModulationSpec(frequency=_FMOD, amplitude=0.25),
+            modulation=mw.media.ModulationSpec(frequency=_FMOD, amplitude=0.25),
         ),
         time_steps=time_steps,
     )
@@ -341,14 +343,14 @@ def test_modulated_kerr_reduces_to_pure_modulation_at_zero_chi3():
     kerr, dt_k = _run(
         mw.Material(
             eps_r=_EPS_INF,
-            modulation=mw.ModulationSpec(frequency=_FMOD, amplitude=0.25),
+            modulation=mw.media.ModulationSpec(frequency=_FMOD, amplitude=0.25),
             kerr_chi3=1.0e-14,
         ),
         amplitude=amplitude,
         time_steps=time_steps,
     )
     linear, dt_l = _run(
-        mw.Material(eps_r=_EPS_INF, modulation=mw.ModulationSpec(frequency=_FMOD, amplitude=0.25)),
+        mw.Material(eps_r=_EPS_INF, modulation=mw.media.ModulationSpec(frequency=_FMOD, amplitude=0.25)),
         amplitude=amplitude,
         time_steps=time_steps,
     )
@@ -367,7 +369,7 @@ def test_modulated_kerr_scene_enables_both_channels_and_runs_finite():
     scene = _slab_scene(
         material=mw.Material(
             eps_r=_EPS_INF,
-            modulation=mw.ModulationSpec(frequency=_FMOD, amplitude=0.2),
+            modulation=mw.media.ModulationSpec(frequency=_FMOD, amplitude=0.2),
             kerr_chi3=1.0e-16,
         ),
         amplitude=50.0,
@@ -376,8 +378,10 @@ def test_modulated_kerr_scene_enables_both_channels_and_runs_finite():
     solver = mw.Simulation.fdtd(
         scene,
         frequencies=[_CARRIER],
-        run_time=mw.TimeConfig(time_steps=64),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=64),
+            full_field_dft=False,
+        ),
     ).prepare().solver
     assert solver.modulation_enabled
     assert solver.kerr_enabled
@@ -386,9 +390,11 @@ def test_modulated_kerr_scene_enables_both_channels_and_runs_finite():
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_CARRIER],
-        run_time=mw.TimeConfig(time_steps=256),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=256),
+            full_field_dft=False,
+        ),
     ).run()
-    trace = _to_numpy(result.monitor("probe")["field"])
+    trace = _to_numpy(result.monitor("probe").sel(component="Ez").values)
     assert np.all(np.isfinite(trace))
     assert float(np.abs(trace).max()) > 0.0

@@ -20,7 +20,7 @@ def test_candidate_retains_input_and_selects_actual_complete_radiator(name):
     assert original == saved
     assert len(data['initial_conductor_ids']) > 10
     assert set(data['initial_conductor_ids']) <= {c['id'] for c in original['conductors']}
-    scene = import_pcb_scene(data, frequency=2.45e9, device='cpu')
+    scene = import_pcb_scene(data, frequency=2.45e9)
     selected = data['initial_conductor_ids']
     direct = direct_scene(data, scene, 2.45e9, selected)
     assert [s.name for s in direct.structures] == [s.name for s in scene.structures]
@@ -40,8 +40,8 @@ def test_explicit_surface_mapping_preserves_substrate_and_removes_only_copper_in
     assert np.diff(after).min() > thickness
     bottom = original['conductors'][0]['bounds_m'][4]
     assert all(c['bounds_m'][4:] == [bottom,bottom] for c in data['conductors'])
-    scene = import_pcb_scene(data, frequency=2.45e9, device='cpu')
+    scene = import_pcb_scene(data, frequency=2.45e9)
     assert all(s.material.thickness == pytest.approx(thickness) for s in scene.structures
-               if isinstance(s.material,mw.CopperFoil))
+               if isinstance(s.material,mw.media.CopperFoil))
     assert all(point[2] == bottom for point in data['ports'][0]['integration_line_m'])
     assert data['candidate_provenance']['surface_mapping']['substrate_thickness_preserved']

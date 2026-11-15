@@ -5,9 +5,10 @@ provider geometry, Riesz/solver/backward state or allocator/host overhead.
 """
 import math
 from .cluster import support_block_partition
+from ..errors import CapacityError
 
 
-class DirectCapacityError(MemoryError):
+class DirectCapacityError(CapacityError):
     def __init__(self, receipt):
         super().__init__('Direct H2 action retained budget exceeded before interpolation allocation')
         self.receipt = receipt

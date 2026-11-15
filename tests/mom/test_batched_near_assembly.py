@@ -67,12 +67,12 @@ def test_public_fmm_near_storage_equals_per_block_assembly(monkeypatch, near_sto
     mesh = sphere_mesh(radius=.5, frequency=3, device='cuda')
     scene = mw.Scene(structures=[mw.Structure(mw.Mesh(mesh.vertices, mesh.faces, recenter=False, fill_mode='solid'),
                                               mw.Material(eps_r=4.))], sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(integration=CONFIG, operator_backend='fmm', riesz_storage='local_rwg_v1',
-                          fmm=mw.FMMConfig(order=4, leaf_size=16, separation_ratio=.25, near_storage=near_storage),
-                          stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal', rtol=1e-6, atol=0.))
-    batched = mw.Simulation.mom(scene, frequency=FREQUENCY, config=config).prepare().solver.handle
+    config = mw.mom.MoMConfig(integration=CONFIG, operator_backend='fmm', riesz_storage='local_rwg_v1',
+                          fmm=mw.mom.FMMConfig(order=4, leaf_size=16, separation_ratio=.25, near_storage=near_storage),
+                          stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal', atol=0.))
+    batched = mw.Simulation.mom(scene, frequencies=FREQUENCY, config=config).prepare().solver.handle
     monkeypatch.setattr(fmm_regional, 'BATCHED_NEAR_ASSEMBLY', False)
-    reference = mw.Simulation.mom(scene, frequency=FREQUENCY, config=config).prepare().solver.handle
+    reference = mw.Simulation.mom(scene, frequencies=FREQUENCY, config=config).prepare().solver.handle
     for new, old in zip((batched.actions.exterior, *batched.actions.interiors),
                         (reference.actions.exterior, *reference.actions.interiors)):
         assert new.near.entries == old.near.entries

@@ -100,22 +100,20 @@ def _snapped_loop_half(dx: float, *, target: float = 0.10) -> float:
     return half
 
 
-def series_rlc_scene(
-    *,
+def series_rlc_scene(*,
     r: float | None = None,
     l: float = DEFAULT_L,  # noqa: E741 - circuit notation
     c: float = DEFAULT_C,
     parallel: bool = False,
     dx: float = 0.01,
-    device: str = "cuda",
 ) -> mw.Scene:
     """Build the coax in-line RLC resonator bench (series or parallel)."""
 
     resistance = (PARALLEL_R if parallel else SERIES_R) if r is None else r
     termination = (
-        mw.ParallelRLC(r=resistance, l=l, c=c)
+        mw.rf.ParallelRLC(r=resistance, l=l, c=c)
         if parallel
-        else mw.SeriesRLC(r=resistance, l=l, c=c)
+        else mw.rf.SeriesRLC(r=resistance, l=l, c=c)
     )
 
     length = line_length(dx)
@@ -136,61 +134,56 @@ def series_rlc_scene(
         termination=termination,
     )
 
+
+
+    # Inner rod: two segments straddling a two-cell axial gap at the load plane.
+    seg1_length = (LOAD_PLANE - dx) - left_edge
+    seg1_center = 0.5 * (left_edge + LOAD_PLANE - dx)
+    seg2_length = right_edge - (LOAD_PLANE + dx)
+    seg2_center = 0.5 * (LOAD_PLANE + dx + right_edge)
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (-DOMAIN_X, DOMAIN_X),
                 (-DOMAIN_TRANSVERSE, DOMAIN_TRANSVERSE),
                 (-DOMAIN_TRANSVERSE, DOMAIN_TRANSVERSE),
             )
-        ),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
-        ports=(_coax_port("feed", FEED_X, "+", dx=dx), load),
-        device=device,
-    )
-
-    scene.add_structure(
-        mw.Structure(
-            _HollowCylinder(
-                position=(0.0, 0.0, 0.0),
-                inner_radius=OUTER_RADIUS,
-                outer_radius=SHIELD_OUTER,
-                length=length,
             ),
-            mw.Material.pec(),
-            name="shield",
-        )
-    )
-
-    # Inner rod: two segments straddling a two-cell axial gap at the load plane.
-    seg1_length = (LOAD_PLANE - dx) - left_edge
-    seg1_center = 0.5 * (left_edge + LOAD_PLANE - dx)
-    scene.add_structure(
-        mw.Structure(
-            mw.Cylinder(
-                position=(seg1_center, 0.0, 0.0),
-                radius=INNER_RADIUS,
-                height=seg1_length,
-                axis="x",
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
+                ports=(_coax_port("feed", FEED_X, "+", dx=dx), load),
+                structures=(
+            mw.Structure(
+                _HollowCylinder(
+                    position=(0.0, 0.0, 0.0),
+                    inner_radius=OUTER_RADIUS,
+                    outer_radius=SHIELD_OUTER,
+                    length=length,
+                ),
+                mw.Material.pec(),
+                name="shield",
             ),
-            mw.Material.pec(),
-            name="inner_feed_side",
-        )
-    )
-    seg2_length = right_edge - (LOAD_PLANE + dx)
-    seg2_center = 0.5 * (LOAD_PLANE + dx + right_edge)
-    scene.add_structure(
-        mw.Structure(
-            mw.Cylinder(
-                position=(seg2_center, 0.0, 0.0),
-                radius=INNER_RADIUS,
-                height=seg2_length,
-                axis="x",
+            mw.Structure(
+                mw.Cylinder(
+                    position=(seg1_center, 0.0, 0.0),
+                    radius=INNER_RADIUS,
+                    height=seg1_length,
+                    axis="x",
+                ),
+                mw.Material.pec(),
+                name="inner_feed_side",
             ),
-            mw.Material.pec(),
-            name="inner_load_side",
-        )
-    )
+            mw.Structure(
+                mw.Cylinder(
+                    position=(seg2_center, 0.0, 0.0),
+                    radius=INNER_RADIUS,
+                    height=seg2_length,
+                    axis="x",
+                ),
+                mw.Material.pec(),
+                name="inner_load_side",
+            ),
+            ),
+            )
 
     return scene

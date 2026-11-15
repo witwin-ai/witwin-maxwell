@@ -10,8 +10,10 @@ import torch
 from .filters import DensityFilter, design_spacing
 from .projection import RobustProjections, robust_projections, smoothed_projection, tanh_projection
 from .symmetry import symmetrize
+from .._stability import experimental
 
 
+@experimental("invdes")
 class DensityParameterization(torch.nn.Module):
     """``params -> symmetrize -> filter -> project`` density pipeline.
 

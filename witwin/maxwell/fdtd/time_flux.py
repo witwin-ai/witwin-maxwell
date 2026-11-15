@@ -2,15 +2,17 @@
 from __future__ import annotations
 import numpy as np
 import torch
-from .quadrature import _AXIS_CODES, _exact_cell_center_widths, _plane_coord_names
+from .quadrature import _AXIS_CODES, _exact_cell_center_widths, _plane_coord_names, symmetry_image_planes
+from ..errors import UnsupportedFeatureError
 
 
 def prepare_time_flux(solver, record, num_samples):
     from .observers import (_FLUX_KERNEL_COMPONENTS, _PLANE_ALIGNMENT_RULES,
         _flux_yee_plane_position, _resolve_coord_source, _physical_plane_masks,
         _resolve_time_plane_component, resolve_plane_observer)
-    if getattr(solver.scene, 'coordinates', None) is not None:
-        raise NotImplementedError('Native time flux on mapped coordinates requires a qualified metric and sided trace reduction.')
+    if getattr(solver.scene.scene, 'coordinates', None) is not None:
+        raise UnsupportedFeatureError('Native time flux on mapped coordinates requires a qualified metric and sided trace reduction.',
+                                      feature="coordinates", method="fdtd")
     axis=record['axis'];normal=_AXIS_CODES[axis]
     position=_flux_yee_plane_position(solver.scene,axis,record['position'])
     record['yee_plane_position']=position
@@ -34,7 +36,8 @@ def prepare_time_flux(solver, record, num_samples):
         buffer=torch.zeros(num_samples,device=solver.device,dtype=torch.float32),
         flux_kernel_components=_FLUX_KERNEL_COMPONENTS[axis],
         flux_average_axis=rules['average_axis'][_FLUX_KERNEL_COMPONENTS[axis][0]],
-        flux_scale=1. if record['normal_direction']=='+' else -1.,
+        # The plane spans the domain: each face symmetry plane tangential to it adds its mirror image.
+        flux_scale=(1. if record['normal_direction']=='+' else -1.)*2.**len(symmetry_image_planes(solver.scene.scene,axis)),
         flux_copper_heads={})
     tangents=[i for i in range(3) if i!=normal]
     magnetic_validated=False
@@ -47,14 +50,17 @@ def prepare_time_flux(solver, record, num_samples):
         selected=(indices[:,normal]>=min(active)) & (indices[:,normal]<=max(active))
         if not bool(selected.any()):continue
         if face.axis==normal:
-            raise NotImplementedError('Time flux touching a normal copper stencil requires an explicitly sided surface.')
+            raise UnsupportedFeatureError('Time flux touching a normal copper stencil requires an explicitly sided surface.',
+                                          feature="material.copper_foil", method="fdtd")
         if len(samples)!=1 or samples[0][1]!=1.:
-            raise NotImplementedError('Copper time flux requires an exact native electric face plane.')
+            raise UnsupportedFeatureError('Copper time flux requires an exact native electric face plane.',
+                                          feature="material.copper_foil", method="fdtd")
         if not magnetic_validated:
             for magnetic in ('Hx','Hy','Hz'):
                 mu=getattr(solver,'mu_'+magnetic);sigma=getattr(solver,'sigma_m_'+magnetic)
                 if not bool(torch.all(mu==float(solver.mu0))) or bool((sigma!=0).any()):
-                    raise NotImplementedError('Copper time flux requires a uniform nonmagnetic background.')
+                    raise UnsupportedFeatureError('Copper time flux requires a uniform nonmagnetic background.',
+                                                  feature="material.copper_foil", method="fdtd")
             magnetic_validated=True
         rows=torch.nonzero(selected,as_tuple=False).reshape(-1)
         local=indices[rows][:,tangents]
@@ -62,7 +68,8 @@ def prepare_time_flux(solver, record, num_samples):
         shape=meta['plane_shape']
         # Endpoint/seam ownership requires its own periodic qualification.
         if bool(((local[:,average]<=0)|(local[:,average]>=shape[average]-1)).any()):
-            raise NotImplementedError('Copper time flux requires native cells on both sides of every trace.')
+            raise UnsupportedFeatureError('Copper time flux requires native cells on both sides of every trace.',
+                                          feature="material.copper_foil", method="fdtd")
         record['flux_copper_heads'].setdefault(component,[]).append(dict(
             indices=(local[:,0],local[:,1]),linear_indices=local[:,0]*shape[1]+local[:,1],
             rows=rows,right_e=entry['right_e'],

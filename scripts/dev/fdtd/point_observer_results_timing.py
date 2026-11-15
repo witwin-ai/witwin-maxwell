@@ -26,25 +26,29 @@ def main():
     # Forty physical nodes plus four PML nodes per face give 48**3 = 110,592.
     nodes = np.linspace(-0.195, 0.195, 40)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.195, 0.195),) * 3),
-        grid=mw.GridSpec.custom(nodes, nodes, nodes),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
-    )
-    scene.add_source(mw.PointDipole(
-        name="source", position=(-0.08, 0.015, -0.04), polarization="Ez", width=0.01,
-        source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.6e9),
-    ))
+                domain=mw.Domain(bounds=((-0.195, 0.195),) * 3),
+                grid=mw.GridSpec.custom(nodes, nodes, nodes),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                sources=(
+            mw.PointDipole(
+                name="source", position=(-0.08, 0.015, -0.04), polarization="Ez", width=0.01,
+                source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.6e9),
+            ),
+            ),
+            )
     for index in range(16_384):
         position = (-0.155 + 0.01 * (index % 32),
                     -0.155 + 0.01 * ((index // 32) % 32),
                     -0.15 + 0.02 * (index // 1024))
-        scene.add_monitor(mw.PointMonitor(f"point_{index:05d}", position,
-                                          fields=("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.PointMonitor(f"point_{index:05d}", position,
+                            fields=("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")),
+        ))
     prepared = mw.Simulation.fdtd(
-        scene, frequencies=(1.0e9,), run_time=mw.TimeConfig(time_steps=128),
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
-        full_field_dft=False,
+        scene, frequencies=(1.0e9,), config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=128),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+        full_field_dft=False),
     ).prepare()
     solver = prepared.solver
     result = prepared.run()

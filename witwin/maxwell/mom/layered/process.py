@@ -8,8 +8,11 @@ import torch
 
 from ...layers import LayerStack
 from ...media import LossyMetalMedium
+from ...errors import UnsupportedFeatureError
+from ..._stability import experimental
 
 
+@experimental("mom_layered")
 @dataclass(frozen=True)
 class LayerMap:
     """One GDS metal (layer, datatype), at exact SI z with physical thickness."""
@@ -22,9 +25,16 @@ class LayerMap:
     datatype: int = 0
 
 
+@experimental("mom_layered")
 @dataclass(frozen=True)
 class ViaMap:
-    """Rectangular, separate tubes between two named consecutive metal planes."""
+    """Separate via tubes between two named metal planes.
+
+    Rectangles import as Box, regular polygons as z-axis Prism and any other
+    simple outline as a z-axis ExtrudedPolygon with the exact grid vertices.
+    A via that passes intermediate planes must clear their metal or land fully
+    inside it.
+    """
 
     layer: int
     between: tuple[str, str]
@@ -32,6 +42,7 @@ class ViaMap:
     datatype: int = 0
 
 
+@experimental("mom_layered")
 @dataclass(frozen=True)
 class ProcessStack:
     """GDS process in SI; import yields Scene(background=dielectrics).
@@ -42,10 +53,12 @@ class ProcessStack:
     LumpedPorts may be supplied instead (or with distinct names).
     GDS user coordinates multiply library.unit; library.precision is the
     physical database grid and is also the Boolean precision. Flattened xy
-    coordinates round to that grid before exact Manhattan checks, including
-    quarter-turn references and fractional-grid magnifications. No unit override.
+    coordinates round to that grid, including quarter-turn references and
+    fractional-grid magnifications. No unit override. Metal polygons may be
+    non-Manhattan (45-degree routing, discretized arcs); those layouts use the
+    planar triangle mesher.
 
-    breakpoint_tolerance_m is opt-in layout repair before Manhattan validation:
+    breakpoint_tolerance_m is opt-in layout repair of near-coincident vertices:
     complete-span coordinate clusters snap to its SI lattice. Choose <= the
     minimum feature/10 and >= the database grid when repairing grid jitter.
     z plane identities are never clustered.
@@ -66,7 +79,6 @@ class ProcessStack:
             raise ValueError("Process metal names and GDS mappings must be unique")
         if not math.isfinite(self.breakpoint_tolerance_m) or self.breakpoint_tolerance_m < 0:
             raise ValueError("breakpoint_tolerance_m must be finite and nonnegative")
-        planes = sorted({m.z for m in self.metals})
         for m in self.metals:
             if not math.isfinite(m.z) or not math.isfinite(m.physical_thickness) or m.physical_thickness < 0:
                 raise ValueError("Metal z and physical_thickness must be finite; thickness must be nonnegative")
@@ -78,14 +90,15 @@ class ProcessStack:
             if len(v.between) != 2 or any(n not in names for n in v.between):
                 raise ValueError("ViaMap.between must name two declared metal planes")
             heights = sorted(next(m.z for m in self.metals if m.name == n) for n in v.between)
-            if planes.index(heights[1]) != planes.index(heights[0]) + 1:
-                raise NotImplementedError("Process vias must join consecutive metal planes")
+            if heights[0] == heights[1]:
+                raise ValueError("ViaMap.between must name two distinct metal planes")
             if not (isinstance(v.material, LossyMetalMedium) or v.material.is_pec):
                 raise ValueError("Process vias require Material.pec() or LossyMetalMedium")
 
-    def scene_from_gds(self, path, *, cell=None, ports=(), strict=True, device="cuda"):
+    def scene_from_gds(self, path, *, cell=None, ports=(), strict=True):
         """Flatten references/arrays, union each plane and preserve polygon holes."""
-        import gdstk
+        from .planar_mesh import optional_module
+        gdstk = optional_module("gdstk", "ProcessStack.scene_from_gds")
         from ...adapters.gds import _resolve_cell
         from ...geometry import PlanarPEC
         from ...ports import AxisPath, LumpedPort
@@ -109,8 +122,8 @@ class ProcessStack:
         scale = library.unit
         grid = library.precision / scale
         # Flattened references can carry sin/cos roundoff at quarter turns.
-        # Canonicalize to the declared Boolean/database grid before the exact
-        # Manhattan predicate; this also defines sub-database magnification.
+        # Canonicalize to the declared Boolean/database grid; this also
+        # defines sub-database magnification.
         polygons = [gdstk.Polygon(np.rint(p.points / grid) * grid,
                                  layer=p.layer, datatype=p.datatype) for p in polygons]
         arrays = [np.asarray(p.points) * scale for p in polygons]
@@ -121,12 +134,10 @@ class ProcessStack:
         repaired = []
         for polygon, points in zip(polygons, arrays):
             points = np.array([[maps[a][float(p[a])] for a in (0, 1)] for p in points])
-            if any(a[0] != b[0] and a[1] != b[1] for a, b in zip(points, np.roll(points, -1, axis=0))):
-                raise NotImplementedError("GDS import requires Manhattan polygons; 45-degree edges are unsupported")
             repaired.append(gdstk.Polygon(points / scale, layer=polygon.layer, datatype=polygon.datatype)
                             if self.breakpoint_tolerance_m else polygon)
         polygons = repaired
-        scene = Scene(background=self.dielectrics, device=device)
+        structures, scene_ports = [], []
         planes = {}
         for m in self.metals:
             if m.z in planes:
@@ -146,7 +157,7 @@ class ProcessStack:
             merged = gdstk.boolean(selected_polygons, [], "or", precision=library.precision / scale)
             for polygon in merged:
                 outer, holes = _boundary_loops(polygon.points * scale)
-                scene.add_structure(Structure(PlanarPEC(outer, holes=holes, normal_axis="z",
+                structures.append(Structure(PlanarPEC(outer, holes=holes, normal_axis="z",
                     coordinate=z, physical_thickness=metal.physical_thickness), metal.material))
         for via in self.vias:
             za, zb = sorted(next(m.z for m in self.metals if m.name == n) for n in via.between)
@@ -162,7 +173,8 @@ class ProcessStack:
                            if not (a[0] == b[0] == c[0] or a[1] == b[1] == c[1])]
                 expected = {(low[0],low[1]),(high[0],low[1]),(high[0],high[1]),(low[0],high[1])}
                 if len(corners) != 4 or set(corners) != expected:
-                    raise NotImplementedError("GDS via polygons must be rectangles; non-rectangular vias are unsupported")
+                    structures.append(Structure(_polygon_via(loop, za, zb, library.precision), via.material))
+                    continue
                 # Form Box centre/size in user units before SI conversion.
                 # This retains the same arithmetic as a declarative Box built
                 # from layout coordinates, avoiding an extra SI round trip.
@@ -170,7 +182,7 @@ class ProcessStack:
                 position = torch.tensor((*((user_low + user_high) / 2 * scale), (za + zb) / 2),
                                         dtype=torch.float64)
                 size = torch.tensor((*(user_high - user_low) * scale, zb - za), dtype=torch.float64)
-                scene.add_structure(Structure(Box(position=position, size=size), via.material))
+                structures.append(Structure(Box(position=position, size=size), via.material))
         terminals = {}
         for label, origin in zip(labels, origins):
             if (label.layer, label.texttype) != self.pin_layer:
@@ -193,14 +205,36 @@ class ProcessStack:
             axes = [a for a in range(3) if positive[a] != negative[a]]
             if len(axes) != 1:
                 raise ValueError("Pin terminals must define a distinct axis-aligned path")
-            size = max(abs(a - b) for a, b in zip(positive, negative))
-            scene.add_port(LumpedPort(name, positive=positive, negative=negative,
-                voltage_path=AxisPath("xyz"[axes[0]]),
-                current_surface=Box(position=tuple((a+b)/2 for a,b in zip(positive,negative)),
-                                    size=(size,size,size)), reference_impedance=50.0))
-        for port in ports:
-            scene.add_port(port)
-        return scene
+            scene_ports.append(LumpedPort(name, positive=positive, negative=negative,
+                voltage_path=AxisPath("xyz"[axes[0]]), reference_impedance=50.0))
+        return Scene(background=self.dielectrics, structures=structures, ports=(*scene_ports, *ports))
+
+
+def _polygon_via(loop, za, zb, grid):
+    """z-axis via of a non-rectangular outline in SI: a Prism when the outline is a regular polygon
+    within the database grid, otherwise an ExtrudedPolygon with the exact outline vertices."""
+    from witwin.core import ExtrudedPolygon, Prism
+    points = np.array(loop, dtype=np.float64)
+    before, after = points - np.roll(points, 1, 0), np.roll(points, -1, 0) - points
+    turns = before[:, 0] * after[:, 1] - before[:, 1] * after[:, 0]
+    corners = points[turns != 0]
+    centre = corners.mean(0)
+    radii = np.hypot(*(corners - centre).T)
+    count = len(corners)
+    angles = np.arctan2(corners[:, 1] - centre[1], corners[:, 0] - centre[0])
+    steps = (np.roll(angles, -1) - angles) % (2 * np.pi)
+    if np.sum(turns) < 0:
+        steps = 2 * np.pi - steps
+    regular = (count >= 3 and np.ptp(radii) <= 2 * grid and
+               np.abs(steps - 2 * np.pi / count).max() * radii.mean() <= 2 * grid)
+    if not regular:
+        return ExtrudedPolygon(torch.tensor(points, dtype=torch.float64), height=torch.tensor(zb - za, dtype=torch.float64),
+                               position=torch.tensor((0.0, 0.0, (za + zb) / 2), dtype=torch.float64), axis="z")
+    theta = angles[0]
+    return Prism(position=torch.tensor((*centre, (za + zb) / 2), dtype=torch.float64),
+                 radius=torch.tensor(radii.mean(), dtype=torch.float64),
+                 height=torch.tensor(zb - za, dtype=torch.float64), num_sides=count, axis="z",
+                 rotation=torch.tensor((math.cos(theta / 2), 0.0, 0.0, math.sin(theta / 2)), dtype=torch.float64))
 
 
 def _boundary_loops(points):

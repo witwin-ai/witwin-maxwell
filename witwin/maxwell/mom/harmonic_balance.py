@@ -7,9 +7,10 @@ from dataclasses import dataclass
 import math
 import torch
 from .nonlinear import instantaneous_harmonic_sources
+from ..errors import ConvergenceError
 
 
-class HarmonicBalanceConvergenceError(RuntimeError):
+class HarmonicBalanceConvergenceError(ConvergenceError):
     def __init__(self, receipt):
         super().__init__(f"Harmonic balance failed: {receipt['failure_reason']}")
         self.receipt = receipt
@@ -158,6 +159,7 @@ class DenseHarmonicBalance:
                     or tangent_rule.preconditioner!='none' or tangent_rule.recycle_size
                     or tangent_rule.fallback!='none'):
                 raise ValueError('HB Newton-Krylov requires unpreconditioned unrecycled GMRES without fallback')
+            tangent_rule=tangent_rule.resolved()
         elif tangent_rule is not None:
             raise ValueError('HB tangent rule requires newton_krylov')
         if implicit_solver not in ('dense','streamed_krylov','streamed_inverse_krylov') or (implicit_solver!='dense' and method!='newton_krylov'):
@@ -182,8 +184,8 @@ class DenseHarmonicBalance:
             'initialization': 'linear_background' if initial is None else 'explicit_state',
             'gradient': 'first_order_implicit_native_torch', 'failure_reason': None}
         if method=='newton_krylov':
-            from dataclasses import asdict
-            receipt.update(newton_direction='matrix_free_gmres',tangent_rule=asdict(tangent_rule),
+            from .options import option_asdict
+            receipt.update(newton_direction='matrix_free_gmres',tangent_rule=option_asdict(tangent_rule),
                 implicit_root_solver={'dense':'dense_svd_checked','streamed_krylov':'streamed_dominance_checked_gmres',
                     'streamed_inverse_krylov':'streamed_inverse_residual_checked_gmres'}[implicit_solver],
                 fully_matrix_free=False,global_hb_jacobian_stored=implicit_solver=='dense')

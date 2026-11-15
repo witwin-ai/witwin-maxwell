@@ -13,7 +13,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA requi
 def test_actual_ac_maps_close_tpa_mean_current_and_recover_neutral_exterior():
     setup = runpy.run_path('tests/mom/test_harmonic_public.py')['setup']
     scene,config,_ = setup()
-    runtime = mw.Simulation.mom(scene,frequency=3e8,config=config).prepare().solver
+    runtime = mw.Simulation.mom(scene,frequencies=3e8,config=config).prepare().solver
     base = runtime.model
     prepared = runtime.prepared
     volume = config.harmonic_balance.volumes[0]

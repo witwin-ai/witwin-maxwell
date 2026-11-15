@@ -8,6 +8,7 @@ import math
 import torch
 from .dual_static_current import DualStaticCurrentBalance
 from .nonlinear import instantaneous_harmonic_sources
+from ..errors import ConvergenceError
 
 
 class _BoundConductivity(torch.autograd.Function):
@@ -22,7 +23,7 @@ class _BoundConductivity(torch.autograd.Function):
         return gradient,None
 
 
-class DualCurrentConvergenceError(RuntimeError):
+class DualCurrentConvergenceError(ConvergenceError):
     def __init__(self, receipt):
         self.receipt = receipt
         super().__init__('Dual DC nonlinear closure failed: '+receipt['failure_reason'])
@@ -65,6 +66,7 @@ class DualHarmonicCurrentClosure:
             action=DualStaticCurrentAction(volumes,sigma_e,sigma_m,projection_rule=streamed_rule,
                                           column_batch=streamed_column_batch)
             self.current=StreamedDualCurrentBalance(action,streamed_rule,column_batch=streamed_column_batch)
+            self.streamed_rule=self.current.inverse.rule
             self.volumes,self.counts=action.volumes,action.counts
             self.response=DualElectricResponse(self.current)
             from .dual_current_material import DualMaterialInverse
@@ -142,9 +144,9 @@ class DualHarmonicCurrentClosure:
                    'threshold_V_per_m_l2':threshold,'checks':[],'physical_qualification':False,
                    'gradient':'first_order_implicit_native_torch','nonlinear_law':'exact_mean_cubic_TPA'}
         if self.streamed_rule is not None:
-            from dataclasses import asdict
+            from .options import option_asdict
             receipt.update(linear_solver='streamed_dual_checked_gmres',
-                streamed_rule=asdict(self.streamed_rule),streamed_column_batch=self.streamed_column_batch,
+                streamed_rule=option_asdict(self.streamed_rule),streamed_column_batch=self.streamed_column_batch,
                 tangent_checks=[],global_response_stored=False,global_nonlinear_tangent_stored=False,
                 conductivity_derivatives=True,fast_work_qualified=False)
         def fail(reason):

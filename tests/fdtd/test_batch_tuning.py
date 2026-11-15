@@ -6,6 +6,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.execution.tuning import _select_candidate, isolate_scene_module
 from tests.fdtd.cuda.test_batch_runtime import simulation
+from witwin.maxwell.scene import place_scene
 
 
 def measurement(q, samples, memory):
@@ -46,7 +47,7 @@ def test_candidate_search_includes_balanced_cohorts_and_skips_idle_slots():
     from types import SimpleNamespace
     from witwin.maxwell.execution.tuning import _candidate_policies
     class Batch:
-        execution = mw.BatchExecution(devices=("cuda:0", "cuda:1"), batch_size="auto",
+        execution = mw.execution.BatchExecution(devices=("cuda:0", "cuda:1"), batch_size="auto",
             max_batch_size=10, slots_per_device="auto", tune=True, graph_steps=32)
         def __len__(self):
             return 10
@@ -62,10 +63,10 @@ def test_candidate_search_includes_balanced_cohorts_and_skips_idle_slots():
 @pytest.mark.parametrize("graph", ["off", "required"])
 def test_tuning_measures_full_runs_without_changing_public_results(graph):
     sims = [simulation(i, steps=19) for i in range(3)]
-    policy = mw.BatchExecution(devices=("cuda:0",), batch_size="auto", max_batch_size=2,
+    policy = mw.execution.BatchExecution(devices=("cuda:0",), batch_size="auto", max_batch_size=2,
         slots_per_device="auto", tune=True, graph=graph, graph_steps=8,
         memory_limit_bytes=128 * 1024**2)
-    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("drive",)), execution=policy)
+    batch = mw.Simulation.batch(sims, variation=mw.execution.BatchVariation(sources=("drive",)), execution=policy)
     state = torch.cuda.get_rng_state().clone()
     with batch.prepare() as prepared:
         report = prepared.report.to_dict()
@@ -91,8 +92,8 @@ def test_tuning_measures_full_runs_without_changing_public_results(graph):
 def test_tuned_training_preserves_inputs_and_backward_after_close():
     sim = simulation(steps=19)
     scales = torch.tensor([0., -1.], device="cuda:0", requires_grad=True)
-    batch = mw.Simulation.batch(sim, parameters=mw.BatchParameters(source_scales={"drive": scales}),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2, tune=True,
+    batch = mw.Simulation.batch(sim, parameters=mw.execution.BatchParameters(source_scales={"drive": scales}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=2, tune=True,
             graph="off", memory_limit_bytes=128 * 1024**2))
     with batch.prepare() as prepared:
         assert scales.grad is None and scales._version == 0
@@ -106,8 +107,8 @@ def test_tuned_training_preserves_inputs_and_backward_after_close():
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires two CUDA devices")
 def test_tuning_selects_graph_chunks_on_two_real_devices():
     batch = mw.Simulation.batch([simulation(i, steps=19) for i in range(4)],
-        variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0", "cuda:1"), batch_size=1, tune=True,
+        variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0", "cuda:1"), batch_size=1, tune=True,
             graph="required", graph_steps="auto", memory_limit_bytes=128 * 1024**2))
     with batch.prepare() as prepared:
         assert {m["policy"]["graph_steps"] for m in prepared.report.candidate_measurements} == {16, 32, 64}
@@ -121,13 +122,14 @@ def test_tuning_selects_graph_chunks_on_two_real_devices():
 def test_tuning_restores_scene_module_rng_on_nonexecution_device():
     class Module(mw.SceneModule):
         def to_scene(self):
-            scene = simulation(steps=8).scene.clone(device="cuda:1")
-            scene.metadata["draw"] = float(torch.rand((), device="cuda:1"))
-            return scene
+            scene = place_scene(simulation(steps=8).scene, "cuda:1")
+            return scene.updated(metadata={**scene.metadata, "draw": float(torch.rand((), device="cuda:1"))})
     sim = mw.Simulation.fdtd(Module(), frequencies=(1e9,),
-        run_time=mw.TimeConfig(time_steps=8, dt=2e-11),
-        spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False)
-    batch = mw.Simulation.batch([sim], execution=mw.BatchExecution(
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=8, dt=2e-11),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False,
+        ))
+    batch = mw.Simulation.batch([sim], execution=mw.execution.BatchExecution(
         devices=("cuda:0",), batch_size=1, graph="off", tune=True))
     state = torch.cuda.get_rng_state("cuda:1")
     with batch.prepare():
@@ -142,12 +144,12 @@ def test_tuning_restores_scene_module_rng_on_nonexecution_device():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_tuning_rejects_capacity_and_propagates_physics_errors():
     sim = simulation(steps=8)
-    policy = mw.BatchExecution(devices=("cuda:0",), batch_size=1, tune=True, graph="off", memory_limit_bytes=1024)
+    policy = mw.execution.BatchExecution(devices=("cuda:0",), batch_size=1, tune=True, graph="off", memory_limit_bytes=1024)
     batch = mw.Simulation.batch([sim], execution=policy)
     with pytest.raises(torch.cuda.OutOfMemoryError, match="No Batch tuning candidate"):
         batch.prepare()
     batch.execution = replace(policy, memory_limit_bytes=128 * 1024**2)
-    batch.outputs = mw.BatchOutput(materials=True)
+    batch.outputs = mw.execution.BatchOutput(materials=True)
     with pytest.raises(NotImplementedError, match="material snapshots"):
         batch.prepare()
 
@@ -166,13 +168,14 @@ def test_tuning_does_not_publish_scene_module_buffer_or_python_state_updates(dev
             self.calls.add_(1)
             self.python_calls += 1
             scene = simulation(steps=8).scene
-            scene.metadata["calls"] = self.python_calls
-            return scene
+            return scene.updated(metadata={**scene.metadata, "calls": self.python_calls})
     module = Module()
     sim = mw.Simulation.fdtd(module, frequencies=(1e9,),
-        run_time=mw.TimeConfig(time_steps=8, dt=2e-11),
-        spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False)
-    batch = mw.Simulation.batch([sim], execution=mw.BatchExecution(
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=8, dt=2e-11),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False,
+        ))
+    batch = mw.Simulation.batch([sim], execution=mw.execution.BatchExecution(
         devices=devices, batch_size=1, graph="required", tune=True))
     calls = module.python_calls
     with batch.prepare() as prepared:

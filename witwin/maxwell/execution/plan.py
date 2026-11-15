@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import torch
+from .._stability import experimental
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ class ExecutionPlan:
 __all__ = ["ExecutionPlan", "ExecutionTask"]
 
 
+@experimental("batch")
 @dataclass(frozen=True)
 class BatchPlanReport:
     """Immutable JSON-backed planning snapshot with independent exported values."""
@@ -199,7 +201,8 @@ def build_batch_plan(batch):
             unresolved.append("actual dt requires compiled material stability bounds")
         output_plan = _batch_output_plan(scene, batch.outputs, simulation.frequencies)
         config = {f.name: getattr(simulation.config, f.name) for f in fields(simulation.config)
-                  if f.name not in ("cuda_graph", "enable_plot", "full_field_dft", "parallel")}
+                  if f.name not in ("cuda_graph", "enable_plot", "full_field_dft", "volume_dft_components",
+                                    "parallel", "material_cache")}
         sources = []
         changing_sources = set(batch.parameters.source_scales if batch.parameters is not None
                                else batch.variation.sources if batch.variation else ())

@@ -24,21 +24,21 @@ RULES=('bivariate_cauchy_v1','real_support_min_v1','positive_tail_min_v1','first
 def test_fft_config_canonical_policy_and_rejects_every_old_alias():
     for rule in RULES:
         for shift in ('dense','separable_v1'):
-            cfg=mw.FMMConfig(table_storage='fft_v1',near_storage='full_matrix',kernel_bound_rule=rule,shift_storage=shift,
-                max_order=12,kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5))
+            cfg=mw.mom.FMMConfig(table_storage='fft_v1',near_storage='full_matrix',kernel_bound_rule=rule,shift_storage=shift,
+                max_order=12,kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5))
             payload=cfg.payload()
             assert payload['version']=='cartesian_fmm_fft_config_v1'
-            assert mw.FMMConfig.restore(payload)==cfg
+            assert mw.mom.FMMConfig.restore(payload)==cfg
             for field in payload['parameters']:
                 bad=copy.deepcopy(payload);del bad['parameters'][field]
-                with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+                with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
             old=replace(cfg,table_storage='compact').payload()
             old['parameters']['table_storage']='fft_v1'
-            with pytest.raises(ValueError):mw.FMMConfig.restore(old)
+            with pytest.raises(ValueError):mw.mom.FMMConfig.restore(old)
             bad=copy.deepcopy(payload);bad['parameters']['table_storage']='compact'
-            with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
-    for params in ({'order':13},{'max_order':13,'kernel_error_budget':mw.KernelErrorBudget(1e-6,1e-5)}):
-        with pytest.raises(ValueError):mw.FMMConfig(table_storage='fft_v1',near_storage='full_matrix',**params)
+            with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
+    for params in ({'order':13},{'max_order':13,'kernel_error_budget':mw.mom.KernelErrorBudget(1e-6,1e-5)}):
+        with pytest.raises(ValueError):mw.mom.FMMConfig(table_storage='fft_v1',near_storage='full_matrix',**params)
     assert m2l_storage_bytes(12,8,'fft_v1')==77928
     assert m2l_storage_bytes(12,8,'compact')==66040
 
@@ -111,8 +111,8 @@ def test_fft_preallocation_native_guards_and_all_periodic_entrypoints(monkeypatc
         with pytest.raises(exc):CartesianFFTTranslation.create_many(value,2.,order,**kw)
     assert CartesianFFTTranslation.create_many(d[:0],2.,6)==()
     with pytest.raises(NotImplementedError,match='free space'):
-        mw.MoMConfig(operator_backend='fmm',fmm=mw.FMMConfig(table_storage='fft_v1'),riesz_storage='local_rwg_v1',
-            periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)),stopping=StoppingRule(preconditioner='rwg_diagonal'))
+        mw.mom.MoMConfig(operator_backend='fmm',fmm=mw.mom.FMMConfig(table_storage='fft_v1'),riesz_storage='local_rwg_v1',
+            periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)),stopping=StoppingRule(preconditioner='rwg_diagonal'))
     from witwin.maxwell.mom.fmm_periodic_order import plan_periodic_order, plan_periodic_parameters
     from witwin.maxwell.mom.fmm_periodic_capacity import plan_periodic_storage
     for func,kw in ((plan_periodic_order,dict(min_order=6,max_order=8,shells=2,exterior_budget=None,interior_budget=None)),
@@ -132,7 +132,7 @@ def test_fft_system_automatic_order_original_all_columns_capacity_and_fixed_grad
         compile_medium(mw.Material(eps_r=2.+i,mu_r=1.2+i*.1),3e8)) for i,x in enumerate((-.5,.5))]
     system=SurfaceSystem.create(bodies);integration=IntegrationConfig(order=3,singular_order=3)
     provider=ScalarSystemBlocks(system,exterior,integration)
-    op=MultipoleSystemActions(provider,order=6,max_order=8,kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5),
+    op=MultipoleSystemActions(provider,order=6,max_order=8,kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5),
         leaf_size=30,table_storage='fft_v1',shift_storage='separable_v1',kernel_bound_rule='direct_first_wave_min_v1')
     assert len(op.exterior.far)==2 and op.order_plan['attempts'][-1]['kernel_pass']
     actual_bytes=storage_bytes(multipole_action_tensors(op))
@@ -180,7 +180,7 @@ STORAGE_HASHES={
 
 def test_fft_integration_explicit_storage_configuration_identities():
     for (rule,shift),expected in STORAGE_HASHES.items():
-        cfg=mw.FMMConfig(table_storage='dense',near_storage='full_matrix',kernel_bound_rule=rule,shift_storage=shift)
+        cfg=mw.mom.FMMConfig(table_storage='dense',near_storage='full_matrix',kernel_bound_rule=rule,shift_storage=shift)
         data=json.dumps(cfg.payload(),sort_keys=True,separators=(",",":")).encode()
         assert hashlib.sha256(data).hexdigest()==expected
-        assert mw.FMMConfig.restore(cfg.payload())==cfg
+        assert mw.mom.FMMConfig.restore(cfg.payload())==cfg

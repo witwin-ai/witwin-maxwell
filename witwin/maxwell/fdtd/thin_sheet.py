@@ -10,41 +10,25 @@ advanced by a local Newmark solve with the foil's passive diffusion two-port.
 A fixed even Chebyshev polynomial and 2x2 block Jacobi keep the solve sparse
 and device resident.
 
-Execution scope (validated at preparation): native CUDA or CPU reference
-backend, real fields, single device, forward only, non-periodic boundaries, isotropic linear non-dispersive
+Execution scope (validated at preparation): native CUDA backend, real fields, single device, forward only, non-periodic boundaries, isotropic linear non-dispersive
 non-magnetic media in the patch, patch outside CPML, no electric sources,
 non-feed ports, lumped elements, wires, TFSF or other conductor owners on the patch.
 """
 from __future__ import annotations
 
 import math
-import os
 from copy import copy
 
 import numpy as np
 import torch
 
 from ..compiler.thin_sheet import _compile_thin_sheet, compile_thin_sheet, thin_sheet_structures
+from ..errors import UnsupportedFeatureError
+from ..scene import _prepared_declarations
 
 _E = ("Ex", "Ey", "Ez")
 _H = ("Hx", "Hy", "Hz")
 CFL_SAFETY = 0.985
-
-
-def _gather_torch(solver, plan, extra_buffer, values):
-    for name, positions, flat in plan["native"]:
-        values.index_copy_(0, positions, getattr(solver, name).reshape(-1).index_select(0, flat).double())
-    if len(plan["extra_positions"]):
-        values.index_copy_(0, plan["extra_positions"], extra_buffer.index_select(0, plan["extra_slots"]))
-    return values
-
-
-def _scatter_torch(solver, plan, extra_buffer, values):
-    for name, positions, flat in plan["native"]:
-        field = getattr(solver, name)
-        field.view(-1).index_copy_(0, flat, values.index_select(0, positions).to(field.dtype))
-    if len(plan["extra_positions"]):
-        extra_buffer.index_copy_(0, plan["extra_slots"], values.index_select(0, plan["extra_positions"]))
 
 
 def _gather_fused(solver, plan, extra_buffer, values):
@@ -58,64 +42,6 @@ def _scatter_fused(solver, plan, extra_buffer, values):
     native = plan["fused"]
     native["scatter"](*(getattr(solver, name) for name in native["names"]),
                       extra_buffer, native["components"], native["offsets"], values)
-
-
-def _copper_rhs_torch(self, solver, old, new):
-    cu, dt = self.copper, float(solver.dt)
-    count = cu["count"]
-    history = (cu["history"] @ cu["state"]).T
-    current, previous = self.chord_e.reshape(-1), self.chord_e_prev.reshape(-1)
-    mass, conductance = cu["mass"].reshape(-1), cu["conductance"].reshape(-1)
-    rhs = (mass / dt - conductance / 2) * current + self.chord_f.reshape(-1)
-    if self.feeds:
-        local_current = torch.einsum("tij,tj->ti", cu["local"][:count], self.chord_e)
-        # Feed matrices already include the side-average factors.
-        chord_area = self.feed_area
-        rhs = rhs - (chord_area[:, None] * local_current / 2
-                     + cu["area"][:count, None] * history[:count]).reshape(-1)
-        rhs = rhs - torch.mv(cu["feed_conductance"], current) / 2
-        for feed in self.feeds:
-            for column in feed["columns"]:
-                if column["kind"] == "chord":
-                    rhs[column["dofs"]] += column["conductance"] * column["u"] * feed["binding"].drive
-    else:
-        rhs = rhs - (cu["area"][:count, None] * (self.chord_e @ cu["effective"].T / 2 + history[:count])).reshape(-1)
-    rhs = rhs - dt / 4 * (torch.mv(cu["Acx"], new + 2 * old + self.x_prev)
-                          + torch.mv(cu["Acc"], 2 * current + previous))
-    return history, rhs
-
-
-def _chord_forcing_torch(self, solver, old, new, updated):
-    cu, dt = self.copper, float(solver.dt)
-    current, previous = self.chord_e.reshape(-1), self.chord_e_prev.reshape(-1)
-    self.chord_f.sub_((dt / 4 * (torch.mv(cu["Acx"], new + 2 * old + self.x_prev)
-                                   + torch.mv(cu["Acc"], updated + 2 * current + previous))).reshape(-1, 2))
-
-
-def _copper_state_torch(self, solver, old, new, updated, pair_old, pair_new):
-    cu, dt = self.copper, float(solver.dt)
-    trace_old = torch.cat((self.chord_e, pair_old)).T
-    trace_new = torch.cat((updated.reshape(-1, 2), pair_new)).T
-    state = cu["state"]
-    next_state = cu["decay"][:, None] * state + cu["drive"] @ (trace_new + trace_old)
-    for feed in self.feeds:
-        next_state.index_fill_(1, feed["ids"], 0)
-    midpoint_e, midpoint_state = (trace_new + trace_old) / 2, (next_state + state) / 2
-    loss = (cu["rates"][:, None] * midpoint_state.square()).sum(0)
-    loss = loss + (midpoint_e * (cu["D"] @ midpoint_e)).sum(0)
-    self.loss.add_(dt * torch.sum(loss * cu["area"]))
-    for feed in self.feeds:
-        binding = feed["binding"]
-        for index, column in enumerate(feed["columns"]):
-            binding.column_voltage[index] = torch.dot(midpoint_e.T[column["ids"]].reshape(-1), column["u"])
-        g = binding.column_conductance
-        binding.voltage.copy_(torch.dot(g, binding.column_voltage) / g.sum())
-        binding.current.copy_(torch.sum(g * (binding.drive - binding.column_voltage)))
-    state.copy_(next_state)
-    self.chord_e_prev.copy_(self.chord_e)
-    self.chord_e.copy_(updated.reshape(-1, 2))
-    self.x_prev.copy_(old)
-    new[cu["promoted_position"].reshape(-1)] = self.chord_e[cu["promoted_chords"]].reshape(-1)
 
 
 def _copper_rhs_fused(self, solver, old, new):
@@ -159,28 +85,6 @@ def _copper_state_fused(self, solver, old, new, updated, pair_old, pair_new):
         binding.current.copy_(torch.sum(g * (binding.drive - binding.column_voltage)))
 
 
-def _chord_solve_torch(self, rhs):
-    """Even Chebyshev residual s_k(mu)^2: 0 < P <= S^-1, with block Jacobi."""
-    cu = self.copper
-    if not cu["count"]:
-        return rhs.clone()
-    a, b, k = cu["chebyshev"]
-    theta, delta = (b+a)/2, (b-a)/2
-    sigma = theta / delta
-    y, residual = torch.zeros_like(rhs), rhs.clone()
-    for _ in range(2):
-        rho = 1 / sigma
-        direction = torch.mv(cu["R"], torch.mv(cu["R"], residual)) / theta
-        for step in range(k):
-            y = y + direction
-            residual = residual - torch.mv(cu["S"], direction)
-            if step + 1 < k:
-                rho_next = 1 / (2 * sigma - rho)
-                direction = rho_next * rho * direction + (2 * rho_next / delta) * torch.mv(cu["R"], torch.mv(cu["R"], residual))
-                rho = rho_next
-    return y
-
-
 def _chord_solve_fused(self, rhs):
     cu = self.copper
     if not cu["count"]:
@@ -214,30 +118,25 @@ def _sparse(rows, cols, vals, shape):
 
 
 def _require_scope(solver):
-    device = torch.device(solver.device)
-    if not (bool(getattr(solver, "cpu_reference", False)) or device.type == "cuda"):
-        raise NotImplementedError(
-            "Conformal thin sheets run on the native CUDA backend or the explicit CPU reference backend.")
     for axis in "xyz":
-        if solver.scene.boundary.axis_kind(axis) in ("periodic", "bloch"):
-            raise NotImplementedError("Conformal thin sheets do not yet support periodic or Bloch boundaries.")
+        if solver.scene.scene.boundary.axis_kind(axis) in ("periodic", "bloch"):
+            raise UnsupportedFeatureError("Conformal thin sheets do not yet support periodic or Bloch boundaries.",
+                                          feature="geometry.surface_mesh", method="fdtd")
     for name in ("complex_fields_enabled", "full_aniso_enabled", "nonlinear_enabled", "modulation_enabled",
                  "gyromagnetic_enabled", "breakdown_enabled", "dispersive_enabled", "magnetic_dispersive_enabled",
                  "tfsf_enabled"):
         if bool(getattr(solver, name, False)):
-            raise NotImplementedError(f"Conformal thin sheets do not support {name.removesuffix('_enabled')} execution.")
-    if getattr(solver.scene, "coordinates", None) is not None:
-        raise NotImplementedError("Conformal thin sheets require Cartesian coordinates.")
+            raise UnsupportedFeatureError(f"Conformal thin sheets do not support {name.removesuffix('_enabled')} execution.",
+                                          feature="geometry.surface_mesh", method="fdtd")
+    if getattr(solver.scene.scene, "coordinates", None) is not None:
+        raise UnsupportedFeatureError("Conformal thin sheets require Cartesian coordinates.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     if getattr(solver.scene, "_fdtd_shard_layout", None) is not None:
-        raise NotImplementedError("Conformal thin sheets require single-device execution.")
+        raise UnsupportedFeatureError("Conformal thin sheets require single-device execution.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     if getattr(solver, "_wire_runtime", None) is not None:
-        raise NotImplementedError("Conformal thin sheets do not yet support wires in the same scene.")
-
-
-def _parents(complex_, kind):
-    if kind == "e":
-        return complex_.e_component, complex_.e_index
-    return complex_.h_component, complex_.h_index
+        raise UnsupportedFeatureError("Conformal thin sheets do not yet support wires in the same scene.",
+                                      feature="geometry.surface_mesh", method="fdtd")
 
 
 def _gather_native(solver, names, components, index, dtype=torch.float64):
@@ -277,9 +176,10 @@ def _side_materials(solver, c):
             continue
         e_side, s_side = eps[ring], sigma[ring]
         if (np.ptp(e_side) > 1e-6 * e_side.max()) or (np.ptp(s_side) > 1e-6 * max(s_side.max(), 1e-30)):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Conformal thin sheets require a homogeneous isotropic medium on each side within two cells of "
-                "the sheet; a material boundary there is a mixed cut cell the runtime cannot represent.")
+                "the sheet; a material boundary there is a mixed cut cell the runtime cannot represent.",
+                feature="geometry.surface_mesh", method="fdtd")
         media[side] = (float(e_side[0]), float(s_side[0]))
     # Unknowns whose Yee dual box lies wholly on one side cannot carry a value
     # averaged across the sheet: a deviation from their side medium is a
@@ -303,8 +203,9 @@ def _side_materials(solver, c):
         select = one_sided & (c.e_side == side)
         if (np.any(np.abs(eps[select] - eps_side) > 1e-6 * eps_side)
                 or np.any(np.abs(sigma[select] - sigma_side) > 1e-6 * max(abs(sigma_side), 1e-30))):
-            raise NotImplementedError(
-                "A third material enters the thin-sheet cut cells; mixed sub-cell media are not represented.")
+            raise UnsupportedFeatureError(
+                "A third material enters the thin-sheet cut cells; mixed sub-cell media are not represented.",
+                feature="geometry.surface_mesh", method="fdtd")
     if len(media) == 2:
         bounds_e = sorted((media[-1][0], media[1][0]))
         bounds_s = sorted((media[-1][1], media[1][1]))
@@ -313,8 +214,9 @@ def _side_materials(solver, c):
         if (np.any(eps[close] < bounds_e[0] * (1 - tolerance)) or np.any(eps[close] > bounds_e[1] * (1 + tolerance))
                 or np.any(sigma[close] < bounds_s[0] - tolerance * max(bounds_s[1], 1e-30))
                 or np.any(sigma[close] > bounds_s[1] + tolerance * max(bounds_s[1], 1e-30))):
-            raise NotImplementedError(
-                "A third material enters the thin-sheet cut cells; mixed sub-cell media are not represented.")
+            raise UnsupportedFeatureError(
+                "A third material enters the thin-sheet cut cells; mixed sub-cell media are not represented.",
+                feature="geometry.surface_mesh", method="fdtd")
     for side, (eps_side, sigma_side) in media.items():
         mask = (c.e_side == side) & near
         eps[mask], sigma[mask] = eps_side, sigma_side
@@ -363,8 +265,9 @@ def prepare_thin_sheet_time_step(solver):
         material = structure.material
         if any(torch.is_tensor(value) and value.requires_grad
                for value in (getattr(material, "thickness", None), getattr(material, "conductivity", None))):
-            raise NotImplementedError("Conformal thin sheets are forward-only; trainable copper parameters are not "
-                                      "supported.")
+            raise UnsupportedFeatureError("Conformal thin sheets are forward-only; trainable copper parameters are not "
+                                      "supported.",
+                                          feature="geometry.surface_mesh", method="fdtd")
     from scipy.sparse.linalg import eigsh
     import scipy.sparse as sp
     complexes = []
@@ -380,7 +283,8 @@ def prepare_thin_sheet_time_step(solver):
             if geometry is None:
                 # On-sheet PEC holds change the mass partition inputs.
                 chord_scene = copy(solver.scene)
-                chord_scene.structures = tuple(chord_structure if s is structure else s for s in solver.scene.structures)
+                chord_scene.scene = _prepared_declarations(solver.scene.scene, structures=tuple(
+                    chord_structure if s is structure else s for s in solver.scene.scene.structures))
                 geometry = compile_thin_sheet(chord_scene, chord_structure)
             else:
                 geometry.name = str(getattr(chord_structure, "name", None) or "thin_sheet")
@@ -411,8 +315,9 @@ def prepare_thin_sheet_time_step(solver):
         worst = max(worst, value)
         complexes.append(complex_)
     feed_names = {f.port_name for c in complexes for f in c.feeds}
-    if any(port.name not in feed_names for port in solver.scene.ports):
-        raise NotImplementedError("Conformal thin sheets support only sheet gap feeds as ports in the same scene.")
+    if any(port.name not in feed_names for port in solver.scene.scene.ports):
+        raise UnsupportedFeatureError("Conformal thin sheets support only sheet gap feeds as ports in the same scene.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     limit = 2.0 / math.sqrt(worst)
     requested = getattr(solver, "_requested_dt", None)
     if float(solver.dt) > CFL_SAFETY * limit:
@@ -491,10 +396,6 @@ class _SheetRuntime:
         c = complex_
         device = torch.device(solver.device)
         self.device = device
-        kernel = os.environ.get("WITWIN_MAXWELL_THIN_SHEET_KERNEL", "fused")
-        if kernel not in ("fused", "torch"):
-            raise ValueError("WITWIN_MAXWELL_THIN_SHEET_KERNEL must be fused or torch.")
-        self._fused_kernels = device.type == "cuda" and kernel == "fused"
         dt = float(solver.dt)
         nE, nH = len(c.e_volume), len(c.h_area)
         K = (_sparse(c.k_rows, c.k_cols, c.k_vals, (nH, nE)) if c.is_pec and not c.feeds else
@@ -522,15 +423,18 @@ class _SheetRuntime:
             promoted = c.chord_trace[c.chord_face[:, 0] < 0] - c.statistics["active_split_faces"]
             dynamic &= ~np.isin(pe, c.trace_dofs[promoted])
         if _absorber_overlap(solver, c, pe, special_h):
-            raise NotImplementedError("A thin-sheet patch intersects the CPML absorber; keep the sheet at least "
-                                      "two cells inside the physical domain.")
+            raise UnsupportedFeatureError("A thin-sheet patch intersects the CPML absorber; keep the sheet at least "
+                                      "two cells inside the physical domain.",
+                                          feature="geometry.surface_mesh", method="fdtd")
         if np.any(cb_native[pe][dynamic] == 0):
-            raise NotImplementedError("A thin-sheet patch edge overlaps a PEC-suppressed electric update.")
+            raise UnsupportedFeatureError("A thin-sheet patch edge overlaps a PEC-suppressed electric update.",
+                                          feature="geometry.surface_mesh", method="fdtd")
         ca = (eps - 0.5 * sigma * dt) / (eps + 0.5 * sigma * dt)
         cb = dt / (eps + 0.5 * sigma * dt)
         ph = special_h
         if not (np.allclose(da[ph], 1.0, rtol=0, atol=1e-6) and np.allclose(db[ph], dt / solver.mu0, rtol=2e-6, atol=0)):
-            raise NotImplementedError("Thin-sheet patch faces require non-magnetic, magnetically lossless media.")
+            raise UnsupportedFeatureError("Thin-sheet patch faces require non-magnetic, magnetically lossless media.",
+                                          feature="geometry.surface_mesh", method="fdtd")
         # H update: H = Da H - Db/A * (Kh @ E[h_cols])
         Kh_local = Kh[:, self.h_cols].tocsr()
         Kh_local = sp.diags(db[ph] / c.h_area[ph]) @ Kh_local
@@ -654,7 +558,7 @@ class _SheetRuntime:
         extra = c.e_extra if kind == "e" else c.h_extra
         names = _E if kind == "e" else _H
         subset = np.asarray(subset, dtype=np.int64)
-        offsets = extra[subset].copy() if self._fused_kernels else None
+        offsets = extra[subset].copy()
         native = []
         for comp in range(3):
             mask = (comps[subset] == comp) & (extra[subset] < 0)
@@ -665,28 +569,25 @@ class _SheetRuntime:
             ijk = index[subset[positions]]
             flat = (ijk[:, 0] * shape[1] + ijk[:, 1]) * shape[2] + ijk[:, 2]
             native.append((names[comp], self._tensor(positions, torch.int64), self._tensor(flat, torch.int64)))
-            if self._fused_kernels:
-                offsets[positions] = flat
+            offsets[positions] = flat
         extra_positions = np.flatnonzero(extra[subset] >= 0)
-        plan = dict(size=len(subset), native=native, extra_positions=self._tensor(extra_positions, torch.int64),
-                    extra_slots=self._tensor(extra[subset[extra_positions]], torch.int64))
-        if self._fused_kernels:
-            from .cuda.backend import get_compiled_extension
-            extension = get_compiled_extension()
-            components = np.where(extra[subset] >= 0, 3, comps[subset])
-            plan["fused"] = dict(names=names, components=self._tensor(components, torch.int32),
-                                 offsets=self._tensor(offsets, torch.int64),
-                                 gather=extension.thin_sheet_gather, scatter=extension.thin_sheet_scatter)
-        return plan
+        from .cuda.backend import get_compiled_extension
+        extension = get_compiled_extension()
+        components = np.where(extra[subset] >= 0, 3, comps[subset])
+        return dict(size=len(subset), native=native, extra_positions=self._tensor(extra_positions, torch.int64),
+                    extra_slots=self._tensor(extra[subset[extra_positions]], torch.int64),
+                    fused=dict(names=names, components=self._tensor(components, torch.int32),
+                               offsets=self._tensor(offsets, torch.int64),
+                               gather=extension.thin_sheet_gather, scatter=extension.thin_sheet_scatter))
 
     @staticmethod
     def gather(solver, plan, extra_buffer, out=None):
         values = torch.empty(plan["size"], dtype=torch.float64, device=extra_buffer.device) if out is None else out
-        return (_gather_fused if "fused" in plan else _gather_torch)(solver, plan, extra_buffer, values)
+        return _gather_fused(solver, plan, extra_buffer, values)
 
     @staticmethod
     def scatter(solver, plan, extra_buffer, values):
-        (_scatter_fused if "fused" in plan else _scatter_torch)(solver, plan, extra_buffer, values)
+        _scatter_fused(solver, plan, extra_buffer, values)
 
     def _init_copper(self, solver, eps, sigma, K, cb, pe):
         """Foil two-port arithmetic on independent chords and exact on-sheet pairs."""
@@ -839,8 +740,7 @@ class _SheetRuntime:
             degree = _chebyshev_degree(b / a, 1e-12)
             cu.update(R=self._csr(R), chebyshev=(a, b, degree), spectrum=(low, high),
                       error_bound=1 / math.cosh(degree * math.acosh((b+a)/(b-a))) ** 2)
-        if self._fused_kernels:
-            self._init_copper_fused()
+        self._init_copper_fused()
 
     def _init_copper_fused(self):
         from .cuda.backend import get_compiled_extension
@@ -911,15 +811,13 @@ class _SheetRuntime:
         if self.copper is not None:
             cu = self.copper
             count = cu["count"]
-            history, rhs = (_copper_rhs_fused if "fused" in cu else _copper_rhs_torch)(
-                self, solver, old, new)
+            history, rhs = _copper_rhs_fused(self, solver, old, new)
             current, previous = self.chord_e.reshape(-1), self.chord_e_prev.reshape(-1)
             extrapolated = 2 * current - previous
             updated = extrapolated + self.chord_solve(rhs - torch.mv(cu["S"], extrapolated))
             updated = updated * cu["held"].reshape(-1)
             new.sub_(torch.mv(cu["Q"], updated))
-            (_chord_forcing_fused if "fused" in cu else _chord_forcing_torch)(
-                self, solver, old, new, updated)
+            _chord_forcing_fused(self, solver, old, new, updated)
             self.h_new.sub_(torch.mv(cu["h_chord"], updated / 4))
             self.scatter(solver, self.plan_patch_h, self.h_extra, self.h_new)
             position = cu["pair_position"]
@@ -936,13 +834,12 @@ class _SheetRuntime:
                         coupled_rhs = torch.mv(column["rhs"], pair_old[pair].reshape(-1)) + raw_forcing + source
                         pair_new[pair] = torch.mv(column["inverse"], coupled_rhs).reshape(-1, 2)
             new[position.reshape(-1)] = pair_new.reshape(-1)
-            (_copper_state_fused if "fused" in cu else _copper_state_torch)(
-                self, solver, old, new, updated, pair_old, pair_new)
+            _copper_state_fused(self, solver, old, new, updated, pair_old, pair_new)
         self.scatter(solver, self.plan_patch_e, self.e_extra, new)
 
     def chord_solve(self, rhs):
         """Even Chebyshev residual s_k(mu)^2: 0 < P <= S^-1, with block Jacobi."""
-        return (_chord_solve_fused if "fused" in self.copper else _chord_solve_torch)(self, rhs)
+        return _chord_solve_fused(self, rhs)
 
     def state_tensors(self):
         """Mutable private state included in graph-capture snapshots."""
@@ -1000,23 +897,28 @@ def _reject_overlaps(solver, runtimes):
                 continue
             nonzero = torch.nonzero(values != 0).cpu().numpy() + offsets
             if any(tuple(map(int, point)) in patch[name] for point in nonzero):
-                raise NotImplementedError("A source overlaps a conformal thin-sheet patch; move the source away from the sheet.")
+                raise UnsupportedFeatureError("A source overlaps a conformal thin-sheet patch; move the source away from the sheet.",
+                                              feature="geometry.surface_mesh", method="fdtd")
     for entry in getattr(solver, "_copper_foils", ()):
         name = entry["electric_name"].removesuffix("_imag")
         for point in entry["indices"].cpu().numpy():
             if tuple(map(int, point)) in patch[name]:
-                raise NotImplementedError("A conformal thin sheet overlaps an axis-aligned CopperFoil interface.")
+                raise UnsupportedFeatureError("A conformal thin sheet overlaps an axis-aligned CopperFoil interface.",
+                                              feature="geometry.surface_mesh", method="fdtd")
     cut = getattr(solver, "_cut_surface", None)
     if cut is not None:
         for name, group in cut["groups"].items():
             for point in group["indices"].cpu().numpy():
                 if tuple(map(int, point)) in patch[name]:
-                    raise NotImplementedError("A conformal thin sheet overlaps a PEC cut-surface constraint.")
+                    raise UnsupportedFeatureError("A conformal thin sheet overlaps a PEC cut-surface constraint.",
+                                                  feature="geometry.surface_mesh", method="fdtd")
     if getattr(solver, "_surface_impedance", None):
-        raise NotImplementedError("Conformal thin sheets do not yet support surface-impedance boundaries in the same scene.")
+        raise UnsupportedFeatureError("Conformal thin sheets do not yet support surface-impedance boundaries in the same scene.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     _warn_side_observers(solver, runtimes)
     if getattr(solver, "_lumped_element_runtimes", ()):
-        raise NotImplementedError("Conformal thin sheets do not yet support lumped elements in the same scene.")
+        raise UnsupportedFeatureError("Conformal thin sheets do not yet support lumped elements in the same scene.",
+                                      feature="geometry.surface_mesh", method="fdtd")
 
 
 def _warn_side_observers(solver, runtimes):

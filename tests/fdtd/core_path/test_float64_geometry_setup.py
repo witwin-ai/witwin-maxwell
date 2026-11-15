@@ -16,6 +16,8 @@ from witwin.maxwell.compiler import materials
 from witwin.maxwell.compiler.accel import conductors, dispatch, poles
 from witwin.maxwell.compiler.accel.geometry import descriptors
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.scene import place_scene
+from witwin.maxwell.scene import _prepared_declarations
 
 
 @contextmanager
@@ -30,24 +32,23 @@ def enabled(value):
 @pytest.mark.parametrize("name", FLOAT64_SCENES)
 @pytest.mark.parametrize("samples,averaging", MODES)
 def test_float64_setup_admission_host(name, samples, averaging):
-    scene = scene_for(name, device="cpu").clone(
-        subpixel_samples=mw.SubpixelSpec(samples=samples, averaging=averaging))
-    scene = prepare_scene(scene)
+    scene = scene_for(name, device="cpu").updated(subpixel=mw.SubpixelSpec(samples=samples, averaging=averaging))
+    scene = prepare_scene(scene, device="cpu")
     # Only the device label changes: this predicate must never allocate on CUDA.
     scene.device = "cuda"
     with enabled(True), patch("torch.cuda._lazy_init", side_effect=AssertionError("CUDA touched")):
-        assert dispatch.eligible(scene, 1., 1., scene.subpixel)
-    assert not dispatch._fp32_geometry(scene.structures[0].geometry)
-    assert not conductors._qualified(scene.structures)
+        assert dispatch.eligible(scene, 1., 1., scene.scene.subpixel)
+    assert not dispatch._fp32_geometry(scene.scene.structures[0].geometry)
+    assert not conductors._qualified(scene.scene.structures)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_lower_precision_geometry_still_refused(dtype):
-    scene = prepare_scene(scene_for("float64_box", device="cpu"))
-    scene.structures[0].geometry.size = scene.structures[0].geometry.size.to(dtype)
+    scene = prepare_scene(scene_for("float64_box", device="cpu"), device="cpu")
+    scene.scene.structures[0].geometry.size = scene.scene.structures[0].geometry.size.to(dtype)
     scene.device = "cuda"
     with enabled(True), patch("torch.cuda._lazy_init", side_effect=AssertionError("CUDA touched")):
-        assert not dispatch.eligible(scene, 1., 1., scene.subpixel)
+        assert not dispatch.eligible(scene, 1., 1., scene.scene.subpixel)
 
 
 @pytest.mark.parametrize("boolean", [False, True])
@@ -56,24 +57,24 @@ def test_float64_mesh_still_refused(boolean):
     geometry = mw.Mesh(vertices.double(), faces, recenter=False)
     assert geometry.vertices.dtype == torch.float64
     if boolean:
-        geometry = mw.Union(geometry, mw.Sphere(device="cpu"))
-    scene = prepare_scene(scene_for("float64_box", device="cpu"))
-    scene.structures = [replace(scene.structures[0], geometry=geometry)]
+        geometry = mw.geometry.Union(geometry, mw.Sphere(device="cpu"))
+    scene = prepare_scene(scene_for("float64_box", device="cpu"), device="cpu")
+    scene.scene = _prepared_declarations(scene.scene, structures=[replace(scene.scene.structures[0], geometry=geometry)])
     scene.device = "cuda"
     with enabled(True), patch("torch.cuda._lazy_init", side_effect=AssertionError("CUDA touched")):
-        assert not dispatch.eligible(scene, 1., 1., scene.subpixel)
+        assert not dispatch.eligible(scene, 1., 1., scene.scene.subpixel)
 
 
 @pytest.mark.parametrize("name", FLOAT64_SCENES[:5])
 def test_float64_pole_ownership_still_refused(name):
-    scene = prepare_scene(scene_for(name, device="cpu"))
-    scene.subpixel = mw.SubpixelSpec(samples=4, averaging="kottke_edge")
+    scene = prepare_scene(scene_for(name, device="cpu"), device="cpu")
+    scene.scene = _prepared_declarations(scene.scene, subpixel=mw.SubpixelSpec(samples=4, averaging="kottke_edge"))
     layout = materials._build_dispersive_layout(scene)
     model = materials._new_material_model(scene, layout, eps_fill=1., mu_fill=1.)
     with patch("torch.cuda._lazy_init", side_effect=AssertionError("CUDA touched")):
         assert poles.scope_reason(scene, model, layout, eps_background=1., mu_background=1.,
             region_densities=(), geometry_periodic_shifts={
-                id(s.geometry): ((0.,), (0.,), (0.,)) for s in scene.structures}) == "geometry_dtype"
+                id(s.geometry): ((0.,), (0.,), (0.,)) for s in scene.scene.structures}) == "geometry_dtype"
 
 
 @pytest.mark.parametrize("name", FLOAT64_SCENES)
@@ -100,11 +101,11 @@ def test_descriptor_casts_before_halving(kind):
 
 @pytest.mark.parametrize("name", F1_SCENES)
 def test_f1_gate_builds_original_cpu_sample(name):
-    scene = prepare_scene(scene_for(name, device="cpu"))
-    assert len(scene.monitors) == 16384
+    scene = prepare_scene(scene_for(name, device="cpu"), device="cpu")
+    assert len(scene.scene.monitors) == 16384
     scene.device = "cuda"
     with enabled(True), patch("torch.cuda._lazy_init", side_effect=AssertionError("CUDA touched")):
-        assert dispatch.eligible(scene, 1., 1., scene.subpixel)
+        assert dispatch.eligible(scene, 1., 1., scene.scene.subpixel)
 
 
 def test_setup_tensor_table_records_normalized_errors(tmp_path):
@@ -125,10 +126,9 @@ def test_cuda_float64_material_setup_t0(name, samples, averaging, authored_devic
     from witwin.maxwell.compiler.accel.primitives import sampling_geometry
     from witwin.maxwell.compiler.subpixel import _subsample_fill_fraction
 
-    scene = scene_for(name, device=authored_device).clone(
-        device="cuda", subpixel_samples=mw.SubpixelSpec(samples=samples, averaging=averaging))
-    prepared = prepare_scene(scene)
-    geometry = prepared.structures[0].geometry
+    scene = place_scene(scene_for(name, device=authored_device).updated(subpixel=mw.SubpixelSpec(samples=samples, averaging=averaging)), "cuda")
+    prepared = prepare_scene(scene, device="cuda")
+    geometry = prepared.scene.structures[0].geometry
     queries = torch.meshgrid(*(getattr(prepared, a) for a in "xyz"), indexing="ij")
     spacing = (.125 / samples,) * 3
     with enabled(False):
@@ -146,7 +146,7 @@ def test_cuda_float64_material_setup_t0(name, samples, averaging, authored_devic
     with enabled(False):
         expected = materials.compile_material_model(prepared)
     with enabled(True):
-        actual = dispatch.try_compile_material_model(prepared, 1., 1., prepared.subpixel, True)
+        actual = dispatch.try_compile_material_model(prepared, 1., 1., prepared.scene.subpixel, True)
     assert actual is not dispatch.UNCHANGED
     rows = setup_rule2_rows(snapshot(expected), snapshot(actual))
     record_property("tensor_tiers", rows)

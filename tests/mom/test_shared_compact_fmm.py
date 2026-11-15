@@ -51,26 +51,30 @@ def test_shared_catalog_exact_native_bits_signed_zero_and_missing_reverse(tmp_pa
 
 def test_shared_config_all_fields_old_versions_and_early_public_rejection(tmp_path):
     for near in ('full_matrix', 'scalar_dk_v1', 'scalar_reciprocal_dk_v1'):
-        config = mw.FMMConfig(table_storage=MODE, near_storage=near, shift_storage='separable_v1')
+        config = mw.mom.FMMConfig(table_storage=MODE, near_storage=near, shift_storage='separable_v1')
         payload = json.loads(json.dumps(config.payload()))
         assert payload['version'] == 'cartesian_fmm_shared_compact_config_v1'
-        assert mw.FMMConfig.restore(payload) == config
+        assert mw.mom.FMMConfig.restore(payload) == config
         for field in payload['parameters']:
             bad = copy.deepcopy(payload); del bad['parameters'][field]
-            with pytest.raises(ValueError): mw.FMMConfig.restore(bad)
+            with pytest.raises(ValueError): mw.mom.FMMConfig.restore(bad)
         for version in ('cartesian_fmm_reciprocal_dk_config_v1', 'cartesian_fmm_scalar_dk_config_v1',
                         'cartesian_fmm_config_v7', 'cartesian_fmm_positive_tail_config_v1'):
             bad = copy.deepcopy(payload); bad['version'] = version
-            with pytest.raises(ValueError): mw.FMMConfig.restore(bad)
+            with pytest.raises(ValueError): mw.mom.FMMConfig.restore(bad)
         bad = copy.deepcopy(payload); bad['parameters']['table_storage'] = 'compact'
-        with pytest.raises(ValueError): mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError): mw.mom.FMMConfig.restore(bad)
         options = dict(operator_backend='fmm', fmm=config, riesz_storage='local_rwg_v1', stopping=StoppingRule(preconditioner='rwg_diagonal'))
         with pytest.raises(NotImplementedError, match='free space'):
-            mw.MoMConfig(periodic=mw.MoMPeriodicConfig(((1., 0., 0.),)), **options)
+            mw.mom.MoMConfig(periodic=mw.mom.MoMPeriodicConfig(((1., 0., 0.),)), **options)
         with pytest.raises(ValueError, match='complex128'):
-            mw.MoMConfig(dtype=torch.complex64, **options)
-    assert mw.FMMConfig().payload()['version'] == 'cartesian_fmm_config_v7'
-    assert mw.FMMConfig(near_storage='scalar_reciprocal_dk_v1').payload()['version'] == 'cartesian_fmm_reciprocal_dk_config_v1'
+            mw.mom.MoMConfig(dtype=torch.complex64, **options)
+    # 9dafc627f made this shared compact storage the default; the pre-default
+    # versions stay reachable when the old storage is selected explicitly.
+    assert mw.mom.FMMConfig().payload()['version'] == 'cartesian_fmm_shared_compact_config_v1'
+    legacy = dict(table_storage='dense', shift_storage='dense')
+    assert mw.mom.FMMConfig(**legacy, near_storage='full_matrix').payload()['version'] == 'cartesian_fmm_config_v7'
+    assert mw.mom.FMMConfig(**legacy, near_storage='scalar_reciprocal_dk_v1').payload()['version'] == 'cartesian_fmm_reciprocal_dk_config_v1'
     (tmp_path/'config.json').write_text(json.dumps(dict(new_version=payload['version'],
         all_fields_required=True, old_versions_preserved=True, periodic_and_complex64_rejected=True,
         production_qualification=False), indent=2)+'\n')
@@ -82,7 +86,7 @@ def complete():
     op = MultipoleSystemActions(provider, order=8, quadrature_order=12, leaf_size=2,
         separation_ratio=.25, table_storage=MODE, shift_storage='separable_v1',
         near_storage='scalar_reciprocal_dk_v1', kernel_bound_rule='direct_first_wave_min_v1',
-        kernel_error_budget=mw.KernelErrorBudget(1e-6, 1e-5), near_action_batch=2)
+        kernel_error_budget=mw.mom.KernelErrorBudget(1e-6, 1e-5), near_action_batch=2)
     # Independent original compact coefficient generation for every logical
     # FAR pair. The already integrated near objects and original projections
     # are shared; no near reintegration or new global physics oracle is implied.
@@ -93,7 +97,7 @@ def complete():
         pairs = [(a, b) for a, b, _ in region.far]
         originals = ElectromagneticM2L.create_many(region.test, region.source, pairs, region.media[0],
             separation_ratio=.25, table_storage='compact', row_batch=region.m2l_row_batch,
-            kernel_bound_rule='direct_first_wave_min_v1', error_budget=mw.KernelErrorBudget(1e-6, 1e-5))
+            kernel_bound_rule='direct_first_wave_min_v1', error_budget=mw.mom.KernelErrorBudget(1e-6, 1e-5))
         ordered.far = tuple((a, b, coupling) for (a, b), coupling in zip(pairs, originals, strict=True))
         ordered.table_storage = 'compact'
         ordered.table_bytes = len(pairs)*m2l_storage_bytes(8, 8, 'compact')
@@ -183,7 +187,7 @@ def test_shared_order_plan_preserves_all_bounds_plain_and_RWG(complete, tmp_path
         options = dict(rwg_statistics=statistics, rwg_absolute_budget=1e-4,
                        balancing_impedance=abs(provider.exterior.eta)) if rwg else {}
         plans = [plan_multipole_order(tuple(zip(trees, (provider.exterior, *[b.interior for b in provider.system.bodies]), strict=True)),
-            mw.KernelErrorBudget(1e-6, 1e-5), min_order=8, max_order=8, separation_ratio=.25,
+            mw.mom.KernelErrorBudget(1e-6, 1e-5), min_order=8, max_order=8, separation_ratio=.25,
             table_storage=mode, kernel_bound_rule='direct_first_wave_min_v1', **options)
             for mode in (MODE, 'compact')]
         assert plans[0]['table_bytes'] == op.table_bytes < plans[1]['table_bytes']
@@ -198,32 +202,32 @@ def test_shared_order_plan_preserves_all_bounds_plain_and_RWG(complete, tmp_path
 def test_public_shared_compact_solve_exact_restore_and_policy_binding(tmp_path, monkeypatch):
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.01, position=(x, 0., 0.)),
         mw.Material(eps_r=2.+i, mu_r=1.2+.1*i)) for i, x in enumerate((-.2, .2))], sources=[mw.PlaneWave()])
-    fmm = mw.FMMConfig(order=6, max_order=10, kernel_error_budget=mw.KernelErrorBudget(1e-6, 1e-5),
+    fmm = mw.mom.FMMConfig(order=6, max_order=10, kernel_error_budget=mw.mom.KernelErrorBudget(1e-6, 1e-5),
         kernel_bound_rule='direct_first_wave_min_v1', table_storage=MODE, shift_storage='separable_v1',
         near_storage='scalar_reciprocal_dk_v1', leaf_size=8, separation_ratio=.25,
         leaf_factor_kernel='primary', leaf_factor_max_edges=16)
-    config = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=4, singular_order=3),
+    config = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=4, singular_order=3),
         operator_backend='fmm', fmm=fmm, riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal', fallback='none',
             rtol=1e-12, atol=0., maxiter=240, restart=120))
-    result = mw.Simulation.mom(scene, frequency=9e7, config=config).run()
+    result = mw.Simulation.mom(scene, frequencies=9e7, config=config).run()
     stats = result.stats(); assert stats['converged'] and stats['error_budget']['checked']
-    actions = result.surface_currents.handle.actions
+    actions = mw.mom.surface_currents(result).handle.actions
     assert actions.exterior.far and actions.exterior.table_storage == MODE
     assert actions.capacity_plan['table_storage'] == MODE
-    current = result.surface_currents.scattered_coefficients
+    current = mw.mom.surface_currents(result).scattered_coefficients
     path = tmp_path/'shared-compact-result.pt'; result.save(path)
     def forbidden(*args, **kwargs): raise AssertionError('Shared compact restore constructed or solved an operator')
     with monkeypatch.context() as patch:
         for cls in (MultipoleOperator, MultipoleSystemActions, SystemOperator): patch.setattr(cls, '__init__', forbidden)
         patch.setattr(torch.linalg, 'solve', forbidden)
         restored = mw.Result.load(path, scene=scene)
-        assert restored.surface_currents.config.fmm == fmm
-        torch.testing.assert_close(restored.surface_currents.scattered_coefficients, current, rtol=0, atol=0)
+        assert mw.mom.surface_currents(restored).config.fmm == fmm
+        torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients, current, rtol=0, atol=0)
         for field, value in (('near_storage', 'scalar_dk_v1'), ('table_storage', 'compact'),
                              ('kernel_bound_rule', 'bivariate_cauchy_v1'), ('shift_storage', 'dense')):
-            bad = copy.deepcopy(result.surface_currents.snapshot()); bad['fmm_config']['parameters'][field] = value
-            with pytest.raises(ValueError): SurfaceData.restore(bad, scene, 9e7)
+            bad = copy.deepcopy(mw.mom.surface_currents(result).snapshot()); bad['fmm_config']['parameters'][field] = value
+            with pytest.raises(ValueError): SurfaceData.restore(bad, scene, 9e7, 'cuda')
     (tmp_path/'public.json').write_text(json.dumps(dict(artifact=str(path),
         artifact_sha256=hashlib.sha256(path.read_bytes()).hexdigest(), fmm_config=fmm.payload(), stats=stats,
         selected_order=actions.order_plan['selected_order'], capacity=actions.capacity_plan,

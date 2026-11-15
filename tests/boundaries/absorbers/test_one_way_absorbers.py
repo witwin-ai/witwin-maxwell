@@ -45,36 +45,36 @@ _PLANE = (0.0, _INF, _INF)
 
 
 def test_mur_abc_order_and_permittivity_validation():
-    assert mw.MurABC().order == 1
-    assert mw.MurABC(order=2, permittivity=2.25).permittivity == 2.25
+    assert mw.fdtd.MurABC().order == 1
+    assert mw.fdtd.MurABC(order=2, permittivity=2.25).permittivity == 2.25
     for kwargs in ({"order": 3}, {"order": True}, {"permittivity": 0.5}, {"permittivity": math.nan}):
         with pytest.raises(ValueError):
-            mw.MurABC(**kwargs)
+            mw.fdtd.MurABC(**kwargs)
 
 
 def test_mode_abc_validation():
-    spec = mw.ModeABC(frequency_range=(1e9, 2e9), order=2)
+    spec = mw.fdtd.ModeABC(frequency_range=(1e9, 2e9), order=2)
     assert spec.is_broadband and spec.frequency is None
     with pytest.raises(ValueError):
-        mw.ModeABC(frequency=1e9, frequency_range=(1e9, 2e9))
+        mw.fdtd.ModeABC(frequency=1e9, frequency_range=(1e9, 2e9))
     with pytest.raises(ValueError):
-        mw.ModeABC(frequency_range=(2e9, 1e9))
+        mw.fdtd.ModeABC(frequency_range=(2e9, 1e9))
     with pytest.raises(ValueError):
-        mw.ModeABC(mode_index=-1)
+        mw.fdtd.ModeABC(mode_index=-1)
     with pytest.raises(ValueError):
-        mw.ModeABC(frequency_range=(1e9, 2e9), order=3)
+        mw.fdtd.ModeABC(frequency_range=(1e9, 2e9), order=3)
 
 
 def test_boundary_spec_normalizes_abc_parameters():
     second = mw.BoundarySpec.mur(order=2, permittivity=1.5)
-    assert second.kind == "mur" and second.mur_abc == mw.MurABC(order=2, permittivity=1.5)
+    assert second.kind == "mur" and second.mur_abc == mw.fdtd.MurABC(order=2, permittivity=1.5)
     # ABC parameters only survive when a face uses them.
-    pml = mw.BoundarySpec.faces(default="pml", num_layers=8, mur_abc=mw.MurABC(order=2), mode_abc=mw.ModeABC())
-    assert pml.mur_abc == mw.MurABC() and pml.mode_abc is None
+    pml = mw.BoundarySpec.faces(default="pml", num_layers=8, mur_abc=mw.fdtd.MurABC(order=2), mode_abc=mw.fdtd.ModeABC())
+    assert pml.mur_abc == mw.fdtd.MurABC() and pml.mode_abc is None
     assert pml.kind == "pml"
     faced = mw.BoundarySpec.faces(default="pml", num_layers=8, x_high="mode_abc")
-    assert faced.face_kind("x", "high") == "mode_abc" and faced.mode_abc == mw.ModeABC()
-    assert faced.with_faces(x_low="mur").mode_abc == mw.ModeABC()
+    assert faced.face_kind("x", "high") == "mode_abc" and faced.mode_abc == mw.fdtd.ModeABC()
+    assert faced.with_faces(x_low="mur").mode_abc == mw.fdtd.ModeABC()
     with pytest.raises(ValueError):
         mw.BoundarySpec.faces(default="mode_abc_typo")
 
@@ -93,8 +93,8 @@ def test_set_abc_parameters_enter_the_resume_fingerprint():
         mw.BoundarySpec.mur(),
         mw.BoundarySpec.mur(order=2),
         mw.BoundarySpec.mur(permittivity=2.0),
-        mw.BoundarySpec.faces(default="pml", num_layers=8, x_high="mode_abc", mode_abc=mw.ModeABC(frequency=1e9)),
-        mw.BoundarySpec.faces(default="pml", num_layers=8, x_high="mode_abc", mode_abc=mw.ModeABC(frequency=2e9)),
+        mw.BoundarySpec.faces(default="pml", num_layers=8, x_high="mode_abc", mode_abc=mw.fdtd.ModeABC(frequency=1e9)),
+        mw.BoundarySpec.faces(default="pml", num_layers=8, x_high="mode_abc", mode_abc=mw.fdtd.ModeABC(frequency=2e9)),
     ]
     assert len({digest(boundary) for boundary in variants}) == len(variants)
     # Unset ABC fields are omitted, so the default spec hashes as before they existed.
@@ -102,17 +102,20 @@ def test_set_abc_parameters_enter_the_resume_fingerprint():
 
 
 def test_internal_absorber_declaration():
-    absorber = mw.InternalAbsorber((0.1, 0.0, 0.0), _PLANE, "-", boundary=mw.ModeABC(frequency=1e9), name="sink")
+    absorber = mw.fdtd.InternalAbsorber((0.1, 0.0, 0.0), _PLANE, "-", boundary=mw.fdtd.ModeABC(frequency=1e9), name="sink")
     assert absorber.normal_axis == "x" and absorber.direction_sign == -1
     with pytest.raises(ValueError):
-        mw.InternalAbsorber((0, 0, 0), (0.0, 0.0, 1.0))
+        mw.fdtd.InternalAbsorber((0, 0, 0), (0.0, 0.0, 1.0))
     with pytest.raises(ValueError):
-        mw.InternalAbsorber((0, 0, 0), _PLANE, "up")
-    assert mw.InternalAbsorber((0, 0, 0), _PLANE, boundary=mw.MurABC(order=2)).boundary.order == 2
-    scene = mw.Scene(device="cpu", internal_absorbers=[absorber])
-    assert scene.clone().internal_absorbers == [absorber]
+        mw.fdtd.InternalAbsorber((0, 0, 0), _PLANE, "up")
+    assert mw.fdtd.InternalAbsorber((0, 0, 0), _PLANE, boundary=mw.fdtd.MurABC(order=2)).boundary.order == 2
+    scene = mw.Scene(internal_absorbers=[absorber])
+    assert scene.internal_absorbers == (absorber,)
     with pytest.raises(ValueError):
-        scene.add_internal_absorber(mw.InternalAbsorber((0.2, 0, 0), _PLANE, name="sink"))
+        scene = scene.updated(internal_absorbers=(
+            *scene.internal_absorbers,
+            mw.fdtd.InternalAbsorber((0.2, 0, 0), _PLANE, name="sink"),
+        ))
 
 
 def test_one_way_mode_coefficient_limits_and_annihilation():
@@ -166,21 +169,22 @@ _FACE_DX = 0.025
 
 def _face_scene(boundary):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 0.5), (-1.0, 1.0), (-1.0, 1.0))),
-        grid=mw.GridSpec.uniform(_FACE_DX),
-        boundary=boundary,
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=_FACE_DX,
-            source_time=mw.GaussianPulse(frequency=_FACE_FREQ, fwidth=0.6 * _FACE_FREQ),
-        )
-    )
-    for name, y in (("deg0", 0.0), ("deg45", 0.35)):
-        scene.add_monitor(mw.FieldTimeMonitor(name, components=("Ez",), position=(0.35, y, 0.0125)))
+                domain=mw.Domain(bounds=((-1.0, 0.5), (-1.0, 1.0), (-1.0, 1.0))),
+                grid=mw.GridSpec.uniform(_FACE_DX),
+                boundary=boundary,
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=_FACE_DX,
+                source_time=mw.GaussianPulse(frequency=_FACE_FREQ, fwidth=0.6 * _FACE_FREQ),
+            ),
+            ),
+            )
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.monitors.FieldTimeMonitor(name, components=("Ez",), position=(0.35, y, 0.0125)) for name, y in (("deg0", 0.0), ("deg45", 0.35))),
+    ))
     return scene
 
 
@@ -188,13 +192,15 @@ def _face_traces(boundary):
     result = mw.Simulation.fdtd(
         _face_scene(boundary),
         frequencies=[_FACE_FREQ],
-        run_time=mw.TimeConfig(time_steps=520),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=520),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).run()
     dt = float(result.solver.dt)
     return {
-        name: np.asarray(result.monitor(name)["field"].detach().cpu(), dtype=np.float64).ravel()
+        name: np.asarray(result.monitor(name).sel(component="Ez").values.detach().cpu(), dtype=np.float64).ravel()
         for name in ("deg0", "deg45")
     }, dt
 
@@ -211,7 +217,7 @@ def test_second_order_mur_reflects_less_than_first_order():
 
     reference, dt = _face_traces(faces())
     first, _ = _face_traces(faces(x_high="mur"))
-    second, _ = _face_traces(faces(x_high="mur", mur_abc=mw.MurABC(order=2)))
+    second, _ = _face_traces(faces(x_high="mur", mur_abc=mw.fdtd.MurABC(order=2)))
     for name in ("deg0", "deg45"):
         assert np.all(np.isfinite(second[name]))
         r1 = _spectral_error(first[name], reference[name], dt, _FACE_FREQ)
@@ -229,27 +235,26 @@ _GUIDE_X_REF = 2.005
 
 def _guide_scene(boundary, x_high, absorbers=()):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.32, x_high), (-0.32, 0.32), (-0.32, 0.32))),
-        grid=mw.GridSpec.uniform(_GUIDE_DX),
-        boundary=boundary,
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
-        device="cuda",
-        internal_absorbers=absorbers,
-    )
-    scene.add_structure(
-        mw.Structure(geometry=mw.Box(position=(0, 0, 0), size=(20.0, 0.20, 0.30)), material=mw.Material(eps_r=4.0))
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(-0.25, 0, 0),
-            size=(0, 0.5, 0.5),
-            polarization="Ez",
-            source_time=mw.GaussianPulse(frequency=2.0e9, fwidth=0.5e9),
-        )
-    )
-    scene.add_monitor(
-        mw.ModeMonitor("m", position=(0.0, 0, 0), size=(0, 0.5, 0.5), polarization="Ez", frequencies=_GUIDE_FREQS)
-    )
+                domain=mw.Domain(bounds=((-0.32, x_high), (-0.32, 0.32), (-0.32, 0.32))),
+                grid=mw.GridSpec.uniform(_GUIDE_DX),
+                boundary=boundary,
+                subpixel=mw.SubpixelSpec(samples=3, averaging="polarized"),
+                internal_absorbers=absorbers,
+                structures=(
+            mw.Structure(geometry=mw.Box(position=(0, 0, 0), size=(20.0, 0.20, 0.30)), material=mw.Material(eps_r=4.0)),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(-0.25, 0, 0),
+                size=(0, 0.5, 0.5),
+                polarization="Ez",
+                source_time=mw.GaussianPulse(frequency=2.0e9, fwidth=0.5e9),
+            ),
+            ),
+                monitors=(
+            mw.ModeMonitor("m", position=(0.0, 0, 0), size=(0, 0.5, 0.5), polarization="Ez", frequencies=_GUIDE_FREQS),
+            ),
+            )
     return scene
 
 
@@ -259,9 +264,11 @@ def _guide_amplitudes(scene):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=list(_GUIDE_FREQS),
-        run_time=mw.TimeConfig(time_steps=1300),
-        spectral_sampler=mw.SpectralSampler(normalize_source=True),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1300),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True),
+            full_field_dft=False,
+        ),
     ).run()
     forward, backward = [], []
     for index in range(len(_GUIDE_FREQS)):
@@ -284,12 +291,12 @@ def test_mode_abc_and_internal_absorber_terminate_guide_like_cpml():
         return np.abs(backward - b_ref) / np.abs(a_ref), solver
 
     cpml, _ = reflection(_guide_scene(_pml_faces(), _GUIDE_X_TEST))
-    single_spec = mw.ModeABC(polarization="Ez", frequency=2.0e9)
+    single_spec = mw.fdtd.ModeABC(polarization="Ez", frequency=2.0e9)
     single, solver = reflection(_guide_scene(_pml_faces(x_high="mode_abc", mode_abc=single_spec), _GUIDE_X_TEST))
     info = solver._mode_abc_info[0]
     assert info["face"] == ("x", "high") and len(info["coefficients"]) == 1
     assert 1.9 < info["effective_index"] < 2.2
-    broadband_spec = mw.ModeABC(polarization="Ez", frequency_range=(1.5e9, 2.5e9), order=2)
+    broadband_spec = mw.fdtd.ModeABC(polarization="Ez", frequency_range=(1.5e9, 2.5e9), order=2)
     broadband, solver = reflection(
         _guide_scene(_pml_faces(x_high="mode_abc", mode_abc=broadband_spec), _GUIDE_X_TEST)
     )
@@ -298,7 +305,7 @@ def test_mode_abc_and_internal_absorber_terminate_guide_like_cpml():
         _guide_scene(
             _pml_faces(),
             _GUIDE_X_REF,
-            (mw.InternalAbsorber((_GUIDE_X_TEST, 0, 0), _PLANE, "+", boundary=single_spec),),
+            (mw.fdtd.InternalAbsorber((_GUIDE_X_TEST, 0, 0), _PLANE, "+", boundary=single_spec),),
         )
     )
     plane_index = solver._internal_absorber_info[0]["plane_index"]
@@ -321,54 +328,57 @@ def test_mode_abc_and_internal_absorber_terminate_guide_like_cpml():
 def test_extended_one_way_boundaries_reject_adjoint():
     density = torch.full((1, 1, 1), 0.5, device="cuda", dtype=torch.float64, requires_grad=True)
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.45, 0.45),) * 3),
-        grid=mw.GridSpec.uniform(0.15),
-        boundary=mw.BoundarySpec.mur(order=2),
-        device="cuda",
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(name="design", geometry=mw.Box(position=(0, 0, 0), size=(0.15,) * 3),
-                          density=density, eps_bounds=(1.0, 4.0))
-    )
-    scene.add_source(mw.PointDipole(position=(-0.15, 0, 0), polarization="Ez", width=0.12,
-                                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9)))
-    scene.add_monitor(mw.PointMonitor("probe", (0.15, 0.0, 0.0), fields=("Ez",)))
-    simulation = mw.Simulation.fdtd(scene, frequencies=[1e9], run_time=mw.TimeConfig(time_steps=40),
-                                    spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False)
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.45, 0.45),) * 3),
+                grid=mw.GridSpec.uniform(0.15),
+                boundary=mw.BoundarySpec.mur(order=2),
+                material_regions=(
+            mw.MaterialRegion(name="design", geometry=mw.Box(position=(0, 0, 0), size=(0.15,) * 3),
+                              density=density, eps_bounds=(1.0, 4.0)),
+            ),
+                sources=(
+            mw.PointDipole(position=(-0.15, 0, 0), polarization="Ez", width=0.12,
+                           source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9)),
+            ),
+                monitors=(mw.PointMonitor("probe", (0.15, 0.0, 0.0), fields=("Ez",)),),
+            )
+    simulation = mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=40),
+                                    spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False))
     with pytest.raises(NotImplementedError, match="second-order Mur"):
         result = simulation.run()
-        result.monitor("probe")["data"].abs().square().sum().backward()
+        result.monitor("probe").sel(component="Ez").values.abs().square().sum().backward()
 
 
 def _small_guide_scene(boundary, *, material=None, absorbers=(), design=None):
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=boundary,
-        device="cuda",
-        internal_absorbers=absorbers,
-    )
-    scene.add_structure(
-        mw.Structure(geometry=mw.Box(position=(0, 0, 0), size=(2.0, 0.12, 0.16)),
-                     material=material or mw.Material(eps_r=4.0))
-    )
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=boundary,
+                internal_absorbers=absorbers,
+                structures=(
+            mw.Structure(geometry=mw.Box(position=(0, 0, 0), size=(2.0, 0.12, 0.16)),
+                         material=material or mw.Material(eps_r=4.0)),
+            ),
+            )
     if design is not None:
-        scene.add_material_region(design)
-    scene.add_source(mw.PointDipole(position=(-0.1, 0, 0), polarization="Ez", width=0.02,
-                                    source_time=mw.GaussianPulse(frequency=2e9, fwidth=0.5e9)))
+        scene = scene.updated(material_regions=(*scene.material_regions, design))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(-0.1, 0, 0), polarization="Ez", width=0.02,
+                       source_time=mw.GaussianPulse(frequency=2e9, fwidth=0.5e9)),
+    ))
     return scene
 
 
 def _prepare(scene):
-    return mw.Simulation.fdtd(scene, frequencies=[2e9], run_time=mw.TimeConfig(time_steps=4)).prepare()
+    return mw.Simulation.fdtd(scene, frequencies=[2e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=4))).prepare()
 
 
 @cuda
 def test_mode_abc_rejects_lossy_mode():
     boundary = mw.BoundarySpec.faces(default="pml", num_layers=6, x_high="mode_abc",
-                                     mode_abc=mw.ModeABC(polarization="Ez", frequency=2e9))
+                                     mode_abc=mw.fdtd.ModeABC(polarization="Ez", frequency=2e9))
     with pytest.raises(NotImplementedError, match="lossless guided mode"):
         _prepare(_small_guide_scene(boundary, material=mw.Material(eps_r=4.0, sigma_e=0.5)))
 
@@ -379,23 +389,23 @@ def test_mode_abc_rejects_trainable_material_on_its_cross_section():
     design = mw.MaterialRegion(name="design", geometry=mw.Box(position=(0.17, 0, 0), size=(0.04, 0.04, 0.04)),
                                density=density, eps_bounds=(1.0, 4.0))
     boundary = mw.BoundarySpec.faces(default="pml", num_layers=6, x_high="mode_abc",
-                                     mode_abc=mw.ModeABC(polarization="Ez", frequency=2e9))
+                                     mode_abc=mw.fdtd.ModeABC(polarization="Ez", frequency=2e9))
     with pytest.raises(NotImplementedError, match="trainable materials"):
         _prepare(_small_guide_scene(boundary, design=design))
 
 
 @cuda
 def test_internal_absorber_rejects_finite_aperture():
-    absorber = mw.InternalAbsorber((0.1, 0, 0), (0.0, 0.2, _INF), "+", name="partial")
+    absorber = mw.fdtd.InternalAbsorber((0.1, 0, 0), (0.0, 0.2, _INF), "+", name="partial")
     with pytest.raises(NotImplementedError, match="full domain cross-section"):
         _prepare(_small_guide_scene(mw.BoundarySpec.pml(num_layers=6), absorbers=(absorber,)))
 
 
 @cuda
 def test_internal_absorber_and_mode_faces_join_the_one_way_pass():
-    absorber = mw.InternalAbsorber((0.1, 0, 0), _PLANE, "+", boundary=mw.MurABC(permittivity=3.0), grid_shift=-1)
+    absorber = mw.fdtd.InternalAbsorber((0.1, 0, 0), _PLANE, "+", boundary=mw.fdtd.MurABC(permittivity=3.0), grid_shift=-1)
     boundary = mw.BoundarySpec.faces(default="pml", num_layers=6, x_low="mode_abc",
-                                     mode_abc=mw.ModeABC(polarization="Ez", frequency=2e9))
+                                     mode_abc=mw.fdtd.ModeABC(polarization="Ez", frequency=2e9))
     solver = _prepare(_small_guide_scene(boundary, absorbers=(absorber,))).solver
     assert solver.has_mur_faces and solver.mode_abc_faces == (("x", "low"),)
     sources = [entry["source"] for entry in solver._mur_state]
@@ -414,17 +424,17 @@ def test_internal_absorber_and_mode_faces_join_the_one_way_pass():
 def test_extended_one_way_histories_survive_disk_resume(tmp_path):
     boundary = mw.BoundarySpec.faces(
         default="mur",
-        mur_abc=mw.MurABC(order=2),
+        mur_abc=mw.fdtd.MurABC(order=2),
         x_high="mode_abc",
-        mode_abc=mw.ModeABC(polarization="Ez", frequency_range=(1.4e9, 2.0e9), order=2),
+        mode_abc=mw.fdtd.ModeABC(polarization="Ez", frequency_range=(1.4e9, 2.0e9), order=2),
     )
-    absorber = mw.InternalAbsorber((-0.12, 0, 0), _PLANE, "-")
+    absorber = mw.fdtd.InternalAbsorber((-0.12, 0, 0), _PLANE, "-")
     scene = _small_guide_scene(boundary, absorbers=(absorber,))
-    scene.add_monitor(mw.PointMonitor("probe", (0.06, 0.0, 0.0), fields=("Ez",)))
+    scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.06, 0.0, 0.0), fields=("Ez",))))
 
     def simulation():
-        return mw.Simulation.fdtd(scene, frequencies=[2e9], run_time=mw.TimeConfig(time_steps=300),
-                                  spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False)
+        return mw.Simulation.fdtd(scene, frequencies=[2e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=300),
+                                  spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False))
 
     expected = simulation().prepare()
     expected.run()
@@ -433,7 +443,7 @@ def test_extended_one_way_histories_survive_disk_resume(tmp_path):
     checkpoint = simulation().prepare().run_until(131)
     path = tmp_path / "abc.pt"
     checkpoint.save(path)
-    restored = mw.FDTDResumeCheckpoint.load(path, map_location="cpu")
+    restored = mw.fdtd.FDTDResumeCheckpoint.load(path, map_location="cpu")
     actual = simulation().prepare()
     actual.simulation._execute_fdtd_solve(actual.solver, resume_from=restored)
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
@@ -451,9 +461,9 @@ def _field_energy(solver):
 @pytest.mark.parametrize(
     "boundary",
     [
-        mw.BoundarySpec.faces(default="pml", num_layers=8, x="mur", mur_abc=mw.MurABC(order=2)),
+        mw.BoundarySpec.faces(default="pml", num_layers=8, x="mur", mur_abc=mw.fdtd.MurABC(order=2)),
         mw.BoundarySpec.faces(default="pml", num_layers=8, x="mode_abc",
-                              mode_abc=mw.ModeABC(polarization="Ez", frequency_range=(1.4e9, 2.0e9), order=2)),
+                              mode_abc=mw.fdtd.ModeABC(polarization="Ez", frequency_range=(1.4e9, 2.0e9), order=2)),
         mw.BoundarySpec.mur(order=2),
     ],
     ids=["mur2_opposite_faces", "broadband_mode_abc_opposite_faces", "mur2_closed_box"],
@@ -462,10 +472,10 @@ def test_opposite_higdon_faces_on_dielectric_guide_stay_passive(boundary):
     energies = []
     for steps in (1000, 9000):
         scene = _small_guide_scene(boundary)
-        scene.add_monitor(mw.PointMonitor("probe", (0.06, 0.0, 0.0), fields=("Ez",)))
-        prepared = mw.Simulation.fdtd(scene, frequencies=[2e9], run_time=mw.TimeConfig(time_steps=steps),
-                                      spectral_sampler=mw.SpectralSampler(window="none"),
-                                      full_field_dft=False).prepare()
+        scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.06, 0.0, 0.0), fields=("Ez",))))
+        prepared = mw.Simulation.fdtd(scene, frequencies=[2e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps),
+                                      spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                                      full_field_dft=False)).prepare()
         prepared.run()
         assert prepared.solver._abc_higdon_state
         energies.append(_field_energy(prepared.solver))

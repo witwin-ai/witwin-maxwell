@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from ..coordinates import BendCoordinates
+from ..errors import UnsupportedFeatureError
 
 
 def copper_half_metric_average(chart, surface_u, width, side, component):
@@ -25,50 +26,63 @@ def validate_coordinate_scene(scene, *, method="fdtd"):
     if not isinstance(chart,BendCoordinates):
         raise TypeError("Scene.coordinates must be BendCoordinates or None.")
     if method!="fdtd":
-        raise NotImplementedError("BendCoordinates currently requires native FDTD.")
+        raise UnsupportedFeatureError("BendCoordinates currently requires native FDTD.",
+                                      feature="coordinates", method=method)
     chart.validate_bounds(scene.domain.bounds)
     if chart.curvature and scene.boundary.axis_kind("y") in ("periodic","bloch"):
-        raise NotImplementedError("The varying normal metric cannot be identified across periodic u faces.")
+        raise UnsupportedFeatureError("The varying normal metric cannot be identified across periodic u faces.",
+                                      feature="coordinates", method="fdtd")
     if scene.sources:
-        raise NotImplementedError("Mapped field sources need physical Piola/Huygens lowering; use a registered RF feed.")
+        raise UnsupportedFeatureError("Mapped field sources need physical Piola/Huygens lowering; use a registered RF feed.",
+                                      feature="coordinates", method="fdtd")
     if scene.thin_wires or scene.material_regions or scene.electrostatic_terminals or scene.charge_densities:
-        raise NotImplementedError("Mapped wires, density regions and electrostatic sources are not registered.")
+        raise UnsupportedFeatureError("Mapped wires, density regions and electrostatic sources are not registered.",
+                                      feature="coordinates", method="fdtd")
     if any(value is not None for value in scene.symmetry):
-        raise NotImplementedError("Mapped symmetry planes require physical image validation.")
+        raise UnsupportedFeatureError("Mapped symmetry planes require physical image validation.",
+                                      feature="coordinates", method="fdtd")
     from ..ports import LumpedPort,TerminalPort
     if any(not isinstance(port,(LumpedPort,TerminalPort)) for port in scene.ports):
-        raise NotImplementedError("Mapped modal ports require a qualified covariant cross-section solve.")
+        raise UnsupportedFeatureError("Mapped modal ports require a qualified covariant cross-section solve.",
+                                      feature="coordinates", method="fdtd")
     from ..monitors import PointMonitor,PowerLossMonitor,FinitePlaneMonitor,ClosedSurfaceMonitor
     if any(not isinstance(monitor,(PointMonitor,PowerLossMonitor,FinitePlaneMonitor,ClosedSurfaceMonitor)) for monitor in scene.monitors):
-        raise NotImplementedError("Mapped observations require points, finite chart faces, closed chart surfaces or static conduction selections.")
+        raise UnsupportedFeatureError("Mapped observations require points, finite chart faces, closed chart surfaces or static conduction selections.",
+                                      feature="coordinates", method="fdtd")
     if any(isinstance(monitor,PowerLossMonitor) and monitor.channels!=("conduction",) for monitor in scene.monitors):
-        raise NotImplementedError("Mapped loss currently registers automatic static electric conduction only.")
+        raise UnsupportedFeatureError("Mapped loss currently registers automatic static electric conduction only.",
+                                      feature="coordinates", method="fdtd")
     for structure in scene.structures:
         if not getattr(structure,"enabled",True):
             continue
         material=structure.material
         if getattr(structure.geometry,"kind",None)=="surface_mesh":
-            raise NotImplementedError("A mapped chart does not enable arbitrary SurfaceMesh split cells.")
+            raise UnsupportedFeatureError("A mapped chart does not enable arbitrary SurfaceMesh split cells.",
+                                          feature="coordinates", method="fdtd")
         for feature in ("is_anisotropic","is_dispersive","is_nonlinear","is_gyromagnetic","is_medium2d",
                         "is_lossy_metal","is_surface_impedance"):
             if getattr(material,feature,False):
-                raise NotImplementedError(f"Mapped physical material capability {feature} is not registered.")
+                raise UnsupportedFeatureError(f"Mapped physical material capability {feature} is not registered.",
+                                              feature="coordinates", method="fdtd")
         if getattr(material,"breakdown",None) is not None or getattr(material,"modulation",None) is not None:
-            raise NotImplementedError("Mapped dynamic conductivity/modulation requires joint transformed state updates.")
+            raise UnsupportedFeatureError("Mapped dynamic conductivity/modulation requires joint transformed state updates.",
+                                          feature="coordinates", method="fdtd")
         if getattr(material,"is_copper_foil",False):
             if abs(chart.curvature)*float(material.thickness)>2e-3:
-                raise NotImplementedError("Mapped copper exceeds the independently bounded curvature*thickness range.")
+                raise UnsupportedFeatureError("Mapped copper exceeds the independently bounded curvature*thickness range.",
+                                              feature="coordinates", method="fdtd")
             from .ports import _box_values
             position,size=_box_values(structure.geometry)
             if size[1]!=0 or size[0]<=0 or size[2]<=0:
-                raise NotImplementedError("Mapped copper requires a true chart-normal u plane.")
+                raise UnsupportedFeatureError("Mapped copper requires a true chart-normal u plane.",
+                                              feature="coordinates", method="fdtd")
 
 
 def attach_coordinate_metric(scene, model):
-    chart=getattr(scene,"coordinates",None)
+    chart=getattr(scene.scene,"coordinates",None)
     if chart is None:
         return model
-    validate_coordinate_scene(scene)
+    validate_coordinate_scene(scene.scene)
     validate_coordinate_observers(scene)
     if "coordinate_frame" in model:
         raise RuntimeError("A coordinate metric must be compiled exactly once.")
@@ -80,7 +94,8 @@ def attach_coordinate_metric(scene, model):
                     for axis,values in model[key].items()}
     edge=model.get("edge_components")
     if edge is None:
-        raise NotImplementedError("Mapped materials require native electric/magnetic component sampling.")
+        raise UnsupportedFeatureError("Mapped materials require native electric/magnetic component sampling.",
+                                      feature="coordinates", method="fdtd")
     for key,magnetic in (("eps",False),("sigma_e",False),("mu",True),("sigma_m",True)):
         transformed={}
         for name,values in edge[key].items():
@@ -105,7 +120,7 @@ def _coordinate_foil_observation_regions(scene):
     regions=[]
     for face in compile_copper_faces(scene,device="cpu"):
         name="E"+"xyz"[face.component]
-        axes=component_coords(scene,name)
+        axes=component_coords(scene,name,device=scene.device)
         indices=face.indices.numpy()
         footprint=[]
         for axis in (0,2):
@@ -136,7 +151,7 @@ def validate_coordinate_observation_bounds(scene, bounds=None, *, points=None,co
     electric normal interpolation is conservatively excluded across the charge
     sheet. Bulk loss has separate two-trace accounting and is unaffected.
     """
-    if getattr(scene,"coordinates",None) is None:
+    if getattr(scene.scene,"coordinates",None) is None:
         return
     for component,exclusion,electric in _coordinate_foil_observation_regions(scene):
         if component not in components:
@@ -151,12 +166,13 @@ def validate_coordinate_observation_bounds(scene, bounds=None, *, points=None,co
                 mask=((points[:,(0,2)]>limits[(0,2),0]) & (points[:,(0,2)]<limits[(0,2),1])).all(-1) & (points[:,1]>=limits[1,0]) & (points[:,1]<limits[1,1])
             overlap=bool(mask.any())
         if overlap:
-            raise NotImplementedError("Mapped ordinary field observations intersect an unresolved copper Yee interpolation stencil; one-sided electric and magnetic trace reconstruction is not registered.")
+            raise UnsupportedFeatureError("Mapped ordinary field observations intersect an unresolved copper Yee interpolation stencil; one-sided electric and magnetic trace reconstruction is not registered.",
+                                          feature="coordinates", method="fdtd")
 
 
 def validate_coordinate_observers(scene):
     from ..monitors import PointMonitor,FinitePlaneMonitor,ClosedSurfaceMonitor
-    for monitor in scene.monitors:
+    for monitor in scene.scene.monitors:
         faces=monitor.faces if isinstance(monitor,ClosedSurfaceMonitor) else (monitor,)
         for face in faces:
             if isinstance(face,PointMonitor):

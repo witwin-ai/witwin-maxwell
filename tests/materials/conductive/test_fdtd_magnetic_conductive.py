@@ -59,26 +59,25 @@ def test_sigma_m_semi_implicit_coefficients_match_analytic():
     sigma_m = 0.4 * omega * _MU0  # s = sigma_m / (omega mu0) = 0.4
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.09, 0.09), (-0.09, 0.09))),
-        grid=mw.GridSpec.uniform(0.006),
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1e7),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="magloss",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.12, 1.0, 1.0)),
-            material=mw.Material(eps_r=1.0, mu_r=1.0, sigma_m=sigma_m),
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(1.0, 0.0, 0.0),
-            polarization=(0.0, 1.0, 0.0),
-            source_time=mw.CW(frequency=f, amplitude=1.0),
-            name="pw",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.09, 0.09), (-0.09, 0.09))),
+                grid=mw.GridSpec.uniform(0.006),
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=1e7),
+                structures=(
+            mw.Structure(
+                name="magloss",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.12, 1.0, 1.0)),
+                material=mw.Material(eps_r=1.0, mu_r=1.0, sigma_m=sigma_m),
+            ),
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=(1.0, 0.0, 0.0),
+                polarization=(0.0, 1.0, 0.0),
+                source_time=mw.CW(frequency=f, amplitude=1.0),
+                name="pw",
+            ),
+            ),
+            )
     solver = mw.Simulation.fdtd(scene, frequencies=[f]).prepare().solver
     dt = float(solver.dt)
 
@@ -115,40 +114,41 @@ def test_sigma_m_attenuation_matches_analytic():
     alpha_analytic = (omega / _C0) * float(np.imag(refractive_index))
 
     dx = 0.006
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.06, 0.06), (-0.06, 0.06))),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1e7),
-        device="cuda",
-    )
     # Fill the whole domain: no front interface, so the forward wave on the +x
     # side of the source is a pure attenuating plane wave (ratio measurement is
     # independent of source calibration and any boundary reflection, which is
     # also forward-decaying at the same alpha).
-    scene.add_structure(
-        mw.Structure(
-            name="fill",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(4.0, 4.0, 4.0)),
-            material=mw.Material(eps_r=1.0, sigma_m=sigma_m),
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(1.0, 0.0, 0.0),
-            polarization=(0.0, 1.0, 0.0),
-            source_time=mw.CW(frequency=f, amplitude=1.0),
-            name="pw",
-        )
-    )
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.06, 0.06), (-0.06, 0.06))),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=1e7),
+                structures=(
+            mw.Structure(
+                name="fill",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(4.0, 4.0, 4.0)),
+                material=mw.Material(eps_r=1.0, sigma_m=sigma_m),
+            ),
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=(1.0, 0.0, 0.0),
+                polarization=(0.0, 1.0, 0.0),
+                source_time=mw.CW(frequency=f, amplitude=1.0),
+                name="pw",
+            ),
+            ),
+            )
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[f],
-        run_time=mw.TimeConfig.auto(steady_cycles=25, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=25, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).run()
 
-    ey = np.abs(_to_np(result.E.y.detach().to(torch.complex64).abs()))
+    ey = np.abs(_to_np(result.E.y.isel(f=0).values.detach().to(torch.complex64).abs()))
     nx, nyc, nzc = ey.shape
     profile = ey[:, nyc // 2, nzc // 2]
     xs = -0.6 + (np.arange(nx) + 0.5) * dx
@@ -200,7 +200,6 @@ def _reflection_coefficient(kind: str, *, alpha_t: float = 3.0, steps: int = 120
         domain=mw.Domain(bounds=((-1.2, _MATCH_X_HIGH), (-0.3, 0.3), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(_MATCH_DX),
         boundary=boundary,
-        device="cuda",
         sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
@@ -216,16 +215,20 @@ def _reflection_coefficient(kind: str, *, alpha_t: float = 3.0, steps: int = 120
             if kind == "matched"
             else mw.Material(eps_r=1.0, sigma_e=sigma_e)
         )
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 name="dut",
                 geometry=mw.Box(position=(_MATCH_X_HIGH - 0.5 * _MATCH_T, 0.0, 0.0), size=(_MATCH_T, 4.0, 4.0)),
                 material=material,
-            )
-        )
-    scene.add_monitor(mw.FieldTimeMonitor("probe", components=("Ey",), position=(_MATCH_X_MON, 0.0, 0.0), interval=1))
-    result = mw.Simulation.fdtd(scene, frequencies=[_MATCH_F], run_time=mw.TimeConfig(time_steps=steps)).run()
-    trace = _to_np(result.monitor("probe")["field"]).ravel()
+            ),
+        ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.FieldTimeMonitor("probe", components=("Ey",), position=(_MATCH_X_MON, 0.0, 0.0), interval=1),
+    ))
+    result = mw.Simulation.fdtd(scene, frequencies=[_MATCH_F], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps))).run()
+    trace = _to_np(result.monitor("probe").sel(component="Ey").values).ravel()
     incident = np.max(np.abs(trace[_MATCH_INC[0]:_MATCH_INC[1]]))
     reflected = np.max(np.abs(trace[_MATCH_REF[0]:_MATCH_REF[1]]))
     return reflected / incident
@@ -261,37 +264,36 @@ class _MagneticLossDesignScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="magloss",
-                geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
-                material=mw.Material(eps_r=1.0, sigma_m=5.0e3),
-            )
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, -0.06), size=(0.12, 0.12, 0.12)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.12),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    structures=(
+                mw.Structure(
+                    name="magloss",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
+                    material=mw.Material(eps_r=1.0, sigma_m=5.0e3),
+                ),
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, -0.06), size=(0.12, 0.12, 0.12)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.12),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -300,12 +302,14 @@ def test_fdtd_adjoint_accepts_magnetic_conductive_media():
     simulation = mw.Simulation.fdtd(
         model,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=24),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=24),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
     result = simulation.run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).sel(component="Ez").values
     loss = (data * data.conj()).real if data.is_complex() else data * data
     loss.backward()
     grad = model.logits.grad

@@ -50,11 +50,11 @@ def build_scene(args):
 
 
 def config(args, grids, preconditioner=None):
-    pfft = mw.PFFTConfig(points_per_wavelength=args.grid_ppw, order=args.order, target_accuracy=args.target,
+    pfft = mw.mom.PFFTConfig(points_per_wavelength=args.grid_ppw, order=args.order, target_accuracy=args.target,
                          grid_precision=args.grid_precision, exterior_grids=grids,
                          cluster_separation=args.separation, solve_dual_tolerance=args.admission_rtol,
                          original_sample_tolerance=args.original_rtol)
-    return mw.MoMConfig(integration=INTEGRATION, operator_backend='pfft', riesz_storage='local_rwg_v1', pfft=pfft,
+    return mw.mom.MoMConfig(integration=INTEGRATION, operator_backend='pfft', riesz_storage='local_rwg_v1', pfft=pfft,
                         right_preconditioner=preconditioner,
                         stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal', rtol=args.rtol, atol=0.,
                                               maxiter=args.maxiter, restart=args.restart,
@@ -64,7 +64,7 @@ def config(args, grids, preconditioner=None):
 def prepare(args, scene, grids, preconditioner=None):
     _peak_reset()
     start = _sync()
-    prepared = mw.Simulation.mom(scene, frequency=args.frequency, config=config(args, grids, preconditioner)).prepare()
+    prepared = mw.Simulation.mom(scene, frequencies=args.frequency, config=config(args, grids, preconditioner)).prepare()
     seconds = _sync()-start
     peak = torch.cuda.max_memory_allocated()
     handle = prepared.solver.handle
@@ -132,15 +132,15 @@ def staged(args, scene, directions, weights):
     _peak_reset()
     start = _sync()
     if args.stage == 'dense':
-        prepared = mw.Simulation.mom(scene, frequency=args.frequency, config=mw.MoMConfig(
+        prepared = mw.Simulation.mom(scene, frequencies=args.frequency, config=mw.mom.MoMConfig(
             integration=INTEGRATION, riesz_storage='compact_rwg_v1',
             stopping=StoppingRule(method='direct', rtol=1e-10, atol=0.))).prepare()
     else:
-        prepared, _ = prepare(args, scene, args.stage, mw.FunctionRightPreconditioner(_body_lu, name='body_lu'))
+        prepared, _ = prepare(args, scene, args.stage, mw.mom.FunctionRightPreconditioner(_body_lu, name='body_lu'))
     prepare_seconds = _sync()-start
     result = prepared.run()
     stats = result.stats()
-    far, _ = result.surface_currents.far_field(directions)
+    far, _ = mw.mom.surface_currents(result).far_field(directions)
     record = {'stage': args.stage, 'unknowns': prepared.solver.handle.shape[0], 'prepare_seconds': prepare_seconds,
               'total_seconds': _sync()-start, 'peak_bytes': torch.cuda.max_memory_allocated(),
               'iterations': stats.get('iterations'), 'converged': stats.get('converged')}
@@ -196,7 +196,7 @@ def main(argv=None):
         print(json.dumps(report['stage'], default=str), flush=True)
         return 0
     generator = torch.Generator(device='cuda').manual_seed(11)
-    clustered, record = prepare(args, scene, 'clusters', mw.FunctionRightPreconditioner(_body_lu, name='body_lu'))
+    clustered, record = prepare(args, scene, 'clusters', mw.mom.FunctionRightPreconditioner(_body_lu, name='body_lu'))
     handle = clustered.solver.handle
     n = handle.shape[0]
     total = n//2
@@ -230,7 +230,7 @@ def main(argv=None):
             stats = result.stats()
             report['single']['solve'] = {'seconds': _sync()-start, 'iterations': stats['iterations'],
                                          'converged': stats['converged']}
-            report['single']['far_field'] = result.surface_currents.far_field(directions)[0]
+            report['single']['far_field'] = mw.mom.surface_currents(result).far_field(directions)[0]
         del single
         torch.cuda.empty_cache()
         save()
@@ -240,8 +240,8 @@ def main(argv=None):
     start = _sync()
     result = clustered.run()
     stats = result.stats()
-    far, _ = result.surface_currents.far_field(directions)
-    sections = result.surface_currents.plane_wave_cross_sections(directions, weights)
+    far, _ = mw.mom.surface_currents(result).far_field(directions)
+    sections = mw.mom.surface_currents(result).plane_wave_cross_sections(directions, weights)
     report['clusters']['solve'] = {
         'seconds': _sync()-start, 'peak_bytes': torch.cuda.max_memory_allocated(), 'iterations': stats['iterations'],
         'converged': stats['converged'], 'reason': stats['reason'], 'relative_residual': stats.get('relative_residual'),
@@ -256,10 +256,10 @@ def main(argv=None):
     if args.dense:
         _peak_reset()
         start = _sync()
-        dense = mw.Simulation.mom(scene, frequency=args.frequency, config=mw.MoMConfig(
+        dense = mw.Simulation.mom(scene, frequencies=args.frequency, config=mw.mom.MoMConfig(
             integration=INTEGRATION, riesz_storage='compact_rwg_v1',
             stopping=StoppingRule(method='direct', rtol=1e-10, atol=0.))).run()
-        far_dense, _ = dense.surface_currents.far_field(directions)
+        far_dense, _ = mw.mom.surface_currents(dense).far_field(directions)
         report['dense'] = {'seconds': _sync()-start, 'peak_bytes': torch.cuda.max_memory_allocated(),
                            'clusters_far_field_relative_difference': _relative(far, far_dense)}
         del dense

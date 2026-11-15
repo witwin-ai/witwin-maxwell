@@ -26,7 +26,7 @@ _ETA0 = 376.730313668
 _SIGMA = 50.0
 _FREQUENCY = 2.0e9
 _BAND = (0.5e9, 5.0e9)
-_ROUGHNESS = mw.HammerstadRoughness(rms_height=1.5e-3)  # Rq ~ delta(2 GHz) = 1.59 mm
+_ROUGHNESS = mw.media.HammerstadRoughness(rms_height=1.5e-3)  # Rq ~ delta(2 GHz) = 1.59 mm
 
 
 def _scene(material, dx):
@@ -35,7 +35,6 @@ def _scene(material, dx):
         domain=mw.Domain(bounds=((-0.5, 0.5), (-trans / 2.0, trans / 2.0), (-trans / 2.0, trans / 2.0))),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.faces(default="periodic", num_layers=10, strength=1.0, x=("pml", "pml")),
-        device="cuda",
         sources=[mw.PointDipole(position=(-0.3, 0.0, 0.0), polarization=(0.0, 0.0, 1.0), width=2.0 * dx,
                                 source_time=mw.CW(frequency=_FREQUENCY, amplitude=40.0), name="pw")],
         structures=[mw.Structure(geometry=Box(position=(0.3, 0.0, 0.0), size=(0.4, 1.0, 1.0)),
@@ -46,14 +45,13 @@ def _scene(material, dx):
 def _simulation(material, cells_per_wavelength=40.0):
     dx = (_C / _FREQUENCY) / cells_per_wavelength
     return mw.Simulation.fdtd(
-        _scene(material, dx), absorber="cpml", frequencies=[_FREQUENCY],
-        run_time=mw.TimeConfig.auto(steady_cycles=16, transient_cycles=24), full_field_dft=True,
+        _scene(material, dx), frequencies=[_FREQUENCY], config=mw.FDTDConfig(absorber="cpml", run_time=mw.TimeConfig.auto(steady_cycles=16, transient_cycles=24), full_field_dft=True),
     )
 
 
 def _absorption(material, cells_per_wavelength=40.0):
     result = _simulation(material, cells_per_wavelength).run()
-    ez = result.field("Ez")
+    ez = result.field("Ez").isel(f=0).values
     ez = (ez["data"] if isinstance(ez, dict) else ez).detach().cpu().numpy()
     assert np.isfinite(ez).all()
     line = np.abs(ez).reshape(ez.shape[0], -1).mean(axis=1)
@@ -69,8 +67,8 @@ def _analytic_absorption(impedance):
 
 
 def test_narrowband_surface_resistance_is_scaled_by_the_loss_factor():
-    smooth = _simulation(mw.LossyMetalMedium(conductivity=_SIGMA)).prepare().solver
-    rough_metal = mw.LossyMetalMedium(conductivity=_SIGMA, roughness=_ROUGHNESS)
+    smooth = _simulation(mw.media.LossyMetalMedium(conductivity=_SIGMA)).prepare().solver
+    rough_metal = mw.media.LossyMetalMedium(conductivity=_SIGMA, roughness=_ROUGHNESS)
     rough = _simulation(rough_metal).prepare().solver
     smooth_r = [write["surface_r"] for write in smooth._surface_impedance["writes"]]
     rough_r = [write["surface_r"] for write in rough._surface_impedance["writes"]]
@@ -81,11 +79,11 @@ def test_narrowband_surface_resistance_is_scaled_by_the_loss_factor():
 
 
 @pytest.mark.parametrize(
-    "roughness", [_ROUGHNESS, mw.HurayRoughness.cannonball(0.3e-3)], ids=["hammerstad", "huray"]
+    "roughness", [_ROUGHNESS, mw.media.HurayRoughness.cannonball(0.3e-3)], ids=["hammerstad", "huray"]
 )
 def test_narrowband_rough_absorption_increases_as_predicted(roughness):
-    smooth_metal = mw.LossyMetalMedium(conductivity=_SIGMA)
-    rough_metal = mw.LossyMetalMedium(conductivity=_SIGMA, roughness=roughness)
+    smooth_metal = mw.media.LossyMetalMedium(conductivity=_SIGMA)
+    rough_metal = mw.media.LossyMetalMedium(conductivity=_SIGMA, roughness=roughness)
     resistance = smooth_metal.surface_impedance_at_freq(_FREQUENCY).real
     expected_smooth = _analytic_absorption(resistance)
     expected_rough = _analytic_absorption(resistance * rough_metal.roughness_loss_factor(_FREQUENCY))
@@ -104,10 +102,10 @@ def test_broadband_rough_rational_surface_absorbs_more_and_stays_stable():
     15 S/m conductor: +12% at 45 and 60 cells/wavelength), so a quantitative rough
     gate would test that runtime limit rather than the roughness model.
     """
-    smooth_metal = mw.LossyMetalMedium(conductivity=_SIGMA)
-    rough_metal = mw.LossyMetalMedium(conductivity=_SIGMA, roughness=_ROUGHNESS)
-    smooth = _absorption(mw.SurfaceImpedanceMedium(impedance=smooth_metal.rational_surface_impedance(_BAND)), 45.0)
-    rough = _absorption(mw.SurfaceImpedanceMedium(impedance=rough_metal.rational_surface_impedance(_BAND)), 45.0)
+    smooth_metal = mw.media.LossyMetalMedium(conductivity=_SIGMA)
+    rough_metal = mw.media.LossyMetalMedium(conductivity=_SIGMA, roughness=_ROUGHNESS)
+    smooth = _absorption(mw.media.SurfaceImpedanceMedium(impedance=smooth_metal.rational_surface_impedance(_BAND)), 45.0)
+    rough = _absorption(mw.media.SurfaceImpedanceMedium(impedance=rough_metal.rational_surface_impedance(_BAND)), 45.0)
     expected_ratio = (
         _analytic_absorption(rough_metal.surface_impedance_at_freq(_FREQUENCY))
         / _analytic_absorption(smooth_metal.surface_impedance_at_freq(_FREQUENCY))

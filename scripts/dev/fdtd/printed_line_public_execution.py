@@ -59,9 +59,9 @@ def _scene(kind,case):
     scene=printed_line_scene(kind,dx=case.dx,longitudinal_dl=case.longitudinal_dl or case.dx,
         axial_half_length=case.axial_half_length,port_separation=case.separation,
         transverse_padding=case.padding,transverse_refinement_radius=.02,
-        sigma_e=case.sigma,metal=case.metal,copper_frequency_range=(.1e9,4e9),device='cpu')
+        sigma_e=case.sigma,metal=case.metal,copper_frequency_range=(.1e9,4e9))
     ports,groups=physical_sources(scene,kind,case.longitudinal_dl or case.dx)
-    return scene.clone(ports=ports),groups
+    return scene.updated(ports=ports),groups
 
 
 def build_public_column(kind,case):
@@ -80,14 +80,14 @@ def build_public_column(kind,case):
         rows=[pair for station in nested for pair in station]
     plan=build_public_vi(scene,reference,monitors,rows,case.frequencies)
     validate_plan_support(plan,scene)
-    prepared=prepare_scene(scene);oracles=[];oracle_indices={};by_key={};query_oracle={}
+    prepared=prepare_scene(scene,device='cpu');oracles=[];oracle_indices={};by_key={};query_oracle={}
     for name,term in plan.queries.items():
         entries=[]
         for index,weight in plan.native_rows[name]:
             key=(term.component,index)
             if key not in by_key:
                 label='public_Cu_reference_'+str(len(by_key));by_key[key]=label
-                point=tuple(float(a[i])for a,i in zip(component_coords(prepared,term.component),index))
+                point=tuple(float(a[i])for a,i in zip(component_coords(prepared,term.component, device=prepared.device),index))
                 oracles.append(mw.PointMonitor(label,point,fields=(term.component,)));oracle_indices[label]=(term.component,index)
             entries.append((by_key[key],term.component,weight))
         query_oracle[name]=tuple(entries)
@@ -96,9 +96,9 @@ def build_public_column(kind,case):
         ordinary=[(n,c,w)for n,c,w in voltage if(c,tuple(original[n].position))not in owned]
         if not ordinary:raise ValueError('Tail controls require an original ordinary electric Point.')
         name,component,_=ordinary[len(ordinary)//2]
-        tails.append(mw.FieldTimeMonitor('full64_tail_'+str(station),components=(component,),position=original[name].position,interval=32))
+        tails.append(mw.monitors.FieldTimeMonitor('full64_tail_'+str(station),components=(component,),position=original[name].position,interval=32))
     bounds=((-0.015,0.015),*scene.domain.bounds[1:]);regional,schema=regional_monitors(scene,bounds,case.frequencies,observation='planes')
-    baseline=scene.clone(monitors=[*plan.monitors,*tails,*regional]);observed=scene.clone(monitors=[*baseline.monitors,*oracles])
+    baseline=scene.updated(monitors=[*plan.monitors,*tails,*regional]);observed=scene.updated(monitors=[*baseline.monitors,*oracles])
     return dict(case=case,base=baseline,observed=observed,groups=groups,plan=plan,
         oracle_indices=oracle_indices,query_oracle=query_oracle,regional_schema=schema,regional_bounds=bounds)
 
@@ -121,12 +121,12 @@ def _run_public_column(kind,case,drive_column,output,*,graph=True,resume=True,le
     output.mkdir(parents=True);started=time.monotonic();events={};torch.cuda.reset_peak_memory_stats();identity_before=source_identity()
     simulation=make_simulation(context['observed'],context['groups'],basis[:,drive_column],case,graph=graph,steps=1)
     prepared=simulation.prepare();solver=prepared.solver;clock=actual_clock(float(solver.dt),case)
-    simulation.config.run_time=mw.TimeConfig(time_steps=clock['total_steps']);operator=operator_signature(solver);events['prepared_s']=time.monotonic()-started
+    simulation.config=replace(simulation.config,run_time=mw.TimeConfig(time_steps=clock['total_steps']));operator=operator_signature(solver);events['prepared_s']=time.monotonic()-started
     if resume:
         checkpoint=prepared.run_until(clock['checkpoint_step']);torch.cuda.synchronize()
         if checkpoint.step!=clock['checkpoint_step']or checkpoint.total_steps!=clock['total_steps']:raise ValueError('Real checkpoint lost the complete physical horizon.')
         checkpoint.save(output/'checkpoint.pt');del checkpoint,prepared,solver;gc.collect();torch.cuda.empty_cache()
-        checkpoint=mw.FDTDResumeCheckpoint.load(output/'checkpoint.pt',map_location='cpu');prepared=simulation.prepare();solver=prepared.solver
+        checkpoint=mw.fdtd.FDTDResumeCheckpoint.load(output/'checkpoint.pt',map_location='cpu');prepared=simulation.prepare();solver=prepared.solver
         if actual_clock(float(solver.dt),case)!=clock or operator_signature(solver)!=operator:raise ValueError('Fresh preparation changed physical source/material/time operator.')
         result=prepared.run(resume_from=checkpoint)
     else:result=prepared.run()

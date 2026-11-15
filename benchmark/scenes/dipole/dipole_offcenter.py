@@ -10,27 +10,26 @@ FREQUENCIES = (1.5e9,)
 
 
 def build_scene() -> mw.Scene:
-    scene = (
-        base_scene()
-        .add_source(
-            mw.PointDipole(
-                position=(0.1, -0.05, 0.08),
-                polarization="Ez",
-                profile="ideal",
-                source_time=mw.GaussianPulse(frequency=1.5e9, fwidth=0.5e9),
-            )
-        )
-        .add_monitor(
-            mw.PlaneMonitor(
-                name="field_xy",
-                axis="z",
-                position=0.0,
-                fields=("Ex", "Ey", "Ez"),
-                frequencies=FREQUENCIES,
-            )
-        )
-        .add_monitor(mw.FluxMonitor(name="flux_z", axis="z", position=0.3, frequencies=FREQUENCIES))
-    )
+    scene = base_scene()
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(
+            position=(0.1, -0.05, 0.08),
+            polarization="Ez",
+            profile="ideal",
+            source_time=mw.GaussianPulse(frequency=1.5e9, fwidth=0.5e9),
+        ),
+    ), monitors=(
+        *scene.monitors,
+        mw.PlaneMonitor(
+            name="field_xy",
+            axis="z",
+            position=0.0,
+            fields=("Ex", "Ey", "Ez"),
+            frequencies=FREQUENCIES,
+        ),
+        mw.FluxMonitor(name="flux_z", axis="z", position=0.3, frequencies=FREQUENCIES),
+    ))
     return with_plot_monitors(scene, frequencies=FREQUENCIES)
 
 

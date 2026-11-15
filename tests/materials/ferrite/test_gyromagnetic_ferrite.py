@@ -21,12 +21,12 @@ def _ferrite(**kwargs):
         gilbert_damping=2.0e-3,
     )
     base.update(kwargs)
-    return mw.GyromagneticFerrite(**base)
+    return mw.media.GyromagneticFerrite(**base)
 
 
 def test_public_export():
-    assert mw.GyromagneticFerrite is media.GyromagneticFerrite
-    assert issubclass(mw.GyromagneticFerrite, mw.Material)
+    assert mw.media.GyromagneticFerrite is media.GyromagneticFerrite
+    assert issubclass(mw.media.GyromagneticFerrite, mw.Material)
 
 
 def test_derived_frequencies():
@@ -58,7 +58,7 @@ def test_validation_rejects(kwargs, message):
 
 
 def test_from_cgs_conversion_recorded():
-    f = mw.GyromagneticFerrite.from_cgs(saturation_4piMs_gauss=1750.0, bias_Oe=2199.0, eps_r=14.5)
+    f = mw.media.GyromagneticFerrite.from_cgs(saturation_4piMs_gauss=1750.0, bias_Oe=2199.0, eps_r=14.5)
     factor = 1.0e-4 / MU_0
     assert f.saturation_magnetization == pytest.approx(1750.0 * factor)
     assert f.bias_magnitude == pytest.approx(2199.0 * factor)
@@ -71,7 +71,7 @@ def test_from_cgs_conversion_recorded():
 
 
 def test_from_resonance_backcomputes_bias_and_damping():
-    f = mw.GyromagneticFerrite.from_resonance(
+    f = mw.media.GyromagneticFerrite.from_resonance(
         resonance_frequency=6.0e9, saturation_magnetization=1.40e5, linewidth=2.0e8, eps_r=14.5,
     )
     assert f.resonance_frequency == pytest.approx(6.0e9, rel=1e-10)
@@ -234,13 +234,13 @@ def test_evaluate_static_background_for_meshing():
 def test_off_diagonal_mu_static_guard_still_in_force():
     """Full constant permeability remains unavailable to the static Yee compiler."""
     with pytest.raises(NotImplementedError):
-        mw.Material(mu_tensor=mw.Tensor3x3([[1, 0.1, 0], [0.1, 1, 0], [0, 0, 1]])).evaluate_static()
+        mw.Material(mu_tensor=mw.media.Tensor3x3([[1, 0.1, 0], [0.1, 1, 0], [0, 0, 1]])).evaluate_static()
 
 
 def test_perturbation_medium_rejects_ferrite():
     grid = torch.ones((2, 2, 2), dtype=torch.float64)
     with pytest.raises(NotImplementedError) as exc:
-        mw.PerturbationMedium(_ferrite(), perturbation=grid)
+        mw.media.PerturbationMedium(_ferrite(), perturbation=grid)
     assert "GyromagneticFerrite" in str(exc.value)
 
 

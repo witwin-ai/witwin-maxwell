@@ -6,6 +6,8 @@ import math
 
 import torch
 
+from ..errors import UnsupportedFeatureError
+
 
 def clip_triangles(triangles, lows, highs):
     """Clip independent triangles against Cartesian boxes on their torch device."""
@@ -105,7 +107,8 @@ def _refine_current_mesh(vertices, triangles, spacing):
             ab, bc, ca = (edge_ids[tuple(sorted(edge))] for edge in ((a,b), (b,c), (c,a)))
             refined.extend(((a,ab,ca), (ab,b,bc), (ca,bc,c), (ab,bc,ca)))
         triangles = torch.tensor(refined, device=vertices.device)
-    raise NotImplementedError("Surface-current mesh refinement exceeded its explicit depth cap.")
+    raise UnsupportedFeatureError("Surface-current mesh refinement exceeded its explicit depth cap.",
+                                  feature="geometry.surface_mesh", method="fdtd")
 
 
 def compile_integrated_traces(vertices, triangles, nodes, *, maximum_constraints=4096, include_magnetic=False):
@@ -120,7 +123,8 @@ def compile_integrated_traces(vertices, triangles, nodes, *, maximum_constraints
     if not edges:
         raise ValueError("Surface-current trace space has no internal edge; refine the triangle mesh.")
     if len(edges) > maximum_constraints:
-        raise NotImplementedError(f"Cut-surface constraint count {len(edges)} exceeds the explicit {maximum_constraints} row cap.")
+        raise UnsupportedFeatureError(f"Cut-surface constraint count {len(edges)} exceeds the explicit {maximum_constraints} row cap.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     points, weights, cells, normals, face_ids = clipped_surface_quadrature(vertices, triangles, nodes, include_face_ids=True)
     cell_shape = tuple(len(axis)-1 for axis in nodes)
     flat_cell = (cells[:, 0]*cell_shape[1]+cells[:, 1])*cell_shape[2]+cells[:, 2]
@@ -178,7 +182,8 @@ def compile_integrated_traces(vertices, triangles, nodes, *, maximum_constraints
     indices,value=matrix.indices()[:,keep],matrix.values()[keep]
     support,local_column=torch.unique(indices[1],sorted=True,return_inverse=True)
     if len(edges)*len(support)*8 > 512*1024**2:
-        raise NotImplementedError("Cut-surface float64 rank-reveal matrix exceeds the explicit 512 MiB cap.")
+        raise UnsupportedFeatureError("Cut-surface float64 rank-reveal matrix exceeds the explicit 512 MiB cap.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     matrix=torch.sparse_coo_tensor(torch.stack((indices[0],local_column)),value,(len(edges),len(support))).coalesce()
     result = dict(matrix=matrix,support=support,shapes=shapes,cell_count=len(unique),constraint_count=len(edges),
         cells=unique,area=area.sum(),minimum_cell_area=area.min(),maximum_cell_area=area.max())
@@ -212,7 +217,8 @@ def compile_integrated_traces(vertices, triangles, nodes, *, maximum_constraints
     indices, value = magnetic.indices()[:,keep],magnetic.values()[keep]
     magnetic_support, local_columns = torch.unique(indices[1],sorted=True,return_inverse=True)
     if len(edges)*(len(support)+len(magnetic_support))*8 > 512*1024**2:
-        raise NotImplementedError("Combined copper mortar rank-reveal matrices exceed the explicit 512 MiB cap.")
+        raise UnsupportedFeatureError("Combined copper mortar rank-reveal matrices exceed the explicit 512 MiB cap.",
+                                      feature="material.copper_foil", method="fdtd")
     magnetic = torch.sparse_coo_tensor(torch.stack((indices[0],local_columns)),value,
                                        (len(edges),len(magnetic_support))).coalesce()
     point_rows = (3*torch.arange(len(points),device=points.device)[:,None,None]+

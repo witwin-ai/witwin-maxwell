@@ -15,7 +15,7 @@ def pec_structures(scene) -> tuple[Any, ...]:
 
     return tuple(
         structure
-        for structure in getattr(scene, "structures", ())
+        for structure in getattr(scene.scene, "structures", ())
         if bool(getattr(structure, "enabled", True))
         and bool(getattr(getattr(structure, "material", None), "is_pec", False))
     )
@@ -26,7 +26,7 @@ def pmc_structures(scene) -> tuple[Any, ...]:
 
     return tuple(
         structure
-        for structure in getattr(scene, "structures", ())
+        for structure in getattr(scene.scene, "structures", ())
         if bool(getattr(structure, "enabled", True))
         and bool(getattr(getattr(structure, "material", None), "is_pmc", False))
     )

@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 import witwin.maxwell as mw
+from witwin.maxwell.compiler import compile_materials
 
 SCRATCH = Path(tempfile.gettempdir()) / 'witwin_cov_meshperf'
 CASES = ('repro64', 'p16s0', 'p16s1178', 'mesh', 'sphere', 'box', 'samples1',
@@ -40,14 +41,14 @@ def make_scene(case):
             record, metadata = read_scene(index, position)
             problem = convert_scene(record, metadata['source_index'])
         path.write_text(json.dumps(problem))
-        return mw.Scene.from_dict(problem['scene'], device='cuda'), problem['analysis']['frequencies'][0]
+        return mw.Scene.from_dict(problem['scene']), problem['analysis']['frequencies'][0]
     from mesh_subpixel_compile_perf import make_scene as repro_scene
     args = SimpleNamespace(mesh=SCRATCH / 'mesh168.npz', cells=64 if case == 'repro64' else 8,
                            pml=8 if case == 'repro64' else 2, samples=4)
     scene = repro_scene(args, 'sphere' if case == 'sphere' else 'mesh')
     mesh = scene.structures[0].geometry
     if case == 'samples1':
-        scene.subpixel = mw.SubpixelSpec(samples=1, averaging='arithmetic')
+        scene = scene.updated(subpixel=mw.SubpixelSpec(samples=1, averaging='arithmetic'))
     if case in ('repro64', 'sphere', 'samples1'):
         return scene, 1e9
     data = np.load(args.mesh)
@@ -55,15 +56,18 @@ def make_scene(case):
     center = (vertices.min(0) + vertices.max(0)) / 2
     extent = np.ptp(vertices, axis=0).max()
     if case == 'box':
-        scene.structures[0] = replace(scene.structures[0],
-            geometry=mw.Box(position=center, size=(extent,) * 3))
+        scene = scene.updated(structures=(replace(scene.structures[0],
+            geometry=mw.Box(position=center, size=(extent,) * 3)), *scene.structures[1:]))
     elif case == 'overlap_mesh':
-        scene.add_structure(mw.Structure(mw.Mesh(vertices, faces, recenter=False,
-            position=(extent * .2, 0, 0), fill_mode='solid'), mw.Material(eps_r=3.2), priority=1))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(mw.Mesh(vertices, faces, recenter=False,
+                position=(extent * .2, 0, 0), fill_mode='solid'), mw.Material(eps_r=3.2), priority=1),
+        ))
     elif case in ('overlap_primitive', 'primitive_first'):
         primitive = mw.Structure(mw.Box(position=center, size=(extent * .8,) * 3),
                                  mw.Material(eps_r=2.7), priority=1 if case == 'overlap_primitive' else -1)
-        scene.add_structure(primitive)
+        scene = scene.updated(structures=(*scene.structures, primitive))
     elif case in ('boundary_touch', 'boundary_cross'):
         lo = vertices.min(0)
         shift = scene.domain.bounds[0][0] - lo[0]
@@ -71,25 +75,24 @@ def make_scene(case):
             shift -= extent * .3
         mesh.position[0] = float(shift)
     elif case == 'transformed':
-        scene.structures[0] = replace(scene.structures[0], geometry=mw.Mesh(
+        scene = scene.updated(structures=(replace(scene.structures[0], geometry=mw.Mesh(
             vertices, faces, position=center, recenter=True, scale=(1.3, .6, .8),
-            rotation=(.9238795325, 0, 0, .3826834324), fill_mode='solid'))
+            rotation=(.9238795325, 0, 0, .3826834324), fill_mode='solid')), *scene.structures[1:]))
     elif case in ('open', 'surface'):
-        scene.structures[0] = replace(scene.structures[0], geometry=mw.Mesh(
-            vertices, faces[:-5], recenter=False, fill_mode='solid' if case == 'open' else 'surface'))
+        scene = scene.updated(structures=(replace(scene.structures[0], geometry=mw.Mesh(
+            vertices, faces[:-5], recenter=False, fill_mode='solid' if case == 'open' else 'surface')), *scene.structures[1:]))
     elif case == 'mm':
         # Set the largest mesh extent to one millimetre.
         factor = .001 / float(extent)
         scene = mw.Scene(domain=mw.Domain(tuple((a * factor, b * factor) for a, b in scene.domain.bounds)),
             grid=mw.GridSpec.uniform(float(scene.grid.dx) * factor), boundary=mw.BoundarySpec.pml(num_layers=2),
-            subpixel_samples=mw.SubpixelSpec(samples=4, averaging='polarized'), device='cuda',
-            structures=[mw.Structure(mw.Mesh(vertices * factor, faces, recenter=False, fill_mode='solid'), mw.Material(eps_r=6.83))])
+            subpixel=mw.SubpixelSpec(samples=4, averaging='polarized'), structures=[mw.Structure(mw.Mesh(vertices * factor, faces, recenter=False, fill_mode='solid'), mw.Material(eps_r=6.83))])
     elif case == 'periodic':
-        scene.boundary = mw.BoundarySpec.periodic()
+        scene = scene.updated(boundary=mw.BoundarySpec.periodic())
     elif case == 'graded':
-        scene.grid = mw.GridSpec.custom(*(np.linspace(a, b, 9) if axis == 0 else
+        scene = scene.updated(grid=mw.GridSpec.custom(*(np.linspace(a, b, 9) if axis == 0 else
             a + (b - a) * np.linspace(0, 1, 9) ** (1 + .1 * axis)
-            for axis, (a, b) in enumerate(scene.domain.bounds)))
+            for axis, (a, b) in enumerate(scene.domain.bounds))))
     elif case != 'mesh':
         raise ValueError(case)
     return scene, 1e9
@@ -140,15 +143,15 @@ def main():
     start = time.perf_counter()
     try:
         if args.backend == 'fdfd':
-            prepared = mw.Simulation.fdfd(scene, frequency=frequency).prepare()
+            prepared = mw.Simulation.fdfd(scene, frequencies=frequency).prepare()
             prepared.solver._ensure_material_components()
         else:
-            prepared = mw.Simulation.fdtd(scene, frequency=frequency,
-                run_time=mw.TimeConfig(time_steps=1)).prepare()
-    except ValueError as error:
+            prepared = mw.Simulation.fdtd(scene, frequencies=frequency,
+                config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare()
+    except NotImplementedError as error:
         if (args.case, args.backend) != ('periodic', 'fdfd'):
             raise
-        assert str(error) == "FDFD supports per-face 'none', 'pml' and 'pec' boundaries."
+        assert "FDFD supports per-face 'none', 'pml' and 'pec' boundaries only" in str(error)
         result = dict(case=args.case, backend=args.backend, label=args.label,
             status='unsupported', error=str(error), seconds=None, tensors=0,
             mismatches=[], **environment)
@@ -165,7 +168,7 @@ def main():
     solver = prepared.solver
     # This is a cache hit on the same compiled model the FDFD consumer reads.
     if args.backend == 'fdfd':
-        model = solver.scene.compile_materials()
+        model = compile_materials(solver.scene)
         model = {key: value for key, value in model.items() if key != 'edge_components'}
     else:
         model = solver._compiled_material_model

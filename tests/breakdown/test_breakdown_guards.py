@@ -25,25 +25,25 @@ pytestmark = pytest.mark.skipif(
 
 def test_unsupported_model_rejected_at_construction():
     with pytest.raises(NotImplementedError, match="field_duration"):
-        mw.DielectricBreakdown(
+        mw.breakdown.DielectricBreakdown(
             critical_field=1e6, post_breakdown_conductivity=1.0, model="instantaneous"
         )
 
 
 def test_unsupported_state_rejected_at_construction():
     with pytest.raises(NotImplementedError, match="latching"):
-        mw.DielectricBreakdown(
+        mw.breakdown.DielectricBreakdown(
             critical_field=1e6, post_breakdown_conductivity=1.0, state="recovering"
         )
 
 
 def test_reserved_fields_rejected_at_construction():
     with pytest.raises(NotImplementedError, match="recovery"):
-        mw.DielectricBreakdown(
+        mw.breakdown.DielectricBreakdown(
             critical_field=1e6, post_breakdown_conductivity=1.0, recovery=object()
         )
     with pytest.raises(NotImplementedError, match="damage_parameters"):
-        mw.DielectricBreakdown(
+        mw.breakdown.DielectricBreakdown(
             critical_field=1e6,
             post_breakdown_conductivity=1.0,
             damage_parameters=object(),
@@ -63,48 +63,47 @@ class _TrainableBreakdownScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-            grid=mw.GridSpec.uniform(0.04),
-            boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-            device="cuda",
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="breakdown_box",
-                geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
-                material=mw.Material(
-                    eps_r=3.0,
-                    breakdown=mw.DielectricBreakdown(
-                        critical_field=1e6, post_breakdown_conductivity=5.0
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+                    grid=mw.GridSpec.uniform(0.04),
+                    boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                    structures=(
+                mw.Structure(
+                    name="breakdown_box",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
+                    material=mw.Material(
+                        eps_r=3.0,
+                        breakdown=mw.breakdown.DielectricBreakdown(
+                            critical_field=1e6, post_breakdown_conductivity=5.0
+                        ),
                     ),
                 ),
-            )
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, -0.06), size=(0.12, 0.12, 0.12)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.12),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=1.0),
-            )
-        )
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, -0.06), size=(0.12, 0.12, 0.12)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.12),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=1.0),
+                ),
+                ),
+                )
         return scene
 
 
 def test_trainable_breakdown_rejected():
     model = _TrainableBreakdownScene().cuda()
     simulation = mw.Simulation.fdtd(
-        model, frequencies=[1e9], run_time=mw.TimeConfig(time_steps=8)
+        model, frequencies=[1e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8))
     )
     with pytest.raises(NotImplementedError, match="Trainable scenes cannot enable"):
         simulation.prepare()

@@ -43,7 +43,7 @@ def test_difference_kernel_against_high_precision_oracle(dtype):
 def test_lifted_rhs_zero_identity_and_nonzero_weak_scattering(epsilon):
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=epsilon))],
                      sources=[mw.PlaneWave()])
-    op = mw.Simulation.mom(scene, frequency=3e8, config=mw.MoMConfig(subdivisions=1,
+    op = mw.Simulation.mom(scene, frequencies=3e8, config=mw.mom.MoMConfig(subdivisions=1,
         riesz_storage='compact_rwg_v1', integration=IntegrationConfig(order=4, singular_order=6))).prepare().solver.handle
     rhs, metadata = build_lifted_rhs(op)
     y, log = solve_reference(op, rhs, StoppingRule(method='direct', rtol=1e-10))
@@ -110,7 +110,7 @@ def test_rhs_multiple_directions_phases_and_exact_source_cancellation(dtype):
                      source_time=mw.CW(frequency=frequency, phase=-.51))
     opposite = mw.PlaneWave(source_time=mw.CW(frequency=frequency, phase=.37, amplitude=-1.))
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=1.01))], sources=[a])
-    config = mw.MoMConfig(subdivisions=0, dtype=dtype,
+    config = mw.mom.MoMConfig(subdivisions=0, dtype=dtype,
                           integration=IntegrationConfig(order=4, singular_order=6, near_tolerance=2e-5))
     basis, exterior, interior = compile_surface(scene, frequency, config)
     def evaluate(sources):
@@ -127,7 +127,7 @@ def test_complete_rhs_order_convergence_is_independent_of_pair_estimator(epsilon
     from witwin.maxwell.mom.runtime import compile_surface, DecodeHandle
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=epsilon))],
                      sources=[mw.PlaneWave(source_time=mw.CW(frequency=3e8, phase=.37))])
-    config = mw.MoMConfig(subdivisions=0)
+    config = mw.mom.MoMConfig(subdivisions=0)
     basis, exterior, interior = compile_surface(scene, 3e8, config)
     values = []
     for order, singular in ((4, 6), (6, 8)):

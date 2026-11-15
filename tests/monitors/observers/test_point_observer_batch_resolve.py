@@ -12,6 +12,14 @@ from witwin.maxwell.fdtd import observers
 from witwin.maxwell.fdtd.coords import component_coords
 from witwin.maxwell.scene import prepare_scene
 from tests.monitors.observers import _point_observer_reference as reference
+from witwin.maxwell.scene import place_scene
+
+
+
+
+def requires_cuda(function):
+    # make_solver prepares an FDTD solver, which needs CUDA; the other tests stay host-only.
+    return pytest.mark.cuda(pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")(function))
 
 
 COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
@@ -30,15 +38,14 @@ def grid_scene():
         (-16, -12, -8, -2, 0, 2, 8, 16), (-16, -8, -4, 0, 2, 4, 12, 16),
         (-16, -12, -4, -2, 0, 4, 8, 16))]
     return mw.Scene(domain=mw.Domain(bounds=((- .5, .5),) * 3),
-                    grid=mw.GridSpec.custom(*axes), boundary=mw.BoundarySpec.pec(), device="cpu")
+                    grid=mw.GridSpec.custom(*axes), boundary=mw.BoundarySpec.pec())
 
 
 def make_solver(scene):
     return mw.Simulation.fdtd(
-        scene, frequencies=(.8e9, 1.e9),
-        backend="cpu_reference" if torch.device(scene.device).type == "cpu" else "native", cuda_graph=False,
+        place_scene(scene, "cuda"), frequencies=(.8e9, 1.e9), config=mw.FDTDConfig(cuda_graph=False,
         full_field_dft=False, run_time=mw.TimeConfig(time_steps=8),
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False)),
     ).prepare().solver
 
 
@@ -64,8 +71,8 @@ def assert_exact(actual, expected):
 
 @pytest.mark.parametrize("component", COMPONENTS)
 def test_batch_resolution_matches_scalar_nonuniform(component):
-    solver = SimpleNamespace(scene=prepare_scene(grid_scene()))
-    coords = component_coords(solver.scene, component)
+    solver = SimpleNamespace(scene=prepare_scene(grid_scene(), device="cpu"))
+    coords = component_coords(solver.scene, component, device=solver.scene.device)
     positions = [tuple(axis[0] for axis in coords), tuple(axis[-1] for axis in coords),
                  (-1., -1., -1.), (1., 1., 1.)]
     # Exercise a tie on every axis independently and simultaneously.
@@ -93,7 +100,7 @@ def test_public_position_conversion_is_preserved(position):
     monitor = mw.PointMonitor("converted", position, fields=COMPONENTS)
     assert all(type(value) is float for value in monitor.position)
     assert monitor.position == tuple(float(value) for value in position)
-    solver = SimpleNamespace(scene=prepare_scene(grid_scene()))
+    solver = SimpleNamespace(scene=prepare_scene(grid_scene(), device="cpu"))
     for component in COMPONENTS:
         expected = observers.resolve_point_observer(solver, dict(component=component, position=monitor.position))
         assert observers._resolve_point_observers(solver, component, [monitor.position]) == [expected]
@@ -101,22 +108,34 @@ def test_public_position_conversion_is_preserved(position):
 
 def mixed_scene():
     scene = grid_scene()
-    scene.add_source(mw.PointDipole(name="source", position=(-.4, -.4, -.4),
-        polarization=(.6, 0., .8), profile="ideal", source_time=mw.CW(frequency=1.e9)))
-    sheet = mw.SurfaceMesh([[-.25, -.25, .25], [.25, -.25, .25],
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(name="source", position=(-.4, -.4, -.4),
+            polarization=(.6, 0., .8), profile="ideal", source_time=mw.CW(frequency=1.e9)),
+    ))
+    sheet = mw.geometry.SurfaceMesh([[-.25, -.25, .25], [.25, -.25, .25],
                             [.25, .25, .25], [-.25, .25, .25]],
                            [(0, 1, 2), (0, 2, 3)], sheet_model="conformal_two_sided")
-    scene.add_structure(mw.Structure(sheet, mw.Material.pec()))
+    scene = scene.updated(structures=(*scene.structures, mw.Structure(sheet, mw.Material.pec())))
     for i in range(24):
         if i == 7:
-            scene.add_monitor(mw.PlaneMonitor("plane", axis="z", position=.013, fields=("Ex", "Hy"),
-                                              frequencies=(1.1e9, .8e9)))
-        scene.add_monitor(mw.PointMonitor(f"point_{i}", ((i % 6 - 3) / 32, .021, -.013), fields=COMPONENTS))
-    scene.add_monitor(mw.DipoleEmissionMonitor("emission", "source", frequencies=(1.e9, 1.1e9)))
-    scene.add_monitor(mw.FluxMonitor("flux", axis="z", position=.02, frequencies=(.8e9,)))
-    scene.add_monitor(mw.PointMonitor("sheet_probe", (.0, .0, .0), fields=("Ez",)))
-    scene.add_monitor(mw.PointMonitor("sheet_surface", (.0, .0, .25), fields=("Ex",)))
-    scene.add_monitor(mw.FieldTimeMonitor("time", position=(0., 0., 0.), components=("Ex", "Ez")))
+            scene = scene.updated(monitors=(
+                *scene.monitors,
+                mw.PlaneMonitor("plane", axis="z", position=.013, fields=("Ex", "Hy"),
+                                frequencies=(1.1e9, .8e9)),
+            ))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.PointMonitor(f"point_{i}", ((i % 6 - 3) / 32, .021, -.013), fields=COMPONENTS),
+        ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.DipoleEmissionMonitor("emission", "source", frequencies=(1.e9, 1.1e9)),
+        mw.FluxMonitor("flux", axis="z", position=.02, frequencies=(.8e9,)),
+        mw.PointMonitor("sheet_probe", (.0, .0, .0), fields=("Ez",)),
+        mw.PointMonitor("sheet_surface", (.0, .0, .25), fields=("Ex",)),
+        mw.monitors.FieldTimeMonitor("time", position=(0., 0., 0.), components=("Ex", "Ez")),
+    ))
     return scene
 
 
@@ -142,13 +161,12 @@ def fill_groups(solver):
                      source_dft_real=.7 + index, source_dft_imag=-.3)
 
 
+@requires_cuda
 @pytest.mark.parametrize("complex_fields,dtype", [(False, torch.float32), (False, torch.float64), (True, torch.float32)])
-@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=[pytest.mark.cuda,
-    pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")])])
-def test_original_prepare_layout_results_and_checkpoint(complex_fields, dtype, device):
+def test_original_prepare_layout_results_and_checkpoint(complex_fields, dtype):
     from witwin.maxwell.fdtd.observation_resume import capture_observations, preflight_observations
 
-    scene = mixed_scene().clone(device=device)
+    scene = mixed_scene()
     expected = make_solver(scene)
     actual = make_solver(scene)
     original_records = compiled_records(scene, reference.compile_fdtd_observers)
@@ -186,6 +204,7 @@ def test_original_prepare_layout_results_and_checkpoint(complex_fields, dtype, d
     assert_exact(observers.get_observer_results(actual), reference.get_observer_results(expected))
 
 
+@requires_cuda
 def test_time_and_thin_sheet_consumers_keep_scalar_resolution():
     from witwin.maxwell.fdtd.thin_sheet import _warn_side_observers
 
@@ -205,6 +224,7 @@ def test_time_and_thin_sheet_consumers_keep_scalar_resolution():
     assert call.call_count == sum(1 for record in solver.observers if record["kind"] == "point") + 2
 
 
+@requires_cuda
 def test_component_work_and_spectral_entry_order():
     scene = mixed_scene()
     solver = make_solver(scene)

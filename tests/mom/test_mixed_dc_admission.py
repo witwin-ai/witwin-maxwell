@@ -9,11 +9,11 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 
 
 def test_all_material_channel_failures_preserved_without_scalarization():
-    tensor=mw.Material(epsilon_tensor=mw.ComplexTensor3x3([[2+.1j,0,0],[0,3+.2j,0],[0,0,4+.3j]]),
-                       mu_tensor=mw.ComplexTensor3x3([[1+.01j,0,0],[0,2+.02j,0],[0,0,3+.03j]]))
+    tensor=mw.Material(epsilon_tensor=mw.media.ComplexTensor3x3([[2+.1j,0,0],[0,3+.2j,0],[0,0,4+.3j]]),
+                       mu_tensor=mw.media.ComplexTensor3x3([[1+.01j,0,0],[0,2+.02j,0],[0,0,3+.03j]]))
     materials=(compile_tensor_harmonic_material(tensor,3e8,2,device='cuda'),
                compile_harmonic_material(mw.Material(eps_r=2.,sigma_e=.001,sigma_m=.01,
-                   nonlinearity=mw.TwoPhotonAbsorption(beta=5.)),3e8,2))
+                   nonlinearity=mw.media.TwoPhotonAbsorption(beta=5.)),3e8,2))
     exterior=compile_harmonic_material(mw.Material(),3e8,2)
     before=materials[0].electric_dc.finite_relative_part.clone()
     with pytest.raises(MixedHarmonicDCAdmissionError) as caught:

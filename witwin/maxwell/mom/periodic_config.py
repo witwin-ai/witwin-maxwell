@@ -2,8 +2,19 @@
 from dataclasses import dataclass, asdict, field
 import math
 import torch
+from .options import MoMOption, option_asdict
+from .._enums import parse_enum
+from .._stability import experimental
 
 
+@experimental("mom")
+class TransverseMap(MoMOption):
+    """Transverse spectral-line coordinate map selected by ``MoMDyadicPeriodicConfig.transverse_map``."""
+    LINEAR = 'linear'
+    SINH = 'sinh'
+
+
+@experimental("mom")
 @dataclass(frozen=True)
 class MoMPeriodicConfig:
     """Row lattice vectors [m], Bloch vector [rad/m] and explicit Ewald budgets.
@@ -71,6 +82,7 @@ class MoMPeriodicConfig:
             pole_relative_tolerance=self.pole_relative_tolerance)
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class MoMDyadicPeriodicConfig:
     """Explicit checked periodic Maxwell budgets, distinct from scalar Ewald.
@@ -88,7 +100,7 @@ class MoMDyadicPeriodicConfig:
     normal: tuple | None = None
     transverse_cutoff: float = 64.
     quadrature_order: int = 64
-    transverse_map: str = 'linear'
+    transverse_map: TransverseMap = TransverseMap.LINEAR
     pole_relative_tolerance: float = 1e-10
     mode_batch: int = 4096
     query_batch: int = 32
@@ -96,6 +108,8 @@ class MoMDyadicPeriodicConfig:
     version: str = field(default='mom_bravais_dyadic_config_v1', init=False)
 
     def __post_init__(self):
+        object.__setattr__(self, 'transverse_map',
+                           parse_enum(TransverseMap, self.transverse_map, name='MoMDyadicPeriodicConfig.transverse_map'))
         def vector(value):
             if (not isinstance(value, (tuple, list)) or len(value) != 3
                     or any(type(v) not in (int, float) or not math.isfinite(v) for v in value)):
@@ -123,13 +137,11 @@ class MoMDyadicPeriodicConfig:
             raise ValueError('Dyadic periodic limits require three halvings and reciprocal doubling')
         if len(self.vectors_m) == 1 and self.max_shells != 2*self.shells:
             raise ValueError('One-dimensional dyadic spectra require an exact two-level reciprocal budget')
-        if self.transverse_map not in ('linear', 'sinh'):
-            raise ValueError('Dyadic transverse mapping must be linear or sinh')
         if type(self.cache_max_bytes) is not int or self.cache_max_bytes < 0:
             raise ValueError('Dyadic periodic cache budget must be a nonnegative integer')
 
     def payload(self):
-        result = asdict(self)
+        result = option_asdict(self)
         result['vectors_m'] = [list(v) for v in self.vectors_m]
         result['bloch_rad_per_m'] = list(self.bloch_rad_per_m)
         result['normal'] = None if self.normal is None else list(self.normal)
@@ -158,5 +170,5 @@ class MoMDyadicPeriodicConfig:
             self.max_halvings, self.absolute_tolerance, self.max_shells,
             normal=None if self.normal is None else sample.new_tensor(self.normal),
             transverse_cutoff=self.transverse_cutoff, quadrature_order=self.quadrature_order,
-            transverse_map=self.transverse_map, integration=integration,
+            transverse_map=self.transverse_map.value, integration=integration,
             primary_cache_max_bytes=primary_cache_max_bytes)

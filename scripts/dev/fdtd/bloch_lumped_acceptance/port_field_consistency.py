@@ -6,6 +6,7 @@ into the field is displacement current plus the RF-oriented H contour integral
 for either finite record, including CW endpoints.
 No port accumulator or circuit state is used to reconstruct either reference.
 """
+from dataclasses import replace
 import sysconfig
 import os
 
@@ -19,6 +20,8 @@ import itertools
 from common import F0, FREQUENCIES, mw, simulation, torch
 from witwin.maxwell.fdtd.coords import component_coords
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.scene import place_scene
+from witwin.maxwell.compiler import compile_ports
 
 
 def main():
@@ -33,25 +36,26 @@ def main():
                          termination=mw.SeriesRLC(r=50., l=5e-9, c=.5e-12))
     if args.source == "cw":
         source = problem.scene.sources[0]
-        problem.scene.sources[0] = mw.PlaneWave(
+        scene = problem.scene.updated(sources=(mw.PlaneWave(
             name=source.name, direction=source.direction, polarization=source.polarization,
-            injection=source.injection, source_time=mw.CW(F0, phase=.47))
-        problem = mw.Simulation.fdtd(problem.scene, frequencies=(F0,), run_time=problem.config.run_time)
-    problem.config.spectral_sampler = mw.SpectralSampler(window="none", normalize_source=args.normalize_source)
+            injection=source.injection, source_time=mw.CW(F0, phase=.47)), *problem.scene.sources[1:]))
+        problem = mw.Simulation.fdtd(scene, frequencies=(F0,), config=mw.FDTDConfig(run_time=problem.config.run_time))
+    problem.config = replace(problem.config, spectral_sampler=mw.SpectralSampler(window="none", normalize_source=args.normalize_source))
     # A nondefault reference also catches an imaginary bank left at f_ref=1.
-    problem.config.reference_frequency = 4.2e9
-    planning = prepare_scene(problem.scene.clone(device="cpu"))
-    geometry = planning.compile_ports(device="cpu")[0]
+    problem.config = replace(problem.config, reference_frequency=4.2e9)
+    planning = prepare_scene(place_scene(problem.scene, "cpu"), device="cpu")
+    geometry = compile_ports(planning, device="cpu")[0]
     rows = {"voltage": [], "contour": [], "charge": []}
     probes = {}
+    probe_monitors = []
 
     def add(row, component, index, weight):
         key = (component, tuple(int(i) for i in index))
         if key not in probes:
             name = f"port_native_{len(probes)}"
-            coords = component_coords(planning, component)
+            coords = component_coords(planning, component, device=planning.device)
             point = tuple(float(axis[i]) for axis, i in zip(coords, key[1]))
-            problem.scene.add_monitor(mw.PointMonitor(name, point, fields=(component,)))
+            probe_monitors.append(mw.PointMonitor(name, point, fields=(component,)))
             probes[key] = name
         rows[row].append((key, float(weight)))
 
@@ -75,6 +79,9 @@ def main():
     for j, k in itertools.product(ys, zs):
         add("charge", "Ex", (normal, j, k), planning.dy_dual64[j] * planning.dz_dual64[k])
 
+    # Scenes are immutable: run the probed scene as a new simulation with the same configuration.
+    problem = mw.Simulation.fdtd(problem.scene.updated(monitors=(*problem.scene.monitors, *probe_monitors)),
+                                 frequencies=problem.frequencies, excitations=problem.excitations, config=problem.config)
     prepared = problem.prepare()
     solver = prepared.solver
     # Physical epsilon on this vacuum face; independent of the lumped solve.
@@ -113,7 +120,7 @@ def main():
     for key, name in probes.items():
         spectra = []
         for frequency in target_frequencies:
-            payload = result.monitor(name, frequency=frequency)
+            payload = result.raw_monitor(name, frequency=frequency)
             assert tuple(payload["field_indices"][key[0]]) == key[1], (name, key)
             # Public observers combine both field banks before normalizing.
             spectra.append(torch.as_tensor(payload[key[0]]).detach().cpu().to(torch.complex128))

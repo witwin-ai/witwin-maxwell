@@ -10,6 +10,7 @@ import witwin.maxwell as mw
 import witwin.maxwell.scene as scene_module
 from benchmark.scenes import build_scene
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_tensors, compile_materials, compile_relative_materials
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +24,7 @@ def _small_cpu_thread_pool():
 def _census(prepared):
     """Original contact-and-stopping predicate, evaluated on prepared geometry."""
     hits = []
-    for i, owner in enumerate([*prepared.structures, *prepared.material_regions]):
+    for i, owner in enumerate([*prepared.scene.structures, *prepared.scene.material_regions]):
         for k, axis in enumerate("xyz"):
             nodes = getattr(prepared, axis)
             others = [a for a in "xyz" if a != axis]
@@ -33,9 +34,9 @@ def _census(prepared):
                 coords = {axis: torch.full_like(a, float(value)), others[0]: a, others[1]: b}
                 return owner.geometry.signed_distance(*(coords[o] for o in "xyz")) <= 0
 
-            for side, bound, outer in (("low", prepared.domain.bounds[k][0], nodes[0]),
-                                       ("high", prepared.domain.bounds[k][1], nodes[-1])):
-                if prepared.boundary.face_kind(axis, side) == "pml":
+            for side, bound, outer in (("low", prepared.scene.domain.bounds[k][0], nodes[0]),
+                                       ("high", prepared.scene.domain.bounds[k][1], nodes[-1])):
+                if prepared.scene.boundary.face_kind(axis, side) == "pml":
                     interface = nodes[(nodes - bound).abs().argmin()]
                     if bool((inside(interface) & ~inside(outer)).any()):
                         hits.append((i, axis, side))
@@ -57,13 +58,13 @@ def _equal(actual, expected):
         assert actual == expected
 
 
-def _scene(geometry=None, *, device="cpu", regions=(), material=None):
+def _scene(geometry=None, *, regions=(), material=None):
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
         grid=mw.GridSpec.uniform(0.125),
         boundary=mw.BoundarySpec.pml(num_layers=2),
-        subpixel_samples=mw.SubpixelSpec(samples=1, averaging="arithmetic"),
-        device=device, material_regions=regions,
+        subpixel=mw.SubpixelSpec(samples=1, averaging="arithmetic"),
+        material_regions=regions,
         structures=[] if geometry is None else [mw.Structure(
             geometry=geometry, material=material or mw.Material(eps_r=4), name="sample")],
     )
@@ -79,26 +80,25 @@ FLAGGED = [
 @pytest.mark.parametrize("name", FLAGGED)
 def test_flagged_benchmark_census_is_clean_after_compile(name, monkeypatch):
     scene = build_scene(name)
-    scene.device = "cpu"
     with monkeypatch.context() as patch:
         patch.setattr(scene_module, "_extrude_pml_contacts", lambda _: [])
-        before = prepare_scene(scene)
+        before = prepare_scene(scene, device="cpu")
     assert _census(before)
-    prepared = prepare_scene(scene)
-    prepared.compile_materials()
+    prepared = prepare_scene(scene, device="cpu")
+    compile_materials(prepared)
     assert prepared.pml_extrusions
     assert not _census(prepared)
-    assert prepared.structures[0] is not scene.structures[0]
+    assert prepared.scene.structures[0] is not scene.structures[0]
     assert "pml_extrusions" not in scene.metadata
-    assert prepared.metadata["pml_extrusions"] == prepared.pml_extrusions
+    assert prepared.scene.metadata["pml_extrusions"] == prepared.pml_extrusions
 
 
 def test_dielectric_slab_matches_manual_extension():
     scene = build_scene("dielectric_slab")
     manual = build_scene("dielectric_slab")
-    manual.structures[0] = mw.Structure(
-        mw.Box(size=(2., 2., .1)), manual.structures[0].material, name="slab")
-    _equal(prepare_scene(scene).compile_materials(), prepare_scene(manual).compile_materials())
+    manual = manual.updated(structures=(mw.Structure(
+        mw.Box(size=(2., 2., .1)), manual.structures[0].material, name="slab"), *manual.structures[1:]))
+    _equal(compile_materials(prepare_scene(scene, device="cpu")), compile_materials(prepare_scene(manual, device="cpu")))
 
 
 def test_drude_halfspace_matches_manual_extension():
@@ -109,23 +109,23 @@ def test_drude_halfspace_matches_manual_extension():
         return mw.Scene(
             domain=mw.Domain(bounds=((-1., 1.), (-.4, .4), (-.4, .4))),
             grid=mw.GridSpec.uniform(.015), boundary=mw.BoundarySpec.pml(num_layers=6),
-            device="cpu", structures=[mw.Structure(
+            structures=[mw.Structure(
                 mw.Box(position=(.6, 0., 0.), size=(1.2, width, width)), material)],
         )
 
-    _equal(prepare_scene(build(.8)).compile_materials(), prepare_scene(build(1.2)).compile_materials())
+    _equal(compile_materials(prepare_scene(build(.8), device="cpu")), compile_materials(prepare_scene(build(1.2), device="cpu")))
 
 
 @pytest.mark.parametrize("name", ["dielectric_sphere", "metal_sphere", "pec_box", "cylinder_scatter"])
 def test_unflagged_benchmark_is_bitwise_unchanged(name, monkeypatch):
     scene = build_scene(name)
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     assert not _census(prepared)
     assert prepared.pml_extrusions == []
-    assert all(a is b for a, b in zip(scene.structures, prepared.structures))
-    expected = prepared.compile_materials()
+    assert all(a is b for a, b in zip(scene.structures, prepared.scene.structures))
+    expected = compile_materials(prepared)
     monkeypatch.setattr(scene_module, "_extrude_pml_contacts", lambda _: [])
-    _equal(prepare_scene(scene).compile_materials(), expected)
+    _equal(compile_materials(prepare_scene(scene, device="cpu")), expected)
 
 
 def test_unflagged_density_and_nearby_soft_tails_are_bitwise_unchanged(monkeypatch):
@@ -133,31 +133,31 @@ def test_unflagged_density_and_nearby_soft_tails_are_bitwise_unchanged(monkeypat
                                torch.full((2, 2, 2), .5), eps_bounds=(1, 4))
     # A soft tail reaches the interface but there is no hard contact node.
     scene = _scene(mw.Box(size=(.999, .25, .25)), regions=[region])
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     assert prepared.pml_extrusions == []
-    expected = prepared.compile_materials()
+    expected = compile_materials(prepared)
     monkeypatch.setattr(scene_module, "_extrude_pml_contacts", lambda _: [])
-    _equal(prepare_scene(scene).compile_materials(), expected)
+    _equal(compile_materials(prepare_scene(scene, device="cpu")), expected)
 
 
 def test_nonprismatic_sphere_warns_once_and_inside_sphere_does_not():
     touching = _scene(mw.Sphere(radius=.5))
     with pytest.warns(RuntimeWarning, match="structure 0.*non-prismatic.*x-low.*z-high") as caught:
-        prepared = prepare_scene(touching)
+        prepared = prepare_scene(touching, device="cpu")
     assert len(caught) == 1
     assert prepared.pml_extrusions == []
-    assert prepared.structures[0] is touching.structures[0]
+    assert prepared.scene.structures[0] is touching.structures[0]
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        assert prepare_scene(_scene(mw.Sphere(radius=.25))).pml_extrusions == []
+        assert prepare_scene(_scene(mw.Sphere(radius=.25)), device="cpu").pml_extrusions == []
     assert not caught
 
 
 def _surface_material(kind):
     if kind == "lossy":
-        return mw.LossyMetalMedium(conductivity=50.)
+        return mw.media.LossyMetalMedium(conductivity=50.)
     if kind == "foil":
-        return mw.CopperFoil(thickness=2.e-6, frequency_range=(.5e9, 5.e9))
+        return mw.media.CopperFoil(thickness=2.e-6, frequency_range=(.5e9, 5.e9))
     from tests.materials.surface_impedance.smooth_surface_probe import _rational_medium
 
     # Reuse the probe medium that supports the runtime's passive Z-form refit.
@@ -177,7 +177,7 @@ def _surface_layout(prepared):
     """Include every face/metal field dumped as layout.* by the smooth probe."""
     from witwin.maxwell.compiler.copper_foil import compile_copper_faces
 
-    compiled = dict(prepared.compile_materials())
+    compiled = dict(compile_materials(prepared))
     layout = compiled.pop("surface_impedance")
     faces = [vars(face) for face in layout.faces]
     metals = [{key: value for key, value in vars(metal).items() if key != "material"}
@@ -196,17 +196,17 @@ def test_surface_impedance_contact_is_bitwise_unchanged(kind, both_faces, monkey
     with pytest.warns(RuntimeWarning, match=(
         r"structure 0 \('metal'\).*x-high: surface-impedance conductor reaches a PML interface; not extruded"
     )) as caught:
-        prepared = prepare_scene(scene)
+        prepared = prepare_scene(scene, device="cpu")
     assert len(caught) == 1
-    assert prepared.structures[0] is scene.structures[0]
+    assert prepared.scene.structures[0] is scene.structures[0]
     assert [axis + "-" + side for _, axis, side in _census(prepared)] == faces
     assert prepared.pml_extrusions == [dict(
         structure_index=0, name="metal", faces=faces, kind="skipped_surface_impedance")]
-    assert prepared.metadata["pml_extrusions"] == prepared.pml_extrusions
+    assert prepared.scene.metadata["pml_extrusions"] == prepared.pml_extrusions
     assert "pml_extrusions" not in scene.metadata
     monkeypatch.setattr(scene_module, "_extrude_pml_contacts", lambda _: [])
-    baseline = prepare_scene(scene)
-    _equal(prepared.compile_material_tensors(), baseline.compile_material_tensors())
+    baseline = prepare_scene(scene, device="cpu")
+    _equal(compile_material_tensors(prepared), compile_material_tensors(baseline))
     _equal(_surface_layout(prepared), _surface_layout(baseline))
 
 
@@ -215,11 +215,11 @@ def test_interior_surface_impedance_has_no_warning_or_record(kind):
     scene = _surface_scene(kind, contact=False)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        prepared = prepare_scene(scene)
+        prepared = prepare_scene(scene, device="cpu")
     assert not caught
     assert not _census(prepared)
     assert prepared.pml_extrusions == []
-    assert prepared.structures[0] is scene.structures[0]
+    assert prepared.scene.structures[0] is scene.structures[0]
 
 
 @pytest.mark.parametrize("flag", ["is_surface_impedance", "is_lossy_metal", "is_copper_foil"])
@@ -229,9 +229,9 @@ def test_surface_impedance_predicate_accepts_material_flags(flag):
     scene = _scene(mw.Box(size=(1., .25, .25)))
     object.__setattr__(scene.structures[0].material, flag, True)
     with pytest.warns(RuntimeWarning, match="surface-impedance conductor reaches a PML interface") as caught:
-        prepared = prepare_scene(scene)
+        prepared = prepare_scene(scene, device="cpu")
     assert len(caught) == 1
-    assert prepared.structures[0] is scene.structures[0]
+    assert prepared.scene.structures[0] is scene.structures[0]
     assert prepared.pml_extrusions[0]["kind"] == "skipped_surface_impedance"
 
 
@@ -241,9 +241,9 @@ def test_perfect_conductor_box_is_still_extruded(material):
     scene = _scene(mw.Box(size=(1., .25, .25)), material=material)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        prepared = prepare_scene(scene)
+        prepared = prepare_scene(scene, device="cpu")
     assert not caught
-    assert prepared.structures[0] is not scene.structures[0]
+    assert prepared.scene.structures[0] is not scene.structures[0]
     assert prepared.pml_extrusions[0]["kind"] == "box"
     assert not _census(prepared)
 
@@ -258,8 +258,8 @@ def test_surface_impedance_solver_and_fields_bitwise_cuda(kind, monkeypatch):
     def snapshot():
         simulation = mw.Simulation.fdtd(
             # The 8-layer closed-transverse cell exercises the CPML kernels: pin CPML explicitly.
-            scene, frequency=2.e9, absorber="cpml", run_time=mw.TimeConfig(time_steps=24),
-            full_field_dft=True, spectral_sampler=mw.SpectralSampler(window="none"))
+            scene, frequencies=2.e9, config=mw.FDTDConfig(absorber="cpml", run_time=mw.TimeConfig(time_steps=24),
+            full_field_dft=True, spectral_sampler=mw.fdtd.SpectralSampler(window="none")))
         out = {}
         _solver_tensors(out, "prepared", simulation.prepare().solver)
         solver = simulation.run().solver
@@ -278,18 +278,18 @@ def test_surface_impedance_solver_and_fields_bitwise_cuda(kind, monkeypatch):
 def test_later_structure_keeps_priority_inside_pml():
     scene = _scene(mw.Box(size=(1., .5, .5)))
     later = mw.Structure(mw.Box(position=(.5, 0, 0), size=(1., .25, .25)), mw.Material(eps_r=9))
-    scene.add_structure(later)
-    prepared = prepare_scene(scene)
-    eps, _ = prepared.compile_relative_materials()
+    scene = scene.updated(structures=(*scene.structures, later))
+    prepared = prepare_scene(scene, device="cpu")
+    eps, _ = compile_relative_materials(prepared)
     assert eps[-1, 6, 6] == 9
-    assert prepared.structures[1] is later
-    assert prepared.structures[0].material is scene.structures[0].material
+    assert prepared.scene.structures[1] is later
+    assert prepared.scene.structures[0].material is scene.structures[0].material
 
 
 def test_extrusion_records_reach_simulation_statistics():
     scene = _scene(mw.Box(size=(1., .25, .25)))
-    prepared = prepare_scene(scene)
-    simulation = mw.Simulation.fdtd(scene, frequency=1.e9)
+    prepared = prepare_scene(scene, device="cpu")
+    simulation = mw.Simulation.fdtd(scene, frequencies=1.e9, config=mw.FDTDConfig(device="cpu"))
     runtime = SimpleNamespace(scene=prepared, dt=1.e-12, _spectral_reference_frequency=None)
     stats = simulation._build_fdtd_solver_stats(
         runtime, time_steps=16, use_full_field_dft=False, dft_cfg=simulation.config.spectral_sampler)
@@ -299,17 +299,17 @@ def test_extrusion_records_reach_simulation_statistics():
 def test_prismatic_cylinder_uses_wrapper_and_preserves_interior():
     original = mw.Cylinder(radius=.25, height=1., axis="x")
     scene = _scene(original)
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     assert prepared.pml_extrusions[0]["kind"] == "wrapper"
     assert not _census(prepared)
     coords = torch.meshgrid(*(torch.linspace(-.375, .375, 7) for _ in range(3)), indexing="ij")
-    assert torch.equal(prepared.structures[0].geometry.signed_distance(*coords),
+    assert torch.equal(prepared.scene.structures[0].geometry.signed_distance(*coords),
                        original.signed_distance(*coords))
     # The accepted wrapper contract continues the interface SDF itself.
     q = (torch.full((3,), .75), torch.tensor([0., .125, .375]), torch.zeros(3))
-    assert torch.equal(prepared.structures[0].geometry.signed_distance(*q),
+    assert torch.equal(prepared.scene.structures[0].geometry.signed_distance(*q),
                        original.signed_distance(q[0].clamp(max=.5), *q[1:]))
-    assert all(t.isfinite().all() for t in prepared.compile_material_tensors())
+    assert all(t.isfinite().all() for t in compile_material_tensors(prepared))
 
 
 @pytest.mark.parametrize("variable", [False, True])
@@ -321,17 +321,17 @@ def test_density_edge_replication_and_nonprismatic_warning(variable):
     scene = _scene(regions=[region])
     if variable:
         with pytest.warns(RuntimeWarning, match="MaterialRegion.*x-high"):
-            prepared = prepare_scene(scene)
+            prepared = prepare_scene(scene, device="cpu")
         assert prepared.pml_extrusions == []
         return
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     assert prepared.pml_extrusions[0]["kind"] == "density"
     assert not _census(prepared)
     # align_corners=False: 8 cells over width 1, plus 4 replicated cells per side.
     padded = torch.cat((density[:1].expand(4, -1, -1), density, density[-1:].expand(4, -1, -1)))
     manual = _scene(regions=[mw.MaterialRegion(
         "design", mw.Box(size=(2., .25, .25)), padded, eps_bounds=(1, 5))])
-    _equal(prepared.compile_material_tensors(), prepare_scene(manual).compile_material_tensors())
+    _equal(compile_material_tensors(prepared), compile_material_tensors(prepare_scene(manual, device="cpu")))
     assert scene.material_regions[0] is region
     assert region.geometry.size[0] == 1.
 
@@ -342,13 +342,13 @@ def test_density_prism_decision_uses_exact_native_slices():
     region = mw.MaterialRegion("design", mw.Box(size=(1., .375, .375)), density, eps_bounds=(1, 5))
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        prepared = prepare_scene(_scene(regions=[region]))
+        prepared = prepare_scene(_scene(regions=[region]), device="cpu")
     assert not caught
     assert prepared.pml_extrusions[0]["faces"] == ["x-low", "x-high"]
     # Texture coordinates and native filtering remain identical in the interior.
     from witwin.maxwell.compiler.materials import _sample_material_region_density
     coords = torch.meshgrid(*(torch.linspace(-.375, .375, 7) for _ in range(3)), indexing="ij")
-    actual = _sample_material_region_density(prepared, prepared.material_regions[0], density, coords=coords)
+    actual = _sample_material_region_density(prepared, prepared.scene.material_regions[0], density, coords=coords)
     expected = _sample_material_region_density(prepared, region, density, coords=coords)
     assert torch.equal(actual, expected)
 
@@ -357,12 +357,12 @@ def _trainable_slab(parameters, *, manual=False, device="cpu"):
     width, thickness, height = parameters.unbind()
     size = torch.stack((width * 0 + 2. if manual else width, width * 0 + .375, thickness))
     position = torch.stack((height * 0, height * 0, height))
-    return _scene(mw.Box(position=position, size=size, device=device), device=device)
+    return _scene(mw.Box(position=position, size=size, device=device))
 
 
 def _slab_loss(parameters, *, manual=False, device="cpu"):
-    prepared = prepare_scene(_trainable_slab(parameters, manual=manual, device=device))
-    eps, _ = prepared.compile_relative_materials()
+    prepared = prepare_scene(_trainable_slab(parameters, manual=manual, device=device), device=device)
+    eps, _ = compile_relative_materials(prepared)
     return (eps * (1 + prepared.Z)).sum()
 
 
@@ -382,9 +382,9 @@ def test_single_extruded_box_face_has_zero_gradient():
     low, high = faces.unbind()
     geometry = mw.Box(position=torch.stack(((low + high) / 2, low * 0, low * 0)),
                       size=torch.stack((high - low, low * 0 + .375, low * 0 + .375)))
-    prepared = prepare_scene(_scene(geometry))
+    prepared = prepare_scene(_scene(geometry), device="cpu")
     assert prepared.pml_extrusions[0]["faces"] == ["x-high"]
-    eps, _ = prepared.compile_relative_materials()
+    eps, _ = compile_relative_materials(prepared)
     gradient = torch.autograd.grad(eps.sum(), faces)[0]
     # The high face is a grid constant after extrusion; only the low face remains trainable.
     assert gradient[1].item() == 0.
@@ -406,17 +406,19 @@ def test_trainable_box_nonextruded_parameter_finite_difference_cuda():
 def test_fdtd_trainable_slab_two_horizon_gradients_and_finite_difference_cuda():
     def loss(parameters, horizon, *, manual=False):
         scene = _trainable_slab(parameters, manual=manual, device="cuda")
-        scene.add_source(mw.PointDipole(
-            position=(0., 0., -.25), polarization="Ex", width=.04,
-            source_time=mw.GaussianPulse(frequency=1.e9, fwidth=1.e9, amplitude=50.)))
-        scene.add_monitor(mw.PointMonitor("probe", (0., 0., .25), fields=("Ex",)))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PointDipole(
+                position=(0., 0., -.25), polarization="Ex", width=.04,
+                source_time=mw.GaussianPulse(frequency=1.e9, fwidth=1.e9, amplitude=50.)),
+        ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0., 0., .25), fields=("Ex",))))
         result = mw.Simulation.fdtd(
-            scene, frequency=1.e9, run_time=mw.TimeConfig(time_steps=horizon),
-            full_field_dft=False, spectral_sampler=mw.SpectralSampler(window="none"),
+            scene, frequencies=1.e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=horizon),
+            full_field_dft=False, spectral_sampler=mw.fdtd.SpectralSampler(window="none")),
         ).run()
         assert result.stats()["pml_extrusions"] == ([] if manual else [
             {"structure_index": 0, "name": "sample", "faces": ["x-low", "x-high"], "kind": "box"}])
-        return result.monitor("probe")["data"].abs().square().sum()
+        return result.monitor("probe", freq_index=0).sel(component="Ex").values.abs().square().sum()
 
     differences = []
     for horizon in (24, 48):
@@ -441,7 +443,7 @@ def _mode_context(prepared):
     return SimpleNamespace(
         scene=prepared, dx=prepared.dx, dy=prepared.dy, dz=prepared.dz,
         Ex=torch.empty(1, device=prepared.device), c=299792458., eps0=VACUUM_PERMITTIVITY,
-        boundary_kind=prepared.boundary.kind, _compiled_material_model=prepared.compile_materials(),
+        boundary_kind=prepared.scene.boundary.kind, _compiled_material_model=compile_materials(prepared),
         _mode_source_rebuild_from_fields=False,
     )
 
@@ -452,9 +454,9 @@ def test_higher_order_mode_plane_eigenpair_and_profile_unchanged(monkeypatch):
 
     scene = build_scene("mode_source_higher_order")
     source = _compile_mode_source(scene.sources[0], default_frequency=2.e9)
-    auto = prepare_scene(scene)
+    auto = prepare_scene(scene, device="cpu")
     monkeypatch.setattr(scene_module, "_extrude_pml_contacts", lambda _: [])
-    baseline = prepare_scene(scene)
+    baseline = prepare_scene(scene, device="cpu")
     # Seed each independent sparse eigen-solve identically to fix its gauge.
     torch.manual_seed(0)
     a = solve_mode_source_profile(_mode_context(auto), copy.deepcopy(source))
@@ -470,9 +472,9 @@ def _sheet_geometry(kind, *, contact=True):
     vertices = [(low, -.25, 0.), (.25, -.25, 0.), (.25, .25, 0.), (low, .25, 0.)]
     faces = [(0, 1, 2), (0, 2, 3)]
     if kind == "planar":
-        return mw.PlanarPEC.rectangle(((low, .25), (-.25, .25)))
+        return mw.geometry.PlanarPEC.rectangle(((low, .25), (-.25, .25)))
     if kind == "surface":
-        return mw.SurfaceMesh(vertices, faces)
+        return mw.geometry.SurfaceMesh(vertices, faces)
     return mw.Mesh(vertices, faces, fill_mode="surface", recenter=False)
 
 
@@ -483,20 +485,20 @@ def test_sheet_dispatch_and_contact_records(kind, contact, monkeypatch):
     original = scene.structures[0].geometry
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        prepared = prepare_scene(scene)
+        prepared = prepare_scene(scene, device="cpu")
     assert not caught
-    assert prepared.structures[0].geometry is original
-    assert type(prepared.structures[0].geometry) is type(original)
+    assert prepared.scene.structures[0].geometry is original
+    assert type(prepared.scene.structures[0].geometry) is type(original)
     assert prepared.pml_extrusions == ([dict(
         structure_index=0, name="sample", faces=["x-low"], kind="skipped_sheet")] if contact else [])
-    expected = prepared.compile_materials()
+    expected = compile_materials(prepared)
     monkeypatch.setattr(scene_module, "_extrude_pml_contacts", lambda _: [])
-    _equal(prepare_scene(scene).compile_materials(), expected)
+    _equal(compile_materials(prepare_scene(scene, device="cpu")), expected)
 
 
 @pytest.mark.parametrize("kind", ["planar", "surface", "mesh_surface"])
 def test_boolean_sheet_leaf_skips_without_sampling_or_warning(kind, monkeypatch):
-    geometry = mw.Union(mw.Box(size=(1., .25, .25)), mw.Union(_sheet_geometry(kind)))
+    geometry = mw.geometry.Union(mw.Box(size=(1., .25, .25)), mw.geometry.Union(_sheet_geometry(kind)))
     scene = _scene(geometry)
 
     def fail_census(*_):
@@ -505,9 +507,9 @@ def test_boolean_sheet_leaf_skips_without_sampling_or_warning(kind, monkeypatch)
     monkeypatch.setattr(scene_module, "_pml_contact_faces", fail_census)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        prepared = prepare_scene(scene)
+        prepared = prepare_scene(scene, device="cpu")
     assert not caught
-    assert prepared.structures[0].geometry is scene.structures[0].geometry
+    assert prepared.scene.structures[0].geometry is scene.structures[0].geometry
     assert prepared.pml_extrusions == []
 
 
@@ -517,23 +519,23 @@ def test_mesh_volume_contact_warns_and_preserves_compilation(boolean, samples, m
     vertices, faces = mw.Box(size=(1., .25, .25)).to_mesh()
     geometry = mw.Mesh(vertices, faces, recenter=False, fill_mode="solid")
     if boolean:
-        geometry = mw.Union(geometry, mw.Box(size=(.25, .125, .125)))
+        geometry = mw.geometry.Union(geometry, mw.Box(size=(.25, .125, .125)))
     scene = _scene(geometry)
-    scene.subpixel = mw.SubpixelSpec(samples=samples, averaging="arithmetic")
+    scene = scene.updated(subpixel=mw.SubpixelSpec(samples=samples, averaging="arithmetic"))
     with pytest.warns(RuntimeWarning, match="structure 0.*mesh geometry") as caught:
-        prepared = prepare_scene(scene)
+        prepared = prepare_scene(scene, device="cpu")
     assert len(caught) == 1
     assert prepared.pml_extrusions == []
-    assert prepared.structures[0].geometry is scene.structures[0].geometry
-    expected = prepared.compile_materials()
+    assert prepared.scene.structures[0].geometry is scene.structures[0].geometry
+    expected = compile_materials(prepared)
     monkeypatch.setattr(scene_module, "_extrude_pml_contacts", lambda _: [])
-    _equal(prepare_scene(scene).compile_materials(), expected)
+    _equal(compile_materials(prepare_scene(scene, device="cpu")), expected)
 
 
 def test_box_euler_zero_rotation_uses_enlarged_box():
-    prepared = prepare_scene(_scene(mw.Box(size=(1., .25, .25), rotation=torch.zeros(3))))
+    prepared = prepare_scene(_scene(mw.Box(size=(1., .25, .25), rotation=torch.zeros(3))), device="cpu")
     assert prepared.pml_extrusions[0]["kind"] == "box"
-    assert isinstance(prepared.structures[0].geometry, mw.Box)
+    assert isinstance(prepared.scene.structures[0].geometry, mw.Box)
 
 
 @pytest.mark.parametrize("geometry", [
@@ -553,7 +555,7 @@ def test_box_euler_zero_rotation_uses_enlarged_box():
 ])
 def test_conservative_prefilter_preserves_exact_contact_census(geometry, monkeypatch):
     monkeypatch.setattr(scene_module, "_extrude_pml_contacts", lambda _: [])
-    prepared = prepare_scene(_scene(geometry))
+    prepared = prepare_scene(_scene(geometry), device="cpu")
     actual = scene_module._pml_contact_faces(prepared, geometry)
     monkeypatch.setattr(scene_module, "_pml_conservative_bounds", lambda *_: None)
     expected = scene_module._pml_contact_faces(prepared, geometry)
@@ -571,9 +573,9 @@ def test_extruded_density_pullback_matches_forward_compile_autograd(projection, 
                                eps_bounds=(1, 5), bounds=(-.5, 1.5),
                                projection_beta=projection, filter_radius=filter_radius)
     scene = _scene(regions=[region])
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     assert prepared.pml_extrusions[0]["kind"] == "density"
-    eps, _ = prepared.compile_relative_materials()
+    eps, _ = compile_relative_materials(prepared)
     generator = torch.Generator().manual_seed(41)
     grads = [torch.randn(shape, generator=generator) for shape in (
         (prepared.Nx-1, prepared.Ny, prepared.Nz),
@@ -593,7 +595,7 @@ def test_nonextruded_density_pullback_keeps_legacy_interpolation():
 
     density = torch.full((2, 3, 2), .4)
     region = mw.MaterialRegion("interior", mw.Box(size=(.375, .375, .375)), density, eps_bounds=(1, 5))
-    prepared = prepare_scene(_scene(regions=[region]))
+    prepared = prepare_scene(_scene(regions=[region]), device="cpu")
     assert prepared.pml_extrusions == []
     layout = _resolve_region_layout(prepared, region)
     patch = torch.arange(torch.tensor(layout.target_shape).prod()).float().reshape(layout.target_shape)/10
@@ -609,14 +611,16 @@ def test_extruded_density_edge_texel_fdtd_finite_difference_cuda():
     def loss(density):
         region = mw.MaterialRegion("design", mw.Box(size=(1., .375, .375), device="cuda"),
                                    density, eps_bounds=(1, 5))
-        scene = _scene(regions=[region], device="cuda")
-        scene.add_source(mw.PointDipole(position=(.5, 0., -.25), polarization="Ex", width=.04,
-            source_time=mw.GaussianPulse(frequency=1.e9, fwidth=1.e9, amplitude=50.)))
-        scene.add_monitor(mw.PointMonitor("probe", (.5, 0., .25), fields=("Ex",)))
-        result = mw.Simulation.fdtd(scene, frequency=1.e9, run_time=mw.TimeConfig(time_steps=48),
-            full_field_dft=False, spectral_sampler=mw.SpectralSampler(window="none")).run()
+        scene = _scene(regions=[region])
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PointDipole(position=(.5, 0., -.25), polarization="Ex", width=.04,
+                source_time=mw.GaussianPulse(frequency=1.e9, fwidth=1.e9, amplitude=50.)),
+        ), monitors=(*scene.monitors, mw.PointMonitor("probe", (.5, 0., .25), fields=("Ex",))))
+        result = mw.Simulation.fdtd(scene, frequencies=1.e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=48),
+            full_field_dft=False, spectral_sampler=mw.fdtd.SpectralSampler(window="none"))).run()
         assert result.stats()["pml_extrusions"][0]["kind"] == "density"
-        return result.monitor("probe")["data"].abs().square().sum()
+        return result.monitor("probe", freq_index=0).sel(component="Ex").values.abs().square().sum()
 
     # Two x slices both border-sample at the physical interface, so perturbing
     # the high edge texel preserves the exact prismatic-contact decision.
@@ -632,7 +636,7 @@ def test_extruded_density_edge_texel_fdtd_finite_difference_cuda():
 
 def test_extrusion_stats_result_save_load_roundtrip(tmp_path):
     scene = _scene(mw.Box(size=(1., .25, .25)))
-    records = prepare_scene(scene).pml_extrusions
+    records = prepare_scene(scene, device="cpu").pml_extrusions
     assert records
     result = mw.Result(scene=scene, method="fdtd", frequency=1.e9, fields={}, monitors={},
                        solver_stats={"pml_extrusions": records}, metadata={"pml_extrusions": records})

@@ -67,13 +67,13 @@ def main():
                            'witwin.maxwell.mom.periodic_runtime.assemble_periodic_system'):
                 stack.enter_context(patch(target, forbidden))
             result = mw.Result.load(args.result, scene=scene)
-            data = result.surface_currents
+            data = mw.mom.surface_currents(result)
             assert data.config.periodic is not None and data.config.dyadic_integration is not None
             periodic = data.config.periodic
             assert producer['periodic_config'] == periodic.payload()
             receipt['periodic_config'] = periodic.payload()
             receipt['nonzero_bloch_phase_control'] = any(periodic.bloch_rad_per_m)
-            config = mw.FieldQueryConfig(relative_tolerance=1e-4,
+            config = mw.mom.FieldQueryConfig(relative_tolerance=1e-4,
                                         absolute_tolerance=1e-9, max_order=8)
             receipt['field_policy'] = dict(relative_tolerance=1e-4,
                                            absolute_tolerance=1e-9, max_order=8)

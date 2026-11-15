@@ -28,9 +28,9 @@ def test_result_density_snapshot_survives_optimizer_update_and_close(slots):
 
 def test_snapshot_detaches_nested_geometry_and_metadata_but_tape_guards_original_inputs():
     density = torch.full((1, 2, 2, 2), .4, device="cuda:0", requires_grad=True)
-    batch = density_batch(density)
+    batch = density_batch(density, edit=lambda scene: {
+        "metadata": {**scene.metadata, "values": [torch.tensor([3.], device="cuda:0")]}})
     original = batch.template.scene
-    original.metadata["values"] = [torch.tensor([3.], device="cuda:0")]
     with batch.prepare() as prepared:
         result = prepared.run()[0]
     stored_size = result.scene.structures[0].geometry.size.clone()

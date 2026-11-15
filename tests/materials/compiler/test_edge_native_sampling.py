@@ -23,6 +23,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 _BOUNDS = ((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))
@@ -38,14 +39,11 @@ def _scene(*, structures=(), samples=(9, 9, 9), averaging="polarized", regions=(
     scene = mw.Scene(
         domain=mw.Domain(bounds=_BOUNDS),
         grid=mw.GridSpec.uniform(_DX),
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=samples, averaging=averaging),
+        subpixel=mw.SubpixelSpec(samples=samples, averaging=averaging),
     )
-    for structure in structures:
-        scene.add_structure(structure)
-    for region in regions:
-        scene.add_material_region(region)
-    return prepare_scene(scene)
+    scene = scene.updated(structures=(*scene.structures, *structures))
+    scene = scene.updated(material_regions=(*scene.material_regions, *regions))
+    return prepare_scene(scene, device="cpu")
 
 
 def _half_space(interface_x, eps_r, *, span=10.0):
@@ -59,7 +57,7 @@ def _half_space(interface_x, eps_r, *, span=10.0):
 
 def test_edge_components_have_staggered_shapes():
     prepared = _scene(structures=[_half_space(0.0, 4.0)])
-    edge = prepared.compile_materials()["edge_components"]
+    edge = compile_materials(prepared)["edge_components"]
     assert edge is not None
     nx, ny, nz = prepared.Nx, prepared.Ny, prepared.Nz
     assert tuple(edge["eps"]["Ex"].shape) == (nx - 1, ny, nz)
@@ -77,7 +75,7 @@ def test_homogeneous_material_is_exact_at_every_component():
         geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(20.0, 20.0, 20.0)),
         material=mw.Material(eps_r=eps_r),
     )
-    edge = _scene(structures=[box]).compile_materials()["edge_components"]
+    edge = compile_materials(_scene(structures=[box]))["edge_components"]
     for component in ("Ex", "Ey", "Ez"):
         interior = edge["eps"][component][2:-2, 2:-2, 2:-2]
         assert torch.allclose(interior, torch.full_like(interior, eps_r), atol=1e-4)
@@ -91,13 +89,13 @@ def test_manufactured_interface_normal_component_is_harmonic_kottke():
     the harmonic (series) Kottke mean 2*eps2/(1+eps2), edge-native."""
     eps2 = 4.0
     # Interface at the Ex edge-5 centre (x=0.05): that edge straddles it 50/50.
-    edge = _scene(structures=[_half_space(0.05, eps2)]).compile_materials()["edge_components"]
+    edge = compile_materials(_scene(structures=[_half_space(0.05, eps2)]))["edge_components"]
     harmonic = 2.0 * eps2 / (1.0 + eps2)  # = 1.6
     value = float(edge["eps"]["Ex"][_EDGE_MAT, _NODE0, _NODE0])
     assert abs(value - harmonic) < 2e-2
     # The node->edge smear (Kottke at the nodes, then arithmetic edge average)
     # gives a markedly different value: this gate is what excludes re-adding it.
-    node = _scene(structures=[_half_space(0.05, eps2)]).compile_materials()["eps_components"]["x"]
+    node = compile_materials(_scene(structures=[_half_space(0.05, eps2)]))["eps_components"]["x"]
     smear = 0.5 * (float(node[_EDGE_MAT, _NODE0, _NODE0]) + float(node[_EDGE_MAT + 1, _NODE0, _NODE0]))
     assert abs(smear - harmonic) > 0.3
 
@@ -107,7 +105,7 @@ def test_manufactured_interface_tangential_component_is_arithmetic_kottke():
     permittivity must take the arithmetic (parallel) mean (eps1+eps2)/2."""
     eps2 = 4.0
     # Interface at node x=0.0: the Ey sample there straddles the interface 50/50.
-    edge = _scene(structures=[_half_space(0.0, eps2)]).compile_materials()["edge_components"]
+    edge = compile_materials(_scene(structures=[_half_space(0.0, eps2)]))["edge_components"]
     arithmetic = 0.5 * (1.0 + eps2)  # = 2.5
     value = float(edge["eps"]["Ey"][_NODE0, _NODE0, _NODE0])
     assert abs(value - arithmetic) < 5e-3
@@ -115,7 +113,7 @@ def test_manufactured_interface_tangential_component_is_arithmetic_kottke():
 
 def test_normal_component_clean_on_each_side_of_a_node_aligned_interface():
     eps2 = 4.0
-    edge = _scene(structures=[_half_space(0.0, eps2)]).compile_materials()["edge_components"]
+    edge = compile_materials(_scene(structures=[_half_space(0.0, eps2)]))["edge_components"]
     ex = edge["eps"]["Ex"]
     assert abs(float(ex[_EDGE_VAC, _NODE0, _NODE0]) - 1.0) < 3e-2  # fully vacuum edge
     assert abs(float(ex[_EDGE_MAT, _NODE0, _NODE0]) - eps2) < 2e-1  # fully material edge
@@ -125,9 +123,9 @@ def test_arithmetic_averaging_applies_no_normal_projection():
     """With arithmetic averaging the SAME straddled edge gives the arithmetic mean,
     not the harmonic one -- confirming the polarized path is what selects Kottke."""
     eps2 = 4.0
-    edge = _scene(
+    edge = compile_materials(_scene(
         structures=[_half_space(0.05, eps2)], averaging="arithmetic"
-    ).compile_materials()["edge_components"]
+    ))["edge_components"]
     value = float(edge["eps"]["Ex"][_EDGE_MAT, _NODE0, _NODE0])
     assert abs(value - 0.5 * (1.0 + eps2)) < 2e-2
 
@@ -137,10 +135,10 @@ def test_full_offdiag_anisotropy_falls_back_to_node_path():
         name="tensor",
         geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
         material=mw.Material(
-            epsilon_tensor=mw.Tensor3x3(((4.0, 0.5, 0.0), (0.5, 4.0, 0.0), (0.0, 0.0, 4.0)))
+            epsilon_tensor=mw.media.Tensor3x3(((4.0, 0.5, 0.0), (0.5, 4.0, 0.0), (0.0, 0.0, 4.0)))
         ),
     )
-    edge = _scene(structures=[structure], averaging="arithmetic").compile_materials()["edge_components"]
+    edge = compile_materials(_scene(structures=[structure], averaging="arithmetic"))["edge_components"]
     assert edge is None
 
 
@@ -151,6 +149,6 @@ def test_conductivity_is_edge_native():
         geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(20.0, 20.0, 20.0)),
         material=mw.Material(eps_r=2.0, sigma_e=sigma),
     )
-    edge = _scene(structures=[box]).compile_materials()["edge_components"]
+    edge = compile_materials(_scene(structures=[box]))["edge_components"]
     interior = edge["sigma_e"]["Ex"][2:-2, 2:-2, 2:-2]
     assert torch.allclose(interior, torch.full_like(interior, sigma), atol=1e-4)

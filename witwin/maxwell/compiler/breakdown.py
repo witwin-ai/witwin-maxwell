@@ -66,13 +66,13 @@ def compile_breakdown_layout(scene) -> CompiledBreakdownLayout:
     ramp_steps = torch.zeros(shape, dtype=torch.int64, device=device)
     material_id = torch.full(shape, -1, dtype=torch.int64, device=device)
 
-    structures = list(scene.structures)
+    structures = list(scene.scene.structures)
     has_breakdown = False
     # ``_bulk_structures`` is priority-sorted (ascending): a later structure is
     # the higher-priority writer and overwrites the cells it owns, exactly like
     # the material compiler. Iterating in that order and applying each structure
     # to the cells it covers gives last-writer-wins for the breakdown mask too.
-    for structure in _bulk_structures(scene):
+    for structure in _bulk_structures(scene.scene):
         breakdown = _structure_breakdown(structure)
         occupancy = _geometry_occupancy(scene, structure.geometry)
         covered = occupancy >= 0.5

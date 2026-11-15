@@ -55,14 +55,16 @@ def make_scene(args, kind):
     bounds = tuple((float(c - span / 2), float(c + span / 2)) for c in domain_center)
     scene = mw.Scene(
         domain=mw.Domain(bounds=bounds), grid=mw.GridSpec.uniform(span / args.cells),
-        boundary=mw.BoundarySpec.pml(num_layers=args.pml), device="cuda",
-        subpixel_samples=mw.SubpixelSpec(samples=args.samples, averaging="polarized"),
+        boundary=mw.BoundarySpec.pml(num_layers=args.pml), subpixel=mw.SubpixelSpec(samples=args.samples, averaging="polarized"),
     )
     if kind == "mesh":
         geometry = mw.Mesh(vertices, faces, recenter=False, scale=1.0, fill_mode="solid")
     else:
         geometry = mw.Sphere(position=center, radius=float(np.ptp(vertices, axis=0).max()) / 2)
-    scene.add_structure(mw.Structure(geometry=geometry, material=mw.Material(eps_r=6.83)))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(geometry=geometry, material=mw.Material(eps_r=6.83)),
+    ))
     return scene
 
 
@@ -118,13 +120,13 @@ def compile_case(args, kind):
             _, elapsed = timed(lambda: materials.compile_material_model(
                 prepared_scene, subpixel=scene.subpixel, include_edges=False))
         elif args.entry == "fdfd":
-            prepared, prepare_seconds = timed(lambda: mw.Simulation.fdfd(scene, frequency=1e9).prepare())
+            prepared, prepare_seconds = timed(lambda: mw.Simulation.fdfd(scene, frequencies=1e9).prepare())
             _, material_seconds = timed(prepared.solver._ensure_material_components)
             elapsed = prepare_seconds + material_seconds
             segments = dict(prepare_seconds=prepare_seconds, material_seconds=material_seconds)
         else:
             _, elapsed = timed(lambda: mw.Simulation.fdtd(
-                scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=1),
+                scene, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1)),
             ).prepare())
     return dict(kind=kind, entry=args.entry, seconds=elapsed, segments=segments,
                 physical_cells=args.cells, pml=args.pml,
@@ -144,7 +146,7 @@ def micro(args):
         "winding_torch": lambda: mesh_sdf._triangle_mesh_winding_angle_torch_from_triangles(points, triangles),
         "signed_dispatch": lambda: geometry.signed_distance(prepared.X, prepared.Y, prepared.Z),
     }
-    h = float(prepared.grid.dx) / args.samples
+    h = float(prepared.scene.grid.dx) / args.samples
     padding = 0.75 * np.sqrt(3) * h + h / 4 + 1e-6
     lo, hi = vertices.amin(0) - padding, vertices.amax(0) + padding
     active_mask = ((points >= lo) & (points <= hi)).all(1)
@@ -192,7 +194,7 @@ def workload(args):
                                           for s in signatures)
     coords = materials._coordinate_grids(prepared, materials._sample_offsets(prepared, (args.samples,) * 3)[0])
     d = geometry.signed_distance(*coords)
-    h = float(prepared.grid.dx) / args.samples
+    h = float(prepared.scene.grid.dx) / args.samples
     threshold = 0.75 * np.sqrt(3) * h
     band = d.abs() <= threshold
     # Exact zeros/ones outside this band follow from |shift| <= width/4 and
@@ -212,9 +214,9 @@ def node_parity(args):
     """Check the existing include_edges flag without changing consumer routing."""
     prepared = prepare_scene(make_scene(args, "mesh"))
     full, full_seconds = timed(lambda: materials.compile_material_model(
-        prepared, subpixel=prepared.subpixel, include_edges=True))
+        prepared, subpixel=prepared.scene.subpixel, include_edges=True))
     nodes, node_seconds = timed(lambda: materials.compile_material_model(
-        prepared, subpixel=prepared.subpixel, include_edges=False))
+        prepared, subpixel=prepared.scene.subpixel, include_edges=False))
 
     def leaves(value, path=""):
         if torch.is_tensor(value):

@@ -135,14 +135,17 @@ def compute_diffraction_from_payload(
     k_cutoff = k0 * float(background_index)
 
     order_records: list[dict[str, object]] = []
+    # Order powers stay 0-d float64 tensors on the field device so trainable
+    # monitor fields keep their autograd graph. float64 and the sequential
+    # accumulation reproduce the former Python-float values exactly.
     total_power = 0.0
     for order in order_specs:
         phase = torch.exp(-1j * (order["kx"] * grid_a + order["ky"] * grid_b)).to(complex_dtype)
         amplitude_e = torch.stack([torch.sum(electric[..., c] * phase) for c in range(3)]) * projection
         amplitude_h = torch.stack([torch.sum(magnetic[..., c] * phase) for c in range(3)]) * projection
         poynting = 0.5 * torch.cross(amplitude_e, torch.conj(amplitude_h), dim=-1)
-        power = float(torch.real(torch.sum(poynting * normal)).item()) * area
-        total_power += power
+        power = torch.real(torch.sum(poynting * normal)).to(torch.float64) * area
+        total_power = total_power + power
 
         propagating = bool(order["propagating"])
         if propagating:
@@ -173,11 +176,9 @@ def compute_diffraction_from_payload(
     reference = (abs(incident_power) if incident_power is not None else
                  sum(abs(record["power"]) for record in order_records if record["propagating"]))
     threshold = 64 * torch.finfo(real_dtype).eps * reference
+    resolved = bool(abs(denominator) > threshold)
     for record in order_records:
-        if abs(denominator) > threshold:
-            record["efficiency"] = record["power"] / denominator
-        else:
-            record["efficiency"] = None
+        record["efficiency"] = record["power"] / denominator if resolved else None
 
     return {
         "monitor": monitor_name,

@@ -21,27 +21,27 @@ def test_wavelength_sphere_answer_and_iterations(backend):
     scene = mw.Scene(structures=[mw.Structure(
         mw.Mesh(mesh.vertices, mesh.faces, recenter=False, fill_mode='solid'), mw.Material(eps_r=4.))],
         sources=[mw.PlaneWave()])
-    pfft = mw.PFFTConfig(order=3, grid_precision='complex128',
+    pfft = mw.mom.PFFTConfig(order=3, grid_precision='complex128',
                          solve_dual_tolerance=1e-6, original_sample_tolerance=3e-2)
 
     def run(factory):
         extra = {'pfft': pfft} if backend == 'pfft' else {}
-        config = mw.MoMConfig(operator_backend=backend, integration=IntegrationConfig(order=4, singular_order=4),
+        config = mw.mom.MoMConfig(operator_backend=backend, integration=IntegrationConfig(order=4, singular_order=4),
             riesz_storage='compact_rwg_v1' if backend == 'dense' else 'local_rwg_v1',
             stopping=StoppingRule(method='gmres', preconditioner='none', rtol=1e-9, atol=0.,
                                   maxiter=600, restart=300, stagnation_window=300),
             right_preconditioner=factory, **extra)
-        prepared = mw.Simulation.mom(scene, frequency=frequency, config=config).prepare()
+        prepared = mw.Simulation.mom(scene, frequencies=frequency, config=config).prepare()
         result = prepared.run()
-        x = result.surface_currents.scattered_coefficients
+        x = mw.mom.surface_currents(result).scattered_coefficients
         residual = (prepared.solver.rhs-prepared.solver.handle.apply(x)).norm()/prepared.solver.rhs.norm()
         assert result.stats()['converged']
         assert float(residual) <= 1e-6
         return x, result.stats()
 
     plain, _ = run(None)
-    leaf, leaf_stats = run(mw.LeafBlockRightPreconditioner(64))
-    x, stats = run(mw.NearFieldRightPreconditioner(pfft=pfft))
+    leaf, leaf_stats = run(mw.mom.LeafBlockRightPreconditioner(64))
+    x, stats = run(mw.mom.NearFieldRightPreconditioner(pfft=pfft))
     assert float((x-plain).norm()/plain.norm()) <= 1e-6
     assert float((x-leaf).norm()/leaf.norm()) <= 1e-6
     assert stats['iterations'] <= leaf_stats['iterations']

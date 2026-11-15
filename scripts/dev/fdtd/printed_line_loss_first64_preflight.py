@@ -13,11 +13,12 @@ from witwin.maxwell.compiler.ports import compile_ports
 from witwin.maxwell.constants import C_0, EPSILON_0, MU_0
 from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd.runtime.timestep import compile_fdtd_time_step
+from witwin.maxwell.compiler import compile_materials
 
 output=Path(os.environ['PCB_FIRST64_PREFLIGHT_OUTPUT'])
 if output.exists():raise FileExistsError(output)
 start=execution_identity();case=PilotCase();scene,groups,bounds,schema,rows,expected,tails=build_case(case)
-prepared=prepare_scene(scene);model=prepared.compile_materials();edge=model['edge_components']
+prepared=prepare_scene(scene);model=compile_materials(prepared);edge=model['edge_components']
 simulation=make_simulation(scene,groups,DRIVE_BASIS[0],case,graph=True,steps=1,device='cpu')
 frequency=simulation._fdtd_time_step_frequency(prepared)
 minimum=[float(getattr(prepared,f'd{axis}_primal64').min()) for axis in 'xyz']

@@ -105,7 +105,6 @@ def coax_sol_scene(
     standard: str = "matched",
     *,
     dx: float = 0.01,
-    device: str = "cuda",
 ) -> mw.Scene:
     """Build the coax one-port terminated by the requested SOL standard."""
 
@@ -115,40 +114,40 @@ def coax_sol_scene(
     length = line_length(dx)
     left_edge = -0.5 * length
 
+
+    # Outer shield runs the full padded length through both PMLs for every standard.
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (-DOMAIN_X, DOMAIN_X),
                 (-DOMAIN_TRANSVERSE, DOMAIN_TRANSVERSE),
                 (-DOMAIN_TRANSVERSE, DOMAIN_TRANSVERSE),
             )
-        ),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
-        ports=(_coax_port("feed", FEED_X, "+", dx=dx),),
-        device=device,
-    )
-
-    # Outer shield runs the full padded length through both PMLs for every standard.
-    scene.add_structure(
-        mw.Structure(
-            _HollowCylinder(
-                position=(0.0, 0.0, 0.0),
-                inner_radius=OUTER_RADIUS,
-                outer_radius=SHIELD_OUTER,
-                length=length,
             ),
-            mw.Material.pec(),
-            name="shield",
-        )
-    )
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
+                ports=(_coax_port("feed", FEED_X, "+", dx=dx),),
+                structures=(
+            mw.Structure(
+                _HollowCylinder(
+                    position=(0.0, 0.0, 0.0),
+                    inner_radius=OUTER_RADIUS,
+                    outer_radius=SHIELD_OUTER,
+                    length=length,
+                ),
+                mw.Material.pec(),
+                name="shield",
+            ),
+            ),
+            )
 
     if standard == "open":
         # Inner rod stops at the load plane; beyond it the shield is a below-cutoff
         # circular guide (evanescent) -> open-circuit reflection.
         rod_length = LOAD_PLANE - left_edge
         rod_center = 0.5 * (left_edge + LOAD_PLANE)
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 mw.Cylinder(
                     position=(rod_center, 0.0, 0.0),
@@ -158,11 +157,12 @@ def coax_sol_scene(
                 ),
                 mw.Material.pec(),
                 name="inner_conductor",
-            )
-        )
+            ),
+        ))
     else:
         # matched / short: inner rod runs the full padded length.
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 mw.Cylinder(
                     position=(0.0, 0.0, 0.0),
@@ -172,14 +172,15 @@ def coax_sol_scene(
                 ),
                 mw.Material.pec(),
                 name="inner_conductor",
-            )
-        )
+            ),
+        ))
 
     if standard == "short":
         # Solid PEC plug shorts inner->shield at the load plane and fills to the edge.
         plug_length = 0.5 * length - LOAD_PLANE
         plug_center = 0.5 * (LOAD_PLANE + 0.5 * length)
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 mw.Cylinder(
                     position=(plug_center, 0.0, 0.0),
@@ -189,8 +190,8 @@ def coax_sol_scene(
                 ),
                 mw.Material.pec(),
                 name="short_plug",
-            )
-        )
+            ),
+        ))
 
     return scene
 

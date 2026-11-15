@@ -11,6 +11,7 @@ import witwin.maxwell as mw
 from witwin.maxwell.compiler.copper_foil import compile_copper_faces
 from witwin.maxwell.fdtd.coords import component_coords
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.scene import place_scene
 
 FREQUENCIES = (0.8e9, 1e9, 1.2e9)
 
@@ -21,27 +22,26 @@ def _scene():
         domain=mw.Domain(bounds=tuple((float(nodes[0]), float(nodes[-1])) for _ in range(3))),
         grid=mw.GridSpec.custom(nodes, nodes, nodes),
         boundary=mw.BoundarySpec.pml(num_layers=3),
-        device="cpu",
         structures=[
             mw.Structure(
                 mw.Box(
                     position=torch.zeros(3, dtype=torch.float64),
                     size=torch.tensor((0.01, 0.01, 0.0), dtype=torch.float64),
                 ),
-                mw.CopperFoil(thickness=35e-6, frequency_range=(0.8e9, 1.2e9)),
+                mw.media.CopperFoil(thickness=35e-6, frequency_range=(0.8e9, 1.2e9)),
                 name="film",
             )
         ],
     )
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     face = next(face for face in compile_copper_faces(prepared, device="cpu") if face.component == 1)
     index = tuple(face.indices[len(face.indices) // 2].tolist())
-    point = tuple(float(axis[i]) for axis, i in zip(component_coords(prepared, "Ey"), index))
+    point = tuple(float(axis[i]) for axis, i in zip(component_coords(prepared, "Ey", device=prepared.device), index))
     monitors = [
         mw.PlaneMonitor("published_Ey", axis="z", position=0.0, fields=("Ey",), frequencies=FREQUENCIES),
         mw.PointMonitor("same_owned_Ey", point, fields=("Ey",)),
     ]
-    return scene.clone(monitors=monitors), index
+    return scene.updated(monitors=monitors), index
 
 
 def _run_control(graph, steps, directory, *, remaining=None):
@@ -49,15 +49,17 @@ def _run_control(graph, steps, directory, *, remaining=None):
         pytest.skip("Actual CUDA execution required")
     scene, index = _scene()
     simulation = mw.Simulation.fdtd(
-        scene.clone(device="cuda"),
+        place_scene(scene, "cuda"),
         frequencies=FREQUENCIES,
         # The short-tail graph captures the GPU full-field DFT tail; request it explicitly
         # (before 6fc1d88c an explicit False was silently overridden to True).
-        full_field_dft=True,
-        field_dtype=torch.float32,
-        cuda_graph=graph,
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
+        config=mw.FDTDConfig(
+            full_field_dft=True,
+            field_dtype=torch.float32,
+            cuda_graph=graph,
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+        ),
     )
     execution = simulation.prepare()
     solver = execution.solver
@@ -77,7 +79,7 @@ def _run_control(graph, steps, directory, *, remaining=None):
         assert checkpoint.step == steps - remaining and checkpoint.total_steps == steps
         checkpoint.save(directory / "checkpoint.pt")
         del checkpoint, execution
-        restored = mw.FDTDResumeCheckpoint.load(directory / "checkpoint.pt", map_location="cpu")
+        restored = mw.fdtd.FDTDResumeCheckpoint.load(directory / "checkpoint.pt", map_location="cpu")
         execution = simulation.prepare()
         result = execution.run(resume_from=restored)
 
@@ -89,11 +91,11 @@ def _run_control(graph, steps, directory, *, remaining=None):
     assert all(count == steps for count in result.stats()["observer_sample_counts"])
     assert int(solver._dft_step.item()) == steps
 
-    point = result.monitor("same_owned_Ey")["components"]["Ey"].detach().cpu()
-    plane = result.monitor("published_Ey")["components"]["Ey"]["data"].detach().cpu()
+    point = result.monitor("same_owned_Ey").sel(component="Ey").values.detach().cpu()
+    plane = result.monitor("published_Ey").sel(component="Ey").values.detach().cpu()
     assert point.dtype == plane.dtype == torch.complex64
     torch.testing.assert_close(point.reshape(-1), plane[:, index[0], index[1]], rtol=0, atol=0)
-    traces = result.conductor_losses["film"]["bulk_electric_traces"]
+    traces = mw.rf.conductor_losses(result)["film"]["bulk_electric_traces"]
     assert len(traces) == 2 and {trace["component"] for trace in traces} == {"Ex", "Ey"}
     ey = next(trace for trace in traces if trace["component"] == "Ey")
     locations = torch.nonzero((ey["indices"].cpu() == torch.tensor(index)).all(dim=1)).flatten()
@@ -118,9 +120,9 @@ def _run_control(graph, steps, directory, *, remaining=None):
 
     result.save(directory / "result.pt")
     loaded = mw.Result.load(directory / "result.pt", scene=scene, map_location="cpu")
-    torch.testing.assert_close(loaded.monitor("same_owned_Ey")["components"]["Ey"], point, rtol=0, atol=0)
-    torch.testing.assert_close(loaded.monitor("published_Ey")["components"]["Ey"]["data"], plane, rtol=0, atol=0)
-    restored_traces = loaded.conductor_losses["film"]["bulk_electric_traces"]
+    torch.testing.assert_close(loaded.monitor("same_owned_Ey").sel(component="Ey").values, point, rtol=0, atol=0)
+    torch.testing.assert_close(loaded.monitor("published_Ey").sel(component="Ey").values, plane, rtol=0, atol=0)
+    restored_traces = mw.rf.conductor_losses(loaded)["film"]["bulk_electric_traces"]
     assert len(restored_traces) == len(traces)
     assert tuple(trace["component"] for trace in restored_traces) == tuple(trace["component"] for trace in traces)
     for original, restored_trace in zip(traces, restored_traces):

@@ -85,16 +85,19 @@ def test_pmc_scene_fingerprint_stays_distinct():
 
     def fingerprint(material):
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.3, 0.3),) * 3),
-            grid=mw.GridSpec.uniform(0.05),
-            boundary=mw.BoundarySpec.pml(num_layers=4),
-            device="cuda",
-        )
-        scene.add_structure(mw.Structure(geometry=mw.Box(position=(0.1, 0, 0), size=(0.1, 0.1, 0.1)), material=material))
-        scene.add_source(mw.PointDipole(position=(-0.1, 0, 0), polarization="Ez", width=0.05,
-                                        source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.5e9)))
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",)))
-        prepared = mw.Simulation.fdtd(scene, frequencies=[1e9], run_time=mw.TimeConfig(time_steps=4)).prepare()
+                    domain=mw.Domain(bounds=((-0.3, 0.3),) * 3),
+                    grid=mw.GridSpec.uniform(0.05),
+                    boundary=mw.BoundarySpec.pml(num_layers=4),
+                    structures=(
+                mw.Structure(geometry=mw.Box(position=(0.1, 0, 0), size=(0.1, 0.1, 0.1)), material=material),
+                ),
+                    sources=(
+                mw.PointDipole(position=(-0.1, 0, 0), polarization="Ez", width=0.05,
+                               source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.5e9)),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",)),),
+                )
+        prepared = mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=4))).prepare()
         model = prepared.solver._compiled_material_model
         return _configuration_fingerprint(prepared.solver), model.get("pmc_occupancy")
 

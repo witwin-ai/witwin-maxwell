@@ -35,16 +35,16 @@ def dipole_far(directions, *, frequency, position, direction, radius, magnetic=F
 
 
 def analytic_result(*, curvature=8., count=24, frame=None, magnetic=False, device='cpu',frequency=1e9):
-    chart=mw.BendCoordinates(curvature=curvature,origin=(.02,-.01,.03),frame=frame,device=device)
-    surface=mw.ClosedSurfaceMonitor.box('huygens',size=(.12,.07,.10),sample_spacing=.01,frequencies=(frequency,))
+    chart=mw.coordinates.BendCoordinates(curvature=curvature,origin=(.02,-.01,.03),frame=frame,device=device)
+    surface=mw.monitors.ClosedSurfaceMonitor.box('huygens',size=(.12,.07,.10),sample_spacing=.01,frequencies=(frequency,))
     scene=mw.Scene(domain=mw.Domain(bounds=((-0.09,.09),(-.06,.06),(-.08,.08))),grid=mw.GridSpec.uniform(.01),
-        coordinates=chart,monitors=(surface,),device=device)
+        coordinates=chart,monitors=(surface,))
     chart=scene.coordinates
     # Emulate the solver payload: closed faces lie on their snapped Yee planes
     # and span the watertight grid-resolved rectangle.
     from witwin.maxwell.scene import prepare_scene
     from witwin.maxwell.fdtd.observers import finite_plane_integration_bounds,nearest_primal_node
-    prepared=prepare_scene(scene)
+    prepared=prepare_scene(scene, device=device)
     direction=chart.frame@torch.tensor((.3,-.4,.8),dtype=torch.float64,device=device)
     direction=direction/torch.linalg.vector_norm(direction)
     samples={};physical_flux=torch.zeros((),device=device,dtype=torch.float64)

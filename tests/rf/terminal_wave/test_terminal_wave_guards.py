@@ -19,23 +19,26 @@ def _scene(substrate=None, *, extra_ports=()):
     y = np.arange(-12, 13) * DX
     z = np.arange(-1, 14) * DX
     scene = mw.Scene(domain=mw.Domain(bounds=((x[0], x[-1]), (y[0], y[-1]), (z[0], z[-1]))),
-                     grid=mw.GridSpec.custom(x, y, z), boundary=mw.BoundarySpec.pec(), device="cuda")
-    scene.add_structure(mw.Structure(mw.PlanarPEC(((-1, -1), (1, -1), (1, 1), (-1, 1)), normal_axis="z", coordinate=0.0),
-                                     mw.Material.pec(), name="ground"))
-    scene.add_structure(mw.Structure(mw.Box(position=(0, 0, 0.01), size=(1, 1, 0.02)),
-                                     substrate or mw.Material(eps_r=3.0), name="substrate"))
-    scene.add_structure(mw.Structure(mw.PlanarPEC(((-1, -0.01), (1, -0.01), (1, 0.01), (-1, 0.01)), normal_axis="z",
-                                                  coordinate=0.02), mw.Material.pec(), name="strip"))
-    scene.add_port(mw.TerminalWavePort("P", position=(0, 0, 0.03), size=(0, 0.11, 0.06), direction="+",
-                                       reference_plane=0.0, terminals=(mw.TerminalRef("strip"),),
-                                       reference=mw.TerminalRef("ground")))
-    for port in extra_ports:
-        scene.add_port(port)
+                     grid=mw.GridSpec.custom(x, y, z), boundary=mw.BoundarySpec.pec(),
+                     structures=(
+                         mw.Structure(mw.geometry.PlanarPEC(((-1, -1), (1, -1), (1, 1), (-1, 1)), normal_axis="z", coordinate=0.0),
+                                      mw.Material.pec(), name="ground"),
+                         mw.Structure(mw.Box(position=(0, 0, 0.01), size=(1, 1, 0.02)),
+                                      substrate or mw.Material(eps_r=3.0), name="substrate"),
+                         mw.Structure(mw.geometry.PlanarPEC(((-1, -0.01), (1, -0.01), (1, 0.01), (-1, 0.01)), normal_axis="z",
+                                                   coordinate=0.02), mw.Material.pec(), name="strip"),
+                     ),
+                     ports=(
+                         mw.rf.TerminalWavePort("P", position=(0, 0, 0.03), size=(0, 0.11, 0.06), direction="+",
+                                             reference_plane=0.0, terminals=(mw.rf.TerminalRef("strip"),),
+                                             reference=mw.rf.TerminalRef("ground")),
+                     ))
+    scene = scene.updated(ports=(*scene.ports, *extra_ports))
     return scene
 
 
 def _manifest(scene):
-    return resolve_terminal_waveport_run_manifest(prepare_scene(scene), mw.PortSweep(), (1.0e9,))
+    return resolve_terminal_waveport_run_manifest(prepare_scene(scene), mw.rf.PortSweep(), (1.0e9,))
 
 
 def test_lossy_cross_section_is_rejected():
@@ -49,21 +52,29 @@ def test_magnetic_cross_section_is_rejected():
 
 
 def test_mixing_with_single_mode_waveports_is_rejected():
-    mode = mw.WaveModeSpec("te", polarization="Ey")
-    wave = mw.WavePort("W", position=(0.01, 0, 0.03), size=(0, 0.11, 0.06), direction="-", reference_plane=0.01,
+    mode = mw.rf.WaveModeSpec("te", polarization="Ey")
+    wave = mw.rf.WavePort("W", position=(0.01, 0, 0.03), size=(0, 0.11, 0.06), direction="-", reference_plane=0.01,
                        modes=(mode,))
     with pytest.raises(NotImplementedError, match="cannot yet be combined with single-mode WavePorts"):
         _manifest(_scene(extra_ports=(wave,)))
 
 
 def test_direct_port_excitation_is_rejected():
-    simulation = mw.Simulation.fdtd(_scene(), frequencies=(1.0e9,), excitations=mw.PortExcitation("P"))
+    simulation = mw.Simulation.fdtd(_scene(), frequencies=(1.0e9,), excitations=mw.rf.PortExcitation("P"))
     with pytest.raises(NotImplementedError, match="driven through PortSweep columns only"):
         simulation.run()
 
 
 def test_trainable_scene_is_rejected_by_the_adjoint_gate():
     eps = torch.tensor(3.0, dtype=torch.float32, requires_grad=True)
-    simulation = mw.Simulation.fdtd(_scene(mw.Material(eps_r=eps)), frequencies=(1.0e9,), excitations=mw.PortSweep())
+    simulation = mw.Simulation.fdtd(_scene(mw.Material(eps_r=eps)), frequencies=(1.0e9,), excitations=mw.rf.PortSweep())
     with pytest.raises(NotImplementedError, match="TerminalWavePort sweeps are forward-only"):
         simulation.run()
+
+
+def test_terminal_waveport_sweep_refuses_a_material_cache_it_would_not_apply():
+    simulation = mw.Simulation.fdtd(_scene(), frequencies=(1.0e9,), excitations=mw.rf.PortSweep(),
+                                    config=mw.FDTDConfig(material_cache=mw.fdtd.FDTDMaterialCache()))
+    with pytest.raises(mw.UnsupportedFeatureError, match="TerminalWavePort sweep runs each column") as error:
+        simulation.run()
+    assert error.value.method == "fdtd"

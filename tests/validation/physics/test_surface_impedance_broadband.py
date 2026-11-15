@@ -24,7 +24,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.core import Box
 from witwin.maxwell.media import RationalSurfaceImpedance, SurfaceImpedanceMedium
-from witwin.maxwell.fdtd.surface_impedance_reference import (
+from tests.oracles.surface_impedance_reference import (
     ETA_0,
     SURFACE_ACCEPTANCE_BUDGET,
     good_conductor_surface_impedance,
@@ -57,7 +57,6 @@ def _run_reflection(frequency, cells_per_wavelength, cuda_graph=False):
         domain=mw.Domain(bounds=((x_lo, x_hi), (-trans / 2, trans / 2), (-trans / 2, trans / 2))),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.faces(default="periodic", num_layers=10, strength=1.0, x=("pml", "pml")),
-        device="cuda",
         sources=[
             mw.PointDipole(
                 position=(source_x, 0.0, 0.0),
@@ -75,13 +74,12 @@ def _run_reflection(frequency, cells_per_wavelength, cuda_graph=False):
         ],
     )
     result = mw.Simulation.fdtd(
-        scene, absorber="cpml",
-        frequencies=[frequency],
+        scene, frequencies=[frequency], config=mw.FDTDConfig(absorber="cpml",
         run_time=mw.TimeConfig.auto(steady_cycles=16, transient_cycles=24),
         full_field_dft=True,
-        cuda_graph=cuda_graph,
+        cuda_graph=cuda_graph),
     ).run()
-    ez = result.field("Ez")
+    ez = result.field("Ez").isel(f=0).values
     ez = (ez["data"] if isinstance(ez, dict) else ez).detach().cpu().numpy()
     assert np.isfinite(ez).all(), "generic surface-impedance field diverged (non-finite)"
     line = np.abs(ez).reshape(ez.shape[0], -1).mean(axis=1)

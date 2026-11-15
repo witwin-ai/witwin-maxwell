@@ -68,7 +68,7 @@ def main(argv=None):
 
         kind, dx = TIERS[tier]
         material = (mw.Material(eps_r=1.0, sigma_e=_SIGMA) if kind == "resolved"
-                    else mw.LossyMetalMedium(conductivity=_SIGMA))
+                    else mw.media.LossyMetalMedium(conductivity=_SIGMA))
         power = _absorbed_power(
             dx, material, subpixel_samples=mw.SubpixelSpec(samples=4, averaging="kottke_edge"),
             device="cuda",

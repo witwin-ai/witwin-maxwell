@@ -10,42 +10,39 @@ from witwin.maxwell.postprocess import compute_mode_overlap
 from witwin.maxwell.postprocess.stratton_chu import build_plane_points
 from witwin.maxwell.result import Result
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 def _mode_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.none(),
-        device="cpu",
-    )
-    scene.add_structure(
-        # A rectangular core: a square cross-section makes the fundamental
-        # Ey/Ez vector-mode pair exactly degenerate, so the eigensolver returns
-        # an arbitrary member of the pair under any floating-point perturbation.
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.32)),
-            material=mw.Material(eps_r=12.0),
-            name='core',
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(0.0, 0.0, 0.0),
-            # Aperture edges land exactly on grid nodes (+-0.24); a 0.56 span
-            # would place them exactly midway between nodes, where the nearest-
-            # node resolution is an ill-conditioned floating-point tie.
-            size=(0.0, 0.48, 0.48),
-            polarization="Ez",
-            source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
-            name="port0",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.32)),
+                material=mw.Material(eps_r=12.0),
+                name='core',
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(0.0, 0.0, 0.0),
+                # Aperture edges land exactly on grid nodes (+-0.24); a 0.56 span
+                # would place them exactly midway between nodes, where the nearest-
+                # node resolution is an ill-conditioned floating-point tie.
+                size=(0.0, 0.48, 0.48),
+                polarization="Ez",
+                source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
+                name="port0",
+            ),
+            ),
+            )
     return scene
 
 
 def _mode_context(scene):
-    prepared_scene = prepare_scene(scene)
+    prepared_scene = prepare_scene(scene, device="cpu")
     return SimpleNamespace(
         scene=prepared_scene,
         dx=prepared_scene.dx,
@@ -53,8 +50,8 @@ def _mode_context(scene):
         dz=prepared_scene.dz,
         Ex=torch.empty((1,), device=prepared_scene.device, dtype=torch.float32),
         c=299792458.0,
-        boundary_kind=prepared_scene.boundary.kind,
-        _compiled_material_model=prepared_scene.compile_materials(),
+        boundary_kind=prepared_scene.scene.boundary.kind,
+        _compiled_material_model=compile_materials(prepared_scene),
     )
 
 
@@ -111,37 +108,36 @@ def _synthetic_mode_monitor(*, reverse_magnetic: bool = False):
 
 def _fdtd_mode_overlap_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
-            material=mw.Material(eps_r=12.0),
-            name='core',
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(-0.32, 0.0, 0.0),
-            size=(0.0, 0.48, 0.48),
-            polarization="Ez",
-            source_time=mw.CW(frequency=1.0e9, amplitude=50.0),
-            name="port0",
-        )
-    )
-    scene.add_monitor(
-        mw.ModeMonitor(
-            "port",
-            position=(-0.24, 0.0, 0.0),
-            size=(0.0, 0.48, 0.48),
-            polarization="Ez",
-            direction="+",
-            frequencies=(1.0e9,),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
+                material=mw.Material(eps_r=12.0),
+                name='core',
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(-0.32, 0.0, 0.0),
+                size=(0.0, 0.48, 0.48),
+                polarization="Ez",
+                source_time=mw.CW(frequency=1.0e9, amplitude=50.0),
+                name="port0",
+            ),
+            ),
+                monitors=(
+            mw.ModeMonitor(
+                "port",
+                position=(-0.24, 0.0, 0.0),
+                size=(0.0, 0.48, 0.48),
+                polarization="Ez",
+                direction="+",
+                frequencies=(1.0e9,),
+            ),
+            ),
+            )
     return scene
 
 
@@ -171,16 +167,14 @@ def test_compute_mode_overlap_separates_backward_mode_when_magnetic_field_is_rev
     assert overlap["power_fraction_backward"] == pytest.approx(1.0, rel=1e-3, abs=1e-3)
 
 
-def test_result_mode_monitor_returns_modal_payload_and_raw_plane():
+def test_result_mode_monitor_returns_mode_amplitudes_and_raw_plane():
     result = _synthetic_mode_monitor(reverse_magnetic=False)
 
-    monitor = result.monitor("port")
+    monitor = result.monitor("port", freq_index=0)
     raw_monitor = result.raw_monitor("port")
 
-    assert monitor["kind"] == "mode"
-    assert monitor["plane"]["kind"] == "plane"
-    assert monitor["plane"]["monitor_type"] == "mode"
-    assert torch.real(monitor["amplitude_forward"]) == pytest.approx(1.0, rel=5e-4, abs=5e-4)
+    assert isinstance(monitor, mw.ModeAmplitudeData) and monitor.dims == ("mode", "propagation")
+    assert torch.real(monitor.isel(mode=0).sel(propagation="+").values) == pytest.approx(1.0, rel=5e-4, abs=5e-4)
     assert raw_monitor["kind"] == "plane"
     assert raw_monitor["monitor_type"] == "mode"
     assert raw_monitor["mode_spec"]["mode_index"] == 0
@@ -191,9 +185,11 @@ def test_compute_mode_overlap_fdtd_monitor_direction_switch_swaps_forward_and_ba
     result = mw.Simulation.fdtd(
         _fdtd_mode_overlap_scene(),
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     plus = compute_mode_overlap(result, "port", direction="+")
@@ -214,43 +210,43 @@ def test_compute_mode_overlap_fdtd_monitor_direction_switch_swaps_forward_and_ba
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_mode_port_materializes_first_class_source_and_monitor_results():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
-            material=mw.Material(eps_r=12.0),
-            name='core',
-        )
-    )
-    scene.add_port(
-        mw.ModePort(
-            "port0",
-            position=(-0.32, 0.0, 0.0),
-            size=(0.0, 0.48, 0.48),
-            polarization="Ez",
-            source_time=mw.CW(frequency=1.0e9, amplitude=50.0),
-            frequencies=(1.0e9,),
-            monitor_offset=0.08,
-        )
-    )
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
+                material=mw.Material(eps_r=12.0),
+                name='core',
+            ),
+            ),
+                ports=(
+            mw.ModePort(
+                "port0",
+                position=(-0.32, 0.0, 0.0),
+                size=(0.0, 0.48, 0.48),
+                polarization="Ez",
+                source_time=mw.CW(frequency=1.0e9, amplitude=50.0),
+                frequencies=(1.0e9,),
+                monitor_offset=0.08,
+            ),
+            ),
+            )
 
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
-    monitor = result.monitor("port0")
+    monitor = result.monitor("port0", freq_index=0)
     raw_monitor = result.raw_monitor("port0")
 
-    assert monitor["kind"] == "mode"
+    assert isinstance(monitor, mw.ModeAmplitudeData)
     assert raw_monitor["kind"] == "plane"
     assert raw_monitor["monitor_type"] == "mode"
-    assert monitor["effective_index"] > 1.0
-    assert bool(torch.isfinite(monitor["amplitude_forward"]).item())
-    assert bool(torch.isfinite(monitor["amplitude_backward"]).item())
+    assert monitor.attrs["effective_index"] > 1.0
+    assert bool(torch.isfinite(monitor.values).all())

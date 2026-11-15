@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from witwin.core import Box
 from .planar_pec import PlanarPEC
+from ..errors import UnsupportedFeatureError
+from ..compiler.materials import compile_materials
 
 
 def _cross(a,b):
@@ -102,10 +104,12 @@ def conductor_support(structure, *, required=False):
         return None
     geometry=structure.geometry
     if not isinstance(geometry,(Box,PlanarPEC)):
-        raise NotImplementedError(f"Conductor {structure.name!r} requires Box or PlanarPEC geometry for named-terminal topology auditing.")
+        raise UnsupportedFeatureError(f"Conductor {structure.name!r} requires Box or PlanarPEC geometry for named-terminal topology auditing.",
+                                      feature="port.TerminalPort", method=None)
     for value in (geometry.position,geometry.rotation,getattr(geometry,'size',None)):
         if torch.is_tensor(value) and value.requires_grad:
-            raise NotImplementedError('Named terminal support requires fixed conductor geometry.')
+            raise UnsupportedFeatureError('Named terminal support requires fixed conductor geometry.',
+                                          feature="port.TerminalPort", method=None)
     rotation=torch.as_tensor(geometry.rotation).detach().cpu().double()
     if not torch.allclose(rotation,torch.tensor((1.,0.,0.,0.),dtype=torch.float64),rtol=0,atol=1e-12):
         raise ValueError(f"terminal structure {structure.name!r} must be an unrotated axis-aligned Box or planar support.")
@@ -114,7 +118,8 @@ def conductor_support(structure, *, required=False):
         normal='xyz'.index(geometry.normal_axis)
         expected=torch.zeros(3,dtype=geometry.position.dtype);expected[normal]=geometry.coordinate
         if not torch.equal(geometry.position.detach().cpu(),expected):
-            raise NotImplementedError('Mutated PlanarPEC placement must be redeclared through its polygon and coordinate.')
+            raise UnsupportedFeatureError('Mutated PlanarPEC placement must be redeclared through its polygon and coordinate.',
+                                          feature="port.TerminalPort", method=None)
         transverse=[i for i in range(3) if i != normal]
         loops=tuple(loop.detach().cpu().numpy().copy() for loop in (geometry.vertices,*geometry.holes))
         lower=np.zeros(3);upper=np.zeros(3)
@@ -319,7 +324,7 @@ def resolve_named_terminals(port,structures,domain_bounds):
 
 def audit_compiled_terminal(scene,port,geometry):
     """Audit every native parallel voltage path, its endpoints and open gap."""
-    supports=_scene_supports(scene.structures,(port.positive_terminal.structure_name,port.negative_terminal.structure_name))
+    supports=_scene_supports(scene.scene.structures,(port.positive_terminal.structure_name,port.negative_terminal.structure_name))
     target={s.name:s for s in supports}
     axis='xyz'.index(geometry.axis)
     nodes=[getattr(scene,a+'_nodes64') for a in 'xyz']
@@ -352,7 +357,8 @@ def audit_compiled_terminal(scene,port,geometry):
     copper_faces=compile_copper_faces(scene,device='cpu')
     for face in copper_faces:
         if face.component == component and edge_keys.intersection(map(tuple,face.indices.tolist())):
-            raise NotImplementedError('TerminalPort voltage row overlaps a split CopperFoil tangential trace; joint port/foil elimination is unsupported.')
+            raise UnsupportedFeatureError('TerminalPort voltage row overlaps a split CopperFoil tangential trace; joint port/foil elimination is unsupported.',
+                                          feature="port.TerminalPort", method=None)
     native_audit=_audit_native_connectivity(scene,port,geometry,supports,copper_faces,grouped)
     return {**port._terminal_audit,**native_audit,'native_parallel_path_count':len(grouped),
             'native_voltage_edge_count':len(indices),'gap_audit':'every native parallel path has two real target contacts and an open conductor-free interior'}
@@ -377,12 +383,12 @@ def _audit_native_connectivity(scene,port,geometry,supports,copper_faces,grouped
     rows=geometry.voltage_indices.detach().cpu().numpy()
     excluded={tuple(map(int,row)) for row in rows}
     edge_sets=[[] for _ in range(3)]
-    fractions=_pec_edge_open_fractions(SimpleNamespace(_compiled_material_model=scene.compile_materials()))
+    fractions=_pec_edge_open_fractions(SimpleNamespace(_compiled_material_model=compile_materials(scene)))
     if fractions is not None:
         for component,name in enumerate(('Ex','Ey','Ez')):
             edge_sets[component].append(torch.nonzero(fractions[name]==0,as_tuple=False).cpu().numpy())
     for face in copper_faces:edge_sets[face.component].append(face.indices.cpu().numpy())
-    for normal,kinds in enumerate(scene.boundary._face_kinds):
+    for normal,kinds in enumerate(scene.scene.boundary._face_kinds):
         for side,kind in enumerate(kinds):
             if kind != 'pec':continue
             for component in range(3):
@@ -410,7 +416,7 @@ def _audit_native_connectivity(scene,port,geometry,supports,copper_faces,grouped
     all_ids=np.unique(np.concatenate([*first,*second,*map(np.asarray,endpoint_sets)]))
     coordinates=np.stack(np.unravel_index(all_ids,shape),axis=1)
     periodic=[]
-    for direction,kinds in enumerate(scene.boundary._face_kinds):
+    for direction,kinds in enumerate(scene.scene.boundary._face_kinds):
         if kinds[0] not in ('periodic','bloch'):continue
         selected=coordinates[:,direction]==shape[direction]-1
         if np.any(selected):

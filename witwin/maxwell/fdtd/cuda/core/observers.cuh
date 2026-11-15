@@ -5,9 +5,9 @@
 
 constexpr int CORE_OBSERVER_GROUPS = 16;
 
-template <typename AccumT>
+template <typename FieldT, typename AccumT>
 struct CoreObserverGroup {
-  const float* field;
+  const FieldT* field;
   int64_t field_size;
   const int64_t* offsets;
   const int64_t* frequency_map;
@@ -17,9 +17,9 @@ struct CoreObserverGroup {
   int retard;
 };
 
-template <typename AccumT>
+template <typename FieldT, typename AccumT>
 struct CoreObserverBatch {
-  CoreObserverGroup<AccumT> groups[CORE_OBSERVER_GROUPS];
+  CoreObserverGroup<FieldT, AccumT> groups[CORE_OBSERVER_GROUPS];
   int64_t prefix[CORE_OBSERVER_GROUPS + 1];
   int group_count;
   const AccumT* weights;
@@ -27,5 +27,6 @@ struct CoreObserverBatch {
   const int* active;
 };
 
-void launch_observer_gather(const CoreObserverBatch<float>& batch, cudaStream_t stream);
-void launch_observer_gather(const CoreObserverBatch<double>& batch, cudaStream_t stream);
+void launch_observer_gather(const CoreObserverBatch<float, float>& batch, cudaStream_t stream);
+void launch_observer_gather(const CoreObserverBatch<float, double>& batch, cudaStream_t stream);
+void launch_observer_gather(const CoreObserverBatch<double, double>& batch, cudaStream_t stream);

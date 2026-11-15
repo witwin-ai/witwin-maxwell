@@ -20,8 +20,9 @@ from .physics import Medium,restore_scalar_medium
 from .mesh import SurfaceMesh,RWGBasis,SurfaceSystem
 from .volume_mesh import TetrahedralVolumeMesh,bind_volume_region
 from .carrier import IncidentCarrier,CarrierWave
-from .harmonic_state import preparation_signature
+from .harmonic_recovery import preparation_signature
 from .harmonic_balance import DenseHarmonicBalance
+from ..errors import UnsupportedFeatureError
 
 VERSION='dense-mixed-tensor-harmonic-bundle-v1'
 CURRENT_VERSION='dense-mixed-tensor-current-harmonic-bundle-v1'
@@ -71,7 +72,8 @@ def snapshot_mixed_tensor_harmonic_bundle(state,prepared):
     for operator in prepared['operators']:
         config=operator._public_config
         if config.operator_backend not in (('hmatrix','h2') if compressed else ('dense',)) or config.periodic is not None:
-            raise NotImplementedError('Mixed harmonic bundle requires matching free-space dense or H/H2 operators')
+            raise UnsupportedFeatureError('Mixed harmonic bundle requires matching free-space dense or H/H2 operators',
+                                          feature="guard:4ac70752", method="mom")
         state_record=dict(sources=_sources(operator.sources)) if compressed else dict(matrix=operator.matrix)
         records.append(dict(numerical=_numerical_identity(config),**state_record,
             metadata=operator.metadata,exterior=sampled_medium_payload(operator.exterior),

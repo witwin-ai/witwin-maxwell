@@ -41,7 +41,7 @@ def sphere_rule(n_theta=32, n_phi=64):
 def scene(side, frequency, direction, polarization):
     return mw.Scene(structures=[mw.Structure(mw.Box(size=(side, side, 0)), mw.Material.pec())],
                     sources=[mw.PlaneWave(direction=direction, polarization=polarization,
-                                          source_time=mw.CW(frequency=frequency))], device='cuda')
+                                          source_time=mw.CW(frequency=frequency))])
 
 
 PFFT = {}
@@ -51,8 +51,8 @@ def config(backend, edge, stopping, factory=None):
     extra = {}
     if backend == 'pfft':
         extra = dict(operator_backend='pfft', riesz_storage='local_rwg_v1',
-                     pfft=mw.PFFTConfig(solve_dual_tolerance=1e-4, **PFFT))
-    return mw.MoMConfig(open_surface=mw.OpenSurfaceConfig(max_edge_length_m=edge), stopping=stopping,
+                     pfft=mw.mom.PFFTConfig(solve_dual_tolerance=1e-4, **PFFT))
+    return mw.mom.MoMConfig(open_surface=mw.mom.OpenSurfaceConfig(max_edge_length_m=edge), stopping=stopping,
                         right_preconditioner=factory, **extra)
 
 
@@ -60,14 +60,14 @@ def run(s, frequency, cfg):
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
-    prepared = mw.Simulation.mom(s, frequency=frequency, config=cfg).prepare()
+    prepared = mw.Simulation.mom(s, frequencies=frequency, config=cfg).prepare()
     torch.cuda.synchronize()
     setup = time.perf_counter()-start
     result = prepared.run()
     torch.cuda.synchronize()
-    return prepared, result, {'setup_seconds': setup, 'solve_seconds': result.solver_stats.get('solve_seconds'),
-                              'iterations': result.solver_stats['iterations'],
-                              'converged': result.solver_stats['converged'],
+    return prepared, result, {'setup_seconds': setup, 'solve_seconds': result.stats().get('solve_seconds'),
+                              'iterations': result.stats()['iterations'],
+                              'converged': result.stats()['converged'],
                               'peak_bytes': torch.cuda.max_memory_allocated()}
 
 
@@ -83,7 +83,7 @@ def rcs_study(args, side, cells, directions, weights):
                     StoppingRule(method='gmres', rtol=1e-8, maxiter=3000, restart=3000, preconditioner='none',
                                  stagnation_window=3000))
         prepared, result, record = run(s, frequency, config(backend, side/cells, stopping))
-        data = result.surface_currents
+        data = mw.mom.surface_currents(result)
         sections = data.plane_wave_cross_sections(directions, weights)
         record.update(monostatic_rcs_m2=float(data.radar_cross_section(backscatter)[0]),
                       bistatic30_rcs_m2=float(data.radar_cross_section(bistatic)[0]),
@@ -110,7 +110,7 @@ def iteration_study(args, side, cells):
     s = scene(side, frequency, (0.0, 0.6, -0.8), (1.0, 0.0, 0.0))
     stopping = StoppingRule(method='gmres', rtol=args.rtol, maxiter=args.maxiter, restart=args.maxiter,
                             preconditioner='none', stagnation_window=args.maxiter)
-    dense_handle = mw.Simulation.mom(s, frequency=frequency, config=config('dense', side/cells, stopping)).prepare()
+    dense_handle = mw.Simulation.mom(s, frequencies=frequency, config=config('dense', side/cells, stopping)).prepare()
     reference = solve_reference(dense_handle.solver.handle, dense_handle.solver.rhs, StoppingRule(method='direct'))[0]
     del dense_handle
     out = {}
@@ -119,7 +119,7 @@ def iteration_study(args, side, cells):
             if f'{backend}_{name}' not in args.cases:
                 continue
             prepared, result, record = run(s, frequency, config(backend, side/cells, stopping, factory))
-            record['solution_relative_error'] = float((result.surface_currents.J-reference).norm()/reference.norm())
+            record['solution_relative_error'] = float((mw.mom.surface_currents(result).J-reference).norm()/reference.norm())
             if prepared.solver.right_preconditioner_receipt is not None:
                 record['preconditioner_setup_seconds'] = prepared.solver.right_preconditioner_receipt.get(
                     'setup_seconds')

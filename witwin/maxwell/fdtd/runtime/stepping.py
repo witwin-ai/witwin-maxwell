@@ -68,6 +68,7 @@ from ..wire import (
     sample_and_update_wire,
 )
 from .breakdown import advance_breakdown_state, initialize_breakdown_runtime
+from ...errors import UnsupportedFeatureError
 
 
 def iter_cpml_memory_regions(solver, attr_name):
@@ -115,212 +116,17 @@ def _cpml_memory_attr(attr_name, *, imag=False):
     return f"{attr_name}_imag" if imag else attr_name
 
 
-def _cpml_memory_tensor(solver, attr_name, *, imag=False):
-    return getattr(solver, _cpml_memory_attr(attr_name, imag=imag))
+def _core_runtime(solver):
+    runtime = getattr(solver, "_core_runtime", None)
+    if runtime is None:
+        raise RuntimeError("This FDTD solver has no core runtime: prepare it with Simulation.prepare() "
+                           "(the per-component stepping path was removed in W7 row 16e).")
+    return runtime
 
 
-def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
-    solver.fdtd_module.updateMagneticFieldHx3D(
-        Hx=hx,
-        Ey=ey,
-        Ez=ez,
-        HxDecay=solver.chx_decay,
-        HxCurl=solver.chx_curl,
-        PsiHxY=_cpml_memory_tensor(solver, "psi_hx_y", imag=imag),
-        PsiHxZ=_cpml_memory_tensor(solver, "psi_hx_z", imag=imag),
-        InvKappaHxY=solver.cpml_inv_kappa_h_y,
-        ByHxY=solver.cpml_b_h_y,
-        CyHxY=solver.cpml_c_h_y,
-        InvKappaHxZ=solver.cpml_inv_kappa_h_z,
-        ByHxZ=solver.cpml_b_h_z,
-        CyHxZ=solver.cpml_c_h_z,
-        invDy=solver.inv_dy_h,
-        invDz=solver.inv_dz_h,
-        uniformDecay=solver._coefficient_uniformity["chx_decay"],
-        uniformCurl=solver._coefficient_uniformity["chx_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateMagneticFieldHy3D(
-        Hy=hy,
-        Ex=ex,
-        Ez=ez,
-        HyDecay=solver.chy_decay,
-        HyCurl=solver.chy_curl,
-        PsiHyX=_cpml_memory_tensor(solver, "psi_hy_x", imag=imag),
-        PsiHyZ=_cpml_memory_tensor(solver, "psi_hy_z", imag=imag),
-        InvKappaHyX=solver.cpml_inv_kappa_h_x,
-        ByHyX=solver.cpml_b_h_x,
-        CyHyX=solver.cpml_c_h_x,
-        InvKappaHyZ=solver.cpml_inv_kappa_h_z,
-        ByHyZ=solver.cpml_b_h_z,
-        CyHyZ=solver.cpml_c_h_z,
-        invDx=solver.inv_dx_h,
-        invDz=solver.inv_dz_h,
-        uniformDecay=solver._coefficient_uniformity["chy_decay"],
-        uniformCurl=solver._coefficient_uniformity["chy_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateMagneticFieldHz3D(
-        Hz=hz,
-        Ex=ex,
-        Ey=ey,
-        HzDecay=solver.chz_decay,
-        HzCurl=solver.chz_curl,
-        PsiHzX=_cpml_memory_tensor(solver, "psi_hz_x", imag=imag),
-        PsiHzY=_cpml_memory_tensor(solver, "psi_hz_y", imag=imag),
-        InvKappaHzX=solver.cpml_inv_kappa_h_x,
-        ByHzX=solver.cpml_b_h_x,
-        CyHzX=solver.cpml_c_h_x,
-        InvKappaHzY=solver.cpml_inv_kappa_h_y,
-        ByHzY=solver.cpml_b_h_y,
-        CyHzY=solver.cpml_c_h_y,
-        invDx=solver.inv_dx_h,
-        invDy=solver.inv_dy_h,
-        uniformDecay=solver._coefficient_uniformity["chz_decay"],
-        uniformCurl=solver._coefficient_uniformity["chz_curl"],
-    ).launchRaw()
-
-
-def update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
-    psi_hx_y_attr = _cpml_memory_attr("psi_hx_y", imag=imag)
-    psi_hx_z_attr = _cpml_memory_attr("psi_hx_z", imag=imag)
-    psi_hy_x_attr = _cpml_memory_attr("psi_hy_x", imag=imag)
-    psi_hy_z_attr = _cpml_memory_attr("psi_hy_z", imag=imag)
-    psi_hz_x_attr = _cpml_memory_attr("psi_hz_x", imag=imag)
-    psi_hz_y_attr = _cpml_memory_attr("psi_hz_y", imag=imag)
-    psi_hx_y_low, psi_hx_y_high_start, psi_hx_y_high = cpml_layout_params(solver, psi_hx_y_attr)
-    psi_hx_z_low, psi_hx_z_high_start, psi_hx_z_high = cpml_layout_params(solver, psi_hx_z_attr)
-    psi_hy_x_low, psi_hy_x_high_start, psi_hy_x_high = cpml_layout_params(solver, psi_hy_x_attr)
-    psi_hy_z_low, psi_hy_z_high_start, psi_hy_z_high = cpml_layout_params(solver, psi_hy_z_attr)
-    psi_hz_x_low, psi_hz_x_high_start, psi_hz_x_high = cpml_layout_params(solver, psi_hz_x_attr)
-    psi_hz_y_low, psi_hz_y_high_start, psi_hz_y_high = cpml_layout_params(solver, psi_hz_y_attr)
-
-    solver.fdtd_module.updateMagneticFieldHxCpmlCompressed3D(
-        Hx=hx,
-        Ey=ey,
-        Ez=ez,
-        HxDecay=solver.chx_decay,
-        HxCurl=solver.chx_curl,
-        PsiHxY=_cpml_memory_tensor(solver, "psi_hx_y", imag=imag),
-        PsiHxZ=_cpml_memory_tensor(solver, "psi_hx_z", imag=imag),
-        InvKappaHxY=solver.cpml_inv_kappa_h_y,
-        ByHxY=solver.cpml_b_h_y,
-        CyHxY=solver.cpml_c_h_y,
-        InvKappaHxZ=solver.cpml_inv_kappa_h_z,
-        ByHxZ=solver.cpml_b_h_z,
-        CyHxZ=solver.cpml_c_h_z,
-        invDy=solver.inv_dy_h,
-        invDz=solver.inv_dz_h,
-        psiHxYLowLength=psi_hx_y_low,
-        psiHxYHighStart=psi_hx_y_high_start,
-        psiHxYHighLength=psi_hx_y_high,
-        psiHxZLowLength=psi_hx_z_low,
-        psiHxZHighStart=psi_hx_z_high_start,
-        psiHxZHighLength=psi_hx_z_high,
-        uniformDecay=solver._coefficient_uniformity["chx_decay"],
-        uniformCurl=solver._coefficient_uniformity["chx_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateMagneticFieldHyCpmlCompressed3D(
-        Hy=hy,
-        Ex=ex,
-        Ez=ez,
-        HyDecay=solver.chy_decay,
-        HyCurl=solver.chy_curl,
-        PsiHyX=_cpml_memory_tensor(solver, "psi_hy_x", imag=imag),
-        PsiHyZ=_cpml_memory_tensor(solver, "psi_hy_z", imag=imag),
-        InvKappaHyX=solver.cpml_inv_kappa_h_x,
-        ByHyX=solver.cpml_b_h_x,
-        CyHyX=solver.cpml_c_h_x,
-        InvKappaHyZ=solver.cpml_inv_kappa_h_z,
-        ByHyZ=solver.cpml_b_h_z,
-        CyHyZ=solver.cpml_c_h_z,
-        invDx=solver.inv_dx_h,
-        invDz=solver.inv_dz_h,
-        psiHyXLowLength=psi_hy_x_low,
-        psiHyXHighStart=psi_hy_x_high_start,
-        psiHyXHighLength=psi_hy_x_high,
-        psiHyZLowLength=psi_hy_z_low,
-        psiHyZHighStart=psi_hy_z_high_start,
-        psiHyZHighLength=psi_hy_z_high,
-        uniformDecay=solver._coefficient_uniformity["chy_decay"],
-        uniformCurl=solver._coefficient_uniformity["chy_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateMagneticFieldHzCpmlCompressed3D(
-        Hz=hz,
-        Ex=ex,
-        Ey=ey,
-        HzDecay=solver.chz_decay,
-        HzCurl=solver.chz_curl,
-        PsiHzX=_cpml_memory_tensor(solver, "psi_hz_x", imag=imag),
-        PsiHzY=_cpml_memory_tensor(solver, "psi_hz_y", imag=imag),
-        InvKappaHzX=solver.cpml_inv_kappa_h_x,
-        ByHzX=solver.cpml_b_h_x,
-        CyHzX=solver.cpml_c_h_x,
-        InvKappaHzY=solver.cpml_inv_kappa_h_y,
-        ByHzY=solver.cpml_b_h_y,
-        CyHzY=solver.cpml_c_h_y,
-        invDx=solver.inv_dx_h,
-        invDy=solver.inv_dy_h,
-        psiHzXLowLength=psi_hz_x_low,
-        psiHzXHighStart=psi_hz_x_high_start,
-        psiHzXHighLength=psi_hz_x_high,
-        psiHzYLowLength=psi_hz_y_low,
-        psiHzYHighStart=psi_hz_y_high_start,
-        psiHzYHighLength=psi_hz_y_high,
-        uniformDecay=solver._coefficient_uniformity["chz_decay"],
-        uniformCurl=solver._coefficient_uniformity["chz_curl"],
-    ).launchRaw()
-
-
-def update_magnetic_fields_cpml(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
-    if solver._cpml_memory_mode == "dense":
-        update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, imag=imag)
-        return
-    update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez, imag=imag)
-
-
-def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
-    solver.fdtd_module.updateMagneticFieldHxStandard3D(
-        Hx=hx,
-        Ey=ey,
-        Ez=ez,
-        HxDecay=solver.chx_decay,
-        HxCurl=solver.chx_curl,
-        invDy=solver.inv_dy_h,
-        invDz=solver.inv_dz_h,
-        uniformDecay=solver._coefficient_uniformity["chx_decay"],
-        uniformCurl=solver._coefficient_uniformity["chx_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateMagneticFieldHyStandard3D(
-        Hy=hy,
-        Ex=ex,
-        Ez=ez,
-        HyDecay=solver.chy_decay,
-        HyCurl=solver.chy_curl,
-        invDx=solver.inv_dx_h,
-        invDz=solver.inv_dz_h,
-        uniformDecay=solver._coefficient_uniformity["chy_decay"],
-        uniformCurl=solver._coefficient_uniformity["chy_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateMagneticFieldHzStandard3D(
-        Hz=hz,
-        Ex=ex,
-        Ey=ey,
-        HzDecay=solver.chz_decay,
-        HzCurl=solver.chz_curl,
-        invDx=solver.inv_dx_h,
-        invDy=solver.inv_dy_h,
-        uniformDecay=solver._coefficient_uniformity["chz_decay"],
-        uniformCurl=solver._coefficient_uniformity["chz_curl"],
-    ).launchRaw()
-
-
-def update_magnetic_fields(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
-    if getattr(solver, "_core_runtime", None) is not None:
-        solver._core_runtime.magnetic()
-        return
-    if solver.uses_cpml:
-        update_magnetic_fields_cpml(solver, hx, hy, hz, ex, ey, ez, imag=imag)
-    else:
-        update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez)
+def update_magnetic_fields(solver, *, imag=False):
+    """The fused core magnetic Yee update (real fields, or the imaginary Bloch half with ``imag``)."""
+    _core_runtime(solver).magnetic(imag=imag)
 
 
 def _electric_curl_tensors(solver):
@@ -336,186 +142,6 @@ def _electric_decay_tensors(solver):
     if getattr(solver, "nonlinear_general_enabled", False):
         return solver.cex_decay_dynamic, solver.cey_decay_dynamic, solver.cez_decay_dynamic
     return solver.cex_decay, solver.cey_decay, solver.cez_decay
-
-
-def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
-    ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
-    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
-    solver.fdtd_module.updateElectricFieldExCpml3D(
-        Ex=ex,
-        Hy=hy,
-        Hz=hz,
-        ExDecay=ex_decay,
-        ExCurl=ex_curl,
-        PsiExY=solver.psi_ex_y,
-        PsiExZ=solver.psi_ex_z,
-        InvKappaExY=solver.cpml_inv_kappa_e_y,
-        BExY=solver.cpml_b_e_y,
-        CExY=solver.cpml_c_e_y,
-        InvKappaExZ=solver.cpml_inv_kappa_e_z,
-        BExZ=solver.cpml_b_e_z,
-        CExZ=solver.cpml_c_e_z,
-        invDy=solver.inv_dy_e,
-        invDz=solver.inv_dz_e,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-        uniformDecay=None if ex_decay is not solver.cex_decay else solver._coefficient_uniformity["cex_decay"],
-        uniformCurl=None if ex_curl is not solver.cex_curl else solver._coefficient_uniformity["cex_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEyCpml3D(
-        Ey=ey,
-        Hx=hx,
-        Hz=hz,
-        EyDecay=ey_decay,
-        EyCurl=ey_curl,
-        PsiEyX=solver.psi_ey_x,
-        PsiEyZ=solver.psi_ey_z,
-        InvKappaEyX=solver.cpml_inv_kappa_e_x,
-        BEyX=solver.cpml_b_e_x,
-        CEyX=solver.cpml_c_e_x,
-        InvKappaEyZ=solver.cpml_inv_kappa_e_z,
-        BEyZ=solver.cpml_b_e_z,
-        CEyZ=solver.cpml_c_e_z,
-        invDx=solver.inv_dx_e,
-        invDz=solver.inv_dz_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-        uniformDecay=None if ey_decay is not solver.cey_decay else solver._coefficient_uniformity["cey_decay"],
-        uniformCurl=None if ey_curl is not solver.cey_curl else solver._coefficient_uniformity["cey_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEzCpml3D(
-        Ez=ez,
-        Hx=hx,
-        Hy=hy,
-        EzDecay=ez_decay,
-        EzCurl=ez_curl,
-        PsiEzX=solver.psi_ez_x,
-        PsiEzY=solver.psi_ez_y,
-        InvKappaEzX=solver.cpml_inv_kappa_e_x,
-        BEzX=solver.cpml_b_e_x,
-        CEzX=solver.cpml_c_e_x,
-        InvKappaEzY=solver.cpml_inv_kappa_e_y,
-        BEzY=solver.cpml_b_e_y,
-        CEzY=solver.cpml_c_e_y,
-        invDx=solver.inv_dx_e,
-        invDy=solver.inv_dy_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        uniformDecay=None if ez_decay is not solver.cez_decay else solver._coefficient_uniformity["cez_decay"],
-        uniformCurl=None if ez_curl is not solver.cez_curl else solver._coefficient_uniformity["cez_curl"],
-    ).launchRaw()
-
-
-def update_electric_fields_cpml_compressed(solver, ex, ey, ez, hx, hy, hz):
-    psi_ex_y_low, psi_ex_y_high_start, psi_ex_y_high = cpml_layout_params(solver, "psi_ex_y")
-    psi_ex_z_low, psi_ex_z_high_start, psi_ex_z_high = cpml_layout_params(solver, "psi_ex_z")
-    psi_ey_x_low, psi_ey_x_high_start, psi_ey_x_high = cpml_layout_params(solver, "psi_ey_x")
-    psi_ey_z_low, psi_ey_z_high_start, psi_ey_z_high = cpml_layout_params(solver, "psi_ey_z")
-    psi_ez_x_low, psi_ez_x_high_start, psi_ez_x_high = cpml_layout_params(solver, "psi_ez_x")
-    psi_ez_y_low, psi_ez_y_high_start, psi_ez_y_high = cpml_layout_params(solver, "psi_ez_y")
-    ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
-    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
-
-    solver.fdtd_module.updateElectricFieldExCpmlCompressed3D(
-        Ex=ex,
-        Hy=hy,
-        Hz=hz,
-        ExDecay=ex_decay,
-        ExCurl=ex_curl,
-        PsiExY=solver.psi_ex_y,
-        PsiExZ=solver.psi_ex_z,
-        InvKappaExY=solver.cpml_inv_kappa_e_y,
-        BExY=solver.cpml_b_e_y,
-        CExY=solver.cpml_c_e_y,
-        InvKappaExZ=solver.cpml_inv_kappa_e_z,
-        BExZ=solver.cpml_b_e_z,
-        CExZ=solver.cpml_c_e_z,
-        invDy=solver.inv_dy_e,
-        invDz=solver.inv_dz_e,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-        psiExYLowLength=psi_ex_y_low,
-        psiExYHighStart=psi_ex_y_high_start,
-        psiExYHighLength=psi_ex_y_high,
-        psiExZLowLength=psi_ex_z_low,
-        psiExZHighStart=psi_ex_z_high_start,
-        psiExZHighLength=psi_ex_z_high,
-        uniformDecay=None if ex_decay is not solver.cex_decay else solver._coefficient_uniformity["cex_decay"],
-        uniformCurl=None if ex_curl is not solver.cex_curl else solver._coefficient_uniformity["cex_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEyCpmlCompressed3D(
-        Ey=ey,
-        Hx=hx,
-        Hz=hz,
-        EyDecay=ey_decay,
-        EyCurl=ey_curl,
-        PsiEyX=solver.psi_ey_x,
-        PsiEyZ=solver.psi_ey_z,
-        InvKappaEyX=solver.cpml_inv_kappa_e_x,
-        BEyX=solver.cpml_b_e_x,
-        CEyX=solver.cpml_c_e_x,
-        InvKappaEyZ=solver.cpml_inv_kappa_e_z,
-        BEyZ=solver.cpml_b_e_z,
-        CEyZ=solver.cpml_c_e_z,
-        invDx=solver.inv_dx_e,
-        invDz=solver.inv_dz_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-        psiEyXLowLength=psi_ey_x_low,
-        psiEyXHighStart=psi_ey_x_high_start,
-        psiEyXHighLength=psi_ey_x_high,
-        psiEyZLowLength=psi_ey_z_low,
-        psiEyZHighStart=psi_ey_z_high_start,
-        psiEyZHighLength=psi_ey_z_high,
-        uniformDecay=None if ey_decay is not solver.cey_decay else solver._coefficient_uniformity["cey_decay"],
-        uniformCurl=None if ey_curl is not solver.cey_curl else solver._coefficient_uniformity["cey_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEzCpmlCompressed3D(
-        Ez=ez,
-        Hx=hx,
-        Hy=hy,
-        EzDecay=ez_decay,
-        EzCurl=ez_curl,
-        PsiEzX=solver.psi_ez_x,
-        PsiEzY=solver.psi_ez_y,
-        InvKappaEzX=solver.cpml_inv_kappa_e_x,
-        BEzX=solver.cpml_b_e_x,
-        CEzX=solver.cpml_c_e_x,
-        InvKappaEzY=solver.cpml_inv_kappa_e_y,
-        BEzY=solver.cpml_b_e_y,
-        CEzY=solver.cpml_c_e_y,
-        invDx=solver.inv_dx_e,
-        invDy=solver.inv_dy_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        psiEzXLowLength=psi_ez_x_low,
-        psiEzXHighStart=psi_ez_x_high_start,
-        psiEzXHighLength=psi_ez_x_high,
-        psiEzYLowLength=psi_ez_y_low,
-        psiEzYHighStart=psi_ez_y_high_start,
-        psiEzYHighLength=psi_ez_y_high,
-        uniformDecay=None if ez_decay is not solver.cez_decay else solver._coefficient_uniformity["cez_decay"],
-        uniformCurl=None if ez_curl is not solver.cez_curl else solver._coefficient_uniformity["cez_curl"],
-    ).launchRaw()
-
-
-def update_electric_fields_cpml(solver, ex, ey, ez, hx, hy, hz):
-    if solver._cpml_memory_mode == "dense":
-        update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz)
-        return
-    update_electric_fields_cpml_compressed(solver, ex, ey, ez, hx, hy, hz)
 
 
 def electric_update_support(solver, component):
@@ -544,327 +170,9 @@ def electric_update_support(solver, component):
     return tuple(support)
 
 
-def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
-    ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
-    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
-    solver.fdtd_module.updateElectricFieldExStandard3D(
-        Ex=ex,
-        Hy=hy,
-        Hz=hz,
-        ExDecay=ex_decay,
-        ExCurl=ex_curl,
-        invDy=solver.inv_dy_e,
-        invDz=solver.inv_dz_e,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-        uniformDecay=None if ex_decay is not solver.cex_decay else solver._coefficient_uniformity["cex_decay"],
-        uniformCurl=None if ex_curl is not solver.cex_curl else solver._coefficient_uniformity["cex_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEyStandard3D(
-        Ey=ey,
-        Hx=hx,
-        Hz=hz,
-        EyDecay=ey_decay,
-        EyCurl=ey_curl,
-        invDx=solver.inv_dx_e,
-        invDz=solver.inv_dz_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-        uniformDecay=None if ey_decay is not solver.cey_decay else solver._coefficient_uniformity["cey_decay"],
-        uniformCurl=None if ey_curl is not solver.cey_curl else solver._coefficient_uniformity["cey_curl"],
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEzStandard3D(
-        Ez=ez,
-        Hx=hx,
-        Hy=hy,
-        EzDecay=ez_decay,
-        EzCurl=ez_curl,
-        invDx=solver.inv_dx_e,
-        invDy=solver.inv_dy_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        uniformDecay=None if ez_decay is not solver.cez_decay else solver._coefficient_uniformity["cez_decay"],
-        uniformCurl=None if ez_curl is not solver.cez_curl else solver._coefficient_uniformity["cez_curl"],
-    ).launchRaw()
-
-
-def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, time_value):
-    # Composing modulation with an instantaneous nonlinearity: the modulation
-    # scales the same field-dependent decay/curl coefficients the nonlinear kernel
-    # rewrote this step (static tensors when no nonlinearity is present).
-    ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
-    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
-    solver.fdtd_module.updateElectricFieldExModulated3D(
-        Ex=ex,
-        Hy=hy,
-        Hz=hz,
-        ExDecay=ex_decay,
-        ExCurl=ex_curl,
-        ModCos=solver.mod_cos_Ex,
-        ModSin=solver.mod_sin_Ex,
-        ModOmega=solver.mod_omega_Ex,
-        ModulationTime=solver._modulation_time,
-        invDy=solver.inv_dy_e,
-        invDz=solver.inv_dz_e,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEyModulated3D(
-        Ey=ey,
-        Hx=hx,
-        Hz=hz,
-        EyDecay=ey_decay,
-        EyCurl=ey_curl,
-        ModCos=solver.mod_cos_Ey,
-        ModSin=solver.mod_sin_Ey,
-        ModOmega=solver.mod_omega_Ey,
-        ModulationTime=solver._modulation_time,
-        invDx=solver.inv_dx_e,
-        invDz=solver.inv_dz_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEzModulated3D(
-        Ez=ez,
-        Hx=hx,
-        Hy=hy,
-        EzDecay=ez_decay,
-        EzCurl=ez_curl,
-        ModCos=solver.mod_cos_Ez,
-        ModSin=solver.mod_sin_Ez,
-        ModOmega=solver.mod_omega_Ez,
-        ModulationTime=solver._modulation_time,
-        invDx=solver.inv_dx_e,
-        invDy=solver.inv_dy_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-    ).launchRaw()
-
-
-def update_electric_fields_modulated_cpml(solver, ex, ey, ez, hx, hy, hz, time_value):
-    if solver._cpml_memory_mode == "dense":
-        update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, time_value)
-        return
-    update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy, hz, time_value)
-
-
-def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, time_value):
-    ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
-    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
-    solver.fdtd_module.updateElectricFieldExCpmlModulated3D(
-        Ex=ex,
-        Hy=hy,
-        Hz=hz,
-        ExDecay=ex_decay,
-        ExCurl=ex_curl,
-        ModCos=solver.mod_cos_Ex,
-        ModSin=solver.mod_sin_Ex,
-        ModOmega=solver.mod_omega_Ex,
-        ModulationTime=solver._modulation_time,
-        PsiExY=solver.psi_ex_y,
-        PsiExZ=solver.psi_ex_z,
-        InvKappaExY=solver.cpml_inv_kappa_e_y,
-        BExY=solver.cpml_b_e_y,
-        CExY=solver.cpml_c_e_y,
-        InvKappaExZ=solver.cpml_inv_kappa_e_z,
-        BExZ=solver.cpml_b_e_z,
-        CExZ=solver.cpml_c_e_z,
-        invDy=solver.inv_dy_e,
-        invDz=solver.inv_dz_e,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEyCpmlModulated3D(
-        Ey=ey,
-        Hx=hx,
-        Hz=hz,
-        EyDecay=ey_decay,
-        EyCurl=ey_curl,
-        ModCos=solver.mod_cos_Ey,
-        ModSin=solver.mod_sin_Ey,
-        ModOmega=solver.mod_omega_Ey,
-        ModulationTime=solver._modulation_time,
-        PsiEyX=solver.psi_ey_x,
-        PsiEyZ=solver.psi_ey_z,
-        InvKappaEyX=solver.cpml_inv_kappa_e_x,
-        BEyX=solver.cpml_b_e_x,
-        CEyX=solver.cpml_c_e_x,
-        InvKappaEyZ=solver.cpml_inv_kappa_e_z,
-        BEyZ=solver.cpml_b_e_z,
-        CEyZ=solver.cpml_c_e_z,
-        invDx=solver.inv_dx_e,
-        invDz=solver.inv_dz_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEzCpmlModulated3D(
-        Ez=ez,
-        Hx=hx,
-        Hy=hy,
-        EzDecay=ez_decay,
-        EzCurl=ez_curl,
-        ModCos=solver.mod_cos_Ez,
-        ModSin=solver.mod_sin_Ez,
-        ModOmega=solver.mod_omega_Ez,
-        ModulationTime=solver._modulation_time,
-        PsiEzX=solver.psi_ez_x,
-        PsiEzY=solver.psi_ez_y,
-        InvKappaEzX=solver.cpml_inv_kappa_e_x,
-        BEzX=solver.cpml_b_e_x,
-        CEzX=solver.cpml_c_e_x,
-        InvKappaEzY=solver.cpml_inv_kappa_e_y,
-        BEzY=solver.cpml_b_e_y,
-        CEzY=solver.cpml_c_e_y,
-        invDx=solver.inv_dx_e,
-        invDy=solver.inv_dy_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-    ).launchRaw()
-
-
-def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy, hz, time_value):
-    # Compressed (slab) psi layout: thread the per-side narrow()/offset bookkeeping
-    # (cpml_layout_params) through the modulated kernels, exactly as the plain
-    # compressed CPML update does, with the modulation phase factors applied on top.
-    psi_ex_y_low, psi_ex_y_high_start, psi_ex_y_high = cpml_layout_params(solver, "psi_ex_y")
-    psi_ex_z_low, psi_ex_z_high_start, psi_ex_z_high = cpml_layout_params(solver, "psi_ex_z")
-    psi_ey_x_low, psi_ey_x_high_start, psi_ey_x_high = cpml_layout_params(solver, "psi_ey_x")
-    psi_ey_z_low, psi_ey_z_high_start, psi_ey_z_high = cpml_layout_params(solver, "psi_ey_z")
-    psi_ez_x_low, psi_ez_x_high_start, psi_ez_x_high = cpml_layout_params(solver, "psi_ez_x")
-    psi_ez_y_low, psi_ez_y_high_start, psi_ez_y_high = cpml_layout_params(solver, "psi_ez_y")
-    ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
-    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
-    solver.fdtd_module.updateElectricFieldExCpmlModulatedCompressed3D(
-        Ex=ex,
-        Hy=hy,
-        Hz=hz,
-        ExDecay=ex_decay,
-        ExCurl=ex_curl,
-        ModCos=solver.mod_cos_Ex,
-        ModSin=solver.mod_sin_Ex,
-        ModOmega=solver.mod_omega_Ex,
-        ModulationTime=solver._modulation_time,
-        PsiExY=solver.psi_ex_y,
-        PsiExZ=solver.psi_ex_z,
-        InvKappaExY=solver.cpml_inv_kappa_e_y,
-        BExY=solver.cpml_b_e_y,
-        CExY=solver.cpml_c_e_y,
-        InvKappaExZ=solver.cpml_inv_kappa_e_z,
-        BExZ=solver.cpml_b_e_z,
-        CExZ=solver.cpml_c_e_z,
-        invDy=solver.inv_dy_e,
-        invDz=solver.inv_dz_e,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-        psiExYLowLength=psi_ex_y_low,
-        psiExYHighStart=psi_ex_y_high_start,
-        psiExYHighLength=psi_ex_y_high,
-        psiExZLowLength=psi_ex_z_low,
-        psiExZHighStart=psi_ex_z_high_start,
-        psiExZHighLength=psi_ex_z_high,
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEyCpmlModulatedCompressed3D(
-        Ey=ey,
-        Hx=hx,
-        Hz=hz,
-        EyDecay=ey_decay,
-        EyCurl=ey_curl,
-        ModCos=solver.mod_cos_Ey,
-        ModSin=solver.mod_sin_Ey,
-        ModOmega=solver.mod_omega_Ey,
-        ModulationTime=solver._modulation_time,
-        PsiEyX=solver.psi_ey_x,
-        PsiEyZ=solver.psi_ey_z,
-        InvKappaEyX=solver.cpml_inv_kappa_e_x,
-        BEyX=solver.cpml_b_e_x,
-        CEyX=solver.cpml_c_e_x,
-        InvKappaEyZ=solver.cpml_inv_kappa_e_z,
-        BEyZ=solver.cpml_b_e_z,
-        CEyZ=solver.cpml_c_e_z,
-        invDx=solver.inv_dx_e,
-        invDz=solver.inv_dz_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-        psiEyXLowLength=psi_ey_x_low,
-        psiEyXHighStart=psi_ey_x_high_start,
-        psiEyXHighLength=psi_ey_x_high,
-        psiEyZLowLength=psi_ey_z_low,
-        psiEyZHighStart=psi_ey_z_high_start,
-        psiEyZHighLength=psi_ey_z_high,
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEzCpmlModulatedCompressed3D(
-        Ez=ez,
-        Hx=hx,
-        Hy=hy,
-        EzDecay=ez_decay,
-        EzCurl=ez_curl,
-        ModCos=solver.mod_cos_Ez,
-        ModSin=solver.mod_sin_Ez,
-        ModOmega=solver.mod_omega_Ez,
-        ModulationTime=solver._modulation_time,
-        PsiEzX=solver.psi_ez_x,
-        PsiEzY=solver.psi_ez_y,
-        InvKappaEzX=solver.cpml_inv_kappa_e_x,
-        BEzX=solver.cpml_b_e_x,
-        CEzX=solver.cpml_c_e_x,
-        InvKappaEzY=solver.cpml_inv_kappa_e_y,
-        BEzY=solver.cpml_b_e_y,
-        CEzY=solver.cpml_c_e_y,
-        invDx=solver.inv_dx_e,
-        invDy=solver.inv_dy_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        psiEzXLowLength=psi_ez_x_low,
-        psiEzXHighStart=psi_ez_x_high_start,
-        psiEzXHighLength=psi_ez_x_high,
-        psiEzYLowLength=psi_ez_y_low,
-        psiEzYHighStart=psi_ez_y_high_start,
-        psiEzYHighLength=psi_ez_y_high,
-    ).launchRaw()
-
-
-def update_electric_fields(solver, ex, ey, ez, hx, hy, hz, *, time_value=None):
-    if getattr(solver, "_core_runtime", None) is not None:
-        solver._core_runtime.electric()
-        return
-    if getattr(solver, "modulation_enabled", False):
-        if time_value is None:
-            raise RuntimeError(
-                "The time-modulated electric update requires the current step time_value."
-            )
-        if solver.uses_cpml:
-            update_electric_fields_modulated_cpml(solver, ex, ey, ez, hx, hy, hz, time_value)
-        else:
-            update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, time_value)
-        return
-    if solver.uses_cpml:
-        update_electric_fields_cpml(solver, ex, ey, ez, hx, hy, hz)
-    else:
-        update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz)
+def update_electric_fields(solver):
+    """The fused core electric Yee update (its modulation clock and live coefficients included)."""
+    _core_runtime(solver).electric()
 
 
 def _full_aniso_periodic_flags(solver):
@@ -1100,11 +408,12 @@ def apply_full_aniso_conduction(solver):
 
 def update_electric_fields_bloch(solver):
     if getattr(solver, "nonlinear_enabled", False):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "FDTD instantaneous nonlinear media cannot evolve on the complex Bloch fields: the "
             "|E|^2 Kerr/chi2/TPA polarization couples the single-wavevector Bloch field to the 2k/3k "
             "harmonic sectors a complex-Bloch run does not carry, so the nonlinear response is not "
-            "closed on the real update kernels. Use a real-field boundary (PML/PEC/PMC/periodic)."
+            "closed on the real update kernels. Use a real-field boundary (PML/PEC/PMC/periodic).",
+            feature="material.nonlinear", method="fdtd"
         )
     solver.fdtd_module.updateElectricFieldExBloch3D(
         ExReal=solver.Ex,
@@ -1158,11 +467,12 @@ def update_electric_fields_bloch(solver):
 
 def update_electric_fields_bloch_xy_standard_z(solver):
     if getattr(solver, "nonlinear_enabled", False):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "FDTD instantaneous nonlinear media cannot evolve on the complex Bloch fields: the "
             "|E|^2 Kerr/chi2/TPA polarization couples the single-wavevector Bloch field to the 2k/3k "
             "harmonic sectors a complex-Bloch run does not carry, so the nonlinear response is not "
-            "closed on the real update kernels. Use a real-field boundary (PML/PEC/PMC/periodic)."
+            "closed on the real update kernels. Use a real-field boundary (PML/PEC/PMC/periodic).",
+            feature="material.nonlinear", method="fdtd"
         )
     solver.fdtd_module.updateElectricFieldExBlochYStandardZ3D(
         ExReal=solver.Ex,
@@ -1241,12 +551,13 @@ def _bloch_cpml_pml_axis(solver):
 def _validate_bloch_cpml_update_layout(solver):
     pml_axis = _bloch_cpml_pml_axis(solver)
     if pml_axis is None:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Mixed Bloch/CPML FDTD updates require exactly one PML axis (both faces PML) and two "
             "Bloch axes (both faces Bloch). The complex split-field Bloch update carries the "
             "transverse wrap phase on the two periodic axes while the single absorbing axis runs the "
             "recursive-convolution CPML stretch, so a face layout that mixes Bloch and PML on one axis "
-            "or leaves more than one absorbing axis is not expressible on that split."
+            "or leaves more than one absorbing axis is not expressible on that split.",
+            feature="boundary.bloch", method="fdtd"
         )
     return pml_axis
 
@@ -1520,46 +831,23 @@ def update_electric_fields_bloch_cpml(solver):
 
 def clamp_field_face(solver, field, axis, side):
     side_code = 0 if side == "low" else 1
-    module = getattr(solver, "fdtd_module", None)
-    if module is not None and module.__class__.__name__ == "NativeFDTDModule":
-        module.clampFieldFace3D(field=field, axis=int(axis), side=side_code).launchRaw()
-        return
-    index = 0 if side_code == 0 else field.shape[axis] - 1
-    field.select(axis, index).zero_()
+    solver.fdtd_module.clampFieldFace3D(field=field, axis=int(axis), side=side_code).launchRaw()
 
 
-def _launch_native_clamp(solver, kernel_name, **kwargs):
-    module = getattr(solver, "fdtd_module", None)
-    if module is None or module.__class__.__name__ != "NativeFDTDModule":
-        return False
-    getattr(module, kernel_name)(**kwargs).launchRaw()
-    return True
-
-
-def _enforce_native_pec_field(solver, field, axis_a, low_a, high_a, axis_b, low_b, high_b):
+def _enforce_pec_field(solver, field, axis_a, low_a, high_a, axis_b, low_b, high_b):
+    module = solver.fdtd_module
     sides_a = (low_a == BOUNDARY_PEC, high_a == BOUNDARY_PEC)
     sides_b = (low_b == BOUNDARY_PEC, high_b == BOUNDARY_PEC)
-    if not any(sides_a) and not any(sides_b):
-        return True
-
     if all(sides_a) and all(sides_b):
-        return _launch_native_clamp(solver, "clampPecBoundary3D", field=field, axisA=axis_a, axisB=axis_b)
-    if all(sides_a):
-        if not _launch_native_clamp(solver, "clampPecBoundary3D", field=field, axisA=axis_a, axisB=axis_a):
-            return False
-    else:
-        for side_code, is_pec in enumerate(sides_a):
-            if is_pec and not _launch_native_clamp(
-                solver, "clampFieldFace3D", field=field, axis=axis_a, side=side_code
-            ):
-                return False
-
-    if all(sides_b):
-        return _launch_native_clamp(solver, "clampPecBoundary3D", field=field, axisA=axis_b, axisB=axis_b)
-    for side_code, is_pec in enumerate(sides_b):
-        if is_pec and not _launch_native_clamp(solver, "clampFieldFace3D", field=field, axis=axis_b, side=side_code):
-            return False
-    return True
+        module.clampPecBoundary3D(field=field, axisA=axis_a, axisB=axis_b).launchRaw()
+        return
+    for axis, sides in ((axis_a, sides_a), (axis_b, sides_b)):
+        if all(sides):
+            module.clampPecBoundary3D(field=field, axisA=axis, axisB=axis).launchRaw()
+            continue
+        for side_code, is_pec in enumerate(sides):
+            if is_pec:
+                module.clampFieldFace3D(field=field, axis=axis, side=side_code).launchRaw()
 
 
 def enforce_pec_boundaries(solver):
@@ -1567,50 +855,12 @@ def enforce_pec_boundaries(solver):
         return
     if has_complex_fields(solver):
         _enforce_imag_pec_boundaries(solver)
-
-    if _enforce_native_pec_field(
-        solver,
-        solver.Ex,
-        1,
-        solver.boundary_y_low_code,
-        solver.boundary_y_high_code,
-        2,
-        solver.boundary_z_low_code,
-        solver.boundary_z_high_code,
-    ) and _enforce_native_pec_field(
-        solver,
-        solver.Ey,
-        0,
-        solver.boundary_x_low_code,
-        solver.boundary_x_high_code,
-        2,
-        solver.boundary_z_low_code,
-        solver.boundary_z_high_code,
-    ) and _enforce_native_pec_field(
-        solver,
-        solver.Ez,
-        0,
-        solver.boundary_x_low_code,
-        solver.boundary_x_high_code,
-        1,
-        solver.boundary_y_low_code,
-        solver.boundary_y_high_code,
-    ):
-        return
-
-    face_specs = (
-        (solver.boundary_x_low_code, "low", (("Ey", 0), ("Ez", 0))),
-        (solver.boundary_x_high_code, "high", (("Ey", 0), ("Ez", 0))),
-        (solver.boundary_y_low_code, "low", (("Ex", 1), ("Ez", 1))),
-        (solver.boundary_y_high_code, "high", (("Ex", 1), ("Ez", 1))),
-        (solver.boundary_z_low_code, "low", (("Ex", 2), ("Ey", 2))),
-        (solver.boundary_z_high_code, "high", (("Ex", 2), ("Ey", 2))),
-    )
-    for boundary_code, side, targets in face_specs:
-        if boundary_code != BOUNDARY_PEC:
-            continue
-        for field_name, axis in targets:
-            clamp_field_face(solver, getattr(solver, field_name), axis, side)
+    x_low, x_high = solver.boundary_x_low_code, solver.boundary_x_high_code
+    y_low, y_high = solver.boundary_y_low_code, solver.boundary_y_high_code
+    z_low, z_high = solver.boundary_z_low_code, solver.boundary_z_high_code
+    _enforce_pec_field(solver, solver.Ex, 1, y_low, y_high, 2, z_low, z_high)
+    _enforce_pec_field(solver, solver.Ey, 0, x_low, x_high, 2, z_low, z_high)
+    _enforce_pec_field(solver, solver.Ez, 0, x_low, x_high, 1, y_low, y_high)
 
 
 def _enforce_imag_pec_boundaries(solver):
@@ -1914,18 +1164,9 @@ def _field_update_block(solver, time_value):
     # can form the time-centred magnetization drive (H_pre + H_tmp)/2. The coupled
     # implicit-midpoint solve + correction runs after the plain magnetic update.
     solver._snapshot_gyromagnetic_drive()
-    update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
+    update_magnetic_fields(solver)
     if has_complex_fields(solver):
-        update_magnetic_fields(
-            solver,
-            solver.Hx_imag,
-            solver.Hy_imag,
-            solver.Hz_imag,
-            solver.Ex_imag,
-            solver.Ey_imag,
-            solver.Ez_imag,
-            imag=True,
-        )
+        update_magnetic_fields(solver, imag=True)
     correct_copper_magnetic(solver)
     advance_thin_sheet_magnetic(solver)
     if solver.tfsf_enabled:
@@ -1957,16 +1198,7 @@ def _field_update_block(solver, time_value):
         # Snapshot sigma . E^n before the base update overwrites E (no-op unless the
         # medium is both full-anisotropic and conductive).
         capture_aniso_conduction_currents(solver)
-        update_electric_fields(
-            solver,
-            solver.Ex,
-            solver.Ey,
-            solver.Ez,
-            solver.Hx,
-            solver.Hy,
-            solver.Hz,
-            time_value=time_value,
-        )
+        update_electric_fields(solver)
         if getattr(solver, "full_aniso_enabled", False):
             apply_full_aniso_corrections(solver)
             apply_full_aniso_conduction(solver)
@@ -2045,9 +1277,7 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     # imaginary E/H fields and their CPML psi memory -- is snapshotted alongside the
     # real fields below (the imaginary psi tensors already match the ``psi`` prefix),
     # and the split update is linear with zero forcing at E = H = 0, so the zero
-    # field (real and imaginary) stays a fixed point through warmup/capture. The
-    # complex running DFT keeps the host tail (build_dft_step_tables declines the GPU
-    # weight table for complex fields), so only the field-update block is captured.
+    # field (real and imaginary) stays a fixed point through warmup/capture.
     graphable = (
         use_cuda_graph
         and torch.cuda.is_available()
@@ -2136,7 +1366,7 @@ def _make_tail_runner(solver, use_gpu_dft: bool):
     if isinstance(getattr(solver, "_dft_step", None), torch.Tensor):
         state[("step",)] = solver._dft_step
     for comp, buffers in getattr(solver, "_dft_batched_fields", {}).items():
-        for key in ("real", "imag"):
+        for key in ("real", "imag", "aux_real", "aux_imag"):
             tensor = buffers.get(key)
             if isinstance(tensor, torch.Tensor):
                 state[("dft", comp, key)] = tensor
@@ -2394,6 +1624,8 @@ def solve_steps(
     cooperative_observer=None,
     cooperative_driver: bool = False,
     dft_components=("Ex", "Ey", "Ez"),
+    checkpoints: list | None = None,
+    checkpoint_stride: int | None = None,
 ):
     """Shared solve lifecycle, optionally yielding before each field update.
 
@@ -2401,17 +1633,28 @@ def solve_steps(
     generator. Source injection, boundary clamps, observation and normalization
     remain identical to the ordinary solve. The caller must validate that its
     field block supports every enabled physical capability.
+
+    ``checkpoints`` (a list, with ``checkpoint_stride``) receives the adjoint
+    checkpoint states of the forward tape: the start step, then every completed
+    multiple of the stride below the end step.
     """
     if cooperative and use_cuda_graph:
         raise ValueError("Cooperative execution owns its field graph policy.")
+    if (checkpoints is None) != (checkpoint_stride is None):
+        raise ValueError("checkpoints and checkpoint_stride are given together.")
+    if checkpoints is not None and (cooperative or cooperative_driver or cooperative_observer is not None
+                                    or shutoff > 0):
+        raise ValueError("Adjoint checkpoint capture requires an ordinary solve without shutoff.")
     if solver.verbose:
         print(f"Starting 3D FDTD simulation (Yee grid), grid size: {solver.Nx}x{solver.Ny}x{solver.Nz}")
     from .timeplan import sources_share_spectrum
     if normalize_source and not sources_share_spectrum(getattr(solver, "_compiled_sources", ())):
-        raise NotImplementedError("normalize_source requires all sources to share one source-time spectrum.")
+        raise UnsupportedFeatureError("normalize_source requires all sources to share one source-time spectrum.",
+                                      feature="guard:ff675a2e", method="fdtd")
     checkpoint_execution = resume_from is not None or stop_step is not None
     if checkpoint_execution and bool(getattr(solver, "breakdown_observers", ())):
-        raise NotImplementedError("FDTD resume does not yet preserve breakdown observers.")
+        raise UnsupportedFeatureError("FDTD resume does not yet preserve breakdown observers.",
+                                      feature="monitor.BreakdownMonitor", method="fdtd")
     if stop_step is not None:
         if isinstance(stop_step, bool) or not isinstance(stop_step, int):
             raise TypeError("stop_step must be an integer when provided.")
@@ -2440,6 +1683,8 @@ def solve_steps(
     run_spectral_observers = make_single_observer_engine(
         solver, enabled=use_cuda_graph and cooperative_observer is None)
     prepare_port_spectral_accumulators(solver, time_steps, dft_window)
+    if solver.tfsf_enabled and solver._tfsf_state.get("provider") == "plane_wave_fixed_k":
+        solver._tfsf_state["auxiliary_grid"].prepare_tables(time_steps)
     prepare_copper_spectra(solver, time_steps, observer_frequency, dft_window)
     prepare_circuit_time_series(solver, time_steps)
     circuit_runtimes = tuple(getattr(solver, "_circuit_runtimes", ()))
@@ -2456,7 +1701,7 @@ def solve_steps(
     if getattr(solver, "breakdown_enabled", False):
         use_cuda_graph = False
 
-    from .passivity import make_passivity_state, sample_passivity, total_energy, SAMPLE_INTERVAL
+    from .passivity import make_passivity_state, sample_completed_step
 
     solver._passivity_state = make_passivity_state(solver)
     solver._shutoff_triggered = False
@@ -2487,9 +1732,8 @@ def solve_steps(
     # device step counter whenever the table can be built, dropping the per-step
     # host arithmetic and host->device transfer of the DFT weights. This is
     # independent of graph capture: the table rows are bit-identical to the
-    # per-step host path, so eager runs take the same fast path. The host path
-    # remains only as the fallback for the complex-field (split-field Bloch)
-    # DFT, which the table builder declines.
+    # per-step host path, so eager runs take the same fast path, complex
+    # (split-field Bloch) fields included.
     use_gpu_dft = False
     if getattr(solver, "dft_enabled", False):
         use_gpu_dft = solver.build_dft_step_tables(time_steps)
@@ -2505,6 +1749,10 @@ def solve_steps(
             resume_from,
             total_steps=time_steps,
         )
+        # The embedded-terminal observer graphs above were captured before the
+        # restore and index their DFT rows by this device counter.
+        if getattr(solver, "_port_runtimes", ()):
+            solver._port_observer_step.fill_(start_step)
     end_step = time_steps if stop_step is None else stop_step
     if end_step < start_step:
         raise ValueError(
@@ -2525,12 +1773,10 @@ def solve_steps(
     measure_step_loop = bool(
         circuit_runtimes or getattr(solver, "_port_runtimes", ())
     )
-    time_on_device = measure_step_loop and torch.device(solver.device).type == "cuda"
-    step_start_event = torch.cuda.Event(enable_timing=True) if time_on_device else None
-    step_end_event = torch.cuda.Event(enable_timing=True) if time_on_device else None
+    step_start_event = torch.cuda.Event(enable_timing=True) if measure_step_loop else None
+    step_end_event = torch.cuda.Event(enable_timing=True) if measure_step_loop else None
     if step_start_event is not None:
         step_start_event.record()
-    host_step_start = time.perf_counter() if measure_step_loop and not time_on_device else None
     iterator = range(start_step, end_step)
     pbar = None
     if solver.verbose:
@@ -2546,19 +1792,25 @@ def solve_steps(
     if cooperative_driver:
         steps_run = yield {"gpu_dft": use_gpu_dft, "shutoff_min_step": shutoff_min_step}
         iterator = ()
+    if checkpoints is not None:
+        from ..checkpoint import capture_checkpoint_state
+        checkpoints.append(capture_checkpoint_state(solver, step=start_step))
     if getattr(solver, "_core_runtime", None) is not None:
         core_steps = solver._core_runtime.run_chunks(
             solver, time_steps=time_steps, start_step=start_step, end_step=end_step,
             use_cuda_graph=core_use_cuda_graph, use_gpu_dft=use_gpu_dft,
             cooperative=cooperative, cooperative_driver=cooperative_driver,
-            cooperative_observer=cooperative_observer, resume_from=resume_from,
-            shutoff=shutoff, shutoff_check_interval=shutoff_check_interval,
-            shutoff_min_step=shutoff_min_step, enable_plot=enable_plot, pbar=pbar,
+            cooperative_observer=cooperative_observer, shutoff=shutoff,
+            shutoff_check_interval=shutoff_check_interval, shutoff_min_step=shutoff_min_step,
+            enable_plot=enable_plot, pbar=pbar,
+            checkpoints=checkpoints, checkpoint_stride=checkpoint_stride,
         )
         if core_steps is not None:
             steps_run = core_steps
             iterator = ()
     for n in iterator:
+        if checkpoints is not None and n > start_step and n % checkpoint_stride == 0:
+            checkpoints.append(capture_checkpoint_state(solver, step=n))
         steps_run = n + 1
         time_value = n * solver.dt
         if solver.tfsf_enabled and solver._tfsf_state.get("auxiliary_grid") is not None:
@@ -2631,11 +1883,7 @@ def solve_steps(
         solver.accumulate_breakdown_observers(n)
         accumulate_wire_monitors(solver, n)
 
-        if solver._passivity_state is not None and (n + 1) % SAMPLE_INTERVAL == 0:
-            sample_passivity(solver._passivity_state, n + 1, total_energy(solver))
-            if solver._passivity_state["warning"] is not None:
-                solver.passivity_guard_status = "warned: complex fixed-k growth"
-                solver.passivity_guard_warning = solver._passivity_state["warning"]
+        sample_completed_step(solver, n + 1)
 
         if shutoff > 0 and (n + 1) % shutoff_check_interval == 0:
             e_energy = _electric_field_energy(solver)
@@ -2666,12 +1914,9 @@ def solve_steps(
             if solver._shutoff_triggered
             else end_step - start_step
         )
-        if time_on_device:
-            step_end_event.record()
-            step_end_event.synchronize()
-            solver.last_step_loop_elapsed_s = step_start_event.elapsed_time(step_end_event) * 1.0e-3
-        else:
-            solver.last_step_loop_elapsed_s = time.perf_counter() - host_step_start
+        step_end_event.record()
+        step_end_event.synchronize()
+        solver.last_step_loop_elapsed_s = step_start_event.elapsed_time(step_end_event) * 1.0e-3
         solver.last_step_loop_steps = completed_steps
     # steps_run, not n + 1: the loop variable is unbound for time_steps == 0 and
     # the graph-driven observer step counter must match the steps actually run,

@@ -92,7 +92,7 @@ def profile(operation, top):
 def run(args):
     torch.set_num_threads(1)
     builder = next(builder for builder in scene_builders() if builder.name == args.scene)
-    sample = builder.build(device="cpu")
+    sample = builder.build()
     solver = make_solver(sample.scene)
     frequencies = tuple(sample.fdtd_kwargs["frequencies"])
     solver.observers = monitors.compile_fdtd_observers(sample.scene)

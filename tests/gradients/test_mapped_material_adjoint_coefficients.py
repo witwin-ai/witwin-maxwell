@@ -12,18 +12,23 @@ from witwin.maxwell.fdtd.adjoint.copper_foil import differentiable_copper_entrie
 from witwin.maxwell.fdtd.material_pullback import pullback_material_input_gradients
 from witwin.maxwell.fdtd.adjoint.copper_spectra import prepare_spectral_outputs,pack_spectral_outputs,rebuild_spectral_outputs
 
+# These CPU controls compare coefficient matrices only. The Torch copper step skips the
+# fused CUDA preparation, which would otherwise need a native extension that a CPU-only
+# process has only if an earlier test happened to load it.
+pytestmark=pytest.mark.usefixtures('copper_torch_kernel')
+
 
 def coefficient_solver(curvature, *, epsilon=2.5, sigma=.2, thickness=2e-6, copper_sigma=1e6):
-    chart=None if curvature is None else mw.BendCoordinates(curvature=curvature)
+    chart=None if curvature is None else mw.coordinates.BendCoordinates(curvature=curvature)
     scene=PreparedScene(mw.Scene(domain=mw.Domain(bounds=((-0.02,.02),(0.,.04),(-.02,.02))),
-        grid=mw.GridSpec.uniform(.01),boundary=mw.BoundarySpec.faces(default='none'),device='cpu',coordinates=chart,
+        grid=mw.GridSpec.uniform(.01),boundary=mw.BoundarySpec.faces(default='none'),coordinates=chart,
         structures=(mw.Structure(name='foil',geometry=mw.Box(position=torch.tensor((0.,.02,0.),dtype=torch.float64),
-            size=torch.tensor((.02,0.,.02),dtype=torch.float64)),material=mw.CopperFoil(thickness=thickness,
-                conductivity=copper_sigma,frequency_range=(.5e9,2e9),mode_count=16)),)))
+            size=torch.tensor((.02,0.,.02),dtype=torch.float64)),material=mw.media.CopperFoil(thickness=thickness,
+                conductivity=copper_sigma,frequency_range=(.5e9,2e9),mode_count=16)),)), device="cpu")
     solver=SimpleNamespace(scene=scene,device=torch.device('cpu'),dt=2e-12,_spectral_integration_dt=None,_spectral_reference_frequency=None,source_frequency=1e9,
         full_aniso_enabled=False,nonlinear_enabled=False,complex_fields_enabled=False)
     for name in ('Ex','Ey','Ez','Hx','Hy','Hz'):
-        axes=component_coords(scene,name);shape=tuple(len(axis)for axis in axes)
+        axes=component_coords(scene,name, device=scene.device);shape=tuple(len(axis)for axis in axes)
         own='xyz'.index(name[1].lower());u=torch.as_tensor(axes[1],dtype=torch.float64)
         h=torch.ones_like(u)if chart is None else 1-curvature*u
         metric=(1/h if own==0 else h)[None,:,None].expand(shape)
@@ -155,8 +160,8 @@ def test_spectral_trace_sigma_coefficient_uses_actual_side_metric(curvature):
 
 
 def test_bulk_conduction_prefactor_has_custom_outputs_without_copper():
-    monitor=mw.PowerLossMonitor('bulk',position=(0,0,0),size=(.02,.02,.02))
-    solver=SimpleNamespace(_copper_foils=(),scene=SimpleNamespace(monitors=(monitor,)))
+    monitor=mw.monitors.PowerLossMonitor('bulk',position=(0,0,0),size=(.02,.02,.02))
+    solver=SimpleNamespace(_copper_foils=(),scene=SimpleNamespace(scene=SimpleNamespace(monitors=(monitor,))))
     for component in ('Ex','Ey','Ez'):setattr(solver,'sigma_e_'+component,torch.full((2,2,2),.2,dtype=torch.float64))
     raw={};prepare_spectral_outputs(solver,raw)
     outputs=[];copper,materials=pack_spectral_outputs(raw,outputs)
@@ -169,7 +174,7 @@ def test_bulk_conduction_prefactor_has_custom_outputs_without_copper():
 
 
 def test_unused_bulk_conductivity_heads_are_not_allocated():
-    solver=SimpleNamespace(_copper_foils=(),scene=SimpleNamespace(monitors=()))
+    solver=SimpleNamespace(_copper_foils=(),scene=SimpleNamespace(scene=SimpleNamespace(monitors=())))
     raw={};prepare_spectral_outputs(solver,raw)
     assert 'loss_materials'not in raw
 
@@ -177,15 +182,14 @@ def test_unused_bulk_conductivity_heads_are_not_allocated():
 def test_unqualified_mapped_adaptive_time_stays_rejected_by_narrow_admission():
     epsilon=torch.tensor(2.,dtype=torch.float64,requires_grad=True)
     scene=mw.Scene(domain=mw.Domain(bounds=((-0.02,.02),)*3),grid=mw.GridSpec.uniform(.01),
-        boundary=mw.BoundarySpec.faces(default='none'),coordinates=mw.BendCoordinates(curvature=3.),device='cpu',
-        structures=(mw.Structure(geometry=mw.Box(size=(.02,.02,.02)),material=mw.Material(eps_r=epsilon)),))
+        boundary=mw.BoundarySpec.faces(default='none'),coordinates=mw.coordinates.BendCoordinates(curvature=3.),structures=(mw.Structure(geometry=mw.Box(size=(.02,.02,.02)),material=mw.Material(eps_r=epsilon)),))
     with pytest.raises(NotImplementedError,match='explicit fixed dt and time_steps'):
-        mw.Simulation.fdtd(scene,frequency=1e9)
+        mw.Simulation.fdtd(scene,frequencies=1e9, config=mw.FDTDConfig(device='cpu'))
 
 
 @pytest.mark.parametrize('curvature',(-3.,3.))
 def test_fixed_chart_world_field_jacobian_matches_independent_numpy_difference(curvature):
-    chart=mw.BendCoordinates(curvature=curvature,origin=(.2,-.1,.3))
+    chart=mw.coordinates.BendCoordinates(curvature=curvature,origin=(.2,-.1,.3))
     points=torch.tensor(((.007,.01,.003),(-.009,-.004,.006)),dtype=torch.float64)
     theta=torch.tensor((1.2,-.3,.7),dtype=torch.float64,requires_grad=True)
     covariant=theta.to(torch.complex128)[None]*torch.tensor([[1+.2j,.3-.7j,.4+.8j],
@@ -210,7 +214,7 @@ def test_fixed_chart_world_field_jacobian_matches_independent_numpy_difference(c
 def test_curved_world_radiation_field_seed_matches_independent_numpy_phase(curvature):
     from witwin.maxwell.postprocess.stratton_chu import PlanarEquivalentCurrents,_mapped_surface_currents
     from witwin.maxwell.postprocess.nfft import NearFieldFarFieldTransformer
-    chart=mw.BendCoordinates(curvature=curvature,origin=(.2,-.1,.3))
+    chart=mw.coordinates.BendCoordinates(curvature=curvature,origin=(.2,-.1,.3))
     axis=torch.tensor((-.01,0.,.01),dtype=torch.float64)
     s,z=torch.meshgrid(axis,axis,indexing='ij');normal=torch.zeros((3,3,3),dtype=torch.complex128);normal[...,1]=1
     theta=torch.tensor((1.2,-.3,.7,.9),dtype=torch.float64,requires_grad=True)

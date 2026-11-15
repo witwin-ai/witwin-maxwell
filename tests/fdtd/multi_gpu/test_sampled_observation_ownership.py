@@ -49,9 +49,9 @@ def test_distributed_resume_circuit_identity_uses_declarative_graph_physics():
     from witwin.maxwell.fdtd.distributed.resume import _signature
     plan=FDTDPartitionPlan(global_shape=(9,7,9),devices=('cuda:0','cuda:1'))
     def solver(resistance):
-        circuit=mw.Circuit('physical_graph')
+        circuit=mw.circuits.Circuit('physical_graph')
         node=circuit.node('load')
-        circuit.add(mw.Resistor('R',node,circuit.ground,resistance))
+        circuit.add(mw.rf.Resistor('R',node,circuit.ground,resistance))
         circuit.bind_port('gap',positive=node,negative=circuit.ground)
         scene=SimpleNamespace(sources=(),ports=(),circuits=(circuit,),networks=(),thin_wires=(),monitors=())
         return SimpleNamespace(logical_scene=scene,shard_layouts=plan.shard_layouts,shards=())

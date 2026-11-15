@@ -2,6 +2,7 @@
 import copy
 from dataclasses import replace
 from types import SimpleNamespace
+import importlib.util
 import pytest
 import torch
 import witwin.maxwell as mw
@@ -18,15 +19,19 @@ def test_policy_canonical_defaults_forwarding_and_receipt_binding():
     active=replace(hb,tensor_face_rule='distance_scaled_duffy',tensor_kernel_batch=8192)
     payload=active.numerical_payload()
     assert payload['tensor_face_rule']=='distance_scaled_duffy' and payload['tensor_kernel_batch']==8192
-    assert mw.HarmonicBalanceConfig(volumes=hb.volumes,**payload).numerical_payload()==payload
+    assert mw.mom.HarmonicBalanceConfig(volumes=hb.volumes,**payload).numerical_payload()==payload
     configured=replace(config,harmonic_balance=active)
     settings=_response_settings(configured)
     assert settings['tensor_kernel_batch']==8192 and settings['tensor_face_rule']=='distance_scaled_duffy'
     for value in (False,0,-1,1.5,None):
         with pytest.raises(ValueError,match='kernel batch'):replace(hb,tensor_kernel_batch=value)
-    with pytest.raises(ValueError,match='face rule'):replace(hb,tensor_face_rule='unknown')
-    with pytest.raises(NotImplementedError,match='dense HB'):
-        _response_settings(SimpleNamespace(operator_backend='h2',harmonic_balance=active))
+    with pytest.raises(ValueError,match='tensor_face_rule must be one of'):replace(hb,tensor_face_rule='unknown')
+    # c0332b94b replaced the compressed-backend refusal with forwarding of the
+    # tensor policy; the compressed path also reads the H and H2 configs.
+    compressed=_response_settings(SimpleNamespace(operator_backend='h2',harmonic_balance=active,
+        stopping=config.stopping,hierarchical=mw.mom.HMatrixConfig(),h2=mw.mom.H2Config()))['compressed_settings']
+    assert compressed['tensor_face_rule']=='distance_scaled_duffy' and compressed['tensor_kernel_batch']==8192
+    assert compressed['source_settings']==dict(max_order=active.source_max_order,max_inner_order=active.source_max_inner_order)
     from test_tensor_volume_source import setup as tensor_setup
     operator,binding=tensor_setup()
     row=dict(face_rule=active.tensor_face_rule,kernel_batch=active.tensor_kernel_batch)
@@ -56,12 +61,14 @@ def test_policy_canonical_defaults_forwarding_and_receipt_binding():
 
 
 def test_public_dense_policy_native_and_bench_identity(tmp_path,monkeypatch):
+    if importlib.util.find_spec('maxwell_bench') is None:
+        pytest.skip('maxwell_bench.harmonic_state is not importable: it is in the sibling witwin/maxwell-bench repo (not this one); install that repo at a MoM-layout revision (branch mom/provider-layout or later) to run the bench check')
     from maxwell_bench.harmonic_state import harmonic_simulation_binding
     scene,config,points=setup()
-    default=mw.Simulation.mom(scene,frequency=3e8,config=config)
+    default=mw.Simulation.mom(scene,frequencies=3e8,config=config)
     configured=replace(config,harmonic_balance=replace(config.harmonic_balance,
         tensor_face_rule='distance_scaled_duffy',tensor_kernel_batch=8192))
-    simulation=mw.Simulation.mom(scene,frequency=3e8,config=configured)
+    simulation=mw.Simulation.mom(scene,frequencies=3e8,config=configured)
     before=harmonic_simulation_binding(default);after=harmonic_simulation_binding(simulation)
     assert before!=after and after['harmonic_config']['tensor_kernel_batch']==8192
     # This public source region is scalar: the control proves policy storage,
@@ -74,7 +81,7 @@ def test_public_dense_policy_native_and_bench_identity(tmp_path,monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(runtime,'assemble_system',forbidden);patch.setattr(torch.linalg,'solve',forbidden)
         replay=mw.Result.load(path,scene=scene)
-        torch.testing.assert_close(replay.harmonic_state.cell_electric,result.harmonic_state.cell_electric,rtol=0,atol=0)
+        torch.testing.assert_close(mw.mom.harmonic_state(replay).cell_electric,mw.mom.harmonic_state(result).cell_electric,rtol=0,atol=0)
     broken=copy.deepcopy(data)
     broken['harmonic_data']['harmonic_config']['tensor_kernel_batch']=4096
     torch.save(broken,tmp_path/'bad.pt')

@@ -5,6 +5,8 @@ from typing import Any
 
 import torch
 
+from ..errors import UnsupportedFeatureError
+
 
 LUMPED_STATE_NAMES = (
     "inductor_current", "capacitor_voltage", "last_voltage_before",
@@ -559,8 +561,9 @@ def replay_lumped_runtime(
     """
 
     if runtime.topology != "series":
-        raise NotImplementedError(
-            "Differentiable lumped replay currently supports series R/L/C topology only."
+        raise UnsupportedFeatureError(
+            "Differentiable lumped replay currently supports series R/L/C topology only.",
+            feature="lumped_element", method="fdtd"
         )
     flat = electric_field.reshape(-1)
     local_field = torch.index_select(flat, 0, runtime.linear_indices)
@@ -645,8 +648,9 @@ def pullback_lumped_runtime(
 
     runtime = trace.runtime
     if runtime.topology != "series":
-        raise NotImplementedError(
-            "Differentiable lumped pullback currently supports series R/L/C topology only."
+        raise UnsupportedFeatureError(
+            "Differentiable lumped pullback currently supports series R/L/C topology only.",
+            feature="lumped_element", method="fdtd"
         )
     flat_adjoint = field_adjoint.reshape(-1)
     local_field_adjoint = torch.index_select(

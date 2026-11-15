@@ -9,6 +9,8 @@ import cupy as cp
 from cupyx.scipy import sparse
 import torch
 
+from ..errors import UnsupportedFeatureError
+
 
 def magnetic_samples(components):
     result = {}
@@ -27,8 +29,11 @@ def flatten_permeability(components):
     return torch.cat([components[name].flatten() for name in 'xyz'])
 
 
-def require_fixed_permeability(components, inputs):
-    """Reject material parameters requiring an unimplemented magnetic pullback."""
+def require_fixed_permeability(components, inputs, names=None):
+    """Reject material parameters requiring an unimplemented magnetic pullback.
+
+    ``names``, when given, labels ``inputs`` one to one for the refusal.
+    """
     values = flatten_permeability(components)
     if not inputs or not values.requires_grad:
         return
@@ -37,15 +42,18 @@ def require_fixed_permeability(components, inputs):
     weights = torch.sin(torch.arange(values.numel(),device=values.device,dtype=real.dtype)+.19)
     gradients = torch.autograd.grad((weights*(real+.83*imag)).sum(),inputs,
                                     allow_unused=True,retain_graph=True)
-    if any(g is not None and bool((g!=0).any()) for g in gradients):
-        raise NotImplementedError('FDFD material gradients require fixed permeability; magnetic parameter/geometry gradients are unsupported.')
+    magnetic = [index for index, g in enumerate(gradients) if g is not None and bool((g!=0).any())]
+    if magnetic:
+        detail = '' if names is None else ' Trainable inputs that change the permeability: ' + ', '.join(names[i] for i in magnetic) + '.'
+        raise UnsupportedFeatureError('FDFD material gradients require fixed permeability; magnetic parameter/geometry gradients are unsupported.' + detail,
+                                      feature="guard:e845c7a2", method="fdfd")
 
 
 def assemble_magnetic_operator(solver):
     scene = solver.scene
     main,half = solver._stretched_metrics()
     padded = [cp.concatenate((v[:1],v,v[-1:])) for v in half]
-    reference = float(scene.dx_primal64[0] if scene.grid.is_custom else scene.grid.dx)
+    reference = float(scene.dx_primal64[0] if scene.scene.grid.is_custom else scene.scene.grid.dx)
     counts = (scene.Nx,scene.Ny,scene.Nz)
     hshapes = [tuple(n if axis==own else n+1 for axis,n in enumerate(counts)) for own in range(3)]
     hoffsets = (0, math.prod(hshapes[0]),

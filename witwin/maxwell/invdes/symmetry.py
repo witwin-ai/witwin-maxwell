@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import torch
+from .._stability import experimental
 
 # A group element is a signed axis permutation ``g`` with ``(g r)_j = s_j r_{q_j}``
 # stored as ``((q_0, s_0), ..., (q_{n-1}, s_{n-1}))`` on centred cell coordinates.
@@ -98,6 +99,7 @@ def _apply(x: torch.Tensor, element: _Element) -> torch.Tensor:
     return y.flip(flips) if flips else y
 
 
+@experimental("invdes")
 def symmetrize(
     x: torch.Tensor,
     *,
@@ -128,16 +130,19 @@ def symmetrize(
     return sum(_apply(x, element) for element in group) / len(group)
 
 
+@experimental("invdes")
 def mirror_symmetrize(x: torch.Tensor, dims: int | Sequence[int]) -> torch.Tensor:
     """Mirror symmetry across the centre of each axis in ``dims``."""
     return symmetrize(x, mirror=(dims,) if isinstance(dims, int) else tuple(dims))
 
 
+@experimental("invdes")
 def rotational_symmetrize(x: torch.Tensor, order: int, dims: Sequence[int] = (0, 1)) -> torch.Tensor:
     """``order``-fold (2 or 4) rotational symmetry in the ``dims`` plane."""
     return symmetrize(x, rotation=order, rotation_dims=dims)
 
 
+@experimental("invdes")
 def diagonal_symmetrize(x: torch.Tensor, dims: Sequence[int] = (0, 1)) -> torch.Tensor:
     """Mirror symmetry across the diagonal of the ``dims`` plane (transpose)."""
     return symmetrize(x, diagonal=dims)

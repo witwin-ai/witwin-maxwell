@@ -45,24 +45,23 @@ class _HollowCylinder(GeometryBase):
 
 
 def _wave_port(name="left", *, position=(-0.20, 0.0, 0.0), direction="+"):
-    return mw.WavePort(
+    return mw.rf.WavePort(
         name,
         position=position,
         size=(0.0, 0.60, 0.30),
         direction=direction,
         reference_plane=position[0],
-        modes=(mw.WaveModeSpec("te", polarization="Ez"),),
+        modes=(mw.rf.WaveModeSpec("te", polarization="Ez"),),
     )
 
 
-def _scene(*, device="cpu", ports=None, sources=()):
+def _scene(*, ports=None, sources=()):
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.4, 0.4), (-0.25, 0.25))),
         grid=mw.GridSpec.uniform(0.02),
         boundary=mw.BoundarySpec.none(),
         ports=(_wave_port(),) if ports is None else ports,
         sources=sources,
-        device=device,
     )
 
 
@@ -71,8 +70,8 @@ def test_manifest_solves_tracks_and_normalizes_te10_channels():
 
     manifest = resolve_waveport_run_manifest(
         _scene(),
-        mw.PortSweep(),
-        frequencies,
+        mw.rf.PortSweep(),
+        frequencies, device="cpu",
     )
 
     prepared = manifest.prepared_ports[0]
@@ -120,7 +119,7 @@ def test_manifest_solves_tracks_and_normalizes_te10_channels():
 )
 def test_manifest_rejects_invalid_frequency_axes(frequencies, message):
     with pytest.raises(ValueError, match=message):
-        resolve_waveport_run_manifest(_scene(), mw.PortSweep(), frequencies)
+        resolve_waveport_run_manifest(_scene(), mw.rf.PortSweep(), frequencies, device="cpu")
 
 
 def test_manifest_rejects_independent_sources_and_mixed_rf_port_families():
@@ -132,8 +131,8 @@ def test_manifest_rejects_independent_sources_and_mixed_rf_port_families():
     with pytest.raises(ValueError, match="independent field sources"):
         resolve_waveport_run_manifest(
             _scene(sources=(source,)),
-            mw.PortSweep(),
-            (5.0e8,),
+            mw.rf.PortSweep(),
+            (5.0e8,), device="cpu",
         )
 
     lumped = mw.LumpedPort(
@@ -146,17 +145,17 @@ def test_manifest_rejects_independent_sources_and_mixed_rf_port_families():
     with pytest.raises(NotImplementedError, match="explicit passive terminations"):
         resolve_waveport_run_manifest(
             _scene(ports=(_wave_port(), lumped)),
-            mw.PortSweep(),
-            (5.0e8,),
+            mw.rf.PortSweep(),
+            (5.0e8,), device="cpu",
         )
 
 
 def test_direct_waveport_excitation_validates_and_selects_a_stable_mode_name():
-    excitation = mw.PortExcitation("left", mode_name="TE0")
+    excitation = mw.rf.PortExcitation("left", mode_name="TE0")
     simulation = mw.Simulation.fdtd(
         _scene(),
-        frequency=4.5e8,
-        excitations=excitation,
+        frequencies=4.5e8,
+        excitations=excitation, config=mw.FDTDConfig(device="cpu"),
     )
 
     simulation._validate_port_excitations()
@@ -164,22 +163,22 @@ def test_direct_waveport_excitation_validates_and_selects_a_stable_mode_name():
     with pytest.raises(ValueError, match="has no mode"):
         mw.Simulation.fdtd(
             _scene(),
-            frequency=4.5e8,
-            excitations=mw.PortExcitation("left", mode_name="missing"),
+            frequencies=4.5e8,
+            excitations=mw.rf.PortExcitation("left", mode_name="missing"), config=mw.FDTDConfig(device="cpu"),
         )._validate_port_excitations()
     with pytest.raises(ValueError, match="source_impedance='matched'"):
         mw.Simulation.fdtd(
             _scene(),
-            frequency=4.5e8,
-            excitations=mw.PortExcitation("left", source_impedance=50.0),
+            frequencies=4.5e8,
+            excitations=mw.rf.PortExcitation("left", source_impedance=50.0), config=mw.FDTDConfig(device="cpu"),
         )._validate_port_excitations()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs one CUDA device")
 def test_manifest_keeps_mode_basis_tracking_and_impedance_on_one_cuda_device():
     manifest = resolve_waveport_run_manifest(
-        _scene(device="cuda"),
-        mw.PortSweep(),
+        _scene(),
+        mw.rf.PortSweep(),
         (4.2e8, 4.8e8),
     )
     prepared = manifest.prepared_ports[0]
@@ -199,7 +198,7 @@ def test_axis_aligned_coax_tem_impedance_matches_analytic_value():
     inner_radius = 0.04
     outer_radius = 0.16
     frequency = 1.0e9
-    mode = mw.WaveModeSpec(
+    mode = mw.rf.WaveModeSpec(
         "tem",
         polarization="Ey",
         voltage_path=((0.0, inner_radius, 0.0), (0.0, outer_radius, 0.0)),
@@ -208,7 +207,7 @@ def test_axis_aligned_coax_tem_impedance_matches_analytic_value():
             size=(0.0, 0.20125, 0.20125),
         ),
     )
-    port = mw.WavePort(
+    port = mw.rf.WavePort(
         "coax",
         position=(0.0, 0.0, 0.0),
         size=(0.0, 0.40, 0.40),
@@ -217,31 +216,28 @@ def test_axis_aligned_coax_tem_impedance_matches_analytic_value():
         modes=(mode,),
     )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.01, 0.01), (-0.205, 0.205), (-0.205, 0.205))),
-        grid=mw.GridSpec.uniform(0.00125),
-        boundary=mw.BoundarySpec.none(),
-        ports=(port,),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Cylinder(position=(0.0, 0.0, 0.0), radius=inner_radius, height=0.02, axis='x'),
-            material=mw.Material.pec(),
-            name='inner_conductor',
-        )
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=_HollowCylinder(position=(0.0, 0.0, 0.0), inner_radius=outer_radius, outer_radius=0.2, length=0.02),
-            material=mw.Material.pec(),
-            name='outer_conductor',
-        )
-    )
+                domain=mw.Domain(bounds=((-0.01, 0.01), (-0.205, 0.205), (-0.205, 0.205))),
+                grid=mw.GridSpec.uniform(0.00125),
+                boundary=mw.BoundarySpec.none(),
+                ports=(port,),
+                structures=(
+            mw.Structure(
+                geometry=mw.Cylinder(position=(0.0, 0.0, 0.0), radius=inner_radius, height=0.02, axis='x'),
+                material=mw.Material.pec(),
+                name='inner_conductor',
+            ),
+            mw.Structure(
+                geometry=_HollowCylinder(position=(0.0, 0.0, 0.0), inner_radius=outer_radius, outer_radius=0.2, length=0.02),
+                material=mw.Material.pec(),
+                name='outer_conductor',
+            ),
+            ),
+            )
 
     prepared_scene = prepare_scene(scene)
     prepared = resolve_waveport_run_manifest(
         prepared_scene,
-        mw.PortSweep(),
+        mw.rf.PortSweep(),
         (frequency,),
     ).prepared_ports[0]
 
@@ -258,7 +254,6 @@ def _hollow_guide_scene():
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         ports=(left, right),
-        device="cuda",
     )
     wall_specs = (
         ((0.0, 0.40, 0.0), (1.0, 0.20, 0.70), "wall_y_high"),
@@ -266,21 +261,21 @@ def _hollow_guide_scene():
         ((0.0, 0.0, 0.25), (1.0, 0.60, 0.20), "wall_z_high"),
         ((0.0, 0.0, -0.25), (1.0, 0.60, 0.20), "wall_z_low"),
     )
-    for position, size, name in wall_specs:
-        scene.add_structure(
-            mw.Structure(
-                geometry=mw.Box(position=position, size=size),
-                material=mw.Material.pec(),
-                name=name,
-            )
-        )
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(
+              geometry=mw.Box(position=position, size=size),
+              material=mw.Material.pec(),
+              name=name,
+          ) for position, size, name in wall_specs),
+    ))
     return scene
 
 
 def _free_space_waveport_array_scene():
     left = _wave_port("left", position=(-0.20, 0.0, 0.0), direction="+")
     right = _wave_port("right", position=(0.20, 0.0, 0.0), direction="-")
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "array_nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(0.50, 0.70, 0.40),
@@ -292,7 +287,6 @@ def _free_space_waveport_array_scene():
         boundary=mw.BoundarySpec.pml(num_layers=2),
         ports=(left, right),
         monitors=(surface,),
-        device="cuda",
     )
 
 
@@ -301,10 +295,12 @@ def test_two_waveport_sweep_returns_physical_single_device_network():
     result = mw.Simulation.fdtd(
         _hollow_guide_scene(),
         frequencies=(4.5e8,),
-        excitations=mw.PortSweep(),
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=14),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortSweep(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=14),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     network = result.network
@@ -357,18 +353,18 @@ def test_multifrequency_waveport_sweep_extracts_array_basis_without_rerun():
     result = mw.Simulation.fdtd(
         scene,
         frequencies=(4.5e8, 4.8e8),
-        excitations=mw.PortSweep(),
-        run_time=mw.TimeConfig(time_steps=1024),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortSweep(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1024),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
-    basis = result.array_basis(
-        monitor="array_nf2ff",
+    basis = mw.antenna.array_basis(result, monitor="array_nf2ff",
         theta_points=9,
         phi_points=13,
-        radius=1.0,
-    )
+        radius=1.0,)
 
     assert basis.port_names == ("left::TE0", "right::TE0")
     assert basis.eep.e_theta.shape == (2, 2, 9, 13)
@@ -431,10 +427,12 @@ def test_prepared_direct_waveport_excitation_returns_modal_port_data_without_net
     simulation = mw.Simulation.fdtd(
         _hollow_guide_scene(),
         frequencies=(4.5e8,),
-        excitations=mw.PortExcitation("left", mode_name="left::TE0"),
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=14),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortExcitation("left", mode_name="left::TE0"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=14),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     )
 
     result = simulation.prepare().run()
@@ -449,3 +447,28 @@ def test_prepared_direct_waveport_excitation_returns_modal_port_data_without_net
     assert result.stats()["waveport_excitation"]["kind"] == (
         "direct_waveport_excitation"
     )
+
+
+def _coarse_two_port_scene():
+    return mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.4, 0.4), (-0.25, 0.25))),
+        grid=mw.GridSpec.uniform(0.05),
+        boundary=mw.BoundarySpec.none(),
+        ports=(_wave_port(), _wave_port("right", position=(0.20, 0.0, 0.0), direction="-")),
+    )
+
+
+def test_waveport_sweep_refuses_a_material_cache_it_would_not_apply():
+    simulation = mw.Simulation.fdtd(_coarse_two_port_scene(), frequencies=(1.0e9,), excitations=mw.rf.PortSweep(),
+                                    config=mw.FDTDConfig(material_cache=mw.fdtd.FDTDMaterialCache(), device="cpu"))
+    with pytest.raises(mw.UnsupportedFeatureError, match="WavePort sweep or excitation runs each column") as error:
+        simulation.run()
+    assert error.value.method == "fdtd"
+
+
+def test_direct_waveport_excitation_refuses_a_material_cache_it_would_not_apply():
+    simulation = mw.Simulation.fdtd(_coarse_two_port_scene(), frequencies=(1.0e9,),
+                                    excitations=mw.rf.PortExcitation("left"), config=mw.FDTDConfig(material_cache=mw.fdtd.FDTDMaterialCache(), device="cpu"))
+    with pytest.raises(mw.UnsupportedFeatureError, match="WavePort sweep or excitation runs each column") as error:
+        simulation.run()
+    assert error.value.method == "fdtd"

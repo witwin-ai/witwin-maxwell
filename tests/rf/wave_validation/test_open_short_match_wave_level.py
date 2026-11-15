@@ -56,12 +56,14 @@ _REFLECT_FLOOR = 0.944    # -0.5 dB
 
 def _gamma(standard: str) -> np.ndarray:
     result = mw.Simulation.fdtd(
-        coax_sol_scene(standard, dx=_DX, device="cuda"),
+        coax_sol_scene(standard, dx=_DX),
         frequencies=_FREQS,
-        excitations=mw.PortExcitation("feed"),
-        run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=20),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortExcitation("feed"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=20),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
     feed = result.port("feed")
     a = feed.a.cpu().numpy().reshape(len(_FREQS), -1)[:, 0]

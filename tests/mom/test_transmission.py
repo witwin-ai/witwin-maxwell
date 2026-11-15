@@ -24,8 +24,8 @@ def _solve(level, *, geometry=None, source=None):
         structures=[mw.Structure(geometry or mw.Sphere(radius=.1), mw.Material(eps_r=2.25, sigma_e=.003))],
         sources=[source or mw.PlaneWave()],
     )
-    config = mw.MoMConfig(subdivisions=level, integration=IntegrationConfig(order=4, singular_order=6))
-    result = mw.Simulation.mom(scene, frequency=3e8, config=config).run()
+    config = mw.mom.MoMConfig(subdivisions=level, integration=IntegrationConfig(order=4, singular_order=6))
+    result = mw.Simulation.mom(scene, frequencies=3e8, config=config).run()
     assert isinstance(result, mw.Result) and result.stats()["converged"]
     return result
 
@@ -36,17 +36,17 @@ def _relative_jump(outside, inside):
 
 
 def _continuity_record(result, directions):
-    mesh = result.surface_currents.mesh
+    mesh = mw.mom.surface_currents(result).mesh
     centroid_directions = mesh.centroids/torch.linalg.vector_norm(mesh.centroids, dim=-1, keepdim=True)
     faces = (directions@centroid_directions.T).argmax(-1)
     points, normals = mesh.centroids[faces], mesh.normals[faces]
     options = FieldQueryConfig(relative_tolerance=1e-5, max_order=128)
     eo, ho = result.query_fields(points, region_id="exterior", field_kind="total", trace_side="exterior", query_config=options)
     ei, hi = result.query_fields(points, region_id="interior", field_kind="total", trace_side="interior", query_config=options)
-    exterior, interior = result.surface_currents.handle.exterior, result.surface_currents.handle.interior
+    exterior, interior = mw.mom.surface_currents(result).handle.exterior, mw.mom.surface_currents(result).handle.interior
     tangent = lambda field: field-normals*(field*normals).sum(-1, keepdim=True)
     normal = lambda field: (field*normals).sum(-1)
-    return {"edges": result.surface_currents.handle.basis.n_edges,
+    return {"edges": mw.mom.surface_currents(result).handle.basis.n_edges,
             "tangential_E_relative_jump": _relative_jump(tangent(eo), tangent(ei)),
             "tangential_H_relative_jump": _relative_jump(tangent(ho), tangent(hi)),
             "normal_D_relative_jump": _relative_jump(exterior.epsilon*normal(eo), interior.epsilon*normal(ei)),
@@ -58,7 +58,7 @@ def _continuity_record(result, directions):
 
 def test_actual_lossy_pmchwt_one_sided_transmission_continuity(tmp_path):
     results = [_solve(level) for level in (0, 1, 2)]
-    coarse = results[0].surface_currents.mesh
+    coarse = mw.mom.surface_currents(results[0]).mesh
     directions = coarse.centroids[[0, 4, 8, 12, 16]]
     directions = directions/torch.linalg.vector_norm(directions, dim=-1, keepdim=True)
     records = [_continuity_record(result, directions) for result in results]
@@ -76,14 +76,14 @@ def test_actual_lossy_pmchwt_one_sided_transmission_continuity(tmp_path):
 
 
 def test_actual_lossy_reciprocity_reverse_directions_and_polarizations():
-    result = _solve(1, geometry=mw.Ellipsoid(radii=(.1, .08, .065), position=(.03, -.02, .01)))
-    handle = result.surface_currents.handle
+    result = _solve(1, geometry=mw.geometry.Ellipsoid(radii=(.1, .08, .065), position=(.03, -.02, .01)))
+    handle = mw.mom.surface_currents(result).handle
     direction = torch.tensor([.3, .7, .4], device="cuda", dtype=torch.float64)
     direction = direction/torch.linalg.vector_norm(direction)
     polarization = torch.tensor([1., 0., 0.], device="cuda", dtype=torch.float64)
     receiver = polarization-(polarization*direction).sum()*direction
     receiver = receiver/torch.linalg.vector_norm(receiver)
-    forward, _ = result.far_field(direction[None])
+    forward = mw.mom.far_field(result, direction[None])[0].values[0]
     reverse_source = mw.PlaneWave(direction=(-direction).tolist(), polarization=receiver.tolist())
     reverse_rhs = build_rhs(handle.basis, handle.exterior, [reverse_source], order=6)
     reverse_x, reverse_log = solve_reference(handle, reverse_rhs)
@@ -98,7 +98,7 @@ def test_actual_lossy_reciprocity_reverse_directions_and_polarizations():
 
 def test_actual_operator_complex_source_superposition_and_zero_forcing():
     result = _solve(0)
-    handle = result.surface_currents.handle
+    handle = mw.mom.surface_currents(result).handle
     first = mw.PlaneWave(source_time=mw.CW(frequency=3e8, amplitude=2., phase=math.pi/2))
     second = mw.PlaneWave(direction=(1., 0., 0.), polarization=(0., 0., 1.),
                           source_time=mw.CW(frequency=3e8, amplitude=1.3, phase=-math.pi/3))

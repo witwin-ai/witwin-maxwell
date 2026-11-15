@@ -9,6 +9,7 @@ from witwin.core import PhysicalMaterial
 from ..media import Material,DiagonalTensor3,Tensor3x3,ComplexTensor3x3,GyromagneticFerrite
 from ..constants import EPSILON_0,MU_0
 from .harmonic_material import _static_channel
+from ..errors import UnsupportedFeatureError
 
 
 class StaticTensorChannel:
@@ -41,7 +42,8 @@ class StaticTensorChannel:
         """Return the actual symmetric PSD SI DC current coefficient."""
         self.assert_current()
         if self.kind not in ('conductive_limit','finite_positive_dielectric'):
-            raise NotImplementedError(f'DC tensor current requires its {self.kind} formulation')
+            raise UnsupportedFeatureError(f'DC tensor current requires its {self.kind} formulation',
+                                          feature="guard:94547eaa", method="mom")
         value=self.conductivity
         if (value.device.type!='cuda' or value.dtype not in (torch.float32,torch.float64)
                 or value.shape!=(3,3) or not bool(torch.isfinite(value).all())
@@ -53,7 +55,8 @@ class StaticTensorChannel:
         """Return a real SI SPD coefficient only for its actual finite DC channel."""
         self.assert_current()
         if self.kind!='finite_positive_dielectric':
-            raise NotImplementedError(f'DC tensor channel requires its {self.kind} formulation')
+            raise UnsupportedFeatureError(f'DC tensor channel requires its {self.kind} formulation',
+                                          feature="guard:708172e3", method="mom")
         value=self.finite_relative_part.real*self.absolute_scale
         _,info=torch.linalg.cholesky_ex(value)
         if not bool(torch.isfinite(value).all()) or bool(info!=0):

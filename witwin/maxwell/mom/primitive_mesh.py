@@ -33,6 +33,7 @@ from witwin.core import Box, Cone, Cylinder, Prism
 
 from ..constants import EPSILON_0, MU_0
 from .mesh import SurfaceMesh, _cuda
+from .._stability import experimental
 
 
 FACETED_PRIMITIVES = (Box, Cylinder, Cone, Prism)
@@ -47,6 +48,7 @@ def _positive_real(value, name, *, allow_none=False):
     return float(value)
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class EdgeGrading:
     """Geometric refinement toward sharp edges, corners and apexes.
@@ -66,6 +68,7 @@ class EdgeGrading:
         return {'min_size': float(self.min_size), 'ratio': float(self.ratio)}
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class SurfaceMeshConfig:
     """Mesh-size control for faceted MoM primitives.

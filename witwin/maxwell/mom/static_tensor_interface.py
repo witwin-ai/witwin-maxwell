@@ -9,6 +9,7 @@ adaptive interface certificate or a public mixed harmonic-balance backend.
 import torch
 from .static_tensor_green import StaticTensorGreen
 from .fields import classify_queries
+from .ordered_reduction import ordered_index_add_
 from .static_tensor_polarization import StaticTensorPolarization
 
 
@@ -135,8 +136,7 @@ class StaticTensorInterfaceOperator:
             moments.append(kernel.panel_linear_double_layer(observers,panels,principal_value=pv))
         if not single:return points.new_empty(rows,cols),points.new_empty(rows,self.potential_count)
         weights=torch.cat(moments).reshape(rows,cols*3)
-        indices=self.potential_indices[start:end].reshape(1,-1).expand(rows,-1)
-        double=weights.new_zeros(rows,self.potential_count).scatter_add(1,indices,weights)
+        double=ordered_index_add_(weights.new_zeros(rows,self.potential_count),1,self.potential_indices[start:end].flatten(),weights)
         return torch.cat(single).reshape(rows,cols),double
 
     def _source_rhs(self,field,offset,bindings,polarizations):

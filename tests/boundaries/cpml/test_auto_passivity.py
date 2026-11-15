@@ -18,6 +18,9 @@ from witwin.maxwell.fdtd.runtime.passivity import (
 )
 
 
+CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD preparation and runs")
+
+
 def _boundary(**kwargs):
     return mw.BoundarySpec.faces(num_layers=kwargs.pop("num_layers", 40), **kwargs)
 
@@ -58,26 +61,25 @@ def test_symmetry_replaces_only_its_face():
     (True, (1., 0., 0.), "periodic", False),
 ])
 def test_complex_fixed_k(complex_fields, k, x, expected):
-    solver = SimpleNamespace(scene=SimpleNamespace(boundary=_boundary(x=x, y="pec", z="pml")),
+    solver = SimpleNamespace(scene=SimpleNamespace(scene=SimpleNamespace(boundary=_boundary(x=x, y="pec", z="pml"))),
                              complex_fields_enabled=complex_fields, resolved_bloch_wavevector=k)
     assert complex_fixed_k(solver) is expected
 
 
 @pytest.fixture
 def host_preparation(monkeypatch):
-    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda *a, **kw: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.solver._require_cuda_scene", lambda *a: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.solver._get_fdtd_module", lambda: object())
-    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.initialization.require_cuda_scene", lambda *a: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.initialization.get_fdtd_module", lambda: object())
+    from tests.support.host_preparation import stub_cuda_preparation
+    stub_cuda_preparation(monkeypatch)
 
 
-def _simulation(boundary, **kwargs):
+def _simulation(boundary, device="cpu", **kwargs):
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.1, .1),) * 3),
-                     grid=mw.GridSpec.uniform(.05), boundary=boundary, device="cpu")
-    scene.add_source(mw.PointDipole(position=(0., 0., 0.), polarization="Ez",
-                                  source_time=mw.GaussianPulse(frequency=1e9, fwidth=.2e9)))
-    return mw.Simulation.fdtd(scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=10), **kwargs)
+                     grid=mw.GridSpec.uniform(.05), boundary=boundary,
+                     sources=(
+                         mw.PointDipole(position=(0., 0., 0.), polarization="Ez",
+                                      source_time=mw.GaussianPulse(frequency=1e9, fwidth=.2e9)),
+                     ))
+    return mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=10), **kwargs, device=device))
 
 
 @pytest.mark.parametrize("faces,expected", [
@@ -89,7 +91,7 @@ def _simulation(boundary, **kwargs):
 ])
 def test_auto_prepares(host_preparation, faces, expected):
     simulation = _simulation(_boundary(**faces))
-    assert simulation.config.absorber == mw.AbsorberKind.AUTO
+    assert simulation.config.absorber == mw.fdtd.AbsorberKind.AUTO
     solver = simulation.prepare().solver
     assert solver.active_absorber_type == expected
     assert solver.absorber_resolution_reason.startswith("auto:")
@@ -309,12 +311,13 @@ def test_uncounted_storage_skips_guard_with_status(host_preparation, attr, value
     assert label in solver.passivity_guard_status
 
 
+@CUDA
 def test_copper_and_sheet_scene_is_skipped_without_sampling_storage():
     from tests.boundaries.cpml.test_guard_storage import _mixed_copper_scene
 
     scene = _mixed_copper_scene(mw.BoundarySpec.faces(x="pec", y="pec", z="pml", num_layers=2))
-    simulation = mw.Simulation.fdtd(scene, frequency=2e9, backend="cpu_reference", absorber="cpml",
-                                    run_time=mw.TimeConfig(time_steps=1))
+    simulation = mw.Simulation.fdtd(scene, frequencies=2e9, config=mw.FDTDConfig(absorber="cpml",
+                                    run_time=mw.TimeConfig(time_steps=1)))
     with pytest.warns(RuntimeWarning, match="passivity guard skipped .*CopperFoil, thin sheets"):
         solver = simulation.prepare().solver
         assert make_passivity_state(solver) is None
@@ -322,13 +325,11 @@ def test_copper_and_sheet_scene_is_skipped_without_sampling_storage():
     assert not any(hasattr(runtime, "energy") for runtime in solver._thin_sheets)
 
 
-def test_closed_transverse_core_refused(host_preparation):
-    from witwin.maxwell.fdtd.runtime.core_path import validate_core_path_request
+def test_closed_transverse_cpml_is_core_admitted(host_preparation):
     sim = _simulation(_boundary(x="periodic", y="pec", z="pml", num_layers=2), absorber="cpml")
     solver = sim.prepare().solver
-    sim.config.fdtd_core_path = True
-    with pytest.raises(ValueError, match="closed-transverse CPML \\(passivity guard\\)"):
-        validate_core_path_request(sim, solver=solver)
+    # The host preparation only skips binding the core launches.
+    assert make_passivity_state(solver) is not None
 
 
 _TRANSVERSE = ("periodic", "pec", "pmc", "bloch", "pml", "none")
@@ -337,40 +338,25 @@ _TRANSVERSE = ("periodic", "pec", "pmc", "bloch", "pml", "none")
 @pytest.mark.parametrize("absorber", ("cpml", "stablepml"))
 @pytest.mark.parametrize("x", _TRANSVERSE)
 @pytest.mark.parametrize("y", _TRANSVERSE)
-def test_guard_sampled_configurations_are_core_ineligible(host_preparation, absorber, x, y):
-    """The guard samples only on the existing eager loop; the core path never samples.
+def test_guard_sampled_configurations_core_admission(host_preparation, absorber, x, y):
+    """Real-field and complex fixed-k guarded cells are core-admitted.
 
-    Every configuration that builds a guard state must therefore be refused by the
-    core-path blockers, which explicit requests and automatic admission share.
+    The core path samples the guard at K-chunk boundaries (test_passivity_core_chunks.py).
     """
-    from witwin.maxwell.fdtd.runtime.core_path import core_path_blockers, validate_core_path_request
-
     bloch = "bloch" in (x, y)
     boundary = mw.BoundarySpec.faces(
         x=x, y=y, z="pml", num_layers=2,
         **({"bloch_wavevector": (1. if x == "bloch" else 0., 1. if y == "bloch" else 0., 0.)} if bloch else {}))
-    sim = _simulation(boundary, absorber=absorber, fdtd_core_path="auto")
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", mw.FDTDCoreFallbackWarning)
-        solver = sim.prepare().solver
+    sim = _simulation(boundary, absorber=absorber)
+    solver = sim.prepare().solver
     state = make_passivity_state(solver)
-    blockers = core_path_blockers(solver)
-    guard_blockers = {"closed-transverse CPML (passivity guard)", "Bloch/complex fields"}
     if x == y and x in ("periodic", "pec", "bloch"):
         assert state is not None  # the enumeration covers both guarded topologies
     if state is None:
         return
-    assert guard_blockers & set(blockers), (x, y, absorber, blockers)
-    # Automatic admission keeps the existing eager loop, where the guard samples.
-    assert solver._fdtd_execution_path == "existing"
-    assert not hasattr(solver, "_core_runtime")
+    fixed_k = state["topology"] == "complex fixed-k Bloch"
+    assert fixed_k is bloch
     assert solver.passivity_guard_status == "active"
-    assert solver._fdtd_fallback_reason in blockers
-    assert [str(entry.message) for entry in caught if entry.category is mw.FDTDCoreFallbackWarning] == [
-        f"FDTD core path fell back to existing execution: {solver._fdtd_fallback_reason}"]
-    sim.config.fdtd_core_path = True
-    with pytest.raises(ValueError, match="passivity guard|Bloch/complex fields"):
-        validate_core_path_request(sim, solver=solver)
 
 
 def test_nonfinite_energy_fails_closed():
@@ -410,10 +396,12 @@ def test_upper_three_stderr_and_rising_endpoint_required():
 def test_cw_uses_transient_even_without_spectral_window(host_preparation):
     scene = _simulation(_boundary(x="bloch", y="pec", z="pml", num_layers=2,
                                    bloch_wavevector=(1., 0., 0.))).scene
-    scene.sources = [mw.PointDipole(position=(0., 0., 0.), source_time=mw.CW(frequency=1e9))]
-    sim = mw.Simulation.fdtd(scene, frequency=1e9,
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        run_time=mw.TimeConfig(time_steps=10, transient_cycles=100))
+    scene = scene.updated(sources=[mw.PointDipole(position=(0., 0., 0.), source_time=mw.CW(frequency=1e9))])
+    sim = mw.Simulation.fdtd(scene, frequencies=1e9,
+        config=mw.FDTDConfig(
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            run_time=mw.TimeConfig(time_steps=10, transient_cycles=100), device="cpu",
+        ))
     solver = sim.prepare().solver
     state = make_passivity_state(solver)
     assert state["start_step"] >= math.ceil(100 / 1e9 / solver.dt)
@@ -431,17 +419,10 @@ def test_total_energy_includes_both_lc_banks_once(host_preparation):
     assert float(total_energy(solver)) == .5 * (2 * (4**2 + 6**2) + 3 * (5**2 + 7**2))
 
 
-def test_cpu_reference_auto_resolves_before_capability_check():
-    sim = _simulation(_boundary(default="none", num_layers=0), backend="cpu_reference")
-    assert sim.prepare().solver.active_absorber_type == "none"
-    graded = _simulation(_boundary(x="pec", y="pec", z="pml"), backend="cpu_reference")
-    with pytest.raises(NotImplementedError, match="CPML absorber only"):
-        graded.prepare()
-
-
+@CUDA
 def test_main_loop_raises_and_disk_resume_keeps_trip_step(monkeypatch, tmp_path):
-    # Exercise the real solve/checkpoint lifecycle on the existing CPU reference
-    # profile. Only the sampled energy and window lengths are controlled here.
+    # Exercise the real solve/checkpoint lifecycle on CUDA.
+    # Only the sampled energy and window lengths are controlled here.
     from witwin.maxwell.fdtd.runtime import passivity
     monkeypatch.setattr(passivity, "SAMPLE_INTERVAL", 2)
     monkeypatch.setattr(passivity, "WINDOW_SAMPLES", 4)
@@ -456,10 +437,9 @@ def test_main_loop_raises_and_disk_resume_keeps_trip_step(monkeypatch, tmp_path)
 
     def prepared():
         scene = mw.Scene(domain=mw.Domain(bounds=((- .1, .1),) * 3),
-            grid=mw.GridSpec.uniform(.05), device="cpu",
-            boundary=_boundary(x="pec", y="pec", z="pml", num_layers=2))
-        return mw.Simulation.fdtd(scene, frequency=1e9, absorber="cpml", backend="cpu_reference",
-            full_field_dft=False, cuda_graph=False, run_time=mw.TimeConfig(time_steps=40)).prepare()
+            grid=mw.GridSpec.uniform(.05), boundary=_boundary(x="pec", y="pec", z="pml", num_layers=2))
+        return mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(absorber="cpml",
+            full_field_dft=False, cuda_graph=False, run_time=mw.TimeConfig(time_steps=40))).prepare()
 
     direct = prepared()
     with pytest.raises(FDTDPassivityError):
@@ -471,13 +451,14 @@ def test_main_loop_raises_and_disk_resume_keeps_trip_step(monkeypatch, tmp_path)
     checkpoint.save(path)
     resumed = prepared()
     with pytest.raises(FDTDPassivityError):
-        resumed.run(resume_from=mw.FDTDResumeCheckpoint.load(path))
+        resumed.run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path))
     assert torch.equal(direct.solver._passivity_state["history"], resumed.solver._passivity_state["history"])
     assert direct.solver._passivity_state["history"][-1, 0] == 32
 
 
+@CUDA
 def test_main_loop_warning_metadata_survives_disk_resume(monkeypatch, tmp_path):
-    # Isolate warning lifecycle/Result plumbing on the CPU reference runtime;
+    # Isolate warning lifecycle/Result plumbing on the CUDA runtime;
     # the growing complex-field physics is covered by the CUDA scene gate.
     from witwin.maxwell.fdtd.runtime import passivity
     monkeypatch.setattr(passivity, "SAMPLE_INTERVAL", 2)
@@ -500,10 +481,9 @@ def test_main_loop_warning_metadata_survives_disk_resume(monkeypatch, tmp_path):
 
     def prepared():
         scene = mw.Scene(domain=mw.Domain(bounds=((- .1, .1),) * 3),
-            grid=mw.GridSpec.uniform(.05), device="cpu",
-            boundary=_boundary(x="pec", y="pec", z="pml", num_layers=2))
-        return mw.Simulation.fdtd(scene, frequency=1e9, absorber="cpml", backend="cpu_reference",
-            full_field_dft=True, cuda_graph=False, run_time=mw.TimeConfig(time_steps=80)).prepare()
+            grid=mw.GridSpec.uniform(.05), boundary=_boundary(x="pec", y="pec", z="pml", num_layers=2))
+        return mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(absorber="cpml",
+            full_field_dft=True, cuda_graph=False, run_time=mw.TimeConfig(time_steps=80))).prepare()
 
     direct = prepared()
     with pytest.warns(RuntimeWarning, match="complex fixed-k Bloch") as caught:
@@ -511,7 +491,7 @@ def test_main_loop_warning_metadata_survives_disk_resume(monkeypatch, tmp_path):
     assert len(caught) == 1
     assert result.metadata["passivity_guard"] == "warned: complex fixed-k growth"
     record = result.metadata["passivity_guard_warning"]
-    assert record == direct.solver.passivity_guard_warning == result.solver_stats["passivity_guard_warning"]
+    assert record == direct.solver.passivity_guard_warning == result.stats()["passivity_guard_warning"]
     assert record["slope"] == pytest.approx(2.5e-6)
     assert record["window"] == (8, 32) and record["step"] == 32
     split = prepared()
@@ -523,11 +503,11 @@ def test_main_loop_warning_metadata_survives_disk_resume(monkeypatch, tmp_path):
     resumed = prepared()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        restored = resumed.run(resume_from=mw.FDTDResumeCheckpoint.load(path))
+        restored = resumed.run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path))
     assert not caught
     assert restored.metadata["passivity_guard"] == result.metadata["passivity_guard"]
     assert restored.metadata["passivity_guard_warning"] == record
-    assert restored.solver_stats["passivity_guard_warning"] == record
+    assert restored.stats()["passivity_guard_warning"] == record
     assert torch.equal(direct.solver._passivity_state["history"], resumed.solver._passivity_state["history"])
 
 
@@ -537,16 +517,17 @@ def test_auto_cpml_coefficients_equal_explicit_cpml(host_preparation, fixed_k):
                 if fixed_k else _boundary(default="pml", num_layers=2))
     automatic = _simulation(boundary).prepare().solver
     explicit = _simulation(boundary, absorber="cpml").prepare().solver
-    assert automatic.cpml_config == explicit.cpml_config
+    assert automatic.cpml_grading == explicit.cpml_grading
     if fixed_k:
-        assert automatic.cpml_config["alpha_max"] > 0
+        assert automatic.cpml_grading.alpha_max > 0
     for name, value in vars(explicit).items():
         if name.startswith("cpml_") and isinstance(value, torch.Tensor):
             assert torch.equal(getattr(automatic, name), value), name
 
 
+@CUDA
 def test_result_records_resolved_absorber_and_reason():
-    result = _simulation(_boundary(default="pml", num_layers=2), backend="cpu_reference",
+    result = _simulation(_boundary(default="pml", num_layers=2), device="cuda",
                          full_field_dft=True).run()
     assert result.metadata["absorber"] == "cpml"
     assert result.metadata["absorber_resolution_reason"] == "auto: complex fields or open PML topology"
@@ -566,7 +547,7 @@ def test_cw_benchmark_fixture_and_horizon_are_sufficient():
 
     simulation = _cw_modulated_slab(device="cpu")
     benchmark = build_scene("modulated_slab")
-    assert simulation.config.absorber == mw.AbsorberKind.CPML
+    assert simulation.config.absorber == mw.fdtd.AbsorberKind.CPML
     assert asdict(simulation.scene.grid) == asdict(benchmark.grid)
     assert simulation.scene.boundary == benchmark.boundary
     assert all(source.source_time.kind == "cw" for source in simulation.scene.sources)

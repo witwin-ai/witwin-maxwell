@@ -8,13 +8,13 @@ _C0 = 299_792_458.0
 
 
 def _index(key: str, wavelength: float) -> complex:
-    return mw.library_material(key).relative_permittivity(_C0 / wavelength) ** 0.5
+    return mw.media.library.library_material(key).relative_permittivity(_C0 / wavelength) ** 0.5
 
 
 def test_every_entry_is_an_ordinary_cited_material():
-    assert set(mw.MATERIAL_LIBRARY) == {"SiO2", "Si3N4", "Al2O3", "cSi", "Ag", "Au", "Cu", "Al"}
-    for key, entry in mw.MATERIAL_LIBRARY.items():
-        assert isinstance(entry, mw.MaterialLibraryEntry)
+    assert set(mw.media.library.MATERIAL_LIBRARY) == {"SiO2", "Si3N4", "Al2O3", "cSi", "Ag", "Au", "Cu", "Al"}
+    for key, entry in mw.media.library.MATERIAL_LIBRARY.items():
+        assert isinstance(entry, mw.media.library.MaterialLibraryEntry)
         assert entry.key == key
         assert entry.reference and entry.doi.startswith("10.")
         low, high = entry.wavelength_range
@@ -35,7 +35,7 @@ def test_every_entry_is_an_ordinary_cited_material():
 
 def test_sellmeier_entries_are_lossless_and_use_si_coefficients():
     for key in ("SiO2", "Si3N4", "Al2O3", "cSi"):
-        entry = mw.MATERIAL_LIBRARY[key]
+        entry = mw.media.library.MATERIAL_LIBRARY[key]
         material = entry.material()
         assert entry.model == "sellmeier"
         assert float(material.eps_r) == 1.0
@@ -62,7 +62,7 @@ def test_dielectric_indices_at_reference_wavelengths():
 
 def test_metals_are_lorentz_drude_with_metallic_response():
     for key in ("Ag", "Au", "Cu", "Al"):
-        entry = mw.MATERIAL_LIBRARY[key]
+        entry = mw.media.library.MATERIAL_LIBRARY[key]
         material = entry.material()
         assert entry.model == "lorentz-drude"
         assert "Rakic" in entry.reference and entry.doi == "10.1364/AO.37.005271"
@@ -74,11 +74,11 @@ def test_metals_are_lorentz_drude_with_metallic_response():
         assert epsilon.imag > 0.0
     # Rakic et al. (1998) Table 2: gold plasma energy 9.03 eV with f0 = 0.760, Gamma0 = 0.053 eV.
     ev_to_hz = 1.602176634e-19 / 6.62607015e-34
-    gold = mw.library_material("Au")
+    gold = mw.media.library.library_material("Au")
     assert gold.drude_poles[0].plasma_frequency == pytest.approx(math.sqrt(0.760) * 9.03 * ev_to_hz)
     assert gold.drude_poles[0].gamma == pytest.approx(0.053 * ev_to_hz)
 
 
 def test_unknown_key_lists_available_entries():
     with pytest.raises(KeyError, match="available"):
-        mw.library_material("Unobtainium")
+        mw.media.library.library_material("Unobtainium")

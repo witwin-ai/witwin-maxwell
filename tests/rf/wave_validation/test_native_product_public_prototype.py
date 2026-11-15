@@ -37,10 +37,9 @@ def _synthetic_copper_result(*, normalized=False):
     from witwin.maxwell.scene import prepare_scene
     from witwin.maxwell.compiler.copper_foil import compile_copper_faces
     from witwin.maxwell.fdtd.coords import component_coords
-    scene=mw.Scene(domain=mw.Domain(bounds=((-0.02,.02),)*3),grid=mw.GridSpec.uniform(.005),boundary=mw.BoundarySpec.none(),device='cpu',
-        structures=(mw.Structure(name='foil',geometry=mw.Box(position=torch.tensor([0.,0.,0.],dtype=torch.float64),
-            size=torch.tensor([.02,.02,0.],dtype=torch.float64)),material=mw.CopperFoil(thickness=2e-6,frequency_range=(.5e9,2e9))),))
-    prepared=prepare_scene(scene)
+    scene=mw.Scene(domain=mw.Domain(bounds=((-0.02,.02),)*3),grid=mw.GridSpec.uniform(.005),boundary=mw.BoundarySpec.none(),structures=(mw.Structure(name='foil',geometry=mw.Box(position=torch.tensor([0.,0.,0.],dtype=torch.float64),
+            size=torch.tensor([.02,.02,0.],dtype=torch.float64)),material=mw.media.CopperFoil(thickness=2e-6,frequency_range=(.5e9,2e9))),))
+    prepared=prepare_scene(scene, device='cpu')
     # Use compiled float64 axes, never round-trip geometry through field dtype.
     nodes=[np.asarray(prepared.y_nodes64),np.asarray(prepared.z_nodes64)]
     centers=[(x[:-1]+x[1:])/2 for x in nodes]
@@ -48,15 +47,15 @@ def _synthetic_copper_result(*, normalized=False):
         fields=('Ey','Hz','Ez','Hy'),frequency=1e9,frequencies=(1e9,),
         y=centers[0],z=centers[1],cell_widths={'y':np.diff(nodes[0]),'z':np.diff(nodes[1])},components={})
     for component in raw['fields']:
-        axes=component_coords(prepared,component)
+        axes=component_coords(prepared,component, device=prepared.device)
         # H is already normally interpolated onto the E plane by observer gathering.
         paired='Ey' if component in ('Ey','Hz') else 'Ez'
-        transverse=component_coords(prepared,paired)[1:]
+        transverse=component_coords(prepared,paired, device=prepared.device)[1:]
         shape=tuple(map(len,transverse));data=torch.zeros(shape,dtype=torch.complex128)
         if component=='Hz':data.fill_(2.)
         if component=='Ey':
             for j,z in enumerate(transverse[1]):data[:,j]=1. if z<=0. else 3.
-        plane=int(np.argmin(abs(component_coords(prepared,paired)[0])))
+        plane=int(np.argmin(abs(component_coords(prepared,paired, device=prepared.device)[0])))
         raw['components'][component]=dict(data=data[None],coords=transverse,plane_indices=(plane,),plane_index=plane,plane_weights=(1.,),collocated=False)
     faces=compile_copper_faces(prepared,device='cpu');traces=[]
     for face in faces:
@@ -70,7 +69,7 @@ def _synthetic_copper_result(*, normalized=False):
 
 def test_public_result_late_copper_uses_real_compiler_without_volume_fields(tmp_path):
     import witwin.maxwell as mw
-    result=_synthetic_copper_result();payload=result.monitor('surface')
+    result=_synthetic_copper_result();payload=result.raw_monitor('surface')
     assert payload['requires_native_flux_heads']
     # Independently replace each head's two adjacent E endpoint contributions.
     base=dict(payload);base.pop('native_flux_heads');base.pop('requires_native_flux_heads')
@@ -84,7 +83,7 @@ def test_public_result_late_copper_uses_real_compiler_without_volume_fields(tmp_
     torch.testing.assert_close(payload['flux'][0],expected,rtol=2e-14,atol=1e-18)
     path=tmp_path/'prescribed.pt';result.save(path)
     restored=mw.Result.load(path,scene=result.scene,map_location='cpu')
-    torch.testing.assert_close(restored.monitor('surface')['flux'],payload['flux'],rtol=0,atol=0)
+    torch.testing.assert_close(restored.monitor('surface').values,payload['flux'],rtol=0,atol=0)
 
 
 def test_public_copper_side_output_cotangents_pass_complex_gradcheck():
@@ -93,7 +92,7 @@ def test_public_copper_side_output_cotangents_pass_complex_gradcheck():
     values=trace['electric_fields'].clone().requires_grad_()
     def functional(v):
         trace['electric_fields']=v
-        return result.monitor('surface')['flux'].sum()
+        return result.monitor('surface', freq_index=0).values.sum()
     assert torch.autograd.gradcheck(functional,(values,),eps=1e-6,atol=1e-9,rtol=1e-6)
     functional(values).backward()
     # The right face contributes independently: removing its graph is a failure.
@@ -107,8 +106,8 @@ def test_normalized_legacy_copper_requires_actual_denominator_and_new_metadata_w
         result.monitor('surface')
     raw=result._monitors['surface'];spectrum=torch.tensor([2+3j],dtype=torch.complex128)
     _normalize_monitor_result_inplace(raw,spectrum)
-    actual=result.monitor('surface')['flux']
-    expected=_synthetic_copper_result().monitor('surface')['flux']/13
+    actual=result.monitor('surface', freq_index=0).values
+    expected=_synthetic_copper_result().monitor('surface', freq_index=0).values/13
     torch.testing.assert_close(actual,expected,rtol=2e-14,atol=1e-18)
 
 
@@ -124,13 +123,13 @@ def test_normalization_retains_full_band_clamp_and_component_dtype():
     torch.testing.assert_close(entry['data'][:,0,0]*factor,torch.ones(2,dtype=torch.complex64),rtol=1e-7,atol=0)
     assert payload['source_normalization_frequencies']==(1.,2.)
 
-@pytest.mark.parametrize('scope',['background','background_material','material_region','anisotropic','magnetic_pole'])
+@pytest.mark.parametrize('scope',['background','material_region','anisotropic','magnetic_pole'])
 def test_copper_native_H_contract_rejects_nonunit_or_unqualified_permeability(scope):
     from types import SimpleNamespace
     from witwin.maxwell.fdtd.plane_product import _require_uniform_nonmagnetic
-    scene=SimpleNamespace(structures=[],material_regions=[])
+    scene=SimpleNamespace(structures=[],material_regions=[],background=None)
     material=SimpleNamespace(mu_r=2.)
-    if scope in ('background','background_material'):setattr(scene,scope,material)
+    if scope=='background':scene.background=material
     elif scope=='material_region':scene.material_regions=[SimpleNamespace(mu_bounds=(1.,2.))]
     else:
         material.mu_r=torch.tensor([1.,1.,2.]) if scope=='anisotropic' else 1.
@@ -144,7 +143,7 @@ def test_copper_native_H_contract_rejects_nonunit_or_unqualified_permeability(sc
 def test_normal_interpolated_copper_jump_matches_independent_per_plane_oracle(one_plane_only,direction):
     result=_synthetic_copper_result();raw=result._monitors['surface'];raw['normal_direction']=direction
     from witwin.maxwell.scene import prepare_scene
-    nodes=prepare_scene(result.scene).x_nodes64
+    nodes=prepare_scene(result.scene, device="cpu").x_nodes64
     choose=(.01,.015) if one_plane_only else (0.,.005)
     indices=tuple(int(np.argmin(abs(nodes-x))) for x in choose);weights=(.3,.7)
     negative_cu=-2.+1j;positive_cu=7.-3j;exterior=4.+2j
@@ -156,7 +155,7 @@ def test_normal_interpolated_copper_jump_matches_independent_per_plane_oracle(on
             z=np.asarray(entry['coords'][1]);entry['data'][...,int(np.argmin(abs(z)))]=interpolated_left
     for trace in result._metadata['conductor_losses']['foil']['bulk_electric_traces']:
         trace['electric_fields'][:,0]=negative_cu;trace['electric_fields'][:,1]=positive_cu
-    payload=result.monitor('surface');heads=payload['native_flux_heads']
+    payload=result.raw_monitor('surface');heads=payload['native_flux_heads']
     assert len(heads)==1 and len(torch.unique(heads[0]['indices'],dim=0))==len(heads[0]['indices'])
     torch.testing.assert_close(heads[0]['negative'],torch.full_like(heads[0]['negative'],interpolated_left),rtol=2e-15,atol=1e-15)
     torch.testing.assert_close(heads[0]['positive'],torch.full_like(heads[0]['positive'],interpolated_right),rtol=2e-15,atol=1e-15)
@@ -173,13 +172,13 @@ def test_normal_interpolated_copper_jump_matches_independent_per_plane_oracle(on
 def test_normal_interpolation_both_actual_cu_jump_cotangents_are_retained():
     result=_synthetic_copper_result();raw=result._monitors['surface']
     from witwin.maxwell.scene import prepare_scene
-    nodes=prepare_scene(result.scene).x_nodes64;planes=tuple(int(np.argmin(abs(nodes-x))) for x in (0.,.005))
+    nodes=prepare_scene(result.scene, device="cpu").x_nodes64;planes=tuple(int(np.argmin(abs(nodes-x))) for x in (0.,.005))
     for entry in raw['components'].values():entry.update(plane_indices=planes,plane_weights=(.3,.7))
     trace=next(t for t in result._metadata['conductor_losses']['foil']['bulk_electric_traces'] if t['component']=='Ey')
     values=trace['electric_fields'].clone().requires_grad_()
     def functional(v):
         trace['electric_fields']=v
-        return result.monitor('surface')['flux'].sum()
+        return result.monitor('surface', freq_index=0).values.sum()
     assert torch.autograd.gradcheck(functional,(values,),eps=1e-6,atol=1e-9,rtol=1e-6)
     functional(values).backward()
     for plane in planes:
@@ -196,7 +195,7 @@ def test_coherent_native_components_and_two_sided_heads_keep_phase_cross_terms()
     e_scale=2.+1j;h_scale=-.3+.7j
     for name,entry in second._monitors['surface']['components'].items():entry['data']*=e_scale if name.startswith('E') else h_scale
     for trace in second._metadata['conductor_losses']['foil']['bulk_electric_traces']:trace['electric_fields']*=e_scale
-    a=first.monitor('surface');b=second.monitor('surface')
+    a=first.raw_monitor('surface');b=second.raw_monitor('surface')
     # Retained native presentation can coexist with an already collocated one;
     # it must be combined independently rather than copied from basis column0.
     for value in (a,b):value['native_components']=copy.deepcopy(value['components'])
@@ -208,7 +207,7 @@ def test_coherent_native_components_and_two_sided_heads_keep_phase_cross_terms()
     for name,entry in expected._monitors['surface']['components'].items():entry['data']*=ec if name.startswith('E') else hc
     for trace in expected._metadata['conductor_losses']['foil']['bulk_electric_traces']:trace['electric_fields']*=ec
     d,area=plane_normal_poynting(combined);flux=(d*area).sum()
-    torch.testing.assert_close(flux,expected.monitor('surface')['flux'][0],rtol=1e-14,atol=1e-18)
+    torch.testing.assert_close(flux,expected.monitor('surface').values[0],rtol=1e-14,atol=1e-18)
     stale=copy.deepcopy(combined);stale['native_flux_heads']=copy.deepcopy(a['native_flux_heads'])
     d,area=plane_normal_poynting(stale)
     assert abs(float((d*area).sum()-flux))>1e-5*abs(float(flux))
@@ -222,7 +221,7 @@ def _normal_sheet_result(position,*,actual_position=None):
     from witwin.maxwell.compiler.copper_foil import compile_copper_faces
     from witwin.maxwell.fdtd.coords import component_coords
     from witwin.maxwell.fdtd.observers import _resolve_plane_sample_positions
-    result=_synthetic_copper_result();prepared=prepare_scene(result.scene)
+    result=_synthetic_copper_result();prepared=prepare_scene(result.scene, device="cpu")
     x,y=prepared.x_nodes64,prepared.y_nodes64;xc,yc=prepared.x_half64,prepared.y_half64
     sample=position if actual_position is None else actual_position
     raw=dict(kind='plane',axis='z',position=position,normal_direction='+',compute_flux=False,
@@ -236,7 +235,7 @@ def _normal_sheet_result(position,*,actual_position=None):
     weight=sum(v['weight'] for v in Eplanes if v['plane_index']==int(np.argmin(abs(prepared.z_nodes64))))
     desired={}
     for component in raw['fields']:
-        axes=component_coords(prepared,component);coords=axes[:2];a,b=np.meshgrid(*coords,indexing='ij')
+        axes=component_coords(prepared,component, device=prepared.device);coords=axes[:2];a,b=np.meshgrid(*coords,indexing='ij')
         value=weight*L(a,b)+(1-weight)*exterior(a,b) if component.startswith('E') else (2+.3j)+(a-2*b)/.03
         want=value.copy()
         # The explicit finite foil occupies only the central rectangle.
@@ -259,7 +258,7 @@ def _normal_sheet_result(position,*,actual_position=None):
         desired[component]=torch.tensor(want[None])
     traces=result._metadata['conductor_losses']['foil']['bulk_electric_traces']
     for trace in traces:
-        axes=component_coords(prepared,trace['component']);idx=trace['indices'].numpy();a,b=axes[0][idx[:,0]],axes[1][idx[:,1]]
+        axes=component_coords(prepared,trace['component'], device=prepared.device);idx=trace['indices'].numpy();a,b=axes[0][idx[:,0]],axes[1][idx[:,1]]
         trace['electric_fields']=torch.tensor(np.stack([L(a,b),R(a,b)])[None])
     result._monitors={'normal_sheet':raw}
     return result,desired
@@ -270,7 +269,7 @@ def test_public_normal_copper_plane_chooses_actual_side_and_matches_correlated_o
     from scripts.dev.fdtd.printed_line_product_flux import adjacent
     from witwin.maxwell.fdtd.plane_product import enrich_plane_flux
     result,desired=_normal_sheet_result(position);raw=copy.deepcopy(result._monitors['normal_sheet'])
-    payload=result.monitor('normal_sheet');area=torch.tensor(payload['cell_widths']['x'])[:,None]*torch.tensor(payload['cell_widths']['y'])[None,:]
+    payload=result.raw_monitor('normal_sheet');area=torch.tensor(payload['cell_widths']['x'])[:,None]*torch.tensor(payload['cell_widths']['y'])[None,:]
     density=.5*(adjacent((desired['Ex']*desired['Hy'].conj()).real,2)-adjacent((desired['Ey']*desired['Hx'].conj()).real,1))
     expected=(density*area).sum((-2,-1))
     torch.testing.assert_close(payload['flux'],expected,rtol=2e-14,atol=1e-18)
@@ -297,7 +296,8 @@ def test_normal_sheet_actual_jump_cotangents_survive_late_presentation_projectio
     trace=next(t for t in traces if t['component']=='Ex');values=trace['electric_fields'].clone().requires_grad_()
     def functional(v):
         trace['electric_fields']=v
-        return result.monitor('normal_sheet')['flux'].sum()
+        # The sheet records E and H without compute_flux; its late-bound flux is payload metadata.
+        return result.raw_monitor('normal_sheet')['flux'].sum()
     assert torch.autograd.gradcheck(functional,(values,),eps=1e-6,atol=1e-9,rtol=1e-6)
     functional(values).backward()
     assert bool((values.grad[:,1].abs()>0).any())

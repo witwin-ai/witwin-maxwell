@@ -26,7 +26,7 @@ def prism_scene(material, side_cells=10):
     mesh = h.extruded_polyline_mesh(pts, (-2*dl, 4*dl), closed=True, **kw)
     return mw.Scene(domain=mw.Domain(bounds=((-extent, extent), (-extent, extent), (0., 2*dl))),
                     grid=mw.GridSpec.uniform(dl), boundary=mw.BoundarySpec.faces(default="pec", z="pmc"),
-                    device="cpu", structures=[mw.Structure(geometry=mesh, material=material)])
+                    structures=[mw.Structure(geometry=mesh, material=material)])
 
 
 def _matrix(c):
@@ -45,7 +45,7 @@ def _radius(c):
 def test_explicit_chord_bound_equals_pec(scene_name):
     complexes = []
     for kind in ("pec", "copper"):
-        material = h.pec_material() if kind == "pec" else mw.CopperFoil(thickness=35e-6, frequency_range=(.3e9, 4e9))
+        material = h.pec_material() if kind == "pec" else mw.media.CopperFoil(thickness=35e-6, frequency_range=(.3e9, 4e9))
         if scene_name == "prism":
             scene = prism_scene(material)
         else:
@@ -53,8 +53,8 @@ def test_explicit_chord_bound_equals_pec(scene_name):
             kw = dict(sheet_model="conformal_two_sided") if kind == "pec" else {}
             structure = mw.Structure(geometry=h.rectangle_mesh(rt.CENTER, normal, .03, .025, **kw), material=material)
             scene = rt._cavity(structure)
-        scene = prepare_scene(scene)
-        complexes.append(compile_thin_sheet(scene, scene.structures[0]))
+        scene = prepare_scene(scene, device="cpu")
+        complexes.append(compile_thin_sheet(scene, scene.scene.structures[0]))
     pec, cu = complexes
     assert np.array_equal(pec.e_volume, cu.e_volume)
     assert np.array_equal(pec.h_area, cu.h_area)
@@ -71,9 +71,9 @@ def test_explicit_chord_bound_equals_pec(scene_name):
 def test_prism_held_chord_modes_equal_pec(side_cells):
     operators = []
     for kind in ("pec", "copper"):
-        material = h.pec_material() if kind == "pec" else mw.CopperFoil(thickness=35e-6, frequency_range=(.3e9, 2e9))
-        scene = prepare_scene(prism_scene(material, side_cells))
-        c = compile_thin_sheet(scene, scene.structures[0])
+        material = h.pec_material() if kind == "pec" else mw.media.CopperFoil(thickness=35e-6, frequency_range=(.3e9, 2e9))
+        scene = prepare_scene(prism_scene(material, side_cells), device="cpu")
+        c = compile_thin_sheet(scene, scene.scene.structures[0])
         keep = np.flatnonzero(~c.e_fixed & (c.e_side == -1))
         K = _matrix(c)[:, keep]
         inv_mass = 1/np.sqrt(EPS0*c.e_volume[keep])
@@ -90,21 +90,22 @@ def test_prism_held_chord_modes_equal_pec(side_cells):
                modes_below_half=int((freq < .5).sum()), added_newmark_dispersion=0.))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Native thin sheets require CUDA.")
 @pytest.mark.parametrize("scene_name", ["plate", "prism"])
 @pytest.mark.parametrize("material_name,condition_gate", [("copper", 1.05), ("resistive", 6.), ("transparent", 12.)])
 def test_chord_implicit_inverse(scene_name, material_name, condition_gate, monkeypatch):
     material = (h.resistive_foil(.5/h.ETA0, band=(.3e9, 4e9)) if material_name == "resistive"
-                else mw.CopperFoil(thickness=35e-6, frequency_range=(.3e9, 4e9)))
+                else mw.media.CopperFoil(thickness=35e-6, frequency_range=(.3e9, 4e9)))
     if material_name == "transparent":
         from types import SimpleNamespace
         from witwin.maxwell.compiler import copper_foil
         response = SimpleNamespace(rates=torch.zeros(0, dtype=torch.float64), state_space=SimpleNamespace(
             B=torch.zeros((0, 2), dtype=torch.float64), D=torch.zeros((2, 2), dtype=torch.float64)))
         monkeypatch.setattr(copper_foil, "compile_copper_response", lambda material: response)
-    scene = rt._cavity(rt._plate(material)) if scene_name == "plate" else prism_scene(material)
+    scene = (rt._cavity(rt._plate(material)) if scene_name == "plate"
+             else prism_scene(material))
     dt = rt.pec_bound_dt(scene)
-    solver = mw.Simulation.fdtd(scene, frequencies=[1e9], run_time=mw.TimeConfig(time_steps=1, dt=dt),
-                                backend="cpu_reference").prepare().solver
+    solver = mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1, dt=dt))).prepare().solver
     sheet = solver._thin_sheets[0]
     cu = sheet.copper
     S = cu["S"].to_dense()
@@ -113,9 +114,10 @@ def test_chord_implicit_inverse(scene_name, material_name, condition_gate, monke
     low, high = cu["spectrum"]
     assert high/low <= condition_gate
     generator = torch.Generator().manual_seed(19)
-    vectors = torch.randn((len(S), 20), dtype=torch.float64, generator=generator)
+    vectors = torch.randn((len(S), 20), dtype=torch.float64, generator=generator).to(S.device)
     exact = torch.linalg.solve(S, vectors)
-    approximate = torch.stack([sheet.chord_solve(v) for v in vectors.T], 1)
+    # The fused chord kernels read contiguous right-hand sides (as the runtime passes them).
+    approximate = torch.stack([sheet.chord_solve(v) for v in vectors.T.contiguous()], 1)
     error = float(torch.linalg.vector_norm(approximate-exact)/torch.linalg.vector_norm(exact))
     defect = (vectors*(exact-approximate)).sum(0)
     scale = (vectors*exact).sum(0)

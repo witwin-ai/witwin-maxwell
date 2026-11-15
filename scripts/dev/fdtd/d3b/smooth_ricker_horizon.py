@@ -5,9 +5,9 @@ from thin_sheet_overhead import SCENARIOS, _scene
 FIELDS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 def sim(n):
     scene = _scene(SCENARIOS["copper_patch"], True)
-    scene.sources = [mw.PointDipole(position=s.position, polarization=s.polarization, profile="gaussian", width=1.5 * SCENARIOS["copper_patch"]["cell"],
-                                    source_time=mw.RickerWavelet(frequency=2.4e9)) for s in scene.sources]
-    return mw.Simulation.fdtd(scene, frequencies=[2.4e9], run_time=mw.TimeConfig(time_steps=n), cuda_graph=True)
+    scene = scene.updated(sources=[mw.PointDipole(position=s.position, polarization=s.polarization, profile="gaussian", width=1.5 * SCENARIOS["copper_patch"]["cell"],
+                                    source_time=mw.sources.RickerWavelet(frequency=2.4e9)) for s in scene.sources])
+    return mw.Simulation.fdtd(scene, frequencies=[2.4e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=n), cuda_graph=True))
 def run(kernel, n):
     os.environ["WITWIN_MAXWELL_THIN_SHEET_KERNEL"] = kernel
     sol = sim(n).run().solver

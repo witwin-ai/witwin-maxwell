@@ -32,7 +32,7 @@ def test_material_mass_density_validation_and_flags():
         mw.Material(mass_density=torch.ones(4))
 
 
-def _scene(*materials_and_boxes, device="cpu"):
+def _scene(*materials_and_boxes):
     structures = tuple(
         mw.Structure(name=f"s{i}", geometry=box, material=material)
         for i, (material, box) in enumerate(materials_and_boxes)
@@ -42,7 +42,6 @@ def _scene(*materials_and_boxes, device="cpu"):
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
         structures=structures,
-        device=device,
     )
 
 
@@ -53,7 +52,7 @@ def test_compile_mass_density_fills_effective_density_and_ids():
             mw.Box(position=(0.5, 0.5, 0.5), size=(4.0, 4.0, 4.0)),
         )
     )
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     mass = compile_mass_density(prepared)
 
     assert mass.shape == (prepared.Nx, prepared.Ny, prepared.Nz)
@@ -76,7 +75,7 @@ def test_compile_mass_density_excludes_materials_without_density():
             mw.Box(position=(0.5, 0.5, 0.5), size=(4.0, 4.0, 4.0)),
         )
     )
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     mass = compile_mass_density(prepared)
     assert torch.all(mass.rho_cell == 0)
     assert torch.all(mass.tissue_id == BACKGROUND_TISSUE_ID)
@@ -104,9 +103,8 @@ def test_compile_mass_density_priority_overwrite_two_tissues():
                 priority=1,
             ),
         ),
-        device="cpu",
     )
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     mass = compile_mass_density(prepared)
     center = (prepared.Nx // 2, prepared.Ny // 2, prepared.Nz // 2)
     assert int(mass.tissue_id[center]) == 1

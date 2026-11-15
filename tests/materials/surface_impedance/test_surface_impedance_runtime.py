@@ -20,7 +20,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.core import Box
 from witwin.maxwell.media import RationalSurfaceImpedance, SurfaceImpedanceMedium
-from witwin.maxwell.fdtd.surface_impedance_reference import good_conductor_surface_impedance
+from tests.oracles.surface_impedance_reference import good_conductor_surface_impedance
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(),
@@ -50,7 +50,6 @@ def test_exact_fill_transverse_face_writes_the_whole_surface_plane():
         domain=mw.Domain(bounds=((-0.02, 0.02),) * 3),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.faces(default="periodic", num_layers=40, strength=1.0, x=("pml", "pml")),
-        device="cuda",
         sources=[
             mw.PointDipole(
                 position=(-0.01, 0.0, 0.0),
@@ -69,7 +68,7 @@ def test_exact_fill_transverse_face_writes_the_whole_surface_plane():
         ],
     )
     solver = mw.Simulation.fdtd(
-        scene, frequencies=[2.0e9], run_time=mw.TimeConfig(time_steps=1)
+        scene, frequencies=[2.0e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))
     ).prepare().solver
 
     writes = solver._surface_impedance["writes"]
@@ -92,7 +91,6 @@ def test_finite_mid_domain_block_runs_finite_on_all_six_faces():
         domain=mw.Domain(bounds=((-0.03, 0.03),) * 3),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.pml(num_layers=8),
-        device="cuda",
         sources=[
             mw.PointDipole(
                 position=(-0.012, 0.0, 0.0),
@@ -111,7 +109,7 @@ def test_finite_mid_domain_block_runs_finite_on_all_six_faces():
         ],
     )
     prepared = mw.Simulation.fdtd(
-        scene, frequencies=[2.0e9], run_time=mw.TimeConfig(time_steps=200)
+        scene, frequencies=[2.0e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=200))
     ).prepare()
     solver = prepared.solver
 

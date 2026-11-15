@@ -2,10 +2,12 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
+from witwin.maxwell.compiler import compile_networks
+from witwin.maxwell.scene import prepare_scene
 
 
-def _state_space(*, conductance: float = 0.02) -> mw.StateSpaceNetwork:
-    return mw.StateSpaceNetwork(
+def _state_space(*, conductance: float = 0.02) -> mw.rf.rational.StateSpaceNetwork:
+    return mw.rf.rational.StateSpaceNetwork(
         A=torch.tensor([[-2.0e9]], dtype=torch.float64),
         B=torch.tensor([[0.0]], dtype=torch.float64),
         C=torch.tensor([[0.0]], dtype=torch.float64),
@@ -16,10 +18,10 @@ def _state_space(*, conductance: float = 0.02) -> mw.StateSpaceNetwork:
     )
 
 
-def _network_data() -> mw.NetworkData:
+def _network_data() -> mw.rf.NetworkData:
     frequencies = torch.tensor([0.0, 1.0e9], dtype=torch.float64)
     admittance = torch.full((2, 1, 1), 0.02 + 0.0j, dtype=torch.complex128)
-    return mw.NetworkData.from_y(
+    return mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=admittance,
         z0=50.0,
@@ -50,11 +52,10 @@ def _scene(*, ports=None, networks=()) -> mw.Scene:
         boundary=mw.BoundarySpec.none(),
         ports=(_port(),) if ports is None else ports,
         networks=networks,
-        device="cpu",
     )
 
 
-def _block(**overrides) -> mw.NetworkBlock:
+def _block(**overrides) -> mw.rf.NetworkBlock:
     values = {
         "name": "matching",
         "network": _network_data(),
@@ -63,7 +64,7 @@ def _block(**overrides) -> mw.NetworkBlock:
         "model": _state_space(),
     }
     values.update(overrides)
-    return mw.NetworkBlock(**values)
+    return mw.rf.NetworkBlock(**values)
 
 
 def test_network_block_normalizes_one_based_connections_and_scene_clone() -> None:
@@ -73,7 +74,7 @@ def test_network_block_normalizes_one_based_connections_and_scene_clone() -> Non
     assert block.connections == {"load": "feed"}
     assert block.port_order == ("load",)
     assert block.connected_port_names == ("feed",)
-    assert scene.clone().networks == [block]
+    assert scene.networks == (block,)
 
 
 def test_scene_rejects_unknown_or_reused_network_connections() -> None:
@@ -82,19 +83,19 @@ def test_scene_rejects_unknown_or_reused_network_connections() -> None:
 
     scene = _scene(networks=(_block(name="first"),))
     with pytest.raises(ValueError, match="already connected"):
-        scene.add_network(_block(name="second"))
+        scene = scene.updated(networks=(*scene.networks, _block(name="second")))
 
 
 def test_network_block_requires_explicit_prefit_contract() -> None:
     with pytest.raises(ValueError, match="fit=False requires"):
-        mw.NetworkBlock(
+        mw.rf.NetworkBlock(
             name="missing_model",
             network=_network_data(),
             connections={"load": "feed"},
             fit=False,
         )
     with pytest.raises(ValueError, match="requires fit=False"):
-        mw.NetworkBlock(
+        mw.rf.NetworkBlock(
             name="ambiguous",
             network=_network_data(),
             connections={"load": "feed"},
@@ -105,7 +106,7 @@ def test_network_block_requires_explicit_prefit_contract() -> None:
 def test_network_compiler_builds_fixed_single_port_discrete_descriptor() -> None:
     scene = _scene(networks=(_block(),))
 
-    (compiled,) = scene.compile_networks(dt=1.0e-12, device="cpu")
+    (compiled,) = compile_networks(prepare_scene(scene, device="cpu"), dt=1.0e-12)
 
     assert compiled.name == "matching"
     assert compiled.port_order == ("load",)
@@ -119,13 +120,13 @@ def test_network_compiler_builds_fixed_single_port_discrete_descriptor() -> None
 def test_compiler_builds_fixed_multiport_discrete_descriptor() -> None:
     frequencies = torch.tensor([0.0, 1.0e9], dtype=torch.float64)
     scattering = torch.zeros((2, 2, 2), dtype=torch.complex128)
-    data = mw.NetworkData(
+    data = mw.rf.NetworkData(
         frequencies=frequencies,
         s=scattering,
         z0=50.0,
         port_names=("a", "b"),
     )
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=-2.0e9 * torch.eye(2, dtype=torch.float64),
         B=torch.zeros((2, 2), dtype=torch.float64),
         C=torch.zeros((2, 2), dtype=torch.float64),
@@ -133,7 +134,7 @@ def test_compiler_builds_fixed_multiport_discrete_descriptor() -> None:
         representation="Y",
         port_order=("a", "b"),
     )
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         "two_port",
         data,
         {"a": "p1", "b": "p2"},
@@ -142,7 +143,7 @@ def test_compiler_builds_fixed_multiport_discrete_descriptor() -> None:
     )
     scene = _scene(ports=(_port("p1"), _port("p2")), networks=(block,))
 
-    (compiled,) = scene.compile_networks(dt=1.0e-12, device="cpu")
+    (compiled,) = compile_networks(prepare_scene(scene, device="cpu"), dt=1.0e-12)
 
     assert compiled.port_order == ("a", "b")
     assert compiled.connection_names == ("p1", "p2")
@@ -160,7 +161,7 @@ def test_state_space_certificate_rejects_active_response_between_samples() -> No
         ],
         dtype=torch.complex128,
     )
-    active = mw.RationalModel(
+    active = mw.rf.rational.RationalModel(
         poles=poles,
         residues=torch.tensor([-1.0e6, -1.0e6], dtype=torch.complex128),
         direct=0.02,
@@ -171,13 +172,13 @@ def test_state_space_certificate_rejects_active_response_between_samples() -> No
     assert bool(torch.all(endpoint_response > 0.0))
     assert active.evaluate(torch.tensor([0.5e9], dtype=torch.float64))[0, 0, 0].real < 0.0
 
-    data = mw.NetworkData.from_y(
+    data = mw.rf.NetworkData.from_y(
         frequencies=endpoints,
         y=active.evaluate(endpoints),
         z0=50.0,
         port_names=("load",),
     )
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         "hidden_active_band",
         data,
         {"load": "feed"},
@@ -187,7 +188,7 @@ def test_state_space_certificate_rejects_active_response_between_samples() -> No
     scene = _scene(networks=(block,))
 
     with pytest.raises(ValueError, match="certified passivity"):
-        scene.compile_networks(dt=1.0e-12, device="cpu")
+        compile_networks(prepare_scene(scene, device="cpu"), dt=1.0e-12)
 
 
 def test_network_embedding_rejects_waveport_terminal_with_accurate_reason() -> None:
@@ -195,14 +196,14 @@ def test_network_embedding_rejects_waveport_terminal_with_accurate_reason() -> N
     # no scalar time-domain (V, I) terminal contract for a lumped state-space
     # network to couple to; the rejection must name that design gap, not read as
     # a transient bug.
-    waveport = mw.WavePort(
+    waveport = mw.rf.WavePort(
         name="wp",
         position=(-0.01, 0.0, 0.0),
         size=(0.0, 0.03, 0.03),
         direction="+",
         reference_plane=-0.01,
         modes=(
-            mw.WaveModeSpec(
+            mw.rf.WaveModeSpec(
                 family="tem",
                 voltage_path=((-0.01, -0.01, 0.0), (-0.01, 0.01, 0.0)),
                 current_contour=mw.Box(
@@ -211,7 +212,7 @@ def test_network_embedding_rejects_waveport_terminal_with_accurate_reason() -> N
             ),
         ),
     )
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="modal_load",
         network=_network_data(),
         connections={"load": "wp"},
@@ -223,7 +224,7 @@ def test_network_embedding_rejects_waveport_terminal_with_accurate_reason() -> N
 
 
 def test_zero_state_direct_network_discretizes_and_certifies_band() -> None:
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.zeros((0, 0), dtype=torch.float64),
         B=torch.zeros((0, 1), dtype=torch.float64),
         C=torch.zeros((1, 0), dtype=torch.float64),
@@ -244,4 +245,4 @@ def test_zero_state_direct_network_discretizes_and_certifies_band() -> None:
 
 def test_fdfd_rejects_scene_network_instead_of_ignoring_it() -> None:
     with pytest.raises(NotImplementedError, match="time-domain FDTD"):
-        mw.Simulation.fdfd(_scene(networks=(_block(),)), frequency=5.0e8)
+        mw.Simulation.fdfd(_scene(networks=(_block(),)), frequencies=5.0e8)

@@ -1033,7 +1033,9 @@ def _scaled_real_lstsq(
     if bool(torch.any(scales == 0.0)):
         raise RuntimeError("Rational fit produced an unconstrained coefficient column.")
     scaled = real_matrix / scales[None, :]
-    solution = torch.linalg.lstsq(scaled, real_target).solution / scales
+    # SVD driver on CPU: deterministic and rank-deficient robust; CUDA supports only 'gels'.
+    driver = "gelsd" if scaled.device.type == "cpu" else "gels"
+    solution = torch.linalg.lstsq(scaled, real_target, driver=driver).solution / scales
     condition = float(torch.linalg.cond(scaled).item())
     return solution, condition
 

@@ -15,15 +15,13 @@ Physics references (thin center-fed half-wave dipole):
 * E-plane power pattern ``~ sin^2(theta)`` (the canonical dipole doughnut);
 * directivity ``~ 1.64`` (linear) ``= 2.15 dBi``.
 
-The dipole is sized to ``L = lambda/2`` at ``design_frequency``. The physical
-half-wave length does NOT coincide with the FDTD delta-gap resonance: the wire
-feed carries a large positive (inductive) reactance offset, so the input
-*reactance* is feed-dominated and the electrical resonance (``X = 0``) sits above
-the physical half-wave frequency. The input *resistance* (radiation resistance)
-still sweeps through the thin-dipole ``73 Ohm`` class within the band, and the
-radiated pattern, directivity, and accepted-vs-radiated power balance reproduce
-the analytic dipole. This is documented rather than hidden (see the acceptance
-record); the reactance offset is a known thin-wire delta-gap feed characteristic.
+The dipole is sized to ``L = lambda/2`` at ``design_frequency``; its electrical
+resonance (``X = 0``) sits slightly below that frequency, as for any finite-radius
+dipole. The node-bound feed measures the terminal-node potential difference plus the
+Yee line integral across the one-cell feed chord (the same port model as a removed
+``gap``), so the input impedance converges under refinement. The gates stay on the
+radiation physics: pattern, directivity, accepted-vs-radiated power balance, and the
+input resistance sweeping through the thin-dipole ``73 Ohm`` class.
 
 The builder returns geometry, feed port, and NF2FF surface only. Excitation, run
 length, and spectral sampling are chosen by the caller (benchmark runner or test)
@@ -71,23 +69,20 @@ def analytic_radiation_resistance() -> float:
 
 
 def default_frequencies(design_frequency: float) -> tuple[float, ...]:
-    """Impedance/pattern sweep band centred a little above the physical resonance.
+    """Impedance/pattern sweep band around the design frequency.
 
     The band brackets the frequency where the radiation resistance crosses the
-    thin-dipole ``73 Ohm`` class in this FDTD model (above the physical half-wave
-    frequency because of the feed reactance offset).
+    thin-dipole ``73 Ohm`` class.
     """
 
     base = float(design_frequency)
     return tuple(base * scale for scale in (0.80, 0.90, 1.00, 1.07, 1.13, 1.20))
 
 
-def half_wave_dipole_scene(
-    *,
+def half_wave_dipole_scene(*,
     design_frequency: float = 3.0e9,
     frequencies: tuple[float, ...] | None = None,
     dx: float = 1.25e-3,
-    device: str = "cuda",
 ) -> mw.Scene:
     """Build a center-fed half-wave dipole with a wire-gap feed and NF2FF box."""
 
@@ -102,31 +97,31 @@ def half_wave_dipole_scene(
 
     negative_nodes = torch.linspace(-arm_half, -0.5 * gap, ARM_SEGMENTS + 1)
     positive_nodes = torch.linspace(0.5 * gap, arm_half, ARM_SEGMENTS + 1)
-    negative_arm = mw.ThinWire(
+    negative_arm = mw.rf.ThinWire(
         "negative_arm",
         tuple((0.0, 0.0, float(value)) for value in negative_nodes),
         radius,
-        mw.WireConductor.pec(),
+        mw.rf.WireConductor.pec(),
         snap="continuous",
     )
-    positive_arm = mw.ThinWire(
+    positive_arm = mw.rf.ThinWire(
         "positive_arm",
         tuple((0.0, 0.0, float(value)) for value in positive_nodes),
         radius,
-        mw.WireConductor.pec(),
+        mw.rf.WireConductor.pec(),
         snap="continuous",
     )
     feed = mw.LumpedPort(
         "feed",
-        wire_binding=mw.WirePortBinding.nodes(
-            negative=mw.WireNodeRef("negative_arm", ARM_SEGMENTS),
-            positive=mw.WireNodeRef("positive_arm", 0),
+        wire_binding=mw.rf.WirePortBinding.nodes(
+            negative=mw.rf.WireNodeRef("negative_arm", ARM_SEGMENTS),
+            positive=mw.rf.WireNodeRef("positive_arm", 0),
         ),
         reference_impedance=analytic_radiation_resistance(),
     )
 
     box_half = arm_half + BOX_MARGIN_CELLS * dx
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "radiation",
         position=(0.0, 0.0, 0.0),
         size=(2.0 * box_half, 2.0 * box_half, 2.0 * box_half),
@@ -141,5 +136,4 @@ def half_wave_dipole_scene(
         thin_wires=(negative_arm, positive_arm),
         ports=(feed,),
         monitors=(surface,),
-        device=device,
     )

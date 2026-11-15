@@ -9,7 +9,10 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.compiler.monitors import compile_fdtd_observers
-from witwin.maxwell.postprocess.diffraction import enumerate_diffraction_orders
+from witwin.maxwell.postprocess.diffraction import (
+    compute_diffraction_from_payload,
+    enumerate_diffraction_orders,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -18,7 +21,7 @@ from witwin.maxwell.postprocess.diffraction import enumerate_diffraction_orders
 
 
 def test_diffraction_monitor_geometry_and_spec():
-    monitor = mw.DiffractionMonitor(
+    monitor = mw.monitors.DiffractionMonitor(
         "orders",
         position=(0.0, 0.0, 0.55),
         size=(0.6, 0.8, 0.0),
@@ -40,11 +43,11 @@ def test_diffraction_monitor_geometry_and_spec():
 
 def test_diffraction_monitor_rejects_negative_orders():
     with pytest.raises(ValueError):
-        mw.DiffractionMonitor("orders", size=(0.6, 0.6, 0.0), orders=-1)
+        mw.monitors.DiffractionMonitor("orders", size=(0.6, 0.6, 0.0), orders=-1)
 
 
 def test_compiler_attaches_diffraction_metadata():
-    monitor = mw.DiffractionMonitor("orders", position=(0.0, 0.0, 0.55), size=(0.6, 0.6, 0.0), orders=2)
+    monitor = mw.monitors.DiffractionMonitor("orders", position=(0.0, 0.0, 0.55), size=(0.6, 0.6, 0.0), orders=2)
     scene = SimpleNamespace(monitors=[monitor])
     compiled = compile_fdtd_observers(scene)
 
@@ -55,6 +58,51 @@ def test_compiler_attaches_diffraction_metadata():
         assert record["diffraction_spec"]["periods"] == {"x": 0.6, "y": 0.6}
         assert record["axis"] == "z"
         assert record["position"] == pytest.approx(0.55)
+
+
+def _synthetic_order_payload(weights: torch.Tensor) -> dict[str, object]:
+    # Unit period, 0.5 m wavelength: all nine |m|, |n| <= 1 orders propagate.
+    # ``weights`` scales the specular and first-order components of Ex/Hy.
+    n = 8
+    x = torch.linspace(-0.5, 0.5, n, dtype=torch.float64)
+    grid_x, _ = torch.meshgrid(x, x, indexing="ij")
+    first = torch.exp(1j * 2.0 * math.pi * grid_x)
+    ex = (weights[0] + weights[1] * first + 0.3j * weights[1] * torch.conj(first)).to(torch.complex128)
+    return {
+        "axis": "z", "x": x, "y": x.clone(), "frequency": 6.0e8, "position": 0.4,
+        "monitor_type": "diffraction", "diffraction_spec": {"orders": 1},
+        "Ex": ex, "Hy": ex / 377.0,
+    }
+
+
+_UNIT_CELL_RESULT = SimpleNamespace(
+    solver=SimpleNamespace(scene=SimpleNamespace(domain_range=(-0.5, 0.5, -0.5, 0.5, -1.0, 1.0)),
+                           resolved_bloch_wavevector=(0.0, 0.0, 0.0)))
+
+
+def _order_observables(weights: torch.Tensor) -> torch.Tensor:
+    data = compute_diffraction_from_payload(_UNIT_CELL_RESULT, "d", _synthetic_order_payload(weights))
+    efficiencies = [record["efficiency"] for record in data["orders"] if record["propagating"]]
+    return torch.stack([data["total_power"], data["propagating_power"],
+                        *(record["power"] for record in data["orders"]), *efficiencies])
+
+
+def test_diffraction_powers_and_efficiencies_keep_autograd_graph():
+    weights = torch.tensor([1.0, 0.4], dtype=torch.float64, requires_grad=True)
+    data = compute_diffraction_from_payload(_UNIT_CELL_RESULT, "d", _synthetic_order_payload(weights))
+    assert data["num_propagating"] == 9
+    for value in (data["total_power"], data["propagating_power"],
+                  *(record["power"] for record in data["orders"]),
+                  *(record["efficiency"] for record in data["orders"])):
+        assert isinstance(value, torch.Tensor) and value.dtype == torch.float64
+        assert value.shape == () and value.requires_grad
+    assert torch.autograd.gradcheck(_order_observables, (weights,))
+
+
+def test_diffraction_unresolved_denominator_reports_no_efficiency():
+    weights = torch.zeros(2, dtype=torch.float64, requires_grad=True)
+    data = compute_diffraction_from_payload(_UNIT_CELL_RESULT, "d", _synthetic_order_payload(weights))
+    assert all(record["efficiency"] is None for record in data["orders"])
 
 
 def test_order_cutoff_matches_hand_computed_set():
@@ -115,54 +163,49 @@ def _grating_scene(*, with_grating: bool):
         bloch_wavevector="auto",
     )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.03),
-        boundary=boundary,
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=20.0),
-            injection=mw.TFSF.slab(axis="z", bounds=_TFSF_BOUNDS),
-            name="incident",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.03),
+                boundary=boundary,
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization=(1.0, 0.0, 0.0),
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=20.0),
+                injection=mw.TFSF.slab(axis="z", bounds=_TFSF_BOUNDS),
+                name="incident",
+            ),
+            ),
+            )
     if with_grating:
         # A dielectric bar filling half the x-period breaks x-translation
         # symmetry and feeds power into the +/-1 diffraction orders.
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.3, 0.6, 0.15)),
                 material=mw.Material(eps_r=4.0),
                 name="grating_bar",
-            )
-        )
-    scene.add_monitor(
-        mw.DiffractionMonitor(
+            ),
+        ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.DiffractionMonitor(
             "transmission_orders",
             position=(0.0, 0.0, _TRANSMISSION_Z),
             size=(_PERIOD, _PERIOD, 0.0),
             frequencies=[_FREQUENCY],
             normal_direction="+",
-        )
-    )
-    # Reflection plane sits below the lower TFSF boundary, i.e. in the
-    # scattered-field region, so it captures only the backward-diffracted power.
-    scene.add_monitor(
-        mw.DiffractionMonitor(
+        ),
+        mw.monitors.DiffractionMonitor(
             "reflection_orders",
             position=(0.0, 0.0, _REFLECTION_Z),
             size=(_PERIOD, _PERIOD, 0.0),
             frequencies=[_FREQUENCY],
             normal_direction="-",
-        )
-    )
-    # Independent flux primitives on the same two planes cross-validate the
-    # diffraction-order power against the established Yee-grid flux integrator.
-    scene.add_monitor(mw.FluxMonitor("transmission_flux", axis="z", position=_TRANSMISSION_Z, normal_direction="+"))
-    scene.add_monitor(mw.FluxMonitor("reflection_flux", axis="z", position=_REFLECTION_Z, normal_direction="-"))
+        ),
+        mw.FluxMonitor("transmission_flux", axis="z", position=_TRANSMISSION_Z, normal_direction="+"),
+        mw.FluxMonitor("reflection_flux", axis="z", position=_REFLECTION_Z, normal_direction="-"),
+    ))
     return scene
 
 
@@ -185,26 +228,29 @@ def _diffraction_metrics(with_grating: bool):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_FREQUENCY],
-        run_time=mw.TimeConfig.auto(transient_cycles=40, steady_cycles=20),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        absorber="cpml",
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(transient_cycles=40, steady_cycles=20),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            absorber="cpml",
+        ),
     ).run()
 
-    decomposition = result.monitor("transmission_orders")
-    reflection = result.monitor("reflection_orders")
+    decomposition = result.monitor("transmission_orders", freq_index=0)
+    reflection = result.monitor("reflection_orders", freq_index=0)
     payload = result.raw_monitor("transmission_orders")
     reference_flux = _reference_plane_flux(payload, period=_PERIOD)
 
-    order_power = {(record["m"], record["n"]): float(record["power"]) for record in decomposition["orders"]}
-    order_propagating = {(record["m"], record["n"]): bool(record["propagating"]) for record in decomposition["orders"]}
+    orders = tuple(zip(decomposition.attrs["m"], decomposition.attrs["n"]))
+    order_power = {order: float(power) for order, power in zip(orders, decomposition.values)}
+    order_propagating = dict(zip(orders, decomposition.attrs["propagating"]))
     metrics = {
         "reference_flux": reference_flux,
-        "sum_power": float(decomposition["total_power"]),
-        "propagating_power": float(decomposition["propagating_power"]),
-        "reflected_power": float(reflection["propagating_power"]),
+        "sum_power": float(decomposition.attrs["total_power"]),
+        "propagating_power": float(decomposition.attrs["propagating_power"]),
+        "reflected_power": float(reflection.attrs["propagating_power"]),
         # Independent Yee-grid flux integrator on the same two planes.
-        "flux_transmission": float(torch.as_tensor(result.monitor("transmission_flux")["flux"]).real),
-        "flux_reflection": float(torch.as_tensor(result.monitor("reflection_flux")["flux"]).real),
+        "flux_transmission": float(torch.as_tensor(result.monitor("transmission_flux", freq_index=0).values).real),
+        "flux_reflection": float(torch.as_tensor(result.monitor("reflection_flux", freq_index=0).values).real),
         "order_power": order_power,
         "order_propagating": order_propagating,
     }

@@ -82,7 +82,7 @@ Implemented:
 - Scene/compiler lowering to a stable, interval-certified passive admittance state-space descriptor connected to the existing sparse `LumpedPort` / resolved `TerminalPort` Yee geometry; unsupported `WavePort`, non-FDTD solvers, and out-of-fit-band result requests or excitation spectra fail before stepping. Phase 2 acceptance scoped this path to one port.
 - Fixed-shape, device-resident same-step feedback solving `(I + D_d Z_f) i = C_d x + D_d u`, followed by midpoint voltage correction and `x_next = A_d x + B_d v` without a one-step delay.
 - A post-source network update block with reusable hot-path buffers and independent CUDA Graph capture, inserted before dispersion, PEC/Mur, DFT, and port observation.
-- Tensor-native `EmbeddedNetworkData` diagnostics exposed through `Result.embedded_network(...)`, including network-oriented V/I, absorbed/generated frequency power, state norm, typed fit report, model identity, warnings, and runtime provenance.
+- Tensor-native `EmbeddedNetworkData` diagnostics exposed through `mw.rf.embedded_network(result, ...)`, including network-oriented V/I, absorbed/generated frequency power, state norm, typed fit report, model identity, warnings, and runtime provenance.
 - Explicit Phase 4 guards for trainable embedded-network coefficients, FDTD adjoint replay, and embedded-network Result persistence.
 
 Acceptance evidence:

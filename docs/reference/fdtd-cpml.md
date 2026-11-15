@@ -2,7 +2,7 @@
 
 ## Automatic absorber selection (2026-11-02, CPML 1+2)
 
-`Simulation.fdtd(..., absorber="auto")` is now the default. Preparation resolves
+`FDTDConfig(absorber="auto")` is now the default. Preparation resolves
 it once, before building boundary coefficients:
 
 | Fields and boundary topology | Resolved absorber |
@@ -38,14 +38,19 @@ Result metadata records the resolved choice as `absorber` and its explanation
 as `absorber_resolution_reason`. Selection is deterministic; there is no
 runtime fallback or automatic absorber replacement.
 
-## Growth guard (main single-device step loop)
+## Growth guard (single-device step loops)
 
 The guard applies to active `"cpml"` or `"stablepml"` with either real-field
 closed-transverse PML or complex fields with a nonzero resolved wavevector
 component on a Bloch axis. Zero-k complex scenes are outside the latter case.
-The opt-in core path refuses closed-transverse CPML with the blocker
-`closed-transverse CPML (passivity guard)`; its stepping loop has no guard.
-The distributed stepping loop and adjoint replay also have no guard. This is
+Real-field closed-transverse CPML and complex fixed-k cells run on the CUDA core path. Its K-step graph
+chunks (K = 32, 16 or 1) end at every multiple of the 32-step sampling interval
+while a guard state exists, and the guard samples after the replay with the same
+energy reduction as the per-step loop. Samples, windows, the trip step and the
+error message are therefore those of the per-step loop, bitwise; a trip raises
+`FDTDPassivityError` directly and never rebuilds the existing path. Complex
+fixed-k cells sample their real plus imaginary energy at the same chunk ends.
+The distributed stepping loop and adjoint replay have no guard. This is
 an empirical detector of sustained energy growth, **not a passive CPML closure**.
 Under user decision D2 (2026-11-06), real-field closed-transverse cells remain
 fail-closed with `FDTDPassivityError`. Complex fixed-k cells emit exactly one
@@ -449,7 +454,7 @@ Result metadata `passivity_guard` reports `active`, `inactive: ...` or
 The adjacent `passivity_guard_warning` field is `None` before a growth warning,
 then a structured record with `slope` (log energy per step), `stderr`, `window`
 (start/end steps of the fit) and `step` (the window end when first warned).
-Both fields are also in `Result.solver_stats`; solver attributes are
+Both fields are also in `Result.stats()`; solver attributes are
 `passivity_guard_status` and `passivity_guard_warning`. A skipped run has no growth
 detection and also emits a `RuntimeWarning` ("passivity guard skipped in a
 topology with known CPML growth: ...") so it is never silent.
@@ -554,6 +559,19 @@ observed envelope windows; this finite-window onset definition is separate
 from the guard's trip rule. These fixtures require GPU review; CPU tests certify the resolver
 and detector decisions, not numerical passivity or reflection accuracy.
 
+## `BoundarySpec.strength` (two readings)
+
+`BoundarySpec.strength` is read in two ways, selected by `FDTDConfig.absorber`. Both are kept
+unchanged in 0.7.0: a single meaning would change CPML numerics.
+
+| Absorber | Reading of `strength` |
+|---|---|
+| `"cpml"`, `"stablepml"`, `"absorber"`, FDFD stretched-coordinate PML | Multiplier of the reflection-calibrated peak conductivity (`_legacy_strength_scale`): a value in (0, 100] scales it; 0 and any value above 100, including the `BoundarySpec.pml(...)` default `1e6`, leave the nominal profile. Within (0, 100] the continuous-layer normal-incidence reflection becomes `R ** strength`. |
+| `"pml"` (simple quartic PML) | Absolute scale: the stored peak conductivity is `2 * strength / (dt * min(dx, dy, dz))`. |
+
+The CPML grading itself (`grading_order`, `kappa_max`, `alpha_max`, `reflection`, memory
+layout) is set through `FDTDConfig.cpml = CPMLConfig(...)`.
+
 ## CPML profiles
 
 
@@ -562,7 +580,7 @@ maximum electric alpha is `2*pi*epsilon_0*f_min`, where `f_min` is the lowest
 requested simulation frequency. Thus alpha/epsilon_0 is an angular-frequency
 relaxation rate on the simulated band scale. The magnetic alpha is scaled by
 mu_0/epsilon_0 so both field updates have the same physical shift. An explicit
-`cpml_config['alpha_max']` overrides this choice, including zero.
+`CPMLConfig(alpha_max=...)` overrides this choice, including zero.
 
 Sigma, kappa and alpha use the same physical layer depth, evaluated from the
 float64 node coordinates for E and actual Yee half-point coordinates for H on
@@ -605,7 +623,7 @@ at 120,000 steps, as recorded in the bound-mode note.
 
 ## Legacy `alpha_max = 0` is not passive for complex fixed-k runs (2026-11-01)
 
-The legacy unshifted profile (`cpml_config={"alpha_max": 0.0}`) remains an explicit
+The legacy unshifted profile (`cpml=CPMLConfig(alpha_max=0.0)`) remains an explicit
 opt-in. For complex fixed-k runs it is **not passive**, even without lumped
 elements. Measured one-step amplification radii `rho - 1` of the small loaded
 Bloch cell (`scripts/dev/fdtd/bloch_lumped_acceptance/one_step_spectrum.py --alpha 0`;
@@ -652,7 +670,7 @@ already admitted under fixed k.
 
 ## Changed defaults for complex fixed-k Bloch runs
 
-**Behaviour change (337cee2f, the Bloch A instability fix):** existing complex fixed-k Bloch runs with CPML change their prepared CPML coefficients and fields. They are not bit-identical to earlier trees; only real-field, k = 0 and non-Bloch paths are. Pin the legacy coefficients with an explicit `cpml_config={"alpha_max": 0.0}` (short runs only; see above). In fixed-k Bloch runs, beams, mode and custom-field sources and soft plane waves must be CW. TFSF-slab plane waves (complex fixed-k incident line), point and current sources may be pulsed.
+**Behaviour change (337cee2f, the Bloch A instability fix):** existing complex fixed-k Bloch runs with CPML change their prepared CPML coefficients and fields. They are not bit-identical to earlier trees; only real-field, k = 0 and non-Bloch paths are. Pin the legacy coefficients with an explicit `cpml=CPMLConfig(alpha_max=0.0)` (short runs only; see above). In fixed-k Bloch runs, beams, mode and custom-field sources and soft plane waves must be CW. TFSF-slab plane waves (complex fixed-k incident line), point and current sources may be pulsed.
 
 Compared with runs made before this change, a nonzero fixed-k Bloch run with CPML
 now differs in three automatic settings:
@@ -660,7 +678,7 @@ now differs in three automatic settings:
 - conductivity grading of order 2 instead of 3;
 - the angle-scaled nominal `reflection` above instead of `1e-6`.
 
-Each explicit `cpml_config` key overrides its own default. `f_min` is the minimum of
+Each `CPMLConfig` field set to a value (rather than `None`) overrides its own default. `f_min` is the minimum of
 all requested output frequencies: `Simulation` assigns the full requested list to
 the solver before CPML initialization, in both the single-device and the
 distributed paths.

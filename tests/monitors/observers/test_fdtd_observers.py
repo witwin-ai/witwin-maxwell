@@ -1,81 +1,79 @@
+from dataclasses import replace
 import numpy as np
 import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.fdtd import calculate_required_steps
+from witwin.maxwell.fdtd.solver import calculate_required_steps
 from witwin.maxwell.fdtd.coords import component_coords
 from witwin.maxwell.postprocess import NearFieldFarFieldTransformer, equivalent_surface_currents_from_monitor
 
 
 def _build_scene(*, bounds, spacing):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=bounds),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="box",
-            geometry=mw.Box(position=(0.0, 0.2, 0.0), size=(0.2, 0.2, 0.2)),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1e9, amplitude=100.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=bounds),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                structures=(
+            mw.Structure(
+                name="box",
+                geometry=mw.Box(position=(0.0, 0.2, 0.0), size=(0.2, 0.2, 0.2)),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1e9, amplitude=100.0),
+                name="src",
+            ),
+            ),
+            )
     return scene
 
 
 def _build_broadband_scene(*, bounds, spacing):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=bounds),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="box",
-            geometry=mw.Box(position=(0.0, 0.1, 0.0), size=(0.18, 0.18, 0.18)),
-            material=mw.Material(eps_r=3.5),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=100.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=bounds),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                structures=(
+            mw.Structure(
+                name="box",
+                geometry=mw.Box(position=(0.0, 0.1, 0.0), size=(0.18, 0.18, 0.18)),
+                material=mw.Material(eps_r=3.5),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=100.0),
+                name="src",
+            ),
+            ),
+            )
     return scene
 
 
 def _build_pulse_scene(*, source_time):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=source_time,
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=source_time,
+                name="src",
+            ),
+            ),
+            )
     return scene
 
 
@@ -87,9 +85,11 @@ def _fixed_runtime(scene, frequencies, *, steady_cycles=4, transient_cycles=15):
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=[min(frequencies)],
-        run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).prepare()
     fdtd = prepared.solver
     domain_size = _domain_size(scene)
@@ -185,9 +185,9 @@ def _interpolate_axis(field, coords, position, axis):
 
 
 def _plane_reference(full_result, scene, component, *, axis, position):
-    field = full_result.tensor(component).detach().cpu().numpy()
+    field = full_result.field(component).isel(f=0).values.detach().cpu().numpy()
     axis_index = {"x": 0, "y": 1, "z": 2}[axis]
-    normal_coords = component_coords(scene, component)[axis_index]
+    normal_coords = component_coords(scene, component, device="cuda")[axis_index]
     return _interpolate_axis(field, normal_coords, position, axis_index)
 
 
@@ -199,9 +199,11 @@ def test_fdtd_pulsed_sources_start_spectral_accumulation_immediately():
     pulsed_solver = mw.Simulation.fdtd(
         pulsed_scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=16),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=16),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).prepare().solver
 
     cw_scene = _build_pulse_scene(
@@ -210,9 +212,11 @@ def test_fdtd_pulsed_sources_start_spectral_accumulation_immediately():
     cw_solver = mw.Simulation.fdtd(
         cw_scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=16),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=16),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).prepare().solver
 
     assert pulsed_solver._compute_spectral_start_step(1e9) == 0
@@ -227,15 +231,20 @@ def test_fdtd_selective_observers_and_precomputed_coefficients():
         bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64)),
         spacing=0.08,
     )
-    scene.add_monitor(mw.PointMonitor("center_ez", (0.0, 0.0, 0.0), fields=("Ez",)))
-    scene.add_monitor(mw.PlaneMonitor("midplane_ez", axis="z", position=0.0, fields=("Ez",)))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PointMonitor("center_ez", (0.0, 0.0, 0.0), fields=("Ez",)),
+        mw.PlaneMonitor("midplane_ez", axis="z", position=0.0, fields=("Ez",)),
+    ))
 
     sim = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     )
     prepared = sim.prepare()
     fdtd = prepared.solver
@@ -262,15 +271,16 @@ def test_fdtd_selective_observers_and_precomputed_coefficients():
         transient_cycles=15,
         domain_size=domain_size,
     )
-    prepared.simulation.config.run_time = mw.TimeConfig(time_steps=steps)
+    prepared.simulation.config = replace(prepared.simulation.config, run_time=mw.TimeConfig(time_steps=steps))
     result = prepared.run()
-    observers = result.monitors
-    assert set(observers) == {"center_ez", "midplane_ez"}
-    assert torch.is_tensor(observers["center_ez"]["data"])
-    assert _to_cpu_numpy(observers["center_ez"]["data"]).shape == ()
-    assert observers["midplane_ez"]["data"].shape == fdtd.Ez[:, :, fdtd.Ez.shape[2] // 2].shape
-    assert torch.abs(observers["center_ez"]["data"]).item() > 0.0
-    assert torch.max(torch.abs(observers["midplane_ez"]["data"])).item() > 0.0
+    assert set(result.monitors) == {"center_ez", "midplane_ez"}
+    center = result.monitor("center_ez", freq_index=0).isel(component=0).values
+    midplane = result.monitor("midplane_ez", freq_index=0).isel(component=0).values
+    assert torch.is_tensor(center)
+    assert _to_cpu_numpy(center).shape == ()
+    assert midplane.shape == fdtd.Ez[:, :, fdtd.Ez.shape[2] // 2].shape
+    assert torch.abs(center).item() > 0.0
+    assert torch.max(torch.abs(midplane)).item() > 0.0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -279,31 +289,38 @@ def test_fdtd_observers_match_full_field_dft_slices():
         bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64)),
         spacing=0.08,
     )
-    scene.add_monitor(mw.PointMonitor("center_ez", (0.0, 0.0, 0.0), fields=("Ez",)))
-    scene.add_monitor(mw.PlaneMonitor("midplane_ez", axis="z", position=0.0, fields=("Ez",)))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PointMonitor("center_ez", (0.0, 0.0, 0.0), fields=("Ez",)),
+        mw.PlaneMonitor("midplane_ez", axis="z", position=0.0, fields=("Ez",)),
+    ))
 
     observer_result = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
     full_result = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).run()
 
-    point_observer = observer_result.monitor("center_ez")
-    plane_observer = observer_result.monitor("midplane_ez")
-    point_reference = full_result.tensor("Ez").detach().cpu().numpy()[point_observer["field_index"]]
+    point_observer = observer_result.raw_monitor("center_ez")
+    plane_observer = observer_result.monitor("midplane_ez", freq_index=0)
+    point_reference = full_result.field("Ez").isel(f=0).values.detach().cpu().numpy()[point_observer["field_index"]]
     plane_reference = _plane_reference(full_result, scene, "Ez", axis="z", position=0.0)
 
-    np.testing.assert_allclose(_to_cpu_numpy(point_observer["data"]), point_reference, rtol=1e-2, atol=1e-3)
-    np.testing.assert_allclose(_to_cpu_numpy(plane_observer["data"]), plane_reference, rtol=1e-2, atol=1e-3)
+    np.testing.assert_allclose(_to_cpu_numpy(point_observer["Ez"]), point_reference, rtol=1e-2, atol=1e-3)
+    np.testing.assert_allclose(_to_cpu_numpy(plane_observer.sel(component="Ez").values), plane_reference, rtol=1e-2, atol=1e-3)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -312,31 +329,36 @@ def test_fdtd_plane_monitor_supports_multi_component_eh_and_postprocess_bridge()
         bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64)),
         spacing=0.08,
     )
-    scene.add_monitor(
+    scene = scene.updated(monitors=(
+        *scene.monitors,
         mw.PlaneMonitor(
             "nf_box",
             axis="z",
             position=0.0,
             fields=("Ex", "Ey", "Hx", "Hy"),
-        )
-    )
+        ),
+    ))
 
     observer_result = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
     full_result = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).run()
 
-    monitor = observer_result.monitor("nf_box")
+    monitor = observer_result.raw_monitor("nf_box")
     prepared_scene = observer_result.prepared_scene
     assert monitor["fields"] == ("Ex", "Ey", "Hx", "Hy")
     assert set(monitor["components"]) == {"Ex", "Ey", "Hx", "Hy"}
@@ -377,31 +399,36 @@ def test_fdtd_plane_monitor_aligns_normal_electric_component_to_in_plane_centers
         bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64)),
         spacing=0.08,
     )
-    scene.add_monitor(
+    scene = scene.updated(monitors=(
+        *scene.monitors,
         mw.PlaneMonitor(
             "field_xy",
             axis="z",
             position=0.0,
             fields=("Ex", "Ey", "Ez"),
-        )
-    )
+        ),
+    ))
 
     observer_result = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
     full_result = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).run()
 
-    monitor = observer_result.monitor("field_xy")
+    monitor = observer_result.monitor("field_xy", freq_index=0)
     prepared_scene = observer_result.prepared_scene
     ex_reference = _plane_reference(full_result, scene, "Ex", axis="z", position=0.0)
     ey_reference = _plane_reference(full_result, scene, "Ey", axis="z", position=0.0)
@@ -415,12 +442,12 @@ def test_fdtd_plane_monitor_aligns_normal_electric_component_to_in_plane_centers
         + ez_reference[1:, 1:]
     )
 
-    assert monitor["Ex"].shape == (prepared_scene.Nx - 1, prepared_scene.Ny - 1)
-    assert monitor["Ey"].shape == (prepared_scene.Nx - 1, prepared_scene.Ny - 1)
-    assert monitor["Ez"].shape == (prepared_scene.Nx - 1, prepared_scene.Ny - 1)
-    np.testing.assert_allclose(_to_cpu_numpy(monitor["Ex"]), ex_reference, rtol=1e-2, atol=1e-3)
-    np.testing.assert_allclose(_to_cpu_numpy(monitor["Ey"]), ey_reference, rtol=1e-2, atol=1e-3)
-    np.testing.assert_allclose(_to_cpu_numpy(monitor["Ez"]), ez_reference, rtol=1e-2, atol=1e-3)
+    assert monitor.sel(component="Ex").values.shape == (prepared_scene.Nx - 1, prepared_scene.Ny - 1)
+    assert monitor.sel(component="Ey").values.shape == (prepared_scene.Nx - 1, prepared_scene.Ny - 1)
+    assert monitor.sel(component="Ez").values.shape == (prepared_scene.Nx - 1, prepared_scene.Ny - 1)
+    np.testing.assert_allclose(_to_cpu_numpy(monitor.sel(component="Ex").values), ex_reference, rtol=1e-2, atol=1e-3)
+    np.testing.assert_allclose(_to_cpu_numpy(monitor.sel(component="Ey").values), ey_reference, rtol=1e-2, atol=1e-3)
+    np.testing.assert_allclose(_to_cpu_numpy(monitor.sel(component="Ez").values), ez_reference, rtol=1e-2, atol=1e-3)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -433,9 +460,11 @@ def test_fdtd_odd_grid_dimensions_cover_tail_cells():
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).run()
     prepared_scene = result.prepared_scene
 
@@ -444,10 +473,10 @@ def test_fdtd_odd_grid_dimensions_cover_tail_cells():
     assert prepared_scene.Nx == 22
     assert prepared_scene.Ny == 20
     assert prepared_scene.Nz == 18
-    assert result.tensor("Ex").shape == (prepared_scene.Nx - 1, prepared_scene.Ny, prepared_scene.Nz)
-    assert result.tensor("Ey").shape == (prepared_scene.Nx, prepared_scene.Ny - 1, prepared_scene.Nz)
-    assert result.tensor("Ez").shape == (prepared_scene.Nx, prepared_scene.Ny, prepared_scene.Nz - 1)
-    assert torch.max(torch.abs(result.tensor("Ez"))).item() > 0.0
+    assert result.field("Ex").isel(f=0).values.shape == (prepared_scene.Nx - 1, prepared_scene.Ny, prepared_scene.Nz)
+    assert result.field("Ey").isel(f=0).values.shape == (prepared_scene.Nx, prepared_scene.Ny - 1, prepared_scene.Nz)
+    assert result.field("Ez").isel(f=0).values.shape == (prepared_scene.Nx, prepared_scene.Ny, prepared_scene.Nz - 1)
+    assert torch.max(torch.abs(result.field("Ez").isel(f=0).values)).item() > 0.0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -462,34 +491,38 @@ def test_fdtd_multi_frequency_full_field_matches_single_frequency_runs():
     multi_result = mw.Simulation.fdtd(
         scene,
         frequencies=frequencies,
-        run_time=runtime,
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=runtime,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).run()
 
     for frequency in frequencies:
         single_result = mw.Simulation.fdtd(
             scene,
             frequencies=[frequency],
-            run_time=runtime,
-            spectral_sampler=mw.SpectralSampler(window="hanning"),
-            full_field_dft=True,
+            config=mw.FDTDConfig(
+                run_time=runtime,
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                full_field_dft=True,
+            ),
         ).run()
         np.testing.assert_allclose(
-            multi_result.tensor("Ex", frequency=frequency).detach().cpu().numpy(),
-            single_result.tensor("Ex").detach().cpu().numpy(),
+            multi_result.field("Ex", frequency=frequency).values.detach().cpu().numpy(),
+            single_result.field("Ex").isel(f=0).values.detach().cpu().numpy(),
             rtol=1e-2,
             atol=1e-3,
         )
         np.testing.assert_allclose(
-            multi_result.tensor("Ey", frequency=frequency).detach().cpu().numpy(),
-            single_result.tensor("Ey").detach().cpu().numpy(),
+            multi_result.field("Ey", frequency=frequency).values.detach().cpu().numpy(),
+            single_result.field("Ey").isel(f=0).values.detach().cpu().numpy(),
             rtol=1e-2,
             atol=1e-3,
         )
         np.testing.assert_allclose(
-            multi_result.tensor("Ez", frequency=frequency).detach().cpu().numpy(),
-            single_result.tensor("Ez").detach().cpu().numpy(),
+            multi_result.field("Ez", frequency=frequency).values.detach().cpu().numpy(),
+            single_result.field("Ez").isel(f=0).values.detach().cpu().numpy(),
             rtol=1e-2,
             atol=1e-3,
         )
@@ -503,8 +536,9 @@ def test_fdtd_multi_frequency_flux_monitor_matches_single_frequency_runs():
         bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64)),
         spacing=0.08,
     )
-    scene.add_monitor(mw.FluxMonitor("port_flux", axis="z", position=position, frequencies=frequencies))
-    scene.add_monitor(
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.FluxMonitor("port_flux", axis="z", position=position, frequencies=frequencies),
         mw.PlaneMonitor(
             "port_plane",
             axis="z",
@@ -512,25 +546,27 @@ def test_fdtd_multi_frequency_flux_monitor_matches_single_frequency_runs():
             fields=("Ex", "Ey", "Hx", "Hy"),
             frequencies=frequencies,
             compute_flux=True,
-        )
-    )
+        ),
+    ))
     runtime = _fixed_runtime(scene, frequencies)
 
     multi_result = mw.Simulation.fdtd(
         scene,
         frequencies=frequencies,
-        run_time=runtime,
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=runtime,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     flux_monitor = multi_result.monitor("port_flux")
     plane_monitor = multi_result.monitor("port_plane")
-    assert flux_monitor["flux"].shape == (2,)
-    np.testing.assert_allclose(_to_cpu_numpy(flux_monitor["flux"]), _to_cpu_numpy(plane_monitor["flux"]), rtol=1e-4, atol=1e-5)
+    assert flux_monitor.values.shape == (2,)
+    np.testing.assert_allclose(_to_cpu_numpy(flux_monitor.values), _to_cpu_numpy(plane_monitor.values), rtol=1e-4, atol=1e-5)
 
     for frequency in frequencies:
-        selected_plane = multi_result.monitor("port_plane", frequency=frequency)
+        selected_plane = multi_result.raw_monitor("port_plane", frequency=frequency)
         manual_flux = _manual_flux(selected_plane)
         np.testing.assert_allclose(_to_cpu_numpy(selected_plane["flux"]), manual_flux, rtol=1e-5, atol=1e-6)
 
@@ -538,17 +574,22 @@ def test_fdtd_multi_frequency_flux_monitor_matches_single_frequency_runs():
             bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64)),
             spacing=0.08,
         )
-        single_scene.add_monitor(mw.FluxMonitor("port_flux", axis="z", position=position, frequencies=[frequency]))
+        single_scene = single_scene.updated(monitors=(
+            *single_scene.monitors,
+            mw.FluxMonitor("port_flux", axis="z", position=position, frequencies=[frequency]),
+        ))
         single_result = mw.Simulation.fdtd(
             single_scene,
             frequencies=[frequency],
-            run_time=runtime,
-            spectral_sampler=mw.SpectralSampler(window="hanning"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=runtime,
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                full_field_dft=False,
+            ),
         ).run()
         np.testing.assert_allclose(
-            _to_cpu_numpy(multi_result.monitor("port_flux", frequency=frequency)["flux"]),
-            _to_cpu_numpy(single_result.monitor("port_flux")["flux"]),
+            _to_cpu_numpy(multi_result.monitor("port_flux", frequency=frequency).values),
+            _to_cpu_numpy(single_result.monitor("port_flux", freq_index=0).values),
             rtol=1e-2,
             atol=1e-3,
         )

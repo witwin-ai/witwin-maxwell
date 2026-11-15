@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from witwin.maxwell.fdtd.cuda import backend
+from witwin.maxwell.fdtd.excitation.gather import build_source_gather
 from tests.fdtd.cuda import torch_reference
 
 
@@ -595,6 +596,11 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
     sample_index_starts = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
     batched_indices = torch.tensor([0, 3, 1, 4], device="cuda", dtype=torch.int32)
     batched_positions = torch.tensor([0.0, 0.4, 1.1, 2.0, 0.3, 1.7], device="cuda", dtype=torch.float32)
+    # Flat per-coefficient routing for the two terms above, as the TFSF packer prepares it.
+    field_codes_per_coeff = torch.tensor([0, 0, 0, 0, 2, 2], device="cuda", dtype=torch.int32)
+    field_offsets = torch.tensor([4, 5, 8, 9, 33, 49], device="cuda", dtype=torch.int32)
+    sample_indices_per_coeff = torch.tensor([0, 0, 3, 3, 1, 4], device="cuda", dtype=torch.int32)
+    source_gather = build_source_gather(field_offsets, field_codes_per_coeff)
 
     def launch_all(fields, module):
         module._add_scaled_slice_source_patch(
@@ -643,6 +649,10 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
             sampleAxisCodes=sample_axis_codes,
             sampleIndexStarts=sample_index_starts,
             sampleIndices=batched_indices,
+            fieldCodesPerCoeff=field_codes_per_coeff,
+            fieldOffsets=field_offsets,
+            sampleIndicesPerCoeff=sample_indices_per_coeff,
+            sourceGather=source_gather,
         )
         module._add_batched_interpolated_source_patches(
             fieldX=fields[0],
@@ -655,8 +665,11 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
             termShapes=term_shapes,
             termOffsets=term_offsets,
             fieldCodes=field_codes,
+            fieldCodesPerCoeff=field_codes_per_coeff,
+            fieldOffsets=field_offsets,
             origin=0.0,
             ds=0.5,
+            sourceGather=source_gather,
         )
 
     launch_all(expected, torch_reference)

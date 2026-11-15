@@ -14,11 +14,11 @@ def test_sparse_absolute_updates_match_dense_and_own_inputs():
         trial=r.trial_updates(indices,delta=delta,pec=pec)
         dense=torch.zeros_like(r._u0); dense[indices]=delta
         mask=torch.zeros_like(dense,dtype=torch.bool); mask[indices]=pec
-        expected=r.run(delta=dense,pec=mask).raw_output['projections']
+        expected=r.run(delta=dense,pec=mask)._raw_output['projections']
         delta.zero_(); pec.zero_(); indices.zero_()
         torch.testing.assert_close(trial.projections,expected,rtol=1e-8,atol=1e-8)
         result=r.accept(trial)
-        torch.testing.assert_close(result.raw_output['projections'],expected,rtol=1e-8,atol=1e-8)
+        torch.testing.assert_close(result._raw_output['projections'],expected,rtol=1e-8,atol=1e-8)
         with pytest.raises(ValueError,match='stale'):
             r.accept(trial)
         with pytest.raises(ValueError,match='unique'):
@@ -86,7 +86,7 @@ def test_long_mixed_sequence_and_zero_forcing_rebuild_bound():
                 r._accept(trial)
                 delta,pec=new_delta,new_pec
             if i%23==0:
-                expected=r.run(delta=new_delta,pec=new_pec).raw_output['projections']
+                expected=r.run(delta=new_delta,pec=new_pec)._raw_output['projections']
                 torch.testing.assert_close(trial.projections,expected,rtol=2e-8,atol=1e-8)
         assert r._rebuild_count>=1
         reset=r.trial(delta=torch.zeros_like(delta),pec=torch.zeros_like(pec))
@@ -154,19 +154,29 @@ def test_fused_trial_accepts_strided_material_and_pec_views():
         delta[0]=3+2j;delta[3]=4;pec[2]=True
         assert not delta.is_contiguous() and not pec.is_contiguous()
         actual=r.trial(delta=delta,pec=pec).projections
-        expected=r.run(delta=delta,pec=pec).raw_output['projections']
+        expected=r.run(delta=delta,pec=pec)._raw_output['projections']
         torch.testing.assert_close(actual,expected,rtol=1e-8,atol=1e-8)
 
 
 def test_auto_grid_rechecks_geometry_dependent_resolved_coordinates():
     import witwin.maxwell as mw
     with setup_response() as base:
-        scene=base.simulation.scene.clone();config=base.config
-    scene.grid=mw.GridSpec.auto(wavelength=.3,min_steps_per_wavelength=6)
-    with mw.Simulation.fdfd(scene,frequency=1e9,solver=mw.GMRES(solver_type='direct',precision='double'),local_response=config).prepare() as r:
+        scene=base.simulation.scene;config=base.config
+    scene = scene.updated(grid=mw.GridSpec.auto(wavelength=.3,min_steps_per_wavelength=6))
+
+    # A Scene is immutable, so only a SceneModule can change the geometry under a prepared response.
+    class Design(mw.SceneModule):
+        def __init__(self):
+            super().__init__()
+            self.extra = ()
+        def to_scene(self):
+            return scene.updated(structures=(*scene.structures, *self.extra))
+
+    design = Design()
+    with mw.Simulation.fdfd(design,frequencies=1e9,config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type='direct',precision='double'),local_response=config)).prepare() as r:
         zero=torch.zeros_like(r._u0)
         r.trial(delta=zero)
-        scene.add_structure(mw.Structure(name='mesh-change',geometry=mw.Box(size=(.04,)*3),material=mw.Material(eps_r=2.)))
+        design.extra = (mw.Structure(name='mesh-change',geometry=mw.Box(size=(.04,)*3),material=mw.Material(eps_r=2.)),)
         with pytest.raises(ValueError,match='Background'):
             r.trial(delta=zero)
 

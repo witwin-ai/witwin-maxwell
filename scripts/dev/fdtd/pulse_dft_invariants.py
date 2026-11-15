@@ -30,16 +30,21 @@ def scene_case(kind):
     spec.loader.exec_module(builder)
     scene, frequencies, excitations = builder.build_scene("dipole" if kind in ("wire", "cw") else "vacuum", 24, 3)
     if kind == "cw":
-        excitations = (mw.PortExcitation("feed", source_time=mw.CW(frequency=builder.FC)),)
+        excitations = (mw.rf.PortExcitation("feed", source_time=mw.CW(frequency=builder.FC)),)
     if kind == "tfsf":
-        scene.sources.clear()
-        scene.add_source(mw.PlaneWave(
-            direction=(1., 0., 0.), polarization=(0., 0., 1.),
-            source_time=mw.GaussianPulse(frequency=builder.FC, fwidth=0.8 * builder.FC),
-            injection=mw.TFSF(bounds=((-0.065, 0.065),) * 3),
-        ))
-        scene.add_structure(mw.Structure(
-            mw.Sphere(position=(0., 0., 0.), radius=0.02), mw.Material(eps_r=3.),
+        scene = scene.updated(sources=())
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PlaneWave(
+                direction=(1., 0., 0.), polarization=(0., 0., 1.),
+                source_time=mw.GaussianPulse(frequency=builder.FC, fwidth=0.8 * builder.FC),
+                injection=mw.TFSF(bounds=((-0.065, 0.065),) * 3),
+            ),
+        ), structures=(
+            *scene.structures,
+            mw.Structure(
+                mw.Sphere(position=(0., 0., 0.), radius=0.02), mw.Material(eps_r=3.),
+            ),
         ))
     return scene, frequencies, excitations
 
@@ -54,8 +59,10 @@ def probe(output):
             scene, frequencies, excitations = scene_case(kind)
             prepared = mw.Simulation.fdtd(
                 scene, frequencies=frequencies, excitations=excitations,
-                run_time=mw.TimeConfig(time_steps=1200), shutoff=0., full_field_dft=True,
-                spectral_sampler=mw.SpectralSampler(normalize_source=normalized, window="none"),
+                config=mw.FDTDConfig(
+                    run_time=mw.TimeConfig(time_steps=1200), shutoff=0., full_field_dft=True,
+                    spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=normalized, window="none"),
+                ),
             ).prepare()
             result = prepared.run()
             row = {}
@@ -63,10 +70,10 @@ def probe(output):
             def save(name, value):
                 row[name] = torch.as_tensor(value).detach().cpu().clone()
 
-            point = torch.as_tensor(result.monitor("point")["Ez"])
-            plane = torch.as_tensor(result.monitor("plane")["Ez"]).reshape(3, -1)
-            flux = torch.as_tensor(result.monitor("flux")["flux"])
-            closed = torch.as_tensor(result.monitor("radiation")["flux"])
+            point = torch.as_tensor(result.raw_monitor("point")["Ez"])
+            plane = torch.as_tensor(result.raw_monitor("plane")["Ez"]).reshape(3, -1)
+            flux = torch.as_tensor(result.raw_monitor("flux")["flux"])
+            closed = torch.as_tensor(result.raw_monitor("radiation")["flux"])
             save("point", point)
             save("plane", plane)
             save("flux", flux)
@@ -78,7 +85,7 @@ def probe(output):
                 save("final/" + component, getattr(prepared.solver, component))
             save("ratio/point_plane", point / torch.linalg.vector_norm(plane, dim=1))
             save("ratio/flux_closed", flux / closed)
-            projection = FieldProjector.from_monitor(result, "radiation", device=scene.device).angles(
+            projection = FieldProjector.from_monitor(result, "radiation", device=prepared.solver.scene.device).angles(
                 np.linspace(0., math.pi, 9), np.linspace(0., 2 * math.pi, 17),
             )
             save("far_E", projection.E)

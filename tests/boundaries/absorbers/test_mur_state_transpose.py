@@ -16,8 +16,8 @@ def _solver(complex_fields):
     boundary = (mw.BoundarySpec.faces(default="mur", x="bloch", bloch_wavevector=(0.7, 0., 0.))
                 if complex_fields else mw.BoundarySpec.mur())
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.2, 0.2),) * 3),
-        grid=mw.GridSpec.uniform(0.1), boundary=boundary, device="cuda")
-    return mw.Simulation.fdtd(scene, frequency=1e9).prepare().solver
+        grid=mw.GridSpec.uniform(0.1), boundary=boundary)
+    return mw.Simulation.fdtd(scene, frequencies=1e9).prepare().solver
 
 
 @pytest.mark.parametrize("complex_fields", [False, True])

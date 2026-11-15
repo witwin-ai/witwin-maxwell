@@ -12,6 +12,9 @@ import time
 import numpy as np
 import torch
 
+from .errors import UnsupportedFeatureError
+from .compiler.materials import compile_materials
+
 
 def _identity(value):
     """Exact content identity; only small geometry/configuration inputs cross host."""
@@ -56,7 +59,7 @@ def _clone_tree(value, memo=None):
     if is_dataclass(value):
         return replace(value, **{field.name: _clone_tree(getattr(value, field.name), memo)
                                  for field in fields(value) if field.init})
-    if value is None or type(value) in (bool, int, float, complex, str):
+    if value is None or isinstance(value, Enum) or type(value) in (bool, int, float, complex, str):
         return value
     raise TypeError(f"Unsupported compiled material entry: {type(value).__name__}")
 
@@ -82,7 +85,8 @@ def _digest(value):
 
 
 def _scene_key(scene, frequency, *, parts=False):
-    """Content key; ``parts=True`` adds the non-structure frame digest and the
+    """Content key of a prepared scene: exact digests of the geometry and material inputs, so a content-equal
+    scene hits and an in-place tensor change misses. ``parts=True`` adds the non-structure frame digest and the
     per-structure digests used to align local recompiles."""
     from witwin.core import Box, Mesh, Structure
     from .media import Material
@@ -93,23 +97,27 @@ def _scene_key(scene, frequency, *, parts=False):
         raise ValueError("FDTDMaterialCache requires a CUDA scene")
     for name in ("material_regions", "thin_wires", "networks", "lumped_elements",
                  "circuits", "electrostatic_terminals", "charge_densities"):
-        if getattr(scene, name, ()):
-            raise NotImplementedError(f"FDTDMaterialCache does not support scene.{name}")
+        if getattr(scene.scene, name, ()):
+            raise UnsupportedFeatureError(f"FDTDMaterialCache does not support scene.{name}",
+                                          feature="guard:ef8af448", method="fdtd")
     if getattr(scene, "_material_model_override", None) is not None:
         raise ValueError("Cannot cache a caller-supplied material model override")
     structures = []
-    for structure in scene.structures:
+    for structure in scene.scene.structures:
         if (type(structure) is not Structure or type(structure.geometry) not in (Mesh, Box, PlanarPEC)
                 or type(structure.material) not in (Material, CopperFoil)):
-            raise NotImplementedError("FDTDMaterialCache supports static Mesh/Box/PlanarPEC with Material or Box CopperFoil")
+            raise UnsupportedFeatureError("FDTDMaterialCache supports static Mesh/Box/PlanarPEC with Material or Box CopperFoil",
+                                          feature="material.copper_foil", method="fdtd")
         material, geometry = structure.material, structure.geometry
         if type(material) is CopperFoil and type(geometry) is not Box:
-            raise NotImplementedError("Cached CopperFoil support requires planar Box geometry")
+            raise UnsupportedFeatureError("Cached CopperFoil support requires planar Box geometry",
+                                          feature="material.copper_foil", method="fdtd")
         for name in ("epsilon_tensor", "mu_tensor", "sigma_e_tensor", "orientation",
                      "kerr_chi3", "nonlinearity", "modulation", "breakdown", "mass_density"):
             value = getattr(material, name)
             if value is not None and value is not False and not (isinstance(value, tuple) and not value):
-                raise NotImplementedError(f"FDTDMaterialCache does not support material.{name}")
+                raise UnsupportedFeatureError(f"FDTDMaterialCache does not support material.{name}",
+                                              feature="guard:3638fe31", method="fdtd")
         if any(isinstance(value, torch.Tensor) and value.requires_grad for value in vars(geometry).values()):
             raise ValueError("FDTDMaterialCache does not support trainable geometry")
         # A cache hit must not bypass the core SDF's stale-topology guard.
@@ -144,8 +152,8 @@ def _scene_key(scene, frequency, *, parts=False):
     # Empty scenes have no geometry tensor whose identity could disambiguate it.
     frame = {"version": 2, "device": str(scene.x.device), "frequency": frequency,
              "torch_default_dtype": str(torch.get_default_dtype()),
-             "domain": scene.domain, "boundary": scene.boundary, "subpixel": scene.subpixel,
-             "symmetry": scene.symmetry, "nodes": [scene.x_nodes64, scene.y_nodes64, scene.z_nodes64]}
+             "domain": scene.scene.domain, "boundary": scene.scene.boundary, "subpixel": scene.scene.subpixel,
+             "symmetry": scene.scene.symmetry, "nodes": [scene.x_nodes64, scene.y_nodes64, scene.z_nodes64]}
     payload = {**frame, "structures": structures}
     key = _digest(payload)
     return (key, _digest(frame), tuple(_digest(structure) for structure in structures)) if parts else key
@@ -171,7 +179,7 @@ def _unchanged_structures(base, current):
 class FDTDMaterialCache:
     """Opt-in static material compilation cache shared by source solves.
 
-    Pass one instance to ``Simulation.fdtd(..., material_cache=cache)``. Inputs
+    Pass one instance to ``FDTDConfig(material_cache=cache)``. Inputs
     are content-keyed; sources/monitors and dt do not affect the cached static
     material model. Frequency is conservatively part of the key. Every solver
     gets owned copies, never shared evolving or writable cached state.
@@ -250,7 +258,7 @@ class FDTDMaterialCache:
             else:
                 self._misses += 1
                 local = self._local_model(scene, frame, structures)
-                model = scene.compile_materials() if local is None else local
+                model = compile_materials(scene) if local is None else local
                 size = _tree_bytes(model)
                 outcome = "miss" if local is None else "local"
                 if local is not None:
@@ -276,3 +284,18 @@ class FDTDMaterialCache:
             scene._material_model_override = model
             return {"outcome": outcome, "key": key, "key_seconds": key_seconds,
                     "bind_seconds": time.perf_counter() - started, **self.stats}
+
+
+def refuse_column_material_cache(config, *, runner):
+    """Refuse a configured cache on a runner whose columns are separate simulations.
+
+    The wave-port, terminal wave-port and modal sweeps (and a direct wave-port
+    excitation) build one ``Simulation`` per column scene and frequency; those
+    columns compile their own materials and never bind the cache.
+    """
+    if config.material_cache is not None:
+        raise UnsupportedFeatureError(
+            f"{runner} runs each column as its own simulation and does not apply FDTDMaterialCache.",
+            feature="guard:96a41650", method="fdtd",
+            alternative="leave FDTDConfig.material_cache unset for this run",
+        )

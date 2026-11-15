@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 import math
 import torch
 from .kernels import FREE_SPACE
+from ..errors import ConvergenceError
+from ..errors import UnsupportedFeatureError
 
 
 @dataclass(frozen=True, eq=False)
@@ -28,7 +30,8 @@ class LatticeSpec:
                 or not bool(torch.isfinite(a).all() and torch.isfinite(b).all())):
             raise ValueError('Lattice requires finite matching real CUDA [D,3] vectors and [3] Bloch vector')
         if a.requires_grad or b.requires_grad:
-            raise NotImplementedError('Trainable lattice/Bloch compilation is not implemented')
+            raise UnsupportedFeatureError('Trainable lattice/Bloch compilation is not implemented',
+                                          feature="boundary.bloch", method="mom")
         singular = torch.linalg.svdvals(a)
         if bool(singular[-1] <= 128*torch.finfo(a.dtype).eps*singular[0]):
             raise ValueError('Lattice vectors must be linearly independent and numerically resolved')
@@ -145,7 +148,7 @@ class LossyImageReference:
                 'support':'strictly_positive_absorption_reference_only'}
 
 
-class PeriodicConvergenceError(RuntimeError):
+class PeriodicConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         self.receipt = receipt
         super().__init__('Periodic Ewald estimate failed: '+receipt['failure_reason'])

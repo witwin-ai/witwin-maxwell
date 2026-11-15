@@ -3,6 +3,7 @@
 This same file is intended to run unchanged on baseline and candidate sources.
 It contains no mapped-adjoint override or private capability hook.
 """
+from dataclasses import replace
 import math
 import pytest
 import torch
@@ -18,8 +19,7 @@ class CartesianLossDesign(mw.SceneModule):
 
     def to_scene(self):
         return mw.Scene(domain=mw.Domain(bounds=((- .03,.03),)*3),grid=mw.GridSpec.uniform(.005),
-            boundary=mw.BoundarySpec.pml(num_layers=4),device='cuda',
-            structures=(mw.Structure(name='substrate',geometry=mw.Box(
+            boundary=mw.BoundarySpec.pml(num_layers=4),structures=(mw.Structure(name='substrate',geometry=mw.Box(
                 position=torch.tensor((0.,.005,0.),dtype=torch.float64),size=torch.tensor((.04,.02,.04),dtype=torch.float64)),
                 material=mw.Material(eps_r=2.,sigma_e=self.log_sigma.exp())),),
             ports=(mw.LumpedPort('feed',positive=(-.015,-.005,.005),negative=(-.015,-.005,-.005),
@@ -27,19 +27,18 @@ class CartesianLossDesign(mw.SceneModule):
                     position=torch.tensor((-.015,-.005,-.0025),dtype=torch.float64),size=torch.tensor((.015,.015,0.),dtype=torch.float64)),
                 voltage_aperture=mw.Box(position=torch.tensor((-.015,-.005,0.),dtype=torch.float64),
                     size=torch.tensor((.01,.01,.01),dtype=torch.float64))),),
-            subpixel_samples=mw.SubpixelSpec(samples=(2,4,2),averaging='arithmetic'),
-            monitors=(mw.PowerLossMonitor('bulk',position=(0.,.005,0.),size=(.035,.025,.035)),))
+            subpixel=mw.SubpixelSpec(samples=(2,4,2),averaging='arithmetic'),
+            monitors=(mw.monitors.PowerLossMonitor('bulk',position=(0.,.005,0.),size=(.035,.025,.035)),))
 
     def simulation(self,*,graph=False,stride=7):
-        simulation=mw.Simulation.fdtd(self,frequency=3e9,full_field_dft=True,cuda_graph=graph,
-            excitations=mw.PortExcitation('feed',source_time=mw.CW(3e9,phase=.37)),
+        simulation=mw.Simulation.fdtd(self,frequencies=3e9,excitations=mw.rf.PortExcitation('feed',source_time=mw.CW(3e9,phase=.37)), config=mw.FDTDConfig(full_field_dft=True,cuda_graph=graph,
             run_time=mw.TimeConfig(time_steps=96,dt=5e-12,transient_cycles=0,steady_cycles=1),
-            spectral_sampler=mw.SpectralSampler(window='none',normalize_source=False))
-        simulation.config.adjoint_checkpoint_stride=stride
+            spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=False)))
+        simulation.config = replace(simulation.config, adjoint_checkpoint_stride=stride)
         return simulation
 
 
-def loss(result):return result.power_loss('bulk').total.sum()
+def loss(result):return result.monitor('bulk').total.sum()
 
 
 def measured_run(model,record_property,label,**options):
@@ -87,7 +86,7 @@ def test_direct_sigma_heads_survive_graph_checkpoint_and_disk_resume(tmp_path,re
         torch.testing.assert_close(model.log_sigma.grad,gradient,rtol=.001,atol=1e-25)
     model.requires_grad_(False);expected=model.simulation().run()
     checkpoint=model.simulation().prepare().run_until(47);path=tmp_path/'cartesian-loss.pt';checkpoint.save(path)
-    resumed=model.simulation(graph=True).prepare().run(resume_from=mw.FDTDResumeCheckpoint.load(path,map_location='cpu'))
+    resumed=model.simulation(graph=True).prepare().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path,map_location='cpu'))
     torch.testing.assert_close(loss(resumed),loss(expected),rtol=3e-4,atol=1e-25)
 
 
@@ -95,8 +94,8 @@ def test_direct_sigma_heads_survive_native_batch_cache_reuse_and_close():
     models=[CartesianLossDesign(.15),CartesianLossDesign(.15*math.exp(.2))]
     simulations=[model.simulation()for model in models]
     parameters=tuple(model.log_sigma for model in models)
-    batch=mw.Simulation.batch(simulations,outputs=mw.BatchOutput(fields=('Ex','Ey','Ez')),
-        execution=mw.BatchExecution(devices=('cuda:0',),batch_size=2,graph='required',graph_steps=7))
+    batch=mw.Simulation.batch(simulations,outputs=mw.execution.BatchOutput(fields=('Ex','Ey','Ez')),
+        execution=mw.execution.BatchExecution(devices=('cuda:0',),batch_size=2,graph='required',graph_steps=7))
     with batch.prepare()as prepared:
         first=prepared.run().results();second=prepared.run().results()
     def evaluate(results):return sum(loss(result)for result in results)

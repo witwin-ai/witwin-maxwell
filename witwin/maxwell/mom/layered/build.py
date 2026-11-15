@@ -20,7 +20,8 @@ def build_extension():
         name="witwin_maxwell_mom_layered",
         sources=[str(root / name) for name in
                  ("binding.cpp", "spectral.cu", "bessel.cu", "interp.cu", "assembly.cu", "vertical.cu",
-                  "lowfreq.cu")],
+                  "lowfreq.cu", "closed.cu", "adjoint.cu", "iterative.cu", "hmatrix.cu", "cudss_workspace.cpp",
+                  "admittance.cu")],
         build_directory=str(directory),
         extra_cflags=["-O3"],
         extra_cuda_cflags=["-O3", "--fmad=false", *_cuda_gencode_flags()],

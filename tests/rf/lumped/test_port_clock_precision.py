@@ -36,11 +36,11 @@ def test_100000_step_gpu_drive_table_and_port_clocks_match_independent_carrier()
     from tests.materials.surface_impedance.test_copper_foil_port_sweep import _ports
     steps, dt, frequency = 100_003, 5e-12, 1e9
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.02,.02),)*3), grid=mw.GridSpec.uniform(.005),
-        boundary=mw.BoundarySpec.none(), device="cuda:0", ports=_ports())
-    simulation = mw.Simulation.fdtd(scene, frequency=frequency,
-        excitations=mw.PortExcitation("left", amplitude=1.2+.4j, source_time=mw.CW(frequency=frequency, phase=.37)),
-        run_time=mw.TimeConfig(time_steps=steps, dt=dt), spectral_sampler=mw.SpectralSampler(window="none"))
-    batch = mw.Simulation.batch([simulation], execution=mw.BatchExecution(devices=("cuda:0",), graph="off"))
+        boundary=mw.BoundarySpec.none(), ports=_ports())
+    simulation = mw.Simulation.fdtd(scene, frequencies=frequency,
+        excitations=mw.rf.PortExcitation("left", amplitude=1.2+.4j, source_time=mw.CW(frequency=frequency, phase=.37)),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps, dt=dt), spectral_sampler=mw.fdtd.SpectralSampler(window="none"), device="cuda:0"))
+    batch = mw.Simulation.batch([simulation], execution=mw.execution.BatchExecution(devices=("cuda:0",), graph="off"))
     with batch.prepare() as prepared:
         lifecycle = prepared._cohort_steps()
         try:

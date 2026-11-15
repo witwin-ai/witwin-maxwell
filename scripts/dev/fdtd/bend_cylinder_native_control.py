@@ -44,7 +44,7 @@ def _private_ring_drive(wavevector, *, public_metric=False):
     injection._validate_soft_surface_source_boundary=lambda *args: None
     runtime.resolve_bloch_wavevector=lambda solver: wavevector
     if public_metric:
-        coordinates.validate_coordinate_scene=lambda scene,**kwargs: original_coordinate_validation(scene.clone(sources=[]),**kwargs)
+        coordinates.validate_coordinate_scene=lambda scene,**kwargs: original_coordinate_validation(scene.updated(sources=[]),**kwargs)
     try:
         yield
     finally:
@@ -65,18 +65,17 @@ def _run(polarization,order,direction,spacing,foil,*,radius,frequency,public_met
     radial_samples=radial_samples[(abs(radial_samples)>=radius/12)&(abs(radial_samples)<=radius*7/30)]
     scene=mw.Scene(domain=mw.Domain(bounds=((-2*spacing,2*spacing),(-radius/2,radius/2),(-2*spacing,2*spacing))),
         grid=mw.GridSpec.uniform(spacing),boundary=mw.BoundarySpec.faces(default="none",num_layers=12,
-            bloch_wavevector="auto" if order else (0.,0.,0.),**kinds),device="cuda",
-        coordinates=mw.BendCoordinates(curvature=-1/radius) if public_metric else None,
+            bloch_wavevector="auto" if order else (0.,0.,0.),**kinds),coordinates=mw.coordinates.BendCoordinates(curvature=-1/radius) if public_metric else None,
         structures=(mw.Structure(name="film",geometry=mw.Box(position=(0.,0.,0.),size=(16*spacing,0.,16*spacing)),
-            material=mw.CopperFoil(thickness=delta,conductivity=sigma,frequency_range=(frequency/2,2*frequency))),) if foil else (),
+            material=mw.media.CopperFoil(thickness=delta,conductivity=sigma,frequency_range=(frequency/2,2*frequency))),) if foil else (),
         monitors=tuple(mw.PointMonitor(f"magnetic_profile_{index}",(spacing/2,float(u),0.),fields=("Hz",))
                        for index,u in enumerate(radial_samples)) if polarization=="te" else (),
         sources=(mw.PlaneWave(name="ring_mode_drive",direction=carrier,polarization=electric,injection_axis="y",
             source_time=mw.CW(frequency,amplitude=80.)),))
     with _private_ring_drive((order/radius,0.,0.),public_metric=public_metric):
-        prepared=mw.Simulation.fdtd(scene,frequency=frequency,cuda_graph=True,full_field_dft=True,
+        prepared=mw.Simulation.fdtd(scene,frequencies=frequency,config=mw.FDTDConfig(cuda_graph=True,full_field_dft=True,
             run_time=mw.TimeConfig(transient_cycles=24,steady_cycles=20,dt=None if public_metric else .2*spacing/mw.constants.C_0),
-            spectral_sampler=mw.SpectralSampler(window="hanning")).prepare()
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"))).prepare()
     solver=prepared.solver
     for component,name in enumerate(("Ex","Ey","Ez","Hx","Hy","Hz")) if not public_metric else ():
         magnetic=name[0]=="H"
@@ -94,7 +93,7 @@ def _run(polarization,order,direction,spacing,foil,*,radius,frequency,public_met
     result=prepared.run()
     component="Ez" if polarization=="tm" else "Hz"
     if polarization=="tm":
-        field=result.chart_fields.tensor('E_z') if public_metric else result.tensor(component)
+        field=mw.coordinates.chart_fields(result).tensor('E_z') if public_metric else result.field(component).values
         if field.ndim==4:field=field[0]
         profile=field[field.shape[0]//2,:,field.shape[2]//2].cpu().numpy()
         u=np.asarray(solver.scene.y_nodes64)
@@ -116,7 +115,7 @@ def _run(polarization,order,direction,spacing,foil,*,radius,frequency,public_met
         result.save(save_path)
     constant=mw.constants.MU_0 if polarization=='tm' else mw.constants.EPSILON_0
     incoming_power=float((abs(incoming)**2).sum()*((4*spacing)**2)/(math.pi*(2*math.pi*frequency)*constant*radius))
-    heat=float(result.conductor_losses['film']['surface_power'][0]) if foil else 0.
+    heat=float(mw.rf.conductor_losses(result)['film']['surface_power'][0]) if foil else 0.
     return incoming,outgoing,dict(direction=direction,hankel_fit_relative_residuals=residuals,
         incoming_hankel_power_w=incoming_power,copper_heat_w=heat,
         direct_heat_absorption=heat/incoming_power,

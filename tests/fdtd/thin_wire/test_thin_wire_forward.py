@@ -17,7 +17,7 @@ from witwin.maxwell.fdtd.wire import (
     deposit_wire_current,
     sample_and_update_wire,
 )
-from witwin.maxwell.fdtd.thin_wire_reference import (
+from tests.oracles.thin_wire_reference import (
     ACCEPTANCE_BUDGET,
     AxisAlignedWireReference,
     WireReferenceState,
@@ -49,44 +49,45 @@ def _scene(
     if points is None:
         points = ((0.0, 0.0, -0.08), (0.0, 0.0, 0.08))
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
-        grid=mw.GridSpec.uniform(0.04),
-        boundary=mw.BoundarySpec.none() if boundary is None else boundary,
-        structures=structures,
-        device="cuda",
-    )
-    scene.add_thin_wire(
-        mw.ThinWire(
-            name="wire",
-            points=points,
-            radius=radius,
-            conductor=mw.WireConductor.pec(),
-            endpoints=endpoints,
-            snap="strict",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
+                grid=mw.GridSpec.uniform(0.04),
+                boundary=mw.BoundarySpec.none() if boundary is None else boundary,
+                structures=structures,
+                thin_wires=(
+            mw.rf.ThinWire(
+                name="wire",
+                points=points,
+                radius=radius,
+                conductor=mw.rf.WireConductor.pec(),
+                endpoints=endpoints,
+                snap="strict",
+            ),
+            ),
+            )
     if source:
-        scene.add_source(
+        scene = scene.updated(sources=(
+            *scene.sources,
             mw.PointDipole(
                 name="drive",
                 position=(0.0, 0.0, 0.02),
                 polarization="Ez",
                 width=0.04,
                 source_time=mw.CW(frequency=_FREQUENCY, amplitude=10.0),
-            )
-        )
+            ),
+        ))
     if monitor:
         monitor_kwargs = {}
         if quantities is not None:
             monitor_kwargs["quantities"] = quantities
-        scene.add_monitor(
-            mw.WireMonitor(
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.rf.WireMonitor(
                 name="wire_state",
                 wire="wire",
                 frequencies=(_FREQUENCY,),
                 **monitor_kwargs,
-            )
-        )
+            ),
+        ))
     return scene
 
 
@@ -94,8 +95,10 @@ def _prepared_solver(scene, *, frequency=_FREQUENCY):
     return mw.Simulation.fdtd(
         scene,
         frequencies=(frequency,),
-        run_time=mw.TimeConfig(time_steps=8),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=8),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).prepare().solver
 
 
@@ -358,7 +361,7 @@ def test_native_wire_cfl_bound_has_strict_gershgorin_slack_on_nonuniform_topolog
     slack, which is comfortably inside the measured value and still non-trivial.
     """
 
-    wire = mw.ThinWire(
+    wire = mw.rf.ThinWire(
         name="nonuniform",
         points=(
             (-0.08, 0.0, 0.0),
@@ -367,7 +370,7 @@ def test_native_wire_cfl_bound_has_strict_gershgorin_slack_on_nonuniform_topolog
             (0.08, 0.0, 0.0),
         ),
         radius=(2.0e-4, 5.0e-3, 8.0e-4),
-        conductor=mw.WireConductor.pec(),
+        conductor=mw.rf.WireConductor.pec(),
         snap="strict",
     )
     solver, masses = _promote_wire_runtime_to_float64(
@@ -428,7 +431,7 @@ def _run_native_wire_recurrence_peak(solver, dt_fraction, *, steps=400):
 
 
 def _closed_loop_wire():
-    return mw.ThinWire(
+    return mw.rf.ThinWire(
         name="loop",
         points=(
             (-0.08, -0.08, 0.0),
@@ -438,7 +441,7 @@ def _closed_loop_wire():
             (-0.08, -0.08, 0.0),
         ),
         radius=2.0e-3,
-        conductor=mw.WireConductor.pec(),
+        conductor=mw.rf.WireConductor.pec(),
         snap="strict",
     )
 
@@ -700,10 +703,8 @@ def _network_scene(wires):
         domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
         grid=mw.GridSpec.uniform(0.04),
         boundary=mw.BoundarySpec.none(),
-        device="cuda",
     )
-    for wire in wires:
-        scene.add_thin_wire(wire)
+    scene = scene.updated(thin_wires=(*scene.thin_wires, *wires))
     return scene
 
 
@@ -747,32 +748,32 @@ def _assert_network_continuity_and_energy(solver):
 
 
 def test_branch_and_closed_loop_cuda_recurrence_meet_continuity_and_energy_gates():
-    junction = mw.WireEnd.node("J")
+    junction = mw.rf.WireEnd.node("J")
     branch = (
-        mw.ThinWire(
+        mw.rf.ThinWire(
             name="a",
             points=((-0.08, 0.0, 0.0), (0.0, 0.0, 0.0)),
             radius=2.0e-3,
-            conductor=mw.WireConductor.pec(),
-            endpoints=(mw.WireEnd.open(), junction),
+            conductor=mw.rf.WireConductor.pec(),
+            endpoints=(mw.rf.WireEnd.open(), junction),
         ),
-        mw.ThinWire(
+        mw.rf.ThinWire(
             name="b",
             points=((0.0, 0.0, 0.0), (0.08, 0.0, 0.0)),
             radius=2.0e-3,
-            conductor=mw.WireConductor.pec(),
-            endpoints=(junction, mw.WireEnd.open()),
+            conductor=mw.rf.WireConductor.pec(),
+            endpoints=(junction, mw.rf.WireEnd.open()),
         ),
-        mw.ThinWire(
+        mw.rf.ThinWire(
             name="c",
             points=((0.0, 0.0, 0.0), (0.0, 0.08, 0.0)),
             radius=2.0e-3,
-            conductor=mw.WireConductor.pec(),
-            endpoints=(junction, mw.WireEnd.open()),
+            conductor=mw.rf.WireConductor.pec(),
+            endpoints=(junction, mw.rf.WireEnd.open()),
         ),
     )
     loop = (
-        mw.ThinWire(
+        mw.rf.ThinWire(
             name="loop",
             points=(
                 (-0.08, -0.08, 0.0),
@@ -782,7 +783,7 @@ def test_branch_and_closed_loop_cuda_recurrence_meet_continuity_and_energy_gates
                 (-0.08, -0.08, 0.0),
             ),
             radius=2.0e-3,
-            conductor=mw.WireConductor.pec(),
+            conductor=mw.rf.WireConductor.pec(),
         ),
     )
     branch_solver = _prepared_solver(_network_scene(branch), frequency=2.0e9)
@@ -852,10 +853,12 @@ def _run_forward(scene, *, cuda_graph):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=180),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
-        cuda_graph=cuda_graph,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=180),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+            cuda_graph=cuda_graph,
+        ),
     ).run()
     return result.monitor("wire_state"), result.stats()
 
@@ -893,15 +896,16 @@ def test_wire_monitor_quantities_control_accumulation_and_typed_output():
 def test_l_wire_forward_propagates_current_across_the_corner():
     points = ((-0.08, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.08, 0.0))
     scene = _scene(points=points, source=False)
-    scene.add_source(
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             name="drive",
             position=(-0.02, 0.0, 0.0),
             polarization="Ex",
             width=0.04,
             source_time=mw.CW(frequency=_FREQUENCY, amplitude=10.0),
-        )
-    )
+        ),
+    ))
     data, stats = _run_forward(scene, cuda_graph=False)
 
     assert stats["thin_wire_segments"] == 2
@@ -918,7 +922,7 @@ def test_named_pec_grounded_endpoint_remains_zero_during_forward():
     )
     scene = _scene(
         structures=(ground,),
-        endpoints=(mw.WireEnd.grounded(structure="ground"), mw.WireEnd.open()),
+        endpoints=(mw.rf.WireEnd.grounded(structure="ground"), mw.rf.WireEnd.open()),
     )
     data, _stats = _run_forward(scene, cuda_graph=False)
 
@@ -940,14 +944,14 @@ def test_named_pec_grounded_endpoint_remains_zero_during_forward():
         (
             mw.Material(
                 eps_r=2.0,
-                nonlinearity=mw.NonlinearSusceptibility(chi3=1.0e-10),
+                nonlinearity=mw.media.NonlinearSusceptibility(chi3=1.0e-10),
             ),
             "nonlinear or time-modulated",
         ),
         (
             mw.Material(
                 eps_r=2.0,
-                modulation=mw.ModulationSpec(frequency=1.0e8, amplitude=0.1),
+                modulation=mw.media.ModulationSpec(frequency=1.0e8, amplitude=0.1),
             ),
             "nonlinear or time-modulated",
         ),
@@ -970,7 +974,7 @@ def test_phase1_rejects_surface_impedance_conductor_ownership():
     surface = mw.Structure(
         name="surface_metal",
         geometry=mw.Box(position=(0.08, 0.0, 0.0), size=(0.08, 0.24, 0.24)),
-        material=mw.LossyMetalMedium(conductivity=5.8e7),
+        material=mw.media.LossyMetalMedium(conductivity=5.8e7),
     )
     with pytest.raises(NotImplementedError, match="share conductor ownership"):
         _prepared_solver(
@@ -985,7 +989,7 @@ def test_phase3_real_periodic_interior_wire_prepares_and_steps():
             source=False,
         ),
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=2),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2)),
     )
 
     result = simulation.run()
@@ -1011,50 +1015,52 @@ def _half_wave_dipole_profile(segment_count: int) -> torch.Tensor:
     half_length = 0.5 * wavelength
     spacing = half_length / segment_count
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half_length, half_length),) * 3),
-        grid=mw.GridSpec.uniform(spacing),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
-    )
-    scene.add_thin_wire(
-        mw.ThinWire(
-            name="dipole",
-            points=tuple(
-                (0.0, 0.0, float(position))
-                for position in torch.linspace(
-                    -0.5 * half_length,
-                    0.5 * half_length,
-                    segment_count + 1,
-                    dtype=torch.float64,
-                )
+                domain=mw.Domain(bounds=((-half_length, half_length),) * 3),
+                grid=mw.GridSpec.uniform(spacing),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                thin_wires=(
+            mw.rf.ThinWire(
+                name="dipole",
+                points=tuple(
+                    (0.0, 0.0, float(position))
+                    for position in torch.linspace(
+                        -0.5 * half_length,
+                        0.5 * half_length,
+                        segment_count + 1,
+                        dtype=torch.float64,
+                    )
+                ),
+                radius=0.02 * (half_length / 12.0),
+                conductor=mw.rf.WireConductor.pec(),
             ),
-            radius=0.02 * (half_length / 12.0),
-            conductor=mw.WireConductor.pec(),
-        )
-    )
-    # Two equal adjacent-edge drives preserve mirror symmetry about the center node.
-    for index, z_position in enumerate((-0.5 * spacing, 0.5 * spacing)):
-        scene.add_source(
-            mw.PointDipole(
-                name=f"drive_{index}",
-                position=(0.0, 0.0, z_position),
-                polarization="Ez",
-                width=spacing,
-                source_time=mw.CW(frequency=_FREQUENCY, amplitude=5.0),
+            ),
             )
-        )
-    scene.add_monitor(
-        mw.WireMonitor(
+    # Two equal adjacent-edge drives preserve mirror symmetry about the center node.
+    scene = scene.updated(sources=(
+        *scene.sources,
+        *(mw.PointDipole(
+              name=f"drive_{index}",
+              position=(0.0, 0.0, z_position),
+              polarization="Ez",
+              width=spacing,
+              source_time=mw.CW(frequency=_FREQUENCY, amplitude=5.0),
+          ) for index, z_position in enumerate((-0.5 * spacing, 0.5 * spacing))),
+    ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.rf.WireMonitor(
             name="dipole_state",
             wire="dipole",
             frequencies=(_FREQUENCY,),
-        )
-    )
+        ),
+    ))
     result = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=60 * segment_count),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=60 * segment_count),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     return result.monitor("dipole_state").current.abs()[0]
 
@@ -1101,12 +1107,11 @@ def test_no_wire_scene_keeps_zero_state_and_no_wire_kernel_runtime():
         domain=mw.Domain(bounds=((-0.08, 0.08),) * 3),
         grid=mw.GridSpec.uniform(0.04),
         boundary=mw.BoundarySpec.none(),
-        device="cuda",
     )
     solver = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQUENCY,),
-        run_time=mw.TimeConfig(time_steps=2),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=2)),
     ).prepare().solver
 
     assert solver._wire_runtime is None

@@ -59,7 +59,7 @@ def test_original_3840_growing_shared_setup_actions_and_current_backward(tmp_pat
         # Use the actual already-admitted selected order. Every constructed
         # coupling still independently enforces the same point-kernel budget.
         return MultipoleSystemActions(provider,order=order,kernel_bound_rule='direct_first_wave_min_v1',
-            kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5),leaf_size=30,separation_ratio=.25,
+            kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5),leaf_size=30,separation_ratio=.25,
             table_storage='compact_shared_displacement_v1',shift_storage='separable_v1',near_storage='scalar_reciprocal_dk_v1',action_retained_budget_bytes=2*1024**3,
             table_budget_bytes=1024**3,near_budget_bytes=1024**3,projection_budget_bytes=1024**3)
     torch.empty(1,device='cuda')

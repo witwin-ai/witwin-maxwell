@@ -18,6 +18,7 @@ this configuration.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import cmath
 import math
 from types import SimpleNamespace
@@ -34,52 +35,53 @@ from witwin.maxwell.fdtd.excitation.modes import (
 )
 from witwin.maxwell.postprocess import compute_mode_overlap
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.scene import place_scene
+from witwin.maxwell.compiler import compile_materials
 
 FREQ = 2.0e9
 DX = 0.0125
 HALF = 0.32
 
 
-def _guide_scene(device: str) -> mw.Scene:
+def _guide_scene() -> mw.Scene:
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-HALF, HALF),) * 3),
-        grid=mw.GridSpec.uniform(DX),
-        boundary=mw.BoundarySpec.pml(num_layers=12),
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
-        device=device,
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0, 0, 0), size=(4 * HALF, 0.20, 0.30)),
-            material=mw.Material(eps_r=4.0),
-            name="waveguide",
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(-0.20, 0, 0),
-            size=(0, 0.5, 0.5),
-            polarization="Ez",
-            source_time=mw.GaussianPulse(frequency=FREQ, fwidth=0.5e9),
-            name="mode",
-        )
-    )
+                domain=mw.Domain(bounds=((-HALF, HALF),) * 3),
+                grid=mw.GridSpec.uniform(DX),
+                boundary=mw.BoundarySpec.pml(num_layers=12),
+                subpixel=mw.SubpixelSpec(samples=3, averaging="polarized"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0, 0, 0), size=(4 * HALF, 0.20, 0.30)),
+                material=mw.Material(eps_r=4.0),
+                name="waveguide",
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(-0.20, 0, 0),
+                size=(0, 0.5, 0.5),
+                polarization="Ez",
+                source_time=mw.GaussianPulse(frequency=FREQ, fwidth=0.5e9),
+                name="mode",
+            ),
+            ),
+            )
     return scene
 
 
 def _cpu_mode_context(scene: mw.Scene):
-    prepared = prepare_scene(scene.clone(device="cpu"))
+    prepared = prepare_scene(place_scene(scene, "cpu"), device="cpu")
     return SimpleNamespace(
         scene=prepared,
         Ex=torch.empty((1,), device=prepared.device, dtype=torch.float32),
         c=299792458.0,
-        boundary_kind=prepared.boundary.kind,
-        _compiled_material_model=prepared.compile_materials(),
+        boundary_kind=prepared.scene.boundary.kind,
+        _compiled_material_model=compile_materials(prepared),
     )
 
 
 def test_sparse_vector_mode_solve_returns_real_profile_and_stable_neff():
-    scene = _guide_scene("cpu")
+    scene = _guide_scene()
     context = _cpu_mode_context(scene)
     compiled = _compile_mode_source(scene.sources[0], default_frequency=FREQ)
 
@@ -113,30 +115,32 @@ def test_sparse_vector_mode_solve_returns_real_profile_and_stable_neff():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_mode_source_launch_is_unidirectional_and_propagates_with_grid_beta():
-    scene = _guide_scene("cuda")
-    for name, position in (("up", -0.26), ("dn1", 0.05), ("dn2", 0.15)):
-        scene.add_monitor(
-            mw.ModeMonitor(
-                name,
-                position=(position, 0, 0),
-                size=(0, 0.5, 0.5),
-                polarization="Ez",
-                direction="+",
-                frequencies=(FREQ,),
-            )
-        )
+    scene = _guide_scene()
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.ModeMonitor(
+              name,
+              position=(position, 0, 0),
+              size=(0, 0.5, 0.5),
+              polarization="Ez",
+              direction="+",
+              frequencies=(FREQ,),
+          ) for name, position in (("up", -0.26), ("dn1", 0.05), ("dn2", 0.15))),
+    ))
 
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=[FREQ],
-        run_time=mw.TimeConfig(time_steps=1),
-        spectral_sampler=mw.SpectralSampler(normalize_source=True),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True),
+            full_field_dft=False,
+        ),
     )
     prepared = simulation.prepare()
     c0 = 299792458.0
     steps = int(np.ceil(30 * (4 * HALF) / c0 / float(prepared.solver.dt)))
-    simulation.config.run_time = mw.TimeConfig(time_steps=steps)
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=steps))
     result = simulation.run()
 
     overlaps = {

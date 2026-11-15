@@ -17,7 +17,7 @@ def scope_reason(scene, model, layout, *, eps_background, mu_background,
     """Return a numerical-scope exclusion, without allocating or initializing CUDA."""
     from .. import materials as m
 
-    if m._resolve_subpixel(scene.subpixel)[1] != "kottke_edge":
+    if m._resolve_subpixel(scene.scene.subpixel)[1] != "kottke_edge":
         return "averaging"
     if any(entry.get("uniform_amplitude") is not None
            for key in POLE_KEYS for entry in layout[key]):
@@ -25,14 +25,14 @@ def scope_reason(scene, model, layout, *, eps_background, mu_background,
     if any(entry.get("graded", False) or entry.get("amplitude") is not None
            for key in POLE_KEYS for entry in layout[key]):
         return "graded"
-    if scene.material_regions or region_densities:
+    if scene.scene.material_regions or region_densities:
         return "material_regions"
-    if any(scene.boundary.axis_kind(a) in ("periodic", "bloch") for a in "xyz"):
+    if any(scene.scene.boundary.axis_kind(a) in ("periodic", "bloch") for a in "xyz"):
         return "periodic"
     if any(options is None or options != ((0.,), (0.,), (0.,))
            for options in geometry_periodic_shifts.values()):
         return "periodic_shifts"
-    if scene.coordinates is not None or m._material_dtype(scene) != torch.float32:
+    if scene.scene.coordinates is not None or m._material_dtype(scene) != torch.float32:
         return "coordinates_or_dtype"
     if (not all(isinstance(v, (int, float)) for v in (eps_background, mu_background))
             or requires_grad((model["eps_components"], model["mu_components"]))):
@@ -41,7 +41,7 @@ def scope_reason(scene, model, layout, *, eps_background, mu_background,
         return "tensor_background"
     if m.material_model_has_modulation(model):
         return "modulation"
-    for structure in scene.structures:
+    for structure in scene.scene.structures:
         if getattr(structure.material, "modulation", None) is not None:
             return "modulation"
         if isinstance(structure.material, PerturbationMedium):
@@ -89,7 +89,7 @@ def try_compile_binary_pole_edges(scene, model, layout, *, samples, eps_backgrou
                     mu_background=mu_background, region_densities=region_densities,
                     geometry_periodic_shifts=geometry_periodic_shifts) is not None:
         return UNCHANGED
-    structures = m._bulk_structures(scene)
+    structures = m._bulk_structures(scene.scene)
     parts = [m._static_structure_material(s) for s in structures]
     active = []
     for prefix, components, channel, background in (

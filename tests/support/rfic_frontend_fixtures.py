@@ -9,10 +9,10 @@ import witwin.maxwell as mw
 
 def process_fa(fixture, *, tolerance=0.0):
     metal = fixture.scene.structures[0].material
-    return mw.ProcessStack(fixture.scene.background,
-        (mw.LayerMap("lower", 1, 302*1e-6, 1e-6, metal),
-         mw.LayerMap("top", 2, 305e-6, 2e-6, metal)),
-        (mw.ViaMap(3, ("lower", "top"), metal),), pin_layer=(10, 0),
+    return mw.mom.ProcessStack(fixture.scene.background,
+        (mw.mom.LayerMap("lower", 1, 302*1e-6, 1e-6, metal),
+         mw.mom.LayerMap("top", 2, 305e-6, 2e-6, metal)),
+        (mw.mom.ViaMap(3, ("lower", "top"), metal),), pin_layer=(10, 0),
         breakpoint_tolerance_m=tolerance)
 
 

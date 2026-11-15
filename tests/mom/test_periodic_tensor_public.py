@@ -25,11 +25,11 @@ def setup(dimension,tensor):
     from witwin.maxwell.mom.physics import compile_medium
     exterior=compile_medium(mw.Material(),3e8)
     beta=tuple(exterior.k.real*v for v in source.direction)
-    periodic=mw.MoMPeriodicConfig(vectors_m=((1.,0.,0.),(0.,1.,0.))[:dimension],
+    periodic=mw.mom.MoMPeriodicConfig(vectors_m=((1.,0.,0.),(0.,1.,0.))[:dimension],
         bloch_rad_per_m=(beta[0],0.,0.),reciprocal_shells=4,quadrature_order=128)
-    config=mw.MoMConfig(integration=IntegrationConfig(order=2,singular_order=3),
-        query_config=mw.FieldQueryConfig(adaptive=False),riesz_storage='compact_rwg_v1',periodic=periodic,
-        dyadic_integration=mw.DyadicIntegrationConfig() if tensor else None)
+    config=mw.mom.MoMConfig(integration=IntegrationConfig(order=2,singular_order=3),
+        query_config=mw.mom.FieldQueryConfig(adaptive=False),riesz_storage='compact_rwg_v1',periodic=periodic,
+        dyadic_integration=mw.mom.DyadicIntegrationConfig() if tensor else None)
     return mw.Scene(structures=bodies,sources=[source]),config
 
 
@@ -45,20 +45,20 @@ def test_public_three_dimensional_tensor_plane_wave_retains_spectral_pole_guard(
         raise AssertionError('A spectral pole must reject before primary tensor assembly')
     monkeypatch.setattr(assembly,'assemble_generalized_system',forbidden)
     with pytest.raises(ValueError,match='spectral pole'):
-        mw.Simulation.mom(scene,frequency=3e8,config=config).prepare()
+        mw.Simulation.mom(scene,frequencies=3e8,config=config).prepare()
 
 
 @pytest.mark.parametrize('dimension',(1,2))
 def test_public_periodic_tensor_scalar_limit_and_archive(dimension,tmp_path,monkeypatch):
     scene,config=setup(dimension,True)
     scalar,scalar_config=setup(dimension,False)
-    reference=mw.Simulation.mom(scalar,frequency=3e8,config=scalar_config).run()
-    result=mw.Simulation.mom(scene,frequency=3e8,config=config).run()
+    reference=mw.Simulation.mom(scalar,frequencies=3e8,config=scalar_config).run()
+    result=mw.Simulation.mom(scene,frequencies=3e8,config=config).run()
     assert result.stats()['converged']
-    for actual,expected in zip(result.surface_currents.scattered_coefficients.chunk(2),
-                               reference.surface_currents.scattered_coefficients.chunk(2)):
+    for actual,expected in zip(mw.mom.surface_currents(result).scattered_coefficients.chunk(2),
+                               mw.mom.surface_currents(reference).scattered_coefficients.chunk(2)):
         torch.testing.assert_close(actual,expected,rtol=1e-8,atol=1e-13)
-    data=result.surface_currents
+    data=mw.mom.surface_currents(result)
     points={1:torch.tensor([[-.19,.01,.01],[.81,.01,.01]],device='cuda',dtype=torch.float64),
             0:torch.tensor([[.1,.2,.3],[1.1,.2,.3]],device='cuda',dtype=torch.float64)}
     expected_fields={}
@@ -85,8 +85,8 @@ def test_public_periodic_tensor_scalar_limit_and_archive(dimension,tmp_path,monk
         patch.setattr(assembly,'assemble_generalized_system',forbidden)
         patch.setattr(torch.linalg,'solve',forbidden)
         restored=mw.Result.load(path,scene=scene)
-        assert restored.surface_currents.config==config
-        torch.testing.assert_close(restored.surface_currents.scattered_coefficients,
+        assert mw.mom.surface_currents(restored).config==config
+        torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,
                                    data.scattered_coefficients,rtol=0,atol=0)
         for region,point in points.items():
             for a,b in zip(restored.query_fields(point,region_id=region,field_kind='total'),expected_fields[region]):
@@ -99,7 +99,7 @@ def test_public_periodic_tensor_scalar_limit_and_archive(dimension,tmp_path,monk
             elif mutation=='material':damaged['body_table'][0]['interior']['mu_r_real_imag'][0][0][0]+=.1
             elif mutation=='operator':damaged['operator_metadata']['operator_identity']='changed'
             else:damaged['decoder_version']='periodic_analytic_lifted_fields_v1'
-            with pytest.raises(ValueError):SurfaceData.restore(damaged,scene,3e8)
+            with pytest.raises(ValueError):SurfaceData.restore(damaged,scene,3e8,'cuda')
     kernel=data.handle.body_handles[0].tensor_kernel
     data.handle.body_handles[0].tensor_kernel=replace(kernel)
     with pytest.raises(ValueError,match='binding changed'):

@@ -1,0 +1,46 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "description": "witwin.maxwell.network.NetworkData",
+ "properties": {
+  "frequencies": {
+   "description": "torch.Tensor"
+  },
+  "metadata": {
+   "description": "Mapping[str, Any]"
+  },
+  "phasor_convention": {
+   "description": "str"
+  },
+  "port_names": {
+   "description": "tuple[str, ...]"
+  },
+  "power_wave_convention": {
+   "description": "str"
+  },
+  "reference_matrix": {
+   "description": "Any"
+  },
+  "s": {
+   "description": "torch.Tensor"
+  },
+  "valid_columns": {
+   "description": "torch.Tensor | None"
+  },
+  "z0": {
+   "description": "Any"
+  }
+ },
+ "required": [
+  "frequencies",
+  "s",
+  "z0",
+  "port_names",
+  "valid_columns",
+  "metadata",
+  "phasor_convention",
+  "power_wave_convention",
+  "reference_matrix"
+ ],
+ "title": "NetworkData",
+ "type": "object"
+}

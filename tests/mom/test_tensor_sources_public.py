@@ -21,10 +21,10 @@ def test_public_tensor_sources_exact_result_and_scene_binding(tmp_path,monkeypat
     q=.002*torch.einsum('i,j,k->ijk',axis,axis,axis)
     c=.001*torch.einsum('i,j,k,l->ijkl',axis,axis,axis,axis)
     def material(scale=1.):
-        return mw.Material(eps_r=2.,nonlinearity=mw.TensorNonlinearSusceptibility(chi2=q*scale,chi3=c))
-    scene.structures[1]=replace(scene.structures[1],material=material())
-    result=mw.Simulation.mom(scene,frequency=3e8,config=config).run()
-    state=result.harmonic_state
+        return mw.Material(eps_r=2.,nonlinearity=mw.media.TensorNonlinearSusceptibility(chi2=q*scale,chi3=c))
+    scene = scene.updated(structures=(*scene.structures[:1], replace(scene.structures[1],material=material()), *scene.structures[2:]))
+    result=mw.Simulation.mom(scene,frequencies=3e8,config=config).run()
+    state=mw.mom.harmonic_state(result)
     assert not state.receipt['physical_qualification']
     assert bool(state.cell_electric[0].norm()>0) and bool(state.cell_electric[2].norm()>0)
     prepared=result._harmonic_data.decoder.prepared
@@ -32,7 +32,7 @@ def test_public_tensor_sources_exact_result_and_scene_binding(tmp_path,monkeypat
     for name,expected in (('chi2_tensor',q),('chi3_tensor',c)):
         torch.testing.assert_close(prepared['nonlinear_coefficients'][name][0],expected,rtol=0,atol=0)
     fields=[result.query_fields(point,region_id=2,field_kind='total',harmonic=n) for n in (1,2)]
-    dc=result.query_dc(point,region_id=2)
+    dc=mw.mom.query_dc(result, point,region_id=2)
     path=tmp_path/'tensor-sources.pt';result.save(path)
     from witwin.maxwell.mom.runtime import SystemOperator
     from witwin.maxwell.mom.static_tensor_interface import StaticTensorInterfaceOperator
@@ -48,15 +48,15 @@ def test_public_tensor_sources_exact_result_and_scene_binding(tmp_path,monkeypat
             patch.setattr(GeneralizedSystemBlocks,'__call__',forbidden)
         restored=mw.Result.load(path,scene=scene)
         for name in ('cell_electric','polarization','total_volume_current'):
-            torch.testing.assert_close(getattr(restored.harmonic_state,name),getattr(state,name),rtol=0,atol=0)
-        for actual,expected in zip(restored.query_dc(point,region_id=2),dc):
+            torch.testing.assert_close(getattr(mw.mom.harmonic_state(restored),name),getattr(state,name),rtol=0,atol=0)
+        for actual,expected in zip(mw.mom.query_dc(restored, point,region_id=2),dc):
             torch.testing.assert_close(actual,expected,rtol=0,atol=0)
         for n,expected_fields in enumerate(fields,1):
             for actual,expected in zip(restored.query_fields(point,region_id=2,field_kind='total',harmonic=n),expected_fields):
                 torch.testing.assert_close(actual,expected,rtol=0,atol=0)
         original=scene.structures[1]
-        scene.structures[1]=replace(original,material=material(2.))
+        scene = scene.updated(structures=(*scene.structures[:1], replace(original,material=material(2.)), *scene.structures[2:]))
         with pytest.raises(ValueError,match='Scene identity'):
             mw.Result.load(path,scene=scene)
-        scene.structures[1]=original
+        scene = scene.updated(structures=(*scene.structures[:1], original, *scene.structures[2:]))
     print({'public_tensor_sources':True,'exact_state_and_queries':True,'physical_qualification':False})

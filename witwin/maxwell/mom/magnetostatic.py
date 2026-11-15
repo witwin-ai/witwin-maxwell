@@ -1,5 +1,6 @@
 """Static cell-current fields and distributional continuity diagnostics."""
 import torch
+from .ordered_reduction import ordered_index_add_
 from .volume_mesh import TetrahedralVolumeMesh
 from .vie_operator import cell_green_potentials
 
@@ -97,10 +98,10 @@ def cell_tensor_magnetostatic_current_fields(mesh,current,points,permeability,*,
         flat=torch.arange(start,min(start+pair_batch,len(points)*faces),device=points.device)
         i,j=flat//faces,flat%faces
         potential,gradient=kernel.panel_integrals(points[i],triangles[j])
-        magnetic=magnetic.index_add(0,i,potential[:,None]*density[j])
-        derivative=derivative.index_add(0,i,density[j,:,None]*gradient[:,None,:])
-        contact=contact.index_add(0,i,currents[j]*(conormals[j]*gradient).sum(-1,keepdim=True))
-        defect=defect.index_add(0,i,-conormals[j]*(currents[j]*gradient).sum(-1,keepdim=True))
+        ordered_index_add_(magnetic,0,i,potential[:,None]*density[j])
+        ordered_index_add_(derivative,0,i,density[j,:,None]*gradient[:,None,:])
+        ordered_index_add_(contact,0,i,currents[j]*(conormals[j]*gradient).sum(-1,keepdim=True))
+        ordered_index_add_(defect,0,i,-conormals[j]*(currents[j]*gradient).sum(-1,keepdim=True))
     flux=magnetic@kernel.coefficient.T
     divergence=torch.einsum('ij,qji->q',kernel.coefficient,derivative)
     if not all(bool(torch.isfinite(v).all()) for v in (magnetic,flux,derivative,contact,defect,divergence)):

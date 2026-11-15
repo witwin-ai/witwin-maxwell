@@ -1,7 +1,4 @@
 #include "checks.h"
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 #include <vector>
 
@@ -142,65 +139,65 @@ __global__ void pole_scatter(PoleEdges p, const int64_t* owner, const float* val
   selected[i]=touch[i]?value[i]:(p.node_background?pole_average(p,p.old,x,y,z):p.old[i]);
 }
 
-std::vector<at::Tensor> poles_setup(at::Tensor geometry, at::Tensor geometry64,
-    at::Tensor boxes, std::vector<at::Tensor> planes, std::vector<at::Tensor> centres,
-    std::vector<at::Tensor> queries, std::vector<at::Tensor> widths,
-    at::Tensor values, at::Tensor carriers, at::Tensor seed, at::Tensor old,
-    at::Tensor slots, std::vector<int64_t> sizes, std::vector<double> constants) {
-  TORCH_CHECK(planes.size()==3 && centres.size()==3 && queries.size()==3 && widths.size()==3,
+std::vector<torch::stable::Tensor> poles_setup(torch::stable::Tensor geometry, torch::stable::Tensor geometry64,
+    torch::stable::Tensor boxes, std::vector<torch::stable::Tensor> planes, std::vector<torch::stable::Tensor> centres,
+    std::vector<torch::stable::Tensor> queries, std::vector<torch::stable::Tensor> widths,
+    torch::stable::Tensor values, torch::stable::Tensor carriers, torch::stable::Tensor seed, torch::stable::Tensor old,
+    torch::stable::Tensor slots, std::vector<int64_t> sizes, std::vector<double> constants) {
+  STD_TORCH_CHECK(planes.size()==3 && centres.size()==3 && queries.size()==3 && widths.size()==3,
               "poles: planes, centres, queries and widths must have three axes");
-  check_tensor(geometry, geometry, at::kFloat, "poles", "geometry");
-  check_tensor(geometry64, geometry, at::kDouble, "poles", "geometry64");
-  check_tensor(boxes, geometry, at::kFloat, "poles", "boxes");
-  check_tensors(planes, geometry, at::kDouble, "poles", "planes");
-  check_tensors(centres, geometry, at::kDouble, "poles", "centres");
-  TORCH_CHECK(queries[0].scalar_type()==at::kFloat || queries[0].scalar_type()==at::kDouble,
+  check_tensor(geometry, geometry, torch::headeronly::ScalarType::Float, "poles", "geometry");
+  check_tensor(geometry64, geometry, torch::headeronly::ScalarType::Double, "poles", "geometry64");
+  check_tensor(boxes, geometry, torch::headeronly::ScalarType::Float, "poles", "boxes");
+  check_tensors(planes, geometry, torch::headeronly::ScalarType::Double, "poles", "planes");
+  check_tensors(centres, geometry, torch::headeronly::ScalarType::Double, "poles", "centres");
+  STD_TORCH_CHECK(queries[0].scalar_type()==torch::headeronly::ScalarType::Float || queries[0].scalar_type()==torch::headeronly::ScalarType::Double,
               "poles: queries must be float32 or float64");
   check_tensors(queries, geometry, queries[0].scalar_type(), "poles", "queries");
-  check_tensors(widths, geometry, at::kFloat, "poles", "widths");
-  check_tensor(values, geometry, at::kFloat, "poles", "values");
-  check_tensor(carriers, geometry, at::kBool, "poles", "carriers");
-  check_tensor(seed, geometry, at::kFloat, "poles", "seed");
-  check_tensor(old, geometry, at::kFloat, "poles", "old");
-  check_tensor(slots, geometry, at::kLong, "poles", "slots");
-  c10::cuda::CUDAGuard guard(geometry.device());
+  check_tensors(widths, geometry, torch::headeronly::ScalarType::Float, "poles", "widths");
+  check_tensor(values, geometry, torch::headeronly::ScalarType::Float, "poles", "values");
+  check_tensor(carriers, geometry, torch::headeronly::ScalarType::Bool, "poles", "carriers");
+  check_tensor(seed, geometry, torch::headeronly::ScalarType::Float, "poles", "seed");
+  check_tensor(old, geometry, torch::headeronly::ScalarType::Float, "poles", "old");
+  check_tensor(slots, geometry, torch::headeronly::ScalarType::Long, "poles", "slots");
+  torch::stable::accelerator::DeviceGuard guard(geometry.get_device_index());
   PoleEdges p{};
-  p.geometry=geometry.data_ptr<float>(); p.geometry64=geometry64.data_ptr<double>();
-  p.boxes=boxes.data_ptr<float>(); p.values=values.data_ptr<float>();
-  p.carriers=carriers.data_ptr<bool>(); p.seed=seed.data_ptr<float>();
-  p.old=old.data_ptr<float>(); p.slots=slots.data_ptr<int64_t>();
+  p.geometry=geometry.const_data_ptr<float>(); p.geometry64=geometry64.const_data_ptr<double>();
+  p.boxes=boxes.const_data_ptr<float>(); p.values=values.const_data_ptr<float>();
+  p.carriers=carriers.const_data_ptr<bool>(); p.seed=seed.const_data_ptr<float>();
+  p.old=old.const_data_ptr<float>(); p.slots=slots.const_data_ptr<int64_t>();
   p.count=sizes[0]*sizes[1]*sizes[2]; p.structures=geometry.size(0);
   p.slot_count=slots.numel(); p.seed_count=seed.numel()?seed.size(0):0;
   p.axis=sizes[9]; p.magnetic=sizes[10]; p.node_background=sizes[11];
-  p.fill=queries[0].scalar_type()==at::kFloat;
+  p.fill=queries[0].scalar_type()==torch::headeronly::ScalarType::Float;
   p.background=constants[0]; p.delta=constants[1]; p.norm_eps=constants[2]; p.lap_scale=constants[3];
   for(int a=0;a<3;++a) {
     p.n[a]=sizes[a]; p.nodes[a]=sizes[a+3]; p.samples[a]=sizes[a+6];
-    p.planes[a]=planes[a].data_ptr<double>(); p.plane_count[a]=planes[a].numel();
-    p.centre[a]=centres[a].data_ptr<double>(); p.width[a]=widths[a].data_ptr<float>();
-    if(p.fill) p.query[a]=queries[a].data_ptr<float>();
-    else p.query64[a]=queries[a].data_ptr<double>();
+    p.planes[a]=planes[a].const_data_ptr<double>(); p.plane_count[a]=planes[a].numel();
+    p.centre[a]=centres[a].const_data_ptr<double>(); p.width[a]=widths[a].const_data_ptr<float>();
+    if(p.fill) p.query[a]=queries[a].const_data_ptr<float>();
+    else p.query64[a]=queries[a].const_data_ptr<double>();
   }
-  auto bounds=at::empty({p.structures,6},geometry64.options());
-  auto owner=at::empty({p.count},geometry.options().dtype(at::kLong));
-  auto value=at::empty({p.count},geometry.options());
-  auto touch=at::empty({p.count},geometry.options().dtype(at::kBool));
-  auto weights=at::empty({p.slot_count,p.count},geometry.options());
-  auto selected=at::empty({p.count},geometry.options());
-  auto stream=c10::cuda::getCurrentCUDAStream();
+  auto bounds=torch::stable::new_empty(geometry64, {p.structures,6});
+  auto owner=torch::stable::new_empty(geometry, {p.count}, torch::headeronly::ScalarType::Long);
+  auto value=torch::stable::new_empty(geometry, {p.count});
+  auto touch=torch::stable::new_empty(geometry, {p.count}, torch::headeronly::ScalarType::Bool);
+  auto weights=torch::stable::new_empty(geometry, {p.slot_count,p.count});
+  auto selected=torch::stable::new_empty(geometry, {p.count});
+  auto stream=current_cuda_stream();
   if(p.structures) {
-    pole_box_bounds<<<(p.structures*6+255)/256,256,0,stream>>>(p,bounds.data_ptr<double>());
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    pole_box_bounds<<<(p.structures*6+255)/256,256,0,stream>>>(p,bounds.mutable_data_ptr<double>());
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
   }
   if(p.count) {
-    pole_owner<<<(p.count+255)/256,256,0,stream>>>(p,bounds.data_ptr<double>(),
-        owner.data_ptr<int64_t>(),value.data_ptr<float>(),touch.data_ptr<bool>());
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    pole_support<<<(p.count+255)/256,256,0,stream>>>(p,bounds.data_ptr<double>(),touch.data_ptr<bool>());
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    pole_scatter<<<(p.count+255)/256,256,0,stream>>>(p,owner.data_ptr<int64_t>(),
-        value.data_ptr<float>(),touch.data_ptr<bool>(),weights.data_ptr<float>(),selected.data_ptr<float>());
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    pole_owner<<<(p.count+255)/256,256,0,stream>>>(p,bounds.mutable_data_ptr<double>(),
+        owner.mutable_data_ptr<int64_t>(),value.mutable_data_ptr<float>(),touch.mutable_data_ptr<bool>());
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
+    pole_support<<<(p.count+255)/256,256,0,stream>>>(p,bounds.mutable_data_ptr<double>(),touch.mutable_data_ptr<bool>());
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
+    pole_scatter<<<(p.count+255)/256,256,0,stream>>>(p,owner.mutable_data_ptr<int64_t>(),
+        value.mutable_data_ptr<float>(),touch.mutable_data_ptr<bool>(),weights.mutable_data_ptr<float>(),selected.mutable_data_ptr<float>());
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return {weights,selected};
 }

@@ -10,6 +10,7 @@ struct GeometryView {
   const double *triangles,*areas2,*centres,*edge2,*slopes;
   const int64_t *planes,*supports,*slots,*face_edges;
   int faces,edges;
+  int width;const double* support_slopes;
   const double* z_weights;int rule_points,z_weight_stride;
   const double* scalar_points;
   const double* radial;
@@ -41,6 +42,18 @@ __device__ inline FacePair face_pair(GeometryView g,GreenTableView table,int row
   p.size2=fmax(g.edge2[p.t],g.edge2[p.s]);
   p.threshold2=ratio*ratio*p.size2;
   return p;
+}
+
+// Face-pair enumeration of one kernel launch: the dense source tile (row t,
+// column begin+c, pair t*count+c) or an explicit [pairs,2] (t,s) list. The
+// matrix-free far action sets far_only and skips every near face pair, so
+// near+far partitions each tile exactly by the classification below.
+struct PairSet {const int64_t* list;int64_t pairs;int begin,count;bool far_only;};
+__device__ inline int pair_row(PairSet set,int64_t pair) {
+  return set.list ? int(set.list[2*pair]) : int(pair/set.count);
+}
+__device__ inline int pair_col(PairSet set,int64_t pair) {
+  return set.list ? int(set.list[2*pair+1]) : set.begin+int(pair%set.count);
 }
 
 // Every branch predicate is fp64, even in the float regular-arithmetic variant.
@@ -317,7 +330,7 @@ template<typename T> __device__ void wall_regular(FacePair p,GreenTableView tabl
     }
   }
   int pair=wall_segment_pair(v,zs,zo);
-  Stack stack{v.epsilon,v.sigma,v.edges,v.L,0,0};
+  Stack stack{v.epsilon,v.sigma,v.edges,v.L,0,0,v.epsilon_stride};
   for(int i=v.offsets[pair];i<v.offsets[pair+1];++i) {
     WallRay ray=wall_ray(v,p,g,i);
     bool near=image_near(p,ray.distance);
@@ -334,7 +347,7 @@ template<typename T> __device__ void wall_regular(FacePair p,GreenTableView tabl
       double R=hypot(rho,d);
       C wave(0);
       if(v.direct[i]) {
-        C epsilon=eps(v.epsilon,v.sigma,region(stack,fmin(src.z,obs.z)),2*pi*v.frequencies[f]);
+        C epsilon=eps(v.epsilon+f*v.epsilon_stride,v.sigma,region(stack,fmin(src.z,obs.z)),2*pi*v.frequencies[f]);
         wave=wave_remainder(root(pow(2*pi*v.frequencies[f]/c0,2)*epsilon),R);
       }
       C values[5]{};
@@ -503,31 +516,37 @@ template<typename T,bool Near> __device__ void horizontal_static(
 }
 template<typename Far,bool Near> __global__ void horizontal_static_geometry(
     GreenTableView table,GeometryView g,const double* rules,int stride,bool adaptive,
-    int requested,int batches,int begin,int count,double ratio,C* cache) {
+    int requested,int batches,PairSet set,double ratio,C* cache) {
   int64_t pair=(int64_t(blockIdx.x)*blockDim.x+threadIdx.x)/32;
-  int64_t pairs=int64_t(g.faces)*count;
+  int64_t pairs=set.pairs;
   if(pair>=pairs) return;
   int lane=threadIdx.x%32;
   if constexpr(!Near) for(int batch=lane;batch<batches;batch+=32)
     for(int k=0;k<10;++k) cache[(int64_t(batch)*pairs+pair)*10+k]=C(0);
-  FacePair p=face_pair(g,table,pair/count,begin+pair%count,ratio);
+  FacePair p=face_pair(g,table,pair_row(set,pair),pair_col(set,pair),ratio);
   if(p.pair<0) return;
-  if(Near||pair_near(p,table))
+  if constexpr(Near) {
+    horizontal_static<double,Near>(p,table,g,rules,stride,adaptive,requested,batches,lane,pair,pairs,cache);
+    return;
+  }
+  bool near=pair_near(p,table);
+  if(near && set.far_only) return;
+  if(near)
     horizontal_static<double,Near>(p,table,g,rules,stride,adaptive,requested,batches,lane,pair,pairs,cache);
   else horizontal_static<Far,Near>(p,table,g,rules,stride,adaptive,requested,batches,lane,pair,pairs,cache);
 }
 
 template<typename T,int B,int Class> __global__ void regular_face_pairs(
     GreenTableView table,GeometryView g,const double* rule,int stride,bool adaptive,
-    int first,int stop,int requested,int begin,int count,double ratio,C* tile) {
+    int first,int stop,int requested,PairSet set,double ratio,C* tile) {
   int64_t pair=(int64_t(blockIdx.x)*blockDim.x+threadIdx.x)/32;
-  if(pair>=int64_t(g.faces)*count) return;
+  if(pair>=set.pairs) return;
   int lane=threadIdx.x%32;
-  FacePair p=face_pair(g,table,pair/count,begin+pair%count,ratio);
+  FacePair p=face_pair(g,table,pair_row(set,pair),pair_col(set,pair),ratio);
   if(p.pair<0) return;
   if constexpr(Class!=0) if(pair_near(p,table)!=(Class==1)) return;
-  regular_pair<T,B>(p,table,g,rule,stride,adaptive,first,stop,requested,lane,pair,
-                    int64_t(g.faces)*count,tile);
+  if constexpr(Class==0) if(set.far_only && pair_near(p,table)) return;
+  regular_pair<T,B>(p,table,g,rule,stride,adaptive,first,stop,requested,lane,pair,set.pairs,tile);
 }
 
 // Wall remainders retain their fixed K-by-K sum and cached z weights.
@@ -535,13 +554,15 @@ template<typename T,int B,int Class> __global__ void regular_face_pairs(
 // only phi, Ahh and the cross component with a nonzero RWG z numerator.
 template<typename Far> __global__ void wall_regular_face_pairs(
     GreenTableView table,VerticalGreenTableView v,GeometryView g,const double* rule,
-    int stride,bool adaptive,int f,int begin,int count,double ratio,C* tile) {
+    int stride,bool adaptive,int f,PairSet set,double ratio,C* tile) {
   int64_t pair=(int64_t(blockIdx.x)*blockDim.x+threadIdx.x)/32;
-  if(pair>=int64_t(g.faces)*count) return;
+  if(pair>=set.pairs) return;
   int lane=threadIdx.x%32;
-  FacePair p=face_pair(g,table,pair/count,begin+pair%count,ratio);
+  FacePair p=face_pair(g,table,pair_row(set,pair),pair_col(set,pair),ratio);
   if(p.pair>=0) return;
-  if(wall_near(p,v,g)) wall_regular<double>(p,table,v,g,rule,stride,adaptive,f,lane,tile+10*pair);
+  bool near=wall_near(p,v,g);
+  if(near && set.far_only) return;
+  if(near) wall_regular<double>(p,table,v,g,rule,stride,adaptive,f,lane,tile+10*pair);
   else wall_regular<Far>(p,table,v,g,rule,stride,adaptive,f,lane,tile+10*pair);
 }
 
@@ -550,11 +571,11 @@ template<typename Far> __global__ void wall_regular_face_pairs(
 // tile read/write. FLOP/node/image: ~420 analytic + ~170 block moments;
 // 3 log/asinh, one solid-angle atan2 and ~12 sqrt are separate SFU work.
 __global__ void near_image_pairs(GreenTableView table,VerticalGreenTableView v,GeometryView g,const double* rules,int stride,
-    bool adaptive,int f,int begin,int count,double ratio,C* tile) {
+    bool adaptive,int f,PairSet set,double ratio,C* tile) {
   int64_t pair=(int64_t(blockIdx.x)*blockDim.x+threadIdx.x)/32;
-  if(pair>=int64_t(g.faces)*count) return;
+  if(pair>=set.pairs) return;
   int lane=threadIdx.x%32;
-  FacePair p=face_pair(g,table,pair/count,begin+pair%count,ratio);
+  FacePair p=face_pair(g,table,pair_row(set,pair),pair_col(set,pair),ratio);
   if(p.pair<0) wall_static(p,v,g,rules,stride,adaptive,f,lane,tile+10*pair);
 }
 
@@ -567,10 +588,10 @@ __global__ void near_image_pairs(GreenTableView table,VerticalGreenTableView v,G
 __global__ void gather_mp_ie(GeometryView g,const C* tile,C* z,int begin,int count,
     const double* frequencies,int f) {
   int64_t thread=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;
-  if(thread>=int64_t(g.edges)*count*3) return;
-  int m=thread/(count*3),face=begin+(thread/3)%count,slot=thread%3;
-  if(g.slopes[3*face+slot]==0) return;
-  int n=g.face_edges[3*face+slot];
+  if(thread>=int64_t(g.edges)*count*g.width) return;
+  int m=thread/(count*g.width),face=begin+(thread/g.width)%count,slot=thread%g.width;
+  if(g.slopes[g.width*face+slot]==0) return;
+  int n=g.face_edges[g.width*face+slot];
   int owner=g.supports[2*n+1]<0 ? g.supports[2*n]:min(g.supports[2*n],g.supports[2*n+1]);
   if(owner>=begin && owner<begin+count && face!=owner) return;
   int64_t index=int64_t(m)*g.edges+n;
@@ -582,7 +603,7 @@ __global__ void gather_mp_ie(GeometryView g,const C* tile,C* z,int begin,int cou
     if(t<0 || s<begin || s>=begin+count) continue;
     int i=g.slots[2*m+a],j=g.slots[2*n+b];
     const C* block=tile+10*(int64_t(t)*count+s-begin);
-    double slope=g.slopes[3*t+i]*g.slopes[3*s+j];
+    double slope=(g.support_slopes ? g.support_slopes[2*m+a]*g.support_slopes[2*n+b] : g.slopes[3*t+i]*g.slopes[3*s+j]);
     value+=slope*(C(0,-w*mu0)*block[3*i+j]+C(0,4/(w*eps0))*block[9]);
   }
   z[index]+=value;
@@ -597,10 +618,10 @@ __global__ void gather_potentials(GeometryView g,const C* tile,C* v,C* p,int beg
     // Unit-integral P0 tests: P is the face-average kernel.
     p[int64_t(t)*g.faces+s]=tile[10*thread+9]*(4/(g.areas2[t]*g.areas2[s]));
   }
-  if(thread>=int64_t(g.edges)*count*3) return;
-  int m=thread/(count*3),face=begin+(thread/3)%count,slot=thread%3;
-  if(g.slopes[3*face+slot]==0) return;
-  int n=g.face_edges[3*face+slot];
+  if(thread>=int64_t(g.edges)*count*g.width) return;
+  int m=thread/(count*g.width),face=begin+(thread/g.width)%count,slot=thread%g.width;
+  if(g.slopes[g.width*face+slot]==0) return;
+  int n=g.face_edges[g.width*face+slot];
   int owner=g.supports[2*n+1]<0 ? g.supports[2*n]:min(g.supports[2*n],g.supports[2*n+1]);
   if(owner>=begin && owner<begin+count && face!=owner) return;
   C value(0);
@@ -608,9 +629,38 @@ __global__ void gather_potentials(GeometryView g,const C* tile,C* v,C* p,int beg
     int t=g.supports[2*m+a],s=g.supports[2*n+b];
     if(t<0 || s<begin || s>=begin+count) continue;
     int i=g.slots[2*m+a],j=g.slots[2*n+b];
-    value+=g.slopes[3*t+i]*g.slopes[3*s+j]*tile[10*(int64_t(t)*count+s-begin)+3*i+j];
+    value+=(g.support_slopes ? g.support_slopes[2*m+a]*g.support_slopes[2*n+b] : g.slopes[3*t+i]*g.slopes[3*s+j])*tile[10*(int64_t(t)*count+s-begin)+3*i+j];
   }
   v[int64_t(m)*g.edges+n]+=value;
+}
+
+// System gather: the gather_potentials V sum, written at loop/tree basis
+// position (order[m],order[n]) of the chunk system so the congruence runs in
+// place. P keeps one value per unordered face pair (t>=s, packed lower rows):
+// face_pair evaluates the canonical (min,max) pair for both orders, so
+// P(t,s) and P(s,t) are the identical number. ~64 B/V entry, 16 B/P entry;
+// one owner per entry, fixed support order, no atomics.
+__global__ void gather_system(GeometryView g,const C* tile,C* v,C* p,const int64_t* order,
+    int begin,int count) {
+  int64_t thread=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+  if(thread<int64_t(g.faces)*count) {
+    int t=thread/count,s=begin+thread%count;
+    if(t>=s) p[int64_t(t)*(t+1)/2+s]=tile[10*thread+9]*(4/(g.areas2[t]*g.areas2[s]));
+  }
+  if(thread>=int64_t(g.edges)*count*g.width) return;
+  int m=thread/(count*g.width),face=begin+(thread/g.width)%count,slot=thread%g.width;
+  if(g.slopes[g.width*face+slot]==0) return;
+  int n=g.face_edges[g.width*face+slot];
+  int owner=g.supports[2*n+1]<0 ? g.supports[2*n]:min(g.supports[2*n],g.supports[2*n+1]);
+  if(owner>=begin && owner<begin+count && face!=owner) return;
+  C value(0);
+  for(int a=0;a<2;++a) for(int b=0;b<2;++b) {
+    int t=g.supports[2*m+a],s=g.supports[2*n+b];
+    if(t<0 || s<begin || s>=begin+count) continue;
+    int i=g.slots[2*m+a],j=g.slots[2*n+b];
+    value+=(g.support_slopes ? g.support_slopes[2*m+a]*g.support_slopes[2*n+b] : g.slopes[3*t+i]*g.slopes[3*s+j])*tile[10*(int64_t(t)*count+s-begin)+3*i+j];
+  }
+  v[order[m]*int64_t(g.edges)+order[n]]+=value;
 }
 
 // Oracle-facing primitive: 120 B input + 32 B output per triangle query,
@@ -637,114 +687,149 @@ std::vector<Tensor> layered_triangle_static(Tensor triangles,Tensor points,Tenso
   C10_CUDA_KERNEL_LAUNCH_CHECK();return {scalar,vector};
 }
 
-std::vector<Tensor> assemble_impl(std::vector<Tensor> green,std::vector<Tensor> geometry,Tensor far_rule,
-    Tensor near_rule,int64_t requested,int64_t source_tile,double ratio,bool fp64,int64_t mode,double ground,bool parts,bool tiles=false) {
-  c10::cuda::CUDAGuard guard(geometry[0].device());
-  GreenTableView table{};
+// Views and geometry-only caches shared by every assembly entry point.
+struct AssemblyViews {
+  GreenTableView table;GeometryView g;VerticalGreenTableView vertical;
+  Tensor radial,points,weights;bool walls;
+};
+AssemblyViews assembly_views(const std::vector<Tensor>& green,const std::vector<Tensor>& geometry,
+    const Tensor& far_rule,int64_t mode,double ground,cudaStream_t stream,
+    const std::vector<Tensor>& cache=std::vector<Tensor>()) {
+  AssemblyViews a{};
+  GreenTableView& table=a.table;
   table.values=green[0].data_ptr<C>();table.slopes=green[1].data_ptr<C>();
   table.rho=green[2].data_ptr<double>();table.plane_z=green[3].data_ptr<double>();
   table.image_offsets=green[4].data_ptr<int64_t>();table.distances=green[5].data_ptr<double>();
-  table.images=green[6].data_ptr<C>();table.epsilon=green[7].data_ptr<C>();
+  table.images=green[6].data_ptr<C>();table.epsilon=green[7].data_ptr<C>();table.epsilon_stride=media_stride(green[7]);
   table.sigma=green[8].data_ptr<double>();table.frequency_hz=green[9].data_ptr<double>();
   table.frequencies=green[9].numel();table.pairs=green[0].size(1);table.nodes=green[2].numel();
   table.image_count=green[5].numel();table.metal_planes=green[3].numel();
   table.exact_mode=mode;table.ground=ground;
-  GeometryView g{geometry[0].data_ptr<double>(),geometry[2].data_ptr<double>(),
+  a.g=GeometryView{geometry[0].data_ptr<double>(),geometry[2].data_ptr<double>(),
       geometry[3].data_ptr<double>(),geometry[4].data_ptr<double>(),geometry[5].data_ptr<double>(),
       geometry[1].data_ptr<int64_t>(),geometry[6].data_ptr<int64_t>(),geometry[7].data_ptr<int64_t>(),
       geometry[8].data_ptr<int64_t>(),
       int(geometry[0].size(0)),int(geometry[6].size(0))};
-  VerticalGreenTableView vertical{};
-  if(green.size()>10) {
+  GeometryView& g=a.g;
+  g.width=geometry[8].size(1);
+  g.support_slopes=geometry.size()>9 ? geometry[9].data_ptr<double>() : nullptr;
+  a.walls=green.size()>10;
+  if(a.walls) {
     std::vector<Tensor> tensors(green.begin()+10,green.end());
-    vertical=vertical_view(tensors,0);
+    a.vertical=vertical_view(tensors,0);
   }
-  int batches=requested<0 ? table.frequencies : 1;
-  if(tiles) source_tile=g.faces;
+  a.radial=at::empty({2},green[2].options());
+  g.radial=a.radial.data_ptr<double>();
+  radial_metadata_kernel<<<1,1,0,stream>>>(table.rho,table.nodes,a.radial.data_ptr<double>());
+  g.rule_points=far_rule.numel()/4;
+  bool cached=!cache.empty();
+  a.points=cached ? cache[0] : at::empty({g.faces,g.rule_points,2},far_rule.options());
+  g.scalar_points=a.points.data_ptr<double>();
+  if(!cached) scalar_points_kernel<<<(int64_t(g.faces)*g.rule_points+127)/128,128,0,stream>>>(
+      g,far_rule.data_ptr<double>(),a.points.data_ptr<double>());
+  if(a.walls && !mode) {
+    g.rule_points=far_rule.numel()/4;g.z_weight_stride=2*a.vertical.K+2;
+    a.weights=cached ? cache[1] : at::empty({g.faces,g.rule_points,g.z_weight_stride},far_rule.options());
+    g.z_weights=a.weights.data_ptr<double>();
+    if(!cached) wall_weights_kernel<<<(int64_t(g.faces)*g.rule_points+127)/128,128,0,stream>>>(
+        g,a.vertical,far_rule.data_ptr<double>(),a.weights.data_ptr<double>(),g.rule_points,g.z_weight_stride);
+  }
+  return a;
+}
+
+// Every face-pair tile kernel of one pair set, for all frequency batches.
+// Buffer layout [batches, set.pairs, 10]. A far-only set launches no near
+// kernel: near static images and near-pair remainders exist only on near pairs.
+void launch_pair_tiles(const AssemblyViews& a,const Tensor& far_rule,const Tensor& near_rule,
+    int64_t requested,int batches,PairSet set,double ratio,bool fp64,C* buffer,cudaStream_t stream) {
+  const GreenTableView& table=a.table;const GeometryView& g=a.g;
   int far_stride=far_rule.size(-2),near_stride=near_rule.size(-2);
   bool far_adaptive=far_rule.dim()==3,near_adaptive=near_rule.dim()==3;
-  auto z=at::zeros({batches,g.edges,g.edges},green[0].options());
-  auto p=at::empty({parts ? batches : 0,g.faces,g.faces},green[0].options());
-  auto buffer=at::empty({batches,g.faces,std::min(int(source_tile),g.faces),10},green[0].options());
-  auto stream=c10::cuda::getCurrentCUDAStream();
-  auto radial=at::empty({2},green[2].options());
-  g.radial=radial.data_ptr<double>();
-  radial_metadata_kernel<<<1,1,0,stream>>>(table.rho,table.nodes,radial.data_ptr<double>());
-  g.rule_points=far_rule.numel()/4;
-  auto points=at::empty({g.faces,g.rule_points,2},far_rule.options());
-  g.scalar_points=points.data_ptr<double>();
-  scalar_points_kernel<<<(int64_t(g.faces)*g.rule_points+127)/128,128,0,stream>>>(
-      g,far_rule.data_ptr<double>(),points.data_ptr<double>());
-  Tensor weights;
-  if(green.size()>10 && !mode) {
-    g.rule_points=far_rule.numel()/4;g.z_weight_stride=2*vertical.K+2;
-    weights=at::empty({g.faces,g.rule_points,g.z_weight_stride},far_rule.options());
-    g.z_weights=weights.data_ptr<double>();
-    wall_weights_kernel<<<(int64_t(g.faces)*g.rule_points+127)/128,128,0,stream>>>(
-        g,vertical,far_rule.data_ptr<double>(),weights.data_ptr<double>(),g.rule_points,g.z_weight_stride);
+  const double *far=far_rule.data_ptr<double>(),*near=near_rule.data_ptr<double>();
+  int blocks=(set.pairs+3)/4;
+  if(fp64) horizontal_static_geometry<double,false><<<blocks,128,0,stream>>>(
+      table,g,far,far_stride,far_adaptive,requested,batches,set,ratio,buffer);
+  else horizontal_static_geometry<float,false><<<blocks,128,0,stream>>>(
+      table,g,far,far_stride,far_adaptive,requested,batches,set,ratio,buffer);
+  if(!set.far_only) horizontal_static_geometry<double,true><<<blocks,128,0,stream>>>(
+      table,g,near,near_stride,near_adaptive,requested,batches,set,ratio,buffer);
+  if(fp64) {
+    for(int batch=0;batch<batches;++batch)
+      regular_face_pairs<double,1,0><<<blocks,128,0,stream>>>(
+          table,g,far,far_stride,far_adaptive,batch,batches,requested,set,ratio,buffer);
+  } else {
+    if(!set.far_only) for(int batch=0;batch<batches;batch+=2) {
+      if(batch+1<batches) regular_face_pairs<double,2,1><<<blocks,128,0,stream>>>(
+          table,g,far,far_stride,far_adaptive,batch,batches,requested,set,ratio,buffer);
+      else regular_face_pairs<double,1,1><<<blocks,128,0,stream>>>(
+          table,g,far,far_stride,far_adaptive,batch,batches,requested,set,ratio,buffer);
+    }
+    for(int batch=0;batch<batches;batch+=4) {
+      switch(std::min(4,batches-batch)) {
+        case 1: regular_face_pairs<float,1,2><<<blocks,128,0,stream>>>(
+          table,g,far,far_stride,far_adaptive,batch,batches,requested,set,ratio,buffer);break;
+        case 2: regular_face_pairs<float,2,2><<<blocks,128,0,stream>>>(
+          table,g,far,far_stride,far_adaptive,batch,batches,requested,set,ratio,buffer);break;
+        case 3: regular_face_pairs<float,3,2><<<blocks,128,0,stream>>>(
+          table,g,far,far_stride,far_adaptive,batch,batches,requested,set,ratio,buffer);break;
+        case 4: regular_face_pairs<float,4,2><<<blocks,128,0,stream>>>(
+          table,g,far,far_stride,far_adaptive,batch,batches,requested,set,ratio,buffer);break;
+      }
+    }
   }
+  for(int batch=0;batch<batches;++batch) {
+    int f=requested<0 ? batch : requested;
+    C* tile=buffer+int64_t(batch)*set.pairs*10;
+    if(a.walls) {
+      if(fp64) wall_regular_face_pairs<double><<<blocks,128,0,stream>>>(
+          table,a.vertical,g,far,far_stride,far_adaptive,f,set,ratio,tile);
+      else wall_regular_face_pairs<float><<<blocks,128,0,stream>>>(
+          table,a.vertical,g,far,far_stride,far_adaptive,f,set,ratio,tile);
+    }
+    if(!set.far_only) near_image_pairs<<<blocks,128,0,stream>>>(table,a.vertical,g,near,near_stride,near_adaptive,
+                                            f,set,ratio,tile);
+  }
+}
+
+std::vector<Tensor> assemble_impl(std::vector<Tensor> green,std::vector<Tensor> geometry,Tensor far_rule,
+    Tensor near_rule,int64_t requested,int64_t source_tile,double ratio,bool fp64,int64_t mode,double ground,bool parts,bool tiles=false,
+    Tensor system=Tensor(),Tensor packed=Tensor(),Tensor order=Tensor()) {
+  c10::cuda::CUDAGuard guard(geometry[0].device());
+  auto stream=c10::cuda::getCurrentCUDAStream();
+  AssemblyViews views=assembly_views(green,geometry,far_rule,mode,ground,stream);
+  const GreenTableView& table=views.table;const GeometryView& g=views.g;
+  int batches=requested<0 ? table.frequencies : 1;
+  if(tiles) source_tile=g.faces;
+  // System mode writes into caller-owned chunk storage: a zeroed [K,N,N]
+  // system and a complex64 workspace whose first F(F+1)/2 complex128 slots
+  // per frequency hold packed P until the factorization reuses them.
+  bool into=system.defined();
+  auto z=into ? system : at::zeros({batches,g.edges,g.edges},green[0].options());
+  auto p=at::empty({parts && !into ? batches : 0,g.faces,g.faces},green[0].options());
+  auto buffer=at::empty({batches,g.faces,std::min(int(source_tile),g.faces),10},green[0].options());
   // Reuse static geometry within the admitted frequency chunk. Gather keeps
   // the same support order and complex128 public potential layout.
   for(int begin=0;begin<g.faces;begin+=source_tile) {
     int count=std::min(int(source_tile),g.faces-begin);
-    int blocks=(int64_t(g.faces)*count+3)/4;
-    if(fp64) horizontal_static_geometry<double,false><<<blocks,128,0,stream>>>(
-        table,g,far_rule.data_ptr<double>(),far_stride,far_adaptive,requested,batches,begin,count,ratio,buffer.data_ptr<C>());
-    else horizontal_static_geometry<float,false><<<blocks,128,0,stream>>>(
-        table,g,far_rule.data_ptr<double>(),far_stride,far_adaptive,requested,batches,begin,count,ratio,buffer.data_ptr<C>());
-    horizontal_static_geometry<double,true><<<blocks,128,0,stream>>>(
-        table,g,near_rule.data_ptr<double>(),near_stride,near_adaptive,requested,batches,begin,count,ratio,buffer.data_ptr<C>());
-    if(fp64) {
-      for(int batch=0;batch<batches;++batch)
-        regular_face_pairs<double,1,0><<<blocks,128,0,stream>>>(
-            table,g,far_rule.data_ptr<double>(),far_stride,far_adaptive,batch,batches,
-            requested,begin,count,ratio,buffer.data_ptr<C>());
-    } else {
-      for(int batch=0;batch<batches;batch+=2) {
-        if(batch+1<batches) regular_face_pairs<double,2,1><<<blocks,128,0,stream>>>(
-            table,g,far_rule.data_ptr<double>(),far_stride,far_adaptive,batch,batches,
-            requested,begin,count,ratio,buffer.data_ptr<C>());
-        else regular_face_pairs<double,1,1><<<blocks,128,0,stream>>>(
-            table,g,far_rule.data_ptr<double>(),far_stride,far_adaptive,batch,batches,
-            requested,begin,count,ratio,buffer.data_ptr<C>());
-      }
-      for(int batch=0;batch<batches;batch+=4) {
-        switch(std::min(4,batches-batch)) {
-          case 1: regular_face_pairs<float,1,2><<<blocks,128,0,stream>>>(
-            table,g,far_rule.data_ptr<double>(),far_stride,far_adaptive,batch,batches,
-            requested,begin,count,ratio,buffer.data_ptr<C>());break;
-          case 2: regular_face_pairs<float,2,2><<<blocks,128,0,stream>>>(
-            table,g,far_rule.data_ptr<double>(),far_stride,far_adaptive,batch,batches,
-            requested,begin,count,ratio,buffer.data_ptr<C>());break;
-          case 3: regular_face_pairs<float,3,2><<<blocks,128,0,stream>>>(
-            table,g,far_rule.data_ptr<double>(),far_stride,far_adaptive,batch,batches,
-            requested,begin,count,ratio,buffer.data_ptr<C>());break;
-          case 4: regular_face_pairs<float,4,2><<<blocks,128,0,stream>>>(
-            table,g,far_rule.data_ptr<double>(),far_stride,far_adaptive,batch,batches,
-            requested,begin,count,ratio,buffer.data_ptr<C>());break;
-        }
-      }
-    }
+    PairSet set{nullptr,int64_t(g.faces)*count,begin,count,false};
+    launch_pair_tiles(views,far_rule,near_rule,requested,batches,set,ratio,fp64,buffer.data_ptr<C>(),stream);
+    if(tiles) {C10_CUDA_KERNEL_LAUNCH_CHECK();return {buffer.select(0,0)};}
     for(int batch=0;batch<batches;++batch) {
     int f=requested<0 ? batch : requested;
     C* tile=buffer.data_ptr<C>()+int64_t(batch)*g.faces*count*10;
-    if(green.size()>10) {
-      if(fp64) wall_regular_face_pairs<double><<<blocks,128,0,stream>>>(
-          table,vertical,g,far_rule.data_ptr<double>(),far_stride,far_adaptive,f,begin,count,ratio,tile);
-      else wall_regular_face_pairs<float><<<blocks,128,0,stream>>>(
-          table,vertical,g,far_rule.data_ptr<double>(),far_stride,far_adaptive,f,begin,count,ratio,tile);
-    }
-    near_image_pairs<<<blocks,128,0,stream>>>(table,vertical,g,near_rule.data_ptr<double>(),near_stride,near_adaptive,
-                                            f,begin,count,ratio,tile);
-    if(tiles) {C10_CUDA_KERNEL_LAUNCH_CHECK();return {buffer.select(0,0)};}
-    if(parts) gather_potentials<<<(std::max(int64_t(g.edges)*count*3,int64_t(g.faces)*count)+127)/128,128,0,stream>>>(
+    if(into) gather_system<<<(std::max(int64_t(g.edges)*count*g.width,int64_t(g.faces)*count)+127)/128,128,0,stream>>>(
+        g,tile,z.data_ptr<C>()+int64_t(batch)*g.edges*g.edges,
+        reinterpret_cast<C*>(packed.data_ptr<c10::complex<float>>())+int64_t(batch)*(packed.size(1)/2),
+        order.data_ptr<int64_t>(),begin,count);
+    else if(parts) gather_potentials<<<(std::max(int64_t(g.edges)*count*g.width,int64_t(g.faces)*count)+127)/128,128,0,stream>>>(
         g,tile,z.data_ptr<C>()+int64_t(batch)*g.edges*g.edges,
         p.data_ptr<C>()+int64_t(batch)*g.faces*g.faces,begin,count);
-    else gather_mp_ie<<<(int64_t(g.edges)*count*3+127)/128,128,0,stream>>>(
+    else gather_mp_ie<<<(int64_t(g.edges)*count*g.width+127)/128,128,0,stream>>>(
         g,tile,z.data_ptr<C>(),begin,count,table.frequency_hz,f);
   }
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if(into) return {};
   if(requested>=0) return {z.select(0,0),parts ? p.select(0,0) : p};
   return {z,p};
 }
@@ -759,10 +844,131 @@ std::vector<Tensor> layered_assemble_parts(std::vector<Tensor> green,std::vector
 }
 
 
+// Chunk system assembly: every frequency of the green views, written in place.
+void layered_assemble_system(std::vector<Tensor> green,std::vector<Tensor> geometry,Tensor far_rule,
+    Tensor near_rule,int64_t source_tile,double ratio,bool fp64,int64_t mode,double ground,
+    Tensor system,Tensor workspace,Tensor order) {
+  assemble_impl(green,geometry,far_rule,near_rule,-1,source_tile,ratio,fp64,mode,ground,true,false,
+                system,workspace,order);
+}
+
 Tensor layered_assemble_tiles(std::vector<Tensor> green,std::vector<Tensor> geometry,Tensor far_rule,
     Tensor near_rule,int64_t f,int64_t source_tile,double ratio,bool fp64,int64_t mode,double ground) {
   return assemble_impl(green,geometry,far_rule,near_rule,f,source_tile,ratio,fp64,mode,ground,false,true)[0];
 }
+// ---------------------------------------------------------------------------
+// Matrix-free backend (near/far split of the identical face-pair tiles).
+
+// Geometry-only caches of one layout and rule pack: fp64 relative scalar
+// points [F,R,2] and, with walls, the wall z weights [F,R,2K+2].
+std::vector<Tensor> layered_assembly_cache(std::vector<Tensor> green,std::vector<Tensor> geometry,
+    Tensor far_rule,int64_t mode,double ground) {
+  c10::cuda::CUDAGuard guard(geometry[0].device());
+  AssemblyViews views=assembly_views(green,geometry,far_rule,mode,ground,c10::cuda::getCurrentCUDAStream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {views.points,views.weights.defined() ? views.weights : at::empty({0},far_rule.options())};
+}
+
+// The assembly's own near predicate of the canonical face pair: horizontal
+// pairs any near image (pair_near), wall pairs any near wall ray (wall_near).
+__device__ inline bool classified_near(const GreenTableView& table,const VerticalGreenTableView& v,
+    const GeometryView& g,int t,int s,double ratio) {
+  FacePair p=face_pair(g,table,t,s,ratio);
+  return p.pair>=0 ? pair_near(p,table) : wall_near(p,v,g);
+}
+constexpr int NEAR_BLOCK=256;
+// Pass 1: near count of each (row, 256-column block); pass 2 writes the
+// columns ascending at the exclusive prefix. Integer output, one owner each.
+__global__ void near_count_kernel(GreenTableView table,VerticalGreenTableView v,GeometryView g,
+    double ratio,int64_t* counts,int blocks) {
+  int64_t t=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;if(t>=int64_t(g.faces)*blocks) return;
+  int row=t/blocks,first=(t%blocks)*NEAR_BLOCK,last=min(first+NEAR_BLOCK,g.faces);
+  int64_t count=0;
+  for(int s=first;s<last;++s) count+=classified_near(table,v,g,row,s,ratio);
+  counts[t+1]=count;
+}
+__global__ void near_fill_kernel(GreenTableView table,VerticalGreenTableView v,GeometryView g,
+    double ratio,const int64_t* offsets,int64_t* list,int blocks) {
+  int64_t t=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;if(t>=int64_t(g.faces)*blocks) return;
+  int row=t/blocks,first=(t%blocks)*NEAR_BLOCK,last=min(first+NEAR_BLOCK,g.faces);
+  int64_t at=offsets[t];
+  for(int s=first;s<last;++s)
+    if(classified_near(table,v,g,row,s,ratio)) {list[2*at]=row;list[2*at+1]=s;++at;}
+}
+Tensor layered_near_pairs(std::vector<Tensor> green,std::vector<Tensor> geometry,Tensor far_rule,
+    double ratio,int64_t mode,double ground) {
+  c10::cuda::CUDAGuard guard(geometry[0].device());
+  auto stream=c10::cuda::getCurrentCUDAStream();
+  AssemblyViews views=assembly_views(green,geometry,far_rule,mode,ground,stream);
+  int blocks=(views.g.faces+NEAR_BLOCK-1)/NEAR_BLOCK;
+  int64_t threads=int64_t(views.g.faces)*blocks;
+  auto counts=at::zeros({threads+1},geometry[6].options());
+  near_count_kernel<<<(threads+127)/128,128,0,stream>>>(views.table,views.vertical,views.g,ratio,
+      counts.data_ptr<int64_t>(),blocks);
+  auto offsets=at::cumsum(counts,0);
+  // Setup-only size transfer; the list itself stays on the device.
+  int64_t total=offsets.select(0,threads).item<int64_t>();
+  auto list=at::empty({total,2},counts.options());
+  near_fill_kernel<<<(threads+127)/128,128,0,stream>>>(views.table,views.vertical,views.g,ratio,
+      offsets.data_ptr<int64_t>(),list.data_ptr<int64_t>(),blocks);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return list;
+}
+
+// Near tiles [pairs,10] of an explicit near list for the single frequency of
+// the green views: the identical pair kernels, launched over list chunks.
+Tensor layered_near_tiles(std::vector<Tensor> green,std::vector<Tensor> geometry,Tensor far_rule,
+    Tensor near_rule,double ratio,bool fp64,int64_t mode,double ground,Tensor list,int64_t chunk,
+    std::vector<Tensor> cache) {
+  c10::cuda::CUDAGuard guard(geometry[0].device());
+  auto stream=c10::cuda::getCurrentCUDAStream();
+  AssemblyViews views=assembly_views(green,geometry,far_rule,mode,ground,stream,cache);
+  int64_t total=list.size(0);
+  auto tiles=at::empty({total,10},green[0].options());
+  for(int64_t first=0;first<total;first+=chunk) {
+    PairSet set{list.data_ptr<int64_t>()+2*first,std::min(chunk,total-first),0,1,false};
+    launch_pair_tiles(views,far_rule,near_rule,-1,1,set,ratio,fp64,tiles.data_ptr<C>()+10*first,stream);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return tiles;
+}
+
+// out[t,k,p] += sum_{s in tile} sum_j tile[t,s][3k+j] c[s,j,p] (k<3) and
+// out[t,3,p] += sum_s tile[t,s][9] c[s,3,p]: one owner per output, ascending
+// source order, tiles in launch order. ~(48+16P/P) B and 8 real FLOP/term.
+__global__ void far_contract_kernel(const C* tile,const C* coefficients,C* out,int faces,int begin,
+    int count,int P) {
+  int64_t i=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;if(i>=int64_t(faces)*4*P) return;
+  int p=i%P,k=(i/P)%4,t=i/(4*P);
+  C sum=out[i];
+  const C* row=tile+int64_t(t)*count*10;
+  for(int s=0;s<count;++s) {
+    const C* block=row+10*s;const C* c=coefficients+int64_t(begin+s)*4*P+p;
+    if(k==3) sum+=block[9]*c[3*P];
+    else for(int j=0;j<3;++j) sum+=block[3*k+j]*c[j*P];
+  }
+  out[i]=sum;
+}
+// Far-pair action on face coefficients [F,4,P]: vertex moments k<3 contract
+// the vector tile, k=3 the scalar tile. Every source tile is evaluated with
+// near pairs skipped (far_only) and contracted for all P columns at once.
+Tensor layered_far_apply(std::vector<Tensor> green,std::vector<Tensor> geometry,Tensor far_rule,
+    Tensor near_rule,double ratio,bool fp64,int64_t mode,double ground,int64_t source_tile,
+    Tensor coefficients,std::vector<Tensor> cache) {
+  c10::cuda::CUDAGuard guard(geometry[0].device());
+  auto stream=c10::cuda::getCurrentCUDAStream();
+  AssemblyViews views=assembly_views(green,geometry,far_rule,mode,ground,stream,cache);
+  int F=views.g.faces,P=coefficients.size(2);
+  auto out=at::zeros_like(coefficients);
+  auto buffer=at::empty({F,std::min(int(source_tile),F),10},green[0].options());
+  for(int begin=0;begin<F;begin+=source_tile) {
+    int count=std::min(int(source_tile),F-begin);
+    PairSet set{nullptr,int64_t(F)*count,begin,count,true};
+    launch_pair_tiles(views,far_rule,near_rule,-1,1,set,ratio,fp64,buffer.data_ptr<C>(),stream);
+    far_contract_kernel<<<(int64_t(F)*4*P+127)/128,128,0,stream>>>(buffer.data_ptr<C>(),
+        coefficients.data_ptr<C>(),out.data_ptr<C>(),F,begin,count,P);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+
 __global__ void radial_indices_kernel(const double* grid,const double* queries,int64_t* out,int nodes,int64_t count,const double* radial) {
   int64_t i=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;
   if(i<count) out[i]=radial_interval(grid,nodes,queries[i],radial[0],radial[1]);

@@ -60,7 +60,8 @@ def diagnostic_execution(args, case, *, normalized=True, **kwargs):
             case, device=args.device, normalized=normalized and not fp64,
             field_dtype=dtype, observer_dtype=dtype, full_field_dft=not fp64, **kwargs)
     if fp64:
-        prepared.simulation.config.spectral_sampler.normalize_source = normalized
+        # Diagnostic bypass of the public FP64 sampler validation (the sampler is frozen).
+        object.__setattr__(prepared.simulation.config.spectral_sampler, "normalize_source", normalized)
         prepared.solver._normalize_source = normalized
     if args.device == "cpu":
         from tests.fdtd.cuda import torch_reference

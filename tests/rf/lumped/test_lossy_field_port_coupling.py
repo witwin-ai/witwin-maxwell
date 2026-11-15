@@ -45,7 +45,7 @@ def test_lossy_midpoint_matches_independent_block_and_energy(device, sigma_ratio
     runtime = prepare_lumped_runtime(geometry, dt=dt, eps_edge=eps.reshape(-1, 1, 1),
                                     yee_control_volume=volume.reshape(-1, 1, 1),
                                     electric_update_coefficient=coefficient.reshape(-1, 1, 1),
-                                    termination=mw.SeriesRLC(r=eps.new_tensor(r), l=eps.new_tensor(l) if l else None,
+                                    termination=mw.rf.SeriesRLC(r=eps.new_tensor(r), l=eps.new_tensor(l) if l else None,
                                                              c=eps.new_tensor(c) if c else None), diagnostics=True)
     e = torch.tensor([.8, -.3, .2], device=device, dtype=dtype)
     il = e.new_zeros(())
@@ -89,21 +89,21 @@ def _scene(*, sigma, remote=False, circuit=False, driven=False):
     port = mw.LumpedPort(name="feed", positive=(0., 0., .005), negative=(0., 0., -.005),
                          voltage_path=mw.AxisPath("z"), current_surface=mw.Box(
                              position=(0., 0., -.0025), size=(.015, .015, 0.)),
-                         termination=None if circuit or driven else mw.SeriesRLC(r=25., l=.5e-9, c=1.e-12))
+                         termination=None if circuit or driven else mw.rf.SeriesRLC(r=25., l=.5e-9, c=1.e-12))
     circuits = ()
     if circuit:
-        network = mw.Circuit("load")
+        network = mw.circuits.Circuit("load")
         a, b, c = network.node("a"), network.node("b"), network.node("c")
-        network.add(mw.Resistor("r", a, b, 25.))
-        network.add(mw.Inductor("l", b, c, .5e-9))
-        network.add(mw.Capacitor("c", c, network.ground, 1.e-12))
+        network.add(mw.rf.Resistor("r", a, b, 25.))
+        network.add(mw.rf.Inductor("l", b, c, .5e-9))
+        network.add(mw.rf.Capacitor("c", c, network.ground, 1.e-12))
         network.bind_port("feed", positive=a, negative=network.ground)
         circuits = (network,)
     box = mw.Box(position=(.0125, 0., 0.) if remote else (0., 0., 0.),
                  size=(.005, .02, .02) if remote else (.03, .03, .03))
     return mw.Scene(domain=mw.Domain(bounds=((-0.02, .02),) * 3), grid=mw.GridSpec.uniform(.005),
                     boundary=mw.BoundarySpec.none(), ports=(port,), circuits=circuits,
-                    structures=(mw.Structure(geometry=box, material=mw.Material(eps_r=2., sigma_e=sigma)),), device="cuda")
+                    structures=(mw.Structure(geometry=box, material=mw.Material(eps_r=2., sigma_e=sigma)),))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -114,7 +114,7 @@ def test_lossy_native_series_and_mna_agree_through_actual_gpu_field_steps(remote
     from witwin.maxwell.fdtd.ports import apply_port_runtimes
     from witwin.maxwell.fdtd.runtime.stepping import _field_update_block
     solvers = [mw.Simulation.fdtd(_scene(sigma=sigma, remote=remote, circuit=mna),
-                                 frequency=3.e9).prepare().solver for mna in (False, True)]
+                                 frequencies=3.e9).prepare().solver for mna in (False, True)]
     native, coupled = solvers
     prepare_circuit_time_series(coupled, 64)
     for solver in solvers:
@@ -143,9 +143,11 @@ def test_lossy_native_series_and_mna_agree_through_actual_gpu_field_steps(remote
 def test_lossy_source_public_run_has_nonzero_voltage_current_and_power(remote):
     result = mw.Simulation.fdtd(
         _scene(sigma=.1, remote=remote, driven=True), frequencies=(2.5e9, 3.e9),
-        excitations=mw.PortExcitation("feed", source_time=mw.GaussianPulse(frequency=2.75e9, fwidth=1.e9)),
-        run_time=mw.TimeConfig(time_steps=256), spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False).run()
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.GaussianPulse(frequency=2.75e9, fwidth=1.e9)),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=256), spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        )).run()
     data = result.port("feed")
     assert torch.isfinite(data.voltage).all() and torch.isfinite(data.current).all()
     assert bool(torch.all(data.accepted_power > 0.))

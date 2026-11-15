@@ -10,11 +10,11 @@ import witwin.maxwell as mw
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _network(port_count: int) -> mw.NetworkData:
+def _network(port_count: int) -> mw.rf.NetworkData:
     generator = torch.Generator().manual_seed(100 + port_count)
     real = torch.rand((3, port_count, port_count), generator=generator, dtype=torch.float64)
     imag = torch.rand((3, port_count, port_count), generator=generator, dtype=torch.float64)
-    return mw.NetworkData(
+    return mw.rf.NetworkData(
         frequencies=torch.tensor((1.0e9, 1.5e9, 2.0e9), dtype=torch.float64),
         s=0.2 * torch.complex(real, imag),
         z0=torch.linspace(45.0, 75.0, port_count, dtype=torch.float64),
@@ -23,7 +23,7 @@ def _network(port_count: int) -> mw.NetworkData:
 
 
 def test_read_one_port_v1_ri_golden():
-    network = mw.NetworkData.from_touchstone(FIXTURES / "one_port_ri.s1p")
+    network = mw.rf.NetworkData.from_touchstone(FIXTURES / "one_port_ri.s1p")
 
     torch.testing.assert_close(
         network.frequencies,
@@ -42,7 +42,7 @@ def test_read_one_port_v1_ri_golden():
 
 
 def test_read_two_port_v2_alternate_order_and_per_port_z0():
-    network = mw.NetworkData.from_touchstone(FIXTURES / "two_port_ma.ts")
+    network = mw.rf.NetworkData.from_touchstone(FIXTURES / "two_port_ma.ts")
 
     expected = torch.tensor(
         [
@@ -61,7 +61,7 @@ def test_read_two_port_v2_alternate_order_and_per_port_z0():
 
 
 def test_read_four_port_v1_row_major_golden():
-    network = mw.NetworkData.from_touchstone(FIXTURES / "four_port_db.s4p")
+    network = mw.rf.NetworkData.from_touchstone(FIXTURES / "four_port_db.s4p")
 
     assert network.s.shape == (1, 4, 4)
     torch.testing.assert_close(
@@ -85,7 +85,7 @@ def test_touchstone_round_trip_complex128_below_1e_10(tmp_path, port_count, data
     path = tmp_path / f"roundtrip.s{port_count}p"
 
     source.to_touchstone(path, format=data_format, version="2.0")
-    loaded = mw.NetworkData.from_touchstone(path)
+    loaded = mw.rf.NetworkData.from_touchstone(path)
 
     torch.testing.assert_close(loaded.frequencies, source.frequencies, rtol=0.0, atol=0.0)
     torch.testing.assert_close(loaded.s, source.s, rtol=0.0, atol=1.0e-10)
@@ -124,7 +124,7 @@ def test_read_z_y_respects_version_one_normalization(
         )
     path.write_text(text, encoding="ascii")
 
-    network = mw.NetworkData.from_touchstone(path)
+    network = mw.rf.NetworkData.from_touchstone(path)
 
     torch.testing.assert_close(
         network.s[0, 0, 0],
@@ -140,7 +140,7 @@ def test_write_and_read_z_y_round_trip(tmp_path):
     for parameter in ("z", "y"):
         path = tmp_path / f"network_{parameter}.ts"
         source.to_touchstone(path, version="2.0", parameter=parameter)
-        loaded = mw.NetworkData.from_touchstone(path)
+        loaded = mw.rf.NetworkData.from_touchstone(path)
         torch.testing.assert_close(loaded.s, source.s, rtol=1.0e-10, atol=1.0e-10)
 
 
@@ -158,8 +158,8 @@ def test_parse_errors_include_source_line(tmp_path, body, match, line):
     path = tmp_path / "bad.s1p"
     path.write_text(body, encoding="ascii")
 
-    with pytest.raises(mw.TouchstoneParseError, match=match) as caught:
-        mw.NetworkData.from_touchstone(path)
+    with pytest.raises(mw.rf.TouchstoneParseError, match=match) as caught:
+        mw.rf.NetworkData.from_touchstone(path)
 
     assert caught.value.line_number == line
     assert f"line {line}" in str(caught.value)
@@ -178,8 +178,8 @@ def test_parser_rejects_suffix_port_mismatch(tmp_path):
         encoding="ascii",
     )
 
-    with pytest.raises(mw.TouchstoneParseError, match="suffix declares 2 ports"):
-        mw.NetworkData.from_touchstone(path)
+    with pytest.raises(mw.rf.TouchstoneParseError, match="suffix declares 2 ports"):
+        mw.rf.NetworkData.from_touchstone(path)
 
 
 def test_parser_expands_lower_matrix_symmetrically(tmp_path):
@@ -196,7 +196,7 @@ def test_parser_expands_lower_matrix_symmetrically(tmp_path):
         encoding="ascii",
     )
 
-    network = mw.NetworkData.from_touchstone(path)
+    network = mw.rf.NetworkData.from_touchstone(path)
 
     torch.testing.assert_close(network.s, network.s.transpose(-2, -1))
     torch.testing.assert_close(
@@ -214,7 +214,7 @@ def test_parser_expands_upper_matrix_symmetrically(tmp_path):
         encoding="ascii",
     )
 
-    network = mw.NetworkData.from_touchstone(path)
+    network = mw.rf.NetworkData.from_touchstone(path)
 
     torch.testing.assert_close(network.s, network.s.transpose(-2, -1))
     torch.testing.assert_close(
@@ -230,7 +230,7 @@ def test_parser_uses_historical_two_port_order_for_version_one(tmp_path):
         encoding="ascii",
     )
 
-    network = mw.NetworkData.from_touchstone(path)
+    network = mw.rf.NetworkData.from_touchstone(path)
 
     torch.testing.assert_close(
         network.s[0],
@@ -239,7 +239,7 @@ def test_parser_uses_historical_two_port_order_for_version_one(tmp_path):
 
 
 def test_from_touchstone_places_tensors_on_requested_device():
-    network = mw.NetworkData.from_touchstone(FIXTURES / "one_port_ri.s1p", device="cpu")
+    network = mw.rf.NetworkData.from_touchstone(FIXTURES / "one_port_ri.s1p", device="cpu")
 
     assert network.frequencies.device.type == "cpu"
     assert network.s.device.type == "cpu"
@@ -253,7 +253,7 @@ def test_parser_preserves_warning_metadata_for_ignored_option_line(tmp_path):
         encoding="ascii",
     )
 
-    network = mw.NetworkData.from_touchstone(path)
+    network = mw.rf.NetworkData.from_touchstone(path)
 
     assert network.metadata["touchstone"]["parser_warnings"] == (
         "line 2: ignored additional option line",
@@ -261,7 +261,7 @@ def test_parser_preserves_warning_metadata_for_ignored_option_line(tmp_path):
 
 
 def test_named_ports_survive_export_import_round_trip(tmp_path):
-    source = mw.NetworkData(
+    source = mw.rf.NetworkData(
         frequencies=torch.tensor([1.0e9], dtype=torch.float64),
         s=torch.zeros((1, 2, 2), dtype=torch.complex128),
         z0=(50.0, 75.0),
@@ -270,14 +270,14 @@ def test_named_ports_survive_export_import_round_trip(tmp_path):
     path = tmp_path / "named.ts"
 
     source.to_touchstone(path, version="2.0")
-    loaded = mw.NetworkData.from_touchstone(path)
+    loaded = mw.rf.NetworkData.from_touchstone(path)
 
     assert loaded.port_names == source.port_names
 
 
 def test_network_data_rejects_port_name_boundary_whitespace():
     with pytest.raises(ValueError, match="leading or trailing whitespace"):
-        mw.NetworkData(
+        mw.rf.NetworkData(
             frequencies=torch.tensor([1.0], dtype=torch.float64),
             s=torch.zeros((1, 1, 1), dtype=torch.complex128),
             z0=50.0,
@@ -287,7 +287,7 @@ def test_network_data_rejects_port_name_boundary_whitespace():
 
 def test_version_one_five_port_rows_wrap_at_four_pairs(tmp_path):
     source = _network(5)
-    uniform = mw.NetworkData(
+    uniform = mw.rf.NetworkData(
         frequencies=source.frequencies,
         s=source.s,
         z0=50.0,
@@ -296,7 +296,7 @@ def test_version_one_five_port_rows_wrap_at_four_pairs(tmp_path):
     path = tmp_path / "wrapped.s5p"
 
     uniform.to_touchstone(path, version="1.0")
-    loaded = mw.NetworkData.from_touchstone(path)
+    loaded = mw.rf.NetworkData.from_touchstone(path)
 
     data_lines = [
         line
@@ -311,7 +311,7 @@ def test_parser_accepts_zero_frequency(tmp_path):
     path = tmp_path / "dc.s1p"
     path.write_text("# Hz S RI R 50\n0 0.25 0\n1 0.5 0\n", encoding="ascii")
 
-    network = mw.NetworkData.from_touchstone(path)
+    network = mw.rf.NetworkData.from_touchstone(path)
 
     torch.testing.assert_close(network.frequencies, torch.tensor([0.0, 1.0], dtype=torch.float64))
 
@@ -328,8 +328,8 @@ def test_version_one_rejects_malformed_line_layout(tmp_path, body, line):
     path = tmp_path / "bad.s2p"
     path.write_text(body, encoding="ascii")
 
-    with pytest.raises(mw.TouchstoneParseError, match="require exactly") as caught:
-        mw.NetworkData.from_touchstone(path)
+    with pytest.raises(mw.rf.TouchstoneParseError, match="require exactly") as caught:
+        mw.rf.NetworkData.from_touchstone(path)
 
     assert caught.value.line_number == line
 
@@ -343,15 +343,15 @@ def test_parser_rejects_non_ascii_and_noncanonical_keyword_spacing(tmp_path):
         encoding="ascii",
     )
 
-    with pytest.raises(mw.TouchstoneParseError, match="ASCII") as caught:
-        mw.NetworkData.from_touchstone(non_ascii)
+    with pytest.raises(mw.rf.TouchstoneParseError, match="ASCII") as caught:
+        mw.rf.NetworkData.from_touchstone(non_ascii)
     assert caught.value.line_number == 1
-    with pytest.raises(mw.TouchstoneParseError, match="expected.*keyword"):
-        mw.NetworkData.from_touchstone(bad_keyword)
+    with pytest.raises(mw.rf.TouchstoneParseError, match="expected.*keyword"):
+        mw.rf.NetworkData.from_touchstone(bad_keyword)
 
 
 def test_db_zero_export_uses_finite_numeric_token(tmp_path):
-    source = mw.NetworkData(
+    source = mw.rf.NetworkData(
         frequencies=torch.tensor([1.0], dtype=torch.float64),
         s=torch.zeros((1, 1, 1), dtype=torch.complex128),
         z0=50.0,
@@ -361,7 +361,7 @@ def test_db_zero_export_uses_finite_numeric_token(tmp_path):
 
     source.to_touchstone(path, format="db")
     text = path.read_text(encoding="ascii").lower()
-    loaded = mw.NetworkData.from_touchstone(path)
+    loaded = mw.rf.NetworkData.from_touchstone(path)
 
     assert "inf" not in text
     assert torch.abs(loaded.s[0, 0, 0]) < 1.0e-10
@@ -377,7 +377,7 @@ def test_duplicate_resolved_port_name_reports_second_comment_line(tmp_path):
         encoding="ascii",
     )
 
-    with pytest.raises(mw.TouchstoneParseError, match="duplicate resolved") as caught:
-        mw.NetworkData.from_touchstone(path)
+    with pytest.raises(mw.rf.TouchstoneParseError, match="duplicate resolved") as caught:
+        mw.rf.NetworkData.from_touchstone(path)
 
     assert caught.value.line_number == 2

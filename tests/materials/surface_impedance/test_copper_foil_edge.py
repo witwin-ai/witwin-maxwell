@@ -4,6 +4,7 @@ The zero-thickness foil's Yee rim trace carries the singular edge current of
 a strip. Without a thickness-aware edge impedance its loss is 38-57% below an
 independent 35 um cross-section reference (and grows ~log under refinement).
 """
+from dataclasses import replace
 import math
 
 import numpy as np
@@ -72,15 +73,15 @@ def test_edge_factor_is_geometric_monotone_and_reduces_to_the_bare_rim_at_fine_c
 
 def test_edge_model_selection_follows_the_good_conductor_regime():
     band = (.8e9, 1.2e9)
-    thick = mw.CopperFoil(thickness=35e-6, frequency_range=band)
-    assert thick.edge_model == mw.CopperFoil.DEFAULT_EDGE_MODEL == "auto" and thick.edge_correction_active
+    thick = mw.media.CopperFoil(thickness=35e-6, frequency_range=band)
+    assert thick.edge_model == mw.media.CopperFoil.DEFAULT_EDGE_MODEL == "auto" and thick.edge_correction_active
     assert float(thick.edge_weight()) == 1.
-    assert not mw.CopperFoil(thickness=35e-6, frequency_range=band, edge_model="none").edge_correction_active
-    assert not mw.CopperFoil(thickness=2e-6, frequency_range=band).edge_correction_active
+    assert not mw.media.CopperFoil(thickness=35e-6, frequency_range=band, edge_model="none").edge_correction_active
+    assert not mw.media.CopperFoil(thickness=2e-6, frequency_range=band).edge_correction_active
     with pytest.raises(ValueError, match="3 skin depths"):
-        mw.CopperFoil(thickness=2e-6, frequency_range=band, edge_model="finite_thickness")
+        mw.media.CopperFoil(thickness=2e-6, frequency_range=band, edge_model="finite_thickness")
     with pytest.raises(ValueError, match="edge_model"):
-        mw.CopperFoil(thickness=35e-6, frequency_range=band, edge_model="rounded")
+        mw.media.CopperFoil(thickness=35e-6, frequency_range=band, edge_model="rounded")
 
 
 def _skin_depth(frequency):
@@ -90,13 +91,13 @@ def _skin_depth(frequency):
 def test_broadband_gating_uses_the_upper_band_edge_and_warns_for_a_thin_low_end():
     # 35 um is thinner than 3 skin depths below ~45 MHz but thick at 1 GHz.
     with pytest.warns(UserWarning, match="lower part has thickness < 3"):
-        broadband = mw.CopperFoil(thickness=35e-6, frequency_range=(1e6, 1e9))
+        broadband = mw.media.CopperFoil(thickness=35e-6, frequency_range=(1e6, 1e9))
     assert float(broadband.edge_weight()) == 1.
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        mw.CopperFoil(thickness=35e-6, frequency_range=(.1e9, 4e9))
-        mw.CopperFoil(thickness=1e-6, frequency_range=(1e6, 1e9))  # weight 0: nothing applied
+        mw.media.CopperFoil(thickness=35e-6, frequency_range=(.1e9, 4e9))
+        mw.media.CopperFoil(thickness=1e-6, frequency_range=(1e6, 1e9))  # weight 0: nothing applied
 
 
 def test_edge_weight_is_a_continuous_differentiable_blend_over_two_to_four_skin_depths():
@@ -109,7 +110,7 @@ def test_edge_weight_is_a_continuous_differentiable_blend_over_two_to_four_skin_
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            foil = mw.CopperFoil(thickness=thickness, frequency_range=band, mode_count=64)
+            foil = mw.media.CopperFoil(thickness=thickness, frequency_range=band, mode_count=64)
         weight = foil.edge_weight(thickness=thickness)
         weights.append(float(weight))
         if 2 < float(ratio) < 4:
@@ -144,13 +145,12 @@ def test_feature_width_limits_are_measured_and_warned():
 def test_periodic_seam_wraps_free_edge_detection():
     h = .0025
     nodes = [np.arange(-4, 5) * h, np.arange(-8, 9) * h, np.arange(-4, 5) * h]
-    foil = mw.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9))
+    foil = mw.media.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9))
     def scene(y0, y1):
         return prepare_scene(mw.Scene(domain=mw.Domain(bounds=tuple((float(a[0]), float(a[-1])) for a in nodes)),
-            grid=mw.GridSpec.custom(*nodes), device="cpu",
-            boundary=mw.BoundarySpec.faces(default="pec", y=("periodic", "periodic")),
+            grid=mw.GridSpec.custom(*nodes), boundary=mw.BoundarySpec.faces(default="pec", y=("periodic", "periodic")),
             structures=[mw.Structure(mw.Box(position=torch.tensor((0., (y0 + y1) / 2, 0.), dtype=torch.float64),
-                size=torch.tensor((1., y1 - y0, 0.), dtype=torch.float64)), foil, name="sheet")]))
+                size=torch.tensor((1., y1 - y0, 0.), dtype=torch.float64)), foil, name="sheet")]), device="cpu")
     # Ends exactly at the y = -20 mm seam node: that end is a free edge.
     ending = scene(-.02, .005)
     faces = compile_copper_faces(ending, device="cpu")
@@ -170,15 +170,14 @@ def test_sharded_x_supports_give_the_unsharded_free_edges():
     from witwin.maxwell.fdtd_parallel import FDTDPartitionPlan
     h = .0025
     nodes = [np.arange(-8, 9) * h, np.arange(-6, 7) * h, np.arange(-3, 4) * h]
-    foil = mw.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9))
+    foil = mw.media.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9))
     # A rectangle whose x ends (Ey free edges, tangent x) sit on and next to the split.
     logical = mw.Scene(domain=mw.Domain(bounds=tuple((float(a[0]), float(a[-1])) for a in nodes)),
-        grid=mw.GridSpec.custom(*nodes), boundary=mw.BoundarySpec.pec(), device="cpu",
-        structures=[mw.Structure(mw.Box(position=torch.tensor((-.00625, 0., 0.), dtype=torch.float64),
+        grid=mw.GridSpec.custom(*nodes), boundary=mw.BoundarySpec.pec(), structures=[mw.Structure(mw.Box(position=torch.tensor((-.00625, 0., 0.), dtype=torch.float64),
             size=torch.tensor((.0125, .01, 0.), dtype=torch.float64)), foil, name="patch"),
             mw.Structure(mw.Box(position=torch.tensor((.0075, 0., 0.), dtype=torch.float64),
             size=torch.tensor((.005, .01, 0.), dtype=torch.float64)), foil, name="pad")])
-    prepared = prepare_scene(logical)
+    prepared = prepare_scene(logical, device="cpu")
     expected = {}
     faces = compile_copper_faces(prepared, device="cpu")
     for face in faces:
@@ -224,7 +223,7 @@ def test_normal_contact_at_a_rim_node_removes_its_free_side():
 def _strip_scene(*, pec_contact=False):
     h = .0025
     nodes = [np.arange(-8, 9) * h, np.arange(-8, 9) * h, np.arange(-4, 5) * h]
-    foil = mw.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9))
+    foil = mw.media.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9))
     structures = [
         mw.Structure(mw.Box(position=torch.tensor((0., 0., 0.), dtype=torch.float64),
                             size=torch.tensor((1., .010, 0.), dtype=torch.float64)), foil, name="strip"),
@@ -235,9 +234,8 @@ def _strip_scene(*, pec_contact=False):
                             size=torch.tensor((1., .0075, 0.), dtype=torch.float64)), foil, name="extension"),
     ]
     scene = mw.Scene(domain=mw.Domain(bounds=tuple((float(a[0]), float(a[-1])) for a in nodes)),
-                     grid=mw.GridSpec.custom(*nodes), boundary=mw.BoundarySpec.pec(), device="cpu",
-                     structures=structures)
-    return prepare_scene(scene)
+                     grid=mw.GridSpec.custom(*nodes), boundary=mw.BoundarySpec.pec(), structures=structures)
+    return prepare_scene(scene, device="cpu")
 
 
 def test_free_edges_are_only_open_strip_rims():
@@ -292,7 +290,7 @@ def _line(kind, edge_model, *, h=.0025, half_x=.06, half_y=.03, pml=10):
     xs = np.arange(-round(half_x / h) - pml, round(half_x / h) + pml + 1) * h
     ys = np.arange(-round(half_y / h), round(half_y / h) + 1) * h
     zs = np.arange(-3, 4) * h
-    foil = mw.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9), edge_model=edge_model)
+    foil = mw.media.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9), edge_model=edge_model)
     structures = [mw.Structure(mw.Box(size=(10., 10., 10.)), mw.Material(eps_r=2.25), name="dielectric")]
     for name, y0, y1, z in (("low", -5., 5., -.005), ("high", -5., 5., .005)) + (
             (("signal", -.005, .005, 0.),) if kind == "stripline" else ()):
@@ -309,12 +307,11 @@ def _line(kind, edge_model, *, h=.0025, half_x=.06, half_y=.03, pml=10):
         boundary = mw.BoundarySpec.faces(default="pec", num_layers=pml, strength=1e6, x=("pml", "pml"),
                                          y=("periodic", "periodic"))
     scene = mw.Scene(domain=mw.Domain(bounds=((xs[0], xs[-1]), (ys[0], ys[-1]), (zs[0], zs[-1]))),
-                     grid=mw.GridSpec.custom(xs, ys, zs), boundary=boundary, device="cuda", structures=structures)
-    for source in sources:
-        scene.add_source(source)
-    return mw.Simulation.fdtd(scene, absorber="cpml", frequencies=[1e9], full_field_dft=True,
+                     grid=mw.GridSpec.custom(xs, ys, zs), boundary=boundary, structures=structures)
+    scene = scene.updated(sources=(*scene.sources, *sources))
+    return mw.Simulation.fdtd(scene, frequencies=[1e9], config=mw.FDTDConfig(absorber="cpml", full_field_dft=True,
                               run_time=mw.TimeConfig(time_steps=6000),
-                              spectral_sampler=mw.SpectralSampler(window="hanning")).run()
+                              spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"))).run()
 
 
 def _local_alpha(result):
@@ -326,7 +323,7 @@ def _local_alpha(result):
     from witwin.maxwell.fdtd.runtime.representation import spectral_phasor_factor
     solver = result.solver
     xs, ys, zs = (np.asarray(getattr(solver.scene, f"{axis}_nodes64")) for axis in "xyz")
-    E = {name: result.tensor(name).cpu().numpy().astype(np.complex128) for name in ("Ex", "Ey", "Ez")}
+    E = {name: result.field(name).isel(f=0).values.cpu().numpy().astype(np.complex128) for name in ("Ex", "Ey", "Ez")}
     dt = float(solver.dt)
     factor = 1 / (1j * MU0 * 2 * math.sin(math.pi * 1e9 * dt) / dt)
     dexdz = (E["Ex"][:, :, 1:] - E["Ex"][:, :, :-1]) / np.diff(zs)[None, None, :]
@@ -346,16 +343,16 @@ def _local_alpha(result):
     dy, dz = np.diff(ys), np.diff(zs)
     dyd = np.r_[dy[0] / 2, (dy[:-1] + dy[1:]) / 2, dy[-1] / 2]
     dzd = np.r_[dz[0] / 2, (dz[:-1] + dz[1:]) / 2, dz[-1] / 2]
-    if solver.scene.boundary.axis_kind("y") == "periodic":
+    if solver.scene.scene.boundary.axis_kind("y") == "periodic":
         dyd[0] = dyd[-1] = dy[0] / 2
-    pml = solver.scene.pml_thickness_for_face("x", "low")
+    pml = solver.scene.scene.pml_thickness_for_face("x", "low")
     alphas = []
     for station in range(len(xs) // 2 + 4, len(xs) - pml - 4):
         flux = .5 * np.real(np.sum(E["Ey"][station] * np.conj((hz[station - 1] + hz[station]) / 2) * dy[:, None] * dzd[None])
                             - np.sum(E["Ez"][station] * np.conj((hy[station - 1] + hy[station]) / 2) * dyd[:, None] * dz[None]))
         lower, upper = xs[station] - (xs[1] - xs[0]) / 2, xs[station] + (xs[1] - xs[0]) / 2
         heat = 0.
-        for record in result.conductor_losses.values():
+        for record in mw.rf.conductor_losses(result).values():
             for trace in record["surface_power_traces"]:
                 low, high = trace["lower_bounds"][:, 0].numpy(), trace["upper_bounds"][:, 0].numpy()
                 fraction = np.clip(np.minimum(high, upper) - np.maximum(low, lower), 0, None) / (high - low)
@@ -371,8 +368,8 @@ cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_edgeless_parallel_plate_is_bit_identical_and_matches_the_analytic_surface_loss(copper_torch_kernel):
     bare, edged = _line("plate", "none"), _line("plate", "auto")
     for name in ("Ex", "Ey", "Ez"):
-        assert torch.equal(bare.tensor(name), edged.tensor(name))
-    assert all(record["free_edge_trace_count"] == 0 for record in edged.conductor_losses.values())
+        assert torch.equal(bare.field(name).isel(f=0).values, edged.field(name).isel(f=0).values)
+    assert all(record["free_edge_trace_count"] == 0 for record in mw.rf.conductor_losses(edged).values())
     alpha, spread = _local_alpha(edged)
     surface_resistance = math.sqrt(math.pi * 1e9 * MU0 / SIGMA)
     analytic = surface_resistance / (math.sqrt(MU0 / (EPS0 * 2.25)) * .010)
@@ -383,9 +380,9 @@ def test_edgeless_parallel_plate_is_bit_identical_and_matches_the_analytic_surfa
 @cuda
 def test_stripline_copper_attenuation_matches_the_independent_35um_reference():
     result = _line("stripline", "auto")
-    record = result.conductor_losses["signal"]
+    record = mw.rf.conductor_losses(result)["signal"]
     assert record["free_edge_trace_count"] > 0
-    assert all(result.conductor_losses[name]["free_edge_trace_count"] == 0 for name in ("low", "high"))
+    assert all(mw.rf.conductor_losses(result)[name]["free_edge_trace_count"] == 0 for name in ("low", "high"))
     factors = torch.cat([trace["edge_impedance_factor"] for trace in record["surface_power_traces"]])
     assert set(np.round(factors.unique().numpy(), 6)) == {1., round(float(copper_edge_impedance_factor(
         35e-6, torch.tensor([.0025]), torch.ones(1), torch.ones(1))), 6)}
@@ -405,16 +402,15 @@ class _ThickFoil(mw.SceneModule):
 
     def to_scene(self):
         return mw.Scene(domain=mw.Domain(bounds=((-.03, .03),) * 3), grid=mw.GridSpec.uniform(.005),
-            boundary=mw.BoundarySpec.pec(), device="cuda",
-            structures=(mw.Structure(mw.Box(size=(0., .02, .02)), mw.CopperFoil(
+            boundary=mw.BoundarySpec.pec(), structures=(mw.Structure(mw.Box(size=(0., .02, .02)), mw.media.CopperFoil(
                 thickness=self.log_thickness.exp(), frequency_range=(2e9, 4e9), mode_count=32), name="foil"),),
             sources=(mw.UniformCurrentSource(name="drive", center=(-.015, 0., -.0025), size=(.005,) * 3,
                 polarization="Ez", source_time=mw.CW(3e9, amplitude=1e-5)),))
 
     def run(self):
-        simulation = mw.Simulation.fdtd(self, frequencies=(3e9,), full_field_dft=True,
-            run_time=mw.TimeConfig(time_steps=72), spectral_sampler=mw.SpectralSampler(window="none"))
-        simulation.config.adjoint_checkpoint_stride = 7
+        simulation = mw.Simulation.fdtd(self, frequencies=(3e9,), config=mw.FDTDConfig(full_field_dft=True,
+            run_time=mw.TimeConfig(time_steps=72), spectral_sampler=mw.fdtd.SpectralSampler(window="none")))
+        simulation.config = replace(simulation.config, adjoint_checkpoint_stride=7)
         return simulation.run()
 
 
@@ -426,7 +422,7 @@ def test_thickness_gradient_includes_the_edge_impedance_factor(kind, thickness):
     # 3.1 um sits inside the 2-4 skin-depth blend at 4 GHz (weight ~0.5).
     model = _ThickFoil(thickness)
     def objective():
-        record = model.run().conductor_losses["foil"]
+        record = mw.rf.conductor_losses(model.run())["foil"]
         return record[kind].sum() if kind == "surface_power" else record[kind], record
     value, record = objective()
     assert record["free_edge_trace_count"] > 0
@@ -450,17 +446,17 @@ def test_thickness_gradient_includes_the_edge_impedance_factor(kind, thickness):
 def test_runtime_conductor_and_port_contacts_are_not_free_edges():
     h = .0025
     nodes = [np.arange(-8, 9) * h, np.arange(-8, 9) * h, np.arange(-4, 5) * h]
-    foil = mw.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9))
+    foil = mw.media.CopperFoil(thickness=35e-6, frequency_range=(.8e9, 1.2e9))
     def foil_box(name, y0, y1, z):
         return mw.Structure(mw.Box(position=torch.tensor((0., (y0 + y1) / 2, z), dtype=torch.float64),
             size=torch.tensor((1., y1 - y0, 0.), dtype=torch.float64)), foil, name=name)
     def prepared(*extra, ports=()):
         scene = mw.Scene(domain=mw.Domain(bounds=tuple((float(a[0]), float(a[-1])) for a in nodes)),
-            grid=mw.GridSpec.custom(*nodes), boundary=mw.BoundarySpec.pec(), device="cuda",
-            structures=[foil_box("strip", -.005, .005, 0.), foil_box("ground", -1., 1., -.005), *extra],
+            grid=mw.GridSpec.custom(*nodes), boundary=mw.BoundarySpec.pec(), structures=[foil_box("strip", -.005, .005, 0.), foil_box("ground", -1., 1., -.005), *extra],
             ports=list(ports))
-        options = dict(excitations=mw.PortExcitation(ports[0].name)) if ports else {}
-        simulation = mw.Simulation.fdtd(scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=4), **options)
+        excitations = mw.rf.PortExcitation(ports[0].name) if ports else None
+        simulation = mw.Simulation.fdtd(scene, frequencies=1e9, excitations=excitations,
+                                        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=4)))
         return simulation.prepare().solver
     def rim_factors(solver):
         entry = next(e for e in solver._copper_foils if e["face"].name == "strip" and e["electric_name"] == "Ex")

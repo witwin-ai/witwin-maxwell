@@ -11,7 +11,7 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 
 def test_scalar_nonlinear_background_and_sources_match_scalar_harmonics():
     material=mw.Material(eps_r=3.,mu_r=1.4,debye_poles=(mw.DebyePole(.3,1e-10),),
-        nonlinearity=mw.NonlinearSusceptibility(chi2=.2,chi3=.1))
+        nonlinearity=mw.media.NonlinearSusceptibility(chi2=.2,chi3=.1))
     scalar=compile_harmonic_material(material,3e8,3)
     tensor=compile_tensor_harmonic_material(material,3e8,3,device='cuda')
     eye=torch.eye(3,device='cuda',dtype=torch.complex128)
@@ -28,8 +28,8 @@ def test_scalar_nonlinear_background_and_sources_match_scalar_harmonics():
 
 
 def test_reciprocal_and_ferrite_harmonics_keep_full_tensor_samples():
-    materials=(mw.Material(epsilon_tensor=mw.Tensor3x3(((2.,.2,0.),(.2,3.,.1),(0.,.1,4.)))),
-        mw.GyromagneticFerrite(saturation_magnetization=1e5,bias_field=(3e4,4e4,0.),gilbert_damping=.03))
+    materials=(mw.Material(epsilon_tensor=mw.media.Tensor3x3(((2.,.2,0.),(.2,3.,.1),(0.,.1,4.)))),
+        mw.media.GyromagneticFerrite(saturation_magnetization=1e5,bias_field=(3e4,4e4,0.),gilbert_damping=.03))
     for material in materials:
         compiled=compile_tensor_harmonic_material(material,3e8,3,device='cuda')
         for n,actual in enumerate(compiled.linear_samples,1):
@@ -55,7 +55,7 @@ def test_singular_dc_classification_and_sampling_admission():
 
 
 def test_nonreciprocal_static_declaration_and_nonzero_tpa_source():
-    gyro=mw.Material(epsilon_tensor=mw.ComplexTensor3x3(
+    gyro=mw.Material(epsilon_tensor=mw.media.ComplexTensor3x3(
         ((2.,.2j,0.),(-.2j,2.,0.),(0.,0.,2.)),reciprocal=False))
     sampled=compile_tensor_harmonic_material(gyro,3e8,2,device='cuda')
     assert all(not m.reciprocal for m in sampled.linear_samples)
@@ -63,7 +63,7 @@ def test_nonreciprocal_static_declaration_and_nonzero_tpa_source():
     with pytest.raises(NotImplementedError,match='unresolved_complex_dc'):
         sampled.electric_dc.dielectric_sample()
     material=mw.Material(eps_r=3.,kerr_chi3=.1,
-        nonlinearity=(mw.NonlinearSusceptibility(chi2=.2,chi3=.3),mw.TwoPhotonAbsorption(beta=1e-9)))
+        nonlinearity=(mw.media.NonlinearSusceptibility(chi2=.2,chi3=.3),mw.media.TwoPhotonAbsorption(beta=1e-9)))
     tensor=compile_tensor_harmonic_material(material,3e8,2,device='cuda')
     scalar=compile_harmonic_material(material,3e8,2)
     assert tensor.chi3==.4 and tensor.tpa_scale==scalar.tpa_scale>0

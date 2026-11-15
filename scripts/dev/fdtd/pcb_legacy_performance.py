@@ -34,15 +34,17 @@ def processes():
 def run_one(args):
     identity = source_identity()
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.04, .04),)*3), grid=mw.GridSpec.uniform(.002),
-        boundary=mw.BoundarySpec.pml(num_layers=6), device='cuda',
-        sources=[mw.PointDipole(position=(0., 0., 0.), polarization='Ez',
+        boundary=mw.BoundarySpec.pml(num_layers=6), sources=[mw.PointDipole(position=(0., 0., 0.), polarization='Ez',
                                source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9))],
         monitors=[mw.PointMonitor('probe', position=(.01, 0., 0.), fields=('Ez',))])
     if args.case == 'dielectric_dipole':
-        scene.add_structure(mw.Structure(mw.Box(size=(.02, .02, .02)), mw.Material(eps_r=2.2)))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(mw.Box(size=(.02, .02, .02)), mw.Material(eps_r=2.2)),
+        ))
     frequencies = (0.8e9, 1.2e9) if args.case == 'two_frequency_dipole' else (1e9,)
-    simulation = mw.Simulation.fdtd(scene, frequencies=frequencies, full_field_dft=True,
-        run_time=mw.TimeConfig(time_steps=args.steps), spectral_sampler=mw.SpectralSampler(window='none'))
+    simulation = mw.Simulation.fdtd(scene, frequencies=frequencies, config=mw.FDTDConfig(full_field_dft=True,
+        run_time=mw.TimeConfig(time_steps=args.steps), spectral_sampler=mw.fdtd.SpectralSampler(window='none')))
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
@@ -58,7 +60,7 @@ def run_one(args):
     after = processes()
     peak = torch.cuda.max_memory_allocated()
     fields = {key: value.detach().cpu() for key, value in result.fields.items()}
-    fields['point_Ez'] = result.monitor('probe')['data'].detach().cpu()
+    fields['point_Ez'] = result.monitor('probe').sel(component="Ez").values.detach().cpu()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(fields, args.output.with_suffix('.pt'))
     report = {'case': args.case, 'pid': os.getpid(), 'source': identity,

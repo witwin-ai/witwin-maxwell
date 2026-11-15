@@ -1,5 +1,6 @@
 """Compare physical Huygens quadrature independently of a fixed antenna field mesh."""
 from __future__ import annotations
+from dataclasses import replace
 import argparse
 import json
 import math
@@ -29,17 +30,16 @@ def main():
     scene=printed_patch_scene(lateral_dl=args.lateral_dl,substrate_cells=args.substrate_cells,
         edge_dl=args.edge_dl,pml_layers=args.pml_layers,air_padding=args.air_padding,frequencies=frequencies)
     old=scene.monitors[0]
-    scene=scene.clone(monitors=[mw.ClosedSurfaceMonitor.box('radiation',position=tuple((a+b)/2 for a,b in old.bounds),
+    scene=scene.updated(monitors=[mw.monitors.ClosedSurfaceMonitor.box('radiation',position=tuple((a+b)/2 for a,b in old.bounds),
         size=tuple(b-a for a,b in old.bounds),frequencies=frequencies,
         sample_spacing=args.spacing if args.spacing else None)])
-    config=mw.Simulation.fdtd(scene,frequencies=frequencies,full_field_dft=False,
-        excitations=mw.PortExcitation('feed',source_time=mw.GaussianPulse(frequency=3.2e9,fwidth=2.2e9)),
-        run_time=mw.TimeConfig(time_steps=1),spectral_sampler=mw.SpectralSampler(window='none'))
+    config=mw.Simulation.fdtd(scene,frequencies=frequencies,excitations=mw.rf.PortExcitation('feed',source_time=mw.GaussianPulse(frequency=3.2e9,fwidth=2.2e9)), config=mw.FDTDConfig(full_field_dft=False,
+        run_time=mw.TimeConfig(time_steps=1),spectral_sampler=mw.fdtd.SpectralSampler(window='none')))
     torch.cuda.reset_peak_memory_stats()
     start=time.perf_counter();prepared=config.prepare();torch.cuda.synchronize();prepare_seconds=time.perf_counter()-start
-    solver=prepared.solver;config.config.run_time=mw.TimeConfig(time_steps=math.ceil(args.duration/solver.dt))
+    solver=prepared.solver;config.config=replace(config.config,run_time=mw.TimeConfig(time_steps=math.ceil(args.duration/solver.dt)))
     start=time.perf_counter();result=prepared.run();torch.cuda.synchronize();run_seconds=time.perf_counter()-start
-    start=time.perf_counter();antenna=result.antenna(surface='radiation',driven_port='feed',theta_points=91,phi_points=73,radius=10.);torch.cuda.synchronize();post_seconds=time.perf_counter()-start
+    start=time.perf_counter();antenna=mw.antenna.antenna(result, surface='radiation',driven_port='feed',theta_points=91,phi_points=73,radius=10.);torch.cuda.synchronize();post_seconds=time.perf_counter()-start
     reflection=result.port('feed').reflection_coefficient.cpu().numpy()
     record={'schema':'physical-surface-quadrature/1','source':source,
         'source_unchanged':source['source_sha256']==package_identity(mw,'witwin-maxwell')['source_sha256'],

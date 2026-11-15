@@ -100,23 +100,12 @@ def _disable_gap_aware_rules(monkeypatch):
 
 def test_dense_assembly_and_lifted_rhs_are_bit_identical_when_no_pair_needs_the_new_rules(monkeypatch):
     import witwin.maxwell as mw
-    # The RHS scatter uses index_add_, whose CUDA atomics reorder sums between
-    # runs; deterministic kernels make a bitwise comparison meaningful.
-    deterministic = torch.are_deterministic_algorithms_enabled()
-    torch.use_deterministic_algorithms(True, warn_only=True)
-    try:
-        _compare_with_rules_disabled(monkeypatch, mw)
-    finally:
-        torch.use_deterministic_algorithms(deterministic)
-
-
-def _compare_with_rules_disabled(monkeypatch, mw):
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=4.))], sources=[mw.PlaneWave()])
-    current = mw.Simulation.mom(scene, frequency=3e8, config=mw.MoMConfig(subdivisions=1)).prepare().solver
+    current = mw.Simulation.mom(scene, frequencies=3e8, config=mw.mom.MoMConfig(subdivisions=1)).prepare().solver
     estimate = current.handle.metadata['quadrature_error_estimate']
     assert 'fallback' not in estimate['near_disjoint'] and 'touching_anisotropic' not in estimate
     _disable_gap_aware_rules(monkeypatch)
-    previous = mw.Simulation.mom(scene, frequency=3e8, config=mw.MoMConfig(subdivisions=1)).prepare().solver
+    previous = mw.Simulation.mom(scene, frequencies=3e8, config=mw.mom.MoMConfig(subdivisions=1)).prepare().solver
     assert torch.equal(current.handle.matrix, previous.handle.matrix)
     assert torch.equal(current.rhs, previous.rhs)
 

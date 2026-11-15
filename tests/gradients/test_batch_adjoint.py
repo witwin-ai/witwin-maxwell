@@ -1,22 +1,28 @@
 """Native batch tapes preserve gradients across slot reuse and closure."""
+from dataclasses import replace
 import pytest
 import torch
 
 import witwin.maxwell as mw
-from tests.fdtd.cuda.test_batch_runtime import simulation
+from tests.fdtd.cuda.test_batch_runtime import simulation, with_scene
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 
-def density_batch(density, *, capacity=2, slots=1, devices=("cuda:0",), graph="required"):
+def density_batch(density, *, capacity=2, slots=1, devices=("cuda:0",), graph="required", edit=None):
     sim = simulation(steps=27, frequencies=(.8e9, 1e9))
-    sim.scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
-    sim.scene.add_material_region(mw.MaterialRegion(name="rho",
-        geometry=mw.Box(position=(.05, 0, 0), size=(.1, .1, .1), device="cuda:0"),
-        density=torch.zeros(2, 2, 2, device="cuda:0"), eps_bounds=(1., 4.)))
-    sim.config.adjoint_checkpoint_stride = 7
-    return mw.Simulation.batch(sim, parameters=mw.BatchParameters(region_densities={"rho": density}),
-        execution=mw.BatchExecution(devices=devices, batch_size=capacity, slots_per_device=slots,
+    sim = with_scene(sim, subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
+    sim = with_scene(sim, material_regions=(
+        *sim.scene.material_regions,
+        mw.MaterialRegion(name="rho",
+            geometry=mw.Box(position=(.05, 0, 0), size=(.1, .1, .1), device="cuda:0"),
+            density=torch.zeros(2, 2, 2, device="cuda:0"), eps_bounds=(1., 4.)),
+    ))
+    if edit is not None:
+        sim = with_scene(sim, **edit(sim.scene))
+    sim.config = replace(sim.config, adjoint_checkpoint_stride=7)
+    return mw.Simulation.batch(sim, parameters=mw.execution.BatchParameters(region_densities={"rho": density}),
+        execution=mw.execution.BatchExecution(devices=devices, batch_size=capacity, slots_per_device=slots,
             graph=graph, graph_steps=8, memory_limit_bytes=256*1024**2, reserve_bytes=0))
 
 
@@ -35,21 +41,23 @@ def test_batch_density_adjoint_matches_independent_after_reuse_and_close(slots, 
         first.results()
         second = prepared.run()
         second.results()
-    assert all(result.solver_stats["batch_adjoint"] == "native_checkpoint_per_lane" for result in first)
+    assert all(result.stats()["batch_adjoint"] == "native_checkpoint_per_lane" for result in first)
     actual, = torch.autograd.grad(objective(first), density)
     repeated, = torch.autograd.grad(objective(second), density)
     for result in (*first, *second):
-        assert result.solver_stats["batch_adjoint_checkpoint_bytes"] > 0
-        memory = result.solver_stats["batch_backward_memory"]
+        assert result.stats()["batch_adjoint_checkpoint_bytes"] > 0
+        memory = result.stats()["batch_backward_memory"]
         assert memory["peak_charged_bytes"] <= memory["limit_bytes"]
     reference_density = density.detach().clone().requires_grad_()
     reference_batch = density_batch(reference_density)
     results = []
     for index in range(3):
         sim = mw.Simulation.fdtd(reference_batch.scene(index), frequencies=batch.template.frequencies,
-            run_time=batch.template.config.run_time, spectral_sampler=batch.template.config.spectral_sampler,
-            cuda_graph=False)
-        sim.config.adjoint_checkpoint_stride = 7
+            config=mw.FDTDConfig(
+                run_time=batch.template.config.run_time, spectral_sampler=batch.template.config.spectral_sampler,
+                cuda_graph=False,
+            ))
+        sim.config = replace(sim.config, adjoint_checkpoint_stride=7)
         results.append(sim.run())
     expected, = torch.autograd.grad(objective(results), reference_density)
     assert expected.abs().max() > 0
@@ -83,15 +91,18 @@ def test_batch_material_adjoint_gathers_gradients_from_two_devices():
 @pytest.mark.parametrize("normalize", [False])
 def test_batch_source_scale_gradient_matches_finite_difference(normalize):
     sim = simulation(steps=35)
-    sim.config.spectral_sampler = mw.SpectralSampler(window="none", normalize_source=normalize)
-    sim.scene.add_source(mw.PointDipole(name="second", position=(0., -.05, 0.), polarization="Ez",
-        source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9, amplitude=.7)))
+    sim.config = replace(sim.config, spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=normalize))
+    sim = with_scene(sim, sources=(
+        *sim.scene.sources,
+        mw.PointDipole(name="second", position=(0., -.05, 0.), polarization="Ez",
+            source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9, amplitude=.7)),
+    ))
     scales = torch.tensor([.7, -1.2, 1.3 if normalize else 0.], device="cuda:0", requires_grad=True)
     other = torch.tensor([.4, .8, -.2], device="cuda:0", requires_grad=True)
     def make(a, b):
         return mw.Simulation.batch(sim,
-            parameters=mw.BatchParameters(source_scales={"drive": a, "second": b}),
-            execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2,
+            parameters=mw.execution.BatchParameters(source_scales={"drive": a, "second": b}),
+            execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=2,
                 graph="required", graph_steps=8, memory_limit_bytes=256*1024**2, reserve_bytes=0))
     result = make(scales, other).run()
     result.results()
@@ -111,10 +122,10 @@ def test_batch_source_scale_gradient_matches_finite_difference(normalize):
 
 def test_normalized_source_preserves_physical_amplitude_gradient():
     sim = simulation(steps=35, frequencies=(.8e9, 1e9))
-    sim.config.spectral_sampler = mw.SpectralSampler(window="none", normalize_source=True)
+    sim.config = replace(sim.config, spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=True))
     scales = torch.tensor([.7, -1.2], device="cuda:0", requires_grad=True)
-    batch = mw.Simulation.batch(sim, parameters=mw.BatchParameters(source_scales={"drive": scales}),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
+    batch = mw.Simulation.batch(sim, parameters=mw.execution.BatchParameters(source_scales={"drive": scales}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
     result = batch.run()
     result.results()
     loss = objective(result)
@@ -131,7 +142,7 @@ def test_shared_parameter_material_and_source_channels_reduce_once():
     def run(value):
         batch = density_batch(value.expand(2, 2, 2, 2))
         batch = mw.Simulation.batch(batch.template,
-            parameters=mw.BatchParameters(region_densities={"rho": value.expand(2, 2, 2, 2)},
+            parameters=mw.execution.BatchParameters(region_densities={"rho": value.expand(2, 2, 2, 2)},
                 source_scales={"drive": value.square().expand(2)}), execution=batch.execution)
         results = batch.run()
         results.results()
@@ -187,15 +198,18 @@ def test_scene_module_optimizer_updates_recompile_current_parameters():
             self.rho = torch.nn.Parameter(torch.full((2, 2, 2), .3, device="cuda:0"))
         def to_scene(self):
             scene = simulation(steps=27).scene
-            scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
-            scene.add_material_region(mw.MaterialRegion(name="rho",
-                geometry=mw.Box(position=(.05, 0., 0.), size=(.1, .1, .1), device="cuda:0"),
-                density=self.rho.sigmoid(), eps_bounds=(1., 4.)))
+            scene = scene.updated(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
+            scene = scene.updated(material_regions=(
+                *scene.material_regions,
+                mw.MaterialRegion(name="rho",
+                    geometry=mw.Box(position=(.05, 0., 0.), size=(.1, .1, .1), device="cuda:0"),
+                    density=self.rho.sigmoid(), eps_bounds=(1., 4.)),
+            ))
             return scene
     module = Design()
-    sim = mw.Simulation.fdtd(module, frequency=1e9, run_time=mw.TimeConfig(time_steps=27, dt=2e-11),
-        spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False)
-    batch = mw.Simulation.batch([sim], execution=mw.BatchExecution(devices=("cuda:0",),
+    sim = mw.Simulation.fdtd(module, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=27, dt=2e-11),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False))
+    batch = mw.Simulation.batch([sim], execution=mw.execution.BatchExecution(devices=("cuda:0",),
         batch_size=1, graph="required"))
     optimizer = torch.optim.SGD(module.parameters(), lr=.1)
     with batch.prepare() as prepared:
@@ -217,10 +231,10 @@ def test_scene_module_optimizer_updates_recompile_current_parameters():
 def test_gathered_training_outputs_survive_close_and_preserve_source_gradients():
     scales = torch.tensor([.4, -.7, 1.2, 0.], device="cuda:0", requires_grad=True)
     batch = mw.Simulation.batch(simulation(steps=29),
-        parameters=mw.BatchParameters(source_scales={"drive": scales}),
-        execution=mw.BatchExecution(devices=("cuda:0", "cuda:1"), slots_per_device=2,
+        parameters=mw.execution.BatchParameters(source_scales={"drive": scales}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0", "cuda:1"), slots_per_device=2,
             batch_size=1, scheduling="static", graph="required", memory_limit_bytes=128*1024**2, reserve_bytes=0),
-        outputs=mw.BatchOutput(result_device="cuda:0"))
+        outputs=mw.execution.BatchOutput(result_device="cuda:0"))
     result = batch.run()
     result.results()
     assert {record.device for record in result.records} == {"cuda:0", "cuda:1"}
@@ -234,17 +248,19 @@ def test_gathered_training_outputs_survive_close_and_preserve_source_gradients()
 def test_unsupported_material_gradient_channels_fail_explicitly(channel):
     from dataclasses import replace
     density = torch.full((1, 2, 2, 2), .4, device="cuda:0", requires_grad=True)
-    batch = density_batch(density)
-    if channel == "permeability":
-        region = batch.template.scene.material_regions[0]
-        batch.template.scene.material_regions[0] = replace(region, mu_bounds=(1., 2.))
-    elif channel == "conductivity":
-        structure = batch.template.scene.structures[0]
-        structure.geometry.size.requires_grad_(True)
-        batch.template.scene.structures[0] = mw.Structure(name=structure.name, geometry=structure.geometry,
-            material=mw.Material(eps_r=2., sigma_e=.01))
-    else:
-        batch.template.scene.material_regions[0].geometry.size.requires_grad_(True)
+
+    def edit(scene):
+        if channel == "permeability":
+            return {"material_regions": (replace(scene.material_regions[0], mu_bounds=(1., 2.)),)}
+        if channel == "conductivity":
+            structure = scene.structures[0]
+            structure.geometry.size.requires_grad_(True)
+            return {"structures": (mw.Structure(name=structure.name, geometry=structure.geometry,
+                                                material=mw.Material(eps_r=2., sigma_e=.01)),)}
+        scene.material_regions[0].geometry.size.requires_grad_(True)
+        return {}
+
+    batch = density_batch(density, edit=edit)
     with pytest.raises(NotImplementedError, match="gradient channel|region geometry"):
         batch.prepare()
     with torch.no_grad(), batch.prepare() as prepared:
@@ -262,10 +278,10 @@ def test_dielectric_geometry_batch_gradient_matches_finite_difference():
     def run(size):
         sim = simulation(steps=35)
         # Preserve the differentiable arithmetic interface used by this finite-difference oracle.
-        sim.scene.subpixel = mw.SubpixelSpec(samples=1, averaging="arithmetic")
-        sim.scene.structures = [mw.Structure(name="design",
-            geometry=mw.Box(position=(.05, 0., 0.), size=size, device="cuda:0"), material=mw.Material(eps_r=2.))]
-        result = mw.Simulation.batch([sim], execution=mw.BatchExecution(devices=("cuda:0",),
+        sim = with_scene(sim, subpixel=mw.SubpixelSpec(samples=1, averaging="arithmetic"))
+        sim = with_scene(sim, structures=[mw.Structure(name="design",
+            geometry=mw.Box(position=(.05, 0., 0.), size=size, device="cuda:0"), material=mw.Material(eps_r=2.))])
+        result = mw.Simulation.batch([sim], execution=mw.execution.BatchExecution(devices=("cuda:0",),
             batch_size=1, graph="required")).run()
         result.results()
         return objective(result)
@@ -279,8 +295,8 @@ def test_dielectric_geometry_batch_gradient_matches_finite_difference():
 def test_requires_grad_changes_invalidate_cached_source_materialization():
     scales = torch.tensor([.4], device="cuda:0")
     batch = mw.Simulation.batch(simulation(steps=27),
-        parameters=mw.BatchParameters(source_scales={"drive": scales}),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1, graph="required"))
+        parameters=mw.execution.BatchParameters(source_scales={"drive": scales}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=1, graph="required"))
     with batch.prepare() as prepared:
         first = prepared.run()
         assert not objective(first).requires_grad
@@ -296,9 +312,9 @@ def test_requires_grad_changes_invalidate_cached_source_materialization():
 def test_cpu_output_revalidates_new_trainable_parameters():
     scales = torch.tensor([.4], device="cuda:0")
     batch = mw.Simulation.batch(simulation(steps=27),
-        parameters=mw.BatchParameters(source_scales={"drive": scales}),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1, graph="off"),
-        outputs=mw.BatchOutput(result_device="cpu"))
+        parameters=mw.execution.BatchParameters(source_scales={"drive": scales}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=1, graph="off"),
+        outputs=mw.execution.BatchOutput(result_device="cpu"))
     with batch.prepare() as prepared:
         prepared.run().results()
         scales.requires_grad_(True)

@@ -6,14 +6,15 @@ import weakref
 import pytest
 import torch
 import witwin.maxwell as mw
-from tests.fdtd.cuda.test_batch_runtime import simulation
+from tests.fdtd.cuda.test_batch_runtime import simulation, with_scene
+from witwin.maxwell.compiler import compile_materials
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 
 @pytest.mark.parametrize("density_changes", [False, True])
 def test_template_material_compilation_count_and_updated_spectra(monkeypatch, density_changes):
-    module = importlib.import_module("witwin.maxwell.scene")
+    module = importlib.import_module("witwin.maxwell.compiler.materials")
     original = module.compile_material_model
     calls = []
     def compile_materials(*args, **kwargs):
@@ -21,29 +22,40 @@ def test_template_material_compilation_count_and_updated_spectra(monkeypatch, de
         return original(*args, **kwargs)
     sim = simulation(steps=31)
     if density_changes:
-        sim.scene.add_material_region(mw.MaterialRegion(name="rho",
-            geometry=mw.Box(size=(.05, .05, .05), device="cuda:0"),
-            density=torch.zeros(2, 2, 2, device="cuda:0"), eps_bounds=(1., 5.)))
+        sim = with_scene(sim, material_regions=(
+            *sim.scene.material_regions,
+            mw.MaterialRegion(name="rho",
+                geometry=mw.Box(size=(.05, .05, .05), device="cuda:0"),
+                density=torch.zeros(2, 2, 2, device="cuda:0"), eps_bounds=(1., 5.)),
+        ))
     scales = torch.tensor([1., 2., 0., -1., 3.], device="cuda:0")
-    parameters = mw.BatchParameters(source_scales={"drive": scales},
+    parameters = mw.execution.BatchParameters(source_scales={"drive": scales},
         region_densities={"rho": torch.linspace(0., 1., 5, device="cuda:0")[:, None, None, None].expand(5, 2, 2, 2)}
         if density_changes else None)
     batch = mw.Simulation.batch(sim, parameters=parameters,
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
     monkeypatch.setattr(module, "compile_material_model", compile_materials)
+
+    def patches():
+        # A local patch compiles one cropped scene through the same entry point,
+        # so every call beyond the single full compile must be a counted patch.
+        return prepared._local_material_cache.patch_compilations if density_changes else 0
+
     with batch.prepare() as prepared:
         first = prepared.run()
         first.results()
-        assert len(calls) == 1
+        assert len(calls) == 1 + patches()
         if density_changes:
+            assert prepared._local_material_cache.full_compilations == 1
             assert prepared._local_material_cache.patch_compilations == 4
         if not density_changes:
             assert len(prepared._fixed_material_cache) == 1
         scales.mul_(2)
         second = prepared.run()
         second.results()
-        assert len(calls) == 1
+        assert len(calls) == 1 + patches()
         if density_changes:
+            assert prepared._local_material_cache.full_compilations == 1
             assert prepared._local_material_cache.patch_compilations == 9
         for a, b in zip(first, second):
             torch.testing.assert_close(b.raw_monitor("probe")["components"]["Ez"],
@@ -52,8 +64,10 @@ def test_template_material_compilation_count_and_updated_spectra(monkeypatch, de
     monkeypatch.setattr(module, "compile_material_model", original)
     for index in range(5):
         reference = mw.Simulation.fdtd(batch.scene(index), frequencies=sim.frequencies,
-            run_time=sim.config.run_time, spectral_sampler=sim.config.spectral_sampler,
-            cuda_graph=False).run()
+            config=mw.FDTDConfig(
+                run_time=sim.config.run_time, spectral_sampler=sim.config.spectral_sampler,
+                cuda_graph=False,
+            )).run()
         torch.testing.assert_close(second[index].raw_monitor("probe")["components"]["Ez"],
             reference.raw_monitor("probe")["components"]["Ez"], rtol=1e-4, atol=1e-6)
 
@@ -61,11 +75,15 @@ def test_template_material_compilation_count_and_updated_spectra(monkeypatch, de
 def test_different_material_lanes_share_only_equal_static_arrays():
     sims = [simulation(index, steps=31) for index in range(3)]
     for index, sim in enumerate(sims):
-        sim.scene.add_structure(mw.Structure(name="dielectric",
-            geometry=mw.Box(size=(.08, .08, .08), device="cuda:0"),
-            material=mw.Material(eps_r=2. + index)))
-    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=3, graph="required"))
+        sim = with_scene(sim, structures=(
+            *sim.scene.structures,
+            mw.Structure(name="dielectric",
+                geometry=mw.Box(size=(.08, .08, .08), device="cuda:0"),
+                material=mw.Material(eps_r=2. + index)),
+        ))
+        sims[index] = sim
+    batch = mw.Simulation.batch(sims, variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=3, graph="required"))
     with batch.prepare() as prepared:
         a, b, c = prepared._slot.solvers
         assert a.mu_Hx.data_ptr() == b.mu_Hx.data_ptr() == c.mu_Hx.data_ptr()
@@ -73,7 +91,7 @@ def test_different_material_lanes_share_only_equal_static_arrays():
         assert a.eps_Ex.data_ptr() != b.eps_Ex.data_ptr()
         assert not torch.equal(a.eps_Ex, b.eps_Ex)
         for solver in (b, c):
-            assert solver.scene.compile_materials() is solver._compiled_material_model
+            assert compile_materials(solver.scene) is solver._compiled_material_model
             assert solver.mu_r is a.mu_r
             assert solver.mu_r_components["x"] is a.mu_r_components["x"]
         first = prepared.run()
@@ -89,8 +107,8 @@ def test_different_material_lanes_share_only_equal_static_arrays():
 
 def test_evicted_cohort_releases_without_cyclic_collection():
     batch = mw.Simulation.batch([simulation(i, steps=8) for i in range(5)],
-        variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
+        variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
     was_enabled = gc.isenabled()
     gc.disable()
     try:
@@ -108,12 +126,15 @@ def test_evicted_cohort_releases_without_cyclic_collection():
 
 def test_one_background_compilation_across_one_hundred_density_updates():
     sim = simulation(steps=8)
-    sim.scene.add_material_region(mw.MaterialRegion(name="rho",
-        geometry=mw.Box(size=(.03, .03, .03), device="cuda:0"),
-        density=torch.zeros(2, 2, 2, device="cuda:0"), eps_bounds=(1., 3.)))
+    sim = with_scene(sim, material_regions=(
+        *sim.scene.material_regions,
+        mw.MaterialRegion(name="rho",
+            geometry=mw.Box(size=(.03, .03, .03), device="cuda:0"),
+            density=torch.zeros(2, 2, 2, device="cuda:0"), eps_bounds=(1., 3.)),
+    ))
     density = torch.zeros(1, 2, 2, 2, device="cuda:0")
-    batch = mw.Simulation.batch(sim, parameters=mw.BatchParameters(region_densities={"rho": density}),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1, graph="off"))
+    batch = mw.Simulation.batch(sim, parameters=mw.execution.BatchParameters(region_densities={"rho": density}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=1, graph="off"))
     with batch.prepare() as prepared:
         saved = None
         for index in range(100):
@@ -131,12 +152,13 @@ def test_one_background_compilation_across_one_hundred_density_updates():
 def test_declared_moving_structures_reuse_one_bank_across_cohorts():
     sims = [simulation(steps=31) for _ in range(5)]
     for index, sim in enumerate(sims):
-        sim.scene.structures = [mw.Structure(name="design",
+        sim = with_scene(sim, structures=[mw.Structure(name="design",
             geometry=mw.Sphere(radius=.025, position=(.02*index-.04, 0., 0.), device="cuda:0"),
-            material=mw.Material(eps_r=2. + .2*index))]
+            material=mw.Material(eps_r=2. + .2*index))])
+        sims[index] = sim
     batch = mw.Simulation.batch(sims,
-        variation=mw.BatchVariation(structures={"design": mw.Box(size=(.25, .25, .25), device="cuda:0")}),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
+        variation=mw.execution.BatchVariation(structures={"design": mw.Box(size=(.25, .25, .25), device="cuda:0")}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
     with batch.prepare() as prepared:
         results = prepared.run()
         results.results()
@@ -155,13 +177,17 @@ def test_declared_planar_pec_sheets_reuse_one_bank_and_match_single_runs():
     sims = [simulation(steps=31) for _ in range(4)]
     for index, sim in enumerate(sims):
         # Fixed structures are shared declarations; only the named sheet varies.
-        sim.scene.structures = list(sims[0].scene.structures[:1])
-        sim.scene.add_structure(mw.Structure(name="plate", material=mw.Material.pec(),
-            geometry=mw.PlanarPEC.rectangle(((-.1, .1), (-.05, .0125 + .025 * index)),
-                                            normal_axis="z", coordinate=.025)))
+        sim = with_scene(sim, structures=list(sims[0].scene.structures[:1]))
+        sim = with_scene(sim, structures=(
+            *sim.scene.structures,
+            mw.Structure(name="plate", material=mw.Material.pec(),
+                geometry=mw.geometry.PlanarPEC.rectangle(((-.1, .1), (-.05, .0125 + .025 * index)),
+                        normal_axis="z", coordinate=.025)),
+        ))
+        sims[index] = sim
     batch = mw.Simulation.batch(sims,
-        variation=mw.BatchVariation(structures={"plate": mw.Box(size=(.3, .3, .3), device="cuda:0")}),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
+        variation=mw.execution.BatchVariation(structures={"plate": mw.Box(size=(.3, .3, .3), device="cuda:0")}),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
     with batch.prepare() as prepared:
         results = prepared.run()
         results.results()

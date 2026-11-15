@@ -11,19 +11,19 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 
 def test_tensor_sources_cutoff_prefix_and_exact_restore(tmp_path,monkeypatch):
     scene,config,point=setup()
-    scene.structures[0]=replace(scene.structures[0],material=mw.Material(eps_r=2.,mu_r=1.3))
+    scene = scene.updated(structures=(replace(scene.structures[0],material=mw.Material(eps_r=2.,mu_r=1.3)), *scene.structures[1:]))
     axis=point.new_tensor([1.,2.,3.]);axis=axis/axis.norm()
     q=.002*torch.einsum('i,j,k->ijk',axis,axis,axis)
     c=.001*torch.einsum('i,j,k,l->ijkl',axis,axis,axis,axis)
-    scene.structures[1]=replace(scene.structures[1],material=mw.Material(eps_r=2.,
-        nonlinearity=mw.TensorNonlinearSusceptibility(chi2=q,chi3=c)))
-    policy=mw.HarmonicCutoffConfig(max_harmonics=3,failure='record')
+    scene = scene.updated(structures=(*scene.structures[:1], replace(scene.structures[1],material=mw.Material(eps_r=2.,
+        nonlinearity=mw.media.TensorNonlinearSusceptibility(chi2=q,chi3=c))), *scene.structures[2:]))
+    policy=mw.mom.HarmonicCutoffConfig(max_harmonics=3,failure='record')
     config=replace(config,harmonic_balance=replace(config.harmonic_balance,harmonics=1,cutoff=policy))
-    public=mw.Simulation.mom(scene,frequency=3e8,config=config).prepare()
+    public=mw.Simulation.mom(scene,frequencies=3e8,config=config).prepare()
     original=public.solver.prepared
     from witwin.maxwell.mom.physics import Medium
     assert all(isinstance(m,Medium) for body in public.solver.materials for m in body.linear_samples)
-    from witwin.maxwell.mom.harmonic_state import preparation_signature
+    from witwin.maxwell.mom.harmonic_recovery import preparation_signature
     import witwin.maxwell.mom.tensor_harmonic_preparation as preparation
     from witwin.maxwell.mom.static_tensor_interface import StaticTensorInterfaceOperator
     response=preparation.prepare_cell_field_response;calls=[]
@@ -43,13 +43,13 @@ def test_tensor_sources_cutoff_prefix_and_exact_restore(tmp_path,monkeypatch):
     assert 'cutoff' not in original['receipt']
     for name in ('chi2_tensor','chi3_tensor'):
         torch.testing.assert_close(extended['nonlinear_coefficients'][name],original['nonlinear_coefficients'][name],rtol=0,atol=0)
-    cutoff=result.solver_stats['cutoff']
+    cutoff=result.stats()['cutoff']
     assert cutoff['final_harmonics']==3 and len(cutoff['checks'])==2
     assert not cutoff['physical_qualification'] and not cutoff['harmonic_truncation_converged']
     assert result._metadata['cell_cutoff_estimate_passed']==cutoff['cell_truncation_estimate_passed']
     if not cutoff['cell_truncation_estimate_passed']:
         assert cutoff['failure_reason']=='harmonic_budget_exhausted'
-    assert bool(result.harmonic_state.cell_electric[2:].norm()>0)
+    assert bool(mw.mom.harmonic_state(result).cell_electric[2:].norm()>0)
     fields=result.query_fields(point,region_id=2,field_kind='total',harmonic=3)
     path=tmp_path/'tensor-cutoff.pt';result.save(path)
     from witwin.maxwell.mom.runtime import SystemOperator
@@ -58,9 +58,9 @@ def test_tensor_sources_cutoff_prefix_and_exact_restore(tmp_path,monkeypatch):
         patch.setattr(StaticTensorInterfaceOperator,'__init__',forbidden)
         patch.setattr(torch.linalg,'solve',forbidden)
         restored=mw.Result.load(path,scene=scene)
-        assert restored.solver_stats['cutoff']==cutoff
+        assert restored.stats()['cutoff']==cutoff
         for name in ('cell_electric','polarization','total_volume_current'):
-            torch.testing.assert_close(getattr(restored.harmonic_state,name),getattr(result.harmonic_state,name),rtol=0,atol=0)
+            torch.testing.assert_close(getattr(mw.mom.harmonic_state(restored),name),getattr(mw.mom.harmonic_state(result),name),rtol=0,atol=0)
         for actual,expected in zip(restored.query_fields(point,region_id=2,field_kind='total',harmonic=3),fields):
             torch.testing.assert_close(actual,expected,rtol=0,atol=0)
     payload=torch.load(path,weights_only=False)

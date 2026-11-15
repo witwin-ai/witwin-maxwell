@@ -12,16 +12,16 @@ from witwin.maxwell.result import Result
 
 def _scene() -> mw.Scene:
     return mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
+        subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"),
         domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
         grid=mw.GridSpec.uniform(0.25),
         boundary=mw.BoundarySpec.none(),
-        device="cpu",  # Backend routing is mocked; no CUDA allocation is needed.
+        # Backend routing is mocked; no CUDA allocation is needed.
     )
 
 
 def _parallel(*, gather_fields: bool = False, result_device: str = "cuda:0"):
-    return mw.FDTDParallelConfig(
+    return mw.fdtd.FDTDParallelConfig(
         devices=("cuda:0", "cuda:1"),
         gather_fields=gather_fields,
         result_device=result_device,
@@ -30,9 +30,9 @@ def _parallel(*, gather_fields: bool = False, result_device: str = "cuda:0"):
 
 def test_parallel_config_is_public_and_forwarded_by_fdtd_factory():
     parallel = _parallel()
-    simulation = mw.Simulation.fdtd(_scene(), frequency=1.0e9, parallel=parallel)
+    simulation = mw.Simulation.fdtd(_scene(), frequencies=1.0e9, config=mw.FDTDConfig(parallel=parallel))
 
-    assert mw.FDTDParallelConfig is simulation_module.FDTDParallelConfig
+    assert mw.fdtd.FDTDParallelConfig is simulation_module.FDTDParallelConfig
     assert simulation.config.parallel is parallel
 
 
@@ -54,17 +54,19 @@ def test_parallel_none_keeps_single_gpu_backend_path(monkeypatch):
 
     prepare_calls = []
 
-    def prepare_single_scene(value, *, material_dtype):
+    def prepare_single_scene(value, *, device, material_dtype):
         assert value is scene
         assert material_dtype is torch.float32
         prepare_calls.append((value, material_dtype))
         return prepared_scene
 
     monkeypatch.setattr(simulation_module, "prepare_scene", prepare_single_scene)
-    monkeypatch.setattr(simulation_module, "_require_cuda_scene", lambda *args, **kwargs: None)
+    monkeypatch.setattr(simulation_module, "_require_cuda_device", lambda *args, **kwargs: None)
     monkeypatch.setattr(simulation_module, "_resolve_fdtd_backend", lambda: (FakeFDTD, object()))
+    # The stand-in solver has no fields to bind the core launches to.
+    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.core_path.activate_core_path", lambda solver: None)
 
-    simulation = mw.Simulation.fdtd(scene, frequency=1.0e9)
+    simulation = mw.Simulation.fdtd(scene, frequencies=1.0e9, config=mw.FDTDConfig(device="cpu"))
     solver = simulation._build_fdtd_solver_for_scene(scene, initialize=True)
 
     assert simulation.config.field_dtype is torch.float32
@@ -75,8 +77,8 @@ def test_parallel_none_keeps_single_gpu_backend_path(monkeypatch):
             prepared_scene,
             {
                 "frequency": 1.0e9,
-                "absorber_type": mw.AbsorberKind.AUTO,
-                "cpml_config": {},
+                "absorber_type": mw.fdtd.AbsorberKind.AUTO,
+                "cpml": mw.fdtd.CPMLConfig(),
             },
         )
     ]
@@ -101,10 +103,10 @@ def test_parallel_builds_distributed_solver_and_initializes(monkeypatch):
             self.initialized = True
 
     monkeypatch.setattr(simulation_module, "prepare_scene", lambda value: value)
-    monkeypatch.setattr(simulation_module, "_require_cuda_scene", lambda *args, **kwargs: None)
+    monkeypatch.setattr(simulation_module, "_require_cuda_device", lambda *args, **kwargs: None)
     monkeypatch.setattr(distributed_module, "DistributedFDTD", FakeDistributedFDTD)
 
-    simulation = mw.Simulation.fdtd(scene, frequency=2.0e9, parallel=parallel)
+    simulation = mw.Simulation.fdtd(scene, frequencies=2.0e9, config=mw.FDTDConfig(parallel=parallel))
     solver = simulation._build_fdtd_solver_for_scene(scene, initialize=True)
 
     assert solver.initialized is True
@@ -114,8 +116,9 @@ def test_parallel_builds_distributed_solver_and_initializes(monkeypatch):
             {
                 "frequency": 2.0e9,
                 "parallel": parallel,
-                "absorber_type": mw.AbsorberKind.AUTO,
-                "cpml_config": {},
+                "absorber_type": mw.fdtd.AbsorberKind.AUTO,
+                "cpml": mw.fdtd.CPMLConfig(),
+                "device": "cuda",
             },
         )
     ]
@@ -131,14 +134,15 @@ def test_unsupported_trainable_parallel_channel_rejected_before_solver_allocatio
     # to the distributed adjoint bridge instead -- covered by the adjoint parity
     # suite.)
     scene = _scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="dielectric",
             geometry=mw.Box(position=torch.zeros(3, requires_grad=True), size=(0.2, 0.2, 0.2)),
             material=mw.Material(eps_r=3.0),
-        )
-    )
-    simulation = mw.Simulation.fdtd(scene, frequency=1.0e9, parallel=_parallel())
+        ),
+    ))
+    simulation = mw.Simulation.fdtd(scene, frequencies=1.0e9, config=mw.FDTDConfig(parallel=_parallel()))
     assert simulation.has_trainable_parameters
 
     def unexpected_allocation(*args, **kwargs):
@@ -152,7 +156,7 @@ def test_unsupported_trainable_parallel_channel_rejected_before_solver_allocatio
 
 def _fake_solved_distributed_solver():
     return SimpleNamespace(
-        scene=object(),
+        scene=SimpleNamespace(pml_extrusions=()),
         dt=0.125,
         last_solve_elapsed_s=1.0,
         dft_sample_counts=(0,),
@@ -167,9 +171,11 @@ def _fake_solved_distributed_solver():
 def test_gather_fields_false_does_not_fallback_to_shard_fields(monkeypatch):
     simulation = mw.Simulation.fdtd(
         _scene(),
-        frequency=1.0e9,
-        run_time=mw.TimeConfig(time_steps=2),
-        parallel=_parallel(gather_fields=False),
+        frequencies=1.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=2),
+            parallel=_parallel(gather_fields=False),
+        ),
     )
     solver = _fake_solved_distributed_solver()
     monkeypatch.setattr(
@@ -186,15 +192,15 @@ def test_gather_fields_false_does_not_fallback_to_shard_fields(monkeypatch):
     result = simulation._run_fdtd_from_solver(solver)
 
     assert result.fields == {}
-    assert result.raw_output == {}
-    assert result.solver_stats["parallel_stats"]["halo_bytes_total"] == 64
+    assert result._raw_output == {}
+    assert result.stats()["parallel_stats"]["halo_bytes_total"] == 64
 
 
 def test_gather_fields_true_requires_distributed_field_output(monkeypatch):
     simulation = mw.Simulation.fdtd(
         _scene(),
-        frequency=1.0e9,
-        parallel=_parallel(gather_fields=True),
+        frequencies=1.0e9,
+        config=mw.FDTDConfig(parallel=_parallel(gather_fields=True)),
     )
     solver = _fake_solved_distributed_solver()
     monkeypatch.setattr(
@@ -209,7 +215,7 @@ def test_gather_fields_true_requires_distributed_field_output(monkeypatch):
 
 def test_gathered_fields_are_normalized_on_explicit_result_device(monkeypatch):
     parallel = _parallel(gather_fields=True, result_device="cuda:1")
-    simulation = mw.Simulation.fdtd(_scene(), frequency=1.0e9, parallel=parallel)
+    simulation = mw.Simulation.fdtd(_scene(), frequencies=1.0e9, config=mw.FDTDConfig(parallel=parallel))
     solver = _fake_solved_distributed_solver()
     raw_fields = {"Ex": torch.tensor([1.0]), "Ey": torch.tensor([2.0]), "Ez": torch.tensor([3.0])}
     requested_devices = []
@@ -229,7 +235,9 @@ def test_gathered_fields_are_normalized_on_explicit_result_device(monkeypatch):
     result = simulation._run_fdtd_from_solver(solver)
 
     assert requested_devices == ["cuda:1"]
-    assert set(result.fields) == {"EX", "EY", "EZ"}
+    # One frequency without the volume DFT: the gathered arrays are the last-step fields.
+    # Stand-in 1-element arrays, not Yee grids: compare the stored tensors.
+    assert all(torch.equal(result._fields[name.upper()], raw_fields[name]) for name in ("Ex", "Ey", "Ez"))
 
 
 def test_distributed_solver_rejects_surface_impedance_ownership():
@@ -244,15 +252,14 @@ def test_distributed_solver_rejects_surface_impedance_ownership():
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cpu",
         structures=[
             mw.Structure(
                 geometry=Box(position=(0.3, 0.0, 0.0), size=(0.4, 1.0, 1.0)),
-                material=mw.LossyMetalMedium(conductivity=5.8e7),
+                material=mw.media.LossyMetalMedium(conductivity=5.8e7),
             )
         ],
     )
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
 
     # Drive the static-capability gate directly (no GPU transport), the same partial-
     # construction style the adjoint-bridge guard tests use.
@@ -267,7 +274,7 @@ def test_distributed_solver_rejects_surface_impedance_ownership():
         solver._validate_static_capabilities()
 
 
-def test_result_solver_stats_is_a_read_only_copy_property():
+def test_result_stats_returns_a_copy_of_the_solver_statistics():
     result = Result(
         method="fdtd",
         scene=_scene(),
@@ -275,9 +282,7 @@ def test_result_solver_stats_is_a_read_only_copy_property():
         solver_stats={"steps_run": 3},
     )
 
-    stats = result.solver_stats
+    stats = result.stats()
     stats["steps_run"] = 99
 
-    assert result.solver_stats == {"steps_run": 3}
-    with pytest.raises(AttributeError):
-        result.solver_stats = {}
+    assert result.stats()["steps_run"] == 3

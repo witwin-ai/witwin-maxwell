@@ -2,6 +2,7 @@
 import torch
 from .dual_current_action import StreamedDualCurrentBalance
 from .fixed_tangent_inverse import _FixedTangentInverse
+from ..errors import ConvergenceError
 
 
 class _Product(torch.autograd.Function):
@@ -95,7 +96,7 @@ class DualNonlinearTangent:
     def adjoint(self,value):return _Product.apply(value,self,True)
 
 
-class DualNonlinearInverseError(RuntimeError):
+class DualNonlinearInverseError(ConvergenceError):
     def __init__(self,receipt):
         self.receipt=receipt
         super().__init__('Dual nonlinear tangent inverse failed its original RHS residual')

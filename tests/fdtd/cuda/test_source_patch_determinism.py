@@ -15,16 +15,18 @@ _STEPS = 512
 
 def _oblique_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.96, 0.96),) * 3),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4), device="cuda:0",
-    )
-    scene.add_source(mw.PlaneWave(
-        direction=(0.6, 0.0, 0.8), polarization="Ey",
-        source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.35e9, amplitude=80.0),
-        injection=mw.TFSF(bounds=((-0.32, 0.32),) * 3),
-    ))
-    scene.add_monitor(mw.PointMonitor("probe", (0.08, 0.08, 0.08), fields=_FIELDS))
+                domain=mw.Domain(bounds=((-0.96, 0.96),) * 3),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.6, 0.0, 0.8), polarization="Ey",
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.35e9, amplitude=80.0),
+                injection=mw.TFSF(bounds=((-0.32, 0.32),) * 3),
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (0.08, 0.08, 0.08), fields=_FIELDS),),
+            )
     return scene
 
 
@@ -34,23 +36,25 @@ def _seam_scene(bloch=False):
         y="bloch" if bloch else "periodic", z="pml",
         bloch_wavevector=(2.3, 1.1, 0.0) if bloch else (0.0, 0.0, 0.0),
     )
-    scene = mw.Scene(domain=mw.Domain(bounds=((-0.4, 0.4),) * 3),
-                     grid=mw.GridSpec.uniform(0.05), boundary=boundary, device="cuda:0")
     # Unequal corner currents make the four endpoint writes order-sensitive.
     coords = (np.linspace(-0.4, 0.4, 3), np.linspace(-0.4, 0.4, 3), (-0.05, 0.05))
     current = np.random.default_rng(17).uniform(0.1, 2.0, (3, 3, 2))
     waveform = mw.CW(frequency=1e9, phase=0.37) if bloch else mw.GaussianPulse(frequency=1e9, fwidth=1e9)
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(coords, {"Jz": current}), source_time=waveform))
-    scene.add_monitor(mw.PointMonitor("probe", (0.35, 0.35, 0.1), fields=_FIELDS))
+    scene = mw.Scene(domain=mw.Domain(bounds=((-0.4, 0.4),) * 3),
+                     grid=mw.GridSpec.uniform(0.05), boundary=boundary,
+                     sources=(
+                         mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(coords, {"Jz": current}), source_time=waveform),
+                     ),
+                     monitors=(mw.PointMonitor("probe", (0.35, 0.35, 0.1), fields=_FIELDS),))
     return scene
 
 
-def _prepare(scene, *, core_path=False):
+def _prepare(scene):
     torch.manual_seed(17)
     return mw.Simulation.fdtd(
-        scene, frequencies=_FREQUENCIES, backend="native", cuda_graph=False, fdtd_core_path=core_path,
+        scene, frequencies=_FREQUENCIES, config=mw.FDTDConfig(cuda_graph=False,
         run_time=mw.TimeConfig(time_steps=_STEPS), shutoff=0,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False)),
     ).prepare()
 
 
@@ -130,21 +134,23 @@ def _batch_run():
     simulations = []
     for lane in range(3):
         scene = mw.Scene(domain=mw.Domain(bounds=((-0.2, 0.2),) * 3), grid=mw.GridSpec.uniform(0.025),
-                         boundary=mw.BoundarySpec.pml(num_layers=3), device="cuda:0")
-        for name, amplitude in (("drive", 1.0 + lane), ("overlap", 0.3)):
-            scene.add_source(mw.PointDipole(
-                name=name, position=(-0.05, 0.0, 0.0), polarization="Ez",
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9, amplitude=amplitude),
-            ))
-        scene.add_monitor(mw.PointMonitor("probe", (0.1, 0.0, 0.0), fields=_FIELDS))
+                         boundary=mw.BoundarySpec.pml(num_layers=3))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            *(mw.PointDipole(
+                  name=name, position=(-0.05, 0.0, 0.0), polarization="Ez",
+                  source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9, amplitude=amplitude),
+              ) for name, amplitude in (("drive", 1.0 + lane), ("overlap", 0.3))),
+        ))
+        scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.1, 0.0, 0.0), fields=_FIELDS)))
         simulations.append(mw.Simulation.fdtd(
-            scene, frequencies=_FREQUENCIES, backend="native", cuda_graph=False, shutoff=0,
+            scene, frequencies=_FREQUENCIES, config=mw.FDTDConfig(cuda_graph=False, shutoff=0,
             run_time=mw.TimeConfig(time_steps=120, dt=2e-11),
-            spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False), device="cuda:0"),
         ))
     batch = mw.Simulation.batch(
-        simulations, variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=3, graph="off",
+        simulations, variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=3, graph="off",
                                     memory_limit_bytes=4 * 1024**3),
     )
     with batch.prepare() as execution:
@@ -170,14 +176,18 @@ def test_oblique_checkpoint_resume_bitwise(tmp_path):
         checkpoint.save(path)
         del checkpoint, execution
         target = _prepare(_oblique_scene())
-        result = target.run(resume_from=mw.FDTDResumeCheckpoint.load(path, map_location="cpu"))
+        result = target.run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path, map_location="cpu"))
         resumed.append(_snapshot(target.solver, result))
     for values in resumed:
         _assert_equal(expected, values)
 
 
 def test_core_path_periodic_seam_patch_bitwise():
-    # fdtd_core_path=True fails closed when unsupported; its source patch with s.wrap set atomicAdds every
-    # periodic boundary image (fdtd/cuda/core/step.cu periodic wrap branch).
-    _repeat(lambda: (lambda execution: _snapshot(execution.solver, execution.run()))(
-        _prepare(_seam_scene(False), core_path=True)))
+    # The core source patch with s.wrap set atomicAdds every periodic boundary image
+    # (fdtd/cuda/core/step.cu periodic wrap branch).
+    def run():
+        execution = _prepare(_seam_scene(False))
+        assert execution.solver._core_runtime is not None
+        return _snapshot(execution.solver, execution.run())
+
+    _repeat(run)

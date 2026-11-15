@@ -5,14 +5,13 @@ import torch
 import witwin.maxwell as mw
 
 
-def _build_scene(source, *, device="cuda"):
+def _build_scene(source):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device=device,
-    )
-    scene.add_source(source)
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(source,),
+            )
     return scene
 
 
@@ -50,29 +49,26 @@ def test_fdtd_gaussian_pulse_reduces_time_step():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_multiple_point_sources_initialize_and_inject_independently():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.16, 0.0, 0.0),
-            polarization="Ex",
-            width=0.05,
-            source_time=mw.CW(frequency=1.0e9, amplitude=25.0),
-            name="src_ex",
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.16, 0.0, 0.0),
-            polarization="Ez",
-            width=0.05,
-            source_time=mw.CW(frequency=1.5e9, amplitude=40.0),
-            name="src_ez",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(-0.16, 0.0, 0.0),
+                polarization="Ex",
+                width=0.05,
+                source_time=mw.CW(frequency=1.0e9, amplitude=25.0),
+                name="src_ex",
+            ),
+            mw.PointDipole(
+                position=(0.16, 0.0, 0.0),
+                polarization="Ez",
+                width=0.05,
+                source_time=mw.CW(frequency=1.5e9, amplitude=40.0),
+                name="src_ez",
+            ),
+            ),
+            )
 
     solver = mw.Simulation.fdtd(scene, frequencies=[1.0e9]).prepare().solver
 
@@ -117,21 +113,17 @@ def test_fdtd_ideal_point_dipole_collapses_to_single_yee_sample():
     assert torch.count_nonzero(ideal_patch).item() <= torch.count_nonzero(gaussian_patch).item()
 
 
-@pytest.mark.parametrize("backend,device", [
-    ("cpu_reference", "cpu"),
-    pytest.param("native", "cuda", marks=pytest.mark.skipif(
-        not torch.cuda.is_available(), reason="needs CUDA for FDTD")),
-])
-def test_fdtd_multi_frequency_dft_accumulates_all_frequencies_in_batched_tensors(backend, device):
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_fdtd_multi_frequency_dft_accumulates_all_frequencies_in_batched_tensors():
     scene = _build_scene(
         mw.PointDipole(
             position=(0.0, 0.0, 0.0),
             polarization="Ez",
             width=0.05,
             source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=1.0e9, amplitude=50.0),
-        ), device=device,
+        ),
     )
-    solver = mw.Simulation.fdtd(scene, frequencies=[1.0e9], backend=backend).prepare().solver
+    solver = mw.Simulation.fdtd(scene, frequencies=[1.0e9]).prepare().solver
     solver.enable_dft((1.0e9, 1.5e9), window_type="none", end_step=4)
     solver.Ex.fill_(1.0)
     solver.Ey.zero_()
@@ -161,19 +153,24 @@ def test_fdtd_plane_wave_produces_uniform_cross_section():
             name="pw",
         )
     )
-    scene.add_monitor(mw.PlaneMonitor("mid_x_ez", axis="x", position=0.0, fields=("Ez",)))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PlaneMonitor("mid_x_ez", axis="x", position=0.0, fields=("Ez",)),
+    ))
 
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
-    monitor = result.monitor("mid_x_ez")
-    assert torch.is_tensor(monitor["data"])
-    field = np.abs(_to_cpu_numpy(monitor["data"]))
+    monitor = result.monitor("mid_x_ez", freq_index=0)
+    assert torch.is_tensor(monitor.sel(component="Ez").values)
+    field = np.abs(_to_cpu_numpy(monitor.sel(component="Ez").values))
     inset = scene.boundary.num_layers
     crop = field[inset:-inset, inset:-inset]
     assert crop.size > 0
@@ -213,17 +210,22 @@ def test_fdtd_soft_plane_wave_flux_scales_with_amplitude_squared():
                 name="pw",
             )
         )
-        scene.add_monitor(mw.FluxMonitor("flux_x", axis="x", position=0.0, frequencies=(1.0e9,)))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.FluxMonitor("flux_x", axis="x", position=0.0, frequencies=(1.0e9,)),
+        ))
         result = mw.Simulation.fdtd(
             scene,
             frequencies=[1.0e9],
-            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-            spectral_sampler=mw.SpectralSampler(window="hanning"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                full_field_dft=False,
+            ),
         ).run()
-        monitor = result.monitor("flux_x")
-        assert torch.is_tensor(monitor["flux"])
-        return float(_to_cpu_numpy(monitor["flux"]).ravel()[0])
+        monitor = result.monitor("flux_x", freq_index=0)
+        assert torch.is_tensor(monitor.values)
+        return float(_to_cpu_numpy(monitor.values).ravel()[0])
 
     flux_1 = run_flux(1.0)
     flux_2 = run_flux(2.0)
@@ -245,19 +247,24 @@ def test_fdtd_gaussian_beam_focuses_energy_near_axis():
             name="beam",
         )
     )
-    scene.add_monitor(mw.PlaneMonitor("focus_ez", axis="x", position=0.0, fields=("Ez",)))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.PlaneMonitor("focus_ez", axis="x", position=0.0, fields=("Ez",)),
+    ))
 
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
-    monitor = result.monitor("focus_ez")
-    assert torch.is_tensor(monitor["data"])
-    field = np.abs(_to_cpu_numpy(monitor["data"]))
+    monitor = result.monitor("focus_ez", freq_index=0)
+    assert torch.is_tensor(monitor.sel(component="Ez").values)
+    field = np.abs(_to_cpu_numpy(monitor.sel(component="Ez").values))
     center = field[field.shape[0] // 2, field.shape[1] // 2]
     inner = field[field.shape[0] // 2 - 1 : field.shape[0] // 2 + 2, field.shape[1] // 2 - 1 : field.shape[1] // 2 + 2]
     outer_edges = np.concatenate((field[0, :], field[-1, :], field[:, 0], field[:, -1]))

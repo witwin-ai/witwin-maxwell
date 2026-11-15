@@ -6,13 +6,14 @@ quadrature, numerical moments/transfers, floating-point effects and solve error.
 import math
 import torch
 from .nearfield import ScalarSystemBlocks
+from .ordered_reduction import ordered_index_add_
 
 
 def _edge_logsumexp(values, indices, size):
     maxima = values.new_full((size,), -torch.inf)
     maxima.scatter_reduce_(0, indices, values, reduce='amax', include_self=True)
     sums = values.new_zeros(size)
-    sums.index_add_(0, indices, torch.exp(values-maxima[indices]))
+    ordered_index_add_(sums, 0, indices, torch.exp(values-maxima[indices]))
     return maxima+torch.log(sums)
 
 

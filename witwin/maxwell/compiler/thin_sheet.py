@@ -45,6 +45,7 @@ import torch
 
 from ..copper_foil import CopperFoil
 from ..ports import LumpedPort
+from ..errors import UnsupportedFeatureError
 
 SHEET_MODEL = "conformal_two_sided"
 CHORD_MASS_FACTOR = 0.5
@@ -66,7 +67,7 @@ def owns_thin_sheet(structure) -> bool:
 
 
 def thin_sheet_structures(scene):
-    return tuple(structure for structure in scene.structures if owns_thin_sheet(structure))
+    return tuple(structure for structure in scene.scene.structures if owns_thin_sheet(structure))
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +294,8 @@ class SheetSurface:
         if len(found) == 1 or (len(found) == 2 and abs(found[0] - found[1]) <= 1e-9):
             return found[0]
         if len(found) > 1:
-            raise NotImplementedError("A Yee edge crosses the faceted sheet more than once; refine the grid.")
+            raise UnsupportedFeatureError("A Yee edge crosses the faceted sheet more than once; refine the grid.",
+                                          feature="geometry.surface_mesh", method="fdtd")
         # Crossing at a fold: bisect the continuous level function.
         lo, hi = 0.0, 1.0
         phi_lo = self.classify(start[None])[0][0]
@@ -351,8 +353,9 @@ class SheetSurface:
             connected |= {b for a, b in folds if a in connected} | {a for a, b in folds if b in connected}
         kinds = {self.convex[key] for key in folds}
         if connected != set(facet_ids) or len(kinds) != 1:
-            raise NotImplementedError("A Yee dual cell meets thin-sheet facets that are not joined by folds of one "
-                                      "kind (separate sheet parts or an inflection within one cell); refine the grid.")
+            raise UnsupportedFeatureError("A Yee dual cell meets thin-sheet facets that are not joined by folds of one "
+                                      "kind (separate sheet parts or an inflection within one cell); refine the grid.",
+                                          feature="geometry.surface_mesh", method="fdtd")
         facets = [self.facets[i] for i in facet_ids]
         if kinds.pop():
             return _clip_box_volume(lower, upper, [(f.normal, f.offset) for f in facets])
@@ -414,8 +417,9 @@ def _clip_box_volume(lower, upper, planes):
 def sheet_surface(geometry, *, fold_limit_deg=90.0) -> SheetSurface:
     vertices, triangles = geometry.to_mesh()
     if torch.is_tensor(vertices) and vertices.requires_grad:
-        raise NotImplementedError("Conformal thin sheets are forward-only; trainable SurfaceMesh vertices are not "
-                                  "supported.")
+        raise UnsupportedFeatureError("Conformal thin sheets are forward-only; trainable SurfaceMesh vertices are not "
+                                  "supported.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     vertices = vertices.detach().cpu().double().numpy()
     triangles = triangles.detach().cpu().numpy().astype(np.int64)
     corners = vertices[triangles]
@@ -431,7 +435,8 @@ def sheet_surface(geometry, *, fold_limit_deg=90.0) -> SheetSurface:
         for k in range(3):
             a, b = int(tri[k]), int(tri[(k + 1) % 3])
             if (a, b) in directed:
-                raise NotImplementedError("The thin-sheet SurfaceMesh is not consistently oriented or not manifold.")
+                raise UnsupportedFeatureError("The thin-sheet SurfaceMesh is not consistently oriented or not manifold.",
+                                              feature="geometry.surface_mesh", method="fdtd")
             directed[(a, b)] = t
     neighbours = {}
     for (a, b), t in directed.items():
@@ -468,7 +473,8 @@ def sheet_surface(geometry, *, fold_limit_deg=90.0) -> SheetSurface:
         offsets = vertices[used] @ normal
         offset = float(offsets.mean())
         if (unit[group] @ normal).min() < 1 - 1e-10 or np.abs(offsets - offset).max() > 1e-9 * scale:
-            raise NotImplementedError("A thin-sheet facet is not planar.")
+            raise UnsupportedFeatureError("A thin-sheet facet is not planar.",
+                                          feature="geometry.surface_mesh", method="fdtd")
         seed = np.eye(3)[int(np.argmin(np.abs(normal)))]
         first = np.cross(normal, seed)
         first /= np.linalg.norm(first)
@@ -497,10 +503,12 @@ def sheet_surface(geometry, *, fold_limit_deg=90.0) -> SheetSurface:
     for (fa, fb), (point, direction) in adjacency.items():
         a, b = facets[fa], facets[fb]
         if float(a.normal @ b.normal) < math.cos(math.radians(fold_limit_deg)) - 1e-12:
-            raise NotImplementedError(f"Thin-sheet facets fold by more than {fold_limit_deg:g} degrees.")
+            raise UnsupportedFeatureError(f"Thin-sheet facets fold by more than {fold_limit_deg:g} degrees.",
+                                          feature="geometry.surface_mesh", method="fdtd")
         # The fold must be a straight line common to both planes.
         if abs(float(direction @ a.normal)) > 1e-9 or abs(float(direction @ b.normal)) > 1e-9:
-            raise NotImplementedError("Thin-sheet facets meet along a non-straight fold.")
+            raise UnsupportedFeatureError("Thin-sheet facets meet along a non-straight fold.",
+                                          feature="geometry.surface_mesh", method="fdtd")
         centroid_b = b.origin + b.triangles.reshape(-1, 2).mean(0) @ b.basis
         convex[(fa, fb)] = bool(centroid_b @ a.normal - a.offset < 0)
     return SheetSurface(tuple(facets), vertices, scale, adjacency, convex, tuple(fold_segments))
@@ -675,7 +683,7 @@ def _polygon_area(polygon):
 def _classify_sheet_gaps(scene, structure, surface, nodes, primal, tolerance):
     """Admit full-width rectangular gaps and their one-cell arm margins."""
     gaps = []
-    for port in scene.ports:
+    for port in scene.scene.ports:
         if not isinstance(port, LumpedPort) or port.wire_binding is not None:
             continue
         terminals = np.array((port.negative, port.positive))
@@ -1017,7 +1025,8 @@ def _compile_thin_sheet(scene, structure, *, stiffness_ratio=2.0, minimum_area=0
     material = structure.material
     is_pec = bool(getattr(material, "is_pec", False))
     if not is_pec and not isinstance(material, CopperFoil):
-        raise NotImplementedError("Conformal thin sheets support PEC or CopperFoil materials.")
+        raise UnsupportedFeatureError("Conformal thin sheets support PEC or CopperFoil materials.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     surface = sheet_surface(structure.geometry)
     nodes, primal = _grid(scene)
     dual = [_dual_extent(p, np.arange(len(p) + 1)) for p in primal]
@@ -1043,9 +1052,9 @@ def _compile_thin_sheet(scene, structure, *, stiffness_ratio=2.0, minimum_area=0
 
     face_kind = {}
     for axis in range(3):
-        kinds = scene.boundary._face_kinds[axis] if hasattr(scene.boundary, "_face_kinds") else None
+        kinds = scene.scene.boundary._face_kinds[axis] if hasattr(scene.scene.boundary, "_face_kinds") else None
         for side_index, side in enumerate(("low", "high")):
-            value = kinds[side_index] if kinds is not None else scene.boundary.axis_kind(_AXES[axis])
+            value = kinds[side_index] if kinds is not None else scene.scene.boundary.axis_kind(_AXES[axis])
             face_kind[(axis, side)] = str(getattr(value, "value", value)).lower()
 
     def below_volume(lower, upper):
@@ -1094,7 +1103,8 @@ def _compile_thin_sheet(scene, structure, *, stiffness_ratio=2.0, minimum_area=0
             count = surface.crossings(starts, ends, region_tol)
             pierced_all = (s0.astype(np.int64) * s1.astype(np.int64)) < 0
             if np.any(count > 1) or np.any((count == 1) & ~pierced_all & (s0 != 0) & (s1 != 0)):
-                raise NotImplementedError("A Yee edge crosses the faceted thin sheet more than once; refine the grid.")
+                raise UnsupportedFeatureError("A Yee edge crosses the faceted thin sheet more than once; refine the grid.",
+                                              feature="geometry.surface_mesh", method="fdtd")
     # Faces --------------------------------------------------------------
     face_info = {}
     for a, b, c in _FRAME:
@@ -1175,8 +1185,9 @@ def _compile_thin_sheet(scene, structure, *, stiffness_ratio=2.0, minimum_area=0
                              for ax in (b, c))
                 if inside:
                     return [zeros[0], point, zeros[1]], [fa, fb]
-        raise NotImplementedError("A Yee face is cut by two thin-sheet facets that do not meet inside it; refine the "
-                                  "grid or widen the facets.")
+        raise UnsupportedFeatureError("A Yee face is cut by two thin-sheet facets that do not meet inside it; refine the "
+                                  "grid or widen the facets.",
+                                      feature="geometry.surface_mesh", method="fdtd")
 
     active_face = {}
     for key, info in face_info.items():
@@ -1184,7 +1195,8 @@ def _compile_thin_sheet(scene, structure, *, stiffness_ratio=2.0, minimum_area=0
             continue
         zeros = [p for label, p, _ in face_cycle(key) if label == "z"]
         if len(zeros) != 2:
-            raise NotImplementedError("A Yee face is cut more than once by the thin sheet; refine the grid.")
+            raise UnsupportedFeatureError("A Yee face is cut more than once by the thin sheet; refine the grid.",
+                                          feature="geometry.surface_mesh", method="fdtd")
         path, path_facets = cut_path(key, zeros)
         if surface.inside(np.stack((path[0], path[-1])), region_tol).all():
             active_face[key] = (path, path_facets)
@@ -1256,7 +1268,8 @@ def _compile_thin_sheet(scene, structure, *, stiffness_ratio=2.0, minimum_area=0
         kinds = on_boundary(key)
         wall = bool(fixed_wall[native])
         if wall and any(kind not in ("pec", "pmc") for kind in kinds):
-            raise NotImplementedError("Thin sheet cut edges may touch PEC or PMC domain walls only.")
+            raise UnsupportedFeatureError("Thin sheet cut edges may touch PEC or PMC domain walls only.",
+                                          feature="geometry.surface_mesh", method="fdtd")
         dof = first[native]
         e_extra[dof + 1] = extra_index[native]
         e_side[dof:dof + 2] = (-1, 1)
@@ -1371,8 +1384,9 @@ def _compile_thin_sheet(scene, structure, *, stiffness_ratio=2.0, minimum_area=0
                 _, facet = surface.classify(center[None])
                 if surface.crossings(center[None], e_pos[target][None], region_tol,
                                      exclude=surface.neighbourhood(int(facet[0])))[0]:
-                    raise NotImplementedError("A thin-sheet mass partition reaches across another part of the faceted "
-                                              "sheet; refine the grid or keep sheet parts further apart.")
+                    raise UnsupportedFeatureError("A thin-sheet mass partition reaches across another part of the faceted "
+                                              "sheet; refine the grid or keep sheet parts further apart.",
+                                                  feature="geometry.surface_mesh", method="fdtd")
             e_vol[target] += orphan
             e_modified[target] = True
 

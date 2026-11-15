@@ -245,7 +245,7 @@ def run_case(shape, dtype_name, batches, baseline, output):
     if shape == 'sphere':
         geometry = mw.Sphere(radius=.1, position=position, device='cuda')
     elif shape == 'ellipsoid':
-        geometry = mw.Ellipsoid(radii=(.14, .09, .07), position=position, device='cuda')
+        geometry = mw.geometry.Ellipsoid(radii=(.14, .09, .07), position=position, device='cuda')
     elif shape == 'harmonic':
         mesh = deformed_sphere_mesh(radius=.1, subdivisions=1, harmonics={(2, 0): .08, (3, 2): .035}, dtype=real)
         geometry = mw.Mesh(mesh.vertices, mesh.faces, position=position, recenter=False, fill_mode='solid', device='cuda')
@@ -253,7 +253,7 @@ def run_case(shape, dtype_name, batches, baseline, output):
         raise ValueError('unknown shape')
     sources = declared_sources(mw)
     scene = mw.Scene(structures=[mw.Structure(geometry, mw.Material(eps_r=2.7, sigma_e=.015))],
-                     sources=[sources[0]], device='cuda')
+                     sources=[sources[0]])
     integration = operator.IntegrationConfig(**PROTOCOL['integration'], pair_batch=batches[0], far_pair_batch=batches[1])
     stopping = StoppingRule(method='direct', rtol=tol['direct_residual'], atol=1e-12, fallback='none')
     config = mw.SIEConfig(subdivisions=1, dtype=dtype, integration=integration, stopping=stopping, riesz_storage='dense')

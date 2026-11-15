@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import math
 
 from ._fixed_inputs import require_fixed_input
+from ._stability import experimental
 
 
 def _point3(label: str, value) -> tuple[float, float, float]:
@@ -40,6 +41,7 @@ def _varying_axes(first, second) -> list[int]:
     ]
 
 
+@experimental("path_integrals")
 @dataclass(frozen=True)
 class AxisSegment:
     """One axis-aligned straight path from ``start`` to ``end``."""
@@ -60,6 +62,7 @@ class AxisSegment:
         return (self.start, self.end)
 
 
+@experimental("path_integrals")
 @dataclass(frozen=True)
 class PolylinePath:
     """An open in-plane polyline ``points[0] -> points[-1]``.
@@ -85,6 +88,7 @@ class PolylinePath:
         object.__setattr__(self, "points", resolved)
 
 
+@experimental("path_integrals")
 @dataclass(frozen=True)
 class RectangleLoop:
     """A planar rectangular current loop; ``size`` has exactly one zero component."""
@@ -119,6 +123,7 @@ class RectangleLoop:
         return tuple(corners)
 
 
+@experimental("path_integrals")
 @dataclass(frozen=True)
 class PolygonLoop:
     """A closed planar polygon current loop (vertices in order, not repeated)."""
@@ -138,6 +143,7 @@ class PolygonLoop:
         return self.points
 
 
+@experimental("path_integrals")
 @dataclass(frozen=True)
 class CircleLoop:
     """A circular current loop approximated by a regular ``segments``-gon."""
@@ -176,6 +182,7 @@ class CircleLoop:
         return tuple(points)
 
 
+@experimental("path_integrals")
 @dataclass(frozen=True)
 class CustomVoltageIntegral:
     """``V = integral of E . dl`` along ``path`` in its declared point order.
@@ -192,6 +199,7 @@ class CustomVoltageIntegral:
         object.__setattr__(self, "path", path)
 
 
+@experimental("path_integrals")
 @dataclass(frozen=True)
 class CustomCurrentIntegral:
     """``I = circulation of H`` around a closed in-plane loop.
@@ -230,6 +238,7 @@ def _composite_terms(label, terms, allowed):
     return tuple(output)
 
 
+@experimental("path_integrals")
 @dataclass(frozen=True)
 class CompositeVoltageIntegral:
     """A real linear combination of voltage integrals."""
@@ -244,6 +253,7 @@ class CompositeVoltageIntegral:
         )
 
 
+@experimental("path_integrals")
 @dataclass(frozen=True)
 class CompositeCurrentIntegral:
     """A real linear combination of current integrals."""

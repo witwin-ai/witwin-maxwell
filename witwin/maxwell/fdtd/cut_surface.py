@@ -6,6 +6,7 @@ import torch
 from ..compiler.cut_surface import compile_integrated_traces
 from ..compiler.power_loss import _component_geometry
 from ..geometry.surface_mesh import SurfaceMesh
+from ..errors import UnsupportedFeatureError
 
 
 class ElectricTraceProjection:
@@ -47,7 +48,8 @@ def _source_support_overlap(solver, groups):
         for group in groups.values():
             if any(bool(((group["indices"][:, axis] <= tfsf["lower"][axis]) |
                          (group["indices"][:, axis] >= tfsf["upper"][axis])).any()) for axis in axes):
-                raise NotImplementedError("PEC cut-surface support must lie strictly inside TFSF faces; joint source/constraint elimination is required.")
+                raise UnsupportedFeatureError("PEC cut-surface support must lie strictly inside TFSF faces; joint source/constraint elimination is required.",
+                                              feature="geometry.surface_mesh", method="fdtd")
     for term in (*getattr(solver, "_source_terms", ()), *getattr(solver, "_electric_source_terms", ()),
                  *tfsf.get("electric_terms", ())):
         name = term["field_name"].removesuffix("_imag")
@@ -61,7 +63,8 @@ def _source_support_overlap(solver, groups):
             local = indices-torch.tensor(term["offsets"], device=indices.device)
             inside = ((local >= 0) & (local < torch.tensor(patch.shape, device=indices.device))).all(-1)
             if bool(inside.any()) and bool((patch[tuple(local[inside].T)] != 0).any()):
-                raise NotImplementedError("An electric source overlaps the PEC cut-surface interpolation support; joint source/constraint elimination is required.")
+                raise UnsupportedFeatureError("An electric source overlaps the PEC cut-surface interpolation support; joint source/constraint elimination is required.",
+                                              feature="geometry.surface_mesh", method="fdtd")
     supports = {name: group["linear_indices"] for name, group in groups.items()}
     for port in getattr(solver, "_port_runtimes", ()):
         if port.field_name not in supports:
@@ -71,16 +74,18 @@ def _source_support_overlap(solver, groups):
         indices = geometry.voltage_indices
         flat = (indices[:, 0]*shape[1]+indices[:, 1])*shape[2]+indices[:, 2]
         if bool(torch.isin(flat, supports[port.field_name]).any()):
-            raise NotImplementedError("A port overlaps the PEC cut-surface interpolation support; joint port/constraint elimination is required.")
+            raise UnsupportedFeatureError("A port overlaps the PEC cut-surface interpolation support; joint port/constraint elimination is required.",
+                                          feature="geometry.surface_mesh", method="fdtd")
     for runtime, name in getattr(solver, "_lumped_element_runtimes", ()):
         if name in supports and bool(torch.isin(runtime.linear_indices, supports[name]).any()):
-            raise NotImplementedError("A lumped element overlaps the PEC cut-surface interpolation support.")
+            raise UnsupportedFeatureError("A lumped element overlaps the PEC cut-surface interpolation support.",
+                                          feature="geometry.surface_mesh", method="fdtd")
 
 
 def initialize_cut_surfaces(solver):
     solver._cut_surface = None
     from ..compiler.thin_sheet import owns_thin_sheet
-    structures = [structure for structure in solver.scene.structures
+    structures = [structure for structure in solver.scene.scene.structures
                   if getattr(structure, "enabled", True) and isinstance(structure.geometry, SurfaceMesh)
                   and not owns_thin_sheet(structure)]
     if not structures:
@@ -92,7 +97,8 @@ def initialize_cut_surfaces(solver):
     nodes = tuple(torch.as_tensor(getattr(solver.scene, axis+"_nodes64"), device=solver.device, dtype=torch.float64) for axis in "xyz")
     for structure in structures:
         if not bool(getattr(structure.material, "is_pec", False)):
-            raise NotImplementedError("SurfaceMesh requires PEC; finite copper needs independent two-sided cut traces.")
+            raise UnsupportedFeatureError("SurfaceMesh requires PEC; finite copper needs independent two-sided cut traces.",
+                                          feature="geometry.surface_mesh", method="fdtd")
         geometry = structure.geometry
         vertices, triangles = geometry.to_mesh()
         vertices, triangles = vertices.to(solver.device), triangles.to(solver.device)
@@ -109,9 +115,11 @@ def initialize_cut_surfaces(solver):
     if any(bool(getattr(solver, name, False)) for name in ("complex_fields_enabled", "full_aniso_enabled",
             "nonlinear_enabled", "modulation_enabled", "gyromagnetic_enabled", "breakdown_enabled",
             "dispersive_enabled", "magnetic_dispersive_enabled")):
-        raise NotImplementedError("PEC cut-surface projection currently requires real isotropic linear fields and disjoint soft sources.")
+        raise UnsupportedFeatureError("PEC cut-surface projection currently requires real isotropic linear fields and disjoint soft sources.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     if getattr(solver, "_wire_runtime", None) is not None:
-        raise NotImplementedError("PEC cut-surface wire contact requires a joint connectivity discretization.")
+        raise UnsupportedFeatureError("PEC cut-surface wire contact requires a joint connectivity discretization.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     rows, columns, values, offset = [], [], [], 0
     total_dofs = sum(getattr(solver, name).numel() for name in ("Ex", "Ey", "Ez"))
     for entry in compiled:
@@ -121,12 +129,14 @@ def initialize_cut_surfaces(solver):
         values.append(matrix.values())
         offset += matrix.shape[0]
     if offset > 4096:
-        raise NotImplementedError("Combined cut-surface constraints exceed the explicit 4096 row cap.")
+        raise UnsupportedFeatureError("Combined cut-surface constraints exceed the explicit 4096 row cap.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     global_matrix = torch.sparse_coo_tensor(torch.stack((torch.cat(rows), torch.cat(columns))), torch.cat(values),
                                            (offset, total_dofs)).coalesce()
     support, inverse = torch.unique(global_matrix.indices()[1], sorted=True, return_inverse=True)
     if offset*len(support)*8 > 512*1024**2:
-        raise NotImplementedError("Combined cut-surface rank-reveal matrix exceeds the explicit 512 MiB cap.")
+        raise UnsupportedFeatureError("Combined cut-surface rank-reveal matrix exceeds the explicit 512 MiB cap.",
+                                      feature="geometry.surface_mesh", method="fdtd")
     matrix = torch.sparse_coo_tensor(torch.stack((global_matrix.indices()[0], inverse)), global_matrix.values(),
                                      (offset, len(support))).coalesce()
     weights, groups, field_offset = [], {}, 0
@@ -141,12 +151,14 @@ def initialize_cut_surfaces(solver):
             # interior PEC constraint's positive physical mass.
             for axis, kind in enumerate("xyz"):
                 if bool(((indices[:, axis] == 0) | (indices[:, axis] == field.shape[axis]-1)).any()):
-                    raise NotImplementedError("PEC cut-surface interpolation support touches a domain boundary; move it inside the physical grid.")
+                    raise UnsupportedFeatureError("PEC cut-surface interpolation support touches a domain boundary; move it inside the physical grid.",
+                                                  feature="geometry.surface_mesh", method="fdtd")
             if solver.uses_cpml:
                 for axis, coordinate in enumerate("xyz"):
                     profile = getattr(solver, "cpml_c_e_"+coordinate)
                     if bool((profile[indices[:, axis]] != 0).any()):
-                        raise NotImplementedError("PEC cut-surface interpolation support intersects a CPML layer.")
+                        raise UnsupportedFeatureError("PEC cut-surface interpolation support intersects a CPML layer.",
+                                                      feature="geometry.surface_mesh", method="fdtd")
             _, widths = _component_geometry(solver.scene, name)
             volume = torch.ones(len(linear), dtype=torch.float64, device=solver.device)
             for axis in range(3):
@@ -156,7 +168,8 @@ def initialize_cut_surfaces(solver):
             curl = getattr(solver, "c"+name.lower()+"_curl").flatten()[linear].double()
             expected = solver.dt/(epsilon+sigma*solver.dt/2)
             if not bool(torch.allclose(curl, expected, rtol=2e-6, atol=0)):
-                raise NotImplementedError("PEC cut-surface interpolation support overlaps PEC, PML or another suppressed electric update.")
+                raise UnsupportedFeatureError("PEC cut-surface interpolation support overlaps PEC, PML or another suppressed electric update.",
+                                              feature="geometry.surface_mesh", method="fdtd")
             weights.append((epsilon+sigma*solver.dt/2)*volume)
             groups[name] = dict(indices=indices, positions=positions, linear_indices=linear,
                                 buffer=torch.empty(len(linear), device=solver.device, dtype=field.dtype),
@@ -170,7 +183,8 @@ def initialize_cut_surfaces(solver):
             indices = entry["indices"]
             flat = (indices[:, 0]*shape[1]+indices[:, 1])*shape[2]+indices[:, 2]
             if bool(torch.isin(flat, groups[name]["linear_indices"]).any()):
-                raise NotImplementedError("PEC cut-surface interpolation overlaps a two-sided copper trace.")
+                raise UnsupportedFeatureError("PEC cut-surface interpolation overlaps a two-sided copper trace.",
+                                              feature="geometry.surface_mesh", method="fdtd")
     weight = torch.cat(weights)
     solver._cut_surface = dict(projection=ElectricTraceProjection(matrix, weight), groups=groups,
         electric=torch.empty_like(weight), physical_area=sum(entry["area"] for entry in compiled),

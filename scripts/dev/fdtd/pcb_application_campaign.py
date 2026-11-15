@@ -1,19 +1,18 @@
 """Execute saved physical application inputs through direct and adapter Scene paths."""
 from __future__ import annotations
+from dataclasses import replace
 import argparse
 import gc
 import hashlib
 import json
 import math
 from pathlib import Path
-import shutil
 import time
 import traceback
 import numpy as np
 import torch
 import witwin.maxwell as mw
 from witwin.maxwell.adapters.pcb import import_pcb_scene
-from witwin.maxwell.scene import prepare_scene
 from scripts.dev.fdtd.pcb_acceptance import package_identity
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -36,13 +35,13 @@ def direct_scene(definition, adapted, frequency, selected):
         model = record.get("constitutive_model", {"kind": "pec"})
         material = mw.Material.pec() if metal else materials[record["material_id"]]
         if metal and model["kind"] == "copper_foil":
-            material = mw.CopperFoil(thickness=model["thickness_m"], conductivity=model["conductivity_s_per_m"],
+            material = mw.media.CopperFoil(thickness=model["thickness_m"], conductivity=model["conductivity_s_per_m"],
                                       frequency_range=model["frequency_range_hz"])
             geometry = mw.Box(position=center, size=size)
         elif metal and record["kind"] == "sheet":
             normal = int(np.flatnonzero(size.numpy() == 0)[0])
             tangential = np.delete(bounds, normal, axis=0)
-            geometry = mw.PlanarPEC.rectangle(tuple(map(tuple, tangential)),
+            geometry = mw.geometry.PlanarPEC.rectangle(tuple(map(tuple, tangential)),
                 normal_axis="xyz"[normal], coordinate=float(bounds[normal, 0]))
         else:
             geometry = mw.Box(position=center, size=size)
@@ -66,16 +65,16 @@ def direct_scene(definition, adapted, frequency, selected):
             reference_impedance=record["reference_ohm"]))
     return mw.Scene(domain=mw.Domain(bounds=[(float(a[0]), float(a[-1])) for a in axes]),
         grid=mw.GridSpec.custom(*axes), boundary=mw.BoundarySpec.pml(num_layers=definition["mesh"]["pml_cells"]),
-        subpixel_samples=mw.SubpixelSpec(**definition['mesh']['subpixel_samples'])
+        subpixel=mw.SubpixelSpec(**definition['mesh']['subpixel_samples'])
             if 'subpixel_samples' in definition['mesh'] else 1,
-        device=adapted.device, structures=structures, ports=ports,
+        structures=structures, ports=ports,
         metadata={"application_path": "direct physical declarations", "selection": selected})
 
 
 def power_observations(definition, scene, frequency):
     """Declare a closed vacuum surface between active geometry and the PML."""
     from witwin.maxwell.scene import prepare_scene
-    grid = prepare_scene(scene)
+    grid = prepare_scene(scene, device="cpu")
     active = {structure.name for structure in scene.structures}
     records = [r for r in definition["dielectrics"] + definition["conductors"] if r["id"] in active]
     boxes = np.asarray([r["bounds_m"] for r in records]).reshape(-1, 3, 2)
@@ -83,51 +82,34 @@ def power_observations(definition, scene, frequency):
     surface = np.empty_like(bounds)
     for dim, axis in enumerate("xyz"):
         nodes = getattr(grid, axis + "_nodes64")
-        low = grid.pml_thickness_for_face(axis, "low")
-        high = grid.pml_thickness_for_face(axis, "high")
+        low = grid.scene.pml_thickness_for_face(axis, "low")
+        high = grid.scene.pml_thickness_for_face(axis, "high")
         interior = (nodes[low+1], nodes[len(nodes)-high-2])
         if bounds[dim, 0] <= interior[0] or bounds[dim, 1] >= interior[1]:
             raise ValueError("Application geometry leaves no enclosing vacuum observation surface outside PML.")
         surface[dim] = ((interior[0]+bounds[dim, 0])/2, (interior[1]+bounds[dim, 1])/2)
     center, size = surface.mean(1), np.diff(surface).ravel()
-    return [mw.ClosedSurfaceMonitor.box("radiation", position=center, size=size, frequencies=(frequency,)),
-            mw.PowerLossMonitor("bulk_loss", position=center, size=size,
+    return [mw.monitors.ClosedSurfaceMonitor.box("radiation", position=center, size=size, frequencies=(frequency,)),
+            mw.monitors.PowerLossMonitor("bulk_loss", position=center, size=size,
                                 frequencies=(frequency,), channels=("conduction",))]
 
 
 def simulation(scene, frequency, *, with_power=False):
-    return mw.Simulation.fdtd(scene, frequency=frequency,
-        excitations=mw.PortExcitation(scene.ports[0].name, source_time=mw.GaussianPulse(frequency=frequency, fwidth=frequency)),
-        run_time=mw.TimeConfig(time_steps=1), full_field_dft=with_power,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False))
+    return mw.Simulation.fdtd(scene, frequencies=frequency,
+        excitations=mw.rf.PortExcitation(scene.ports[0].name, source_time=mw.GaussianPulse(frequency=frequency, fwidth=frequency)),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1), full_field_dft=with_power,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+        ))
 
 
-def application_scenes(definition, frequency, selected, *, with_power, device="cuda"):
-    adapted = import_pcb_scene(definition, frequency=frequency, selected_conductors=selected, device=device)
+def application_scenes(definition, frequency, selected, *, with_power):
+    adapted = import_pcb_scene(definition, frequency=frequency, selected_conductors=selected)
     direct = direct_scene(definition, adapted, frequency, selected)
     if with_power:
-        direct = direct.clone(monitors=power_observations(definition, direct, frequency))
-        adapted = adapted.clone(monitors=power_observations(definition, adapted, frequency))
+        direct = direct.updated(monitors=power_observations(definition, direct, frequency))
+        adapted = adapted.updated(monitors=power_observations(definition, adapted, frequency))
     return direct, adapted
-
-
-class FamilyPreparation:
-    """Material replay for one shard's current family, separately for each path."""
-
-    def __init__(self):
-        self.materials = [None, None]
-
-    def prepare(self, config, index):
-        from witwin.maxwell.compiler.materials import _PCBConductivityReplay
-        if self.materials[index] is None:
-            self.materials[index] = _PCBConductivityReplay(config.scene)
-        else:
-            config.scene._material_model_override = self.materials[index].compile({
-                structure.name: float(structure.material.sigma_e)
-                for structure in config.scene.structures
-                if not structure.material.is_pec and not isinstance(structure.material, mw.CopperFoil)})
-        # Simulation still validates the target's imported loss-reference frequency.
-        return config.prepare()
 
 
 def declared_frequencies(definition, frequency, *, full_band):
@@ -144,7 +126,6 @@ class _BitwiseGateFailure(AssertionError):
     def __init__(self, message, max_rel_diff):
         super().__init__(message)
         self.max_rel_diff = max_rel_diff
-        self.gate_recheck = None
 
 
 def _assert_bitwise_gate(outputs, powers):
@@ -161,22 +142,18 @@ def _assert_bitwise_gate(outputs, powers):
         raise _BitwiseGateFailure(str(error), max_relative) from error
 
 
-def _run_once(name, *, output, duration, frequency, selections, input_dir=FIXTURES, with_power=False,
-              prep_cache=None):
-    preparation_start = time.perf_counter()
+def _run_once(name, *, output, duration, frequency, selections, input_dir=FIXTURES, with_power=False):
     path = input_dir / f"metahz-scene-{name}.json"
     input_bytes = path.read_bytes()
     definition = json.loads(input_bytes)
     selected = selections.get(name, definition["initial_conductor_ids"])
     direct, adapted = application_scenes(definition, frequency, selected, with_power=with_power)
-    configs = [simulation(prepare_scene(scene) if prep_cache is not None else scene,
-                          frequency, with_power=with_power) for scene in (direct, adapted)]
+    configs = [simulation(scene, frequency, with_power=with_power) for scene in (direct, adapted)]
     prepared, preparation_seconds = [], []
-    for index, config in enumerate(configs):
+    for config in configs:
         start = time.perf_counter()
-        prepared.append(config.prepare() if prep_cache is None else prep_cache.prepare(config, index))
+        prepared.append(config.prepare())
         preparation_seconds.append(time.perf_counter() - start)
-    cached_prepare_seconds = time.perf_counter() - preparation_start
     a, b = [item.solver for item in prepared]
     coefficients_equal = all(torch.equal(getattr(a, key), getattr(b, key)) for key in (
         "cex_decay", "cex_curl", "cey_decay", "cey_curl", "cez_decay", "cez_curl"))
@@ -189,7 +166,7 @@ def _run_once(name, *, output, duration, frequency, selections, input_dir=FIXTUR
     steps = math.ceil(duration / a.dt)
     outputs, run_seconds, powers = [], [], []
     for config, item, label in zip(configs, prepared, ("direct", "adapter")):
-        config.config.run_time = mw.TimeConfig(time_steps=steps)
+        config.config = replace(config.config, run_time=mw.TimeConfig(time_steps=steps))
         torch.cuda.synchronize()
         start = time.perf_counter()
         result = item.run()
@@ -202,10 +179,10 @@ def _run_once(name, *, output, duration, frequency, selections, input_dir=FIXTUR
         outputs.append({"voltage": port.voltage.detach().cpu(), "current": port.current.detach().cpu(),
                         "reflection": port.reflection_coefficient.detach().cpu()})
         if with_power:
-            antenna = result.antenna(surface="radiation", driven_port=port.port_name,
+            antenna = mw.antenna.antenna(result, surface="radiation", driven_port=port.port_name,
                                     theta_points=91, phi_points=73, radius=10.)
-            bulk = result.power_loss("bulk_loss").conduction
-            copper = sum((row["surface_power"].to(bulk.device) for row in result.conductor_losses.values()),
+            bulk = result.monitor("bulk_loss").conduction
+            copper = sum((row["surface_power"].to(bulk.device) for row in mw.rf.conductor_losses(result).values()),
                          torch.zeros_like(bulk))
             powers.append({"accepted_w": antenna.p_accepted.detach().cpu(),
                            "radiated_w": antenna.p_rad.detach().cpu(),
@@ -223,44 +200,15 @@ def _run_once(name, *, output, duration, frequency, selections, input_dir=FIXTUR
         "loss_model": "Static conductivity calibrated from declared loss tangent at frequency_hz; no constant-loss-tangent dispersion claim across the band.",
         "physical_duration_s": steps * a.dt, "steps": steps, "dt_s": a.dt,
         "diagnostics": prepared[1].diagnostics, "prepare_seconds": preparation_seconds, "run_seconds": run_seconds,
-        "prep_cache": prep_cache is not None, "cached_prepare_seconds": cached_prepare_seconds,
         "compiled_coefficients_equal": coefficients_equal, "port_geometry_equal": bool(geometry_equal),
         "outputs_bitwise_equal": True, "port": serial,
         "power": {key: value.tolist() for key, value in powers[1].items()} if powers else None,
         "qualification": "full-duration path parity only; spatial/time/PML convergence and radiated/loss closure remain required"}
 
 
-def run(name, *, output, duration, frequency, selections, input_dir=FIXTURES, with_power=False,
-        prep_cache=None):
-    options = dict(output=output, duration=duration, frequency=frequency, selections=selections,
-                   input_dir=input_dir, with_power=with_power, prep_cache=prep_cache)
-    try:
-        return _run_once(name, **options)
-    except _BitwiseGateFailure as first:
-        if prep_cache is None:
-            raise
-        first.gate_recheck = {"cached_first": False, "max_rel_diff_first": first.max_rel_diff}
-        # Release failed solver frames before allocating the two re-check runs.
-        traceback.clear_frames(first.__traceback__)
-        rows = []
-        for label, cache in (("uncached", None), ("cached_second", prep_cache)):
-            destination = output / f"gate-recheck-{label}"
-            destination.mkdir()
-            try:
-                row = _run_once(name, **dict(options, output=destination, prep_cache=cache))
-            except Exception as error:
-                first.add_note(f"{label} re-check failed:\n{traceback.format_exc()}")
-                traceback.clear_frames(error.__traceback__)
-                row = None
-            first.gate_recheck[label] = row is not None
-            rows.append(row)
-        if not first.gate_recheck["uncached"] or not first.gate_recheck["cached_second"]:
-            raise
-        for path in (output / "gate-recheck-uncached").glob("*.pt"):
-            shutil.copy2(path, output / path.name)
-        recovered = rows[0]
-        recovered.update(gate_recheck=first.gate_recheck, recovered_after_recheck=True)
-        return recovered
+def run(name, *, output, duration, frequency, selections, input_dir=FIXTURES, with_power=False):
+    return _run_once(name, output=output, duration=duration, frequency=frequency, selections=selections,
+                     input_dir=input_dir, with_power=with_power)
 
 
 def main():
@@ -274,8 +222,6 @@ def main():
     parser.add_argument("--power", action="store_true")
     parser.add_argument("--declared-band", action="store_true",
                         help="Reimport and run each declared frequency separately, retaining its physical tangent-loss calibration.")
-    parser.add_argument("--no-prep-cache", action="store_true",
-                        help="Repeat all preparation for every declared-band target.")
     parser.add_argument("--shard-index", type=int, default=0,
                         help="Run only targets whose position in the ordered (family, frequency) list is congruent to this index.")
     parser.add_argument("--shard-count", type=int, default=1)
@@ -309,22 +255,16 @@ def main():
     report['shard'] = {"index": args.shard_index, "count": args.shard_count, "total_targets": len(targets),
                        "fail_fast": args.fail_fast,
                        "targets": [{"family": n, "index": i, "frequency_hz": f} for n, i, f in selected_targets]}
-    current_family, prep_cache = None, None
     for name, index, frequency in selected_targets:
-        if name != current_family:
-            current_family = name
-            prep_cache = FamilyPreparation() if args.declared_band and not args.no_prep_cache else None
         destination = args.output/name/f"frequency-{index:03d}-{frequency:.12g}" if args.declared_band else args.output
         destination.mkdir(parents=True, exist_ok=True)
         try:
             row = run(name, output=destination, duration=args.duration, frequency=frequency,
-                      selections=selections, input_dir=args.input_dir, with_power=args.power, prep_cache=prep_cache)
+                      selections=selections, input_dir=args.input_dir, with_power=args.power)
             report["runs"].append(row)
             print(json.dumps({k: row[k] for k in ("family", "frequency_hz", "steps", "run_seconds", "outputs_bitwise_equal")}), flush=True)
-        except Exception as error:
+        except Exception:
             failure = {"family": name, "frequency_hz": frequency, "traceback": traceback.format_exc()}
-            if isinstance(error, _BitwiseGateFailure) and error.gate_recheck is not None:
-                failure["gate_recheck"] = error.gate_recheck
             report["failures"].append(failure)
             print(traceback.format_exc(), flush=True)
         (args.output / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")

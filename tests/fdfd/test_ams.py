@@ -10,24 +10,23 @@ requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA r
 
 def _solver():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=4.0),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization=(0.0, 0.0, 1.0),
-            width=0.05,
-            source_time=mw.CW(frequency=1e9, amplitude=100.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=4.0),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization=(0.0, 0.0, 1.0),
+                width=0.05,
+                source_time=mw.CW(frequency=1e9, amplitude=100.0),
+                name="src",
+            ),
+            ),
+            )
     return mw.Simulation.fdfd(
         scene,
-        frequency=1e9,
-        solver=mw.GMRES(solver_type="gmres", preconditioner="ams", precision="double"),
+        frequencies=1e9,
+        config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(solver_type="gmres", preconditioner="ams", precision="double")),
     ).prepare().solver
 
 

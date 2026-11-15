@@ -249,7 +249,7 @@ def compile_array_basis_request(
     run_manifest=None,
 ) -> CompiledArrayBasisRequest:
     validate_array_superposition(scene)
-    resolved_device = torch.device(scene.device if device is None else device)
+    resolved_device = torch.device("cuda" if device is None else device)
     surface = _resolve_monitor(scene, monitor)
     selected_ports, physical_ports, manifest_frequencies, manifest_metadata = _manifest_contract(
         scene, run_manifest, ports

@@ -25,6 +25,7 @@ from ...monitors import AuxFieldTimeMonitor, SurfaceFieldTimeMonitor
 from ...scene import Scene, prepare_scene
 from ...ports import LumpedPort, ModePort, TerminalPort
 from ...sources import PointDipole, UniformCurrentSource
+from ...fdtd_cpml import CPMLConfig, require_cpml_config
 from ...fdtd_parallel import FDTDParallelConfig, FDTDPartitionPlan, FDTDShardLayout
 from ..observers import _merge_frequency_lists
 from ..solver import FDTD
@@ -45,6 +46,7 @@ from .nccl_transport import NcclHaloTransport
 from .shard_engine import ShardEngine, _plane_position
 from .transport import CudaP2PHaloTransport
 from .wire import DistributedWireRuntime, move_wire_monitor
+from ...errors import UnsupportedFeatureError
 
 
 def _unsupported_distributed_trainable_tensors(scene: Scene) -> tuple[torch.Tensor, ...]:
@@ -98,121 +100,6 @@ def _matches_x_node(nodes: np.ndarray, node_index: int, value: float) -> bool:
     return abs(float(value) - coordinate) <= tolerance
 
 
-def _bounded_x_kwargs(layout: FDTDShardLayout, component: str, x_slice: slice) -> dict[str, int]:
-    component_layout = layout.component(component)
-    return {
-        "localXBegin": int(x_slice.start),
-        "localXEnd": int(x_slice.stop),
-        "globalXOffset": int(component_layout.global_origin[0]),
-        "globalXExtent": int(component_layout.global_shape[0]),
-    }
-
-
-def _launch_magnetic_hx(solver, layout: FDTDShardLayout, x_slice: slice) -> None:
-    if x_slice.stop <= x_slice.start:
-        return
-    solver.fdtd_module.updateMagneticFieldHxStandardBounded3D(
-        Hx=solver.Hx,
-        Ey=solver.Ey,
-        Ez=solver.Ez,
-        HxDecay=solver.chx_decay,
-        HxCurl=solver.chx_curl,
-        invDy=solver.inv_dy_h,
-        invDz=solver.inv_dz_h,
-        **_bounded_x_kwargs(layout, "Hx", x_slice),
-    ).launchRaw()
-
-
-def _launch_magnetic_hy_hz(solver, layout: FDTDShardLayout, x_slice: slice) -> None:
-    if x_slice.stop <= x_slice.start:
-        return
-    solver.fdtd_module.updateMagneticFieldHyStandardBounded3D(
-        Hy=solver.Hy,
-        Ex=solver.Ex,
-        Ez=solver.Ez,
-        HyDecay=solver.chy_decay,
-        HyCurl=solver.chy_curl,
-        invDx=solver.inv_dx_h,
-        invDz=solver.inv_dz_h,
-        **_bounded_x_kwargs(layout, "Hy", x_slice),
-    ).launchRaw()
-    solver.fdtd_module.updateMagneticFieldHzStandardBounded3D(
-        Hz=solver.Hz,
-        Ex=solver.Ex,
-        Ey=solver.Ey,
-        HzDecay=solver.chz_decay,
-        HzCurl=solver.chz_curl,
-        invDx=solver.inv_dx_h,
-        invDy=solver.inv_dy_h,
-        **_bounded_x_kwargs(layout, "Hz", x_slice),
-    ).launchRaw()
-
-
-def _electric_coefficients(solver):
-    return stepping._electric_decay_tensors(solver), stepping._electric_curl_tensors(solver)
-
-
-def _launch_electric_ex(solver, layout: FDTDShardLayout, x_slice: slice) -> None:
-    if x_slice.stop <= x_slice.start:
-        return
-    decay, curl = _electric_coefficients(solver)
-    solver.fdtd_module.updateElectricFieldExStandardBounded3D(
-        Ex=solver.Ex,
-        Hy=solver.Hy,
-        Hz=solver.Hz,
-        ExDecay=decay[0],
-        ExCurl=curl[0],
-        invDy=solver.inv_dy_e,
-        invDz=solver.inv_dz_e,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-        **_bounded_x_kwargs(layout, "Ex", x_slice),
-    ).launchRaw()
-
-
-def _launch_electric_ey_ez(
-    solver,
-    layout: FDTDShardLayout,
-    node_slice: slice,
-    *,
-    x_low_mode: int,
-    x_high_mode: int,
-) -> None:
-    if node_slice.stop <= node_slice.start:
-        return
-    decay, curl = _electric_coefficients(solver)
-    solver.fdtd_module.updateElectricFieldEyStandardBounded3D(
-        Ey=solver.Ey,
-        Hx=solver.Hx,
-        Hz=solver.Hz,
-        EyDecay=decay[1],
-        EyCurl=curl[1],
-        invDx=solver.inv_dx_e,
-        invDz=solver.inv_dz_e,
-        xLowBoundaryMode=x_low_mode,
-        xHighBoundaryMode=x_high_mode,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-        **_bounded_x_kwargs(layout, "Ey", node_slice),
-    ).launchRaw()
-    solver.fdtd_module.updateElectricFieldEzStandardBounded3D(
-        Ez=solver.Ez,
-        Hx=solver.Hx,
-        Hy=solver.Hy,
-        EzDecay=decay[2],
-        EzCurl=curl[2],
-        invDx=solver.inv_dx_e,
-        invDy=solver.inv_dy_e,
-        xLowBoundaryMode=x_low_mode,
-        xHighBoundaryMode=x_high_mode,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        **_bounded_x_kwargs(layout, "Ez", node_slice),
-    ).launchRaw()
-
-
 class DistributedFDTD:
     """Single-process x-slab coordinator that duck-types the prepared FDTD solver."""
 
@@ -223,8 +110,9 @@ class DistributedFDTD:
         frequency: float,
         parallel: FDTDParallelConfig,
         absorber_type: str = "cpml",
-        cpml_config: dict[str, Any] | None = None,
+        cpml: CPMLConfig | None = None,
         allow_adjoint: bool = False,
+        device: str = "cuda",
     ):
         if not isinstance(parallel, FDTDParallelConfig):
             raise TypeError("parallel must be an FDTDParallelConfig instance.")
@@ -235,6 +123,7 @@ class DistributedFDTD:
         # public Simulation path -- a plain NCCL forward run keeps allow_adjoint
         # False and the fences reject a trainable/monitor scene as before.
         self._allow_adjoint = bool(allow_adjoint)
+        # Every shard runs the fused core Yee update (one CorePathRuntime per shard solver).
         self._nccl = parallel.transport == "nccl"
         if self._nccl and not all(
             os.environ.get(key) for key in ("RANK", "WORLD_SIZE", "LOCAL_RANK")
@@ -251,7 +140,7 @@ class DistributedFDTD:
                 "(or 'auto') for the in-process multi-GPU runtime."
             )
         self.logical_scene = scene
-        self.scene = prepare_scene(scene)
+        self.scene = prepare_scene(scene, device=device)
         self.frequency = float(frequency)
         # Requested output/port frequencies enforced against an embedded network's
         # fitted band. Defaults to the time-stepping frequency; the public
@@ -268,13 +157,8 @@ class DistributedFDTD:
             distributed=True,
         )
         self.absorber_type = resolved_absorber if str(absorber_type) == "auto" else str(absorber_type)
-        self.cpml_config = dict(cpml_config or {})
-        requested_cpml_mode = str(self.cpml_config.get("memory_mode", "auto")).strip().lower()
-        if requested_cpml_mode not in {"auto", "dense", "slab"}:
-            raise ValueError(
-                "cpml_config['memory_mode'] must be one of 'auto', 'dense', or 'slab'."
-            )
-        self._cpml_memory_mode_requested = requested_cpml_mode
+        self.cpml = require_cpml_config(cpml)
+        self._cpml_memory_mode_requested = self.cpml.memory_mode.value
         self._cpml_memory_mode = "none"
         self._cpml_allocated_memory_bytes = 0
         self._cpml_dense_memory_bytes = 0
@@ -327,7 +211,8 @@ class DistributedFDTD:
 
     def _validate_static_capabilities(self) -> None:
         if getattr(self.logical_scene,"coordinates",None) is not None:
-            raise NotImplementedError("Mapped distributed fields require qualified chart ownership and physical observations.")
+            raise UnsupportedFeatureError("Mapped distributed fields require qualified chart ownership and physical observations.",
+                                          feature="coordinates", method="fdtd")
         if self._nccl:
             self._validate_nccl_capabilities()
         # Defense in depth: the public Simulation entry validates trainable+parallel
@@ -481,8 +366,8 @@ class DistributedFDTD:
             devices=self.devices,
             decomposition_axis="x",
             halo_width=1,
-            low_pml_cells=int(self.scene.pml_thickness_for_face("x", "low")),
-            high_pml_cells=int(self.scene.pml_thickness_for_face("x", "high")),
+            low_pml_cells=int(self.scene.scene.pml_thickness_for_face("x", "low")),
+            high_pml_cells=int(self.scene.scene.pml_thickness_for_face("x", "high")),
         )
         internal_x_nodes = tuple(
             int(layout.global_cell_owned.stop)
@@ -510,8 +395,9 @@ class DistributedFDTD:
             getattr(structure.geometry, "kind", None) == "surface_mesh"
             for structure in self.logical_scene.structures if structure.enabled
         ):
-            raise NotImplementedError(
-                "Distributed SurfaceMesh PEC constraints require joint surface-current ownership and halos."
+            raise UnsupportedFeatureError(
+                "Distributed SurfaceMesh PEC constraints require joint surface-current ownership and halos.",
+                feature="geometry.surface_mesh", method="fdtd"
             )
         if any(
             bool(getattr(getattr(structure, "material", None), "is_lossy_metal", False))
@@ -523,11 +409,14 @@ class DistributedFDTD:
             )
         if any(getattr(structure.material, "is_copper_foil", False) for structure in self.logical_scene.structures):
             if self._nccl:
-                raise NotImplementedError("Distributed CopperFoil shadow-trace halos currently require cuda_p2p transport.")
+                raise UnsupportedFeatureError("Distributed CopperFoil shadow-trace halos currently require cuda_p2p transport.",
+                                              feature="material.copper_foil", method="fdtd")
             if self.logical_scene.thin_wires:
-                raise NotImplementedError("Distributed CopperFoil and ThinWire require joint field-edge ownership.")
+                raise UnsupportedFeatureError("Distributed CopperFoil and ThinWire require joint field-edge ownership.",
+                                              feature="thin_wire", method="fdtd")
             if any(getattr(region.density, "requires_grad", False) for region in self.logical_scene.material_regions):
-                raise NotImplementedError("Distributed CopperFoil does not yet support material-density adjoints.")
+                raise UnsupportedFeatureError("Distributed CopperFoil does not yet support material-density adjoints.",
+                                              feature="material.copper_foil", method="fdtd")
         for monitor in self.logical_scene.resolved_monitors():
             if isinstance(monitor, (PermittivityMonitor, MediumMonitor)):
                 raise ValueError(
@@ -646,17 +535,18 @@ class DistributedFDTD:
         )
 
         scene = self.logical_scene
-        for wire in getattr(scene, "thin_wires", ()):
+        for wire in scene.thin_wires:
             conductor = getattr(wire, "conductor", None)
             if conductor is not None and getattr(conductor, "kind", "pec") == "finite":
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Multi-GPU ThinWire with a finite-conductivity (lossy) conductor is "
                     "not supported: the distributed owner runtime builds only the "
                     "lossless PEC current update and never constructs the passive "
                     "series-impedance ADE companion, so a lossy wire would silently run "
                     "as PEC across shards. The owner-reduction contract does not carry "
                     "the per-segment ADE loss state. Run a lossy thin wire on the "
-                    "single-GPU FDTD path."
+                    "single-GPU FDTD path.",
+                    feature="thin_wire", method="fdtd"
                 )
         if (
             _scene_trainable_wire_parameters(scene)
@@ -670,22 +560,25 @@ class DistributedFDTD:
                 "use the single-GPU adjoint path."
             )
         if scene.boundary.uses_kind("pml"):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Multi-GPU ThinWire with a distributed CPML boundary has no verified "
                 "wire-edge/PML ownership across the x split; use a non-absorbing boundary or "
-                "run single-device FDTD."
+                "run single-device FDTD.",
+                feature="thin_wire", method="fdtd"
             )
         if scene.boundary.uses_kind("mur"):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Multi-GPU ThinWire with a distributed Mur absorbing boundary has no verified "
                 "wire-edge/boundary ownership across the x split; use a non-absorbing boundary or "
-                "run single-device FDTD."
+                "run single-device FDTD.",
+                feature="thin_wire", method="fdtd"
             )
         if scene.networks or scene.circuits:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Multi-GPU ThinWire and an embedded network or lumped circuit each claim "
                 "owner-resident coordination state on one shard with no distributed ownership "
-                "merge between them; run them in separate simulations."
+                "merge between them; run them in separate simulations.",
+                feature="thin_wire", method="fdtd"
             )
 
     def _validate_hardware(self) -> None:
@@ -726,13 +619,13 @@ class DistributedFDTD:
             return
         self._validate_hardware()
         timing_scene = prepare_scene(
-            self.logical_scene.clone(ports=(), circuits=(), networks=())
+            self.logical_scene.updated(ports=(), circuits=(), networks=()), device=self.scene.device
         )
         reference_solver = FDTD(
             timing_scene,
             frequency=self.frequency,
             absorber_type=self.absorber_type,
-            cpml_config=self.cpml_config,
+            cpml=self.cpml,
         )
         reference_solver._requested_dt = getattr(self, "_requested_dt", None)
         reference_solver._max_electric_field = getattr(self, "_max_electric_field", None)
@@ -766,8 +659,8 @@ class DistributedFDTD:
         self.dt = float(reference_solver.dt)
         self._time_step_metadata = dict(reference_solver._time_step_metadata)
         del reference_solver
-        low_pml = int(self.scene.pml_thickness_for_face("x", "low"))
-        high_pml = int(self.scene.pml_thickness_for_face("x", "high"))
+        low_pml = int(self.scene.scene.pml_thickness_for_face("x", "low"))
+        high_pml = int(self.scene.scene.pml_thickness_for_face("x", "high"))
         self.partition_plan = FDTDPartitionPlan(
             global_shape=(self.Nx, self.Ny, self.Nz),
             devices=self.devices,
@@ -795,7 +688,7 @@ class DistributedFDTD:
                 layout,
                 frequency=self.frequency,
                 absorber_type=self.absorber_type,
-                cpml_config=self.cpml_config,
+                cpml=self.cpml,
                 dt=self.dt,
             )
             for layout in build_layouts
@@ -867,7 +760,26 @@ class DistributedFDTD:
             if not all(descriptor == descriptors[0] for descriptor in descriptors):
                 raise ValueError("Distributed source reference providers disagree across shards.")
             source.update(descriptors[0])
+        self._activate_core_path()
         self._initialized = True
+
+    def _activate_core_path(self) -> None:
+        """Bind one fused core Yee runtime to each shard's local field storage.
+
+        Built last, after the owner-resident circuit/network/wire/copper runtimes, so
+        the compressed coefficient tables see the final shard coefficients. Each
+        shard's launch covers its whole local storage. The seam faces of a shard
+        solver are ``none``, so the ghost E node planes stay inactive; the ghost
+        ``Hy``/``Hz`` cell plane is overwritten by the magnetic exchange before the
+        electric update, and the ghost ``Ex`` cell and ``Hx`` node planes feed only
+        ghost cells. Owned cells therefore update exactly as with bounded launches.
+        """
+
+        from ..runtime.core_path import CorePathRuntime
+
+        for shard in self.shards:
+            with torch.cuda.device(shard.device):
+                shard.solver._core_runtime = CorePathRuntime(shard.solver)
 
     def _prepare_outputs(self, time_steps, dft_frequency, dft_window, full_field_dft):
         sampled = any(isinstance(monitor,FinitePlaneMonitor) and monitor.sample_spacing is not None
@@ -911,129 +823,28 @@ class DistributedFDTD:
             self._distributed_copper.prepare_spectra(time_steps, default_frequencies, dft_window)
 
     def _overlap_active(self) -> bool:
-        if self._nccl:
-            # The NCCL halo exchange is a blocking batched send/recv on the
-            # engine's compute stream; the coordinator runs the serialized
-            # schedule (interior/boundary overlap is a follow-up on work handles).
-            return False
-        if not self.parallel.overlap:
-            return False
-        return all(
-            not shard.solver.uses_cpml
-            and not shard.solver.complex_fields_enabled
-            and not getattr(shard.solver, "modulation_enabled", False)
-            for shard in self.shards
-        )
+        # The fused core launch covers the whole shard; it has no x-range split into
+        # interior and halo-dependent planes yet, so the halo copy is never hidden behind
+        # interior compute (and the NCCL exchange is a blocking batched send/recv).
+        return False
 
-    def _advance_magnetic_overlapped(self) -> None:
-        self.transport.exchange_electric(self.shards)
-        for shard in self.shards:
-            solver = shard.solver
-            cs = shard.layout.storage_cell_owned
-            ns = shard.layout.storage_node_owned
-            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
-                _launch_magnetic_hx(solver, shard.layout, ns)
-                if shard.is_last:
-                    _launch_magnetic_hy_hz(solver, shard.layout, cs)
-                    continue
-                interior = slice(cs.start, max(cs.start, cs.stop - 1))
-                _launch_magnetic_hy_hz(solver, shard.layout, interior)
-                shard.compute_stream.wait_event(shard.electric_received)
-                _launch_magnetic_hy_hz(
-                    solver, shard.layout, slice(cs.stop - 1, cs.stop)
-                )
-
-    def _advance_electric_overlapped(self) -> None:
-        self.transport.exchange_magnetic(self.shards)
-        for shard in self.shards:
-            solver = shard.solver
-            cs = shard.layout.storage_cell_owned
-            ns = shard.layout.storage_node_owned
-            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
-                _launch_electric_ex(solver, shard.layout, cs)
-                if shard.is_first:
-                    _launch_electric_ey_ez(
-                        solver,
-                        shard.layout,
-                        ns,
-                        x_low_mode=solver.boundary_x_low_code,
-                        x_high_mode=solver.boundary_x_high_code,
-                    )
-                    continue
-                interior = slice(min(ns.start + 1, ns.stop), ns.stop)
-                _launch_electric_ey_ez(
-                    solver,
-                    shard.layout,
-                    interior,
-                    x_low_mode=solver.boundary_x_low_code,
-                    x_high_mode=solver.boundary_x_high_code,
-                )
-                shard.compute_stream.wait_event(shard.magnetic_received)
-                boundary = slice(ns.start, min(ns.start + 1, ns.stop))
-                _launch_electric_ey_ez(
-                    solver,
-                    shard.layout,
-                    boundary,
-                    x_low_mode=solver.boundary_x_low_code,
-                    x_high_mode=solver.boundary_x_high_code,
-                )
-
-    def _advance_magnetic_serialized(self) -> None:
+    def _advance_magnetic(self) -> None:
         self.transport.exchange_electric(self.shards)
         for shard in self.shards:
             with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
                 if not shard.is_last:
                     shard.compute_stream.wait_event(shard.electric_received)
-                solver = shard.solver
-                if not solver.uses_cpml and not solver.complex_fields_enabled:
-                    _launch_magnetic_hx(
-                        solver, shard.layout, shard.layout.storage_node_owned
-                    )
-                    _launch_magnetic_hy_hz(
-                        solver, shard.layout, shard.layout.storage_cell_owned
-                    )
-                else:
-                    stepping.update_magnetic_fields(
-                        solver,
-                        solver.Hx, solver.Hy, solver.Hz,
-                        solver.Ex, solver.Ey, solver.Ez,
-                    )
+                shard.solver._core_runtime.magnetic()
 
-    def _advance_electric_serialized(self, time_value: float) -> None:
+    def _advance_electric(self) -> None:
         self.transport.exchange_magnetic(self.shards)
         for shard in self.shards:
             with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
                 if not shard.is_first:
                     shard.compute_stream.wait_event(shard.magnetic_received)
-                solver = shard.solver
-                if (
-                    not solver.uses_cpml
-                    and not solver.complex_fields_enabled
-                    and not solver.modulation_enabled
-                ):
-                    _launch_electric_ex(
-                        solver, shard.layout, shard.layout.storage_cell_owned
-                    )
-                    _launch_electric_ey_ez(
-                        solver,
-                        shard.layout,
-                        shard.layout.storage_node_owned,
-                        x_low_mode=solver.boundary_x_low_code,
-                        x_high_mode=solver.boundary_x_high_code,
-                    )
-                else:
-                    stepping.update_electric_fields(
-                        solver,
-                        solver.Ex,
-                        solver.Ey,
-                        solver.Ez,
-                        solver.Hx,
-                        solver.Hy,
-                        solver.Hz,
-                        time_value=time_value,
-                    )
+                shard.solver._core_runtime.electric()
 
-    def _advance_one_step(self, n: int, *, overlap_active: bool) -> None:
+    def _advance_one_step(self, n: int) -> None:
         # The coordinator orchestrates one Yee step as an alternation of rank-local
         # engine phases and transport-mediated field launches: pre-magnetic
         # bookkeeping, the magnetic update (electric halo inside), magnetic
@@ -1046,10 +857,7 @@ class DistributedFDTD:
         if self._distributed_copper is not None:
             self._distributed_copper.begin()
 
-        if overlap_active:
-            self._advance_magnetic_overlapped()
-        else:
-            self._advance_magnetic_serialized()
+        self._advance_magnetic()
 
         if self._distributed_copper is not None:
             self._distributed_copper.correct_magnetic()
@@ -1062,10 +870,7 @@ class DistributedFDTD:
         if self._distributed_wire is not None:
             self._distributed_wire.apply_sample_and_update()
 
-        if overlap_active:
-            self._advance_electric_overlapped()
-        else:
-            self._advance_electric_serialized(time_value)
+        self._advance_electric()
         if self._distributed_copper is not None:
             self._distributed_copper.advance_electric()
 
@@ -1185,7 +990,8 @@ class DistributedFDTD:
                                       or not 0<=stop_step<int(time_steps)):
             raise ValueError("Distributed stop_step must be an integer before the planned end.")
         if self._nccl and (resume_from is not None or stop_step is not None):
-            raise NotImplementedError("Distributed resume currently requires cuda_p2p transport.")
+            raise UnsupportedFeatureError("Distributed resume currently requires cuda_p2p transport.",
+                                          feature="guard:8a7ed275", method="fdtd")
         if self._nccl and float(shutoff) > 0.0:
             # reduce_owned_energy is a primitive-tested NCCL collective, but the
             # coordinator's shutoff bookkeeping (peak tracking on the result
@@ -1259,7 +1065,7 @@ class DistributedFDTD:
             raise ValueError("Distributed stop_step precedes the resumed checkpoint.")
         start = time.perf_counter()
         for n in range(start_step,end_step):
-            self._advance_one_step(n, overlap_active=overlap_active)
+            self._advance_one_step(n)
             if shutoff > 0.0 and (n + 1) % int(shutoff_check_interval) == 0:
                 energy = self.transport.reduce_owned_energy(self.shards)
                 self._shutoff_peak = torch.maximum(self._shutoff_peak, energy)
@@ -1392,13 +1198,6 @@ class DistributedFDTD:
         if self._distributed_network is None:
             return {}
         return self._distributed_network.checkpoint_tensors()
-
-    def wire_checkpoint_tensors(self) -> dict[str, torch.Tensor]:
-        """Return live owner-GPU thin-wire I/q state without gathering fields."""
-
-        if self._distributed_wire is None:
-            return {}
-        return self._distributed_wire.checkpoint_tensors()
 
     @property
     def dft_sample_counts(self):

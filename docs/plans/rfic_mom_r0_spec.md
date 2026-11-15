@@ -222,6 +222,529 @@ absent declared via spans fail closed.
 
 ## 10. 修订记录
 
+- 2026-11-11: R6-3 passive wideband macromodel (C3, macromodel.py) + wideband sweep (D3). Fit: the shared
+  vector-fitting algorithm on S (initial poles, real basis, relocation, stable canonical poles reused from
+  rational.py) with Householder-QR least squares; the shared fit's default CPU lstsq driver (gelsy) varies at
+  1e-16 between calls, QR is bitwise repeatable. Certificate: bounded-real Hamiltonian M (R = D^T D - I,
+  Q = D D^T - I); imaginary eigenvalues = singular-value crossings of 1; a stable model with |D|_2 < 1 and no
+  crossing at f > 0 is passive from DC to infinity. Eigenvalues within 1e-6 of |lambda|_max are the DC point
+  (sigma(S(0)) = 1 is the lossless DC limit of an open even mode, allowed); unconfirmed near-axis eigenvalues
+  void the certificate. Enforcement: clip sigma(D) to 1 - margin, then minimise sum_f |dC X(s_f)|_F^2 (sampled
+  Gramian over the samples + a 512-point band grid) subject to sigma_i + Re(u_i^H dC X v_i) <= 1 - margin at 17
+  points per violation band (accumulated), exact QP in whitened coordinates via its dual (Lawson-Hanson; a primal
+  active set cycled on the loop fixture), repeat until the Hamiltonian test passes. A clipped D is followed by a
+  least-squares refit of C to the samples (a 3e-3 D clip otherwise shifted the whole loop response).
+  AdaptiveSweep: a surrogate failing its in-band check is enforced the same way if the change is <= tolerance/4
+  (enforcement_change), else rejected as before; passing sweeps unchanged (F-A test_layered_adaptive 30/30). Bound: max_error <= fit_max_error + enforcement_change (triangle inequality).
+  Export: exact LFT to the SI Y realization (A - B(I+D)^-1 C, ...), SPICE subcircuit of 1 pF state capacitors
+  and VCCS cards; read back by an independent nodal analysis (1e-12). Public mw.mom.passive_macromodel,
+  PassiveMacromodel, MacromodelReport, HamiltonianReport (experimental mom_layered); exported in mom/round7
+  with its conventional consumer re-receipt (mw.mom/__init__.py is a pinned consumer-epoch file). Streamed mm-wave
+  calls take AdaptiveSweep: each sample is its own single-frequency streamed solve and merge_streamed_sweep
+  regroups the frequency-sorted samples by wall mesh (guard 5e7a41c3 retired; gradients keep a new
+  gradient-only guard). Matrix_free/hmatrix multi-frequency calls warm-start block GMRES from the previous
+  frequency's loop/tree coefficients (single-frequency calls and the first frequency unchanged bit for bit;
+  later frequencies move within the 1e-5 admittance stopping bound). Evidence <evidence-root>/rfic-mom-20261106/r6-3.
+- 2026-11-11: R4-2 per-frequency mm-wave Green tables (frequency_groups.py). A graded vertical table
+  stores every frequency at the graded size (0.5-1.8 GB per frequency, 6.1 GiB build peak per via-stack
+  frequency), so a 4-frequency 60-200 GHz call ran out of memory at 7.5 GiB. Now the full-set
+  ungraded step 0 runs exactly as before; if it admits, the one-table path is unchanged (A/B vs
+  e42174e6e on ungraded 1/3/5 GHz microstrip, 1/10 GHz and 5 GHz via-stack networks: S, z0 and
+  currents torch.equal). If it fails with dielectric interfaces and >1 frequency, the table build
+  returns None (vertical_refine defer_grading) and prepare returns a StreamedLayeredNetwork; the
+  solve runs the exact single-frequency prepare+solve per frequency (own table, level, wall mesh),
+  frees it, and concatenates S/z0 exactly. Each frequency is torch.equal to its single-frequency
+  call by construction; peak = largest single-frequency peak. Rejected: one multi-frequency graded
+  table per level group -- table bits depend on the band (k_max, truncation, radial grid, GEMM
+  chunking use fmin/fmax), so it cannot equal per-frequency calls, and memory-sized groups would
+  make bits depend on free memory. Groups = maximal runs of consecutive frequencies on one wall
+  mesh; currents per group (GroupedLayeredSurfaceData.groups); metadata frequency_streaming,
+  frequency_groups, frequency_metadata, per-frequency tuples concatenated. Sweep/gradients and
+  single-mesh currents/layout fail closed (3 census guards). Predictor: the first level no longer
+  credits (K0/12)^4 (via stack K0 = 8: ungraded -> level-1 drop measured 9x, not 81x); K0 = 12
+  unchanged. Gates (GPU 0, 60/100/150/200 GHz, one call): microstrip levels 2/2/3/3, 2 groups,
+  5.33 GiB total device peak at a 7.5 GiB torch cap; via stack levels 1/2/2/2, 2 groups, 6.53 GiB
+  total device peak at a 7.1 GiB torch cap (at a 7.5 GiB torch cap the caching allocator reserved
+  7.4 GiB + context = 7.7 GiB, so the slot run uses 7.1); every frequency torch.equal to its
+  single-frequency call (S, z0, currents, mesh). Evidence <evidence-root>/rfic-mom-20261106/r4-mmfreq.
+- 2026-11-11: round 3 (G1-G4 merged on mom/round3) + horizontal admission family floor (interp.cu
+  admission_kernel). The {0 PEC, 100, 110} um via-stack horizontal table at 1 GHz read 6.08e4: the
+  (0 PEC, 110 um) tangential row cancels against its image to ~1e-14 and was normalized by its own
+  row maximum. Each row's denominator floor is now 1e-6 x the maximum row scale over all plane
+  pairs of the same frequency and component (the C1 rule of vertical.cu horizontal_admission);
+  fixed-order per-thread maxima, no atomics. That table now admits at 6.5e-10 with a bitwise
+  repeat. Proof on 12 previously admitted tables (G1's 11 identity cases + the R6b fixture table):
+  all 30 tensors bitwise equal before/after; the admission scalar is unchanged except the ground
+  case 9.3e-15 -> 2.0e-15 (verdict only). Evidence <evidence-root>/rfic-mom-20261106/round3/probes.
+- 2026-11-10: G1 mm-wave vertical Green-table z admission (graded z segments, vertical_refine.py).
+  Cause: the vertical remainder is the total kernel minus static (q -> inf) images. At a
+  dielectric interface the next reflection term, O(k^2/q^2) exp(-q d), leaves k^2 d log d in the
+  image distance d = |2 z_i - z - z'| (and in the transmitted distance across the interface), so
+  one Chebyshev polynomial per layer converges like f^2 K^-4 (measured on the 254 um eps 9.8
+  grounded microstrip, K = 8..24, 30..200 GHz; the worst rows have z' on the substrate/air
+  interface and rho -> 0). PEC images are exact and do not contribute.
+  Algorithm (one adaptive loop, coordinator-accepted 2026-11-10): step 0 builds and measures the
+  ungraded table exactly as before; e0 <= 1e-6 returns it unchanged (bitwise; an a-priori
+  predictor cannot promise this). Otherwise the table is rebuilt with 12 nodes per piece and
+  geometric pieces of ratio 4 toward every dielectric segment end (cuts at L*4^-i, i = 1..levels,
+  L the segment length, L/2 when both ends are graded). Corner error ~ delta^2 K^-4, so the first
+  level is ceil(log16(e0 (K0/12)^4 / 1e-6)); every failure adds one level; level 5 raises
+  ConvergenceError (census safety guard). Graded tables use a truncation per z pair,
+  min(T_ungraded, max(T_horizontal, 64/(eta_s + eta_o))) in power-of-two buckets: every
+  non-exact remainder path touches an interface, so its spectrum decays like
+  exp(-q (eta_s + eta_o)); the ungraded rule 32/min eta is the maximum of this bound over pairs.
+  Wall meshes take the piece boundaries as z breakpoints (assembly integrates each wall
+  triangle in one segment). table.vertical.grading_record and network metadata
+  "vertical_z_grading" (graded tables only) record levels, predicted levels, pieces and errors.
+  Gates: table A/B of 11 previously admitted stacks vs fe59b3cd2 bitwise (30 tensors each);
+  grounded microstrip admits at 60/100/150/200 GHz (z 1.6e-7/5.0e-7/6.9e-8/1.4e-7, levels 2/2/3/3,
+  each the predicted level), bitwise repeat, network Y vs a one-level-finer table on the same
+  mesh <= 2.1e-11. Via stack (PEC / 100 um eps 12.9 / 10 um eps 3 / air, underpass with two vias,
+  horizontal ports; the 10 um span is graded from both ends): admits at 60/100/150/200 GHz with
+  levels 1/2/2/2 (predicted 1: one loop step), z 9.9e-7/6.1e-7/1.8e-7/9.2e-7, bitwise repeat,
+  network Y vs a level-3 table on the same mesh 8.4e-9/5.1e-11/8.4e-12/2.8e-11 (gpu0 runner,
+  head peak 6.1 GiB, reference 11.7 GiB; the via-stack gate is @slow and needs a >= 7 GiB cap).
+  Cost: step 0 2-3 s; graded vertical build
+  10/17/34 s, peak 1.0/2.2/3.9 GiB, stored 0.47/1.04/1.84 GB per frequency at levels 1/2/3
+  (ungraded K=12: 3 s, 0.48 GiB, 0.12 GB). A multi-frequency table stores every frequency: four
+  frequencies at 60-200 GHz exceed a 7.5 GiB cap (open: per-frequency-group tables).
+
+- 2026-11-10: G4 combination gates and lifted round-2 refusals (tests/mom/layered/test_layered_combinations.py).
+  Polygon layouts x dispersive layers and surface_admittance x dispersive layers match per-frequency runs of
+  the frozen permittivity eps(f) (E1 method; polygon <= 2.7e-12, surface_admittance <= 1.4e-9 over the low,
+  blend and DSA regimes). GR1 gradients pass the GR1 central-FD bound on the planar mesher (forced triangle
+  mesher and Prism vias; conductivity, roughness, thickness, via conductivity/roughness; errors <= 1e-6 of
+  max|dY|) and agree with dense through hmatrix currents. Lifted: polygon x hmatrix (partition and near pairs
+  in leaves on planar meshes with walls; hmatrix vs dense 1e-8..1.3e-7, exact check <= 1.4e-8), polygon x
+  edge ports (planar._planar_edge_span: the C1 rules on the shapely metal union; edge == delta gap of the
+  same width bitwise), surface_admittance x edge ports (aperture-wide flush PEC block; edge-fed split strip
+  DC R = l/(sigma A) to 5e-10; bitwise the same-width delta-gap block). Defect fixed: the D2 body
+  preconditioner keyed on layout.face_owners, which planar layouts also carry; it now keys on face_kinds
+  (closed body meshes), since widened via-wall patterns were quadratic in the wall faces.
+- 2026-11-09: F-B four-port transformer fixture and independent reference workflow.
+  Two interleaved Manhattan two-turn windings use 20-um traces, 5-um spacing,
+  360/310-um primary/secondary outer dimensions, centered 2/1-um top/underpass
+  metal at z=305/302 um, four 4x4x3-um signal vias and a 30-um ground ring
+  with inner/outer sides 430/490 um. The wider traces place the F-A-density
+  fine sheet mesh near the requested 15k scale: max_edge/edge_cell=10/4.9 um,
+  14411 unknowns and 10400 faces; coarse 80/20 um gives 1708 unknowns.
+  Layout coordinates use an exact binary lattice with nominal 1-um pitch
+  error below 3e-19 m, avoiding one-ULP duplicate bridge/rim breakpoints.
+  The process stack and matching lower half-space are identical to F-A.
+  Four 50-ohm single-ended ports join x=205..215 um at y=170/70/145/45 um:
+  p1-p2 primary, p3-p4 secondary, both with the same circulation.
+  With D=((1,0),(-1,0),(0,1),(0,-1)), Zw=D.T Z D describes zero common-mode
+  winding currents; L=-Im(Zw)/omega, R=Re(Zw), M=L12 and k=M/sqrt(L1 L2).
+  Reference source bridges retain their explicit cut/gap convention without
+  deembedding. The quasi-static inductance reference uses the compiled metal
+  union and direct admittance columns p1/p3 from four external terminal pairs,
+  resolving finite copper cross sections and a 0.1-um thin-sheet control.
+  Direct overlap and order-6/order-8 controls quantify the accelerated operator;
+  a measured segment-preconditioner control preserves the printed L/M/k/R values.
+  All ten quasi-static cases have rc=0. At 1 GHz the nominal 2.5-um case gives
+  L1/L2/M=1.731400/1.457585/1.042330 nH and k=0.656130. Its 5-to-2.5-um
+  self-L spread is <=0.611%, with resistance spread <=3.32%; the thin-metal
+  self-L spread is <=0.219% over 1 MHz, 0.1 and 1 GHz. Order-6 to order-8
+  changes L/M by <=0.00428% at those frequencies. These are finite spreads.
+  The open-source FDTD reference uses four independent drives at 10/5/2.5-um
+  lateral resolution, plus one p1 loaded-response boundary/z/source-gap control
+  each at 5 um. Field acquisition uses nice 10, at most two engines and sixteen
+  threads total; remaining fine drives use one sixteen-thread engine.
+  All fifteen field solves have rc=0. At 1 GHz the 2.5-um reference gives
+  L1/L2/M=1.786880/1.505557/1.061488 nH and k=0.647171; the 5-to-2.5-um
+  change is about 3% in self-L and 0.01934 in k. Maximum magnitude S change
+  is 0.04015. Observed self-L orders are negative; reference convergence at
+  the qualification targets remains open.
+  The quasi-static inductance reference is primary for L1/L2/M/k and winding R
+  at its acquired frequencies (R width-filament spread up to 3.86% exceeds its
+  3% target), while the open-source FDTD reference is evidence-only for S/Q/SRF/
+  shunt G and must not supply L or k targets.
+  No Richardson or other extrapolated limit is claimed for either reference.
+  Three complete native coarse runs per PEC/Cu and vacuum/10-S/m variant
+  exercise passivity, reciprocity and torch.equal S/current determinism.
+  Full mesh work is 16*(12*N^2+F^2)=41604528832 bytes (38.75 GiB)
+  before the unchanged 20% workspace reserve; its refusal is recorded.
+  Full-mesh physical qualification and the <=1-min/frequency target remain open.
+  Frozen future qualification targets: L 2%, Q peak 5%, |S| absolute 0.01,
+  phase 1 degree, k absolute 0.01. Coupling uncertainty must be below its
+  target before native qualification; finite-grid references are not exact.
+  All thirteen new tests pass through the prescribed GPU runner and memory cap,
+  rc=0, no skips/xfails; maximum GPU-test time/allocation are 96.291 s/0.488 GiB.
+  The CPU guard census also passes all seven tests, rc=0.
+  Frozen reference evidence is tests/mom/layered/data/fixture_fb_reference.json
+  (173296 bytes), with input/binary/log/raw hashes and successful receipts.
+  Drivers: scripts/dev/rfic/{reference,inductance,summarize}_fixture_fb.py.
+  Evidence and unmet items:
+  report.md of run fb in <evidence-root>/rfic-mom-20261106/.
+
+- 2026-11-09: Evidence numerical locks (user decision D-P1), replacing source-hash pins.
+  Rule: the committed layered evidence values (tests/mom/layered/data:
+  fixture_r6_native_evidence.json, fixture_r6b_shunt_evidence.json,
+  fixture_r4b_closed_comparison.json) are locked by value with the tiers of
+  numerical_equivalence_standard.md. Source sha256 pins are not gates and are removed from
+  the evidence; geometry digests (checked against a live compile) and data-artifact digests stay.
+  Locked fields: R6 coarse/finest metrics and unknowns, the R6 pi effective shunt conductance,
+  the R6b native_coarse/previous/fine records (observations excluded), and the R4b case
+  unknowns and comparison samples (L, R, relative errors, pass flags).
+  Tiers per field (committed value vs re-acquisition):
+  - T0: float64 bits equal (discrete fields equal);
+  - T1: max|new-ref| <= 1e-10*max|ref| per field, the fp64 run-level bound (network S/Y/Z and
+    quantities derived from them); auto-accepted and listed with max_rel_diff in the merge
+    declaration;
+  - accepted T2: outside the bound and named, field by field, in an accept file with the user
+    approval and its analysis;
+  - T2: anything else, and every discrete change. A T2 blocks renewal.
+  Derived relative-error fields (for example R4b L_relative) amplify the relative change of
+  their input by 1/|value|; they are judged by the same per-field bound.
+  Procedure (scripts/dev/rfic/evidence_lock.py):
+  - acquire DIR on GPU 0 through the runner, on a clean witwin/ tree; DIR/acquisition.json
+    records the commit;
+  - judge DIR on CPU writes DIR/tier_table.{json,md} (with the merge-declaration text) and
+    DIR/fields.json; exit 1 on an unaccepted T2;
+  - renew DIR --accept-t2 FILE writes the moved values (T1, accepted T2) into the committed
+    evidence and appends a renewal record to each file's numerical_lock (acquisition commit,
+    tier table path and sha256, summary, renewed fields, accepted T2 entries).
+  Producer artifacts outside the repository (R6 MPIE sweeps, R4b closed cases) are judged
+  report-only; their pi-fit diagnostics are ill-conditioned nonlinear fits, not committed values.
+  Fast tests: the CUDA evidence tests keep their fixture, physics-target and live-coarse checks
+  without source hashes; test_layered_evidence_lock.py (host only) checks the lock records and
+  that no source-hash pin returns. Heavy re-acquisition is a merge-time script run, once per
+  merge that changes layered numerics or their producers. A renewal with T1 movers only needs no
+  user approval; every T2 needs one, per field. The consumer-metadata bridge
+  (tests/api/public/test_consumer_metadata.py) is a provenance gate and keeps its own re-receipt
+  procedure.
+
+- 2026-11-09: Horizontal admission floor (vertical tables). horizontal_z_error and
+  horizontal_rho_error divide each row's error by max(row max|expected|, 1e-6 x the
+  per-frequency family max), the vertical_error rule. Cause: on a stack PEC plane the
+  tangential kernel cancels against its image to denormal noise (2.6e-321 beside a
+  5.4e-2 family at 1 GHz, h = 254 um), so a PEC-endpoint row read as relative error 1
+  and refused an accurate table (12 of 91 rows; 8..32 z nodes all refused). Table
+  values are unchanged: nine previously admitted tables are bitwise identical with
+  identical admission errors.
+
+- 2026-11-09: C1 port system, C2 device-parameter extraction, A3 groundwork.
+  Port V/I contract (unchanged sign chain, network.py): every port is an ideal
+  lossless bridge with a delta-gap source on its midpoint cut; V = phi(+) - phi(-)
+  is the same on every parallel path across the bridge; I is the total cut current
+  leaving the positive terminal. LumpedPort.voltage_aperture is now applied: the
+  bridge spans the aperture's transverse width (edge port), which is the FDTD meaning
+  of the field (voltage over parallel paths, one current); FDTD is unchanged. The
+  aperture must equal the terminal span along the path, contain the path in its
+  width, have both bridge ends covered by metal over the full width (horizontal) and
+  an open gap. Vertical apertures have zero extent along the strip normal. The
+  reference is explicit through the negative terminal: a coplanar conductor, a stack
+  PEC plane, or a conductor on the adjacent plane (sheet boundary attachment only).
+  port_system.edge_port builds such ports from named PlanarPECs;
+  metadata["ports"] records kind, orientation, conductors, width, length, cut and
+  the V/I definitions. Closed-model aperture ports and rotated apertures refuse
+  (guards registered). PortPair/mixed_mode: Vd = Vp - Vn, Id = (Ip - In)/2,
+  Vc = (Vp + Vn)/2, Ic = Ip + In. extraction.py: terminals are ports or (p, n) pairs,
+  Z_w = D^T Z_S D with the other ports shorted or open (no default); L = -Im Z/omega,
+  R = Re Z, Q = -Im Z/Re Z, M, k, SRF (linear reactance zero), peak Q, pi/T models,
+  T fit (closed form), nine-element pi fit (bounded projected Levenberg-Marquardt,
+  implicit-function gradients). deembed.py: two-line gamma through identical
+  reciprocal error boxes (branch continuity in frequency), open-short de-embedding
+  and open/short standard Scenes from named structures.
+
+- 2026-11-09: B1/B2 polygon layouts (general planar mesher, polygonal and multi-plane vias).
+  Manhattan inputs keep the rectangle path (T0, unchanged code path); non-Manhattan PlanarPEC,
+  z-axis Prism vias and vias passing a metal plane (or planar_mesher="triangle") compile to
+  PolygonSheet (one per PlanarPEC, holes kept) and PolygonVia (footprint loop, exact plane z)
+  records; prepare_layered_network dispatches them to planar.prepare_planar_network.
+  Mesher (planar_mesh.py, host, deterministic): per plane, the noded union of material-group,
+  bridge and cut linework restricted to the metal domain, plus via rims (not noded, must clear
+  other linework), forms one constraint registry with plane masks. Conforming Delaunay
+  refinement (Qhull): split missing or encroached segments (midpoint; concentric shells from
+  acute input vertices), else insert circumcentres of triangles with min angle < 28 deg or
+  longest edge > sqrt(2) s(centroid), s = min(h, h_edge + (g-1) d); circumcentres that encroach
+  a segment split it instead; batch insertion keeps candidates > R/2 apart. Rim splits apply to
+  every plane of the rim. Walls: rim segments (<= min(h_edge, 2 max dz)) times the graded z axis
+  of the via (its planes and interior interfaces). Exact-coordinate welding; three-face landing
+  rims switch the layout to the junction RWG basis. Quality gate: sheet min angle >=
+  min(18 deg, half the smallest acute input wedge), aspect <= 6 on sheets and walls; acute input
+  corners < 18 deg are refused. The mesh sha256 (vertices, faces, planes, owners) is recorded.
+  Loss: per-face owner records (sheets then vias), two-face sheet impedance and single-face wall
+  impedance as before; bridge-only faces are ideal. Ports: horizontal delta-gap bridges whose
+  cut must clear metal; vertical ports and the closed model are refused on this path.
+  Validation: tests/mom/layered/test_layered_planar_{mesh,assembly,network}.py; drivers and
+  logs under <evidence-root>/rfic-mom-20261106/b1/.
+
+- 2026-11-11: R5-1 compressed surface-admittance body blocks on matrix_free/hmatrix
+  (body_compress.py, body_block_lu.PatternBodyLU). Action: each W_b is an H-matrix on the exterior
+  RWG centres (median bisection, LEAF 32, admissibility min(diam) <= dist, dense near leaves); every
+  admissible block is a batched full-pivot cross approximation stopped at an explicit residual
+  |R|_F <= 1e-10 |W_b|_F, so the reported dropped mass is the exact |W_b - W~_b|_F. Applied through
+  row-owner CSR products (Q_b, V^H, [N | U], Q_b^T), exact transposes for A^T; deterministic (ranks and
+  factors torch.equal on repeat). Looped per-block GPU SVDs took minutes per F-B body and were replaced.
+  Preconditioner: the sparse near LU (D2 pattern) with D B_b D added only on the pattern's own keys;
+  the R4-1 dense Schur set and its admission guard are retired. Dense B_b exists transiently per body.
+  Layouts without bodies: Y, currents, steps, LU nnz torch.equal vs mom/r4-blockpc (strip sheet/closed,
+  F-B 80/20 sheet; mf and hm).
+  Measured: strip 40/4 mf/hm vs dense 1.5e-9/1.0e-7/1.5e-7 and 2.4e-9/1.5e-7/1.1e-7 in 6/7/9 steps
+  (= R4-1), LU 0.88M nnz (R4-1 3.77M), repeat torch.equal. F-B 80/20 @1 GHz: 8 steps mf and hm (R4-1
+  8), mf 8.1e-9 / hm 1.2e-7 vs dense, LU 9.37M nnz (1.0 GB est.), W ranks <= 61, stored 0.37-0.69 of
+  the dense entries, torch peak 5.67 GB, device 6.8 GiB (R4-1 7.4). F-B 40/10: 9 steps (R4-1 9), mf vs
+  R4-1 mf Y 3.3e-10, L/M/R within 2.4e-8 of the dense backend; ranks <= 53, stored 0.27-0.44 of dense;
+  torch peak 11.17 GB (R4-1 12.38, dense backend 12.2 at two frequencies), set by the DSA stage
+  (structures 6.46 GB + one body's 4.7 GB DSA transient; 8.54 GB after it); device peak 14.0 GiB
+  (R4-1 14.0), from structure build and DSA fragments, not from the preconditioner.
+  Report: <evidence-root>/rfic-mom-20261106/r5-wcompress/report.md.
+
+- 2026-11-11: R4-1 dense body-block preconditioner for surface_admittance on matrix_free/hmatrix
+  (body_block_lu.py). The G2 fold of the dense body blocks into the sparse near LU is removed
+  (34M LU nnz for 17M block entries on F-B 80/20). The preconditioner matrix M (D-scaled near or
+  D2-widened pattern plus the scaled B_b) is split into a dense set D (every body basis column plus
+  every rest column the pattern couples to one) and the sparse rest S: one dense complex128 LU of the
+  Schur complement C = M_DD - M_DS M_SS^-1 M_SD, the cuDSS LU (deterministic mode) on S only, and
+  y = M_SS^-1 r_S, z_D = C^-1 (r_D - M_DS y), z_S = y - M_SS^-1 M_SD z_D, i.e. M^-1 exactly.
+  Per-body LUs were measured first and rejected: a forward block Gauss-Seidel sweep took 30 block
+  steps at 10 GHz on the 40/4 strip (18 with three sweeps) vs 9 exact; F-B 80/20 bodies share 68
+  basis columns and the off-body pattern touches 7267 of 7272 columns, so an exact interface step
+  is dense in N anyway. Admission: 2 * 16 |D|^2 bytes against available_work_memory (process cap),
+  else UnsupportedFeatureError (guard registered, negative test). Layouts without admittance
+  bodies keep NearFieldLU: torch.equal Y and currents vs e42174e6e on strip sheet, strip closed and
+  F-B 80/20 sheet, matrix_free and hmatrix. Limit: |D|^2 grows as N^2 when bodies span the layout;
+  F-C-scale thick metal needs compressed W or a per-component split of D.
+  Measured: strip 40/4 (|D| 1942 of 1946, dense LU 60 MB) mf/hm vs dense <= 1.5e-7, 6/7/9 steps
+  (= G2), repeat torch.equal. F-B 80/20 at 1 GHz (|D| = N = 7272, S empty): dense LU 0.85 GB,
+  mf 9.0e-9 / hm 1.2e-7 vs dense in 8 block steps, device peak 7.4 GiB (G2 fold: 15.6 GiB; dense
+  backend 3.9 GiB). F-B 40/10 (N = |D| = 12640, dense LU 2.56 GB; G2 fold ran out of memory at
+  15 GiB): mf and hm run at 14.0 GiB device peak in 9 block steps, transformer L/M/R within 2e-8
+  of the dense backend (12.2 GB torch peak), hm vs mf |dY|/|Y| 1.9e-8.
+  Report: <evidence-root>/rfic-mom-20261106/r4-blockpc/report.md.
+
+- 2026-11-10: G2 surface_admittance on the matrix_free and hmatrix backends (admittance_near.py).
+  Each body block W_b (exterior RWG ids_b) enters the shared near operator M, the near action and
+  sparse-LU preconditioner of both backends: Q_b = Q[ids_b, cols_b] keeps the c_b basis columns
+  touching the body; the basis block -i mu0 S Q_b^T (W_b i/(mu0 w)) Q_b S (mu0 = 4e-7 pi as the
+  dense fold) is formed with two dense real x complex products per frequency and its c_b^2 keys
+  are appended to the near pattern (the stable-sort/segment-sum merge after the MPIE entries).
+  A symbolic sparse product of a dense block would expand ~nnz(Q row)^2 entries per W entry.
+  A = M + Far is the dense system with the exact MPIE near/far split; Far is unchanged. DSA
+  blocks are not symmetric (5% on the strip), so the operator adjoint applies M^T through a
+  transpose permutation of the symmetric pattern, and the GMRES stopping bound uses |X| for
+  |A^-T B| (first order in the asymmetry; agreement with dense is the gate). Body blocks are
+  computed once per frequency. The action applies them as dense products on their columns;
+  only the D2 widened LU pattern carries their keys (values added after the MPIE segment sums,
+  the merged-segment order). Memory: O(sum_b c_b^2): 16 B per entry in the action, 8 B keys
+  and the sparse-LU fill in the preconditioner.
+  A1 interior kernels: far/near launches split over pair ranges (admittance.LAUNCH), one owner
+  per pair, outputs independent of the split; single launches of 5 s tripped context-switch
+  timeouts on time-sliced shared devices.
+  Measured: strip 40/4 (low/window/DSA) |dY|/|Y| <= 1.5e-7 (matrix_free and hmatrix), 6-9
+  block steps; F-B 80/20 thick (N = 7272, c_b = 2400/2572/2188) matrix_free 9.0e-9 vs dense at
+  1 GHz in 8 steps, but 6.2 GB torch plus a 9.7 GB sparse-LU estimate vs 2.7 GB dense: the
+  sparse LU of the dense body blocks (34M nnz for 17M entries) dominates. Follow-up: per-body
+  dense LU block preconditioner, compressed W. F-B 40/10 matrix_free does not fit 15.5 GiB.
+  Refusals retired: LayeredSurfaceConfig and prepare_layered_network backend guards.
+  Report: <evidence-root>/rfic-mom-20261106/g2-fastthick/report.md.
+
+- 2026-11-09: A1c two-regime conductor_model="surface_admittance". Per body, t = largest
+  smallest box dimension, x = t/delta. x <= 0.3: uniform-current local conduction J = e/z on S,
+  z = P/(sigma A) - i w dL'_int P from the owner-box cross-section normal to its longest dimension,
+  A_low = <e, e/z>, W = B A_low^-1 B^T (= z <g, g> for one z): R = l/(sigma A) exact on prismatic
+  bars; dL'_int = mu0/(2 pi)(ln GMD_perimeter - ln GMD_area) (perimeter closed form, area by a
+  Duffy split with exact radial integral). x >= 0.6: A1 DSA block unchanged (torch.equal).
+  Between: A = (1-s) A_low + s A_DSA, s = C1 smoothstep of log x; blending W instead overshoots R
+  by ~1% (one current through both impedances). Per-body blocks computed before the dense chunk,
+  admission counts them (extra_per_frequency). Gradients refused. Measured on the strip 20/2:
+  DC R +5.4e-10 (10/1 below), R within 0.71% of the 25x13 filament reference 10 kHz-10 GHz,
+  window monotone (adjacent dR <= 0.23%, dL <= 0.033%); regime mismatch at x = 0.3: R 0.52%,
+  L 0.22%; x = 0.6: R 0.19%, L 0.11%. Unmet: L 1% (-1.06% low, -1.19..-1.25% DSA; shared with
+  closed/PEC; reference converged (Richardson 9/17/25: 0.03%), exterior 20/2 -> 10/1: -0.07%);
+  100 GHz (radiating loop, QS reference invalid). Report:
+  <evidence-root>/rfic-mom-20261106/a1c/report.md.
+
+- 2026-11-09: A1 (R4c) conductor_model="surface_admittance" (dense backend only).
+  Differential surface admittance per lossy body V (closed dV = exposed S + PEC contact
+  faces C). Interior identity (outward n, J = n x H, M = e x n): T_m j + K'_m eps + G eps/2 = 0,
+  T_m = i w mu0 (V_m - P_m/k_m^2), K'_m = <f, curl S_m[n x g]>, e expanded in RT on S
+  (S-interior RWGs + S-side seam halves), Gram coupling <f, e> = G eps. Divided differences
+  F = (G_c - G_b)/(k_c^2 - k_b^2): j_b = T_b^-1(-K'_b - G/2)eps, J_D = T_c^-1[-dk2 K'hat eps - dT j_b];
+  scalar operators only in tree-tree blocks via exact face charges. W = R_x^T G_S Y_S^-1 R_x per body,
+  keyed by body owner, folded before the loop/tree congruence. Native CUDA face-pair engine:
+  joint Duffy touching rules (radial panels for |k_c| h >> 1) on the bounded remainders,
+  closed-form static inner integrals (scalar, moment, gradient) on graded (touching) and
+  adaptive 4^L (near) observer rules, polar near remainders, product far rules; deterministic
+  tile gathers. Contacts: material-group contact faces (closed.cu contact_mesh); horizontal
+  ports become ideal PEC block bridges (terminal thickness) with cap contacts and a
+  mid-section ring delta gap. Rejected: rotated-RT e (X exactly singular -> zero-resistance
+  modes), RT e broken at sharp edges (worse), Leontovich local updates, 1-D coth/csch (oracle
+  only), composite-union background (no same-surface divided difference), FEM interior.
+  Measured: strip 1e8-1e10 Hz R/L within 1.3% (L offset -1.2% mesh-independent and shared with
+  closed at 10 GHz); DC R +0.5%. Unmet: DC 1e-6; low-frequency L (|k_c| h << 1): internal
+  inductance error -0.46 nH (20/2) / -0.31 nH (10/1) from a +-60 nH cancellation amplified by
+  sigma P^-1; follow-up A1b = potential-based (A-phi, SLIM family) interior formulation.
+  References: S. Sharma and P. Triverio (IEEE AWPL 2020; IEEE TMTT 2022); U. R. Patel and
+  P. Triverio (2016-2017); M. Huynen, D. De Zutter, H. Rogier (3-D DSA). Report:
+  <evidence-root>/rfic-mom-20261106/a1/report.md.
+
+- 2026-11-08: Layered MoM input contract (0.7.0 correctness, no silent ignores).
+  compile_layered_scene refuses, in one NotImplementedError that lists every item,
+  each declared input the layered solve would not apply: Scene sources, monitors,
+  thin_wires, networks, lumped_elements, circuits, material_regions,
+  electrostatic_terminals, charge_densities and internal_absorbers; Scene.symmetry;
+  any boundary face kind other than "none"; Scene.coordinates; ports that are not
+  LumpedPort; and the LumpedPort fields termination, reference_plane,
+  voltage_aperture, current_surface and wire_binding. LumpedPort.current_surface is
+  optional (the layered port current is the delta-gap MoM current) and is required
+  only by FDTD field ports. Trainable Layer/HalfSpace fields are refused at
+  construction. LayeredNetworkRuntime.run recompiles the Scene and refuses a
+  compiled-input signature (LayerStack, sheet rectangles and records, vias, ports,
+  device) that differs from prepare().
+  Thickness semantics (documented, not refused): conductor_model "sheet" does not
+  model geometric thickness; for LossyMetalMedium physical_thickness enters only the
+  surface impedance, and a Material.pec() sheet is infinitely thin whatever its
+  declared physical_thickness. "closed" models the conductor volume. Result.metadata
+  and Result.network.metadata record conductor_model and
+  thickness_modelled_geometrically.
+
+- 2026-11-09: D1 H-matrix/ACA far field (operator_backend="hmatrix") and D2 body-aware preconditioner.
+  hmatrix keeps the S2a system, near LU and block GMRES and compresses the far face-pair
+  operator (vector 3F x 3F, scalar F x F) once per frequency. One support octree per z class
+  (each metal plane, the walls); unordered block pairs over all class pairs, so cross-plane
+  blocks are compressed too. Admissibility is lateral only (images can approach the observer
+  plane): max diam_xy <= eta gap_xy (eta = 1) and gap_xy^2 >= NEAR_RATIO^2 h^2 (1 + 1e-6), so
+  every near pair of pair_near/wall_near lies in an exact leaf block (integer-checked).
+  Entries come from the S2a list kernel (bitwise the dense tiles). Face-pivot cross
+  approximation (rank <= 3 per vector sample, complete pivoting in the pivot block, random
+  check face) with balanced Gram/eigh recompression at ACA_TOLERANCE = 1e-6 per block and
+  channel: per entry at the float32 rounding floor of the dense far vector moments and inside
+  the Rule 2 setup bound 64 eps32 max|ref|. Blocks are stored once and applied with their
+  transpose (exactly complex symmetric); native low-rank/leaf action with fixed-order sums.
+  The worst-case and quadrature compression bounds are metadata diagnostics; acceptance is
+  measured |dY|/|Y| against dense; hmatrix_exact_check=True verifies each solve with one exact
+  far action (refused above 1e-5). Measured |dY|/|Y| vs dense <= 1.7e-6 on F-A test/fine, F-B
+  test/fine (1 kHz-100 GHz) and closed F-A fine; F-B 27k/37k/44k RWG agree with matrix_free to
+  4e-8 with 2.2/3.1/3.8 GB compressed storage (O(N log N)-like) and an action 0.06-0.11% of the
+  matrix-free far action. D2: on a closed body mesh the LU pattern adds same-body (face owner)
+  pairs within WIDE_RATIO = 3 cells; the action is unchanged (Y within 7e-8); closed F-A fine
+  steps 30/39/60/77 -> 16/22/30/36 at 1.26x LU fill. Hook commit 1f4c64f8 is a bitwise refactor
+  of the matrix-free near values plus optional pair-list/preconditioner arguments.
+  Drivers: scripts/dev/rfic/bench_hmatrix_d1.py.
+
+- 2026-11-09: E1 frequency-dependent (dispersive) layer permittivity.
+  Layer/HalfSpace.eps_r takes a constant (unchanged) or a causal model:
+  WidebandDebye(eps_inf, delta_eps, f1, f2) (Djordjevic-Sarkar, exp(-i w t):
+  eps = eps_inf + delta_eps ln((f2 - i f)/(f1 - i f))/ln(f2/f1), a uniform log-spread
+  of passive Debye poles, Kramers-Kronig exact; from_loss_tangent(eps_r, tan_delta,
+  frequency, f1=1e3, f2=1e12) matches Re eps and tan delta at one frequency) or
+  PolePermittivity(eps_inf, poles) over the existing DebyePole/DrudePole/LorentzPole
+  (from_material adapts an isotropic electric-dispersive Material, e.g. a
+  fit_dispersion result; static conduction stays in Layer.sigma). Refused as
+  non-passive/non-physical: delta_eps < 0, eps_inf < 1, not 0 < f1 < f2, non-finite,
+  gain Lorentz poles, custom (spatially varying) poles, trainable tensors.
+  Green table: a dispersive stack stores media as [F, regions] rows, eps(f) evaluated
+  per table frequency at build; constant stacks keep the [regions] row (bitwise). Every
+  CUDA permittivity read offsets the row by the frequency index of the table it reads
+  (stride regions, or 0 for a 1-D row). _frequency_view slices the rows with the other
+  frequency tensors, so PH1 dense chunks, the S2a matrix-free per-frequency views and
+  adaptive probes never mix frequencies; admission stays per (frequency, pair,
+  component) row. Host image pruning, the wave-number scale km and the uniform
+  (exact-mode) test evaluate every frequency of a dispersive stack. Gradients through
+  dispersion parameters are not supported (fixed inputs).
+  Driver: scripts/dev/rfic/e1_dispersive_microstrip.py.
+
+- 2026-11-09: S2a matrix-free backend (GMRES with a sparse near-field preconditioner).
+  LayeredSurfaceConfig(operator_backend="matrix_free") solves the PH1 equilibrated
+  loop/tree system without N^2 storage. Face pairs split by the assembly's own near
+  predicate (pair_near / wall_near), which partitions every tile exactly. Near pairs
+  are evaluated per frequency by the identical pair kernels over an explicit pair list
+  (bitwise the dense tiles), gathered to V_near (with R/(-i mu0 w) folded) and P_near,
+  and transformed by symbolic expand/stable-sort/segment-sum products to
+  M = D[S Q^T V' Q S + C^T P C/(eps0 w0^2)]D, D = |diag M|^(-1/2) (Y and currents are
+  invariant under D). M is the near action and a complex128 sparse-LU right
+  preconditioner (GPU direct solver, deterministic mode; that mode admits one RHS per
+  solve, and the default mode is not bitwise for several). Far pairs are re-integrated
+  in every action by the same tile kernels in a far-only selection and contracted for
+  all ports per tile visit. Block GMRES (CGS2, restart 48) stops when
+  |X|_F|R|_F <= 1e-5 |B^T X|_F: Z is complex symmetric, so dY = X*^T R; a true residual
+  confirms. The matrix-free loop/tree setup emits sparse cycle columns directly (no
+  transient [N,N]); the dense setup and every dense result are unchanged (T0 checked).
+  Each far action costs about one dense assembly; far-field compression (2b) is separate.
+  Drivers: scripts/dev/rfic/bench_matrix_free_s2a.py.
+
+- 2026-11-08: PH1 dense operator protocol and memory.
+  Each frequency owns one complex128 equilibrated loop/tree system and one complex64
+  workspace. The tile gather writes V at its loop/tree basis position; lossy Gram terms
+  fold in as R/(-i mu0 w). The sparse congruence and the diagonal equilibration run
+  in place, keeping the old summation orders; the tree-tree charge block reads packed
+  P (bitwise symmetric through canonical face pairs) on the fly. The workspace holds
+  packed P during assembly and the column-major complex64 LU afterwards (LU aliases A).
+  Footprint 16N^2+8max(N^2,F(F+1)) (<=24N^2 for F<=N) plus O(F) tile/wall scratch;
+  admission uses it. LoopTree persists only norms and CSC columns. Section 5's
+  precision policy is unchanged (complex64 LU, complex128 refinement, complex128
+  escalation only on failure, explicitly admitted). LayeredSurfaceConfig gains
+  operator_backend="dense"; each frequency is a SurfaceOperatorProtocol operator
+  driven by the shared Krylov interfaces. Pinned movers vs 74f2d6aa are T1 at
+  rounding level (division replaces the vendor diagonal trsm; loss folding). The
+  source-hash provenance pins await their own renewal procedure.
+  Drivers: scripts/dev/rfic/bench_dense_ph1.py, evidence_lock.py (then evidence_compare_ph1.py).
+
+- 2026-11-08: GR1 native adjoint network gradients for local loss parameters.
+  Network extraction already returns X = Z^-1 V for all ports, and
+  dY/dtheta = -X^T (dZ/dtheta) X, so no extra solve runs. Every GR1 parameter
+  enters only R = sum_f Zs_f G_f: PlanarPEC/via LossyMetalMedium conductivity,
+  Hammerstad/Huray roughness fields and sheet-model PlanarPEC thickness, for
+  conductor_model "sheet" and "closed". A PyTorch-native map evaluates the
+  per-group Zs from the Scene tensors (the prepare_sheet_loss and closed
+  Leontovich formulas); the native loss_adjoint operator contracts the local
+  Gram rows with L = X conj(gY) and X, one block per (frequency, group), with
+  fixed-order face/row CSR walks and a fixed shared-memory tree: no dZ storage,
+  no floating-point atomics, bitwise-repeatable gradients. Result.network keeps
+  the forward values (S via one S->Y->S round trip) and gains the autograd graph.
+  Reference impedances and port loads differentiate through NetworkData
+  renormalize/terminate; a trainable LumpedPort.reference_impedance remains
+  refused by the shared non-FDTD Simulation admission. Closed-model thickness
+  (moves body faces), geometry, process-stack and termination gradients,
+  adaptive sweeps with gradients and current gradients refuse explicitly.
+  With no trainable input the forward path is unchanged. Gates: complex128
+  gradcheck of the re-solving Zs -> Y map, dense contraction oracle (1e-12),
+  central differences in the bound 2(|FD_2h-FD_h|/3 + 2 kappa beta max|Y|/h)
+  for nine sheet/closed cases, three-run torch.equal, a SceneModule + Adam Q
+  rise checked by an independent forward, and F-A all-Y gradients <= 2x forward.
+  Report: <evidence-root>/rfic-mom-20261106/gr1/report.md.
+
+- 2026-11-07: R4b opt-in closed conductor surfaces; physical qualification remains open.
+  LayeredSurfaceConfig(conductor_model="closed") extrudes positive-thickness
+  PlanarPEC objects symmetrically about their declared mid-planes. The default
+  "sheet" and its two-face finite-thickness impedance are unchanged. Native CUDA
+  builds the exposed rectangle/via union, including polygon-hole walls; each
+  via joins the top face of its lower body to the bottom face of its upper body.
+  Lossy exterior faces use single-face Leontovich impedance with the public
+  complex roughness factor. PEC faces and top-face ideal bridges have zero loss.
+  At a k-face edge, k-1 pair RWGs span the complete zero-sum integrated-current
+  space. Native padded incidence, fixed-order potential/loss gathers and the
+  loop/tree forest cover ordinary bends, three-face bridge rims and a tested
+  four-face junction without floating-point atomics.
+  Horizontal bridges attach to top faces while declared terminals retain their
+  mid-plane coordinates. Zero thickness, closed vertical bridge ports, overlapping
+  distinct-plane bodies, nonuniform via rims and unequal bridge top heights
+  explicitly refuse; existing sheet/via geometry refusals remain. Five capability
+  boundaries and two contract validations have negative controls in the guard manifest.
+  Derived heights within eight fp64 ULPs of a dielectric interface canonicalize
+  to it. Horizontal Green rows use the upper-region limit; tangential continuity
+  is checked against an upward 10-pm displacement. Native affine centroids retain
+  constant coordinates exactly, preventing a face from rounding outside a vertical
+  Green segment. Metadata records the model, per-PlanarPEC union-owned face
+  counts, shortened via gaps and via face counts; overlaps belong to the earliest
+  declaration. New kernels are registered native PyTorch operators.
+  Closed SIBC requires skin depth much smaller than thickness and width. It has
+  no finite-conductivity DC resistance limit and is not a thin-lossy-metal model.
+  F-A vacuum L(1 GHz)=3.1821 nH versus the resolved-copper bridge reference
+  3.1503 nH is within 1.5%; L(0.1 GHz) and resistance miss. Longitudinal refinement
+  from 10274 to 11138 unknowns barely changes these values; transverse convergence
+  and original R6 physical qualification remain open.
+  Original R6 tests, both strict xfails, frozen source/reference receipts and the
+  consumer-metadata archive are unchanged. Six R6/R6b source-hash failures need
+  re-receipts rather than rewritten historical evidence. Final native operator
+  contracts and the 7/7 guard census are recorded separately.
+  Drivers: scripts/dev/rfic/closed_fixture_r4b.py and closed_reference_r4b.py.
+  Model, A-D tables, skin regimes, reference sensitivities, memory refusals,
+  timing and unmet items:
+  report.md of run r4b in <evidence-root>/rfic-mom-20261106/.
+
 - 2026-11-07: R6b inductance and substrate-conductance arbitration.
   Preserve the original R6 targets and both strict xfails. The native finite-thickness
   impedance still acts on zero-volume sheets; a resolved conductor cross section is a
@@ -258,7 +781,7 @@ absent declared via spans fail closed.
   No solver source, protected module, original R6 evidence or consumer-metadata archive
   changes. Physical R6 qualification remains open. Drivers and checks are under
   scripts/dev/rfic/ and tests/mom/layered/test_layered_fixture_r6b.py; complete evidence:
-  <evidence-root>/rfic-mom-20261106/codex/r6b/report.md.
+  report.md of run r6b in <evidence-root>/rfic-mom-20261106/.
 
 - 2026-11-07: R6 substrate/shield reference study; physical qualification remains open.
   Extend the single F-A builder with none/pgs/solid shields at z=300.5 um,
@@ -285,7 +808,7 @@ absent declared via spans fail closed.
   source or protected shared module changes. Frozen reference and report:
   tests/mom/layered/data/fixture_r6_reference.json, source-bound finer-native
   evidence in tests/mom/layered/data/fixture_r6_native_evidence.json, and
-  <evidence-root>/rfic-mom-20261106/codex/r6/report.md.
+  report.md of run r6 in <evidence-root>/rfic-mom-20261106/.
   Measured: peak-frequency 3.4% and SRF 4.0% pass; L(1 GHz) +6.1% and Q peak
   +28.8% miss (PEC control L +7.2%, effective shunt G -22.7%). Tests assert the
   passing targets, PGS direction agreement and the increase of the fitted Cox-coupled
@@ -376,7 +899,7 @@ absent declared via spans fail closed.
   or public API changed. Frozen mesh evidence:
   tests/mom/layered/data/fixture_fa_convergence.json. Report, L/R/Q tables,
   timings, references and test artifacts:
-  <evidence-root>/rfic-mom-20261106/codex/fa/report.md.
+  report.md of run fa in <evidence-root>/rfic-mom-20261106/.
 
 - 2026-11-07: R3b adds consecutive-plane Box vias and boundary-attached vertical delta-gap ports.
   Via footprints are removed from both sheets; exact-coordinate welding makes four-wall tubes
@@ -464,3 +987,133 @@ absent declared via spans fail closed.
   - 桥接方向取 LumpedPort 的 voltage_path（只允许 x 或 y）。
   - 切线上的边按边中点严格落在桥宽内来选取，所有切线边都必须施加激励：漏掉一条就会把间隙短路。
   - 符号链写在 network.py 的模块说明里。在 exp(-iωt) 下，电感满足 Im Z = -ωL < 0。
+- 2026-11-10: G3 thin-strip L offset localized to the reference, no solver change. The A1c
+  centreline FastHenry loop (one segment per run piece, corners joined at centreline nodes)
+  over-estimates the 10x2 um loop by +1.19% (PEC, equal filaments) against a true-geometry lattice
+  FastHenry model (cell-centred PEEC of the exact ring, graded to every edge, cut-plane delta gap;
+  scripts/dev/rfic/strip_reference_fasthenry_g3.py): 4.8 pH localized at the corners, found by
+  loop-length scaling (200/400/800/1600 um). Per-length L of the MoM matches an independent 2D PEC
+  BEM (scripts/dev/rfic/strip_pul_bem_g3.py) to +0.25% (mesh, converging from above). Thick 20-um
+  control: the centreline model is +1.84% high too; the earlier 0.05% "agreement" was that bias
+  cancelling the closed model's zero-thickness top-face bridge. The strict expected failure is
+  replaced by test_strip_inductance_true_corner_reference (1 MHz..10 GHz, 1%).
+- 2026-11-11 R4-3 (thick-terminal ports): a horizontal `voltage_aperture` edge port on
+  conductor_model="closed" now builds an ideal PEC block over the aperture width and the full
+  terminal thickness (network._thick_terminal_blocks), welded to both terminal end faces by the closed union mesher;
+  the delta gap is the block mid cross-section ring (the surface_admittance block port, shared
+  _cut_vectors branch). This lifts the closed x edge-port refusal (guard 715430df retired). On the
+  G3 strip loop at 1 GHz (PEC, 20/2 um mesh) the edge port gives 0.264885 nH for t = 20 um
+  (-0.32% vs the lattice 0.265744; the top-face delta-gap bridge 0.268676, +1.10%) and 0.382023 nH
+  for t = 2 um (-0.46% vs 0.383802). Closed delta-gap ports keep the top-face bridge bitwise; the
+  edge port is their de-embedded form. Vertical ports on closed bodies stay refused (4991fdd0).
+  surface_admittance already used the block; its 20-um edge port reproduces R = l/(sigma A) at DC.
+- 2026-11-11: R5-2 A1 interior far kernel, one warp per far face pair (no output change). Lanes
+  evaluate 32 consecutive (i,j,k,l) nodes of the product rule and store the 29 real factors of
+  every accumulate() term in shared memory; each lane owns up to three of the 94 real output slots
+  and adds the batch's terms in node order. Every term and every addition is the IEEE operation of
+  the former one-thread-per-pair kernel (module built with --fmad=false; c10::complex scales
+  componentwise), so all seven interior operators are torch.equal to it. The former kernel stays as
+  the test oracle far_serial_kernel, reachable only through the test-only op
+  admittance_operators_serial_far (tests/support/layered_admittance_oracle.py). Far launches hold
+  1<<15 pairs (longest F-B 80/20 launch 0.71 s); far kernel 2.7x faster than the serial one there.
+- 2026-11-11: R6-2 A1 interior kernels, divided-difference Taylor coefficients formed once per
+  launch (no output change). For |kc| R < 1/2 the series of F = (g_c - g_b)/dk2 formed the
+  r-independent factors c_n = i^n (kc^n - kb^n)/(n! 4 pi dk2) and c_n (n-1), n = 1..26, at every
+  node (26 complex divisions). taylor_kernel now forms them once per admittance_operators call with
+  the identical expressions; the per-node series keeps its r-dependent operations and order
+  (--fmad=false), so all seven operators are torch.equal to the base build (strip 1e6/2e8/1e10,
+  F-B 80/20 bodies). The Taylor branch dominated the near kernel at low frequency (strip 1e6:
+  near time 1.8x that at 1e10 before, about 1.0x after; indicative, shared GPU).
+- 2026-11-11: R6-2 thick-metal memory on matrix_free/hmatrix (no output change). (1) The near basis
+  products V'Q, Q^T V'Q, C^T P, C^T P C and their merge are no longer stored per structure (the
+  SparseProduct plans were 1.6 GB of index arrays on F-B 80/20): build_near_structure keeps only
+  the merged pattern, and near_values replays the symbolic products per frequency in X row chunks
+  of <= 2^23 expansion entries (matrix_free.sparse_product / merge_blocks). A row chunk's stable
+  key sort is the global one restricted to its rows, and segment_sum adds each segment in order,
+  so the values are independent of the chunk size and bitwise those of the stored plans. (2) The
+  D2-wide preconditioner structure shares the action structure's Green operands, rules and
+  assembly cache (the cache was built twice, 0.4 GB on F-B 80/20). (3) AdmittanceBody keeps R_x,
+  the body cycle transform Q and the face charges as sparse COO of the exact dense entries and
+  densifies them per use; the per-body Grams are formed per call after the interior operators
+  (no longer cached for every body). SurfaceAdmittance.body_block(i, f) forms one body's W, and
+  body_compress.body_operators streams bodies: W_b is folded, compressed and released before the
+  next body's interior operators exist. body_impedance consumes its interior operators as it goes
+  (congruence of a popped operator, in-place scalings and equilibration) with the same IEEE
+  operations and operand order. Operator state (near values, D, body H-factors, M^-1 drive) is
+  torch.equal to master e64438f0e on F-B 80/20 and 40/10 at 1 GHz. Measured (runner, one
+  frequency, operator setup + one preconditioner apply): F-B 80/20 torch peak 5.67 -> 2.61 GB,
+  device 6798 -> 3948 MiB; F-B 40/10 torch 11.17 -> 5.17 GB, device 14354 -> 7034 MiB (5892 MiB
+  with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True); structures 6.22 -> 1.13 GB allocated;
+  one body's DSA transient 4.7 -> 3.5 GB (the interior-operator call itself holds the seven
+  operators plus its 1 GiB pair tile, whose size fixes the gather summation order). F-C class
+  fixture: scripts/dev/rfic/fixture_fc.py (rows x cols array of F-B transformers; 40/10 is 12640
+  unknowns per device, 4x4 ~ 2e5) and fixture_fc_series.py (one process per case).
+- 2026-11-11 R6-1 (A2, default thick-metal model): LayeredSurfaceConfig.conductor_model defaults to
+  "auto" (runtime.select_conductor_model), resolved once per Simulation by a physics-only rule:
+  surface_admittance when max t/delta over lossy PlanarPEC at f_max (AdaptiveSweep.f_max for a sweep)
+  is >= 0.3 (the lower edge of the surface_admittance regime window), sheet otherwise. No fallback:
+  a surface_admittance selection on a layout with a polygon layout, zero-thickness PlanarPEC,
+  roughness, a vertical port or trainable inputs raises (guard 5a2c81e7) with the feature and
+  t/delta; conductor_model="sheet" accepts the sheet approximation explicitly. Metadata records
+  conductor_model (selected) and conductor_model_selection. fixture_fa/fixture_fb pin "sheet" (the
+  locked R6/R6b/F-B evidence is the sheet model; polygon thick-copper test configs pin it too).
+  T2 behaviour change approved by the user 2026-11-11 (relayed by the RFIC lead; items: auto default,
+  raise instead of sheet on refused features, "auto" payload, sheet pins, new surface_admittance evidence).
+  R6 no-shield with surface_admittance (20/5 um, tests/mom/layered/data/
+  fixture_r6_surface_admittance_evidence.json) vs the 5-um reference: L(1 GHz) +0.73%, Q peak -2.2%,
+  peak frequency -6.0% (targets 3/10/10%). The sheet gaps (L +6.1%, Q +28.8%) are attributed by exact
+  pi-branch swaps (scripts/dev/rfic/attribution_fixture_r6.py): series R at the peak 3.09 vs 3.77 ohm
+  carries 2.7-2.9 of the 3.65 Q gap; the sheet strict xfails stay (locked sheet evidence).
+- 2026-11-11: R6-4 vertical closed ports and TRL de-embedding (plan A3). A vertical port between
+  closed (or surface_admittance) bodies on consecutive metal planes is an ideal PEC block from the
+  lower top face to the upper bottom face, spanning the bridge width along the shared edge and the
+  thinner terminal thickness into the metal; the mesher gets it split at its mid-height cut, whose
+  ring is the delta gap. Vertical ports to a stack PEC ground stay refused (guard 5cec8f9a; the
+  junction basis has no grounded half RWGs); guard 4991fdd0 is retired. Two-strip PEC line in eps_r = 4
+  oxide: two-line eps_eff - eps_r <= 4e-4 relative; surface_admittance PEC == closed bitwise. deembed.trl: TRL in ABCD
+  form, reciprocal boxes (det = 1), reflect root by kind, impedance level from a D = 1 lumped port
+  model at both port planes plus the feed lengths (port_model_residual = left/right mismatch) or a
+  given line impedance; deembed() works per port (no z21 division); trl_standards() builds thru,
+  open reflect and line Scenes of a rectangular PlanarPEC two-port. Copper microstrip, 1 mm series
+  strip, 1/2/4 mm feeds, 2-5 GHz: L spread 0.15%, Q spread 0.22% (1-2 mm feeds), 1.4% at 4 mm / 5 GHz (open).
+- 2026-11-11 R7-2 (A4 certification, internal independent references only; no solver change): new fixtures
+  F-D (MIM: equal plates on a 1 um eps-7 nitride film, vertical delta-gap port), F-E (PEC-ground microstrip
+  h = w = 254 um eps 9.8; finite-ground CPW 10/10/40 um on a silicon half-space; edge ports) and F-F (two-turn
+  octagonal differential inductor, apothems 70/58 um, w 8, s 4, underpass crossover, PEC, polygon mesher).
+  De-embedding uses master's API only: two-line gamma (deembed.line_parameters) for eps_eff, length differencing for
+  C' (MIM plates 60/120 um, open-ended lines at 10 MHz); Z0 and eps_eff are composed from separately extrapolated
+  L' = eps/(c^2 C') and C'. References: 2D quasi-static spectral-domain Galerkin (quasistatic_sda_r7.py; exact CPW
+  conformal map to 6e-12) and the FastHenry sub-strip lattice of the octagon (octagon_reference_r7.py) at n = 16,
+  zero-thickness limit in h, calibrated on the straight trace pair against the exact 2D value (the lattice
+  converges faster than first order beyond n = 16, so an n = 8/12/16 extrapolation overshoots by 0.6%):
+  0.88718 nH +-0.18%. Results: F-D and CPW pass their derived tolerances; microstrip L' converges first order to
+  +0.38% (C' to +0.02%): the air-filled line has the same L' error and exact C', and halving the longitudinal cell
+  moves L' by +0.003%, so the offset is in the vector-potential path over the PEC ground (image / image-extracted
+  table), not the dielectric or the mesh; F-F edge-only sequence non-asymptotic, +0.66% at 1 um. Evidence locked
+  (D-P1 parts fd/fe/ff in evidence_lock.py; F-D on RTX A6000, F-E/F-F on L40S with their A6000 re-acquisition a
+  pre-merge step).
+- 2026-11-12: round-6 group merge (mom/round6), A4 re-lock. All three A4 files re-acquired with --repeat on
+  RTX A6000 at the merged code head b6b88dd2b and re-assembled from those records (one device type for all locks):
+  renewals T0 156 (F-D, records identical to R7-2's A6000 lock), T0 132 (F-E), T0 45 (F-F). F-F now uses the
+  proportional sequence (set r2, maximum edge 2x the edge cell, 2/1.414/1 um; the first two meshes coincide with
+  the edge-only ones): +0.644% at 1 um against 0.88718 nH +-0.18%, inside the derived tolerance 0.655% (no
+  extrapolation: steps -0.06%/-0.47%) and the 1% target, so its strict xfail is gone; the one-off 0.707/1.414 um
+  check (cloud RTX A6000, 22312 unknowns, does not fit a 15 GiB lane) gives +0.557%. The PEC-ground microstrip
+  L'/eps_eff offset stays the only strict xfail (unchanged values class: +0.38%/+0.41%).
+- 2026-11-12: R7-1 B2 arbitrary-outline vias. witwin.core ExtrudedPolygon (core feat/extruded-polygon,
+  additive, Prism frame, exact scale-free SDF) is a third via primitive: via_record maps a z-axis
+  ExtrudedPolygon (rotation about z only) to an exact counter-clockwise PolygonVia outline in fp64;
+  compile_layered_scene and _needs_planar route it to the planar mesher. ProcessStack imports
+  irregular GDS via outlines as ExtrudedPolygon on the database grid (rectangles stay Box, regular
+  outlines stay Prism, bitwise); guard faae7b7a retired, 01bd8946/219df972 re-registered as
+  f809e749/9f961005. A regular-octagon ExtrudedPolygon via loop is bitwise the Prism loop. Via-array
+  reference: tests/support/via_array_reference.py, a 2D magnetostatic BEM (exact log panel
+  integrals, graded panels; all vias of a net share A_z because PEC planes close every same-net loop)
+  with the Leontovich wall condition A_z - Zs K/(i omega) = c_net (the model of the MoM via walls),
+  Z' = -i omega (c_+ - c_-); exact against the coaxial (with impedance) and two-wire (PEC limit) closed
+  forms to O(N^-2). Gate: a 2x2 via array inside an 8-via fence, de-embedded by the height difference
+  60 -> 120 um: dR -1.16%, dL +1.54% (edge 4 um), -1.16% / +1.39% (edge 2 um, 21k/32k unknowns), KCL
+  <= 3e-12; 40 -> 80 um gives -2.45% / +3.5% (end coupling through the pads ~ 1/h; the per-via split
+  departs from the BEM's by about 2.7 um / h). The PEC-limit K overstates R' by 29% here (197.4 vs
+  152.9 ohm/m): at Rs/(omega L') ~ 0.1 the wall resistance relaxes proximity crowding. Evidence: scripts/dev/rfic/via_array_reference_evidence_r7.py
+  (closed-form N^-2 tables, both reference values, Zs -> 0 limit).

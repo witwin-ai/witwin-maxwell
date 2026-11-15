@@ -8,6 +8,8 @@ from typing import Any, ClassVar, Literal
 import torch
 
 from .constants import MU_0
+from ._fixed_inputs import require_fixed_input
+from ._stability import experimental
 
 
 _SNAP_POLICIES = {"continuous", "nearest", "strict"}
@@ -143,6 +145,7 @@ def _normalize_radius(radius, *, segment_count: int):
     return value
 
 
+@experimental("thin_wire")
 @dataclass(frozen=True)
 class WireConductor:
     """Thin-wire conductor law.
@@ -180,6 +183,8 @@ class WireConductor:
             return
         if conductivity is None:
             raise ValueError("WireConductor.finite() requires a conductivity.")
+        require_fixed_input(conductivity, name="WireConductor.conductivity")
+        require_fixed_input(permeability, name="WireConductor.permeability")
         resolved_conductivity = _positive_real_scalar(
             conductivity, field_name="conductivity"
         )
@@ -203,6 +208,7 @@ class WireConductor:
         return cls("finite", conductivity=conductivity, permeability=permeability)
 
 
+@experimental("thin_wire")
 @dataclass(frozen=True)
 class WireEnd:
     """Boundary condition for one physical endpoint of a thin wire."""
@@ -259,6 +265,7 @@ class WireEnd:
         return cls("node", node_name=name)
 
 
+@experimental("thin_wire")
 @dataclass(frozen=True, eq=False)
 class ThinWire:
     """Immutable centerline definition for a subgrid thin wire.
@@ -347,6 +354,7 @@ class ThinWire:
         return self.points[0] == self.points[-1]
 
 
+@experimental("thin_wire")
 @dataclass(frozen=True, eq=False)
 class WireData:
     """Frequency-domain current, charge, and loss for one wire monitor.

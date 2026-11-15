@@ -4,9 +4,11 @@ import torch
 from .periodic import LatticeSpec
 from .fmm_expansion import _points
 from .interpolation_error import KernelBoundUnavailable, KernelErrorBudget
+from ..errors import SetupError
+from ..errors import UnsupportedFeatureError
 
 
-class PeriodicImageTailError(ValueError):
+class PeriodicImageTailError(SetupError):
     def __init__(self, receipt):
         self.receipt = receipt
         super().__init__('Periodic outer-image tail exceeds the declared kernel budget')
@@ -125,7 +127,7 @@ def periodic_multipole_error_bound(lattice, displacement, test_radius, source_ra
         near_quadrature_certified=False, floating_point_certified=False, physical_qualification=False)
 
 
-class PeriodicMultipoleError(ValueError):
+class PeriodicMultipoleError(SetupError):
     def __init__(self, receipt):
         self.receipt = receipt
         super().__init__('Combined periodic M2L and image tail exceed the declared kernel budget')
@@ -154,7 +156,8 @@ def periodic_hierarchy_error_bound(test_tree, source_tree, lattice, wave_number,
     test_tree.assert_current()
     source_tree.assert_current()
     if test_tree.expansion_centers is not None or source_tree.expansion_centers is not None:
-        raise NotImplementedError('Dyadic expansion centers currently require free space')
+        raise UnsupportedFeatureError('Dyadic expansion centers currently require free space',
+                                      feature="guard:3503d667", method="mom")
     tc = test_tree.lower*.5+test_tree.upper*.5
     sc = source_tree.lower*.5+source_tree.upper*.5
     tr = torch.linalg.vector_norm((test_tree.upper-test_tree.lower)*.5, dim=-1)

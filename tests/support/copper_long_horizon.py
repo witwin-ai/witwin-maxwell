@@ -12,11 +12,10 @@ def run_passive_full_field_steps(thickness, replays):
     from witwin.maxwell.fdtd.cuda.runtime.graph import CudaGraphRunner
     from witwin.maxwell.fdtd.runtime.stepping import _field_update_block, enforce_pec_boundaries
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.02, .02),) * 3),
-        grid=mw.GridSpec.uniform(.01), boundary=mw.BoundarySpec.pec(), device="cuda",
-        structures=[mw.Structure(geometry=mw.Box(position=torch.zeros(3, dtype=torch.float64),
+        grid=mw.GridSpec.uniform(.01), boundary=mw.BoundarySpec.pec(), structures=[mw.Structure(geometry=mw.Box(position=torch.zeros(3, dtype=torch.float64),
             size=torch.tensor([0., .08, .08], dtype=torch.float64)), name="foil",
-            material=mw.CopperFoil(thickness=thickness, frequency_range=(.5e9, 2e9)))])
-    solver = mw.Simulation.fdtd(scene, frequency=2e9, run_time=mw.TimeConfig(time_steps=1)).prepare().solver
+            material=mw.media.CopperFoil(thickness=thickness, frequency_range=(.5e9, 2e9)))])
+    solver = mw.Simulation.fdtd(scene, frequencies=2e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare().solver
     generator = torch.Generator(device="cuda").manual_seed(911)
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         getattr(solver, name).normal_(generator=generator)

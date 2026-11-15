@@ -10,6 +10,8 @@ from ..array import ArrayBasisData, EmbeddedElementPatternData
 from ..array_execution import ArrayRunData
 from .antenna import _far_fields_from_result
 from .stratton_chu import EquivalentCurrentsSurface
+from ..errors import UnsupportedFeatureError
+from ..compiler.array import compile_array_monitors
 
 
 def _frequency_parameter(value, index: int, count: int):
@@ -273,10 +275,10 @@ def array_basis_from_result(
     """Build unit-incident-power embedded patterns from retained PortSweep columns."""
 
     if result.method != "fdtd":
-        raise NotImplementedError("Array basis extraction is FDTD-only.")
+        raise UnsupportedFeatureError("Array basis extraction is FDTD-only.", feature="guard:54cbf394", method=None)
     network = result.network
     if network is None or not network.is_complete:
-        raise RuntimeError("Result.array_basis() requires a complete PortSweep NetworkData.")
+        raise RuntimeError("mw.antenna.array_basis(result, ...) requires a complete PortSweep NetworkData.")
     run_data = getattr(result, "_array_run_data", None)
     if not isinstance(run_data, ArrayRunData):
         raise RuntimeError(
@@ -313,7 +315,7 @@ def array_basis_from_result(
             device=network.s.device,
             dtype=network.frequencies.dtype,
         )
-    (request,) = result.scene.compile_array_monitors(
+    (request,) = compile_array_monitors(result.scene,
         monitor=monitor,
         frequencies=tuple(float(value) for value in result.frequencies),
         theta=requested_theta,

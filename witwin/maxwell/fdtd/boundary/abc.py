@@ -20,6 +20,8 @@ import math
 import numpy as np
 import torch
 
+from ...errors import UnsupportedFeatureError
+
 _AXES = ("x", "y", "z")
 _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
 
@@ -98,7 +100,7 @@ def _solve_plane_mode_beta(solver, spec, *, axis, plane_index, direction, freque
             continue
         # Use the solver's own physical edge nodes so the aperture check, which
         # compares against those sampled coordinates, accepts the full span.
-        lo_index, hi_index = physical_interior_indices(scene, other_axis)
+        lo_index, hi_index = physical_interior_indices(scene, other_axis, device=scene.device)
         axis_coords = getattr(scene, other_axis)
         low = float(axis_coords[lo_index].item())
         high = float(axis_coords[hi_index].item())
@@ -117,16 +119,18 @@ def _solve_plane_mode_beta(solver, spec, *, axis, plane_index, direction, freque
     mode_data = solve_mode_source_profile(solver, compiled)
     beta_tensor = mode_data.get("beta_tensor")
     if isinstance(beta_tensor, torch.Tensor) and beta_tensor.requires_grad:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "ModeABC does not differentiate its one-way coefficient through trainable materials on "
-            "the boundary cross-section; keep design regions off the ModeABC plane."
+            "the boundary cross-section; keep design regions off the ModeABC plane.",
+            feature="boundary.mode_abc", method="fdtd"
         )
     beta_complex = mode_data.get("beta_complex")
     beta = float(mode_data["beta"])
     if beta_complex is not None and abs(complex(beta_complex).imag) > 1e-3 * max(abs(beta), 1e-30):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "ModeABC requires a lossless guided mode; the one-step real update cannot absorb a "
-            "mode with a complex propagation constant."
+            "mode with a complex propagation constant.",
+            feature="boundary.mode_abc", method="fdtd"
         )
     if not math.isfinite(beta) or beta <= 0.0:
         raise ValueError("ModeABC mode solve returned a non-propagating mode.")
@@ -295,7 +299,7 @@ def initialize_mode_abc_state(solver):
     if not faces:
         return
     scene = solver.scene
-    spec = scene.boundary.mode_abc
+    spec = scene.scene.boundary.mode_abc
     for axis, side in faces:
         primal = _axis_primal(scene, axis)
         size = int(len(primal)) + 1
@@ -334,17 +338,18 @@ def _internal_absorber_plane_index(scene, absorber):
     for other_index, other_axis in enumerate(_AXES):
         if other_index == axis_index:
             continue
-        low, high = scene.domain.bounds[other_index]
+        low, high = scene.scene.domain.bounds[other_index]
         extent = float(high) - float(low)
         if absorber.size[other_index] < extent * (1.0 - 1e-9):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 f"InternalAbsorber {absorber.name or ''!s} must span the full domain cross-section along "
                 f"{other_axis}; finite absorber apertures (with their PEC frame and backing plate) are "
-                "not implemented. Use size=inf on the transverse axes."
+                "not implemented. Use size=inf on the transverse axes.",
+                feature="internal_absorber", method="fdtd"
             )
     nodes = np.asarray(getattr(scene, f"{axis}_nodes64"), dtype=np.float64)
     index = int(np.argmin(np.abs(nodes - float(absorber.position[axis_index])))) + int(absorber.grid_shift)
-    physical_lo, physical_hi = physical_interior_indices(scene, axis)
+    physical_lo, physical_hi = physical_interior_indices(scene, axis, device=scene.device)
     if index <= physical_lo or index >= physical_hi:
         raise ValueError(
             "InternalAbsorber plane must lie strictly inside the non-PML region along its normal axis."

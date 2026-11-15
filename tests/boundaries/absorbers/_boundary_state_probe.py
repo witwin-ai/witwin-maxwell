@@ -1,8 +1,8 @@
 """Dump prepared boundary tensors and a short field run for one configuration.
 
 Executed in a fresh interpreter by ``test_boundary_bit_identity.py`` against both
-the current tree and an archived baseline tree. It touches only public API that
-predates the absorbing-boundary extensions, so it runs unchanged on either tree.
+the current tree and an archived baseline tree. It builds scenes and simulations through
+``tests/support/api_dialect.py``, so it runs unchanged on either tree.
 
 Usage:
   python _boundary_state_probe.py <config> <output.pt>
@@ -17,10 +17,14 @@ from __future__ import annotations
 
 import math
 import sys
+from pathlib import Path
 
 import torch
 
-import witwin.maxwell as mw
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "support"))
+import api_dialect as api  # noqa: E402
+
+mw = api.mw
 
 # legacy subpixel pin; default coverage lives in tests/materials/compiler/test_subpixel_default_guard.py and tests/materials/compiler/test_kottke_edge.py
 _LEGACY_SUBPIXEL = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic", pec="staircase")
@@ -30,30 +34,29 @@ _STATE_PREFIXES = ("cpml_", "psi", "boundary_", "inv_", "cex", "cey", "cez", "ch
 
 
 def _dipole_scene(boundary):
-    scene = mw.Scene(
+    scene = api.scene(
         subpixel_samples=_LEGACY_SUBPIXEL,
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.35, 0.35), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=boundary,
         device="cuda",
     )
-    scene.add_structure(
-        mw.Structure(geometry=mw.Box(position=(0.1, 0.0, 0.0), size=(0.2, 0.2, 0.2)), material=mw.Material(eps_r=3.0))
-    )
-    scene.add_source(
-        mw.PointDipole(
+    return api.add(
+        scene,
+        structures=[mw.Structure(geometry=mw.Box(position=(0.1, 0.0, 0.0), size=(0.2, 0.2, 0.2)),
+                                 material=mw.Material(eps_r=3.0))],
+        sources=[mw.PointDipole(
             position=(-0.1, 0.05, 0.0),
             polarization="Ez",
             width=0.05,
             source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.5e9),
-        )
+        )],
+        monitors=[mw.PointMonitor("probe", (0.2, 0.1, 0.05), fields=("Ez",))],
     )
-    scene.add_monitor(mw.PointMonitor("probe", (0.2, 0.1, 0.05), fields=("Ez",)))
-    return scene
 
 
 def _bloch_scene():
-    scene = mw.Scene(
+    scene = api.scene(
         subpixel_samples=_LEGACY_SUBPIXEL,
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
         grid=mw.GridSpec.uniform(0.06),
@@ -68,17 +71,17 @@ def _bloch_scene():
         ),
         device="cuda",
     )
-    scene.add_source(
-        mw.PlaneWave(
+    return api.add(
+        scene,
+        sources=[mw.PlaneWave(
             direction=(0.2, 0.1, 0.9746794344808963),
             polarization=(1.0, 0.0, -0.20519567041703082),
             # Fixed-k Bloch runs accept CW sources only; see the broadband injection note.
             source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
             injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
-        )
+        )],
+        monitors=[mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ex", "Ez"))],
     )
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
-    return scene
 
 
 CONFIGS = {
@@ -98,7 +101,7 @@ _CHECKPOINT_STEP = 37
 
 
 def _simulation(config):
-    return mw.Simulation.fdtd(
+    return api.fdtd(
         CONFIGS[config](),
         frequencies=[1.0e9],
         run_time=mw.TimeConfig(time_steps=_RUN_STEPS),

@@ -28,10 +28,17 @@ __device__ inline C root(C z) {
 __device__ inline C eps(const C* media, const double* sigma, int l, double w) {
   return media[l]+C(0,sigma[l]/(w*eps0));
 }
+// Relative permittivity rows: media is [L] (frequency independent, stride 0) or
+// [F,L] (dispersive layers, stride L). Kernels offset the row by the frequency
+// index of the table they read, so frequency slices never mix media.
+inline int64_t media_stride(const at::Tensor& media) { return media.dim()==2 ? media.size(1) : 0; }
+inline int media_layers(const at::Tensor& media) { return int(media.size(-1)); }
 struct Stack {
   const C* media;
   const double *sigma, *edges;
   int n, pec_bottom, pec_top;
+  int64_t stride;
+  __device__ Stack at(int f) const { Stack s=*this; s.media+=f*stride; return s; }
 };
 __device__ inline C kz(Stack s, int l, C q, double w) {
   return root((w/c0)*(w/c0)*eps(s.media,s.sigma,l,w)-q*q);

@@ -50,7 +50,7 @@ def main():
         for name, expected in actual['saved_files_sha256'].items(): assert sha(folder / name) == expected
         dt = actual['actual_dt_s']; count = actual['planned_steps']; split = math.floor(case.checkpoint_time / dt)
         assert count == math.ceil(case.duration / dt)
-        checkpoint = mw.FDTDResumeCheckpoint.load(folder / 'checkpoint.pt', map_location='cpu')
+        checkpoint = mw.fdtd.FDTDResumeCheckpoint.load(folder / 'checkpoint.pt', map_location='cpu')
         assert checkpoint.step == checkpoint.physics.step == split
         assert checkpoint.total_steps == count and checkpoint.dt == dt
         checkpoint_steps = {key: value.tolist() for key, value in checkpoint.physics.tensors.items()
@@ -69,7 +69,7 @@ def main():
         result = mw.Result.load(folder / 'result.pt', scene=scene, map_location='cpu'); results.append(result)
         native = {}
         for name, (component, index) in expected_probes.items():
-            payload = result.monitor(name); assert tuple(payload['field_indices'][component]) == index
+            payload = result.raw_monitor(name); assert tuple(payload['field_indices'][component]) == index
             assert tuple(payload['frequencies']) == case.frequencies
             native[name] = payload['components'][component].numpy().astype(np.complex128).reshape(len(case.frequencies))
             assert np.array_equal(native[name], np.asarray(actual['native_phasors'][name]))
@@ -77,7 +77,7 @@ def main():
         assert np.array_equal(state, np.asarray(actual['physical_state'])); reconstructed_states.append(state)
         tail_ratios = {}
         for monitor in tails:
-            payload = result.monitor(monitor.name); field = np.asarray(payload['field']); times = np.asarray(payload['t'])
+            trace = result.monitor(monitor.name); field = np.asarray(trace.isel(component=0).values); times = np.asarray(trace.coords['t'])
             selected = times >= count * dt - 2e-9
             ratio = float(abs(field[selected]).max() / abs(field).max())
             assert ratio == actual['tails'][monitor.name]['last2ns_peak_relative']

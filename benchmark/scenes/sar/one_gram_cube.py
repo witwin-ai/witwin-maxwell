@@ -37,33 +37,32 @@ def one_gram_cell_mass() -> float:
     return MASS_DENSITY * ONE_GRAM_DX**3
 
 
-def build_scene(*, device: str = "cuda") -> mw.Scene:
+def build_scene() -> mw.Scene:
     extent = _CELLS * ONE_GRAM_DX
     material = mw.Material(
         eps_r=42.0, sigma_e=SIGMA_E, mass_density=MASS_DENSITY, name="phantom"
     )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, extent),) * 3),
-        grid=mw.GridSpec.uniform(ONE_GRAM_DX),
-        boundary=mw.BoundarySpec.none(),
-        structures=(
+                domain=mw.Domain(bounds=((0.0, extent),) * 3),
+                grid=mw.GridSpec.uniform(ONE_GRAM_DX),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
             mw.Structure(
                 geometry=mw.Box(position=(0.5 * extent,) * 3, size=(10.0,) * 3),
                 material=material,
                 name="phantom",
             ),
-        ),
-        device=device,
-    )
-    scene.add_monitor(
-        mw.PowerLossMonitor(
-            "loss",
-            position=(0.5 * extent,) * 3,
-            size=(extent,) * 3,
-            frequencies=FREQUENCIES,
-            channels=("conduction",),
-        )
-    )
+            ),
+                monitors=(
+            mw.monitors.PowerLossMonitor(
+                "loss",
+                position=(0.5 * extent,) * 3,
+                size=(extent,) * 3,
+                frequencies=FREQUENCIES,
+                channels=("conduction",),
+            ),
+            ),
+            )
     return scene
 
 

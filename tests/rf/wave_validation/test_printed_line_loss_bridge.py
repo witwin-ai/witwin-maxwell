@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 import ast, hashlib, json, math
 import numpy as np, pytest, torch
+import witwin.maxwell as mw
 
 import scripts.dev.fdtd.printed_line_loss_bridge as bridge
 import scripts.dev.fdtd.printed_line_loss_execution as execution
@@ -95,7 +96,7 @@ def records_for(entries, seed=7):
 
 def fake_result(records, *, ports=None, monitors=None, steps=N):
     ports = ports or {}
-    return NS(conductor_losses=records, frequencies=FREQ, port=lambda name: ports[name],
+    return NS(_conductor_losses=lambda: records, frequencies=FREQ, port=lambda name: ports[name],
         monitor=lambda name, **_: monitors[name],
         stats=lambda: dict(time_steps=steps, steps_run=steps, dt=DT, normalize_source=False, dft_window='none'))
 
@@ -111,7 +112,7 @@ def basis_and_operator(context, *, imaginary=False):
     operator = dict(Norton='1' * 64, material='2' * 64, sources='3' * 64, copper=operator_signature(fake_solver(entries))['copper'])
     records = records_for(entries)
     from witwin.maxwell.scene import prepare_scene
-    contract = bridge.spectral_contract(identity=IDENTITY, grid=bridge.grid_of(prepare_scene(context['observed'])),
+    contract = bridge.spectral_contract(identity=IDENTITY, grid=bridge.grid_of(prepare_scene(context['observed'], device='cpu')),
         operator=operator, context=context, total_steps=N)
     realizations = []
     for entry in (e for e in entries if not e['imaginary']):
@@ -252,11 +253,14 @@ def test_coherent_loss_replay_binds_realization_to_executed_records(context):
         bridge.check_coherent_loss(fake_result(edited), capture)
 
 
-def tail_payload(peak=2., last=1e-4, samples=None):
-    count = len(range(0, N, 32)) if samples is None else samples
+def tail_payload(peak=2., last=1e-4, samples=None, field=None):
+    """The point FieldTimeMonitor trace Result.monitor returns."""
+    count = len(field) if field is not None else len(range(0, N, 32)) if samples is None else samples
     times = torch.arange(count, dtype=torch.float64) * 32 * DT
-    field = torch.full((count,), last, dtype=torch.float64); field[10] = peak
-    return dict(t=times, field=field)
+    if field is None:
+        field = torch.full((count,), last, dtype=torch.float64); field[10] = peak
+    return mw.FieldData(values=field[None], dims=('component', 't'), coords={'component': ('Ez',), 't': times},
+                        units='V/m')
 
 
 def test_tail_field_is_complete_and_uses_original_last2ns_rule(context):
@@ -266,7 +270,7 @@ def test_tail_field_is_complete_and_uses_original_last2ns_rule(context):
     records = bridge.check_tails(ctx, fake_result({}, monitors=good), CLOCK)
     assert [r['last2ns_peak_relative'] for r in records] == [5e-5] * len(names)
     for broken, message in ((tail_payload(samples=719), 'complete executed interval'), (tail_payload(peak=0., last=0.), 'no field'),
-            (dict(tail_payload(), field=torch.full((720,), math.nan)), 'complete executed interval')):
+            (tail_payload(field=torch.full((720,), math.nan)), 'complete executed interval')):
         with pytest.raises(ValueError, match=message):
             bridge.check_tails(ctx, fake_result({}, monitors=dict(good, **{names[0]: broken})), CLOCK)
 

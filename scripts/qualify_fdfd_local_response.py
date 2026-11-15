@@ -50,10 +50,10 @@ def main():
     frequency = simulation.frequencies[0]
     cfg = simulation.config.local_response
     if args.volume_design:
-        cfg = replace(cfg,design=mw.LocalDesignRegion(bounds=((-0.06,.06),(-0.06,.06),(.02,.08))))
-    settings = mw.GMRES(solver_type='direct', precision='double')
+        cfg = replace(cfg,design=mw.fdfd.LocalDesignRegion(bounds=((-0.06,.06),(-0.06,.06),(.02,.08))))
+    settings = mw.fdfd.FDFDSolverConfig(solver_type='direct', precision='double')
     # Prepare a separate full-domain reference before response timing.
-    full = mw.Simulation.fdfd(scene, frequency=frequency, solver=settings).prepare().solver
+    full = mw.Simulation.fdfd(scene, frequencies=frequency, config=mw.FDFDConfig(solver=settings)).prepare().solver
     full._ensure_system_matrix()
     base_matrix = full.A_matrix.copy()
     scale = full._ensure_symmetrization_scale()
@@ -61,8 +61,8 @@ def main():
     projections = compile_projection(cfg.observations, full.scene, torch.complex128, frequency)
     torch.cuda.reset_peak_memory_stats()
     free_before = cp.cuda.runtime.memGetInfo()[0]
-    response, cold_seconds = timed(lambda: mw.Simulation.fdfd(scene,frequency=frequency,
-                                               solver=settings,local_response=cfg).prepare())
+    response, cold_seconds = timed(lambda: mw.Simulation.fdfd(scene,frequencies=frequency,
+                                               config=mw.FDFDConfig(solver=settings,local_response=cfg)).prepare())
     free_after = cp.cuda.runtime.memGetInfo()[0]
     design = response.design_indices
     cp_design = cp.from_dlpack(design)
@@ -113,7 +113,7 @@ def main():
         trial, trial_seconds = timed(lambda: response.trial(delta=candidate_delta,pec=candidate_pec))
         (field, observed, residual), full_seconds = timed(lambda: reference(candidate_delta,candidate_pec))
         projection_error = relative(trial.projections,observed)
-        local_error = relative(trial.result().raw_output['local_field'],field[design])
+        local_error = relative(trial.result()._raw_output['local_field'],field[design])
         accepted = index%3 != 1
         accept_seconds = None
         if accepted:
@@ -129,7 +129,7 @@ def main():
     amplitude = torch.tensor(.8,device='cuda',dtype=torch.float64,requires_grad=True)
     direction = torch.rand(n,device='cuda',dtype=torch.float64,generator=generator)*100
     result = response.run(delta=amplitude*direction)
-    loss = result.raw_output['projections'].abs().square().sum()
+    loss = result._raw_output['projections'].abs().square().sum()
     gradient = torch.autograd.grad(loss,amplitude)[0]
     step = 1e-4
     values = [reference(((float(amplitude.detach())+sign*step)*direction).to(torch.complex128),torch.zeros_like(pec))[1]

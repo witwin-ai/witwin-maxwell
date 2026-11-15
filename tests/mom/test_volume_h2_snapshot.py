@@ -16,19 +16,6 @@ from witwin.maxwell.mom.physics import compile_medium
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
 
 
-@pytest.fixture(autouse=True)
-def deterministic_actions(monkeypatch):
-    # Packed near index accumulation is nondeterministic in the default CUDA
-    # path. Exact execution controls opt into deterministic native algorithms;
-    # the storage hash remains exact independently of that execution policy.
-    monkeypatch.setenv('CUBLAS_WORKSPACE_CONFIG',':4096:8')
-    enabled=torch.are_deterministic_algorithms_enabled()
-    warn_only=torch.is_deterministic_algorithms_warn_only_enabled()
-    torch.use_deterministic_algorithms(True)
-    try:yield
-    finally:torch.use_deterministic_algorithms(enabled,warn_only=warn_only)
-
-
 @pytest.mark.parametrize('far',[False,True])
 def test_actual_volume_h2_exact_independent_restore_without_reconversion(far,monkeypatch,tmp_path):
     make=runpy.run_path('tests/mom/test_volume_hmatrix.py')['elongated_volume'] if far else runpy.run_path('tests/mom/test_volume_green.py')['mesh']

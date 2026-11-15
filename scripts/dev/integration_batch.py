@@ -20,9 +20,11 @@ import os
 from pathlib import Path
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import xml.etree.ElementTree as ET
@@ -46,7 +48,9 @@ _REQUIRED_MANIFEST_KEYS = frozenset({
 })
 # Include descriptive metadata documented by the manifest and its fixtures.
 _MANIFEST_TABLE_KEYS = {
-    "merge_declarations": frozenset({"branch", "commit", "pytest", "benchmark", "note"}),
+    # consumer_group_receipt = "<receipt path>@<sha256>": the consumer-metadata feature-group receipt the
+    # merge admits (scripts/dev/fdtd/consumer_metadata/derive_consumer_bridge.py reads it).
+    "merge_declarations": frozenset({"branch", "commit", "pytest", "benchmark", "note", "consumer_group_receipt"}),
     "known_failures": frozenset({"selector", "failure_contains", "reason", "breaking_commit", "owner"}),
     "expected_movers": frozenset({
         "commit", "selector", "row", "pins", "expected_change", "failure_contains",
@@ -55,7 +59,7 @@ _MANIFEST_TABLE_KEYS = {
     "suites": frozenset({
         "id", "kind", "status", "classification", "selectors", "argv", "estimated_seconds",
         "expected_tests", "tier", "requires_gpus", "two_device_only", "component", "report_format",
-        "environment", "artifacts", "metric_limits", "scenario_metric_limits", "scenario_investigation",
+        "environment", "artifacts", "metric_limits", "scenario_metric_limits", "scenario_scalar_limits", "scenario_investigation",
         "scenario_quarantine", "owner", "evidence",
     }),
 }
@@ -139,13 +143,104 @@ def select_units(units, names):
     return [indexed[name] for name in dict.fromkeys(names)]
 
 
-def unit_order(unit):
-    stage = min([i for i, name in enumerate(STAGES) if name in unit["suites"]] + [len(STAGES)])
-    return stage, -unit["seconds"], unit["id"]
+def unit_stage(unit):
+    return min([i for i, name in enumerate(STAGES) if name in unit["suites"]] + [len(STAGES)])
 
 
 def unit_phase(unit):
-    return 1 if unit_order(unit)[0] < 3 else 2
+    return 1 if unit_stage(unit) < 3 else 2
+
+
+def unit_order(unit):
+    """Phase 1 keeps its stage order; phase 2 starts the longest units first (LPT), so
+    claiming lanes finish together instead of serializing multi-hour units at the tail."""
+    phase = unit_phase(unit)
+    return phase, unit_stage(unit) if phase == 1 else 0, -unit["seconds"], unit["id"]
+
+
+def read_history(paths):
+    """Measured seconds from earlier batch outputs, median over paths.
+
+    Returns {"units": {unit ID: s}, "nodes": {node ID: s}, "overhead": {unit ID: s}}. Each path is
+    a batch output directory or its progress.log. A unit's seconds come from its END line's
+    measured= field, else END minus START (lock waits and deferrals happen before START, so
+    neither form counts them); INFRA units never ran. In a directory, the per-unit JUnit files
+    (shard-*/unit-*.xml) give each node's seconds, and a pytest unit's overhead is its seconds
+    minus its cases' seconds (interpreter start, collection, teardown).
+    """
+    units, nodes, overhead = defaultdict(list), defaultdict(list), defaultdict(list)
+    for path in map(Path, paths):
+        log = path if path.is_file() else path / "progress.log"
+        starts, seen = {}, {}
+        for line in log.read_text().splitlines():
+            fields = line.split()
+            if len(fields) < 4 or not fields[2].startswith("unit="):
+                continue
+            stamp = datetime.fromisoformat(fields[0].replace("Z", "+00:00"))
+            unit, event = fields[2].removeprefix("unit="), fields[3]
+            if event == "START":
+                starts[unit] = stamp
+            elif event == "END" and unit in starts and "status=INFRA" not in fields:
+                explicit = [f.removeprefix("measured=").rstrip("s") for f in fields if f.startswith("measured=")]
+                seen[unit] = float(explicit[0]) if explicit else max(1.0, (stamp - starts.pop(unit)).total_seconds())
+        for unit, seconds in seen.items():
+            units[unit].append(seconds)
+        cases, case_sums = defaultdict(float), defaultdict(float)
+        for xml in sorted(path.glob("shard-*/unit-*.xml")) if path.is_dir() else []:
+            try:
+                root = ET.parse(xml).getroot()
+            except (ET.ParseError, OSError):
+                continue
+            for item in root.iter("testcase"):
+                if item.get("classname") in ("command", "infrastructure"):
+                    continue
+                nodeid, seconds = junit_nodeid(item), float(item.get("time") or 0)
+                cases[nodeid] += seconds
+                case_sums["pytest:" + nodeid.split("::")[0]] += seconds
+        for nodeid, seconds in cases.items():
+            nodes[nodeid].append(seconds)
+        for unit, total in case_sums.items():
+            if unit in seen:
+                overhead[unit].append(max(0.0, seen[unit] - total))
+    return {name: {key: statistics.median(values) for key, values in table.items()}
+            for name, table in (("units", units), ("nodes", nodes), ("overhead", overhead))}
+
+
+_NO_HISTORY = dict(units={}, nodes={}, overhead={})
+
+
+def planned_seconds(unit_id, guess, manifest, history, nodes=()):
+    """(seconds, timing source, nodes without a measurement).
+
+    With node history, a unit costs its nodes' measured seconds plus its measured overhead
+    (the median overhead when the unit is new); its unmeasured nodes are priced later by
+    history_rates ("history-partial"). Otherwise the unit's measured seconds, else the
+    manifest unit_seconds pin, else the guess.
+    """
+    key = unit_id.removeprefix("pytest:")
+    measured = [history["nodes"][node] for node in nodes if node in history["nodes"]]
+    if measured:
+        overhead = history["overhead"].get(unit_id, statistics.median(history["overhead"].values() or [0.0]))
+        missing = len(nodes) - len(measured)
+        return sum(measured) + overhead, "history-partial" if missing else "history", missing
+    if unit_id in history["units"]:
+        return history["units"][unit_id], "history", 0
+    if key in manifest.get("unit_seconds", {}):
+        return manifest["unit_seconds"][key], "manifest", 0
+    return guess, "guess", len(nodes)
+
+
+def history_rates(units, history):
+    """Median measured seconds per test of each component's fully measured files (and over all, key None).
+
+    A median keeps a few multi-hour files from pricing every new node of their component."""
+    rates = defaultdict(list)
+    for unit in units:
+        if unit["timing"] == "history" and unit["kind"] == "pytest" and unit["nodes"]:
+            cases = unit["seconds"] - history["overhead"].get(unit["id"], 0.0)
+            rates[unit["component"]].append(max(0.0, cases) / len(unit["nodes"]))
+            rates[None].append(max(0.0, cases) / len(unit["nodes"]))
+    return {name: statistics.median(values) for name, values in rates.items()}
 
 
 def stop_after(phase, status, policy):
@@ -278,13 +373,18 @@ def suite_matches(node, suite, two_device):
             and (not suite.get("two_device_only", False) or node in two_device))
 
 
-def progress(path, unit, event, passed, failed, elapsed):
+_PROGRESS = threading.Lock()
+
+
+def progress(path, unit, event, passed, failed, elapsed, measured=None):
     utc = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     line = (f"{utc} phase={unit_phase(unit)} unit={unit['id']} {event} "
-            f"pass={passed} fail={failed} elapsed={elapsed:.3f}s")
-    print(line, flush=True)
-    with path.open("a") as handle:
-        handle.write(line + "\n")
+            f"pass={passed} fail={failed} elapsed={elapsed:.3f}s"
+            + (f" measured={measured:.3f}s" if measured is not None else ""))
+    with _PROGRESS:
+        print(line, flush=True)
+        with path.open("a") as handle:
+            handle.write(line + "\n")
 
 
 def test_ownership(files, components):
@@ -307,6 +407,57 @@ def touched_components(paths, components):
         touched.update(source_matches)
         touched.update(name for name, c in components.items() if any(matches(path, s.split("::")[0]) for s in c["tests"]))
     return list(components) if "shared" in touched else [name for name in components if name in touched]
+
+
+def dependency_change(path):
+    return matches(path, "witwin/core") or "witwin-core" in Path(path).parts or path == "pyproject.toml"
+
+
+def executed_triggered(changed, tests, files, manifest, fallback):
+    """Test files of an executed-trigger component (``trigger = "executed"``) that ``changed`` reaches.
+
+    ``manifest`` is the component's executed-sources manifest: for each test file, the repository files
+    whose function bodies ran during that file's traced run (tests/support/line_trace.py), so a module
+    that is only imported, such as the FDTD runtime loaded by ``import witwin.maxwell``, is not a trigger.
+    A listed test file runs when a changed path is the file itself, one of its executed files, or a
+    non-Python file in an executed file's directory or one level below it (CUDA sources next to their
+    loader; the tests root directory itself does not count). A test file missing from the manifest runs when ``fallback`` (the
+    component-level source-glob/shared rule) holds. Dependency changes and changed non-Python files under
+    the component's test directories (fixtures, reference payloads) select every file.
+    """
+    if any(dependency_change(path) or (not path.endswith(".py") and any(matches(path, t) for t in tests))
+           for path in changed):
+        return sorted(files)
+    paths = manifest["paths"]
+    selected = []
+    for test in sorted(files):
+        if test not in manifest["tests"]:
+            if fallback:
+                selected.append(test)
+            continue
+        executed = {paths[i] for i in manifest["tests"][test]} | {test}
+        directories = {Path(f).parent.as_posix() for f in executed} - {"tests"}
+        if any(path in executed or (not path.endswith(".py") and (
+                Path(path).parent.as_posix() in directories or Path(path).parent.parent.as_posix() in directories))
+               for path in changed):
+            selected.append(test)
+    return selected
+
+
+def executed_sources_main(args):
+    """Build an executed-sources manifest from line-trace JSON-lines files (tests/support/line_trace.py)."""
+    executed = defaultdict(set)
+    for trace in args.traces:
+        for line in Path(trace).read_text().splitlines():
+            record = json.loads(line)
+            executed[record["nodeid"].split("::")[0]].update(record["lines"])
+    paths = sorted(set().union(*executed.values()))
+    index = {path: i for i, path in enumerate(paths)}
+    manifest = dict(commit=args.commit, traces=sorted(Path(t).name for t in args.traces), paths=paths,
+                    tests={test: sorted(index[p] for p in files) for test, files in sorted(executed.items())})
+    Path(args.output).write_text(json.dumps(manifest, separators=(",", ":")) + "\n")
+    print(f"{len(manifest['tests'])} test files, {len(paths)} executed source files -> {args.output}")
+    return 0
 
 
 def provision_benchmark_cache(source):
@@ -391,6 +542,12 @@ def validate_scenario_metric_limits(suite, names, movers):
                 raise ValueError(f"Benchmark error limit must be positive: {name}.{key}")
             if key == "field_corr_min" and not 0 < value < 1:
                 raise ValueError(f"Benchmark correlation limit must be in (0, 1): {name}.{key}")
+    for name, limits in suite.get("scenario_scalar_limits", {}).items():
+        if name not in names:
+            raise ValueError(f"Unknown benchmark scenario: {name}")
+        for key, value in limits.items():
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"Benchmark scalar limit must be positive and finite: {name}.{key}")
     covered = {entry["row"] for entry in movers if "row" in entry}
     for name, reason in suite.get("scenario_investigation", {}).items():
         if name not in names:
@@ -448,19 +605,30 @@ def check_caches_main(args):
     return 0
 
 
-def benchmark_units(source, suite, names):
+def benchmark_units(source, suite, names, history=None):
     if not names:
         return []
+    history = history or _NO_HISTORY
     timings = {}
     for line in (source / "benchmark/RESULTS.md").read_text().splitlines():
         row = [cell.strip() for cell in line.split("|")[1:-1]]
         if len(row) == 18 and row[0] in names and row[11] != "-":
             timings[row[0]] = float(row[11])
-    return [dict(suite, id=f"benchmark:{name}", argv=[*suite["argv"], name],
-                 suites={suite["id"]: []}, nodes=[f"benchmark:{name}"], component=None, always_on=True,
-                 seconds=timings.get(name, suite["estimated_seconds"] / len(names)),
-                 evidence="RESULTS.md original-run timing" if name in timings else "Guess: benchmark total / scenario count")
-            for name in names]
+
+    def timing(name):
+        if f"benchmark:{name}" in history["units"]:
+            return history["units"][f"benchmark:{name}"], "Batch history: measured unit seconds", "history"
+        if name in timings:
+            return timings[name], "RESULTS.md original-run timing", "results"
+        return suite["estimated_seconds"] / len(names), "Guess: benchmark total / scenario count", "guess"
+
+    units = []
+    for name in names:
+        seconds, evidence, source_kind = timing(name)
+        units.append(dict(suite, id=f"benchmark:{name}", argv=[*suite["argv"], name],
+                          suites={suite["id"]: []}, nodes=[f"benchmark:{name}"], component=None, always_on=True,
+                          seconds=seconds, evidence=evidence, timing=source_kind))
+    return units
 
 
 def collect(source, selectors, directory):
@@ -488,7 +656,10 @@ def collect_main(args):
             if report.failed:
                 data["errors"].append(str(report.longrepr))
 
-    code = pytest.main([*args.selectors, "--gpu", "--collect-only", "-q", "-o", "addopts="], plugins=[Collector()])
+    # The batch covers the slow tier; perf tests (idle-device wall-clock budgets) stay out. MoM milestone
+    # originals are collected so the milestone suites can claim them; integration units name nodes explicitly.
+    code = pytest.main([*args.selectors, "--gpu", "--run-slow", "--run-mom-milestone", "--collect-only", "-q", "-o", "addopts="],
+                       plugins=[Collector()])
     from benchmark.scenes import SCENARIOS
 
     data["benchmark_scenarios"] = sorted(SCENARIOS)
@@ -605,7 +776,9 @@ def undeclared_merges(source, sha, since, manifest):
     return missing
 
 
-def build_plan(source, sha, manifest, directory, since=None, tier="integration", two_gpu=False, exclude_components=(), changed_files=None):
+def build_plan(source, sha, manifest, directory, since=None, tier="integration", two_gpu=False, exclude_components=(), changed_files=None,
+               history=None):
+    history = history or _NO_HISTORY
     declared_movers = declared_pytest_movers(manifest)
     expected_movers = classify_movers(manifest.get("expected_movers", []), declared_movers)
     mover_errors = mover_declaration_errors(expected_movers, declared_movers)
@@ -630,13 +803,24 @@ def build_plan(source, sha, manifest, directory, since=None, tier="integration",
             if missing:
                 raise ValueError("Merges without a [[merge_declarations]] entry (pytest/benchmark movers or 'none'):\n" + "\n".join(missing))
     selected = list(components) if changed is None else touched_components(changed, components)
+    triggered = {}
+    if changed is not None:
+        for name, component in components.items():
+            if component.get("trigger") == "executed":
+                manifest_path = source / component["executed_sources"]
+                executed = json.loads(manifest_path.read_text()) if manifest_path.is_file() else dict(paths=[], tests={})
+                triggered[name] = executed_triggered(changed, component["tests"], [f for f in files if owners[f] == name],
+                                                     executed, name in selected)
+        selected = [name for name in selected if name not in triggered or triggered[name]]
+        selected += [name for name, files in triggered.items() if files and name not in selected]
+        selected = [name for name in components if name in selected]
     selected = [name for name in selected if name not in excluded]
     uncovered = uncovered_bit_identity_files(source, manifest)
     if uncovered:
         raise ValueError("Bit-identity test files must be in pin_files and a BITID suite: " + ", ".join(uncovered))
     declared = [s for s in manifest["suites"] if s.get("tier", "integration") != "milestone" or tier == "milestone"]
     suites = [dict(id=f"pytest-{name}", component=name, kind="pytest", status="READY", classification="MIXED",
-                   selectors=components[name]["tests"]) for name in selected] + declared
+                   selectors=triggered.get(name, components[name]["tests"])) for name in selected] + declared
     enabled = [s for s in suites if s.get("requires_gpus", 1) == 1 or two_gpu]
     cache = source / "benchmark/cache"
     cache_manifest = benchmark_cache_manifest(cache)
@@ -682,9 +866,10 @@ def build_plan(source, sha, manifest, directory, since=None, tier="integration",
         members = {s["id"]: [n for n in nodes if selected_by(n, s)]
                    for s in enabled if s["status"] == "READY" and s["kind"] == "pytest"}
         members = {key: value for key, value in members.items() if value}
-        seconds = max([manifest["pytest_seconds_per_test"] * len(nodes)] +
-                      [s["estimated_seconds"] * len(members[s["id"]]) / counts[s["id"]]
-                       for s in declared if s["id"] in members])
+        guess = max([manifest["pytest_seconds_per_test"] * len(nodes)] +
+                    [s["estimated_seconds"] * len(members[s["id"]]) / counts[s["id"]]
+                     for s in declared if s["id"] in members])
+        seconds, timing, unmeasured = planned_seconds(f"pytest:{path}", guess, manifest, history, nodes)
         text = (source / path).read_text()
         classification = "MIXED" if any(k in text for k in ("torch.equal", "rtol=0", "atol=0", "sha256", "hexdigest")) else "TOLERANCE"
         if any(s["classification"] == "BITID" and len(members.get(s["id"], [])) == len(nodes) for s in suites):
@@ -695,13 +880,25 @@ def build_plan(source, sha, manifest, directory, since=None, tier="integration",
                           require_baselines=os.environ.get("WITWIN_REQUIRE_BASELINES") == "1" and
                           any(s["classification"] == "BITID" and s["id"] in members for s in suites),
                           always_on=any(s["id"] in members for s in declared),
-                          seconds=manifest.get("unit_seconds", {}).get(path, seconds)))
+                          seconds=seconds, timing=timing, unmeasured=unmeasured))
+    # With history, nodes it does not cover (new files, renamed or new tests such as regression
+    # twins of milestone originals) are priced at their component's measured median rate instead
+    # of the per-test guess; a new file also gets the median overhead.
+    rates = history_rates(units, history)
+    overhead = statistics.median(history["overhead"].values() or [0.0])
+    for unit in units:
+        rate = rates.get(unit["component"], rates.get(None, manifest["pytest_seconds_per_test"]))
+        if unit["timing"] == "history-partial":
+            unit["seconds"] += rate * unit["unmeasured"]
+        elif unit["timing"] == "guess" and rates:
+            unit.update(seconds=rate * len(unit["nodes"]) + overhead, timing="history-rate")
     for suite in enabled:
         if suite["status"] == "READY" and suite["kind"] == "command":
             if suite.get("report_format") == "benchmark":
-                units.extend(benchmark_units(source, suite, collection["benchmark_scenarios"]))
+                units.extend(benchmark_units(source, suite, collection["benchmark_scenarios"], history))
             else:
-                units.append(dict(suite, suites={suite["id"]: []}, seconds=suite["estimated_seconds"],
+                seconds, timing, _ = planned_seconds(suite["id"], suite["estimated_seconds"], manifest, history)
+                units.append(dict(suite, suites={suite["id"]: []}, seconds=seconds, timing=timing,
                                   component=None, always_on=True, nodes=[]))
     stale = stale_caches(source, [u["id"].removeprefix("benchmark:") for u in units
                                   if u.get("report_format") == "benchmark"
@@ -713,6 +910,9 @@ def build_plan(source, sha, manifest, directory, since=None, tier="integration",
                 stale_caches=stale, trust_cache=os.environ.get("WITWIN_BENCHMARK_TRUST_CACHE") == "1",
                 suites=suites, counts=counts, units=units, collection=collection, since=since,
                 changed_paths=changed, components=list(components), selected_components=selected, tier=tier, two_gpu=two_gpu,
+                executed_triggered=triggered, milestone_triggered=sorted(
+                    node for node in milestone_nodes if components[owners[node.split("::")[0]]].get("trigger") == "executed"
+                    and (changed is None or node.split("::")[0] in triggered[owners[node.split("::")[0]]])),
                 excluded_components=excluded, milestone_only=milestone_only,
                 disabled_suites=[s["id"] for s in suites if s not in enabled],
                 known_failures=manifest["known_failures"], expected_movers=expected_movers,
@@ -755,6 +955,13 @@ def pin_changes(sha, manifest):
     return changes
 
 
+def junit_nodeid(item):
+    classname = item.get("classname", "").split(".")
+    module_end = next((i + 1 for i, part in enumerate(classname) if part.startswith("test_")), len(classname))
+    nodeid = "/".join(classname[:module_end]) + ".py"
+    return nodeid + "::" + "::".join([*classname[module_end:], item.get("name", "")])
+
+
 def junit_cases(path, require_baselines=False):
     cases = []
     for item in ET.parse(path).getroot().iter("testcase"):
@@ -770,20 +977,37 @@ def junit_cases(path, require_baselines=False):
         if require_baselines and status == "SKIP":
             status = "FAIL"
             details.append("Missing baseline: BITID skips fail when WITWIN_REQUIRE_BASELINES=1")
-        classname = item.get("classname", "").split(".")
-        module_end = next((i + 1 for i, part in enumerate(classname) if part.startswith("test_")), len(classname))
-        nodeid = "/".join(classname[:module_end]) + ".py"
-        nodeid += "::" + "::".join([*classname[module_end:], item.get("name", "")])
-        cases.append(dict(nodeid=nodeid, status=status, details="\n".join(details), seconds=float(item.get("time", "0")),
+        cases.append(dict(nodeid=junit_nodeid(item), status=status, details="\n".join(details), seconds=float(item.get("time", "0")),
                           assertion_message="\n".join(x.get("message", "") for x in (failure, error) if x is not None),
                           stdout_tail="\n".join(x.text or "" for x in item.findall("system-out"))[-8000:],
                           stderr_tail="\n".join(x.text or "" for x in item.findall("system-err"))[-8000:]))
     return cases
 
 
+def scalar_cases(rows, unit):
+    """Score scalar-observable rows (8 cells) on their relative error, for scenarios with scalar limits."""
+    cases = {}
+    for row in rows:
+        if len(row) != 8 or f"benchmark:{row[0]}" not in unit["nodes"]:
+            continue
+        limit = unit.get("scenario_scalar_limits", {}).get(row[0], {}).get(row[2])
+        if limit is None:
+            continue
+        value = float(row[5])
+        cases.setdefault(row[0], []).append(dict(
+            nodeid=f"benchmark:{row[0]}[{row[2]}]", status="PASS" if value < limit else "FAIL",
+            details=f"{row[2]} relative error: {value}; target < {limit}", seconds=0))
+    return cases
+
+
 def benchmark_cases(path, unit):
-    """Apply the existing metric guide targets, supplied explicitly by the manifest."""
+    """Apply the existing metric guide targets, supplied explicitly by the manifest.
+
+    Field cells marked ``(not scored)`` are diagnostics only; such a row passes or fails on its
+    scalar observables (``scenario_scalar_limits``).
+    """
     rows = [[c.strip() for c in line.split("|")[1:-1]] for line in path.read_text().splitlines()]
+    scalars = scalar_cases(rows, unit)
     cases = []
     for row in rows:
         if not row or f"benchmark:{row[0]}" not in unit["nodes"]:
@@ -802,13 +1026,15 @@ def benchmark_cases(path, unit):
             cases.append(dict(nodeid=nodeid, status="SKIP", details=f"Quarantined reference: {quarantine}",
                               seconds=seconds))
             continue
+        if len(row) == 7 and all("not scored" in row[i] for i, _, _ in metrics):
+            continue  # per-frequency diagnostics of a row scored on its scalar observables
         overrides = unit.get("scenario_metric_limits", {}).get(row[0], {})
         limits = {**unit["metric_limits"], **overrides}
         unconverged = any("unconverged" in row[i] for i, _, _ in metrics)
         failed = False
         details = []
         for i, key, lower in metrics:
-            if row[i] == "-" or "unconverged" in row[i]:
+            if row[i] == "-" or "unconverged" in row[i] or "not scored" in row[i]:
                 continue
             value = float(row[i])
             detail = f"{key}: {value}; target {'>' if lower else '<'} {limits[key]}"
@@ -819,9 +1045,29 @@ def benchmark_cases(path, unit):
                 failed = True
         if unconverged and not failed:
             details.append("Unconverged metrics are not passes")
+        if len(row) == 18 and row[0] in scalars:
+            failed = failed or any(case["status"] == "FAIL" for case in scalars[row[0]])
+            details.extend(case["details"] for case in scalars[row[0]])
         cases.append(dict(nodeid=nodeid, status="FAIL" if failed else "SKIP" if unconverged else "PASS",
                           details="; ".join(details), seconds=seconds))
+        if len(row) == 18:
+            cases.extend(scalars.get(row[0], []))
     return cases
+
+
+def unit_name(unit_id):
+    return "unit-" + hashlib.sha256(unit_id.encode()).hexdigest()[:16]
+
+
+def group_command(selectors, xml, basetemp):
+    """The pytest command of execute() for several files; test_integration_batch keeps the two equal."""
+    return [PYTHON, "-m", "pytest", *selectors, "--gpu", "--run-slow", "--run-mom-milestone", "-ra", "-o", "addopts=",
+            "-o", "junit_logging=all", "-o", "junit_log_passing_tests=false",
+            f"--junitxml={xml}", f"--basetemp={basetemp}"]
+
+
+_BITID_EXPOSURE = ("See original assertions and retained *-tmp payloads. Equality-only gates expose labels/booleans; "
+                   "add value dumps at the failing assertion in the selected test/probe.")
 
 
 def execute(source, sha, unit, directory, lock):
@@ -830,7 +1076,7 @@ def execute(source, sha, unit, directory, lock):
     log = directory / f"{name}.log"
     command = [PYTHON]
     if unit["kind"] == "pytest":
-        command += ["-m", "pytest", *unit["selectors"], "--gpu", "-ra", "-o", "addopts=",
+        command += ["-m", "pytest", *unit["selectors"], "--gpu", "--run-slow", "--run-mom-milestone", "-ra", "-o", "addopts=",
                     "-o", "junit_logging=all", "-o", "junit_log_passing_tests=false",
                     f"--junitxml={xml}", f"--basetemp={directory / (name + '-tmp')}"]
     else:
@@ -890,17 +1136,133 @@ def execute(source, sha, unit, directory, lock):
                   cases=cases, missing_nodes=missing, log=str(log), junit=str(xml), command=command,
                   pin_tier_log=str(tier_log),
                   pin_tiers=[json.loads(line) for line in tier_log.read_text().splitlines()],
-                  bitid_values={"old": None, "new": None, "causing_commit": None,
-                                "exposure": "See original assertions and retained *-tmp payloads. Equality-only gates expose labels/booleans; add value dumps at the failing assertion in the selected test/probe."})
+                  bitid_values={"old": None, "new": None, "causing_commit": None, "exposure": _BITID_EXPOSURE})
     write_json(directory / f"{name}.json", result)
     return result
+
+
+# Test files that change process-global state (environment, imports, default dtype,
+# backend flags) or measure memory/time keep their own interpreter.
+_PROCESS_STATE = re.compile(
+    r"os\.environ\[[^]]+\]\s*=|os\.environ\.(?:update|setdefault|pop)|os\.putenv|sys\.modules\[|importlib\.reload|"
+    r"set_default_dtype|use_deterministic_algorithms|torch\.backends\.[A-Za-z_.]+\s*=[^=]|set_per_process_memory_fraction|"
+    r"sys\.path\.insert|max_memory_allocated|max_memory_reserved|memory_reserved|mem_get_info|reset_peak_memory_stats|"
+    r"perf_counter|fresh_interpreter|_fresh")
+
+
+def groupable(source, unit, light):
+    """A light phase-2 pytest file that may share an interpreter with other light files."""
+    return (light is not None and unit["kind"] == "pytest" and unit_phase(unit) == 2 and unit["seconds"] <= light
+            and unit["classification"] != "BITID" and not unit.get("environment")
+            and not unit.get("require_baselines") and unit.get("status") != "INFRA"
+            and not _PROCESS_STATE.search((source / unit["id"].removeprefix("pytest:")).read_text()))
+
+
+def pack_jobs(units, can_group, lock_of, budget):
+    """Consecutive groupable units with the same lock share one interpreter up to budget seconds."""
+    jobs = []
+    for unit in units:
+        light = can_group(unit)
+        last = jobs[-1] if jobs else None
+        if light and last and last["light"] and lock_of(last["units"][0]) == lock_of(unit) and \
+                last["seconds"] + unit["seconds"] <= budget:
+            last["units"].append(unit)
+            last["seconds"] += unit["seconds"]
+        else:
+            jobs.append(dict(units=[unit], seconds=unit["seconds"], light=light))
+    return [job["units"] for job in jobs]
+
+
+def execute_group(source, sha, units, directory, lock):
+    """Run light pytest units in one interpreter and split the JUnit into one record per unit.
+
+    Returns (group, records). A unit whose record is None must be re-executed alone: the
+    group crashed or was interrupted, or the unit failed or lost nodes inside the group,
+    so only a passing, complete in-group outcome is accepted.
+    """
+    name = "group-" + hashlib.sha256("\n".join(u["id"] for u in units).encode()).hexdigest()[:16]
+    xml, log = directory / f"{name}.xml", directory / f"{name}.log"
+    command = group_command([s for u in units for s in u["selectors"]], xml, directory / (name + "-tmp"))
+    tier_log = directory / f"{name}-pin-tiers.jsonl"
+    tier_log.write_text("")
+    started = time.monotonic()
+    with log.open("w") as handle:
+        child = subprocess.run(command, cwd=source, env=environment(source, {"WITWIN_PIN_TIER_LOG": str(tier_log.resolve())}),
+                               stdout=handle, stderr=subprocess.STDOUT)
+    elapsed = time.monotonic() - started
+    group = dict(id=name, units=[u["id"] for u in units], seconds=elapsed, returncode=child.returncode, log=str(log))
+    if child.returncode not in (0, 1) or not xml.exists():
+        return group, {u["id"]: None for u in units}
+    owned = defaultdict(list)
+    for item in ET.parse(xml).getroot().iter("testcase"):
+        owned[junit_nodeid(item).split("::")[0]].append(item)
+    paths = {u["id"]: u["id"].removeprefix("pytest:") for u in units}
+    case_seconds = {uid: sum(float(i.get("time") or 0) for i in owned[path]) for uid, path in paths.items()}
+    share = max(0.0, elapsed - sum(case_seconds.values())) / len(units)
+    pin_rows = [json.loads(line) for line in tier_log.read_text().splitlines()]
+    records = {}
+    for unit in units:
+        path = paths[unit["id"]]
+        unit_xml = directory / f"{unit_name(unit['id'])}.xml"
+        root = ET.Element("testsuites")
+        suite = ET.SubElement(root, "testsuite", name=unit["id"], tests=str(len(owned[path])))
+        suite.extend(owned[path])
+        ET.ElementTree(root).write(unit_xml, encoding="unicode")
+        cases = junit_cases(unit_xml)
+        missing = sorted(set(unit.get("nodes", [])) - {c["nodeid"] for c in cases})
+        if not cases or missing or any(c["status"] == "FAIL" for c in cases):
+            records[unit["id"]] = None
+            continue
+        status = "INCOMPLETE" if any(c["status"] == "SKIP" for c in cases) else "PASS"
+        result = dict(unit=unit, commit=sha, status=status, returncode=0, seconds=case_seconds[unit["id"]] + share,
+                      lock=str(lock) if lock else None, cases=cases, missing_nodes=[], log=str(log), junit=str(unit_xml),
+                      command=command, pin_tier_log=str(tier_log),
+                      pin_tiers=[row for row in pin_rows if row["nodeid"].split("::")[0] == path], group=group,
+                      bitid_values={"old": None, "new": None, "causing_commit": None, "exposure": _BITID_EXPOSURE})
+        write_json(directory / f"{unit_name(unit['id'])}.json", result)
+        records[unit["id"]] = result
+    return group, records
+
+
+class DeviceShare:
+    """Pytest jobs share the lane device; a command job (no pytest memcap) runs alone.
+    A waiting command job blocks new pytest jobs so it cannot starve."""
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._shared = 0
+        self._alone = False
+        self._waiting = 0
+
+    @contextmanager
+    def hold(self, alone):
+        with self._condition:
+            if alone:
+                self._waiting += 1
+                self._condition.wait_for(lambda: not self._alone and self._shared == 0)
+                self._waiting -= 1
+                self._alone = True
+            else:
+                self._condition.wait_for(lambda: not self._alone and self._waiting == 0)
+                self._shared += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                if alone:
+                    self._alone = False
+                else:
+                    self._shared -= 1
+                self._condition.notify_all()
 
 
 def plan_main(args):
     require_two_gpu(args.two_gpu)
     sha, source = source_tree(args)
     with tempfile.TemporaryDirectory(prefix="ib-plan-") as temporary:
-        plan = build_plan(source, sha, load_manifest(), Path(temporary), args.since, args.tier, args.two_gpu, args.exclude_component, args.changed_files)
+        manifest = load_manifest()
+        plan = build_plan(source, sha, manifest, Path(temporary), args.since, args.tier, args.two_gpu, args.exclude_component, args.changed_files,
+                          read_history(args.history))
     print("Component | Full pytest selected | GPU-h (including always-on overlap)")
     for name in plan["components"]:
         hours = sum(u["seconds"] for u in plan["units"] if u["component"] == name) / 3600
@@ -910,6 +1272,10 @@ def plan_main(args):
     print(f"Always-on suites, deduplicated: {always_hours:.3f} GPU-h\n")
     for path in plan["milestone_only"]:
         print(f"milestone-only: {path}")
+    for name, files in plan["executed_triggered"].items():
+        print(f"{name}: executed-source-triggered test files: {len(files)}" + "".join(f"\n  {f}" for f in files))
+    for node in plan["milestone_triggered"]:
+        print(f"milestone run triggered (needs --tier milestone): {node}")
     for item in plan["not_run"]:
         print(f"NOT RUN (needs 2 GPUs): {item['nodeid']} [{item['reason']}]")
     if plan["trust_cache"]:
@@ -928,9 +1294,26 @@ def plan_main(args):
                   + (f" INFRA ({unit['reason']})" if unit.get("status") == "INFRA" else "")
                   + (f" [{unit['evidence']}]" if unit.get("report_format") == "benchmark" else ""))
     print(f"\nUnique scheduled work: ~{sum(loads) / 3600:.2f} h; estimated wall ~{max(loads) / 3600:.2f} h (unresolved suites excluded).")
+    for line in timing_summary(plan["units"], manifest):
+        print(line)
     for error in plan["collection"]["errors"]:
         print(error, file=sys.stderr)
     return int(plan["collection"]["exit_code"] != 0)
+
+
+def timing_summary(units, manifest):
+    """Where the planned seconds come from, and what phase 1 already covers."""
+    lines = []
+    for kind in ("history", "history-partial", "history-rate", "manifest", "results", "guess"):
+        chosen = [u for u in units if u.get("timing") == kind]
+        if chosen:
+            lines.append(f"Timing {kind}: {len(chosen)} units, ~{sum(u['seconds'] for u in chosen) / 3600:.2f} h")
+    phase_one = [u for u in units if unit_phase(u) == 1]
+    pinned = [path for path in manifest["pin_files"] if any(matches(path, u["id"].removeprefix("pytest:")) for u in phase_one)]
+    lines.append(f"Phase 1: {len(phase_one)} units, ~{sum(u['seconds'] for u in phase_one) / 3600:.2f} h; runs "
+                 f"{len(pinned)}/{len(manifest['pin_files'])} pin_files (BITID-8). A standalone BITID-8 run at this commit "
+                 "duplicates phase 1.")
+    return lines
 
 
 def claim_unit(claim_dir, unit_id):
@@ -963,12 +1346,18 @@ def run_main(args):
     k, n = map(int, args.shard.split("/"))
     if not 0 <= k < n:
         raise ValueError("shard must be K/N with 0 <= K < N")
+    if args.procs < 1:
+        raise ValueError("--procs must be positive")
+    if args.procs > 1 and (not args.min_free_mib or args.lock):
+        raise ValueError("--procs > 1 needs --min-free-mib (per-process memcap plus margin) and no lane --lock, "
+                         "which would serialize every unit; use --lock-for for units that need exclusivity")
     sha, source = source_tree(args)
     label = args.label or str(k)
     directory = Path(args.out).resolve() / f"shard-{label}"
     directory.mkdir(parents=True, exist_ok=False)
     manifest = load_manifest()
-    plan = build_plan(source, sha, manifest, directory, args.since, args.tier, args.two_gpu, args.exclude_component, args.changed_files)
+    plan = build_plan(source, sha, manifest, directory, args.since, args.tier, args.two_gpu, args.exclude_component, args.changed_files,
+                      read_history(args.history))
     lanes, _ = balance(plan["units"], n)
     # --units-from replaces the balanced lane with an explicit list (work stealing after a
     # stopped shard); every listed unit must exist in this commit's plan.
@@ -979,7 +1368,8 @@ def run_main(args):
         raise ValueError(f"--units-from lists units absent from the plan: {unknown[:5]}")
     plan.update(shard=label, shards=n, claimed=bool(args.claim_dir), assigned=sorted(assigned, key=lambda uid: unit_order(next(u for u in plan["units"] if u["id"] == uid))),
                 stop_on_fail=args.stop_on_fail, pin_changes=None if args.in_place else pin_changes(sha, manifest),
-                no_start_after=args.no_start_after,
+                no_start_after=args.no_start_after, procs=args.procs, group_light=args.group_light,
+                group_budget=args.group_budget,
                 effective_pins={p: pin_values((source / p).read_text() if args.in_place else git(ROOT, "show", f"{sha}:{p}"),
                                               effective=True) for p in manifest["pin_files"]})
     write_json(directory / "plan.json", plan)
@@ -988,36 +1378,104 @@ def run_main(args):
     progress_path = directory.parent / "progress.log"
     docs_manifest = os.environ.get("WITWIN_TEST_DOCS_MANIFEST") if args.in_place else None
     excluded_docs = json.loads(Path(docs_manifest).read_text())["excluded"] if docs_manifest else []
+
+    def lock_of(unit):
+        return unit_lock(unit["id"], args.lock, overrides)
+
     results = []
-    passed = failed = 0
-    for unit in select_units(plan["units"], plan["assigned"]):
+    counts = dict(passed=0, failed=0)
+    guard, memory, device = threading.Lock(), threading.Lock(), DeviceShare()
+
+    def run_job(job):
+        """Execute one unit, or a group of light units in one interpreter; returns (unit, result) pairs."""
         started = time.monotonic()
-        lock = unit_lock(unit["id"], args.lock, overrides)
+        lock = lock_of(job[0])
+
         def on_defer(until):
-            progress(progress_path, unit, f"DEFER until={until.isoformat()}", passed, failed, time.monotonic() - started)
-        missing_docs = missing_unit_docs(source, unit, excluded_docs, manifest.get("docs_text_mentions", [])) if args.in_place else []
-        reason = unit.get("reason") if unit.get("status") == "INFRA" else None
-        if missing_docs:
-            reason = "docs path not staged for cloud: " + ", ".join(missing_docs)
-        with unit_slot(lock, unit["seconds"], windows, on_defer):
-            if args.claim_dir and not claim_unit(Path(args.claim_dir), unit["id"]):
-                continue
-            if reason is None:
-                wait_for_free_memory(args.min_free_mib)
-            progress(progress_path, unit, "START", passed, failed, 0)
-            if reason is not None:
-                result = dict(unit=unit, commit=sha, status="INFRA", returncode=None, cases=[],
-                              reason=reason)
-                name = "unit-" + hashlib.sha256(unit["id"].encode()).hexdigest()[:16]
-                write_json(directory / f"{name}.json", result)
-            else:
-                result = execute(source, sha, unit, directory, lock)
-        results.append(result)
-        passed += sum(c["status"] == "PASS" for c in result["cases"])
-        failed += sum(c["status"] == "FAIL" for c in result["cases"])
-        progress(progress_path, unit, f"END status={result['status']}", passed, failed, time.monotonic() - started)
-        if stop_after(unit_phase(unit), result["status"], args.stop_on_fail) and not (unit_phase(unit) == 1 and known_only(result, manifest)):
+            progress(progress_path, job[0], f"DEFER until={until.isoformat()}", counts["passed"], counts["failed"],
+                     time.monotonic() - started)
+        reasons = {}
+        for unit in job:
+            missing_docs = missing_unit_docs(source, unit, excluded_docs, manifest.get("docs_text_mentions", [])) if args.in_place else []
+            reasons[unit["id"]] = ("docs path not staged for cloud: " + ", ".join(missing_docs) if missing_docs else
+                                   unit.get("reason") if unit.get("status") == "INFRA" else None)
+        with device.hold(job[0]["kind"] != "pytest"), unit_slot(lock, sum(u["seconds"] for u in job), windows, on_defer):
+            members = [u for u in job if not args.claim_dir or claim_unit(Path(args.claim_dir), u["id"])]
+            if not members:
+                return []
+            runnable = [u for u in members if reasons[u["id"]] is None]
+            if runnable:
+                with memory:
+                    wait_for_free_memory(args.min_free_mib)
+            for unit in members:
+                progress(progress_path, unit, "START", counts["passed"], counts["failed"], 0)
+            done = {}
+            for unit in members:
+                if reasons[unit["id"]] is not None:
+                    done[unit["id"]] = dict(unit=unit, commit=sha, status="INFRA", returncode=None, cases=[],
+                                            reason=reasons[unit["id"]])
+                    write_json(directory / f"{unit_name(unit['id'])}.json", done[unit["id"]])
+            if len(runnable) > 1:
+                group, records = execute_group(source, sha, runnable, directory, lock)
+                done.update((uid, record) for uid, record in records.items() if record is not None)
+                for unit in runnable:
+                    if records[unit["id"]] is None:
+                        # The in-group outcome is not accepted; the unit's own interpreter decides.
+                        done[unit["id"]] = execute(source, sha, unit, directory, lock)
+                        done[unit["id"]]["group"] = dict(group, rerun_alone=True)
+                        write_json(directory / f"{unit_name(unit['id'])}.json", done[unit["id"]])
+            elif runnable:
+                done[runnable[0]["id"]] = execute(source, sha, runnable[0], directory, lock)
+        outcomes = []
+        for unit in members:
+            result = done[unit["id"]]
+            with guard:
+                results.append(result)
+                counts["passed"] += sum(c["status"] == "PASS" for c in result["cases"])
+                counts["failed"] += sum(c["status"] == "FAIL" for c in result["cases"])
+                passed, failed = counts["passed"], counts["failed"]
+            progress(progress_path, unit, f"END status={result['status']}", passed, failed, time.monotonic() - started,
+                     result.get("seconds"))
+            outcomes.append((unit, result))
+        return outcomes
+
+    def stops(outcomes):
+        return any(stop_after(unit_phase(unit), result["status"], args.stop_on_fail) and
+                   not (unit_phase(unit) == 1 and known_only(result, manifest)) for unit, result in outcomes)
+
+    jobs = pack_jobs(select_units(plan["units"], plan["assigned"]),
+                     lambda unit: groupable(source, unit, args.group_light), lock_of, args.group_budget)
+    # Phase 1 always runs one unit at a time; --procs workers start on phase 2.
+    split = len(jobs) if args.procs == 1 else next((i for i, job in enumerate(jobs) if unit_phase(job[0]) == 2), len(jobs))
+    stopped = False
+    for job in jobs[:split]:
+        if stops(run_job(job)):
+            stopped = True
             break
+    if not stopped and split < len(jobs):
+        pending, take, errors = iter(jobs[split:]), threading.Lock(), []
+        halt = threading.Event()
+
+        def worker():
+            while not halt.is_set():
+                with take:
+                    job = next(pending, None)
+                if job is None:
+                    return
+                try:
+                    if stops(run_job(job)):
+                        halt.set()
+                except BaseException as error:  # surfaced in the main thread below
+                    errors.append(error)
+                    halt.set()
+
+        threads = [threading.Thread(target=worker, name=f"lane-proc-{index}") for index in range(args.procs)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if errors:
+            raise errors[0]
     return int(bool(plan["not_run"] or plan["disabled_suites"]) or any(r["status"] != "PASS" for r in results) or any(s["status"] != "READY" for s in plan["suites"]))
 
 
@@ -1236,6 +1694,9 @@ def main():
                       help="exclude a full-pytest component; always-on suites remain selected")
     plan.add_argument("--tier", choices=("integration", "milestone"), default="integration")
     plan.add_argument("--two-gpu", action="store_true", help="admit the selected two-device suites")
+    plan.add_argument("--history", action="append", default=[], metavar="BATCH_DIR",
+                      help="earlier batch output (directory or progress.log) whose measured unit seconds replace "
+                           "guesses; repeat for a median; run must receive the same list")
     run = subs.add_parser("run")
     run.add_argument("--commit", required=True)
     run.add_argument("--shard", required=True, help="zero-based K/N")
@@ -1245,6 +1706,17 @@ def main():
     run.add_argument("--label", help="output directory label (shard-<label>); defaults to K")
     run.add_argument("--claim-dir", help="shared directory of O_EXCL unit claims; claimed units are skipped")
     run.add_argument("--min-free-mib", type=int, default=0, help="wait for this much free GPU memory before each unit")
+    run.add_argument("--history", action="append", default=[], metavar="BATCH_DIR",
+                     help="earlier batch output whose measured unit seconds replace guesses (same list as plan and every shard)")
+    run.add_argument("--procs", type=int, default=1,
+                     help="phase-2 units run concurrently on this lane's device (opt-in; needs --min-free-mib and a "
+                          "per-process memcap; command units still run alone)")
+    run.add_argument("--group-light", type=float, metavar="SECONDS",
+                     help="opt-in: run consecutive phase-2 pytest files planned at <= SECONDS in one interpreter; "
+                          "BITID, environment and process-state files stay alone; a unit that fails or loses nodes "
+                          "in a group is re-run alone and that outcome is recorded")
+    run.add_argument("--group-budget", type=float, default=600, metavar="SECONDS",
+                     help="planned seconds per light-file group (default 600)")
     run.add_argument("--lock-for", action="append", default=[], metavar="PATTERN=PATH",
                      help="override the per-unit lock by unit-ID glob; last matching pattern wins")
     selection = run.add_mutually_exclusive_group()
@@ -1269,6 +1741,10 @@ def main():
     bisect.add_argument("--good", required=True)
     bisect.add_argument("--bad", required=True)
     bisect.add_argument("--units", nargs="+", required=True, help="plan unit IDs (pytest:path, benchmark:name or command suite ID)")
+    executed = subs.add_parser("executed-sources", help="build an executed-trigger manifest from line traces")
+    executed.add_argument("--commit", required=True, help="commit the traces were taken at")
+    executed.add_argument("--output", required=True)
+    executed.add_argument("traces", nargs="+", help="--line-trace JSON-lines files")
     collection = subs.add_parser("_collect", help=argparse.SUPPRESS)
     collection.add_argument("output")
     collection.add_argument("selectors", nargs="+")
@@ -1283,7 +1759,7 @@ def main():
     worker.add_argument("--units", nargs="+", required=True)
     args = parser.parse_args()
     return {"plan": plan_main, "run": run_main, "report": report_main,
-            "bisect": bisect_main, "_collect": collect_main, "_check-caches": check_caches_main, "_probe": probe_main,
+            "bisect": bisect_main, "executed-sources": executed_sources_main, "_collect": collect_main, "_check-caches": check_caches_main, "_probe": probe_main,
             "_bisect-worker": bisect_worker_main}[args.action](args)
 
 

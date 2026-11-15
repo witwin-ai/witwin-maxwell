@@ -11,7 +11,7 @@ import math
 
 import torch
 
-from ...layers import HalfSpace, LayerStack
+from ...layers import HalfSpace, LayerStack, permittivity_key, relative_permittivity
 from .build import build_extension
 
 
@@ -41,7 +41,12 @@ _GAUSS_WEIGHTS = (
 )
 
 
-def _image_paths(stack, planes, pairs, fmin, fmax, limit, *, vertical=False):
+def _probe_frequencies(stack, frequencies):
+    """Host frequencies for pruning bounds: the band ends, or every frequency if dispersive."""
+    return tuple(frequencies) if stack.dispersive else (min(frequencies), max(frequencies))
+
+
+def _image_paths(stack, planes, pairs, frequencies, limit, *, vertical=False):
     """Enumerate static rays; CUDA evaluates their frequency-dependent weights.
 
     Only rays shorter than ``limit`` are extracted; longer bounce terms stay in
@@ -53,18 +58,18 @@ def _image_paths(stack, planes, pairs, fmin, fmax, limit, *, vertical=False):
     media = (stack.bottom, *stack.layers, stack.top)
     edges = stack.interfaces()
 
+    probes = _probe_frequencies(stack, frequencies)
+
     def dielectric(index, frequency):
         m = media[index]
-        return complex(m.eps_r) + 1j * m.sigma / (2 * math.pi * frequency * _EPS0)
+        return relative_permittivity(m, frequency) + 1j * m.sigma / (2 * math.pi * frequency * _EPS0)
 
     def coefficient(a, b, transmission):
         if media[b] == "pec":
             return 1.0
-        ea, eb = dielectric(a, fmin), dielectric(b, fmin)
-        rlow = (ea - eb) / (ea + eb)
-        ea, eb = dielectric(a, fmax), dielectric(b, fmax)
-        rhigh = (ea - eb) / (ea + eb)
-        return max(abs(1 + rlow), abs(1 + rhigh)) if transmission else max(abs(rlow), abs(rhigh))
+        reflections = [(ea - eb) / (ea + eb) for ea, eb in
+                       ((dielectric(a, f), dielectric(b, f)) for f in probes)]
+        return max(abs(1 + r) if transmission else abs(r) for r in reflections)
 
     distances, sources, offsets, events, multiplicities = [], [], [0], [], []
     pair_offsets = [0]
@@ -183,7 +188,8 @@ def _quadrature_bins(rho_nodes, near, rho_max, wave_bound, truncation, frequenci
 class LayeredGreenTable:
     """Contiguous [frequency, reciprocal pair, component, rho] remainder table.
 
-    Components are (G^A_xx, K^Phi). Float plane arguments to evaluate are z
+    Components are (G^A_xx, K^Phi). ``media`` is the relative permittivity per region,
+    [regions] for constant stacks or [frequency, regions] for dispersive layers. Float plane arguments to evaluate are z
     coordinates; Python integers and int64 CUDA arguments index sorted ``planes``. Pair
     arguments are scalar or have the same number of entries as ``rho``.
     Output shape is [frequency, component, *rho.shape]. At a coincident source
@@ -224,7 +230,7 @@ class LayeredGreenTable:
 
     @classmethod
     def build(cls, stack: LayerStack, planes, frequencies, rho_max, *, device, extract_distance=math.inf,
-              via_spans=(), z_nodes=8):
+              via_spans=(), z_nodes=8, stream_graded=False):
         """Build from host stack/plane/frequency metadata onto the CUDA device.
 
         Declared via_spans add (zz,zrho,rhoz,phi) tables on per-layer Chebyshev
@@ -237,15 +243,19 @@ class LayeredGreenTable:
         the mesh are extracted. It must be at least the thinnest finite layer,
         which keeps every unextracted exp(-q d) term below exp(-24) at the real-axis
         truncation. Closed-form (exact-mode) stacks always keep their images.
+        stream_graded (R4-2): return None when several frequencies would need a
+        graded vertical table; the caller streams single-frequency tables.
         """
         # Cubic phase interpolation needs this density for the 1e-9, five-wavelength gate.
         result = cls._build(stack, planes, frequencies, rho_max, device=device,
                             rho_nodes=8192 if math.isinf(extract_distance) else 5121,
                             extract_distance=extract_distance)
         if via_spans:
-            from .vertical import VerticalGreenTable
-            result.vertical = VerticalGreenTable.build(result, stack, via_spans, z_nodes=z_nodes,
-                                                        extract_distance=extract_distance)
+            from .vertical_refine import admitted_vertical_table
+            result.vertical = admitted_vertical_table(result, stack, via_spans, z_nodes=z_nodes,
+                                                      extract_distance=extract_distance, defer_grading=stream_graded)
+            if result.vertical is None:
+                return None
         return result
 
     @classmethod
@@ -257,7 +267,8 @@ class LayeredGreenTable:
         regions = (stack.bottom, *stack.layers, stack.top)
         dielectrics = tuple(m for m in regions if m != "pec")
         reference = dielectrics[0]
-        uniform = all((m.eps_r, m.sigma) == (reference.eps_r, reference.sigma) for m in dielectrics)
+        uniform = all((permittivity_key(m.eps_r), m.sigma) == (permittivity_key(reference.eps_r), reference.sigma)
+                      for m in dielectrics)
         bottom, top = stack.bottom == "pec", stack.top == "pec"
         exact_mode = (2 if bottom else 3 if top else 1) if uniform and not (bottom and top) else 0
         ground = 0.0 if bottom else stack.interfaces()[-1]
@@ -267,12 +278,16 @@ class LayeredGreenTable:
         if extract_distance < dmin:
             raise ValueError(f"extract_distance {extract_distance:g} is below the thinnest layer {dmin:g}")
         distances, sources, path_offsets, events, pair_offsets, multiplicities = _image_paths(
-            stack, heights, pair_values, fmin, fmax, math.inf if exact_mode else extract_distance)
+            stack, heights, pair_values, frequency_values, math.inf if exact_mode else extract_distance)
 
         def tensor(data, dtype):
             return torch.tensor(data, dtype=dtype, device=device)
 
-        media = tensor(tuple(complex(m.eps_r) if m != "pec" else 1.0 for m in regions), torch.complex128)
+        # Dispersive stacks store one permittivity row per frequency ([F, regions]);
+        # constant stacks keep one frequency-independent row ([regions]).
+        media = tensor(tuple(tuple(relative_permittivity(m, f) if m != "pec" else 1.0 for m in regions)
+                             for f in frequency_values) if stack.dispersive else
+                       tuple(complex(m.eps_r) if m != "pec" else 1.0 for m in regions), torch.complex128)
         sigma = tensor(tuple(m.sigma if m != "pec" else 0.0 for m in regions), torch.float64)
         edges = tensor(stack.interfaces(), torch.float64)
         plane_tensor = tensor(heights, torch.float64)
@@ -297,8 +312,10 @@ class LayeredGreenTable:
                             tensor(distances, torch.float64), tensor(multiplicities, torch.float64))
         images = ext.group_images(images, tensor(group_ranges, torch.int64))
         # These conservative scales are quadrature metadata, not evaluated fields.
+        probes = _probe_frequencies(stack, frequency_values)
         km = 2 * math.pi * fmax / _C0 * math.sqrt(max(
-            abs(complex(m.eps_r)) + m.sigma / (2 * math.pi * fmin * _EPS0) for m in dielectrics))
+            max(abs(relative_permittivity(m, f)) for f in probes) + m.sigma / (2 * math.pi * fmin * _EPS0)
+            for m in dielectrics))
         # Unextracted static rays have d >= extract_distance. The extracted
         # q^-3 term leaves the algebraic O(T^-3) tail covered by 512*km.
         decay_distance = dmin if math.isinf(extract_distance) else extract_distance

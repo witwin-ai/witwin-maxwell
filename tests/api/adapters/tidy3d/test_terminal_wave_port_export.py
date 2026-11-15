@@ -17,16 +17,16 @@ UM = 1.0e6
 
 
 def _pair_port(**kwargs):
-    voltages = tuple(mw.CustomVoltageIntegral(mw.PolylinePath(((0, c, 2e-4), (0, c + 1e-4, 1e-4), (0, c + 1e-4, 0.0))))
+    voltages = tuple(mw.rf.CustomVoltageIntegral(mw.rf.PolylinePath(((0, c, 2e-4), (0, c + 1e-4, 1e-4), (0, c + 1e-4, 0.0))))
                      for c in (3e-4, -3e-4))
     currents = (
-        mw.CustomCurrentIntegral(mw.RectangleLoop(center=(0, 3e-4, 2e-4), size=(0, 3.1e-4, 2.1e-4))),
-        mw.CompositeCurrentIntegral(((1.0, mw.CustomCurrentIntegral(mw.CircleLoop((0, -3e-4, 2e-4), 1.6e-4, "x", 16))),
-                                     (-1.0, mw.CustomCurrentIntegral(mw.PolygonLoop(
+        mw.rf.CustomCurrentIntegral(mw.rf.RectangleLoop(center=(0, 3e-4, 2e-4), size=(0, 3.1e-4, 2.1e-4))),
+        mw.rf.CompositeCurrentIntegral(((1.0, mw.rf.CustomCurrentIntegral(mw.rf.CircleLoop((0, -3e-4, 2e-4), 1.6e-4, "x", 16))),
+                                     (-1.0, mw.rf.CustomCurrentIntegral(mw.rf.PolygonLoop(
                                          ((0, -5e-4, 0.5e-4), (0, -1e-4, 0.5e-4), (0, -3e-4, 4e-4))))))),
     )
-    return mw.TerminalWavePort("P1", position=(0, 0, 4e-4), size=(0, 2e-3, 8e-4), direction="+", reference_plane=0.0,
-                               terminals=(mw.TerminalRef("a"), mw.TerminalRef("b")), reference=mw.TerminalRef("g"),
+    return mw.rf.TerminalWavePort("P1", position=(0, 0, 4e-4), size=(0, 2e-3, 8e-4), direction="+", reference_plane=0.0,
+                               terminals=(mw.rf.TerminalRef("a"), mw.rf.TerminalRef("b")), reference=mw.rf.TerminalRef("g"),
                                voltage_integrals=voltages, current_integrals=currents, **kwargs)
 
 
@@ -59,12 +59,12 @@ def test_reference_adapter_rejects_constructs_without_an_equivalent():
         terminal_wave_port_to_tidy3d(_pair_port(reference_impedance=(40.0, 60.0)))
     with pytest.raises(ValueError, match="modal-basis"):
         terminal_wave_port_to_tidy3d(_pair_port(basis="modal"))
-    segment = mw.CustomVoltageIntegral(mw.AxisSegment((0, 0, 1e-4), (0, 0, 0)))
+    segment = mw.rf.CustomVoltageIntegral(mw.rf.AxisSegment((0, 0, 1e-4), (0, 0, 0)))
     with pytest.raises(ValueError, match="Only CustomVoltageIntegral"):
-        voltage_integral_to_tidy3d(mw.CompositeVoltageIntegral(((0.5, segment), (0.5, segment))), axis="x")
-    loop = mw.CustomCurrentIntegral(mw.RectangleLoop(center=(0, 0, 0), size=(0, 1e-4, 1e-4)))
+        voltage_integral_to_tidy3d(mw.rf.CompositeVoltageIntegral(((0.5, segment), (0.5, segment))), axis="x")
+    loop = mw.rf.CustomCurrentIntegral(mw.rf.RectangleLoop(center=(0, 0, 0), size=(0, 1e-4, 1e-4)))
     with pytest.raises(ValueError, match="flat composites"):
-        current_integral_to_tidy3d(mw.CompositeCurrentIntegral(((0.5, loop),)), axis="x", direction="+")
+        current_integral_to_tidy3d(mw.rf.CompositeCurrentIntegral(((0.5, loop),)), axis="x", direction="+")
     reversed_loop = np.asarray(current_integral_to_tidy3d(loop, axis="x", direction="-").vertices)
     area = 0.5 * np.sum(reversed_loop[:-1, 0] * reversed_loop[1:, 1] - reversed_loop[1:, 0] * reversed_loop[:-1, 1])
     assert area < 0      # right-handed about -x for a '-' port

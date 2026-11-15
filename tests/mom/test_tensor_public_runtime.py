@@ -21,19 +21,19 @@ def test_public_tensor_scalar_limit_multibody_restore(backend, tmp_path, monkeyp
             name=f'body{i}') for i, (x, eps, mu) in enumerate(((-.5, 2., 1.3), (.5, 3., 1.5)))],
             sources=[mw.PlaneWave()])
     physical = scene(True)
-    base = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=3),
-                        query_config=mw.FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1')
-    reference = mw.Simulation.mom(scene(False), frequency=3e8, config=base).run()
-    config = replace(base, dyadic_integration=mw.DyadicIntegrationConfig(), dyadic_cache_max_bytes=1024**2,
+    base = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=3),
+                        query_config=mw.mom.FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1')
+    reference = mw.Simulation.mom(scene(False), frequencies=3e8, config=base).run()
+    config = replace(base, dyadic_integration=mw.mom.DyadicIntegrationConfig(), dyadic_cache_max_bytes=1024**2,
         operator_backend=backend, riesz_storage='compact_rwg_v1' if backend == 'dense' else 'local_rwg_v1',
-        hierarchical=None if backend == 'dense' else mw.HMatrixConfig(pivoting='adaptive'),
+        hierarchical=None if backend == 'dense' else mw.mom.HMatrixConfig(pivoting='adaptive'),
         stopping=StoppingRule(method='direct') if backend == 'dense' else StoppingRule(method='gmres',
             preconditioner='row_column_norm', rtol=1e-12, atol=0., maxiter=240, restart=120))
-    result = mw.Simulation.mom(physical, frequency=3e8, config=config).run()
+    result = mw.Simulation.mom(physical, frequencies=3e8, config=config).run()
     assert result.stats()['converged'], result.stats()
-    data = result.surface_currents
+    data = mw.mom.surface_currents(result)
     assert all(isinstance(b.interior, TensorMedium) for b in data.handle.system.bodies)
-    for got, expected in zip(data.scattered_coefficients.chunk(2), reference.surface_currents.scattered_coefficients.chunk(2)):
+    for got, expected in zip(data.scattered_coefficients.chunk(2), mw.mom.surface_currents(reference).scattered_coefficients.chunk(2)):
         assert float((got-expected).norm()/expected.norm()) < 1e-8
     if backend == 'hmatrix':
         assert data.handle.metadata['far_blocks'] > 0
@@ -70,8 +70,8 @@ def test_public_tensor_scalar_limit_multibody_restore(backend, tmp_path, monkeyp
             for actual, expected in zip((decoded.apply(vector), decoded.adjoint(vector)), actions):
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     restored = mw.Result.load(path, scene=physical)
-    assert restored.surface_currents.config == config
-    assert torch.equal(restored.surface_currents.scattered_coefficients, data.scattered_coefficients)
+    assert mw.mom.surface_currents(restored).config == config
+    assert torch.equal(mw.mom.surface_currents(restored).scattered_coefficients, data.scattered_coefficients)
     for got, expected in zip(restored.query_fields(points, region_id='body0', field_kind='total'), fields):
         torch.testing.assert_close(got, expected, rtol=0, atol=0)
     for modify in ('budget', 'material', 'qualification', 'operator', 'rhs'):
@@ -85,7 +85,7 @@ def test_public_tensor_scalar_limit_multibody_restore(backend, tmp_path, monkeyp
         else:
             damaged['body_table'][0]['interior']['mu_r_real_imag'][0][0][0] += .1
         with pytest.raises(ValueError, match='identity|material'):
-            SurfaceData.restore(damaged, physical, 3e8)
+            SurfaceData.restore(damaged, physical, 3e8, 'cuda')
     outer = torch.load(path, weights_only=False)
     outer['metadata']['physical_qualification'] = True
     damaged_path = tmp_path/'wrong_outer.pt'
@@ -100,8 +100,8 @@ def test_public_tensor_scalar_limit_multibody_restore(backend, tmp_path, monkeyp
     local.tensor_contrast_kernel = contrast
     if backend != 'dense':
         assert local.tensor_kernel is data.handle.provider.interior_kernels[0]
-    kernel = restored.surface_currents.handle.body_handles[0].tensor_kernel
-    restored.surface_currents.handle.body_handles[0].tensor_kernel = replace(kernel)
+    kernel = mw.mom.surface_currents(restored).handle.body_handles[0].tensor_kernel
+    mw.mom.surface_currents(restored).handle.body_handles[0].tensor_kernel = replace(kernel)
     with pytest.raises(ValueError, match='binding changed'):
         restored.query_fields(points, region_id='body0', field_kind='total')
 
@@ -111,33 +111,33 @@ def test_public_anisotropic_kernel_failure_is_not_a_scalar_fallback(periodic,bac
     from witwin.maxwell.mom.dyadic_green import DyadicConvergenceError
     material = mw.Material(epsilon_tensor=mw.DiagonalTensor3(2., 3., 4.), sigma_e=.01)
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.01), material)], sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=1, singular_order=1, pair_batch=1),
-        periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)) if periodic else None,
-        dyadic_integration=mw.DyadicIntegrationConfig(radial_order=2, azimuthal_order=2,
+    config = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=1, singular_order=1, pair_batch=1),
+        periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)) if periodic else None,
+        dyadic_integration=mw.mom.DyadicIntegrationConfig(radial_order=2, azimuthal_order=2,
             max_radial_order=4, max_azimuthal_order=4, relative_tolerance=1e-12, absolute_tolerance=1e-15))
     if backend != 'dense':
         from witwin.maxwell.mom.linalg import StoppingRule
         config = replace(config, operator_backend=backend, riesz_storage='local_rwg_v1',
             stopping=StoppingRule(method='gmres', fallback='none'))
     with pytest.raises(DyadicConvergenceError):
-        mw.Simulation.mom(scene, frequency=3e8, config=config).prepare()
+        mw.Simulation.mom(scene, frequencies=3e8, config=config).prepare()
 
 
 def test_tensor_combinations_reject_before_construction():
     for backend in ('fmm', 'direct_h2'):
         with pytest.raises(NotImplementedError, match='Tensor interiors'):
-            mw.MoMConfig(operator_backend=backend, dyadic_integration=mw.DyadicIntegrationConfig())
+            mw.mom.MoMConfig(operator_backend=backend, dyadic_integration=mw.mom.DyadicIntegrationConfig())
     for backend in ('fmm','direct_h2'):
         with pytest.raises(NotImplementedError, match='Tensor interiors'):
-            mw.MoMConfig(operator_backend=backend,periodic=mw.MoMPeriodicConfig(((1., 0., 0.),)),
-                         dyadic_integration=mw.DyadicIntegrationConfig())
+            mw.mom.MoMConfig(operator_backend=backend,periodic=mw.mom.MoMPeriodicConfig(((1., 0., 0.),)),
+                         dyadic_integration=mw.mom.DyadicIntegrationConfig())
 
     from witwin.maxwell.mom.linalg import StoppingRule
     for backend in ('hmatrix','h2'):
-        config = mw.MoMConfig(operator_backend=backend, riesz_storage='local_rwg_v1',
+        config = mw.mom.MoMConfig(operator_backend=backend, riesz_storage='local_rwg_v1',
             stopping=StoppingRule(method='gmres', fallback='none'),
-            periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)),
-            dyadic_integration=mw.DyadicIntegrationConfig())
+            periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)),
+            dyadic_integration=mw.mom.DyadicIntegrationConfig())
         assert config.operator_backend == backend and config.hierarchical is not None
 
 
@@ -169,21 +169,21 @@ def test_complex_constitutive_declaration_public_scalar_limit_and_restore(tmp_pa
     frequency = 3e8
     omega = 2*math.pi*frequency
     def diagonal(value):
-        return mw.ComplexTensor3x3(tuple(tuple(value if i == j else 0 for j in range(3)) for i in range(3)))
+        return mw.media.ComplexTensor3x3(tuple(tuple(value if i == j else 0 for j in range(3)) for i in range(3)))
     def scene(material):
         return mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.01), material)], sources=[mw.PlaneWave()])
     physical = scene(mw.Material(epsilon_tensor=diagonal(2+.2j), mu_tensor=diagonal(1.3+.1j)))
     scalar = scene(mw.Material(eps_r=2, mu_r=1.3, sigma_e=.2*omega*EPSILON_0, sigma_m=.1*omega*MU_0))
-    base = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=3),
-                        query_config=mw.FieldQueryConfig(adaptive=False))
-    expected = mw.Simulation.mom(scalar, frequency=frequency, config=base).run()
-    result = mw.Simulation.mom(physical, frequency=frequency,
-        config=replace(base, dyadic_integration=mw.DyadicIntegrationConfig())).run()
+    base = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=3),
+                        query_config=mw.mom.FieldQueryConfig(adaptive=False))
+    expected = mw.Simulation.mom(scalar, frequencies=frequency, config=base).run()
+    result = mw.Simulation.mom(physical, frequencies=frequency,
+        config=replace(base, dyadic_integration=mw.mom.DyadicIntegrationConfig())).run()
     assert result.stats()['converged']
-    for actual, reference in zip(result.surface_currents.scattered_coefficients.chunk(2),
-                                 expected.surface_currents.scattered_coefficients.chunk(2)):
+    for actual, reference in zip(mw.mom.surface_currents(result).scattered_coefficients.chunk(2),
+                                 mw.mom.surface_currents(expected).scattered_coefficients.chunk(2)):
         assert float((actual-reference).norm()/reference.norm()) < 1e-8
     result.save(tmp_path/'complex.pt')
     restored = mw.Result.load(tmp_path/'complex.pt', scene=physical)
-    assert torch.equal(restored.surface_currents.scattered_coefficients, result.surface_currents.scattered_coefficients)
-    assert restored.surface_currents.snapshot()['operator_metadata']['physical_qualification'] is False
+    assert torch.equal(mw.mom.surface_currents(restored).scattered_coefficients, mw.mom.surface_currents(result).scattered_coefficients)
+    assert mw.mom.surface_currents(restored).snapshot()['operator_metadata']['physical_qualification'] is False

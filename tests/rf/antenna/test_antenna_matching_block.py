@@ -11,7 +11,7 @@ This test exercises that relationship through ``Result.antenna`` on a **real**
 FDTD solve: a driven z-directed lumped port radiates inside a small PML box, a
 first-class ``ClosedSurfaceMonitor`` captures the near field, and
 ``Result.antenna`` transforms the genuine monitor payload to a far field via
-Stratton-Chu. The lossless matching two-port is a real ``mw.NetworkData`` built
+Stratton-Chu. The lossless matching two-port is a real ``mw.rf.NetworkData`` built
 through the public ``NetworkData.from_y`` constructor; its predicted matched
 reflection is obtained from the network's public S-parameters (``NetworkData.s``)
 cascaded with the load.
@@ -60,40 +60,41 @@ def _radiator_scene() -> mw.Scene:
         current_surface=mw.Box(position=(0.0, 0.0, -0.0025), size=(0.015, 0.015, 0.0)),
         reference_impedance=_Z0,
     )
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(0.04, 0.04, 0.04),
         frequencies=(_FREQUENCY,),
     )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.08, 0.08),) * 3),
-        grid=mw.GridSpec.uniform(0.005),
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        ports=(port,),
-        device=_DEVICE,
-    )
-    scene.add_monitor(surface)
+                domain=mw.Domain(bounds=((-0.08, 0.08),) * 3),
+                grid=mw.GridSpec.uniform(0.005),
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+                ports=(port,),
+                monitors=(surface,),
+            )
     return scene
 
 
 def _real_far_field_result():
     simulation = mw.Simulation.fdtd(
         _radiator_scene(),
-        frequency=_FREQUENCY,
-        excitations=mw.PortExcitation(
+        frequencies=_FREQUENCY,
+        excitations=mw.rf.PortExcitation(
             "feed",
             amplitude=1.0,
             source_impedance="matched",
             source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=1.0e9),
         ),
-        run_time=mw.TimeConfig.auto(steady_cycles=16, transient_cycles=32),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=16, transient_cycles=32),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+        ),
     )
     return simulation.run()
 
 
-def _port_from_reflection(gamma: complex, *, accepted_power: float) -> mw.PortData:
+def _port_from_reflection(gamma: complex, *, accepted_power: float) -> mw.rf.PortData:
     """Model a driven port with the given input reflection and accepted power."""
 
     magnitude = abs(gamma)
@@ -102,7 +103,7 @@ def _port_from_reflection(gamma: complex, *, accepted_power: float) -> mw.PortDa
         [complex(math.sqrt(incident), 0.0)], dtype=torch.complex128, device=_DEVICE
     )
     b = a * torch.tensor([gamma], dtype=torch.complex128, device=_DEVICE)
-    return mw.PortData.from_power_waves(
+    return mw.rf.PortData.from_power_waves(
         port_name="feed",
         frequencies=torch.tensor([_FREQUENCY], dtype=torch.float64, device=_DEVICE),
         a=a,
@@ -111,7 +112,7 @@ def _port_from_reflection(gamma: complex, *, accepted_power: float) -> mw.PortDa
     )
 
 
-def _series_reactance_block(reactance_ohms: float) -> mw.NetworkData:
+def _series_reactance_block(reactance_ohms: float) -> mw.rf.NetworkData:
     """A lossless series-reactance two-port built from its public admittance matrix.
 
     A series impedance ``jX`` between the two ports has the indefinite admittance
@@ -123,7 +124,7 @@ def _series_reactance_block(reactance_ohms: float) -> mw.NetworkData:
     y = (1.0 / (1j * reactance_ohms)) * torch.tensor(
         [[1.0, -1.0], [-1.0, 1.0]], dtype=torch.complex128
     )
-    return mw.NetworkData.from_y(
+    return mw.rf.NetworkData.from_y(
         frequencies=torch.tensor([_FREQUENCY], dtype=torch.float64),
         y=y.unsqueeze(0),
         z0=_Z0,
@@ -131,7 +132,7 @@ def _series_reactance_block(reactance_ohms: float) -> mw.NetworkData:
     )
 
 
-def _input_reflection_through_block(block: mw.NetworkData, load_gamma: complex) -> complex:
+def _input_reflection_through_block(block: mw.rf.NetworkData, load_gamma: complex) -> complex:
     """Cascade a two-port matching block (public S) with a load reflection Gamma_L.
 
     ``NetworkData`` exposes no public cascade/termination helper, so this is the
@@ -147,13 +148,11 @@ def _input_reflection_through_block(block: mw.NetworkData, load_gamma: complex) 
 
 
 def _antenna(result, port):
-    return result.antenna(
-        surface="nf2ff",
+    return mw.antenna.antenna(result, surface="nf2ff",
         driven_port=port,
         theta_points=15,
         phi_points=21,
-        radius=4.0,
-    )
+        radius=4.0,)
 
 
 def test_realized_gain_lift_matches_network_mismatch_ratio_on_a_real_solve():

@@ -41,30 +41,27 @@ def main() -> None:
 
     cuda_build = _load_cuda_build_module()
     build_dir = Path(
-        os.environ.get(
-            "WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR",
-            Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda_wheel" / "stable_abi_v3",
-        )
+        os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR")
+        or tempfile.mkdtemp(prefix="witwin_maxwell_fdtd_cuda_wheel_")
     )
     os.environ["WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR"] = str(build_dir)
     os.environ["WITWIN_MAXWELL_FDTD_CUDA_SKIP_PREBUILT"] = "1"
     _ensure_current_device_arch()
 
-    module = cuda_build.build_extension(verbose=args.verbose)
-    module_file = Path(module.__file__).resolve()
-
     target_dir = cuda_build.prebuilt_root()
     target_dir.mkdir(parents=True, exist_ok=True)
-    for suffix in (".pyd", ".so"):
-        existing = target_dir / f"witwin_maxwell_fdtd_cuda{suffix}"
-        if existing.exists():
-            existing.unlink()
-    target = cuda_build.prebuilt_extension_path()
-    shutil.copy2(module_file, target)
-    marker = cuda_build.prebuilt_abi_marker_path(target)
-    marker.write_text(f"{cuda_build.STABLE_ABI_VERSION}\n", encoding="utf-8")
-
-    print(f"Built prebuilt FDTD CUDA extension: {target}")
+    for library in cuda_build.LIBRARIES:
+        module = cuda_build.build_extension(verbose=args.verbose, library=library)
+        module_file = Path(module.__file__).resolve()
+        for suffix in (".pyd", ".so"):
+            existing = target_dir / f"{library.name}{suffix}"
+            if existing.exists():
+                existing.unlink()
+        target = cuda_build.prebuilt_extension_path(library)
+        shutil.copy2(module_file, target)
+        marker = cuda_build.prebuilt_abi_marker_path(target, library)
+        marker.write_text(f"{library.abi}\n", encoding="utf-8")
+        print(f"Built prebuilt CUDA extension: {target}")
 
 
 if __name__ == "__main__":

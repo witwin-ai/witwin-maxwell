@@ -8,6 +8,7 @@ import torch
 
 from ..ports import CoaxialLumpedPort, LumpedPort, ModePort, TerminalPort, _coordinate_roundoff, _resolve_terminal_port
 from ..scene import prepare_scene
+from .thin_wire import compile_thin_wires
 
 
 _AXES = "xyz"
@@ -281,7 +282,7 @@ def _compile_voltage(port: LumpedPort | TerminalPort, scene, *, device: torch.de
                 right = np.minimum(nodes[upper], halves[np.minimum(len(halves) - 1, chosen)])
                 left[0], right[-1] = nodes[lower], nodes[upper]
                 weight = (right - left) / (nodes[upper] - nodes[lower])
-                chart=getattr(scene,"coordinates",None)
+                chart=getattr(scene.scene,"coordinates",None)
                 if chart is not None and chart.curvature and axis==2 and dim==1:
                     # A physical z-normal aperture has area h_s ds du.
                     # Integrate the linear metric over each clipped dual
@@ -393,15 +394,15 @@ def compile_port_geometry(
 
     if not isinstance(port, (LumpedPort, TerminalPort)):
         raise TypeError("compile_port_geometry expects a LumpedPort or TerminalPort.")
-    resolved_scene = prepare_scene(scene)
+    resolved_scene = prepare_scene(scene, device=device)
     resolved_port = (
-        _resolve_terminal_port(port, resolved_scene.structures, resolved_scene.domain.bounds)
+        _resolve_terminal_port(port, resolved_scene.scene.structures, resolved_scene.scene.domain.bounds)
         if isinstance(port, TerminalPort) and port.wire_binding is None
         else port
     )
     target_device = torch.device(resolved_scene.device if device is None else device)
     if getattr(resolved_port, "wire_binding", None) is not None:
-        network = resolved_scene.compile_thin_wires(device=target_device)
+        network = compile_thin_wires(resolved_scene, device=target_device)
         matches = tuple(
             index
             for index, name in enumerate(network.port_binding_names)
@@ -434,6 +435,8 @@ def compile_port_geometry(
             metadata=dict(record),
         )
     try:
+        if resolved_port.current_surface is None:
+            raise TypeError("LumpedPort.current_surface is required for FDTD; it is optional only for layered MoM")
         direction, voltage_component, voltage_indices, voltage_weights = _compile_voltage(
             resolved_port,
             resolved_scene,
@@ -471,7 +474,8 @@ def compile_port_geometry(
         try:
             audit=audit_compiled_terminal(resolved_scene,resolved_port,geometry)
         except (ValueError,NotImplementedError) as error:
-            raise type(error)(f"TerminalPort {resolved_port.name!r}: {error}") from error
+            error.args = (f"TerminalPort {resolved_port.name!r}: {error}",)
+            raise
         from dataclasses import replace
         geometry=replace(geometry,metadata=audit)
     return geometry
@@ -485,7 +489,7 @@ def compile_ports(
 ) -> tuple[CompiledPortGeometry, ...]:
     """Compile lumped ports while leaving existing ModePort expansion unchanged."""
 
-    selected_ports = tuple(scene.ports if ports is None else ports)
+    selected_ports = tuple(scene.scene.ports if ports is None else ports)
     compiled = []
     for port in selected_ports:
         if isinstance(port, ModePort):

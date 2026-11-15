@@ -22,6 +22,7 @@ from .postprocess import (
     get_field_raw as get_field_raw_impl,
     interpolate_yee_to_center as interpolate_yee_to_center_impl,
 )
+from ..compiler.materials import compile_materials
 
 
 # Iterative-refinement steps for the cuDSS direct solver. The complex64 LU of
@@ -118,38 +119,6 @@ def _require_cuda_scene(scene):
     cp.cuda.Device(scene.x.device.index).use()
 
 
-def _validate_supported_fdfd_materials(scene):
-    for structure in getattr(scene, "structures", ()):
-        material = getattr(structure, "material", None)
-        if material is None:
-            continue
-        if material is not None and bool(getattr(material, "is_gyromagnetic", False)):
-            # The static material compile lowers a GyromagneticFerrite to its
-            # diagonal background (eps_r, mu_infinity, sigma_e) only; the
-            # non-reciprocal off-diagonal Polder permeability is carried by the
-            # FDTD magnetization-ADE runtime, which the FDFD solver never runs.
-            # Fail closed rather than silently solving a reciprocal medium.
-            raise NotImplementedError(
-                "FDFD does not support GyromagneticFerrite media: the frequency-domain "
-                "solver would ingest only the diagonal background permeability and silently "
-                "drop the non-reciprocal off-diagonal Polder gyrotropy. Use FDTD, whose "
-                "magnetization-ADE runtime carries the gyromagnetic tensor."
-            )
-        if bool(getattr(material, "is_nonlinear", False)):
-            raise NotImplementedError(
-                "FDFD static parity for Kerr nonlinear media is deferred (user decision 2026-07-11): a "
-                "frequency-domain solve has no single linear operator for a field-amplitude-dependent "
-                "permittivity. Use FDTD, which models the nonlinearity directly."
-            )
-        if bool(getattr(material, "has_full_epsilon_tensor", False)):
-            raise NotImplementedError(
-                "FDFD static parity for full (off-diagonal Tensor3x3) anisotropic permittivity is deferred "
-                "(user decision 2026-07-11): the curl-curl operator assembly here forms only per-axis "
-                "diagonal material components. Use FDTD, which models the coupled tensor."
-            )
-
-
-
 class FDFD:
     """
     Full-vector 3D FDFD solver based on the Yee staggered grid.
@@ -187,20 +156,9 @@ class FDFD:
         self.tqdm_position = tqdm_position
         self.verbose = verbose
 
-        unsupported_face_kinds = sorted(
-            {
-                self.scene.boundary.face_kind(axis, side)
-                for axis in ("x", "y", "z")
-                for side in ("low", "high")
-                if self.scene.boundary.face_kind(axis, side) not in {"none", "pml", "pec"}
-            }
-        )
-        if unsupported_face_kinds:
-            raise ValueError(
-                "FDFD supports per-face 'none', 'pml' and 'pec' boundaries."
-            )
-        if getattr(self.scene, "has_symmetry", False):
-            raise ValueError("FDFD currently does not support Scene(symmetry=...).")
+        # Scene-feature admission (materials, boundaries, symmetry, ports, ...) runs at
+        # Simulation.fdfd(...) construction and again before material compilation
+        # (_ensure_material_components): the fdfd capability table (witwin.maxwell.capability).
         _require_cuda_scene(self.scene)
         self.use_gpu = True
 
@@ -212,7 +170,7 @@ class FDFD:
         if preconditioner not in ['none', 'jacobi', 'ssor', 'ilu', 'ams']:
             raise ValueError("preconditioner must be 'none', 'jacobi', 'ssor', 'ilu', or 'ams'")
         self.preconditioner = preconditioner
-        if preconditioner == 'ams' and not self.scene.grid.is_uniform:
+        if preconditioner == 'ams' and not self.scene.scene.grid.is_uniform:
             raise ValueError("AMS requires a uniform auxiliary grid; use jacobi, ssor or direct for graded grids.")
         if precision not in ['single', 'double']:
             raise ValueError("precision must be 'single' or 'double'")
@@ -242,7 +200,6 @@ class FDFD:
         self.material_eps_components = None
         self.material_mu_components = None
 
-        _validate_supported_fdfd_materials(self.scene)
 
         if self.verbose:
             print("Initializing full-vector FDFD solver based on Yee grid")
@@ -270,8 +227,8 @@ class FDFD:
         conductive = any(float(getattr(s.material, 'sigma_e', 0.)) != 0
                          or float(getattr(s.material, 'sigma_m', 0.)) != 0
                          or getattr(s.material, 'sigma_e_tensor', None) is not None
-                         for s in self.scene.structures)
-        if _scene_has_dispersive_material(self.scene) or conductive:
+                         for s in self.scene.scene.structures)
+        if _scene_has_dispersive_material(self.scene.scene) or conductive:
             self.material_eps_components = None
             self.material_mu_components = None
             self.material_eps_r = None
@@ -280,8 +237,9 @@ class FDFD:
     def _ensure_material_components(self):
         if self.material_eps_components is not None:
             return
-        _validate_supported_fdfd_materials(self.scene)
-        model = self.scene.compile_materials()
+        from ..capability import check_scene
+        check_scene(self.scene.scene, "fdfd", frequencies=(self.frequency,)).raise_if_unsupported()
+        model = compile_materials(self.scene)
         self.material_eps_components, self.material_mu_components = _evaluate_components(model, self.frequency)
         self.material_eps_edges, self.material_mu_edges = _evaluate_edge_components(model, self.frequency)
         self.material_eps_r = (
@@ -476,7 +434,7 @@ class FDFD:
         Primal metrics belong to half nodes; dual metrics to main nodes. Each
         stretch is sampled at its own Yee position, never averaged.
         """
-        reference = float(self.scene.dx_primal64[0] if self.scene.grid.is_custom else self.scene.grid.dx)
+        reference = float(self.scene.dx_primal64[0] if self.scene.scene.grid.is_custom else self.scene.scene.grid.dx)
         real_dtype = cp.float64 if self.precision == 'double' else cp.float32
         main, half = [], []
         for axis, (stretch_main, stretch_half) in zip("xyz", self._pml_stretch()):
@@ -502,7 +460,7 @@ class FDFD:
                 if boundary_axis == axis:
                     continue
                 for side, index in (("low", 0), ("high", -1)):
-                    if self.scene.boundary.face_kind(boundary_axis, side) == "pec":
+                    if self.scene.scene.boundary.face_kind(boundary_axis, side) == "pec":
                         selection = [slice(None)] * 3
                         selection[normal] = index
                         mask[tuple(selection)] = True
@@ -578,7 +536,7 @@ class FDFD:
         stretches = []
         for axis in "xyz":
             nodes = getattr(scene, f"{axis}_nodes64")
-            layers = (scene.pml_thickness_for_face(axis, "low"), scene.pml_thickness_for_face(axis, "high"))
+            layers = (scene.scene.pml_thickness_for_face(axis, "low"), scene.scene.pml_thickness_for_face(axis, "high"))
             stretches.append(tuple(
                 cp.asarray(stretch_profile_1d(
                     positions, nodes, *layers, omega=self.omega, eps0=self.eps0,
@@ -599,7 +557,7 @@ class FDFD:
         system; solves must scale b -> d*b and unscale x -> x/d (see
         _ensure_symmetrization_scale).
         """
-        ds = float(self.scene.dx_primal64[0] if self.scene.grid.is_custom else self.scene.grid.dx)
+        ds = float(self.scene.dx_primal64[0] if self.scene.scene.grid.is_custom else self.scene.scene.grid.dx)
         k0 = self.k0
 
         Nx_ex, Ny_ex, Nz_ex = self.scene.Nx_ex, self.scene.Ny_ex, self.scene.Nz_ex
@@ -819,7 +777,7 @@ class FDFD:
     def _build_source_vector_yee(self):
         """Build the total b vector for the Yee grid from the scene source list. Uses broadcasting instead of meshgrid to save memory."""
         b = cp.zeros(self.scene.N_vector_total, dtype=self._iteration_dtype())
-        compiled_sources = compile_fdfd_sources(self.scene, default_frequency=self.frequency)
+        compiled_sources = compile_fdfd_sources(self.scene.scene, default_frequency=self.frequency)
         if not compiled_sources:
             return b
 
@@ -828,7 +786,7 @@ class FDFD:
         # Prepare coordinate data on GPU (1D arrays, using broadcasting)
         # Uniform axes use the same arithmetic as the source cutoff stencil;
         # reconstructing from float64 masters can change cutoff-plane inclusion.
-        if self.scene.grid.is_custom:
+        if self.scene.scene.grid.is_custom:
             half = [getattr(self.scene, a + '_half') for a in 'xyz']
         else:
             half = [getattr(self.scene, a)[:-1] + spacing / 2
@@ -1097,15 +1055,15 @@ def solve_isotropic(self, source_pos, source_width, source_amplitude, max_iter=1
             print(f"\nStep {i+2}/4: Solving {pol_name}-polarization...")
 
         # a. Clear old sources and set new source for the current scene
-        self.scene.sources = [
+        self.scene.scene = self.scene.scene.updated(sources=(
             PointDipole(
                     position=tuple(source_pos),
                 polarization=pol_vector,
                 width=source_width,
                 source_time=CW(frequency=self.frequency, amplitude=source_amplitude),
                 name=f"iso_{pol_name.lower()}",
-            )
-        ]
+            ),
+        ))
 
         # b. Rebuild only the b vector (Yee grid version)
         b_gpu = self._build_source_vector_yee()

@@ -72,8 +72,8 @@ def field_stencil(scene, component, points, frequency, mu_samples=None):
             # Observations are physical: refuse PML samples rather than silently
             # exporting stretched-coordinate magnetic fields as SI fields.
             axis = 'xyz'[derivative]
-            nlow = scene.pml_thickness_for_face(axis,'low')
-            nhigh = scene.pml_thickness_for_face(axis,'high')
+            nlow = scene.scene.pml_thickness_for_face(axis,'low')
+            nhigh = scene.scene.pml_thickness_for_face(axis,'high')
             active = w != 0
             if bool((active & ((ijk[:,derivative] < nlow) | (ijk[:,derivative] >= spacing.numel()-nhigh))).any()):
                 raise ValueError("Magnetic observations must lie outside PML cells.")
@@ -90,7 +90,7 @@ def _farfield_terms(spec, scene, frequency, mu_samples=None):
     nodes = [getattr(scene,a) for a in 'xyz']
     limits = []
     for axis,(c,pair) in enumerate(zip(nodes,spec.bounds)):
-        bounds = scene.domain.bounds[axis]
+        bounds = scene.scene.domain.bounds[axis]
         if pair[0] <= bounds[0] or pair[1] >= bounds[1]:
             raise ValueError("Huygens box must lie strictly inside the physical domain.")
         lo,hi = (int((c-v).abs().argmin()) for v in pair)

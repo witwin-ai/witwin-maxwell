@@ -1,7 +1,4 @@
 #include "checks.h"
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 #include <vector>
 #include <cfloat>
@@ -25,20 +22,20 @@ __global__ void coverage_queries(Setup p, const float* points, float* out) {
                    p.width[0][ix],p.width[1][iy],p.width[2][iz]);
 }
 
-at::Tensor coverage_setup(at::Tensor geometry, at::Tensor points,
-    std::vector<at::Tensor> widths, std::vector<int64_t> shape, std::vector<double> constants) {
-  check_tensor(geometry, geometry, at::kFloat, "coverage", "geometry");
-  check_tensor(points, geometry, at::kFloat, "coverage", "points");
-  check_tensors(widths, geometry, at::kFloat, "coverage", "widths");
-  c10::cuda::CUDAGuard guard(points.device());
-  auto out=at::empty({points.size(0)},points.options());
-  Setup p{}; p.count=points.size(0); p.geometry=geometry.data_ptr<float>();
-  for(int a=0;a<3;++a) {p.n[a]=shape[a]; p.width[a]=widths[a].data_ptr<float>();}
+torch::stable::Tensor coverage_setup(torch::stable::Tensor geometry, torch::stable::Tensor points,
+    std::vector<torch::stable::Tensor> widths, std::vector<int64_t> shape, std::vector<double> constants) {
+  check_tensor(geometry, geometry, torch::headeronly::ScalarType::Float, "coverage", "geometry");
+  check_tensor(points, geometry, torch::headeronly::ScalarType::Float, "coverage", "points");
+  check_tensors(widths, geometry, torch::headeronly::ScalarType::Float, "coverage", "widths");
+  torch::stable::accelerator::DeviceGuard guard(points.get_device_index());
+  auto out=torch::stable::new_empty(points, {points.size(0)});
+  Setup p{}; p.count=points.size(0); p.geometry=geometry.const_data_ptr<float>();
+  for(int a=0;a<3;++a) {p.n[a]=shape[a]; p.width[a]=widths[a].const_data_ptr<float>();}
   p.delta=constants[0]; p.norm_eps=constants[1]; p.lap_scale=constants[2];
   if(p.count) {
-    coverage_queries<<<(p.count+255)/256,256,0,c10::cuda::getCurrentCUDAStream()>>>(
-        p,points.data_ptr<float>(),out.data_ptr<float>());
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    coverage_queries<<<(p.count+255)/256,256,0,current_cuda_stream()>>>(
+        p,points.const_data_ptr<float>(),out.mutable_data_ptr<float>());
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return out;
 }
@@ -96,42 +93,42 @@ __global__ void sample_pole_kernel(Setup p, float* output, const float* amplitud
   output[i]=sum*p.scale;
 }
 
-void sample_setup(std::vector<at::Tensor> outputs, std::vector<at::Tensor> axes,
-                  at::Tensor geometry, at::Tensor values, at::Tensor fills,
-                  at::Tensor offsets, at::Tensor ids,
+void sample_setup(std::vector<torch::stable::Tensor> outputs, std::vector<torch::stable::Tensor> axes,
+                  torch::stable::Tensor geometry, torch::stable::Tensor values, torch::stable::Tensor fills,
+                  torch::stable::Tensor offsets, torch::stable::Tensor ids,
                   std::vector<int64_t> sizes, std::vector<double> constants,
-                  std::vector<at::Tensor> pole_outputs, std::vector<at::Tensor> amplitudes,
+                  std::vector<torch::stable::Tensor> pole_outputs, std::vector<torch::stable::Tensor> amplitudes,
                   std::vector<int64_t> owners) {
-  check_tensors(outputs, outputs[0], at::kFloat, "sample", "outputs");
-  check_tensors(axes, outputs[0], at::kFloat, "sample", "axes");
-  check_tensor(geometry, outputs[0], at::kFloat, "sample", "geometry");
-  check_tensor(values, outputs[0], at::kFloat, "sample", "values");
-  check_tensor(fills, outputs[0], at::kFloat, "sample", "fills");
-  check_tensor(offsets, outputs[0], at::kInt, "sample", "offsets");
-  check_tensor(ids, outputs[0], at::kInt, "sample", "ids");
-  check_tensors(pole_outputs, outputs[0], at::kFloat, "sample", "pole_outputs");
-  check_tensors(amplitudes, outputs[0], at::kFloat, "sample", "amplitudes");
-  TORCH_CHECK(amplitudes.size()==pole_outputs.size() && owners.size()==pole_outputs.size(),
+  check_tensors(outputs, outputs[0], torch::headeronly::ScalarType::Float, "sample", "outputs");
+  check_tensors(axes, outputs[0], torch::headeronly::ScalarType::Float, "sample", "axes");
+  check_tensor(geometry, outputs[0], torch::headeronly::ScalarType::Float, "sample", "geometry");
+  check_tensor(values, outputs[0], torch::headeronly::ScalarType::Float, "sample", "values");
+  check_tensor(fills, outputs[0], torch::headeronly::ScalarType::Float, "sample", "fills");
+  check_tensor(offsets, outputs[0], torch::headeronly::ScalarType::Int, "sample", "offsets");
+  check_tensor(ids, outputs[0], torch::headeronly::ScalarType::Int, "sample", "ids");
+  check_tensors(pole_outputs, outputs[0], torch::headeronly::ScalarType::Float, "sample", "pole_outputs");
+  check_tensors(amplitudes, outputs[0], torch::headeronly::ScalarType::Float, "sample", "amplitudes");
+  STD_TORCH_CHECK(amplitudes.size()==pole_outputs.size() && owners.size()==pole_outputs.size(),
               "sample: pole_outputs, amplitudes and owners must have equal length");
-  c10::cuda::CUDAGuard guard(outputs[0].device());
+  torch::stable::accelerator::DeviceGuard guard(outputs[0].get_device_index());
   Setup p{};
-  for(int c=0;c<6;++c) { p.out[c]=outputs[c].data_ptr<float>(); p.background[c]=constants[4+c]; }
+  for(int c=0;c<6;++c) { p.out[c]=outputs[c].mutable_data_ptr<float>(); p.background[c]=constants[4+c]; }
   for(int a=0;a<3;++a) {
-    p.axis[a]=axes[a].data_ptr<float>(); p.width[a]=axes[a+3].data_ptr<float>();
+    p.axis[a]=axes[a].mutable_data_ptr<float>(); p.width[a]=axes[a+3].mutable_data_ptr<float>();
     p.n[a]=sizes[a]; p.samples[a]=sizes[a+3];
   }
-  p.geometry=geometry.data_ptr<float>(); p.values=values.data_ptr<float>(); p.fills=fills.data_ptr<float>();
-  p.offsets=offsets.data_ptr<int>(); p.ids=ids.data_ptr<int>();
+  p.geometry=geometry.mutable_data_ptr<float>(); p.values=values.mutable_data_ptr<float>(); p.fills=fills.mutable_data_ptr<float>();
+  p.offsets=offsets.mutable_data_ptr<int>(); p.ids=ids.mutable_data_ptr<int>();
   p.begin=sizes[6]; p.count=sizes[7]; p.structures=geometry.size(0); p.edge=sizes[8];
   p.bins_y=(p.n[1]+7)/8; p.bins_z=(p.n[2]+7)/8;
   p.delta=constants[0]; p.norm_eps=constants[1]; p.lap_scale=constants[2]; p.scale=constants[3];
-  sample_kernel<<<(p.count+255)/256,256,0,c10::cuda::getCurrentCUDAStream()>>>(p);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  sample_kernel<<<(p.count+255)/256,256,0,current_cuda_stream()>>>(p);
+  STD_CUDA_KERNEL_LAUNCH_CHECK();
   for(size_t slot=0;slot<pole_outputs.size();++slot) {
-    sample_pole_kernel<<<(p.count+255)/256,256,0,c10::cuda::getCurrentCUDAStream()>>>(
-        p,pole_outputs[slot].data_ptr<float>(),
-        amplitudes[slot].numel()?amplitudes[slot].data_ptr<float>():nullptr,owners[slot]);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    sample_pole_kernel<<<(p.count+255)/256,256,0,current_cuda_stream()>>>(
+        p,pole_outputs[slot].mutable_data_ptr<float>(),
+        amplitudes[slot].numel()?amplitudes[slot].mutable_data_ptr<float>():nullptr,owners[slot]);
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
   }
 }
 
@@ -143,15 +140,15 @@ __global__ void distance_kernel(const float* geometry, const float* points, floa
   out[i]=distance(geometry+structure*16*24,points[point*3],points[point*3+1],points[point*3+2]);
 }
 
-at::Tensor distance_setup(at::Tensor geometry, at::Tensor points) {
-  check_tensor(geometry, geometry, at::kFloat, "distance", "geometry");
-  check_tensor(points, geometry, at::kFloat, "distance", "points");
-  c10::cuda::CUDAGuard guard(points.device());
-  auto out=at::empty({geometry.size(0),points.size(0)},points.options());
+torch::stable::Tensor distance_setup(torch::stable::Tensor geometry, torch::stable::Tensor points) {
+  check_tensor(geometry, geometry, torch::headeronly::ScalarType::Float, "distance", "geometry");
+  check_tensor(points, geometry, torch::headeronly::ScalarType::Float, "distance", "points");
+  torch::stable::accelerator::DeviceGuard guard(points.get_device_index());
+  auto out=torch::stable::new_empty(points, {geometry.size(0),points.size(0)});
   if(out.numel()) {
-    distance_kernel<<<(out.numel()+255)/256,256,0,c10::cuda::getCurrentCUDAStream()>>>(
-      geometry.data_ptr<float>(),points.data_ptr<float>(),out.data_ptr<float>(),points.size(0),out.numel());
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    distance_kernel<<<(out.numel()+255)/256,256,0,current_cuda_stream()>>>(
+      geometry.const_data_ptr<float>(),points.const_data_ptr<float>(),out.mutable_data_ptr<float>(),points.size(0),out.numel());
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return out;
 }
@@ -174,18 +171,18 @@ __global__ void bulk_kernel(const float* distances, const float* values, const f
   material[i]=result; near[i]=interface;
 }
 
-std::vector<at::Tensor> bulk_setup(at::Tensor distances, at::Tensor values,
-                                 at::Tensor band, double background, bool smooth) {
-  check_tensor(distances, distances, at::kFloat, "bulk", "distances");
-  check_tensor(values, distances, at::kFloat, "bulk", "values");
-  check_tensor(band, distances, at::kFloat, "bulk", "band");
-  c10::cuda::CUDAGuard guard(band.device());
-  auto material=at::empty_like(band);
-  auto near=at::empty(band.sizes(),band.options().dtype(at::kBool));
-  bulk_kernel<<<(band.numel()+255)/256,256,0,c10::cuda::getCurrentCUDAStream()>>>(
-      distances.data_ptr<float>(),values.data_ptr<float>(),band.data_ptr<float>(),material.data_ptr<float>(),
-      near.data_ptr<bool>(),band.numel(),distances.size(0),float(background),smooth);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+std::vector<torch::stable::Tensor> bulk_setup(torch::stable::Tensor distances, torch::stable::Tensor values,
+                                 torch::stable::Tensor band, double background, bool smooth) {
+  check_tensor(distances, distances, torch::headeronly::ScalarType::Float, "bulk", "distances");
+  check_tensor(values, distances, torch::headeronly::ScalarType::Float, "bulk", "values");
+  check_tensor(band, distances, torch::headeronly::ScalarType::Float, "bulk", "band");
+  torch::stable::accelerator::DeviceGuard guard(band.get_device_index());
+  auto material=torch::stable::empty_like(band);
+  auto near=torch::stable::new_empty(band, band.sizes(), torch::headeronly::ScalarType::Bool);
+  bulk_kernel<<<(band.numel()+255)/256,256,0,current_cuda_stream()>>>(
+      distances.const_data_ptr<float>(),values.const_data_ptr<float>(),band.const_data_ptr<float>(),material.mutable_data_ptr<float>(),
+      near.mutable_data_ptr<bool>(),band.numel(),distances.size(0),float(background),smooth);
+  STD_CUDA_KERNEL_LAUNCH_CHECK();
   return {material,near};
 }
 
@@ -213,17 +210,17 @@ __global__ void polygon_distance_kernel(const float* points, const float* starts
   out[i]=(crossings%2==1)?-distance:distance;
 }
 
-at::Tensor polygon_distance(at::Tensor points, at::Tensor starts, at::Tensor ends) {
-  check_tensor(points, points, at::kFloat, "polygon_distance", "points");
-  check_tensor(starts, points, at::kFloat, "polygon_distance", "starts");
-  check_tensor(ends, points, at::kFloat, "polygon_distance", "ends");
-  c10::cuda::CUDAGuard guard(points.device());
-  auto out=at::empty({points.size(0)},points.options());
+torch::stable::Tensor polygon_distance(torch::stable::Tensor points, torch::stable::Tensor starts, torch::stable::Tensor ends) {
+  check_tensor(points, points, torch::headeronly::ScalarType::Float, "polygon_distance", "points");
+  check_tensor(starts, points, torch::headeronly::ScalarType::Float, "polygon_distance", "starts");
+  check_tensor(ends, points, torch::headeronly::ScalarType::Float, "polygon_distance", "ends");
+  torch::stable::accelerator::DeviceGuard guard(points.get_device_index());
+  auto out=torch::stable::new_empty(points, {points.size(0)});
   if(out.numel()) {
-    polygon_distance_kernel<<<(out.numel()+255)/256,256,0,c10::cuda::getCurrentCUDAStream()>>>(
-        points.data_ptr<float>(),starts.data_ptr<float>(),ends.data_ptr<float>(),
-        out.data_ptr<float>(),points.size(0),starts.size(0));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    polygon_distance_kernel<<<(out.numel()+255)/256,256,0,current_cuda_stream()>>>(
+        points.const_data_ptr<float>(),starts.const_data_ptr<float>(),ends.const_data_ptr<float>(),
+        out.mutable_data_ptr<float>(),points.size(0),starts.size(0));
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return out;
 }
@@ -242,17 +239,17 @@ __global__ void conductor_edge_kernel(const float* distance, float* out,
   out[i]=cut?fraction:float(upper<=0.f);
 }
 
-std::vector<at::Tensor> conductor_edges(at::Tensor distance) {
-  check_tensor(distance, distance, at::kFloat, "conductor_edges", "distance");
-  c10::cuda::CUDAGuard guard(distance.device());
-  std::vector<at::Tensor> out;
+std::vector<torch::stable::Tensor> conductor_edges(torch::stable::Tensor distance) {
+  check_tensor(distance, distance, torch::headeronly::ScalarType::Float, "conductor_edges", "distance");
+  torch::stable::accelerator::DeviceGuard guard(distance.get_device_index());
+  std::vector<torch::stable::Tensor> out;
   for(int axis=0;axis<3;++axis) {
     auto shape=distance.sizes().vec(); --shape[axis];
-    out.push_back(at::empty(shape,distance.options()));
-    conductor_edge_kernel<<<(out.back().numel()+255)/256,256,0,c10::cuda::getCurrentCUDAStream()>>>(
-        distance.data_ptr<float>(),out.back().data_ptr<float>(),distance.size(0),
+    out.push_back(torch::stable::new_empty(distance, shape));
+    conductor_edge_kernel<<<(out.back().numel()+255)/256,256,0,current_cuda_stream()>>>(
+        distance.const_data_ptr<float>(),out.back().mutable_data_ptr<float>(),distance.size(0),
         distance.size(1),distance.size(2),axis,out.back().numel());
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return out;
 }

@@ -1,10 +1,11 @@
-"""CPU checks for study fits, resumability and shared physical fixtures."""
+"""Checks for study fits, resumability and shared physical fixtures."""
 
 import importlib
 from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 import witwin.maxwell as mw
 
@@ -109,9 +110,9 @@ def test_shared_builders_keep_default_policy_and_geometry():
 
     policy = mw.SubpixelSpec()
     assert policy.samples == (4, 4, 4) and policy.averaging == "kottke_edge"
-    scene = _cylinder_scene(0.003, mw.Material(sigma_e=30), subpixel_samples=policy, device="cpu")
+    scene = _cylinder_scene(0.003, mw.Material(sigma_e=30), subpixel_samples=policy)
     assert scene.subpixel == policy
-    pairs = [_rayleigh_scenes(dx, subpixel_samples=policy, device="cpu")
+    pairs = [_rayleigh_scenes(dx, subpixel_samples=policy)
              for dx in (0.01, 0.005, 0.0025)]
     for scattering, reference in pairs:
         assert scattering.subpixel == reference.subpixel == policy
@@ -119,25 +120,15 @@ def test_shared_builders_keep_default_policy_and_geometry():
         assert scattering.structures[0].geometry.radius == 0.01
 
 
-def test_tiny_cpu_reference_cylinder_measurement():
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_tiny_cylinder_measurement():
     from tests.validation.physics.test_sibc_cylinder_convergence import _absorbed_power
 
     # Two steps only check compilation, execution and the shared flux reader, not physics.
     power = _absorbed_power(
         0.003, mw.Material(eps_r=1.0, sigma_e=30), subpixel_samples=mw.SubpixelSpec(),
-        device="cpu", backend="cpu_reference",
         run_time=mw.TimeConfig(time_steps=2, transient_cycles=0, steady_cycles=0),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
     )
     assert np.isfinite(power)
 
-
-def test_cpu_reference_rayleigh_rejects_unsupported_tfsf_kernel():
-    from tests.validation.physics.test_postprocess_end_to_end_validation import _run_tfsf_rayleigh_rcs_validation
-
-    with pytest.raises(NotImplementedError, match="addBatchedReferenceSourcePatches3D"):
-        _run_tfsf_rayleigh_rcs_validation(
-            0.01, subpixel_samples=mw.SubpixelSpec(), device="cpu", backend="cpu_reference",
-            run_time=mw.TimeConfig(time_steps=2, transient_cycles=0, steady_cycles=0),
-            angular_shape=(3, 5), batch_size=4,
-        )

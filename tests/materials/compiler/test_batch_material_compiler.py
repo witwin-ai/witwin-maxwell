@@ -14,30 +14,34 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA comp
 def prepared_scene(*, averaging, samples, nonuniform=False, periodic=False):
     axis = [-0.2, -0.16, -0.09, -0.03, 0.015, 0.08, 0.14, 0.2]
     grid = mw.GridSpec.custom(axis, axis, axis) if nonuniform else mw.GridSpec.uniform(0.04)
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.2, 0.2),) * 3), grid=grid,
-        boundary=mw.BoundarySpec.periodic() if periodic else mw.BoundarySpec.none(),
-        subpixel_samples=mw.SubpixelSpec(samples=samples, averaging=averaging), device="cuda:0",
-    )
-    scene.add_structure(mw.Structure(
-        geometry=mw.Sphere(position=(0.025, -0.01, 0.0), radius=0.13, device="cuda:0"),
-        material=mw.Material(eps_r=2.5, sigma_e=0.1),
-    ))
     rho = torch.linspace(0.15, 0.85, 60, device="cuda:0").reshape(4, 5, 3).requires_grad_()
-    scene.add_material_region(mw.MaterialRegion(
-        name="design", geometry=mw.Box(position=(0.04, 0.0, 0.0), size=(0.14, 0.18, 0.12), device="cuda:0"),
-        density=rho, eps_bounds=(1.0, 4.0), mu_bounds=(1.0, 1.2),
-        filter_radius=0.045, projection_beta=2.0,
-    ))
-    return prepare_scene(scene), rho
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-0.2, 0.2),) * 3), grid=grid,
+                boundary=mw.BoundarySpec.periodic() if periodic else mw.BoundarySpec.none(),
+                subpixel=mw.SubpixelSpec(samples=samples, averaging=averaging),
+                structures=(
+            mw.Structure(
+                geometry=mw.Sphere(position=(0.025, -0.01, 0.0), radius=0.13, device="cuda:0"),
+                material=mw.Material(eps_r=2.5, sigma_e=0.1),
+            ),
+            ),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design", geometry=mw.Box(position=(0.04, 0.0, 0.0), size=(0.14, 0.18, 0.12), device="cuda:0"),
+                density=rho, eps_bounds=(1.0, 4.0), mu_bounds=(1.0, 1.2),
+                filter_radius=0.045, projection_beta=2.0,
+            ),
+            ),
+            )
+    return prepare_scene(scene, device="cuda:0"), rho
 
 
 def compile_component(scene, component, *, selection=None):
-    geometries = [s.geometry for s in scene.structures] + [r.geometry for r in scene.material_regions]
+    geometries = [s.geometry for s in scene.scene.structures] + [r.geometry for r in scene.scene.material_regions]
     return _compile_edge_component(
         scene, component, eps_background=1.0, mu_background=1.0,
-        averaging=scene.subpixel.averaging, samples=scene.subpixel.samples,
-        region_densities=tuple(_prepare_material_region_density(scene, r) for r in scene.material_regions),
+        averaging=scene.scene.subpixel.averaging, samples=scene.scene.subpixel.samples,
+        region_densities=tuple(_prepare_material_region_density(scene, r) for r in scene.scene.material_regions),
         geometry_periodic_shifts={id(g): _static_periodic_shift_options(scene, g) for g in geometries},
         selection=selection,
     )

@@ -104,7 +104,7 @@ def _profile_kernels(handle, rhs, reference, points):
     rows = torch.zeros(count, dtype=torch.long, device=handle.device)
     cols = torch.arange(count, device=handle.device)
     categories = classify_pairs(handle.basis.mesh, rows, cols)
-    query = mw.FieldQueryConfig(relative_tolerance=1e-4, max_order=32)
+    query = mw.mom.FieldQueryConfig(relative_tolerance=1e-4, max_order=32)
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                  record_shapes=True, profile_memory=True) as capture:
         for category in range(5):
@@ -153,12 +153,12 @@ def run_case(level, dtype, *, profile_kernels=False, correction_guesses=True, ma
     torch.cuda.reset_peak_memory_stats(device)
     initial_allocated = torch.cuda.memory_allocated(device)
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=2.25, sigma_e=.004))],
-                     sources=[mw.PlaneWave(source_time=mw.CW(frequency=3e8, amplitude=1., phase=.23))], device=device)
+                     sources=[mw.PlaneWave(source_time=mw.CW(frequency=3e8, amplitude=1., phase=.23))])
     integration = IntegrationConfig(order=4, singular_order=6, pair_batch=16, near_tolerance=1e-4, near_max_order=16)
-    query = mw.FieldQueryConfig(relative_tolerance=2e-4, absolute_tolerance=1e-8, max_order=48)
-    config = mw.MoMConfig(subdivisions=level, dtype=dtype, integration=integration, query_config=query)
+    query = mw.mom.FieldQueryConfig(relative_tolerance=2e-4, absolute_tolerance=1e-8, max_order=48)
+    config = mw.mom.MoMConfig(subdivisions=level, dtype=dtype, integration=integration, query_config=query)
     print(json.dumps({'stage': 'preparation_started', 'level': level, 'dtype': str(dtype)}), flush=True)
-    prepared, preparation_seconds = _timed(device, lambda: mw.Simulation.mom(scene, frequency=3e8, config=config).prepare())
+    prepared, preparation_seconds = _timed(device, lambda: mw.Simulation.mom(scene, frequencies=3e8, config=config).prepare())
     print(json.dumps({'stage': 'preparation_finished', 'level': level, 'seconds': preparation_seconds}), flush=True)
     runtime = prepared.solver
     handle, rhs = runtime.handle, runtime.rhs

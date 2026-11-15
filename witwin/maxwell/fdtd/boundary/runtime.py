@@ -19,6 +19,7 @@ from .cpml import (
     initialize_simple_pml_state,
     initialize_stable_pml_state,
 )
+from ...errors import UnsupportedFeatureError
 
 
 def _effective_face_kinds(scene_or_boundary):
@@ -54,7 +55,7 @@ def closed_transverse_pml(scene_or_boundary) -> bool:
 def complex_fixed_k(solver) -> bool:
     """Complex fields with a nonzero resolved k component on a Bloch axis."""
     return bool(getattr(solver, "complex_fields_enabled", False)) and any(
-        solver.scene.boundary.axis_kind(axis) == "bloch" and float(k) != 0.0
+        solver.scene.scene.boundary.axis_kind(axis) == "bloch" and float(k) != 0.0
         for axis, k in zip(("x", "y", "z"),
                            getattr(solver, "resolved_bloch_wavevector", (0., 0., 0.)))
     )
@@ -69,10 +70,11 @@ def resolve_absorber(scene, requested, *, complex_fields, distributed=False):
         return requested, "explicit absorber selection"
     if not complex_fields and closed_transverse_pml(scene):
         if distributed:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "absorber='auto' selects graded sigma for real-field closed-transverse "
                 "PML topology; the distributed solver verifies only cpml/stablepml. "
-                "Use a single-device run or an explicit absorber."
+                "Use a single-device run or an explicit absorber.",
+                feature="guard:9019ed16", method="fdtd"
             )
         faces = _effective_face_kinds(scene)
         boundary = scene.boundary
@@ -100,8 +102,8 @@ def resolve_absorber(scene, requested, *, complex_fields, distributed=False):
 
 
 def _configure_face_boundary_codes(solver):
-    symmetry = getattr(solver.scene, "symmetry", (None, None, None))
-    boundary = solver.scene.boundary
+    symmetry = getattr(solver.scene.scene, "symmetry", (None, None, None))
+    boundary = solver.scene.scene.boundary
     face_codes = {
         axis: [
             BOUNDARY_KIND_TO_CODE[boundary.face_kind(axis, "low")],
@@ -161,7 +163,7 @@ def _configure_face_boundary_codes(solver):
         for side in ("low", "high")
         if boundary.face_kind(axis, side) == "mode_abc"
     )
-    solver.internal_absorbers = tuple(getattr(solver.scene, "internal_absorbers", ()) or ())
+    solver.internal_absorbers = tuple(getattr(solver.scene.scene, "internal_absorbers", ()) or ())
     if solver.mode_abc_faces or solver.internal_absorbers:
         # Mode-matched faces and internal absorber planes run through the same
         # post-E-update one-way boundary pass as the Mur faces.
@@ -190,9 +192,9 @@ def _validate_symmetry_source_placement(scene, symmetry):
     """
     if all(entry is None for entry in symmetry):
         return
-    resolver = getattr(scene, "resolved_sources", None)
-    sources = resolver() if callable(resolver) else getattr(scene, "sources", ())
-    bounds = scene.domain.bounds
+    resolver = getattr(scene.scene, "resolved_sources", None)
+    sources = resolver() if callable(resolver) else getattr(scene.scene, "sources", ())
+    bounds = scene.scene.domain.bounds
     tol = 1e-9
     for source in sources:
         center = _source_center(source)
@@ -222,7 +224,7 @@ def _validate_symmetry_source_placement(scene, symmetry):
 
 
 def initialize_boundary_state(solver):
-    solver.boundary_kind = solver.scene.boundary.kind
+    solver.boundary_kind = solver.scene.scene.boundary.kind
     solver.boundary_code = (
         BOUNDARY_KIND_TO_CODE[solver.boundary_kind]
         if solver.boundary_kind in BOUNDARY_KIND_TO_CODE
@@ -230,7 +232,7 @@ def initialize_boundary_state(solver):
     )
     _configure_face_boundary_codes(solver)
 
-    solver.complex_fields_enabled = solver.scene.boundary.uses_kind("bloch")
+    solver.complex_fields_enabled = solver.scene.scene.boundary.uses_kind("bloch")
     if solver.complex_fields_enabled:
         initialize_complex_fields(solver)
 
@@ -240,11 +242,11 @@ def initialize_boundary_state(solver):
     solver.boundary_phase_cos = tuple(float(phase.real) for phase in phases)
     solver.boundary_phase_sin = tuple(float(phase.imag) for phase in phases)
     solver.active_absorber_type, solver.absorber_resolution_reason = resolve_absorber(
-        solver.scene, solver.absorber_type, complex_fields=solver.complex_fields_enabled,
+        solver.scene.scene, solver.absorber_type, complex_fields=solver.complex_fields_enabled,
     )
     solver.uses_cpml = solver.active_absorber_type in ("cpml", "stablepml")
 
-    if solver.scene.boundary.uses_kind("pml"):
+    if solver.scene.scene.boundary.uses_kind("pml"):
         if solver.active_absorber_type == "cpml":
             initialize_cpml_state(solver)
         elif solver.active_absorber_type == "stablepml":
@@ -281,7 +283,7 @@ def initialize_mur_state(solver):
     scene = solver.scene
     axis_primal = {"x": scene.dx_primal64, "y": scene.dy_primal64, "z": scene.dz_primal64}
     speed_dt = solver.c * solver.dt
-    mur_abc = scene.boundary.mur_abc
+    mur_abc = scene.scene.boundary.mur_abc
     if mur_abc.permittivity is not None:
         speed_dt = speed_dt / math.sqrt(mur_abc.permittivity)
     first_order_faces = solver.mur_faces

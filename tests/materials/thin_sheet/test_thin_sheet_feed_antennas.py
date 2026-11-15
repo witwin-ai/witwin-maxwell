@@ -35,7 +35,7 @@ def cylindrical_strip():
     count = len(points)
     triangles = [triangle for i in range(count-1)
                  for triangle in ((i, i+1, count+i), (i+1, count+i+1, count+i))]
-    return mw.SurfaceMesh(vertices, triangles, sheet_model="conformal_two_sided")
+    return mw.geometry.SurfaceMesh(vertices, triangles, sheet_model="conformal_two_sided")
 
 
 def antenna_scene(resolution, *, normal=None, curved=False):
@@ -44,7 +44,7 @@ def antenna_scene(resolution, *, normal=None, curved=False):
     x_shift = 0. if curved else (round(GAP/cell) % 2) * cell/2
     y_shift = 0. if curved else (round(WIDTH/cell) % 2) * cell/2
     terminal_y = -y_shift if normal is None and not curved else 0.
-    foil = mw.CopperFoil(thickness=35e-6, frequency_range=(.5e9, 2e9))
+    foil = mw.media.CopperFoil(thickness=35e-6, frequency_range=(.5e9, 2e9))
     port = mw.LumpedPort(
         "feed", negative=(-GAP/2, terminal_y, 0), positive=(GAP/2, terminal_y, 0),
         voltage_path=mw.AxisPath("x"),
@@ -64,8 +64,8 @@ def antenna_scene(resolution, *, normal=None, curved=False):
         domain=mw.Domain(bounds=((- .24+x_shift, .24+x_shift),
                                  (- .24+y_shift, .24+y_shift), (- .24, .24))),
         grid=mw.GridSpec.uniform(cell),
-        boundary=mw.BoundarySpec.pml(num_layers=10), device="cuda", structures=structures,
-        ports=[port], monitors=[mw.ClosedSurfaceMonitor.box(
+        boundary=mw.BoundarySpec.pml(num_layers=10), structures=structures,
+        ports=[port], monitors=[mw.monitors.ClosedSurfaceMonitor.box(
             "radiation", size=(.24, .24, .24), frequencies=[FREQUENCY])])
 
 
@@ -77,10 +77,12 @@ def measure_antenna(resolution, *, normal=None, curved=False):
     dt = 2e-12 * cell/.005
     result = mw.Simulation.fdtd(
         antenna_scene(resolution, normal=normal, curved=curved), frequencies=FREQUENCIES.tolist(),
-        run_time=mw.TimeConfig(time_steps=math.ceil(12e-9/dt), dt=dt),
-        cuda_graph=True, full_field_dft=False,
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        excitations=mw.PortExcitation("feed", source_time=mw.GaussianPulse(
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=math.ceil(12e-9/dt), dt=dt),
+            cuda_graph=True, full_field_dft=False,
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.GaussianPulse(
             FREQUENCY, fwidth=.6*FREQUENCY))).run()
     impedance = result.port("feed").z_in.detach().cpu().numpy()
     # First reactance zero is the half-wave resonance, before the higher mode.
@@ -155,16 +157,16 @@ def measure_power(kind, monkeypatch):
     torch.cuda.reset_peak_memory_stats()
     scene = antenna_scene(60, normal=NORMALS[1], curved=kind == "curved")
     if kind == "patch":
-        scene.structures = [mw.Structure(geometry=rectangle_mesh(
+        scene = scene.updated(structures=[mw.Structure(geometry=rectangle_mesh(
             (0, 0, 0), NORMALS[1], .045, .03, u_direction=(1, 0, 0),
-            sheet_model="conformal_two_sided"), material=scene.structures[0].material)]
+            sheet_model="conformal_two_sided"), material=scene.structures[0].material)])
     frequencies = FREQUENCY*np.array((.8, 1., 1.2))
-    scene.monitors = [mw.ClosedSurfaceMonitor.box(
-        "radiation", size=(.24, .24, .24), frequencies=frequencies.tolist())]
+    scene = scene.updated(monitors=[mw.monitors.ClosedSurfaceMonitor.box(
+        "radiation", size=(.24, .24, .24), frequencies=frequencies.tolist())])
     prepared = mw.Simulation.fdtd(
-        scene, frequencies=frequencies.tolist(), run_time=mw.TimeConfig(time_steps=6000, dt=2e-12),
-        cuda_graph=False, full_field_dft=False, spectral_sampler=mw.SpectralSampler(window="none"),
-        excitations=mw.PortExcitation("feed", source_time=mw.GaussianPulse(
+        scene, frequencies=frequencies.tolist(), config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=6000, dt=2e-12),
+        cuda_graph=False, full_field_dft=False, spectral_sampler=mw.fdtd.SpectralSampler(window="none")),
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.GaussianPulse(
             FREQUENCY, fwidth=.6*FREQUENCY))).prepare()
     solver = prepared.solver
     sheet, = solver._thin_sheets
@@ -193,7 +195,7 @@ def measure_power(kind, monkeypatch):
     loss = (cu["rates"][None, :, None]*z_hat.abs().square()).sum(1)
     loss += (e_hat.conj()*torch.einsum("ij,fjn->fin", cu["D"].to(e_hat.dtype), e_hat)).real.sum(1)
     copper = .5*(loss*cu["area"]).sum(1)
-    radiation = torch.stack([torch.as_tensor(result.monitor("radiation", frequency=f)["flux"])
+    radiation = torch.stack([torch.as_tensor(result.monitor("radiation", frequency=f).values)
                              for f in frequencies]).reshape(-1)
     diagnostics = result.port("feed").metadata["sheet_gap"]
     accepted = diagnostics["field_accepted_power"]

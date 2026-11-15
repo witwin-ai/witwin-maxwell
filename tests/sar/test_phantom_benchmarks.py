@@ -23,6 +23,7 @@ from benchmark.scenes.sar import (
     one_gram_cube,
     uniform_lossy_cube,
 )
+from witwin.maxwell.compiler import compile_ports
 
 _HAS_CUDA = torch.cuda.is_available()
 _DEVICE = "cuda" if _HAS_CUDA else "cpu"
@@ -47,11 +48,13 @@ def _run_planewave_sar(scene):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=list(scene.monitors[0].frequencies or ()),
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(normalize_source=True),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True),
+            full_field_dft=True,
+        ),
     ).run()
-    return result.sar("loss", averaging=mw.SARAveraging(mass=(1e-3, 10e-3)))
+    return mw.sar.sar(result, "loss", averaging=mw.sar.SARAveraging(mass=(1e-3, 10e-3)))
 
 
 # --------------------------------------------------------------------------- #
@@ -60,9 +63,9 @@ def _run_planewave_sar(scene):
 
 def test_one_gram_cube_exact_hand_computed_average():
     e0 = 2.0
-    scene = one_gram_cube.build_scene(device=_DEVICE)
+    scene = one_gram_cube.build_scene()
     monitor = next(m for m in scene.monitors if m.name == "loss")
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device=_DEVICE)
     compiled = compile_power_loss_monitor(prepared, monitor)
     fields = {
         component.upper(): torch.full(
@@ -80,7 +83,7 @@ def test_one_gram_cube_exact_hand_computed_average():
         frequencies=one_gram_cube.FREQUENCIES,
         fields=fields,
     )
-    sar = result.sar("loss", averaging=mw.SARAveraging(mass=(1e-3,)))
+    sar = mw.sar.sar(result, "loss", averaging=mw.sar.SARAveraging(mass=(1e-3,)))
     peak = sar.peak(mass=1e-3)
 
     # 27 cells at rho=1000 on the one-gram grid weigh exactly 1 g.
@@ -99,7 +102,7 @@ def test_one_gram_cube_exact_hand_computed_average():
 
 @requires_cuda
 def test_uniform_lossy_cube_power_closure_and_golden():
-    scene = uniform_lossy_cube.build_scene(device="cuda")
+    scene = uniform_lossy_cube.build_scene()
     sar = _run_planewave_sar(scene)
 
     # Absorbed-power volume integral closes exactly against the channel total.
@@ -123,7 +126,7 @@ def test_uniform_lossy_cube_power_closure_and_golden():
 
 @requires_cuda
 def test_layered_slab_tissue_peak_and_golden():
-    scene = layered_slab.build_scene(device="cuda")
+    scene = layered_slab.build_scene()
     sar = _run_planewave_sar(scene)
 
     assert _closure_residual(sar) < 1e-5
@@ -158,9 +161,9 @@ def test_layered_slab_tissue_peak_and_golden():
 # --------------------------------------------------------------------------- #
 
 def test_antenna_near_phantom_resolves_exact_feed_nodes_and_native_half_grid_contour():
-    scene = antenna_near_phantom.build_scene(device="cpu")
-    prepared = prepare_scene(scene,lazy_meshgrid=True)
-    port, = prepared.compile_ports(device="cpu")
+    scene = antenna_near_phantom.build_scene()
+    prepared = prepare_scene(scene,lazy_meshgrid=True, device="cpu")
+    port, = compile_ports(prepared, device="cpu")
     assert port.voltage_indices.numel() > 0
     assert all(indices.numel() > 0 for indices in port.current_indices)
     assert scene.ports[0].positive[2] == .0025
@@ -178,13 +181,13 @@ def test_antenna_near_phantom_driven_loss_normalized_sar_and_persistence(graph,t
     result = antenna_exposure_result(cuda_graph=graph)
     assert bool(result.stats()["cuda_graph_active"]) == graph
     accepted = result.port("feed").accepted_power
-    loss = result.power_loss("loss").conduction
+    loss = result.monitor("loss").conduction
     assert bool(torch.all(torch.isfinite(accepted) & (accepted > 0)))
     assert bool(torch.all(torch.isfinite(loss) & (loss > 0)))
-    averaging = mw.SARAveraging(mass=(1e-3,10e-3))
-    base = result.sar("loss",averaging=averaging)
-    normalization = mw.PowerNormalization.accepted_power("feed",1.)
-    scaled = result.sar("loss",normalization=normalization,averaging=averaging)
+    averaging = mw.sar.SARAveraging(mass=(1e-3,10e-3))
+    base = mw.sar.sar(result, "loss",averaging=averaging)
+    normalization = mw.sar.PowerNormalization.accepted_power("feed",1.)
+    scaled = mw.sar.sar(result, "loss",normalization=normalization,averaging=averaging)
     valid = base.valid[None].expand_as(base.point_sar("total"))
     torch.testing.assert_close(scaled.point_sar("total")[valid],
         (base.point_sar("total").to(scaled.point_sar("total"))
@@ -199,12 +202,12 @@ def test_antenna_near_phantom_driven_loss_normalized_sar_and_persistence(graph,t
     path = tmp_path/"exposure.pt"
     result.save(path)
     loaded = mw.Result.load(path,scene=result.scene,map_location="cuda:0")
-    repeated = loaded.sar("loss",normalization=normalization,averaging=averaging)
+    repeated = mw.sar.sar(loaded, "loss",normalization=normalization,averaging=averaging)
     for mass in (1e-3,10e-3):
         torch.testing.assert_close(repeated.peak(mass).sar,scaled.peak(mass).sar,rtol=2e-5,atol=1e-12)
     path = tmp_path/"sar.pt"
     scaled.save(path)
-    typed = mw.SARResult.load(path)
+    typed = mw.sar.SARResult.load(path)
     torch.testing.assert_close(typed.peak(1e-3).sar,scaled.peak(1e-3).sar.cpu())
     record_property("accepted_power_w",accepted.detach().cpu().tolist())
     record_property("absorbed_power_w",loss.detach().cpu().tolist())

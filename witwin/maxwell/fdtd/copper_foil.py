@@ -1,8 +1,6 @@
 """Implicit passive two-sided copper-foil coupling to the Yee field update."""
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import torch
 
@@ -13,6 +11,7 @@ from .copper_foil_ade import (
     initialize_copper_trace_ade, prepare_copper_trace_history,
     finalize_copper_trace_ade, iter_copper_trace_ade_state,
 )
+from ..errors import UnsupportedFeatureError
 
 
 _FIELDS = ("Ex", "Ey", "Ez")
@@ -50,13 +49,13 @@ def prepare_copper_magnetic_support(solver, face, indices):
     safe_low[:, tangent].clamp_(0, normal_h.shape[tangent] - 1)
     safe_high[:, tangent].clamp_(0, normal_h.shape[tangent] - 1)
     gather_low, gather_high = safe_low.clone(), safe_high.clone()
-    paired = solver.scene.boundary.axis_kind("xyz"[tangent]) in ("periodic", "bloch")
+    paired = solver.scene.scene.boundary.axis_kind("xyz"[tangent]) in ("periodic", "bloch")
     if paired:
         gather_low[~low_valid, tangent] = normal_h.shape[tangent] - 1
         gather_high[~high_valid, tangent] = 0
     phase = 0.
-    if solver.scene.boundary.axis_kind("xyz"[tangent]) == "bloch":
-        limits = solver.scene.domain.bounds[tangent]
+    if solver.scene.scene.boundary.axis_kind("xyz"[tangent]) == "bloch":
+        limits = solver.scene.scene.domain.bounds[tangent]
         phase = float(solver.resolved_bloch_wavevector[tangent]) * (limits[1] - limits[0])
     normal_curl = getattr(solver, "c" + _MAGNETIC[normal].lower() + "_curl")
     inv_tangent = getattr(solver, f"inv_d{'xyz'[tangent]}_h")
@@ -168,7 +167,8 @@ def initialize_copper_foils(solver):
     if not faces:
         return
     if solver.full_aniso_enabled or solver.nonlinear_enabled:
-        raise NotImplementedError("CopperFoil currently requires isotropic linear Yee fields.")
+        raise UnsupportedFeatureError("CopperFoil currently requires isotropic linear Yee fields.",
+                                      feature="material.copper_foil", method="fdtd")
     response_cache = {}
     occupied = {}
     # Free-edge detection must see neighbour traces owned by adjacent shards.
@@ -214,10 +214,11 @@ def initialize_copper_foils(solver):
                                 eps[right_index].double() * right_width))
         conductance = torch.stack((sigma[left_index].double() * left_width,
                                    sigma[right_index].double() * right_width))
-        chart=getattr(solver.scene,"coordinates",None)
+        chart=getattr(solver.scene.scene,"coordinates",None)
         if chart is not None:
             if normal!=1 or component not in (0,2):
-                raise NotImplementedError("Mapped copper requires chart-normal u with tangential s/z traces.")
+                raise UnsupportedFeatureError("Mapped copper requires chart-normal u with tangential s/z traces.",
+                                              feature="coordinates", method="fdtd")
             from ..compiler.coordinates import copper_half_metric_average
             surface_u=float(solver.scene.y_nodes64[face.normal_index])
             surface_h=1-chart.curvature*surface_u
@@ -290,11 +291,10 @@ def initialize_copper_foils(solver):
             solver._copper_foils.append(imaginary)
 
     initialize_copper_trace_ade(solver)
-    if solver.device.type == "cuda" and os.environ.get("WITWIN_MAXWELL_COPPER_KERNEL", "fused") == "fused":
-        from .cuda.backend import prepare_copper_electric
-        for entry in solver._copper_foils:
-            if not (entry["imaginary"] or entry["paired"] or entry["phase"] or entry["material_ade"]):
-                prepare_copper_electric(solver, entry)
+    from .cuda.backend import prepare_copper_electric
+    for entry in solver._copper_foils:
+        if not (entry["imaginary"] or entry["paired"] or entry["phase"] or entry["material_ade"]):
+            prepare_copper_electric(solver, entry)
 
 
 def begin_copper_step(solver):
@@ -452,9 +452,9 @@ def copper_loss_report(solver):
         power, edge_power = copper_spectral_power(phasor, frequency, solver.dt,
             entry["B"], entry["rates"], entry["D"], entry["area"] * entry["admittance_scale"], return_edge_power=True)
         record.setdefault("frequencies", frequency.detach().cpu().clone())
-        record.setdefault("coordinate_frame", "mapped_chart" if getattr(solver.scene, "coordinates", None) is not None else "cartesian")
+        record.setdefault("coordinate_frame", "mapped_chart" if getattr(solver.scene.scene, "coordinates", None) is not None else "cartesian")
         record.setdefault("periodic_axes", tuple(axis for axis in "xyz"
-            if solver.scene.boundary.axis_kind(axis) in ("periodic", "bloch")))
+            if solver.scene.scene.boundary.axis_kind(axis) in ("periodic", "bloch")))
         record.setdefault("surface_power", torch.zeros_like(power, device="cpu"))
         record.setdefault("spectral_valid", (normalization > 0).detach().cpu().clone())
         record["surface_power"] += power.detach().cpu()
@@ -593,14 +593,17 @@ def validate_copper_port_coupling(solver):
                 local = entry["indices"] - torch.tensor(term["offsets"], device=solver.device)
                 inside = ((local >= 0) & (local < torch.tensor(patch.shape, device=solver.device))).all(-1)
                 if bool(inside.any()) and bool(torch.any(patch[tuple(local[inside].T)] != 0)):
-                    raise NotImplementedError("An electric source patch overlaps a CopperFoil split-trace edge; joint source/trace elimination is required.")
+                    raise UnsupportedFeatureError("An electric source patch overlaps a CopperFoil split-trace edge; joint source/trace elimination is required.",
+                                                  feature="material.copper_foil", method="fdtd")
         for port in getattr(solver, "_port_runtimes", ()):
             geometry = port.geometry
             if getattr(geometry, "voltage_component", None) != component:
                 continue
             port_offsets = _flat_offsets(getattr(solver, component).shape, geometry.voltage_indices)
             if bool(torch.isin(port_offsets, offsets).any()):
-                raise NotImplementedError(f"Port {port.port.name!r} overlaps CopperFoil {entry['face'].name!r}; split-trace port elimination is required.")
+                raise UnsupportedFeatureError(f"Port {port.port.name!r} overlaps CopperFoil {entry['face'].name!r}; split-trace port elimination is required.",
+                                              feature="material.copper_foil", method="fdtd")
         for runtime, field_name in getattr(solver, "_lumped_element_runtimes", ()):
             if field_name == component and bool(torch.isin(runtime.linear_indices, offsets).any()):
-                raise NotImplementedError("A lumped element overlaps a CopperFoil split-trace edge.")
+                raise UnsupportedFeatureError("A lumped element overlaps a CopperFoil split-trace edge.",
+                                              feature="material.copper_foil", method="fdtd")

@@ -107,27 +107,26 @@ def test_fdtd_lossy_slab_complex_effective_index_matches_transcendental_solver()
     z_coords = np.array([-0.5 * lz + i * dz for i in range(nz_cells + 1)], dtype=np.float64)
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.5 * dx, 1.5 * dx), (y0, y0 + ly), (-0.5 * lz, 0.5 * lz))),
-        grid=mw.GridSpec.custom(x_coords, y_coords, z_coords),
-        boundary=mw.BoundarySpec(kind="none", num_layers=8, strength=1e6, z="pml"),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(6.0 * dx, d, 2.0 * lz)),
-            material=core,
-            name='slab',
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(0.0, 0.0, 0.0),
-            size=(ap_x, ly - 4.0 * dy, 0.0),
-            polarization="Ex",
-            source_time=mw.CW(frequency=f, amplitude=1.0),
-            name="mode0",
-        )
-    )
+                domain=mw.Domain(bounds=((-1.5 * dx, 1.5 * dx), (y0, y0 + ly), (-0.5 * lz, 0.5 * lz))),
+                grid=mw.GridSpec.custom(x_coords, y_coords, z_coords),
+                boundary=mw.BoundarySpec(kind="none", num_layers=8, strength=1e6, z="pml"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(6.0 * dx, d, 2.0 * lz)),
+                material=core,
+                name='slab',
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(0.0, 0.0, 0.0),
+                size=(ap_x, ly - 4.0 * dy, 0.0),
+                polarization="Ex",
+                source_time=mw.CW(frequency=f, amplitude=1.0),
+                name="mode0",
+            ),
+            ),
+            )
 
     solver = mw.Simulation.fdtd(scene, frequencies=[f]).prepare().solver
     compiled = solver._compiled_sources[0]

@@ -114,24 +114,23 @@ def _build_scene(mw: Any, *, port_count: int, cell: float, half_x: float, half_y
     bounds = _domain_bounds(half_x, half_yz)
     ports = tuple(_lumped_port(mw, index) for index in range(port_count))
     scene = mw.Scene(
-        domain=mw.Domain(bounds=bounds),
-        grid=mw.GridSpec.uniform(cell),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        ports=ports,
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization="Ez",
-            width=1.5 * cell,
-            source_time=mw.GaussianPulse(
-                frequency=CENTER_FREQUENCY_HZ,
-                fwidth=0.5 * SWEEP_SPAN_HZ,
-                amplitude=1.0,
+                domain=mw.Domain(bounds=bounds),
+                grid=mw.GridSpec.uniform(cell),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                ports=ports,
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                width=1.5 * cell,
+                source_time=mw.GaussianPulse(
+                    frequency=CENTER_FREQUENCY_HZ,
+                    fwidth=0.5 * SWEEP_SPAN_HZ,
+                    amplitude=1.0,
+                ),
             ),
-        )
-    )
+            ),
+            )
     # The base (no port) needs a valid frequency output -- a bare no-output run
     # is rejected by the solver. A single-frequency point monitor is the cheapest
     # such output: exactly one accumulation kernel per step (a 181-frequency point
@@ -141,9 +140,10 @@ def _build_scene(mw: Any, *, port_count: int, cell: float, half_x: float, half_y
     # the base's lone 1-frequency monitor kernel is negligible next to a Yee step,
     # keeping the base a genuine bare-FDTD stepping reference.
     if port_count == 0:
-        scene.add_monitor(
-            mw.PointMonitor(name="probe", position=(0.05, 0.0, 0.0), fields=("Ez",))
-        )
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.PointMonitor(name="probe", position=(0.05, 0.0, 0.0), fields=("Ez",)),
+        ))
     if len(scene.ports) != port_count:
         raise AssertionError("scene port count mismatch")
     return scene
@@ -214,10 +214,12 @@ def _time_run_ms(mw: Any, scene, *, steps: int, frequencies: tuple[float, ...]) 
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=_scene_frequencies(scene, frequencies),
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
-        cuda_graph=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+            cuda_graph=False,
+        ),
     )
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)

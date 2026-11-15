@@ -618,7 +618,7 @@ class _DistributedFDTDGradientBridge:
             )
         else:
             candidates = scene_trainable_material_tensors(self.base_scene)
-        self.material_inputs = material_dependent_inputs(graph_scene, candidates)
+        self.material_inputs = material_dependent_inputs(graph_scene, candidates, device=simulation.config.device)
         self.trainable_inputs = ancestry_safe_trainable_tensors(self.material_inputs)
         if not self.trainable_inputs:
             raise ValueError(
@@ -671,7 +671,7 @@ class _DistributedFDTDGradientBridge:
                 frequency=simulation.frequency,
                 parallel=config.parallel,
                 absorber_type=config.absorber,
-                cpml_config=config.cpml_config,
+                cpml=config.cpml,
             )
             simulation._configure_fdtd_solver_time(distributed)
             distributed.init_field()
@@ -786,7 +786,7 @@ class _DistributedFDTDGradientBridge:
                 # one sync per checkpoint stride (~sqrt(N) times total).
                 distributed._synchronize_all()
                 checkpoints.append(capture_distributed_checkpoint(distributed, n))
-            distributed._advance_one_step(n, overlap_active=overlap_active)
+            distributed._advance_one_step(n)
         distributed._synchronize_all()
 
         for shard in distributed.shards:
@@ -1275,6 +1275,7 @@ class _DistributedFDTDGradientBridge:
             scene = self._material_graph_scene()
             return pullback_material_input_gradients(
                 scene,
+                device=self.simulation.config.device,
                 inputs=base_inputs,
                 grad_eps_ex=global_grad_eps["Ex"],
                 grad_eps_ey=global_grad_eps["Ey"],
@@ -1374,7 +1375,7 @@ class _NcclDistributedFDTDGradientBridge(_DistributedFDTDGradientBridge):
             if n > 0 and n % stride == 0:
                 distributed._synchronize_all()
                 checkpoints.append(capture_distributed_checkpoint(distributed, n))
-            distributed._advance_one_step(n, overlap_active=overlap_active)
+            distributed._advance_one_step(n)
         distributed._synchronize_all()
 
         for shard in distributed.shards:
@@ -1406,7 +1407,7 @@ class _NcclDistributedFDTDGradientBridge(_DistributedFDTDGradientBridge):
                 frequency=simulation.frequency,
                 parallel=config.parallel,
                 absorber_type=config.absorber,
-                cpml_config=config.cpml_config,
+                cpml=config.cpml,
                 allow_adjoint=True,
             )
             simulation._configure_fdtd_solver_time(distributed)
@@ -1540,6 +1541,7 @@ class _NcclDistributedFDTDGradientBridge(_DistributedFDTDGradientBridge):
             scene = self._material_graph_scene()
             return pullback_material_input_gradients(
                 scene,
+                device=self.simulation.config.device,
                 inputs=base_inputs,
                 grad_eps_ex=global_grad_eps["Ex"],
                 grad_eps_ey=global_grad_eps["Ey"],
@@ -1639,6 +1641,7 @@ def run_distributed_fdtd_with_gradient_bridge(simulation):
     output_tensors = raw_outputs if isinstance(raw_outputs, tuple) else (raw_outputs,)
 
     from ..adjoint.core import _rebuild_monitors
+    from ..time_traces import guard_nondifferentiable_traces
 
     pack = bridge._pack
     fields = {
@@ -1647,6 +1650,7 @@ def run_distributed_fdtd_with_gradient_bridge(simulation):
     }
     monitors = _rebuild_monitors(pack.monitor_templates, output_tensors, len(pack.field_names))
     monitors.update(bridge._raw_output.get("time_observers", {}))
+    guard_nondifferentiable_traces(monitors)
     raw_output = {
         field_name: fields[field_name.upper()] for field_name in pack.field_names
     }

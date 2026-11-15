@@ -28,7 +28,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.core import Box
 from witwin.maxwell.media import RationalSurfaceImpedance, SurfaceImpedanceMedium
-from witwin.maxwell.fdtd.surface_impedance_reference import good_conductor_surface_impedance
+from tests.oracles.surface_impedance_reference import good_conductor_surface_impedance
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(),
@@ -54,17 +54,17 @@ def _simulation(*, steps=64, frequency=3.0e9, sigma=50.0):
         current_surface=mw.Box(position=(0.0, 0.0, -0.0025), size=(0.015, 0.015, 0.0)),
         reference_impedance=50.0,
     )
-    circuit = mw.Circuit("pulse_interconnect")
+    circuit = mw.circuits.Circuit("pulse_interconnect")
     input_node = circuit.node("input")
     output_node = circuit.node("output")
-    circuit.add(mw.Resistor("R1", input_node, output_node, 35.0))
-    circuit.add(mw.Capacitor("C1", output_node, circuit.ground, 1.2e-12))
+    circuit.add(mw.rf.Resistor("R1", input_node, output_node, 35.0))
+    circuit.add(mw.rf.Capacitor("C1", output_node, circuit.ground, 1.2e-12))
     circuit.add(
-        mw.CurrentSource(
+        mw.circuits.CurrentSource(
             "I1",
             circuit.ground,
             input_node,
-            waveform=mw.PiecewiseLinearWaveform(
+            waveform=mw.circuits.PiecewiseLinearWaveform(
                 (0.0, 4.0e-11, 8.0e-11, 1.4e-10, 2.0e-10),
                 (0.0, 0.0, 0.02, -0.01, 0.0),
             ),
@@ -86,13 +86,14 @@ def _simulation(*, steps=64, frequency=3.0e9, sigma=50.0):
                 material=_good_conductor_medium(sigma=sigma),
             ),
         ),
-        device="cuda",
     )
     return mw.Simulation.fdtd(
         scene,
-        frequency=frequency,
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        frequencies=frequency,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     )
 
 
@@ -101,12 +102,10 @@ def _surface_state_keys(checkpoint):
 
 
 def _assert_fields_close(actual, expected, *, rtol, atol):
-    for name in ("Ex", "Ey", "Ez"):
-        a = actual.field(name)
-        b = expected.field(name)
-        a = a["data"] if isinstance(a, dict) else a
-        b = b["data"] if isinstance(b, dict) else b
-        torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
+    # Single-frequency runs without the volume DFT: compare the last-step fields.
+    for name in ("EX", "EY", "EZ"):
+        torch.testing.assert_close(actual.time_snapshot[name].values, expected.time_snapshot[name].values,
+                                   rtol=rtol, atol=atol)
 
 
 def test_generic_surface_resume_matches_uninterrupted_run():
@@ -146,9 +145,9 @@ def test_zeroing_captured_ade_state_breaks_resume():
 
     corrupted = _simulation().prepare().run(resume_from=checkpoint)
 
-    ez_expected = expected.field("Ez")
+    ez_expected = expected.time_snapshot["EZ"].values
     ez_expected = ez_expected["data"] if isinstance(ez_expected, dict) else ez_expected
-    ez_corrupt = corrupted.field("Ez")
+    ez_corrupt = corrupted.time_snapshot["EZ"].values
     ez_corrupt = ez_corrupt["data"] if isinstance(ez_corrupt, dict) else ez_corrupt
     max_abs = float(ez_expected.abs().max())
     rel = float((ez_corrupt - ez_expected).abs().max()) / max_abs

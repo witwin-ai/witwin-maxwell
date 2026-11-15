@@ -9,6 +9,7 @@ import torch
 
 from ..constants import EPSILON_0, MU_0
 from .dyadic_green import maxwell_symbol, cross_matrix, SpectralModeCache, _plane_eigensystem
+from ..errors import UnsupportedFeatureError
 
 
 def _reduce(transverse, medium):
@@ -667,7 +668,8 @@ class DyadicContrastKernel:
         if not isinstance(self.integration, DyadicIntegrationConfig):
             raise TypeError('Contrast integration must be DyadicIntegrationConfig')
         if self.integration.spatial_rule == 'factored_spd_tail_v1':
-            raise NotImplementedError('Factored SPD tails do not support paired regional contrasts')
+            raise UnsupportedFeatureError('Factored SPD tails do not support paired regional contrasts',
+                                          feature="guard:21abe121", method="mom")
         if self.integration.spatial_rule == 'factored_spd_pair_tail_v1':
             from .dyadic_green import _validate_factored_plane_medium
             if (self.exterior.frequency != self.interior.frequency

@@ -5,7 +5,8 @@ against the frozen pre-TerminalWavePort source and the working tree. Only APIs p
 both trees are used: the shared LumpedPort/TerminalPort/coax WavePort scenes of
 ``rf_port_bit_identity_scene.py`` and a shielded coupled pair whose WavePort carries the
 even (mode 0) and odd (mode 1) quasi-TEM modes through the existing mode solver,
-ModeSource/ModeMonitor compilation and modal overlap.
+ModeSource/ModeMonitor compilation and modal overlap. Scenes, simulations and results go
+through ``api_dialect.py`` beside this script.
 """
 from __future__ import annotations
 
@@ -14,10 +15,11 @@ from pathlib import Path
 
 import torch
 
-import witwin.maxwell as mw
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import api_dialect as api  # noqa: E402
 from rf_port_bit_identity_scene import _record, main as shared_main  # noqa: E402
+
+mw = api.mw
 
 
 def _pair_scene(dx=0.01):
@@ -34,22 +36,21 @@ def _pair_scene(dx=0.01):
                            reference_plane=x, modes=(mode("even", 0, x, direction), mode("odd", 1, x, direction)))
 
     length = 2.0 * (0.12 + 6 * dx) + 8.0 * dx
-    scene = mw.Scene(
+    scene = api.scene(
         domain=mw.Domain(bounds=((-0.12, 0.12), (-0.21, 0.21), (-0.21, 0.21))),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.pml(num_layers=6),
         ports=(port("left", -0.02, "+"), port("right", 0.02, "-")),
         device="cuda",
     )
-    for index, (center, size) in enumerate((
-        ((0.0, 0.0, 0.17), (length, 0.36, 0.02)), ((0.0, 0.0, -0.17), (length, 0.36, 0.02)),
-        ((0.0, 0.17, 0.0), (length, 0.02, 0.36)), ((0.0, -0.17, 0.0), (length, 0.02, 0.36)),
-    )):
-        scene.add_structure(mw.Structure(mw.Box(position=center, size=size), mw.Material.pec(), name=f"shield{index}"))
-    for name, y in (("line_a", 0.05), ("line_b", -0.05)):
-        scene.add_structure(mw.Structure(mw.Box(position=(0.0, y, 0.0), size=(length, 0.04, 0.04)),
-                                         mw.Material.pec(), name=name))
-    return scene
+    shields = [mw.Structure(mw.Box(position=center, size=size), mw.Material.pec(), name=f"shield{index}")
+               for index, (center, size) in enumerate((
+                   ((0.0, 0.0, 0.17), (length, 0.36, 0.02)), ((0.0, 0.0, -0.17), (length, 0.36, 0.02)),
+                   ((0.0, 0.17, 0.0), (length, 0.02, 0.36)), ((0.0, -0.17, 0.0), (length, 0.02, 0.36)),
+               ))]
+    lines = [mw.Structure(mw.Box(position=(0.0, y, 0.0), size=(length, 0.04, 0.04)), mw.Material.pec(), name=name)
+             for name, y in (("line_a", 0.05), ("line_b", -0.05))]
+    return api.add(scene, structures=[*shields, *lines])
 
 
 def main(output):
@@ -57,7 +58,7 @@ def main(output):
     shared_main(str(shared))
     payload = torch.load(shared, weights_only=False)
     module = payload.pop("module")
-    pair = mw.Simulation.fdtd(
+    pair = api.fdtd(
         _pair_scene(),
         frequencies=(0.8e9,),
         excitations=mw.PortSweep(),
@@ -66,7 +67,7 @@ def main(output):
         full_field_dft=False,
     ).run()
     _record("pair", pair, payload)
-    for name, data in pair.ports.items():
+    for name, data in api.ports(pair).items():
         payload[f"pair/{name}/characteristic_impedance"] = data.characteristic_impedance.detach().cpu()
         payload[f"pair/{name}/beta"] = data.beta.detach().cpu()
     payload["module"] = module

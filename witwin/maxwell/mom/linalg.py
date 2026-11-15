@@ -2,9 +2,11 @@
 from __future__ import annotations
 from contextlib import contextmanager
 from .operator_protocol import KrylovView, IterativeState
+from .options import MoMOption
+from .._enums import parse_enum
 
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import copy
 import ctypes
@@ -808,24 +810,43 @@ def condition_diagnostics(handle: DenseOperator) -> dict:
             'certified_stability_bound': False, 'method': 'dense_svd', 'exact_svd': True}
 
 
+class MoMSolveMethod(MoMOption):
+    """Linear solve selected by ``StoppingRule.method``."""
+    DIRECT = 'direct'
+    GMRES = 'gmres'
+    BLOCK_GMRES = 'block_gmres'
+
+
+class DirectStorage(MoMOption):
+    """Direct-factor storage selected by ``StoppingRule.direct_storage``."""
+    RESIDENT = 'resident'
+    SEALED_HOST_RESTORE_V1 = 'sealed_host_restore_v1'
+
+
 @dataclass(frozen=True)
 class StoppingRule:
-    rtol: float = 1e-8
+    # None means unset: MoMConfig derives it from its backend (0.1 * solve_dual_tolerance for
+    # hierarchical/FMM admission); every other consumer resolves it to 1e-8 on acceptance.
+    rtol: float | None = None
     atol: float = 1e-12
     maxiter: int = 500
     restart: int = 40
     stagnation_window: int | None = None
     stagnation_rtol: float = 1e-4
-    method: str = 'gmres'
+    method: MoMSolveMethod = MoMSolveMethod.GMRES
     preconditioner: str = 'row_norm'
     recycle_size: int = 0
     fallback: str = 'none'
-    direct_storage: str = 'resident'
+    direct_storage: DirectStorage = DirectStorage.RESIDENT
 
     def __post_init__(self):
+        object.__setattr__(self, 'method', parse_enum(MoMSolveMethod, self.method, name='StoppingRule.method'))
+        object.__setattr__(self, 'direct_storage',
+                           parse_enum(DirectStorage, self.direct_storage, name='StoppingRule.direct_storage'))
         if self.stagnation_window is None:
             object.__setattr__(self, 'stagnation_window', self.restart)
-        if not math.isfinite(self.rtol) or not math.isfinite(self.atol) or self.rtol < 0 or self.atol < 0:
+        if ((self.rtol is not None and (not math.isfinite(self.rtol) or self.rtol < 0))
+                or not math.isfinite(self.atol) or self.atol < 0):
             raise ValueError('residual tolerances must be finite and nonnegative')
         if self.rtol == self.atol == 0:
             raise ValueError('at least one residual tolerance must be positive')
@@ -834,10 +855,8 @@ class StoppingRule:
             raise ValueError('iteration, restart, and stagnation budgets must be positive integers')
         if not 0 <= self.stagnation_rtol < 1:
             raise ValueError('stagnation_rtol must be in [0, 1)')
-        if self.direct_storage not in ('resident', 'sealed_host_restore_v1') or (self.direct_storage != 'resident' and (self.method != 'direct' or self.fallback != 'none')):
+        if self.direct_storage != 'resident' and (self.method != 'direct' or self.fallback != 'none'):
             raise ValueError('direct_storage must be resident, or sealed_host_restore_v1 with direct and no fallback')
-        if self.method not in ('direct', 'gmres', 'block_gmres'):
-            raise ValueError('method must be direct, gmres, or block_gmres')
         if self.preconditioner not in ('none', 'row_norm', 'row_column_norm', 'rwg_diagonal'):
             raise ValueError('preconditioner must be none, row_norm, row_column_norm, or backend-supported rwg_diagonal')
         if not isinstance(self.recycle_size, int) or isinstance(self.recycle_size, bool) or self.recycle_size < 0:
@@ -846,6 +865,10 @@ class StoppingRule:
             raise ValueError('recycled correction subspaces require method=gmres')
         if self.fallback not in ('none', 'direct') or (self.fallback != 'none' and self.method not in ('gmres', 'block_gmres')):
             raise ValueError('fallback must be none, or direct with an iterative method')
+
+    def resolved(self, rtol=1e-8):
+        """Return this rule with an unset rtol replaced by ``rtol``."""
+        return self if self.rtol is not None else replace(self, rtol=rtol)
 
 
 def _norm(x):
@@ -1338,7 +1361,7 @@ def _correct(handle, b: torch.Tensor, x0: torch.Tensor,
     physical coordinates. ``fallback='direct'`` explicitly opts into an LU
     fallback after failed GMRES; both attempts and their costs remain logged.
     """
-    rule = stopping_rule or StoppingRule()
+    rule = (stopping_rule or StoppingRule()).resolved()
     if right_preconditioner is not None and (not callable(right_preconditioner) or rule.method != 'gmres'
                                              or rule.recycle_size or rule.fallback != 'none'):
         raise ValueError('A right preconditioner requires callable action, method=gmres, no recycling and no fallback')
@@ -1453,7 +1476,7 @@ def _correct(handle, b: torch.Tensor, x0: torch.Tensor,
         'rhs_logs': logs,
         **{key: sum(log[key] for log in logs)
            for key in ('iterations', 'matvecs', 'restarts', 'residual_checks')}}
-    combined.update({'method': rule.method, 'preconditioner': rule.preconditioner if rule.method != 'direct' else 'none',
+    combined.update({'method': rule.method.value, 'preconditioner': rule.preconditioner if rule.method != 'direct' else 'none',
                      'cache_reused': cache_reused, 'setup_seconds': setup_end - start,
                      'solve_seconds': end - setup_end, 'total_seconds': end - start,
                      'peak_memory_bytes': torch.cuda.max_memory_allocated(handle.device),

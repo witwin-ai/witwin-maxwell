@@ -16,7 +16,7 @@ def sample_fields(scene, structures, backgrounds, bases, offsets, spacing, shift
     widths = [torch.as_tensor(value, device=scene.device, dtype=torch.float32).expand(shape[a]).contiguous()
               for a, value in enumerate(spacing or (0., 0., 0.))]
     delta = .25 * min(float(value.min()) if torch.is_tensor(value) else value for value in spacing) if spacing else 1.
-    periodic = any(scene.boundary.axis_kind(a) in ("periodic", "bloch") for a in "xyz")
+    periodic = any(scene.scene.boundary.axis_kind(a) in ("periodic", "bloch") for a in "xyz")
     native = [spacing is not None and not periodic and native_geometry(s.geometry) for s in structures]
     geometry = descriptors(structures, device=scene.device, native_coverage=spacing is not None and not periodic)
     values = []
@@ -56,7 +56,7 @@ def compile_setup(scene, eps_background, mu_background, subpixel, include_edges)
 
     samples, averaging, pec_mode = m._resolve_subpixel(subpixel)
     m.validate_legacy_thin_pec(scene)
-    structures = m._bulk_structures(scene)
+    structures = m._bulk_structures(scene.scene)
     shifts = {id(s.geometry): m._static_periodic_shift_options(scene, s.geometry) for s in structures}
     layout = m._build_dispersive_layout(scene)
     model = m._new_material_model(scene, layout, eps_fill=0., mu_fill=0.)
@@ -122,6 +122,10 @@ def compile_setup(scene, eps_background, mu_background, subpixel, include_edges)
         model["edge_components"] = edges
     if include_edges and averaging == "kottke_edge":
         m._compile_binary_pole_edges(scene, model, layout, samples=samples,
+            eps_background=eps_background, mu_background=mu_background,
+            region_densities=(), geometry_periodic_shifts=shifts)
+    if include_edges and averaging in m._POLE_WEIGHTED_AVERAGING:
+        m._compile_polarized_pole_edges(scene, model, layout, samples=samples, averaging=averaging,
             eps_background=eps_background, mu_background=mu_background,
             region_densities=(), geometry_periodic_shifts=shifts)
     return model

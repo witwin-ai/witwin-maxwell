@@ -7,11 +7,10 @@ from witwin.maxwell.compiler.sources import compile_fdtd_sources
 from witwin.maxwell.fdtd.coords import component_coords
 
 
-def _make_scene(*, device="cpu"):
+def _make_scene():
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.uniform(0.25),
-        device=device,
     )
 
 
@@ -22,15 +21,16 @@ def _make_scene(*, device="cpu"):
 
 def test_uniform_current_source_compiles_box_and_polarization():
     scene = _make_scene()
-    scene.add_source(
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.UniformCurrentSource(
             size=(0.2, 0.2, 0.2),
             polarization="Ez",
             source_time=mw.CW(frequency=1e9, amplitude=3.0),
             center=(0.1, 0.0, -0.1),
             name="uc",
-        )
-    )
+        ),
+    ))
 
     compiled = compile_fdtd_sources(scene, default_frequency=1e9)
 
@@ -58,27 +58,30 @@ def test_uniform_current_source_rejects_negative_size():
 def test_current_dataset_rejects_shape_mismatch():
     coords = (np.linspace(-0.1, 0.1, 3), np.linspace(-0.1, 0.1, 3), np.linspace(-0.1, 0.1, 3))
     with pytest.raises(ValueError):
-        mw.CurrentDataset(coords, {"Jz": np.ones((3, 3, 2))})
+        mw.sources.CurrentDataset(coords, {"Jz": np.ones((3, 3, 2))})
 
 
 def test_current_dataset_rejects_unknown_component():
     coords = (np.linspace(-0.1, 0.1, 2), np.linspace(-0.1, 0.1, 2), np.linspace(-0.1, 0.1, 2))
     with pytest.raises(ValueError):
-        mw.CurrentDataset(coords, {"Ex": np.ones((2, 2, 2))})
+        mw.sources.CurrentDataset(coords, {"Ex": np.ones((2, 2, 2))})
 
 
 def test_field_dataset_rejects_non_increasing_coordinates():
     coords = (np.array([0.1, 0.0, 0.2]), np.linspace(-0.1, 0.1, 3), np.array([0.0]))
     with pytest.raises(ValueError):
-        mw.FieldDataset(coords, {"Ex": np.ones((3, 3, 1))})
+        mw.sources.FieldDataset(coords, {"Ex": np.ones((3, 3, 1))})
 
 
 def test_custom_current_source_compiles_dataset():
     n = 3
     axis = np.linspace(-0.1, 0.1, n)
-    dataset = mw.CurrentDataset((axis, axis, axis), {"Jz": np.ones((n, n, n)), "My": np.zeros((n, n, n))})
+    dataset = mw.sources.CurrentDataset((axis, axis, axis), {"Jz": np.ones((n, n, n)), "My": np.zeros((n, n, n))})
     scene = _make_scene()
-    scene.add_source(mw.CustomCurrentSource(dataset, source_time=mw.CW(frequency=1e9), name="cc"))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.sources.CustomCurrentSource(dataset, source_time=mw.CW(frequency=1e9), name="cc"),
+    ))
 
     compiled = compile_fdtd_sources(scene, default_frequency=1e9)
     assert compiled[0]["kind"] == "custom_current"
@@ -88,29 +91,29 @@ def test_custom_current_source_compiles_dataset():
 
 def test_custom_current_source_rejects_wrong_dataset_type():
     with pytest.raises(TypeError):
-        mw.CustomCurrentSource("not a dataset")
+        mw.sources.CustomCurrentSource("not a dataset")
 
 
 def test_custom_field_source_requires_planar_dataset():
     n = 3
     axis = np.linspace(-0.1, 0.1, n)
-    volumetric = mw.FieldDataset((axis, axis, axis), {"Ex": np.ones((n, n, n))})
+    volumetric = mw.sources.FieldDataset((axis, axis, axis), {"Ex": np.ones((n, n, n))})
     with pytest.raises(ValueError):
-        mw.CustomFieldSource(volumetric)
+        mw.sources.CustomFieldSource(volumetric)
 
 
 def test_custom_field_source_compiles_plane_normal():
     n = 4
     tangential = np.linspace(-0.2, 0.2, n)
-    dataset = mw.FieldDataset(
+    dataset = mw.sources.FieldDataset(
         (tangential, tangential, np.array([0.05])),
         {"Ex": np.ones((n, n, 1)), "Hy": np.ones((n, n, 1))},
     )
-    source = mw.CustomFieldSource(dataset, source_time=mw.CW(frequency=1e9), name="cf")
+    source = mw.sources.CustomFieldSource(dataset, source_time=mw.CW(frequency=1e9), name="cf")
     assert source.normal_axis == "z"
 
     scene = _make_scene()
-    scene.add_source(source)
+    scene = scene.updated(sources=(*scene.sources, source))
     compiled = compile_fdtd_sources(scene, default_frequency=1e9)
     assert compiled[0]["kind"] == "custom_field"
     assert compiled[0]["normal_axis"] == "z"
@@ -127,28 +130,29 @@ _ETA0 = 376.730313668
 def test_uniform_current_radiated_power_scales_as_amplitude_squared():
     def _flux(amplitude):
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.4, 0.4), (-0.4, 0.4), (-0.4, 0.4))),
-            grid=mw.GridSpec.uniform(0.06),
-            boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-            device="cuda",
-        )
-        scene.add_source(
-            mw.UniformCurrentSource(
-                size=(0.1, 0.1, 0.1),
-                polarization="Ez",
-                source_time=mw.CW(frequency=1e9, amplitude=amplitude),
-                center=(0.0, 0.0, 0.0),
-            )
-        )
-        scene.add_monitor(mw.FluxMonitor("fz", axis="z", position=0.18, frequencies=[1e9]))
+                    domain=mw.Domain(bounds=((-0.4, 0.4), (-0.4, 0.4), (-0.4, 0.4))),
+                    grid=mw.GridSpec.uniform(0.06),
+                    boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                    sources=(
+                mw.UniformCurrentSource(
+                    size=(0.1, 0.1, 0.1),
+                    polarization="Ez",
+                    source_time=mw.CW(frequency=1e9, amplitude=amplitude),
+                    center=(0.0, 0.0, 0.0),
+                ),
+                ),
+                    monitors=(mw.FluxMonitor("fz", axis="z", position=0.18, frequencies=[1e9]),),
+                )
         result = mw.Simulation.fdtd(
             scene,
             frequencies=[1e9],
-            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False,
+            ),
         ).run()
-        return float(torch.as_tensor(result.monitor("fz")["flux"]).reshape(-1)[0].cpu())
+        return float(torch.as_tensor(result.monitor("fz", freq_index=0).values).reshape(-1)[0].cpu())
 
     flux_low = _flux(1.0)
     flux_high = _flux(3.0)
@@ -165,23 +169,26 @@ def test_custom_current_radiated_power_scales_as_amplitude_squared():
     current = np.ones((n, n, n))
 
     def _flux(amplitude):
+        dataset = mw.sources.CurrentDataset((axis, axis, axis), {"Jz": current})
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.4, 0.4), (-0.4, 0.4), (-0.4, 0.4))),
-            grid=mw.GridSpec.uniform(0.06),
-            boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-            device="cuda",
-        )
-        dataset = mw.CurrentDataset((axis, axis, axis), {"Jz": current})
-        scene.add_source(mw.CustomCurrentSource(dataset, source_time=mw.CW(frequency=1e9, amplitude=amplitude)))
-        scene.add_monitor(mw.FluxMonitor("fz", axis="z", position=0.18, frequencies=[1e9]))
+                    domain=mw.Domain(bounds=((-0.4, 0.4), (-0.4, 0.4), (-0.4, 0.4))),
+                    grid=mw.GridSpec.uniform(0.06),
+                    boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                    sources=(
+                mw.sources.CustomCurrentSource(dataset, source_time=mw.CW(frequency=1e9, amplitude=amplitude)),
+                ),
+                    monitors=(mw.FluxMonitor("fz", axis="z", position=0.18, frequencies=[1e9]),),
+                )
         result = mw.Simulation.fdtd(
             scene,
             frequencies=[1e9],
-            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False,
+            ),
         ).run()
-        return float(torch.as_tensor(result.monitor("fz")["flux"]).reshape(-1)[0].cpu())
+        return float(torch.as_tensor(result.monitor("fz", freq_index=0).values).reshape(-1)[0].cpu())
 
     flux_low = _flux(1.0)
     flux_high = _flux(2.0)
@@ -198,30 +205,31 @@ def test_custom_field_source_reproduces_plane_wave():
     n = 13
     tangential = np.linspace(-0.45, 0.45, n)
     z_source = -0.12
-    dataset = mw.FieldDataset(
+    dataset = mw.sources.FieldDataset(
         (tangential, tangential, np.array([z_source])),
         {"Ex": np.ones((n, n, 1)), "Hy": (1.0 / _ETA0) * np.ones((n, n, 1))},
     )
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.06),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(mw.CustomFieldSource(dataset, source_time=mw.CW(frequency=1e9, amplitude=1.0)))
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                grid=mw.GridSpec.uniform(0.06),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=(mw.sources.CustomFieldSource(dataset, source_time=mw.CW(frequency=1e9, amplitude=1.0)),),
+            )
 
     prepared = mw.Simulation.fdtd(
         scene,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=300),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=300),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=True,
+        ),
     ).prepare()
     result = prepared.run()
 
-    ex = result.tensor("Ex").abs().cpu().numpy()
-    ey = result.tensor("Ey").abs().cpu().numpy()
-    ez = result.tensor("Ez").abs().cpu().numpy()
+    ex = result.field("Ex").isel(f=0).values.abs().cpu().numpy()
+    ey = result.field("Ey").isel(f=0).values.abs().cpu().numpy()
+    ez = result.field("Ez").isel(f=0).values.abs().cpu().numpy()
     z = prepared.solver.scene.z.cpu().numpy()
     kz = int(np.argmin(np.abs(z - z_source)))
     cx = ex.shape[0] // 2
@@ -233,7 +241,7 @@ def test_custom_field_source_reproduces_plane_wave():
     assert forward > 1.8 * backward
 
     # Transverse uniformity of a downstream plane (plane-wave signature).
-    x, y, _ = component_coords(prepared.solver.scene, "Ex")
+    x, y, _ = component_coords(prepared.solver.scene, "Ex", device=prepared.solver.scene.device)
     central_x = np.flatnonzero(np.abs(x) <= 0.30)
     central_y = np.flatnonzero(np.abs(y) <= 0.30)
     plane = ex[np.ix_(central_x, central_y, np.array([kz + 4]))].squeeze(-1)

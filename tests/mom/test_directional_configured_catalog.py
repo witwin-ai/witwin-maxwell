@@ -38,7 +38,7 @@ def _provider():
 
 def _root(provider, limit):
     return AutomaticDirectionalRegionPlan(provider,provider.exterior,
-        kernel_error_budget=mw.KernelErrorBudget(1e-10,1e-10),ideal_rwg_error_budget=1e-4,
+        kernel_error_budget=mw.mom.KernelErrorBudget(1e-10,1e-10),ideal_rwg_error_budget=1e-4,
         balancing_impedance=abs(provider.exterior.eta),leaf_size=8,separation_ratio=.15,
         cone_subdivisions=(2**20,),max_families=limit)
 
@@ -62,18 +62,18 @@ def catalog():
 
 
 def test_public_catalog_policy_roundtrip_and_strict_integer_capacity(tmp_path):
-    config = mw.DirectionalFMMConfig(max_families=512)
+    config = mw.mom.DirectionalFMMConfig(max_families=512)
     payload = json.loads(json.dumps(config.payload()))
-    assert mw.FMMConfig.restore(payload)==config
-    assert mw.DirectionalFMMConfig().max_families==32
+    assert mw.mom.FMMConfig.restore(payload)==config
+    assert mw.mom.DirectionalFMMConfig().max_families==32
     for value in (0,-1,True,1.5):
-        with pytest.raises(ValueError): mw.DirectionalFMMConfig(max_families=value)
+        with pytest.raises(ValueError): mw.mom.DirectionalFMMConfig(max_families=value)
     from dataclasses import replace
     from witwin.maxwell.mom.runtime import _numerical_identity
     from witwin.maxwell.mom.linalg import StoppingRule
     options = dict(operator_backend='fmm',riesz_storage='local_rwg_v1',
         stopping=StoppingRule(preconditioner='rwg_diagonal'))
-    a,b = mw.MoMConfig(fmm=config,**options),mw.MoMConfig(fmm=replace(config,max_families=513),**options)
+    a,b = mw.mom.MoMConfig(fmm=config,**options),mw.mom.MoMConfig(fmm=replace(config,max_families=513),**options)
     assert _numerical_identity(a)!=_numerical_identity(b)
     (tmp_path/'configuration.json').write_text(json.dumps(dict(payload=payload,
         unchanged_default_capacity=32,configured_catalog_bound_in_numerical_identity=True,

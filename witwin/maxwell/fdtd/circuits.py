@@ -111,6 +111,8 @@ class EMCircuitRuntime:
     running_energy_balance: torch.Tensor | None = None
     step_index: int = 0
     graph_eligible: bool = False
+    # Differentiable circuits keep the eager generic step that the per-step VJP replays.
+    adjoint_replay: bool = False
     rc_fast_plan: _RCFastPlan | None = None
 
     @property
@@ -379,7 +381,7 @@ class EMCircuitRuntime:
         self.running_energy_balance = self._reuse_prepared_buffer(self.running_energy_balance, self.initial_solution.new_zeros(()))
         # Built-in switch/source schedules are fully precomputed on the device.
         # A separate graph is captured for each integration/switch factor class.
-        self.graph_eligible = not any(
+        self.graph_eligible = not self.adjoint_replay and not any(
             value.requires_grad for value in self.system._parameter_cache.values()
         )
         self._record_initial()
@@ -969,7 +971,7 @@ def prepare_circuit_runtimes(
     field_couplings: Mapping[str, FieldPortCoupling] | None = None,
 ) -> tuple[EMCircuitRuntime, ...]:
     circuits = (
-        tuple(getattr(solver.scene, "circuits", ()))
+        tuple(getattr(solver.scene.scene, "circuits", ()))
         if circuits is None
         else tuple(circuits)
     )

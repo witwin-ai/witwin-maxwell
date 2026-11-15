@@ -92,31 +92,6 @@
         1.2076800898752962e-15
       ],
       "frequency_chunk_size": 2
-    },
-    "source_sha256": {
-      "witwin/maxwell/mom/layered/__init__.py": "8cbb7ea3295374383363dfd473a348401ebb9f54549bd7e941f486a21a7bbfee",
-      "witwin/maxwell/mom/layered/loss.py": "2c3bc4eeac79ee343947f37a6f113cc13acb987be92f23cf4111273b9af7208b",
-      "witwin/maxwell/mom/layered/green.py": "f9ffa6acae753b5ef26d0cfe9a1bfa968db9fdbb369e16b0b1c8a541ff892843",
-      "witwin/maxwell/mom/layered/process.py": "5486af65e790ca3757dd5693cb1406624b1a6700d7c301a3442f471264a087e3",
-      "witwin/maxwell/mom/layered/build.py": "54aadfbda0ebdca7e94c674a61d4d63feff7a349b98efef14c0c6f0f39c16fff",
-      "witwin/maxwell/mom/layered/vertical.py": "3e800cbf255fde168a7bf52637d4af2a0dd0ae969748fa8d55046ca486a6a573",
-      "witwin/maxwell/mom/layered/network.py": "dc372a043e4b02d005064abe40f830b408f10d93be686215a4f8449331246857",
-      "witwin/maxwell/mom/layered/assembly.py": "bf27efa62b2083bf0d675ad16ebf86a0a498a7867ee4061798e399558e27e8a6",
-      "witwin/maxwell/mom/layered/mesh.py": "d37140840460b54d737cf0868ac1930401c2d27ed9d6de732af98fe08ddb9087",
-      "witwin/maxwell/mom/layered/config.py": "f36162d4af7bd721f94d9f45ecad4fbe29076565dc913cba8e5c57673dd1fa4a",
-      "witwin/maxwell/mom/layered/sweep.py": "5a3067b19309c3f0f8d75fae6ee9dc52df82b674729737983fc02dbd05b660e8",
-      "witwin/maxwell/mom/layered/runtime.py": "b90c0c0c382b5526688db3e5e7a24688968dc6e14665eb312a5313a8b685666d",
-      "witwin/maxwell/mom/layered/lowfreq.py": "7608cee84cd5c47ef7d40ab9b0776a0cbd027cf4cb1702e51e6a65cfd6dc0d2e",
-      "witwin/maxwell/mom/layered/cuda/assembly.cu": "35acfb2e55feec3b2f766e9939e769b84442a655ea30cdcd8d9321a4d6a26691",
-      "witwin/maxwell/mom/layered/cuda/common.cuh": "62b41971e1b06739c2b9c0212fc575a2084b45e2bfd9e0909f0e5ebf682c5864",
-      "witwin/maxwell/mom/layered/cuda/vertical.cu": "6a1ca6c31f978cc10ff697cd313c800bd642c951f130394c246d5ec1656deec5",
-      "witwin/maxwell/mom/layered/cuda/spectral.cu": "cfd91eaf6ae2a36871f39b75353b5c5bd57e35aa2ff3a91ec523a5faa6fb2ee1",
-      "witwin/maxwell/mom/layered/cuda/triangle_static.cuh": "c129a5f5f3dedb380724b26ab20a7f487aeb72f81b0dc9c0b1227e31407fe359",
-      "witwin/maxwell/mom/layered/cuda/bessel.cu": "10acfcda189ed9580a7b2f4231d6bc70431d7e6e416237a01c133338e61c3cee",
-      "witwin/maxwell/mom/layered/cuda/interp.cu": "f4584be63eddef1aa6636c9bc286787b461698b8b6d346b567e518f86b9afb85",
-      "witwin/maxwell/mom/layered/cuda/lowfreq.cu": "f54f4400bbf631bdf13fee75d91d369fac7452a29ac7eb75f850905226ce9cfe",
-      "witwin/maxwell/mom/layered/cuda/green_eval.cuh": "8035ac87259ca5bb69a55dc172508727c8a9e54cb4ad034e7c675327f3313f15",
-      "witwin/maxwell/mom/layered/cuda/binding.cpp": "7824d257dd284694af27f3f87e49b30fd44e5c60bfab269e21afa6a7aab83889"
     }
   },
   "native_fine": {
@@ -212,31 +187,6 @@
         1.0693988906206041e-16
       ],
       "frequency_chunk_size": 2
-    },
-    "source_sha256": {
-      "witwin/maxwell/mom/layered/__init__.py": "8cbb7ea3295374383363dfd473a348401ebb9f54549bd7e941f486a21a7bbfee",
-      "witwin/maxwell/mom/layered/loss.py": "2c3bc4eeac79ee343947f37a6f113cc13acb987be92f23cf4111273b9af7208b",
-      "witwin/maxwell/mom/layered/green.py": "f9ffa6acae753b5ef26d0cfe9a1bfa968db9fdbb369e16b0b1c8a541ff892843",
-      "witwin/maxwell/mom/layered/process.py": "5486af65e790ca3757dd5693cb1406624b1a6700d7c301a3442f471264a087e3",
-      "witwin/maxwell/mom/layered/build.py": "54aadfbda0ebdca7e94c674a61d4d63feff7a349b98efef14c0c6f0f39c16fff",
-      "witwin/maxwell/mom/layered/vertical.py": "3e800cbf255fde168a7bf52637d4af2a0dd0ae969748fa8d55046ca486a6a573",
-      "witwin/maxwell/mom/layered/network.py": "dc372a043e4b02d005064abe40f830b408f10d93be686215a4f8449331246857",
-      "witwin/maxwell/mom/layered/assembly.py": "bf27efa62b2083bf0d675ad16ebf86a0a498a7867ee4061798e399558e27e8a6",
-      "witwin/maxwell/mom/layered/mesh.py": "d37140840460b54d737cf0868ac1930401c2d27ed9d6de732af98fe08ddb9087",
-      "witwin/maxwell/mom/layered/config.py": "f36162d4af7bd721f94d9f45ecad4fbe29076565dc913cba8e5c57673dd1fa4a",
-      "witwin/maxwell/mom/layered/sweep.py": "5a3067b19309c3f0f8d75fae6ee9dc52df82b674729737983fc02dbd05b660e8",
-      "witwin/maxwell/mom/layered/runtime.py": "b90c0c0c382b5526688db3e5e7a24688968dc6e14665eb312a5313a8b685666d",
-      "witwin/maxwell/mom/layered/lowfreq.py": "7608cee84cd5c47ef7d40ab9b0776a0cbd027cf4cb1702e51e6a65cfd6dc0d2e",
-      "witwin/maxwell/mom/layered/cuda/assembly.cu": "35acfb2e55feec3b2f766e9939e769b84442a655ea30cdcd8d9321a4d6a26691",
-      "witwin/maxwell/mom/layered/cuda/common.cuh": "62b41971e1b06739c2b9c0212fc575a2084b45e2bfd9e0909f0e5ebf682c5864",
-      "witwin/maxwell/mom/layered/cuda/vertical.cu": "6a1ca6c31f978cc10ff697cd313c800bd642c951f130394c246d5ec1656deec5",
-      "witwin/maxwell/mom/layered/cuda/spectral.cu": "cfd91eaf6ae2a36871f39b75353b5c5bd57e35aa2ff3a91ec523a5faa6fb2ee1",
-      "witwin/maxwell/mom/layered/cuda/triangle_static.cuh": "c129a5f5f3dedb380724b26ab20a7f487aeb72f81b0dc9c0b1227e31407fe359",
-      "witwin/maxwell/mom/layered/cuda/bessel.cu": "10acfcda189ed9580a7b2f4231d6bc70431d7e6e416237a01c133338e61c3cee",
-      "witwin/maxwell/mom/layered/cuda/interp.cu": "f4584be63eddef1aa6636c9bc286787b461698b8b6d346b567e518f86b9afb85",
-      "witwin/maxwell/mom/layered/cuda/lowfreq.cu": "f54f4400bbf631bdf13fee75d91d369fac7452a29ac7eb75f850905226ce9cfe",
-      "witwin/maxwell/mom/layered/cuda/green_eval.cuh": "8035ac87259ca5bb69a55dc172508727c8a9e54cb4ad034e7c675327f3313f15",
-      "witwin/maxwell/mom/layered/cuda/binding.cpp": "7824d257dd284694af27f3f87e49b30fd44e5c60bfab269e21afa6a7aab83889"
     }
   },
   "static_fine": {
@@ -318,32 +268,6 @@
         -0.0003859337067936034
       ]
     }
-  },
-  "source_sha256": {
-    "witwin/maxwell/mom/layered/__init__.py": "8cbb7ea3295374383363dfd473a348401ebb9f54549bd7e941f486a21a7bbfee",
-    "witwin/maxwell/mom/layered/loss.py": "2c3bc4eeac79ee343947f37a6f113cc13acb987be92f23cf4111273b9af7208b",
-    "witwin/maxwell/mom/layered/green.py": "f9ffa6acae753b5ef26d0cfe9a1bfa968db9fdbb369e16b0b1c8a541ff892843",
-    "witwin/maxwell/mom/layered/process.py": "5486af65e790ca3757dd5693cb1406624b1a6700d7c301a3442f471264a087e3",
-    "witwin/maxwell/mom/layered/build.py": "54aadfbda0ebdca7e94c674a61d4d63feff7a349b98efef14c0c6f0f39c16fff",
-    "witwin/maxwell/mom/layered/vertical.py": "3e800cbf255fde168a7bf52637d4af2a0dd0ae969748fa8d55046ca486a6a573",
-    "witwin/maxwell/mom/layered/network.py": "dc372a043e4b02d005064abe40f830b408f10d93be686215a4f8449331246857",
-    "witwin/maxwell/mom/layered/assembly.py": "bf27efa62b2083bf0d675ad16ebf86a0a498a7867ee4061798e399558e27e8a6",
-    "witwin/maxwell/mom/layered/mesh.py": "d37140840460b54d737cf0868ac1930401c2d27ed9d6de732af98fe08ddb9087",
-    "witwin/maxwell/mom/layered/config.py": "f36162d4af7bd721f94d9f45ecad4fbe29076565dc913cba8e5c57673dd1fa4a",
-    "witwin/maxwell/mom/layered/sweep.py": "5a3067b19309c3f0f8d75fae6ee9dc52df82b674729737983fc02dbd05b660e8",
-    "witwin/maxwell/mom/layered/runtime.py": "b90c0c0c382b5526688db3e5e7a24688968dc6e14665eb312a5313a8b685666d",
-    "witwin/maxwell/mom/layered/lowfreq.py": "7608cee84cd5c47ef7d40ab9b0776a0cbd027cf4cb1702e51e6a65cfd6dc0d2e",
-    "witwin/maxwell/mom/layered/cuda/assembly.cu": "35acfb2e55feec3b2f766e9939e769b84442a655ea30cdcd8d9321a4d6a26691",
-    "witwin/maxwell/mom/layered/cuda/common.cuh": "62b41971e1b06739c2b9c0212fc575a2084b45e2bfd9e0909f0e5ebf682c5864",
-    "witwin/maxwell/mom/layered/cuda/vertical.cu": "6a1ca6c31f978cc10ff697cd313c800bd642c951f130394c246d5ec1656deec5",
-    "witwin/maxwell/mom/layered/cuda/spectral.cu": "cfd91eaf6ae2a36871f39b75353b5c5bd57e35aa2ff3a91ec523a5faa6fb2ee1",
-    "witwin/maxwell/mom/layered/cuda/triangle_static.cuh": "c129a5f5f3dedb380724b26ab20a7f487aeb72f81b0dc9c0b1227e31407fe359",
-    "witwin/maxwell/mom/layered/cuda/bessel.cu": "10acfcda189ed9580a7b2f4231d6bc70431d7e6e416237a01c133338e61c3cee",
-    "witwin/maxwell/mom/layered/cuda/interp.cu": "f4584be63eddef1aa6636c9bc286787b461698b8b6d346b567e518f86b9afb85",
-    "witwin/maxwell/mom/layered/cuda/lowfreq.cu": "f54f4400bbf631bdf13fee75d91d369fac7452a29ac7eb75f850905226ce9cfe",
-    "witwin/maxwell/mom/layered/cuda/green_eval.cuh": "8035ac87259ca5bb69a55dc172508727c8a9e54cb4ad034e7c675327f3313f15",
-    "witwin/maxwell/mom/layered/cuda/binding.cpp": "7824d257dd284694af27f3f87e49b30fd44e5c60bfab269e21afa6a7aab83889",
-    "tests/support/rfic_r6b_references.py": "e1994832dfc35208e7cf52db0bce7fc8b2c6025b055651f14b94e470d0ca07ac"
   },
   "native_previous": {
     "frequency_Hz": [
@@ -438,32 +362,6 @@
         2.3526636883169664e-16
       ],
       "frequency_chunk_size": 2
-    },
-    "source_sha256": {
-      "witwin/maxwell/mom/layered/__init__.py": "8cbb7ea3295374383363dfd473a348401ebb9f54549bd7e941f486a21a7bbfee",
-      "witwin/maxwell/mom/layered/loss.py": "2c3bc4eeac79ee343947f37a6f113cc13acb987be92f23cf4111273b9af7208b",
-      "witwin/maxwell/mom/layered/green.py": "f9ffa6acae753b5ef26d0cfe9a1bfa968db9fdbb369e16b0b1c8a541ff892843",
-      "witwin/maxwell/mom/layered/process.py": "5486af65e790ca3757dd5693cb1406624b1a6700d7c301a3442f471264a087e3",
-      "witwin/maxwell/mom/layered/build.py": "54aadfbda0ebdca7e94c674a61d4d63feff7a349b98efef14c0c6f0f39c16fff",
-      "witwin/maxwell/mom/layered/vertical.py": "3e800cbf255fde168a7bf52637d4af2a0dd0ae969748fa8d55046ca486a6a573",
-      "witwin/maxwell/mom/layered/network.py": "dc372a043e4b02d005064abe40f830b408f10d93be686215a4f8449331246857",
-      "witwin/maxwell/mom/layered/assembly.py": "bf27efa62b2083bf0d675ad16ebf86a0a498a7867ee4061798e399558e27e8a6",
-      "witwin/maxwell/mom/layered/mesh.py": "d37140840460b54d737cf0868ac1930401c2d27ed9d6de732af98fe08ddb9087",
-      "witwin/maxwell/mom/layered/config.py": "f36162d4af7bd721f94d9f45ecad4fbe29076565dc913cba8e5c57673dd1fa4a",
-      "witwin/maxwell/mom/layered/sweep.py": "5a3067b19309c3f0f8d75fae6ee9dc52df82b674729737983fc02dbd05b660e8",
-      "witwin/maxwell/mom/layered/runtime.py": "b90c0c0c382b5526688db3e5e7a24688968dc6e14665eb312a5313a8b685666d",
-      "witwin/maxwell/mom/layered/lowfreq.py": "7608cee84cd5c47ef7d40ab9b0776a0cbd027cf4cb1702e51e6a65cfd6dc0d2e",
-      "witwin/maxwell/mom/layered/cuda/assembly.cu": "35acfb2e55feec3b2f766e9939e769b84442a655ea30cdcd8d9321a4d6a26691",
-      "witwin/maxwell/mom/layered/cuda/common.cuh": "62b41971e1b06739c2b9c0212fc575a2084b45e2bfd9e0909f0e5ebf682c5864",
-      "witwin/maxwell/mom/layered/cuda/vertical.cu": "6a1ca6c31f978cc10ff697cd313c800bd642c951f130394c246d5ec1656deec5",
-      "witwin/maxwell/mom/layered/cuda/spectral.cu": "cfd91eaf6ae2a36871f39b75353b5c5bd57e35aa2ff3a91ec523a5faa6fb2ee1",
-      "witwin/maxwell/mom/layered/cuda/triangle_static.cuh": "c129a5f5f3dedb380724b26ab20a7f487aeb72f81b0dc9c0b1227e31407fe359",
-      "witwin/maxwell/mom/layered/cuda/bessel.cu": "10acfcda189ed9580a7b2f4231d6bc70431d7e6e416237a01c133338e61c3cee",
-      "witwin/maxwell/mom/layered/cuda/interp.cu": "f4584be63eddef1aa6636c9bc286787b461698b8b6d346b567e518f86b9afb85",
-      "witwin/maxwell/mom/layered/cuda/lowfreq.cu": "f54f4400bbf631bdf13fee75d91d369fac7452a29ac7eb75f850905226ce9cfe",
-      "witwin/maxwell/mom/layered/cuda/green_eval.cuh": "8035ac87259ca5bb69a55dc172508727c8a9e54cb4ad034e7c675327f3313f15",
-      "witwin/maxwell/mom/layered/cuda/binding.cpp": "7824d257dd284694af27f3f87e49b30fd44e5c60bfab269e21afa6a7aab83889",
-      "tests/support/rfic_r6b_references.py": "e1994832dfc35208e7cf52db0bce7fc8b2c6025b055651f14b94e470d0ca07ac"
     }
   },
   "static_finite_source_gap": {
@@ -505,5 +403,95 @@
         -0.0003859337067936034
       ]
     }
+  },
+  "source_renewal_receipt": "<evidence-root>/rfic-mom-20261106/review/checkpoint/r4b-receipts/receipt.json",
+  "numerical_lock": {
+    "rule": "D-P1 (user decision 2026-11-09): committed numeric evidence is locked by value with the tiers of numerical_equivalence_standard.md (T0 bitwise, T1 within the fp64 run-level bound, T2 only with a per-field user approval); source hashes are not gates. Harness: scripts/dev/rfic/evidence_lock.py.",
+    "renewals": [
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round1/evidence/acq-0770640a",
+        "acquisition_commit": "0770640a6fc11fae34e9b459db9ff1fe902c66eb",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round1/evidence/acq-0770640a/tier_table.json",
+        "tier_table_sha256": "b97ca3243b230d589974b79d70c067f3c93480a18a9e2ba8af4e160022d5ac5f",
+        "summary": {
+          "T0": 114,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      },
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round2/evidence/acq-064a22d4",
+        "acquisition_commit": "064a22d4bd82e2b2cd90acaca2e9bb8be7930b0a",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round2/evidence/acq-064a22d4/tier_table.json",
+        "tier_table_sha256": "f1ae75be5b54c5ddf0178264a0e83bda07bb48ecaa7b03816ef7a48396fc65c8",
+        "summary": {
+          "T0": 114,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      },
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round3/evidence/acq-5877b7e7",
+        "acquisition_commit": "5877b7e7d31cd55101ba6f75f6f8978932cf9a63",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round3/evidence/acq-5877b7e7/tier_table.json",
+        "tier_table_sha256": "4f2d185645d75a1c5efd24f92be1a33daa8eab7200d30bc6cf2940159bd36258",
+        "summary": {
+          "T0": 114,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      },
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round4/evidence/acq-538c3b40",
+        "acquisition_commit": "538c3b40ef8d2fe85e661afe6eae4e15dc2cc879",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round4/evidence/acq-538c3b40/tier_table.json",
+        "tier_table_sha256": "ae0de71e8b29e4dad1b25c1c93a10a6f231d15fd39aa6505d46f28b14a14577a",
+        "summary": {
+          "T0": 114,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      },
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round5/evidence/acq-1e9e6009",
+        "acquisition_commit": "1e9e60092d5b1f04d64a7376455ba6a48c373d51",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round5/evidence/acq-1e9e6009/tier_table.json",
+        "tier_table_sha256": "c0a7e0c0318194e80bebe74cdb05ee815b7fc5b774ea8d76581fe4a5c7c4f789",
+        "summary": {
+          "T0": 114,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      },
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round67/evidence/acq-b6b88dd2",
+        "acquisition_commit": "b6b88dd2b75302676b9caccb52ec62d3b094a67e",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round67/evidence/acq-b6b88dd2/tier_table.json",
+        "tier_table_sha256": "201eb02cad37159259e1f111c94ffab7109ebe62407730ff527fd006fa479045",
+        "summary": {
+          "T0": 114,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      }
+    ]
   }
 }

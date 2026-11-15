@@ -90,9 +90,11 @@ def _run_planewave(scene):
     return mw.Simulation.fdtd(
         scene,
         frequencies=list(scene.monitors[0].frequencies or ()),
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(normalize_source=True),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True),
+            full_field_dft=True,
+        ),
     ).run()
 
 
@@ -117,9 +119,9 @@ def run_one_gram_cube() -> SarReport:
     try:
         device = _device()
         e0 = 2.0
-        scene = one_gram_cube.build_scene(device=device)
+        scene = one_gram_cube.build_scene()
         monitor = next(m for m in scene.monitors if m.name == "loss")
-        prepared = prepare_scene(scene)
+        prepared = prepare_scene(scene, device=device)
         compiled = compile_power_loss_monitor(prepared, monitor)
         fields = {
             component.upper(): torch.full(
@@ -137,7 +139,7 @@ def run_one_gram_cube() -> SarReport:
             frequencies=one_gram_cube.FREQUENCIES,
             fields=fields,
         )
-        sar = result.sar("loss", averaging=mw.SARAveraging(mass=(1e-3,)))
+        sar = mw.sar.sar(result, "loss", averaging=mw.sar.SARAveraging(mass=(1e-3,)))
         peak = sar.peak(mass=1e-3)
         measured = float(peak.sar[0])
         analytic = 0.5 * one_gram_cube.SIGMA_E * (3.0 * e0**2) / one_gram_cube.MASS_DENSITY
@@ -179,9 +181,9 @@ def run_uniform_lossy_cube() -> SarReport:
             report.status = "pending"
             report.notes.append("CUDA required for the FDTD run; skipped on CPU.")
             return report
-        scene = uniform_lossy_cube.build_scene(device="cuda")
+        scene = uniform_lossy_cube.build_scene()
         result = _run_planewave(scene)
-        sar = result.sar("loss", averaging=mw.SARAveraging(mass=(1e-3, 10e-3)))
+        sar = mw.sar.sar(result, "loss", averaging=mw.sar.SARAveraging(mass=(1e-3, 10e-3)))
         volume_absorbed = _volume_absorbed_power(sar)
         channel = float(sar.provenance["electric_channel_power"][0])
         peak_point = float(
@@ -212,12 +214,12 @@ def run_uniform_lossy_cube() -> SarReport:
 # sar/layered_slab -- wave-level conservation closure + 3-grid convergence.   #
 # --------------------------------------------------------------------------- #
 def _layered_conservation(dx: float) -> dict:
-    scene = layered_slab.build_conservation_scene(dx=dx, device="cuda")
+    scene = layered_slab.build_conservation_scene(dx=dx)
     result = _run_planewave(scene)
-    sar = result.sar("loss", averaging=mw.SARAveraging(mass=(1e-3,)))
+    sar = mw.sar.sar(result, "loss", averaging=mw.sar.SARAveraging(mass=(1e-3,)))
     volume_absorbed = _volume_absorbed_power(sar)
-    flux_in = float(result.monitor("flux_in")["flux"])
-    flux_out = float(result.monitor("flux_out")["flux"])
+    flux_in = float(result.raw_monitor("flux_in")["flux"])
+    flux_out = float(result.raw_monitor("flux_out")["flux"])
     surface_absorbed = flux_in - flux_out
     return {
         "dx": dx,
@@ -274,13 +276,15 @@ def run_layered_slab() -> SarReport:
 # sar/antenna_near_phantom -- functional workflow, physical qualification gap. #
 # --------------------------------------------------------------------------- #
 def antenna_exposure_result(*, cuda_graph=True):
-    scene = antenna_near_phantom.build_scene(device="cuda")
+    scene = antenna_near_phantom.build_scene()
     return mw.Simulation.fdtd(scene,frequencies=antenna_near_phantom.FREQUENCIES,
-        excitations=mw.PortExcitation("feed",source_time=mw.GaussianPulse(
+        excitations=mw.rf.PortExcitation("feed",source_time=mw.GaussianPulse(
             antenna_near_phantom.DESIGN_FREQUENCY,fwidth=1.5e9)),
-        run_time=mw.TimeConfig.auto(steady_cycles=24,transient_cycles=0),
-        spectral_sampler=mw.SpectralSampler(window="none"),full_field_dft=True,
-        cuda_graph=cuda_graph).run()
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=24,transient_cycles=0),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),full_field_dft=True,
+            cuda_graph=cuda_graph,
+        )).run()
 
 
 def run_antenna_near_phantom(*, execute=True) -> SarReport:
@@ -309,11 +313,11 @@ def run_antenna_near_phantom(*, execute=True) -> SarReport:
     try:
         result = antenna_exposure_result()
         accepted = float(result.port("feed").accepted_power[0])
-        absorbed = float(result.power_loss("loss").conduction[0])
+        absorbed = float(result.monitor("loss").conduction[0])
         if accepted <= 0 or absorbed <= 0:
             raise ValueError("Functional exposure requires positive measured accepted and conductive power.")
-        sar = result.sar("loss",normalization=mw.PowerNormalization.accepted_power("feed",1.),
-            averaging=mw.SARAveraging(mass=(1e-3,10e-3)))
+        sar = mw.sar.sar(result, "loss",normalization=mw.sar.PowerNormalization.accepted_power("feed",1.),
+            averaging=mw.sar.SARAveraging(mass=(1e-3,10e-3)))
         report.gate_class = POSTPROCESS_ONLY
         for quantity,value,unit in (("accepted_power",accepted,"W"),("absorbed_power",absorbed,"W"),
                 ("peak_1g_sar_at_1W",float(sar.peak(1e-3).sar[0]),"W/kg"),

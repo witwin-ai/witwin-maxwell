@@ -7,9 +7,10 @@ quadratic work. This is a balanced block Frobenius test, not a global Riesz norm
 from dataclasses import dataclass, field
 import math
 import torch
+from ..errors import ConvergenceError
 
 
-class CompressionFailure(RuntimeError):
+class CompressionFailure(ConvergenceError):
     def __init__(self, message, receipt):
         super().__init__(message)
         self.receipt = receipt

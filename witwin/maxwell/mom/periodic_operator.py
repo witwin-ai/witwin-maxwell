@@ -4,6 +4,8 @@ from dataclasses import dataclass,replace
 import torch
 from .operator import IntegrationConfig,assemble_system,_pair_integrals
 from .periodic import EwaldHelmholtzKernel
+from ..errors import ConvergenceError
+from ..errors import UnsupportedFeatureError
 
 
 class _RegularKernel:
@@ -115,7 +117,7 @@ class PeriodicAssemblyCheck:
             raise ValueError('Periodic assembly tolerances must be finite, nonnegative and nonzero')
 
 
-class PeriodicAssemblyConvergenceError(RuntimeError):
+class PeriodicAssemblyConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         self.receipt=receipt
         super().__init__('Periodic assembly refinement failed: '+receipt['failure_reason'])
@@ -165,7 +167,8 @@ def validate_periodic_sources(sources,lattice,exterior):
     lattice.assert_current()
     for source in sources:
         if not isinstance(source,PlaneWave):
-            raise NotImplementedError('Periodic incident fields currently require explicit plane waves')
+            raise UnsupportedFeatureError('Periodic incident fields currently require explicit plane waves',
+                                          feature="boundary.periodic", method="mom")
         direction=lattice.vectors.new_tensor(source.direction)
         translations=lattice.vectors@direction
         imaginary_phase=exterior.k.imag*translations

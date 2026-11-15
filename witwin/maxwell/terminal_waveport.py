@@ -35,13 +35,18 @@ from .compiler.sources import _compile_mode_source
 from .compiler.terminal_waveports import CompiledTerminalWavePort, compile_terminal_waveport
 from .compiler.path_integrals import audit_terminal_integral
 from .constants import C_0
+from .errors import MaxwellWarning
 from .fdtd.excitation.modes import sample_mode_source_component, solve_mode_source_profile
 from .lumped import PortSweep
+from .material_cache import refuse_column_material_cache
 from .monitors import ModeMonitor
 from .network import NetworkData, PortData
 from .ports import TerminalWavePort, WavePort
 from .result import Result
+from .scene import scene_declarations
 from .sources import CW, ModeSource, _resolve_mode_source_polarization_axis
+from .errors import UnsupportedFeatureError
+from ._stability import experimental
 
 TERMINAL_SOURCE_PREFIX = "__terminal_waveport_source__::"
 
@@ -50,7 +55,8 @@ TERMINAL_SOURCE_PREFIX = "__terminal_waveport_source__::"
 APERTURE_WALL_CHARGE_LIMIT = 0.05
 
 
-class TerminalWavePortApertureWarning(UserWarning):
+@experimental("rf_ports")
+class TerminalWavePortApertureWarning(MaxwellWarning):
     """The TerminalWavePort aperture truncates a modal field (see ``APERTURE_WALL_CHARGE_LIMIT``)."""
 
 
@@ -301,7 +307,8 @@ def _prepare_port(context, port: TerminalWavePort, frequencies) -> PreparedTermi
 
 
 def resolve_terminal_waveport_run_manifest(scene, sweep: PortSweep, frequencies, *, requested_dt=None,
-                                           base_frequency=None, max_electric_field=None):
+                                           base_frequency=None, max_electric_field=None, device=None):
+    declared = scene_declarations(scene)
     from .waveport_sweep import _mode_context
 
     if not isinstance(sweep, PortSweep):
@@ -313,16 +320,17 @@ def resolve_terminal_waveport_run_manifest(scene, sweep: PortSweep, frequencies,
         raise ValueError("TerminalWavePort PortSweep frequencies must be finite and positive.")
     if any(right <= left for left, right in zip(frequency_values, frequency_values[1:])):
         raise ValueError("TerminalWavePort PortSweep frequencies must be strictly increasing.")
-    terminal_ports = tuple(port for port in scene.ports if isinstance(port, TerminalWavePort))
+    terminal_ports = tuple(port for port in declared.ports if isinstance(port, TerminalWavePort))
     if not terminal_ports:
         raise ValueError("TerminalWavePort PortSweep requires at least one TerminalWavePort.")
-    if any(isinstance(port, WavePort) for port in scene.ports):
-        raise NotImplementedError(
+    if any(isinstance(port, WavePort) for port in declared.ports):
+        raise UnsupportedFeatureError(
             "A TerminalWavePort sweep cannot yet be combined with single-mode WavePorts in one scene; "
-            "declare every modal aperture as a TerminalWavePort."
+            "declare every modal aperture as a TerminalWavePort.",
+            feature="port.TerminalWavePort", method="fdtd"
         )
     unterminated = tuple(
-        port.name for port in scene.ports
+        port.name for port in declared.ports
         if not isinstance(port, TerminalWavePort) and hasattr(port, "termination") and port.termination is None
     )
     if unterminated:
@@ -330,7 +338,7 @@ def resolve_terminal_waveport_run_manifest(scene, sweep: PortSweep, frequencies,
             "A TerminalWavePort run can retain lumped/terminal ports only as explicit passive "
             f"terminations; unterminated entries are {unterminated}."
         )
-    if scene.sources:
+    if declared.sources:
         raise ValueError("TerminalWavePort PortSweep requires a Scene without independent field sources.")
     ports_by_name = {port.name: port for port in terminal_ports}
     selected = tuple(ports_by_name) if sweep.ports is None else tuple(sweep.ports)
@@ -338,7 +346,7 @@ def resolve_terminal_waveport_run_manifest(scene, sweep: PortSweep, frequencies,
     if missing:
         raise ValueError(f"PortSweep references missing TerminalWavePort entries: {missing}.")
     context = _mode_context(scene, requested_dt=requested_dt, base_frequency=base_frequency,
-                            max_electric_field=max_electric_field)
+                            max_electric_field=max_electric_field, device=device)
     prepared = tuple(_prepare_port(context, ports_by_name[name], frequency_values) for name in selected)
     return TerminalWavePortRunManifest(
         physical_port_names=selected,
@@ -353,7 +361,9 @@ def _monitor_name(port_name: str, mode: int) -> str:
     return f"{WAVEPORT_MONITOR_PREFIX}{port_name}::M{mode + 1}"
 
 
-def _column_scene(scene, manifest, *, active_port: int, active_channel: int, frequency_index: int, amplitude: complex):
+def _column_scene(scene, manifest, *, active_port: int, active_channel: int, frequency_index: int, amplitude: complex,
+                  device):
+    declared = scene_declarations(scene)
     from .waveport_sweep import _source_plane
 
     frequency = manifest.frequencies[frequency_index]
@@ -376,7 +386,7 @@ def _column_scene(scene, manifest, *, active_port: int, active_channel: int, fre
             monitors.append(monitor)
         if port_index != active_port:
             continue
-        position = _source_plane(scene, prepared)
+        position = _source_plane(scene, prepared, device=device)
         coefficients = prepared.drive[frequency_index][:, active_channel]
         coefficient_floor = 64 * torch.finfo(coefficients.dtype).eps * abs(amplitude) * float(coefficients.abs().max().item())
         for mode in range(port.terminal_count):
@@ -389,15 +399,15 @@ def _column_scene(scene, manifest, *, active_port: int, active_channel: int, fre
                 position=position, coefficient=coefficient,
                 name=f"{TERMINAL_SOURCE_PREFIX}{port.name}::{active_channel}::{mode}",
             ))
-    retained = tuple(port for port in scene.ports if not isinstance(port, TerminalWavePort))
-    return scene.clone(ports=retained, sources=sources, monitors=[*scene.monitors, *monitors])
+    retained = tuple(port for port in declared.ports if not isinstance(port, TerminalWavePort))
+    return declared.updated(ports=retained, sources=sources, monitors=(*declared.monitors, *monitors))
 
 
 def _modal_waves(result, prepared, frequency_index):
     result = result._spectral_ratio_view()
     forward, backward = [], []
     for mode in range(prepared.port.terminal_count):
-        modal = result.monitor(_monitor_name(prepared.port.name, mode), resolve_modal=True)
+        modal = result._mode_overlap(_monitor_name(prepared.port.name, mode))
         complex_mode = prepared.mode_data[frequency_index][mode].get("beta_complex") is not None
         scale = 1.0 if complex_mode else torch.sqrt(torch.abs(modal["mode_power"]))
         forward.append(modal["amplitude_forward"] * scale)
@@ -421,6 +431,7 @@ def run_terminal_waveport_sweep(simulation, scene, manifest: TerminalWavePortRun
     from .array_execution import ArrayRunData, compact_array_column_result
     from .waveport_sweep import _user_monitor_payloads
 
+    refuse_column_material_cache(simulation.config, runner="A TerminalWavePort sweep")
     amplitude = complex(simulation.port_sweep.amplitude.detach().cpu())
     channel_locations = [(port_index, channel)
                          for port_index, prepared in enumerate(manifest.prepared_ports)
@@ -432,7 +443,8 @@ def run_terminal_waveport_sweep(simulation, scene, manifest: TerminalWavePortRun
         incident_f, reflected_f, voltage_f, current_f, stats, results = [], [], [], [], [], []
         for frequency_index, frequency in enumerate(manifest.frequencies):
             run_scene = _column_scene(scene, manifest, active_port=active_port, active_channel=active_channel,
-                                      frequency_index=frequency_index, amplitude=amplitude)
+                                      frequency_index=frequency_index, amplitude=amplitude,
+                                      device=simulation.config.device)
             sub_simulation = type(simulation)(
                 scene=run_scene,
                 method=simulation.method,
@@ -569,7 +581,7 @@ def run_terminal_waveport_sweep(simulation, scene, manifest: TerminalWavePortRun
             "user_monitor_frequency": manifest.frequencies[0]} if user_monitors else {}
     return Result(
         method="fdtd",
-        scene=scene,
+        scene=scene_declarations(scene),
         prepared_scene=last_result.prepared_scene,
         frequency=manifest.frequencies[0],
         frequencies=manifest.frequencies,

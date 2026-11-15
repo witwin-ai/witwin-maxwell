@@ -27,6 +27,7 @@ import pytest
 
 td = pytest.importorskip("tidy3d")
 
+from witwin.maxwell.adapters.tidy3d import scene_to_tidy3d
 from benchmark.scenes.antenna.half_wave_dipole import half_wave_dipole_scene
 from benchmark.scenes.antenna.patch import patch_antenna_scene
 from benchmark.scenes.rf.coax_thru import coax_thru_scene
@@ -40,8 +41,8 @@ from benchmark.scenes.rf.lumped_open_short_match import (
 # WavePort -> ModeSource (drive, port 0) + ModeMonitor (every port).          #
 # --------------------------------------------------------------------------- #
 def test_coax_thru_wave_ports_export_drive_and_receive_monitors():
-    scene = coax_thru_scene(dx=0.01, device="cpu")
-    sim = scene.to_tidy3d(frequencies=(0.6e9, 1.0e9, 1.6e9))
+    scene = coax_thru_scene(dx=0.01)
+    sim = scene_to_tidy3d(scene, frequencies=(0.6e9, 1.0e9, 1.6e9))
 
     # Exactly one modal drive (the first declared port, "left").
     sources = [s for s in sim.sources if isinstance(s, td.ModeSource)]
@@ -60,8 +61,8 @@ def test_coax_thru_wave_ports_export_drive_and_receive_monitors():
 
 
 def test_lumped_open_short_match_single_wave_port_is_runnable():
-    scene = coax_sol_scene("matched", dx=0.01, device="cpu")
-    sim = scene.to_tidy3d(frequencies=sol_frequencies())
+    scene = coax_sol_scene("matched", dx=0.01)
+    sim = scene_to_tidy3d(scene, frequencies=sol_frequencies())
 
     sources = [s for s in sim.sources if isinstance(s, td.ModeSource)]
     monitors = [m for m in sim.monitors if isinstance(m, td.ModeMonitor)]
@@ -75,8 +76,8 @@ def test_lumped_open_short_match_single_wave_port_is_runnable():
 # LumpedPort -> equivalent current injection (UniformCurrentSource filament).  #
 # --------------------------------------------------------------------------- #
 def test_dipole_wire_gap_feed_exports_z_current_filament():
-    scene = half_wave_dipole_scene(design_frequency=3.0e9, device="cpu")
-    sim = scene.to_tidy3d(frequencies=scene.monitors[0].frequencies)
+    scene = half_wave_dipole_scene(design_frequency=3.0e9)
+    sim = scene_to_tidy3d(scene, frequencies=scene.monitors[0].frequencies)
 
     sources = [s for s in sim.sources if isinstance(s, td.UniformCurrentSource)]
     assert len(sources) == 1
@@ -98,9 +99,8 @@ def test_dipole_wire_gap_feed_exports_z_current_filament():
 def test_patch_probe_feed_exports_z_current_filament_at_feed_inset():
     scene = patch_antenna_scene(
         frequencies=tuple(f * 1e9 for f in (4.4, 4.8, 5.2, 5.6, 6.0)),
-        device="cpu",
     )
-    sim = scene.to_tidy3d(frequencies=scene.monitors[0].frequencies)
+    sim = scene_to_tidy3d(scene, frequencies=scene.monitors[0].frequencies)
 
     sources = [s for s in sim.sources if isinstance(s, td.UniformCurrentSource)]
     assert len(sources) == 1
@@ -122,7 +122,7 @@ def test_current_filament_orientation_follows_voltage_axis():
     from witwin.maxwell.adapters.tidy3d import _lumped_port_current_source
 
     scene = patch_antenna_scene(
-        frequencies=(5.0e9,), device="cpu"
+        frequencies=(5.0e9,)
     )
     feed_port = scene.ports[0]
     source = _lumped_port_current_source(feed_port, scene, td, 1.0e6, td.GaussianPulse(freq0=5e9, fwidth=1e9))
@@ -133,6 +133,6 @@ def test_current_filament_orientation_follows_voltage_axis():
 
 
 def test_port_export_requires_frequencies():
-    scene = coax_thru_scene(dx=0.01, device="cpu")
+    scene = coax_thru_scene(dx=0.01)
     with pytest.raises(ValueError, match="frequencies"):
-        scene.to_tidy3d(frequencies=None)
+        scene_to_tidy3d(scene, frequencies=None)

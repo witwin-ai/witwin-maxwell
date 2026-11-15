@@ -64,14 +64,14 @@ def test_nonzero_near_zero_and_exact_zero_are_distinguished():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA required')
 def test_public_magnetic_duality_of_solved_currents_and_fields(tmp_path):
-    config = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=4, singular_order=6),
+    config = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=4, singular_order=6),
                          query_config=FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1')
     results = []
     for eps, mu, pol in [(2., 1., (1., 0., 0.)), (1., 2., (0., 1., 0.))]:
         scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.07), mw.Material(eps_r=eps, mu_r=mu))],
                          sources=[mw.PlaneWave(polarization=pol)])
-        results.append(mw.Simulation.mom(scene, frequency=3e8, config=config).run())
-    first, second = (r.surface_currents for r in results)
+        results.append(mw.Simulation.mom(scene, frequencies=3e8, config=config).run())
+    first, second = (mw.mom.surface_currents(r) for r in results)
     eta = first.handle.exterior.eta
     torch.testing.assert_close(second.J_scattered, first.M_scattered/eta, rtol=2e-10, atol=1e-13)
     torch.testing.assert_close(second.M_scattered, -eta*first.J_scattered, rtol=2e-10, atol=1e-11)
@@ -84,8 +84,8 @@ def test_public_magnetic_duality_of_solved_currents_and_fields(tmp_path):
     path = tmp_path/'magnetic.pt'
     results[1].save(path)
     restored = mw.Result.load(path, scene=results[1].scene)
-    assert restored.surface_currents.handle.interior.mu_r == 2
-    assert torch.equal(restored.surface_currents.scattered_coefficients, second.scattered_coefficients)
+    assert mw.mom.surface_currents(restored).handle.interior.mu_r == 2
+    assert torch.equal(mw.mom.surface_currents(restored).scattered_coefficients, second.scattered_coefficients)
 
 
 def test_exact_undamped_magnetic_pole_is_rejected_explicitly():
@@ -99,10 +99,10 @@ def test_opposite_branch_public_solution_and_magnetic_volume_loss():
     pole = mw.DrudePole(plasma_frequency=math.sqrt(2)*3e8, gamma=.001e8)
     material = mw.Material(drude_poles=(pole,), mu_drude_poles=(pole,), sigma_m=.001)
     scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.03), material)], sources=[mw.PlaneWave()])
-    config = mw.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=4),
+    config = mw.mom.MoMConfig(subdivisions=0, integration=IntegrationConfig(order=3, singular_order=4),
                          query_config=FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1')
-    result = mw.Simulation.mom(scene, frequency=3e8, config=config).run()
-    data = result.surface_currents
+    result = mw.Simulation.mom(scene, frequencies=3e8, config=config).run()
+    data = mw.mom.surface_currents(result)
     assert data.handle.interior.k.real < 0 and data.handle.interior.k.imag > 0
     assert torch.isfinite(data.scattered_coefficients).all()
     points = torch.tensor([[0., 0., 0.]], device='cuda', dtype=torch.float64)

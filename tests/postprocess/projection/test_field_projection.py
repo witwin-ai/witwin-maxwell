@@ -311,14 +311,14 @@ def test_projection_validates_inputs(projector):
 
 def _synthetic_two_frequency_result() -> mw.Result:
     frequencies = (1.0e9, 1.5e9)
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "huygens", position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4), frequencies=frequencies
     )
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
         grid=mw.GridSpec.uniform(0.1),
-        device="cpu",
-    ).add_monitor(surface)
+        monitors=(surface,),
+    )
     coords = np.linspace(-0.3, 0.3, 7)
     monitors = {}
     for face in surface.faces:

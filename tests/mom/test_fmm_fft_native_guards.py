@@ -26,7 +26,7 @@ def test_fft_native_order_and_float32_fail_before_support_tree_or_pair_walk(monk
         tree=SimpleNamespace(lower=torch.zeros((1,3),device='cuda',dtype=dtype))
         with pytest.raises(ValueError):plan_multipole_storage((tree,),order=order,separation_ratio=.5,
             budget_bytes=1024**3,table_storage='fft_v1')
-        with pytest.raises(ValueError):plan_multipole_order(((tree,None),),mw.KernelErrorBudget(1e-6,1e-5),
+        with pytest.raises(ValueError):plan_multipole_order(((tree,None),),mw.mom.KernelErrorBudget(1e-6,1e-5),
             min_order=order,max_order=order,table_storage='fft_v1')
     for dtype,order,max_order in ((torch.float32,6,None),(torch.float64,13,None),(torch.float64,6,13)):
         medium=compile_medium(mw.Material(),3e8)
@@ -34,4 +34,4 @@ def test_fft_native_order_and_float32_fail_before_support_tree_or_pair_walk(monk
         system=SurfaceSystem.create([(0,'body',basis,compile_medium(mw.Material(eps_r=2.),3e8))])
         provider=ScalarSystemBlocks(system,medium,IntegrationConfig(order=3,singular_order=3))
         with pytest.raises(ValueError):MultipoleSystemActions(provider,order=order,max_order=max_order,
-            table_storage='fft_v1',kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5))
+            table_storage='fft_v1',kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5))

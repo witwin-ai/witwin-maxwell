@@ -12,13 +12,13 @@ from witwin.maxwell.scene import prepare_scene
 @pytest.mark.parametrize('dx',[.00125,.000625,.0003125,.00015625])
 def test_real_broadband_source_apertures_compile_on_all_refinements(kind,dx):
     scene=printed_line_scene(kind,dx=dx,longitudinal_dl=.0025,transverse_padding=.02,
-        axial_half_length=.3,port_separation=.4,transverse_refinement_radius=.02,device='cpu')
+        axial_half_length=.3,port_separation=.4,transverse_refinement_radius=.02)
     ports,groups=physical_sources(scene,kind,.0025)
     assert len(groups)==(4 if kind=='differential_pair' else 2)
     assert all(len(group)==(2 if kind in ('stripline','cpw') else 1) for group in groups)
-    prepared=prepare_scene(scene.clone(ports=ports))
+    prepared=prepare_scene(scene.updated(ports=ports), device="cpu")
     axes=[getattr(prepared,a+'_half64') for a in 'xyz']
-    for port in prepared.ports:
+    for port in prepared.scene.ports:
         compiled=compile_port_geometry(prepared,port,device='cpu')
         assert len(compiled.voltage_weights)>0
         assert np.isfinite(compiled.voltage_weights.numpy()).all()
@@ -30,7 +30,7 @@ def test_real_broadband_source_apertures_compile_on_all_refinements(kind,dx):
         torch.testing.assert_close(copied.voltage_aperture.size,port.voltage_aperture.size,rtol=0,atol=0)
     if kind in ('stripline','cpw'):
         for group in groups:
-            a,b=[next(p for p in prepared.ports if p.name==name) for name in group]
+            a,b=[next(p for p in prepared.scene.ports if p.name==name) for name in group]
             normal='xyz'.index(a.voltage_path.axis)
             va=np.asarray(a.positive)-np.asarray(a.negative)
             vb=np.asarray(b.positive)-np.asarray(b.negative)

@@ -17,6 +17,7 @@ import pytest
 import torch
 
 from tests.breakdown._common import build_breakdown_scene, build_plain_scene, run_breakdown
+import witwin.maxwell as mw
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="FDTD breakdown requires CUDA"
@@ -46,13 +47,13 @@ def test_below_threshold_descriptor_is_bitwise_identical():
 
     # The descriptor scene still exposes a breakdown result (material is present),
     # but it never triggered.
-    assert with_descriptor.breakdown_data is not None
-    assert with_descriptor.breakdown_data.triggered_count == 0
+    assert mw.breakdown.breakdown_data(with_descriptor) is not None
+    assert mw.breakdown.breakdown_data(with_descriptor).triggered_count == 0
     # A never-triggering descriptor deposits exactly zero breakdown energy: the
     # dissipation channel only accumulates on conducting edges. Assert exact 0.0
     # (not int-truncated, which would silently pass any value in [0, 1)).
-    assert with_descriptor.breakdown_data.total_dissipated_energy == 0.0
-    assert float(with_descriptor.breakdown_data.dissipated_energy.abs().sum().item()) == 0.0
+    assert mw.breakdown.breakdown_data(with_descriptor).total_dissipated_energy == 0.0
+    assert float(mw.breakdown.breakdown_data(with_descriptor).dissipated_energy.abs().sum().item()) == 0.0
 
     a = _last_step_fields(with_descriptor)
     b = _last_step_fields(without)
@@ -65,8 +66,8 @@ def test_below_threshold_descriptor_is_bitwise_identical():
 def test_scene_without_breakdown_material_reports_none():
     """No breakdown descriptor anywhere -> Result.breakdown_data is None (zero cost)."""
     result = run_breakdown(build_plain_scene(source_amplitude=50.0))
-    assert result.breakdown_data is None
-    assert result.breakdown_events == ()
+    assert mw.breakdown.breakdown_data(result) is None
+    assert mw.breakdown.breakdown_events(result) == ()
 
 
 def test_plain_scene_never_compiles_breakdown_layout(monkeypatch):
@@ -84,8 +85,8 @@ def test_plain_scene_never_compiles_breakdown_layout(monkeypatch):
     monkeypatch.setattr(breakdown_runtime, "compile_breakdown_layout", _forbidden)
 
     result = run_breakdown(build_plain_scene(source_amplitude=50.0))
-    assert result.breakdown_data is None
-    assert result.breakdown_events == ()
+    assert mw.breakdown.breakdown_data(result) is None
+    assert mw.breakdown.breakdown_events(result) == ()
 
 
 def test_plain_scene_run_is_bitwise_deterministic():
@@ -117,8 +118,8 @@ def test_triggering_breaks_parity_control():
     )
     without = run_breakdown(build_plain_scene(source_amplitude=50.0))
 
-    assert triggering.breakdown_data is not None
-    assert triggering.breakdown_data.triggered_count > 0
+    assert mw.breakdown.breakdown_data(triggering) is not None
+    assert mw.breakdown.breakdown_data(triggering).triggered_count > 0
 
     a = _last_step_fields(triggering)
     b = _last_step_fields(without)

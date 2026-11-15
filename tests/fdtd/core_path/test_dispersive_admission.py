@@ -27,13 +27,13 @@ def test_ordinary_ade_order(monkeypatch, tfsf):
     groups = ("magnetic", "electric", "ordinary", "tfsf_magnetic", "tfsf_electric")
     runtime.sources = SimpleNamespace(auxiliary=None, groups={
         name: [SimpleNamespace(launch=lambda n=name: events.append(n))] for name in groups})
-    solver = SimpleNamespace(scene=SimpleNamespace(), tfsf_enabled=tfsf, observers_enabled=False,
+    solver = SimpleNamespace(scene=SimpleNamespace(scene=SimpleNamespace()), tfsf_enabled=tfsf, observers_enabled=False,
         _advance_magnetic_dispersive_state=lambda: events.append("ade_h"),
         _apply_magnetic_dispersive_corrections=lambda: events.append("correct_h"),
         _advance_dispersive_state=lambda: events.append("ade_e"),
         _apply_dispersive_corrections=lambda: events.append("correct_e"))
     monkeypatch.setattr(core_tables, "compile_spectral_tables", lambda *a:
-        SimpleNamespace(launch=lambda: events.append("dft")))
+        (SimpleNamespace(launch=lambda: events.append("dft")),))
     monkeypatch.setattr(core_tables, "compile_monitor_routes", lambda *a: None)
     monkeypatch.setattr(stepping, "enforce_pec_boundaries", lambda s: events.append("pec"))
     monkeypatch.setattr(stepping, "apply_mur_boundaries", lambda s: events.append("mur"))
@@ -75,16 +75,15 @@ def test_final_ade_coefficients_pack_bitwise(conductive, uniform):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Core resume requires CUDA.")
 def test_lorentz_two_pole_core_resume_bitwise(tmp_path):
-    from benchmark.core_path.gates import make_simulation, tensors
+    from benchmark.core_path.gates import api_dialect, make_simulation, tensors
     from benchmark.core_path.scenes import build_core_case
 
     steps = 3 * 32 + 13
     case = build_core_case("lorentz_two_pole_slab")
 
     def prepare():
-        simulation = make_simulation(case, arm="candidate", steps=steps, full_field_dft=True)
-        assert simulation.config.fdtd_core_path
-        execution = simulation.prepare()
+        execution = make_simulation(case, steps=steps, full_field_dft=True).prepare()
+        assert hasattr(execution.solver, "_core_runtime")
         execution.solver._core_runtime.chunk_size = 32
         return execution
 
@@ -101,15 +100,17 @@ def test_lorentz_two_pole_core_resume_bitwise(tmp_path):
     assert partial.solver._core_step_graph_chunks == [32, 13]
     path = tmp_path / "lorentz-two-pole.pt"
     checkpoint.save(path)
-    resumed = prepare().run(resume_from=mw.FDTDResumeCheckpoint.load(path))
-    # The resumed suffix uses per-step graphs, which stay eager for magnetic surface sources.
-    assert resumed.solver._cuda_graph_active is not bool(resumed.solver._magnetic_source_terms)
+    resumed = prepare().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path))
+    # The resumed suffix continues on the core path in whole-step graphs from the checkpoint step.
+    assert resumed.solver._core_runtime is not None
+    assert resumed.solver._core_step_graph_active
+    assert resumed.solver._core_step_graph_chunks == [32, 32]
     assert direct.stats()["steps_run"] == resumed.stats()["steps_run"] == steps
 
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         assert torch.equal(getattr(direct.solver, name), getattr(resumed.solver, name)), name
-    expected_monitors = tensors(direct.monitors, "monitors")
-    actual_monitors = tensors(resumed.monitors, "monitors")
+    expected_monitors = tensors(api_dialect.monitors(direct), "monitors")
+    actual_monitors = tensors(api_dialect.monitors(resumed), "monitors")
     assert expected_monitors and expected_monitors.keys() == actual_monitors.keys()
     for name, value in expected_monitors.items():
         assert torch.equal(value, actual_monitors[name]), name

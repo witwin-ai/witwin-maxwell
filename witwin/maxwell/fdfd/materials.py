@@ -4,6 +4,7 @@ import math
 import torch
 from ..compiler.materials import evaluate_material_components
 from ..constants import EPSILON_0, MU_0
+from ..compiler.materials import compile_materials
 
 
 def compile_fdfd_materials(scene, frequency, *, edges=False):
@@ -14,17 +15,23 @@ def compile_fdfd_materials(scene, frequency, *, edges=False):
     fold magnetic conductivity into mu. Correct those terms at this boundary;
     conjugating entire components would incorrectly reverse the pole loss.
     """
-    model = scene.compile_materials()
+    model = compile_materials(scene)
     return _evaluate_edge_components(model, frequency) if edges else _evaluate_components(model, frequency)
 
 
 def _evaluate_components(model, frequency):
     epsilon, permeability = evaluate_material_components(model, frequency)
     omega = 2*math.pi*frequency
-    if any(bool((value != 0).any()) for value in model['sigma_e_components'].values()):
-        epsilon = {axis:value.to(torch.complex64)+2j*model['sigma_e_components'][axis]/(omega*EPSILON_0)
+    # The shared sampler subtracts 1j*sigma/(omega eps0) only for nonzero
+    # conductivity, so the +i correction is 2j over it and 1j without it. A
+    # trainable conductivity is folded even at zero: skipping it there would
+    # drop its (nonzero) derivative from the material graph.
+    shared_loss = any(bool((value != 0).any()) for value in model['sigma_e_components'].values())
+    if shared_loss or any(value.requires_grad for value in model['sigma_e_components'].values()):
+        fold = 2j if shared_loss else 1j
+        epsilon = {axis:value.to(torch.complex64)+fold*model['sigma_e_components'][axis]/(omega*EPSILON_0)
                    for axis,value in epsilon.items()}
-    if any(bool((value != 0).any()) for value in model['sigma_m_components'].values()):
+    if any(value.requires_grad or bool((value != 0).any()) for value in model['sigma_m_components'].values()):
         permeability = {axis:value.to(torch.complex64)+1j*model['sigma_m_components'][axis]/(omega*MU_0)
                         for axis,value in permeability.items()}
     return epsilon, permeability

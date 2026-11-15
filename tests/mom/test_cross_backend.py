@@ -10,11 +10,11 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA requ
 
 
 def test_yee_interpolation_reproduces_complex_affine_fields():
-    scene = mw.Scene(domain=mw.Domain(bounds=((-1, 1),)*3), grid=mw.GridSpec.uniform(.25), device='cuda')
+    scene = mw.Scene(domain=mw.Domain(bounds=((-1, 1),)*3), grid=mw.GridSpec.uniform(.25))
     prepared = prepare_scene(scene)
     fields = {}
     for c, name in enumerate(('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz')):
-        axes = [torch.as_tensor(axis, device='cuda', dtype=torch.float64) for axis in component_coords(prepared, name)]
+        axes = [torch.as_tensor(axis, device='cuda', dtype=torch.float64) for axis in component_coords(prepared, name, device=prepared.device)]
         x, y, z = torch.meshgrid(*axes, indexing='ij')
         fields[name.upper()] = (c+1)*(x+2*y-3*z+2j)
     result = mw.Result(method='fdtd', scene=scene, prepared_scene=prepared, frequency=3e8, fields=fields)
@@ -31,13 +31,13 @@ def test_yee_interpolation_reproduces_complex_affine_fields():
 
 def test_sparse_point_stencils_interpolate_on_actual_component_coordinates():
     points_tuple = ((.13, -.27, .32), (-.4, .17, .08))
-    scene = mw.Scene(domain=mw.Domain(bounds=((-1, 1),)*3), grid=mw.GridSpec.uniform(.25), device='cuda')
-    add_query_stencils(scene, points_tuple)
+    scene = mw.Scene(domain=mw.Domain(bounds=((-1, 1),)*3), grid=mw.GridSpec.uniform(.25))
+    scene = add_query_stencils(scene, points_tuple)
     prepared = prepare_scene(scene)
     monitors = {}
     for monitor in scene.monitors:
         component = monitor.fields[0].capitalize()
-        axes = component_coords(prepared, component)
+        axes = component_coords(prepared, component, device=prepared.device)
         indices = tuple(int(abs(axis-p).argmin()) for axis, p in zip(axes, monitor.position))
         x, y, z = monitor.position
         value = torch.tensor(x+2*y-3*z+2j, dtype=torch.complex128, device='cuda')
@@ -59,15 +59,15 @@ def test_shared_point_monitors_have_mom_physical_semantics():
     scene = mw.Scene(structures=[mw.Structure(geometry=mw.Sphere(radius=.1), material=mw.Material(eps_r=2.25))],
                      sources=[mw.PlaneWave()], monitors=[mw.PointMonitor('probe', (.3, .2, .1), fields=('Ex','Hy')),
                                                        mw.PointMonitor('duplicate', (.3,.2,.1), fields=('Ey',))])
-    result = mw.Simulation.mom(scene, frequency=3e8, config=mw.MoMConfig(
+    result = mw.Simulation.mom(scene, frequencies=3e8, config=mw.mom.MoMConfig(
         subdivisions=0, integration=IntegrationConfig(order=3, singular_order=6))).run()
     monitor = result.monitor('probe')
     point = torch.tensor([[.3, .2, .1]], device='cuda', dtype=torch.float64)
     e,h = result.query_fields(point, region_id='exterior', field_kind='total')
-    torch.testing.assert_close(monitor['Ex'], e[0,0])
-    torch.testing.assert_close(monitor['Hy'], h[0,1])
-    assert monitor['field_kind'] == 'total' and monitor['region_id'] == 0
-    assert monitor['sampling'] == 'physical_position'
+    torch.testing.assert_close(monitor.sel(component='Ex').values[0], e[0,0])
+    torch.testing.assert_close(monitor.sel(component='Hy').values[0], h[0,1])
+    assert monitor.attrs['field_kind'] == 'total' and monitor.attrs['region_id'] == 0
+    assert monitor.attrs['sampling'] == 'physical_position'
     assert result.stats()['unique_monitor_positions'] == 1
     assert result.stats()['monitor_query_logs'][0]['query_count'] == 1
 
@@ -90,7 +90,7 @@ def test_tfsf_query_never_mislabels_scattered_storage_as_total():
     scene = mw.Scene(domain=mw.Domain(bounds=((-1,1),)*3), grid=mw.GridSpec.uniform(.2),
         sources=[mw.PlaneWave(injection=mw.TFSF(bounds=((-0.3,.3),)*3))])
     prepared = prepare_scene(scene)
-    shape = tuple(len(axis) for axis in component_coords(prepared,'Ex'))
+    shape = tuple(len(axis) for axis in component_coords(prepared,'Ex', device=prepared.device))
     result = mw.Result(method='fdtd', scene=scene, prepared_scene=prepared, frequency=3e8,
                        fields={'EX': torch.ones(shape, device='cuda', dtype=torch.complex64)})
     points = torch.tensor([[.25, .0, .0]], device='cuda', dtype=torch.float64)
@@ -152,10 +152,10 @@ def test_auxiliary_stencils_do_not_change_the_mom_physical_solution():
     physical = physical_scene_without_stencils(scene)
     assert len(scene.monitors) == 1 and not physical.monitors
     assert physical.structures is scene.structures and physical.sources is scene.sources
-    config = mw.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=3,singular_order=6))
-    a = mw.Simulation.mom(scene,frequency=3e8,config=config).run()
-    b = mw.Simulation.mom(physical,frequency=3e8,config=config).run()
-    torch.testing.assert_close(a.surface_currents.scattered_coefficients,b.surface_currents.scattered_coefficients,rtol=1e-12,atol=1e-12)
+    config = mw.mom.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=3,singular_order=6))
+    a = mw.Simulation.mom(scene,frequencies=3e8,config=config).run()
+    b = mw.Simulation.mom(physical,frequencies=3e8,config=config).run()
+    torch.testing.assert_close(mw.mom.surface_currents(a).scattered_coefficients,mw.mom.surface_currents(b).scattered_coefficients,rtol=1e-12,atol=1e-12)
     points = torch.tensor([[.3,.2,.1]],device='cuda',dtype=torch.float64)
     for first,second in zip(a.query_fields(points,region_id='exterior',field_kind='total'),
                             b.query_fields(points,region_id='exterior',field_kind='total')):

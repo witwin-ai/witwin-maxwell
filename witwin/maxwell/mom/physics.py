@@ -18,6 +18,7 @@ from ..constants import EPSILON_0, MU_0, complex_dtype_for
 from ..media import Material
 from ..scene import Scene
 from ..sources import CW, PlaneWave, PointDipole
+from ..errors import UnsupportedFeatureError
 
 
 def _finite_scalar(value, name: str) -> complex:
@@ -204,9 +205,11 @@ def validate_scene_structure(scene: Scene, frequency: float, *, tensor_exterior=
     if not isinstance(scene, Scene):
         raise TypeError("MoM preparation requires the shared Scene object.")
     if getattr(scene.background, 'perturbation', None) is not None:
-        raise NotImplementedError('MoM homogeneous backgrounds do not support material perturbation fields')
+        raise UnsupportedFeatureError('MoM homogeneous backgrounds do not support material perturbation fields',
+                                      feature="background.homogeneous", method="mom")
     if scene.background is not None and not tensor_exterior:
-        raise NotImplementedError('An explicit homogeneous background requires the dedicated dyadic exterior runtime')
+        raise UnsupportedFeatureError('An explicit homogeneous background requires the dedicated dyadic exterior runtime',
+                                      feature="background.homogeneous", method="mom")
     structures = [structure for structure in scene.structures if structure.enabled]
     if not structures:
         raise ValueError("MoM requires at least one enabled homogeneous structure.")
@@ -237,20 +240,20 @@ def validate_scene_structure(scene: Scene, frequency: float, *, tensor_exterior=
 
 
 def validate_scene_system(scene: Scene, frequency: float, *, tensor_materials=False,
-                          tensor_exterior=False, dtype=torch.complex128, point_dipoles=False):
+                          tensor_exterior=False, dtype=torch.complex128, point_dipoles=False, device):
     """Validate shared scene scope and compile its linear scalar materials."""
     structures = validate_scene_structure(scene, frequency, tensor_exterior=tensor_exterior,
                                           point_dipoles=point_dipoles)
     if tensor_exterior:
         from .tensor_medium import compile_tensor_medium
         exterior = compile_tensor_medium(Material() if scene.background is None else scene.background,
-            frequency, device=scene.device, dtype=dtype)
+            frequency, device=device, dtype=dtype)
     else:
         exterior = compile_medium(Material(), frequency, background=True)
     if tensor_materials or tensor_exterior:
         from .tensor_medium import compile_tensor_medium
         from ..media import GyromagneticFerrite
-        interiors = tuple(compile_tensor_medium(s.material, frequency, device=scene.device, dtype=dtype)
+        interiors = tuple(compile_tensor_medium(s.material, frequency, device=device, dtype=dtype)
             if tensor_exterior or isinstance(s.material, GyromagneticFerrite) or getattr(s.material, 'is_anisotropic', False)
             else compile_medium(s.material, frequency) for s in structures)
     else:
@@ -258,9 +261,9 @@ def validate_scene_system(scene: Scene, frequency: float, *, tensor_materials=Fa
     return exterior, interiors
 
 
-def validate_scene(scene: Scene, frequency: float) -> tuple[Medium, Medium]:
+def validate_scene(scene: Scene, frequency: float, *, device) -> tuple[Medium, Medium]:
     """Single-body compiler entry; multi-body callers use validate_scene_system."""
-    exterior, interiors = validate_scene_system(scene, frequency)
+    exterior, interiors = validate_scene_system(scene, frequency, device=device)
     if len(interiors) != 1:
         raise ValueError("Core MoM requires exactly one enabled homogeneous dielectric structure.")
     return exterior, interiors[0]

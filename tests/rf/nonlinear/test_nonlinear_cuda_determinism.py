@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.compiler.nonlinear_devices import (
+from tests.oracles.nonlinear_devices import (
     NonlinearMNASystem,
     _scatter_currents,
     _stamp_conductance,
@@ -21,18 +21,18 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires 
 
 
 def _build_shared_node_system(*, device):
-    circuit = mw.Circuit("three_phase_rectifier")
+    circuit = mw.circuits.Circuit("three_phase_rectifier")
     sources = [circuit.node(f"src{i}") for i in range(3)]
     out = circuit.node("out")
     node_index = {node.name: index for index, node in enumerate([*sources, out])}
     diodes = [
-        mw.Diode(
+        mw.circuits.Diode(
             f"d{i}", node, out,
             saturation_current=fx.SATURATION_CURRENT, ideality=fx.IDEALITY,
         )
         for i, node in enumerate(sources)
     ]
-    cap = mw.VoltageDependentCapacitor(
+    cap = mw.circuits.VoltageDependentCapacitor(
         "cs", out, circuit.ground,
         q_coefficients=torch.tensor([0.0, fx.SMOOTHING_CAPACITANCE], dtype=fx.DTYPE),
     )
@@ -70,7 +70,7 @@ def test_cuda_transient_is_bitwise_repeatable(builder):
     for _ in range(3):
         system, source_injection, output_index = builder(device="cuda")
         result = run_nonlinear_transient(
-            system, times, source_injection, mw.NonlinearSolveConfig(),
+            system, times, source_injection, mw.circuits.NonlinearSolveConfig(),
             integration="trapezoidal",
         )
         assert result.converged

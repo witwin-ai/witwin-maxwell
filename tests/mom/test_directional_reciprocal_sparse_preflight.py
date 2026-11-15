@@ -21,7 +21,7 @@ def test_actual_sparse_reciprocal_near_capacity_rejects_before_maps(tmp_path,mon
     provider=ScalarSystemBlocks(SurfaceSystem.create([(0,'body',basis,interior)]),exterior,
         IntegrationConfig(order=3,singular_order=3))
     root=AutomaticDirectionalRegionPlan(provider,exterior,
-        kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-4),ideal_rwg_error_budget=1e-4,
+        kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-4),ideal_rwg_error_budget=1e-4,
         balancing_impedance=abs(exterior.eta),leaf_size=4,separation_ratio=.15,cone_subdivisions=(2**20,))
     capacity=plan_directional_reciprocal_near_storage(root.tree,root.near_nodes,budget_bytes=1024**3)
     assert capacity['stored_blocks']<capacity['logical_blocks']

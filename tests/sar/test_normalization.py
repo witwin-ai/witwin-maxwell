@@ -31,10 +31,8 @@ def _valid_ratio(scaled, base):
 def test_accepted_power_scales_by_watts_over_measured():
     """accepted_power(port, watts) multiplies SAR by watts / measured accepted power."""
     result, _ = _result_with_port(frequencies=(1.0e9,), accepted=(0.5,))
-    base = result.sar("loss")
-    scaled = result.sar(
-        "loss", normalization=mw.PowerNormalization.accepted_power(port="feed", watts=2.0)
-    )
+    base = mw.sar.sar(result, "loss")
+    scaled = mw.sar.sar(result, "loss", normalization=mw.sar.PowerNormalization.accepted_power(port="feed", watts=2.0))
     ratio = _valid_ratio(scaled, base)
     torch.testing.assert_close(
         ratio, torch.full_like(ratio, 4.0), rtol=1e-5, atol=1e-6
@@ -46,10 +44,8 @@ def test_accepted_power_is_per_frequency():
     accepted = (0.5, 0.25)
     watts = 1.0
     result, _ = _result_with_port(frequencies=(1.0e9, 2.0e9), accepted=accepted)
-    base = result.sar("loss")
-    scaled = result.sar(
-        "loss", normalization=mw.PowerNormalization.accepted_power(port="feed", watts=watts)
-    )
+    base = mw.sar.sar(result, "loss")
+    scaled = mw.sar.sar(result, "loss", normalization=mw.sar.PowerNormalization.accepted_power(port="feed", watts=watts))
     valid = base.valid
     for f, p in enumerate(accepted):
         expected = watts / p
@@ -64,9 +60,7 @@ def test_accepted_power_is_per_frequency():
 def test_accepted_power_missing_port_fails_closed():
     result, _ = _uniform_cube_result(frequencies=(1.0e9,))
     with pytest.raises(KeyError, match="feed"):
-        result.sar(
-            "loss", normalization=mw.PowerNormalization.accepted_power(port="feed", watts=1.0)
-        )
+        mw.sar.sar(result, "loss", normalization=mw.sar.PowerNormalization.accepted_power(port="feed", watts=1.0))
 
 
 def test_accepted_power_frequency_mismatch_fails_closed():
@@ -81,9 +75,7 @@ def test_accepted_power_frequency_mismatch_fails_closed():
         )
     }
     with pytest.raises(KeyError, match="not all present"):
-        result.sar(
-            "loss", normalization=mw.PowerNormalization.accepted_power(port="feed", watts=1.0)
-        )
+        mw.sar.sar(result, "loss", normalization=mw.sar.PowerNormalization.accepted_power(port="feed", watts=1.0))
 
 
 def test_accepted_power_nonpositive_measured_fails_closed():
@@ -99,24 +91,20 @@ def test_accepted_power_nonpositive_measured_fails_closed():
         )
     }
     with pytest.raises(ValueError, match="strictly positive"):
-        result.sar(
-            "loss", normalization=mw.PowerNormalization.accepted_power(port="feed", watts=1.0)
-        )
+        mw.sar.sar(result, "loss", normalization=mw.sar.PowerNormalization.accepted_power(port="feed", watts=1.0))
 
 
 def test_input_power_fails_closed():
     result, _ = _uniform_cube_result(frequencies=(1.0e9,))
     with pytest.raises(NotImplementedError, match="input_power"):
-        result.sar("loss", normalization=mw.PowerNormalization.input_power(watts=1.0))
+        mw.sar.sar(result, "loss", normalization=mw.sar.PowerNormalization.input_power(watts=1.0))
 
 
 def test_source_amplitude_square_law_holds_exactly():
     result, _ = _uniform_cube_result(frequencies=(1.0e9,))
-    base = result.sar("loss")
+    base = mw.sar.sar(result, "loss")
     for amplitude in (0.5, 2.0, 3.0):
-        scaled = result.sar(
-            "loss", normalization=mw.PowerNormalization.source(amplitude=amplitude)
-        )
+        scaled = mw.sar.sar(result, "loss", normalization=mw.sar.PowerNormalization.source(amplitude=amplitude))
         ratio = _valid_ratio(scaled, base)
         torch.testing.assert_close(
             ratio, torch.full_like(ratio, amplitude ** 2), rtol=1e-6, atol=1e-7

@@ -141,34 +141,20 @@ def collect_reference(directory):
 def freeze_native(root,mpie,conductance):
     from tests.support.rfic_fixtures import fixture_fa
     from witwin.maxwell.mom.layered.runtime import compile_layered_scene
-    source_paths=sorted(p for p in Path("witwin/maxwell/mom/layered").rglob("*")
-                        if p.suffix in (".py",".cu",".cuh",".cpp",".h"))
-    source_paths += [Path("witwin/maxwell/mom")/name for name in ("open_surface.py","topology.py")]
-    source_paths += [Path("witwin/maxwell")/name for name in
-                     ("scene.py","simulation.py","network.py","network_math.py","constants.py","media.py","layers.py","ports.py")]
-    hashes={str(path):hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
-    analysis_hashes={name:hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in
-                     ("tests/support/rfic_fa_references.py","tests/support/rfic_r6_references.py")}
-    evidence=dict(solver_source_sha256=hashes,analysis_source_sha256=analysis_hashes,
-                  coarse={},finest={},pi_model_source_mesh="shield_fine",
+    # Values are locked numerically (D-P1, scripts/dev/rfic/evidence_lock.py), not by source hashes.
+    evidence=dict(coarse={},finest={},pi_model_source_mesh="shield_fine",
                   pi_effective_shunt_conductance_3p4GHz_S=conductance)
     for variant in ("none","pgs","solid"):
         for level,mesh in (("coarse","shield"),("finest","full" if variant=="none" else "shield_fine")):
             data=mpie[f"{variant}/{mesh}"]
-            fixture=fixture_fa(shield=variant,mesh=mesh,device="cpu")
+            fixture=fixture_fa(shield=variant,mesh=mesh)
             _,rectangles,ports,materials,_,vias,via_materials=compile_layered_scene(fixture.scene)
-            producers=[json.loads(Path(path).read_text()) for path in data["sources"]]
-            for producer in producers:
-                for name,digest in producer["source_sha256"].items():
-                    if name!="tests/support/rfic_fixtures.py":
-                        assert hashes[name]==digest
             evidence[level][variant]=dict(metrics=scalars(data["metrics"]),mesh=mesh,
                 unknowns=data["unknowns"],config=fixture.config.layered.payload(),
                 ports=[dict(name=p.name,terminal_pair_um=[[round(float(v)*1e6,6) for v in point]
                            for point in (p.positive,p.negative)],axis=p.voltage_path.axis,
                            reference_impedance=p.reference_impedance) for p in ports],
                 geometry_sha256=geometry_digest(rectangles,materials,vias,via_materials),
-                producer_fixture_sha256=sorted({x["source_sha256"]["tests/support/rfic_fixtures.py"] for x in producers}),
                 sources=data["sources"])
     Path("tests/mom/layered/data/fixture_r6_native_evidence.json").write_text(
         json.dumps(evidence,indent=2)+"\n")
@@ -274,7 +260,7 @@ def plot_evidence(root,summary):
     from witwin.maxwell.mom.layered.runtime import compile_layered_scene
     fig,axes=plt.subplots(1,3,figsize=(13,4.2),sharex=True,sharey=True)
     for ax,variant in zip(axes,("none","pgs","solid")):
-        _,rectangles,_,_,_,vias,_=compile_layered_scene(fixture_fa(shield=variant,device="cpu").scene)
+        _,rectangles,_,_,_,vias,_=compile_layered_scene(fixture_fa(shield=variant).scene)
         for z,color,alpha in ((300.5e-6,"#3886c6",.8),(302e-6,"#db9c36",.65),(305e-6,"#242a32",.45)):
             for x0,x1,y0,y1,height in rectangles:
                 if abs(height-z)<1e-12:

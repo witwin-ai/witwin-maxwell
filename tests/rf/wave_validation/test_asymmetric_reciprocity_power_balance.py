@@ -70,36 +70,37 @@ def _asymmetric_scene() -> mw.Scene:
         current_surface=mw.Box(position=(2 * _DX, 0.0, -0.5 * _DX), size=(_DX, 5 * _DX, 0.0)),
         reference_impedance=50.0,
     )
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-_HALF, _HALF), (-_HALF, _HALF), (-_HALF, _HALF))),
-        grid=mw.GridSpec.uniform(_DX),
-        boundary=mw.BoundarySpec.pml(num_layers=6),
-        ports=(feed, load),
-        device="cuda",
-    )
     # Physical geometric asymmetry: a lossless dielectric block sits next to p2
     # only (not p1). The medium stays isotropic/reciprocal (so S12==S21 must hold),
     # but the two ports now see different surroundings, forcing S11 != S22 by
     # physics rather than by port normalization (M6).
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(2 * _DX, 0.0, 0.0), size=(2 * _DX, 4 * _DX, 4 * _DX)),
-            material=mw.Material(eps_r=9.0),
-            name='p2_dielectric_load',
-        )
-    )
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-_HALF, _HALF), (-_HALF, _HALF), (-_HALF, _HALF))),
+                grid=mw.GridSpec.uniform(_DX),
+                boundary=mw.BoundarySpec.pml(num_layers=6),
+                ports=(feed, load),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(2 * _DX, 0.0, 0.0), size=(2 * _DX, 4 * _DX, 4 * _DX)),
+                material=mw.Material(eps_r=9.0),
+                name='p2_dielectric_load',
+            ),
+            ),
+            )
     return scene
 
 
 def _run_network():
     result = mw.Simulation.fdtd(
         _asymmetric_scene(),
-        frequency=3.0e9,
-        excitations=mw.PortSweep(
+        frequencies=3.0e9,
+        excitations=mw.rf.PortSweep(
             source_time=mw.GaussianPulse(frequency=3.0e9, fwidth=2.0e9)
         ),
-        run_time=mw.TimeConfig(time_steps=2000),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=2000),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+        ),
     ).run()
     return result
 

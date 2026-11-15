@@ -16,15 +16,17 @@ from .static_tensor_preparation import prepare_static_tensor_cell_response
 from .volume_mesh import bind_volume_region
 from .volume_response_matrix import prepare_cell_field_response
 from .harmonic_balance import DenseHarmonicBalance
+from ..errors import UnsupportedFeatureError
 
 
 
-class MixedHarmonicDCAdmissionError(NotImplementedError):
+class MixedHarmonicDCAdmissionError(UnsupportedFeatureError):
     """All unsupported analytic DC channels, without changing material data."""
     def __init__(self,failures):
         self.failures=tuple(dict(row) for row in failures)
         super().__init__('Mixed harmonic DC admission failed: '+'; '.join(
-            f"region {row['region']} {row['channel']}: {row['reason']}" for row in self.failures))
+            f"region {row['region']} {row['channel']}: {row['reason']}" for row in self.failures),
+            feature='guard:mom.mixed_harmonic_dc', method='mom', items=self.failures)
 
 
 def admit_mixed_dc_channels(materials,exterior_material,regions,*,device,dtype,tensor_current=False):
@@ -41,7 +43,8 @@ def admit_mixed_dc_channels(materials,exterior_material,regions,*,device,dtype,t
                     if region not in regions:raise ValueError('Every mixed current body requires an explicit volume')
                     if isinstance(channel,StaticTensorChannel):
                         if not tensor_current:
-                            raise NotImplementedError('Mixed tensor conductivity requires explicit internal tensor-current admission')
+                            raise UnsupportedFeatureError('Mixed tensor conductivity requires explicit internal tensor-current admission',
+                                                          feature="guard:110c10b2", method="mom")
                         if channel.absolute_scale!=scale:
                             raise ValueError('Mixed DC constitutive channel has incompatible units')
                         conductivity=channel.conductivity_sample()
@@ -50,7 +53,8 @@ def admit_mixed_dc_channels(materials,exterior_material,regions,*,device,dtype,t
                     elif isinstance(channel,StaticChannel):conductivity=channel.conductivity
                     else:raise TypeError('Mixed harmonic current channel is not supported')
                     if channel.kind not in ('conductive_limit','finite_positive_dielectric'):
-                        raise NotImplementedError('Mixed current requires its actual finite dielectric or conductive DC channel')
+                        raise UnsupportedFeatureError('Mixed current requires its actual finite dielectric or conductive DC channel',
+                                                      feature="guard:f9f73a92", method="mom")
                     conductivities[region]=conductivity;value=None
                 elif isinstance(channel,StaticTensorChannel):
                     value=channel.dielectric_sample()
@@ -118,7 +122,7 @@ def prepare_mixed_tensor_harmonic_balance(operators, volumes, body_materials, ex
                        max_response_bytes=max_static_response_bytes)
     reuse_count=0
     if reuse_prepared is not None:
-        from .harmonic_state import preparation_signature
+        from .harmonic_recovery import preparation_signature
         if (type(reuse_prepared) is not dict or
                 preparation_signature(reuse_prepared)!=reuse_prepared.get('_signature')):
             raise ValueError('Reused mixed harmonic preparation changed after validation')
@@ -197,7 +201,8 @@ def prepare_mixed_tensor_harmonic_balance(operators, volumes, body_materials, ex
         if sampled_medium_payload(operator.exterior)!=sampled_medium_payload(exterior_material.linear_samples[harmonic]):
             raise ValueError('Mixed harmonic exterior sample differs')
         if not isinstance(operator.exterior,Medium):
-            raise NotImplementedError('Mixed tensor HB currently requires a scalar exterior carrier')
+            raise UnsupportedFeatureError('Mixed tensor HB currently requires a scalar exterior carrier',
+                                          feature="guard:e530a45b", method="mom")
         for index,body in enumerate(operator.system.bodies):
             reference=system.bodies[index]
             if (body.name!=reference.name or body.structure_index!=reference.structure_index
@@ -256,6 +261,6 @@ def prepare_mixed_tensor_harmonic_balance(operators, volumes, body_materials, ex
             dc_surface_representation='regional_potential_exterior_conormal_v1',
             harmonic_truncation_converged=False,public_runtime_supported=False,
             static_preparation_policy=static_policy,reused_positive_harmonics=reuse_count,reused_static_response=bool(reuse_count)))
-    from .harmonic_state import preparation_signature
+    from .harmonic_recovery import preparation_signature
     prepared['_signature']=preparation_signature(prepared)
     return model,prepared

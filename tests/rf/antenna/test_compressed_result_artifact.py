@@ -15,7 +15,7 @@ from scripts.dev.fdtd.compressed_result_artifact import (
 def result():
     values = torch.arange(60, dtype=torch.float64).reshape(3, 4, 5)
     return mw.Result(method='fdtd', scene=None, frequencies=(1e9,),
-        fields={'Ex': values.to(torch.complex128) * (1 + 2j), 'Hy': values.float()},
+        fields={'EX': values.to(torch.complex128) * (1 + 2j), 'HY': values.float()},
         metadata={'physical_input_sha256': 'unchanged'}, solver_stats={'steps': 1024})
 
 
@@ -25,9 +25,11 @@ def test_real_result_preserves_dtype_shape_values_and_original_serialized_bytes(
     path = tmp_path / 'physical.result.pt.gz'
     record = save_compressed_result(original, path, max_raw_bytes=2**20, reserve_bytes=0)
     restored = load_compressed_result(path, scene=None)
-    for component, values in original.fields.items():
-        assert restored.fields[component].dtype == values.dtype
-        torch.testing.assert_close(restored.fields[component], values, rtol=0, atol=0)
+    # Synthetic arrays, not Yee grids: compare the stored tensors.
+    for component in ("EX", "HY"):
+        values = original._fields[component]
+        assert restored._fields[component].dtype == values.dtype
+        torch.testing.assert_close(restored._fields[component], values, rtol=0, atol=0)
     assert restored.frequencies == original.frequencies
     assert restored._metadata['physical_input_sha256'] == 'unchanged'
     assert restored.stats()['steps'] == 1024

@@ -17,32 +17,32 @@ def _ports():
 
 @pytest.mark.parametrize("graph", [False, True])
 def test_foil_ade_port_sweep_matches_independent_columns_and_roundtrips_losses(tmp_path, graph):
-    cache = mw.FDTDMaterialCache()
-    scene = _simulation().scene.clone(sources=(), ports=_ports())
+    cache = mw.fdtd.FDTDMaterialCache()
+    scene = _simulation().scene.updated(sources=(), ports=_ports())
     waveform = mw.CW(frequency=1e9)
-    common = dict(frequency=1e9, run_time=mw.TimeConfig(time_steps=96, dt=5e-12),
-        spectral_sampler=mw.SpectralSampler(window="none"), material_cache=cache, cuda_graph=graph)
-    result = mw.Simulation.fdtd(scene, excitations=mw.PortSweep(source_time=waveform), **common).run()
+    common = dict(run_time=mw.TimeConfig(time_steps=96, dt=5e-12),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"), material_cache=cache, cuda_graph=graph)
+    result = mw.Simulation.fdtd(scene, frequencies=1e9, excitations=mw.rf.PortSweep(source_time=waveform), config=mw.FDTDConfig(**common)).run()
     assert cache.stats["misses"] == cache.stats["hits"] == 1
-    assert result.conductor_losses == {}
-    assert tuple(result.conductor_loss_columns) == ("left", "right")
+    assert mw.rf.conductor_losses(result) == {}
+    assert tuple(mw.rf.conductor_loss_columns(result)) == ("left", "right")
     for column, active in enumerate(("left", "right")):
         ports = []
         for port in _ports():
             ports.append(mw.LumpedPort(name=port.name, positive=port.positive, negative=port.negative,
                 voltage_path=port.voltage_path, current_surface=port.current_surface,
-                termination=None if port.name == active else mw.SeriesRLC(r=50.)))
-        direct = mw.Simulation.fdtd(scene.clone(ports=ports), excitations=mw.PortExcitation(active,
-            source_time=waveform), **common).run()
+                termination=None if port.name == active else mw.rf.SeriesRLC(r=50.)))
+        direct = mw.Simulation.fdtd(scene.updated(ports=ports), frequencies=1e9, excitations=mw.rf.PortExcitation(active,
+            source_time=waveform), config=mw.FDTDConfig(**common)).run()
         for name in ("left", "right"):
             for component in ("voltage", "current", "a", "b"):
                 torch.testing.assert_close(getattr(result.port(name), component)[column],
                     getattr(direct.port(name), component), rtol=2e-5, atol=1e-8)
-        actual, expected = result.conductor_loss_columns[active]["foil"], direct.conductor_losses["foil"]
+        actual, expected = mw.rf.conductor_loss_columns(result)[active]["foil"], mw.rf.conductor_losses(direct)["foil"]
         assert actual["dissipated_energy"] == pytest.approx(expected["dissipated_energy"], rel=2e-5)
         torch.testing.assert_close(actual["surface_power"], expected["surface_power"], rtol=2e-5, atol=1e-12)
         compact = result._array_run_data.column_results[column][0]
-        torch.testing.assert_close(compact.conductor_losses["foil"]["surface_power"], actual["surface_power"])
+        torch.testing.assert_close(mw.rf.conductor_losses(compact)["foil"]["surface_power"], actual["surface_power"])
     result.save(tmp_path / "sweep.pt")
     restored = mw.Result.load(tmp_path / "sweep.pt", scene=scene)
     torch.testing.assert_close(restored.network.s, result.network.s.cpu())
@@ -51,6 +51,6 @@ def test_foil_ade_port_sweep_matches_independent_columns_and_roundtrips_losses(t
             torch.testing.assert_close(getattr(restored.port(name), component),
                                        getattr(result.port(name), component).cpu())
     for active in ("left", "right"):
-        torch.testing.assert_close(restored.conductor_loss_columns[active]["foil"]["surface_power"],
-                                   result.conductor_loss_columns[active]["foil"]["surface_power"])
-    assert restored.conductor_losses == {}
+        torch.testing.assert_close(mw.rf.conductor_loss_columns(restored)[active]["foil"]["surface_power"],
+                                   mw.rf.conductor_loss_columns(result)[active]["foil"]["surface_power"])
+    assert mw.rf.conductor_losses(restored) == {}

@@ -74,7 +74,7 @@ def _dispersive_material(chi2):
         lorentz_poles=(mw.LorentzPole(delta_eps=_DELTA_EPS, resonance_frequency=_POLE_FREQUENCY, gamma=_POLE_GAMMA),),
     )
     if chi2 != 0.0:
-        kwargs["nonlinearity"] = mw.NonlinearSusceptibility(chi2=chi2)
+        kwargs["nonlinearity"] = mw.media.NonlinearSusceptibility(chi2=chi2)
     return mw.Material(**kwargs)
 
 
@@ -82,7 +82,7 @@ def _matched_material(n_w, chi2):
     # Dispersionless slab whose (frequency-independent) index equals the
     # dispersive slab's index at w, so the pump coupling matches and only the
     # 2w phase matching differs (dk = 0 here).
-    return mw.Material(eps_r=n_w * n_w, nonlinearity=mw.NonlinearSusceptibility(chi2=chi2))
+    return mw.Material(eps_r=n_w * n_w, nonlinearity=mw.media.NonlinearSusceptibility(chi2=chi2))
 
 
 def _plane_complex_mean(payload):
@@ -98,11 +98,10 @@ def _second_harmonic_amplitude(material, thickness):
     """|E(2w)| at a monitor behind a slab of the given material and thickness."""
     entrance = -0.45
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-0.15, 0.15), (-0.15, 0.15))),
-        grid=mw.GridSpec.uniform(0.01),
-        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-0.15, 0.15), (-0.15, 0.15))),
+                grid=mw.GridSpec.uniform(0.01),
+                boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+                sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=(0.0, 0.0, 1.0),
@@ -111,23 +110,25 @@ def _second_harmonic_amplitude(material, thickness):
                 source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=1.0e8, amplitude=100.0),
                 name="pw",
             )
-        ],
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=Box(position=(entrance + thickness / 2.0, 0.0, 0.0), size=(thickness, 0.6, 0.6)),
-            material=material,
-        )
-    )
-    scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.6, fields=("Ez",)))
+            ],
+                structures=(
+            mw.Structure(
+                geometry=Box(position=(entrance + thickness / 2.0, 0.0, 0.0), size=(thickness, 0.6, 0.6)),
+                material=material,
+            ),
+            ),
+                monitors=(mw.PlaneMonitor("post", axis="x", position=0.6, fields=("Ez",)),),
+            )
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_FREQUENCY, 2.0 * _FREQUENCY],
-        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-        spectral_sampler=mw.SpectralSampler(window="hanning", normalize_source=False),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning", normalize_source=False),
+            full_field_dft=False,
+        ),
     ).run()
-    return abs(_plane_complex_mean(result.monitor("post", freq_index=1)["components"]["Ez"]))
+    return abs(_plane_complex_mean(result.raw_monitor("post", freq_index=1)["components"]["Ez"]))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -140,25 +141,24 @@ def test_nonlinear_dispersive_same_material_compiles_and_runs():
     """
     n_w, _, _, coherence_length = _phase_matching()
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-0.15, 0.15), (-0.15, 0.15))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-0.15, 0.15), (-0.15, 0.15))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=(0.0, 0.0, 1.0),
                 source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=1.0e8, amplitude=50.0),
                 name="pw",
             )
-        ],
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=Box(position=(0.0, 0.0, 0.0), size=(coherence_length, 0.6, 0.6)),
-            material=_dispersive_material(_CHI2),
-        )
-    )
+            ],
+                structures=(
+            mw.Structure(
+                geometry=Box(position=(0.0, 0.0, 0.0), size=(coherence_length, 0.6, 0.6)),
+                material=_dispersive_material(_CHI2),
+            ),
+            ),
+            )
     solver = mw.Simulation.fdtd(scene, frequencies=[_FREQUENCY, 2.0 * _FREQUENCY]).prepare().solver
     assert solver.nonlinear_enabled
     assert solver.nonlinear_general_enabled

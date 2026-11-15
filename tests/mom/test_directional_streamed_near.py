@@ -21,9 +21,9 @@ def raw_write(path,value):
 
 
 def directional_config():
-    return mw.DirectionalFMMConfig(near_storage='scalar_reciprocal_streamed_dk_v1',
+    return mw.mom.DirectionalFMMConfig(near_storage='scalar_reciprocal_streamed_dk_v1',
         near_coefficient_workspace_budget_bytes=4096,leaf_size=3,separation_ratio=.15,
-        kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5),
+        kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5),
         regional_near_budget_bytes=1024**3,tensor_workspace_budget_bytes=512*1024**2)
 
 
@@ -53,32 +53,32 @@ def test_new_directional_streamed_version_and_affected_old_field_omissions(tmp_p
     # previous numerical, planner, successful producer or archive is rerun.
     for policy in ('scalar_dk_v1','scalar_reciprocal_dk_v1'):
         old=original.DirectionalFMMConfig(near_storage=policy)
-        new=mw.DirectionalFMMConfig(near_storage=policy)
+        new=mw.mom.DirectionalFMMConfig(near_storage=policy)
         assert old.payload()==new.payload()
         assert 'near_coefficient_workspace_budget_bytes' not in new.payload()['parameters']
-        assert mw.FMMConfig.restore(old.payload()).payload()==old.payload()
+        assert mw.mom.FMMConfig.restore(old.payload()).payload()==old.payload()
     cfg=directional_config();payload=cfg.payload()
     assert payload['version']=='automatic_directional_streamed_reciprocal_dag_fmm_config_v1'
-    assert mw.FMMConfig.restore(json.loads(json.dumps(payload)))==cfg
+    assert mw.mom.FMMConfig.restore(json.loads(json.dumps(payload)))==cfg
     for field in payload['parameters']:
         bad=copy.deepcopy(payload);bad['parameters'].pop(field)
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     for value in (False,0,-1,4096.):
         bad=copy.deepcopy(payload);bad['parameters']['near_coefficient_workspace_budget_bytes']=value
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     for version in ('automatic_directional_dag_fmm_config_v1','automatic_directional_reciprocal_dag_fmm_config_v1'):
         bad=copy.deepcopy(payload);bad['version']=version
         bad['parameters'].pop('near_coefficient_workspace_budget_bytes')
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     bad=copy.deepcopy(payload);bad['parameters']['near_storage']='scalar_reciprocal_dk_v1'
-    with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+    with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     bad=copy.deepcopy(payload);bad['parameters']['unbounded_near']=True
-    with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
-    with pytest.raises(ValueError):mw.DirectionalFMMConfig(near_coefficient_workspace_budget_bytes=4096)
+    with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
+    with pytest.raises(ValueError):mw.mom.DirectionalFMMConfig(near_coefficient_workspace_budget_bytes=4096)
     options=dict(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',stopping=StoppingRule(preconditioner='none'))
-    with pytest.raises(ValueError,match='complex128'):mw.MoMConfig(**options,dtype=torch.complex64)
+    with pytest.raises(ValueError,match='complex128'):mw.mom.MoMConfig(**options,dtype=torch.complex64)
     with pytest.raises(NotImplementedError,match='free space'):
-        mw.MoMConfig(**options,periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)))
+        mw.mom.MoMConfig(**options,periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)))
     raw_write(tmp_path/'streamed-directional-config.json',dict(completed=True,payload=payload,
         old_two_payloads_exact=True,new_field_impact_only=True,production_qualification=False))
 
@@ -116,11 +116,11 @@ def prepared_case(tmp_path_factory):
     raw_write(path,raw)
     try:
         scene=declare_scene();fmm=directional_config()
-        config=mw.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3,
+        config=mw.mom.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3,
             pair_batch=4,far_pair_batch=16),operator_backend='fmm',fmm=fmm,riesz_storage='local_rwg_v1',
             stopping=StoppingRule(method='gmres',preconditioner='rwg_diagonal',fallback='none',
                 rtol=1e-12,atol=0.,maxiter=240,restart=120))
-        prepared=mw.Simulation.mom(scene,frequency=1.73e8,config=config).prepare()
+        prepared=mw.Simulation.mom(scene,frequencies=1.73e8,config=config).prepare()
         actions=prepared.solver.handle.actions
         raw.update(configuration=fmm.payload(),physical_currents=actions.shape[0],
             FAR_counts=[len(r.far.rectangles) for r in (actions.exterior,*actions.interiors)],
@@ -204,7 +204,7 @@ def test_new_public_directional_streamed_all_columns_gradients_true_weak_and_exa
             regional_receipts=[r.receipt() for r in regions])
         raw_write(path,raw);assert current_error<1e-11 and higher_error<1e-11
         result=prepared.run();stats=result.stats();assert stats['converged'] and stats['error_budget']['checked']
-        current=result.surface_currents.scattered_coefficients
+        current=mw.mom.surface_currents(result).scattered_coefficients
         residual=relative(current@reference.mT,prepared.solver.rhs)
         raw.update(complete_original_residual=residual,residual_relative_gate=1e-10,residual_absolute_gate=0.)
         raw_write(path,raw);assert residual<=1e-10
@@ -215,11 +215,11 @@ def test_new_public_directional_streamed_all_columns_gradients_true_weak_and_exa
                 patch.setattr(cls,'__init__',forbidden)
             patch.setattr(torch.linalg,'solve',forbidden)
             restored=mw.Result.load(artifact,scene=scene)
-            assert restored.surface_currents.config.fmm==fmm
-            torch.testing.assert_close(restored.surface_currents.scattered_coefficients,current,rtol=0,atol=0)
+            assert mw.mom.surface_currents(restored).config.fmm==fmm
+            torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,current,rtol=0,atol=0)
             for key,value in [('near_coefficient_workspace_budget_bytes',2048),('near_storage','scalar_reciprocal_dk_v1')]:
-                bad=copy.deepcopy(result.surface_currents.snapshot());bad['fmm_config']['parameters'][key]=value
-                with pytest.raises(ValueError):SurfaceData.restore(bad,scene,1.73e8)
+                bad=copy.deepcopy(mw.mom.surface_currents(result).snapshot());bad['fmm_config']['parameters'][key]=value
+                with pytest.raises(ValueError):SurfaceData.restore(bad,scene,1.73e8,'cuda')
         raw.update(completed=True,artifact=str(artifact),artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
             exact_restore=True,whole_peak_qualified=False,original_weak_reference_is_not_independent_EM=True,
             high_frequency_or_positive_changing_paths_not_qualified=True)

@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 import torch
+import witwin.maxwell as mw
 
 
 def superposition_metrics(combined, direct, basis, coefficients, *, rtol=1e-4, atol=1e-11, physical_weights=None):
@@ -58,13 +59,13 @@ def physical_electric_vectors(results, cpu_scene, schema, frequency):
     from witwin.maxwell.compiler.power_loss import compile_power_loss_monitor
     from witwin.maxwell.scene import prepare_scene
     from scripts.dev.fdtd.printed_line_regional_power import _native_plane_field
-    if str(cpu_scene.device) != 'cpu' or getattr(cpu_scene, 'coordinates', None) is not None:
-        raise ValueError('Field-norm inference requires the actual Cartesian CPU scene.')
+    if getattr(cpu_scene, 'coordinates', None) is not None:
+        raise ValueError('Field-norm inference requires the actual Cartesian scene.')
     bounds = tuple(tuple(value) for value in cpu_scene.domain.bounds)
-    monitor = mw.PowerLossMonitor('physical_field_norm_geometry',
+    monitor = mw.monitors.PowerLossMonitor('physical_field_norm_geometry',
         position=tuple((a + b) / 2 for a, b in bounds), size=tuple(b - a for a, b in bounds),
         quadrature='physical_intersection')
-    compiled = compile_power_loss_monitor(prepare_scene(cpu_scene), monitor)
+    compiled = compile_power_loss_monitor(prepare_scene(cpu_scene, device='cpu'), monitor)
     dense_weights = {}
     for component, mask in compiled.component_masks.items():
         values = torch.zeros(mask.shape, dtype=torch.float64)
@@ -74,7 +75,7 @@ def physical_electric_vectors(results, cpu_scene, schema, frequency):
         if not needed.issubset(actual):
             raise ValueError('Recorded native planes do not cover every physical field-norm degree of freedom.')
         dense_weights[component] = values
-    records = [result.conductor_losses for result in results]
+    records = [mw.rf.conductor_losses(result) for result in results]
     blocks = [[] for _ in results]; weight_blocks = []
     claimed = {component: torch.zeros_like(values, dtype=torch.bool) for component, values in dense_weights.items()}
     for name, record in records[0].items():
@@ -259,8 +260,8 @@ def actual_basis_bilinear_flux_metrics(combined,direct,bases,coefficients,*,moni
         if not bool(torch.isfinite(value).all()):raise ValueError('Actual source phasors must be finite.')
         return value
     for fi,frequency in enumerate(frequencies):
-        measured=[value.monitor(monitor_name,frequency=frequency)['faces']for value in(combined,direct)]
-        inputs=[value.monitor(monitor_name,frequency=frequency)['faces']for value in bases]
+        measured=[value.raw_monitor(monitor_name,frequency=frequency)['faces']for value in(combined,direct)]
+        inputs=[value.raw_monitor(monitor_name,frequency=frequency)['faces']for value in bases]
         if any(set(value)!=expected for value in(*measured,*inputs)):
             raise ValueError('All six physical signed faces are required.')
         scales={};signed=[{},{}]

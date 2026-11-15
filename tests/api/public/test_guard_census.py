@@ -1,6 +1,6 @@
 """Guard-convergence gate for the P5 functional-completeness plan.
 
-Walks every ``raise NotImplementedError`` and explicitly inventoried safety refusal
+Walks every ``raise NotImplementedError``/``UnsupportedFeatureError`` and explicitly inventoried safety refusal
 in ``witwin/`` via AST, subtracts the
 unchanged contract-guard exclusion list, and matches every remaining capability
 site to its exact reviewed manifest. New predicates/messages/scopes and retired
@@ -41,8 +41,6 @@ CONTRACT_GUARDS = (
     # A quotient by an absent or ambiguous incident waveform is undefined.
     ("witwin/maxwell/fdtd/runtime/timeplan.py", "normalize_source requires an incident source spectrum"),
     ("witwin/maxwell/fdtd/runtime/timeplan.py", "normalize_source has no unique incident spectrum for circuit-driven fields"),
-    ("witwin/maxwell/circuit_devices.py", "Transistor device BJT is gated behind the independent Phase 5"),
-    ("witwin/maxwell/circuit_devices.py", "Transistor device MOSFET is gated behind the independent Phase 5"),
     ("witwin/maxwell/media.py", "Nonlinear Material frequency evaluation is not defined without a field amplitude"),
     ("witwin/maxwell/media.py", "relative_permittivity() currently supports isotropic Material only"),
     ("witwin/maxwell/media.py", "relative_permittivity() is not defined for nonlinear Material"),
@@ -89,7 +87,7 @@ def _literal_fragments(node: ast.expr) -> str:
 
 
 def _raised_not_implemented(tree: ast.AST, rel=""):
-    from scripts.dev.fdtd.guard_census import SAFETY_GUARDS
+    from scripts.dev.fdtd.guard_census import SAFETY_GUARDS, TRACKED_EXCEPTIONS
 
     class Inventory(ast.NodeVisitor):
         def __init__(self):
@@ -108,7 +106,7 @@ def _raised_not_implemented(tree: ast.AST, rel=""):
             exc = node.exc
             name = exc.func.id if isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name) else getattr(exc, "id", None)
             safety = (rel, ".".join(self.scope), name) in SAFETY_GUARDS
-            if name != "NotImplementedError" and not safety:
+            if name not in TRACKED_EXCEPTIONS and not safety:
                 return
             message = _literal_fragments(exc.args[0]) if isinstance(exc, ast.Call) and exc.args else ""
             self.guards.append((node.lineno, message))
@@ -190,6 +188,22 @@ def test_reviewed_capability_manifest_exactly_matches_source():
             _assert_test_reference(test)
 
 
+def test_migrated_raises_keep_their_reviews_through_the_receipt():
+    """Every raise moved to UnsupportedFeatureError carries its review to the new identity."""
+    import json
+    from scripts.dev.fdtd.guard_census import collect_detailed_guards, migrated_identities
+    manifest = json.loads(MANIFEST_PATH.read_text())
+    active = {entry["id"] for entry in manifest["active"]}
+    present = {guard["id"]: guard for guard in collect_detailed_guards()}
+    for old, new in migrated_identities().items():
+        assert old not in present and old not in active, old
+        guard = present.get(new["id"])
+        if guard is not None:
+            assert guard["expression"] == new["expression"]
+            assert guard["expression"].startswith("Call(func=Name(id='UnsupportedFeatureError'")
+            assert new["id"] in active or _is_contract(guard["path"], guard["message"]), new["id"]
+
+
 def test_detailed_guard_collector_preserves_the_complete_exception_inventory():
     from collections import Counter
     from scripts.dev.fdtd.guard_census import collect_detailed_guards
@@ -241,7 +255,7 @@ def test_contract_guard_list_is_accurate():
     guards = collect_guards()
     for file, key in CONTRACT_GUARDS:
         assert any(rel == file and key in msg for rel, _, msg in guards), (
-            f"Stale contract-guard entry: {file!r} has no NotImplementedError containing {key!r}. "
+            f"Stale contract-guard entry: {file!r} has no tracked refusal containing {key!r}. "
             "Update CONTRACT_GUARDS and docs/reference/fdtd-capability-guard-census.md."
         )
 
@@ -294,3 +308,60 @@ def test_no_deferral_phrase_in_public_forward_path():
         "add it to PHRASE_GATE_ALLOWLIST with the owning phase:\n"
         + "\n".join(f"  {rel}:{lineno}  {msg[:90]}" for rel, lineno, msg in violations)
     )
+
+
+def test_p7b_rekeyed_guards_keep_their_body_and_normalized_predicates():
+    """Phase 7b re-keyed guards only because their enclosing predicates read prepared.scene."""
+    import json
+    from scripts.dev.fdtd.guard_census import P7B_RECEIPT, collect_detailed_guards, p7b_guard_hashes
+    receipt = json.loads(P7B_RECEIPT.read_text())
+    present = {guard["id"]: guard for guard in collect_detailed_guards()}
+    assert set(receipt["review"]) <= set(receipt["guard_id_map"])
+    for old, entry in receipt["guard_id_map"].items():
+        guard = present[entry["id"]]
+        assert old not in present
+        assert guard["conditions"] == entry["conditions"]
+        assert p7b_guard_hashes(guard) == (entry["body_sha256"], entry["normalized_conditions_sha256"])
+        if old not in receipt["review"]:
+            assert entry["old_normalized_conditions_sha256"] == entry["normalized_conditions_sha256"], old
+
+
+def test_result_strict_reads_rekeyed_guards_keep_their_body_and_review():
+    """fix/result-strict-scene-reads re-keyed guards only because result.py reads Scene fields strictly."""
+    import hashlib
+    import json
+    from scripts.dev.fdtd.guard_census import collect_detailed_guards
+    receipt = json.loads((PACKAGE_ROOT.parent / "scripts/dev/fdtd/result_strict_guard_receipt.json").read_text())
+    manifest = {entry["id"]: entry for entry in json.loads(MANIFEST_PATH.read_text())["active"]}
+    present = {guard["id"]: guard for guard in collect_detailed_guards()}
+    assert receipt["review"] == []
+    for old, entry in receipt["guard_id_map"].items():
+        guard = present[entry["id"]]
+        assert old not in present and old not in manifest
+        assert guard["conditions"] == entry["conditions"]
+        body = json.dumps([guard["path"], guard["scope"], guard["expression"], guard["message"]]).encode()
+        assert hashlib.sha256(body).hexdigest() == entry["body_sha256"]
+        assert entry["old_normalized_conditions_sha256"] == entry["normalized_conditions_sha256"], old
+        assert manifest[entry["id"]]["review_status"] == "reviewed"
+
+
+def test_strict_reads_2_rekeyed_guards_keep_their_body_and_review():
+    """fix/strict-scene-reads-2 re-keyed guards only because simulation.py reads Scene fields strictly."""
+    import hashlib
+    import json
+    from scripts.dev.fdtd.guard_census import collect_detailed_guards
+    receipt = json.loads((PACKAGE_ROOT.parent / "scripts/dev/fdtd/strict_reads_2_guard_receipt.json").read_text())
+    manifest = {entry["id"]: entry for entry in json.loads(MANIFEST_PATH.read_text())["active"]}
+    present = {guard["id"]: guard for guard in collect_detailed_guards()}
+    assert receipt["review"] == []
+    for old, entry in receipt["guard_id_map"].items():
+        guard = present[entry["id"]]
+        assert old not in present and old not in manifest
+        assert guard["conditions"] == entry["conditions"]
+        body = json.dumps([guard["path"], guard["scope"], guard["expression"], guard["message"]]).encode()
+        assert hashlib.sha256(body).hexdigest() == entry["body_sha256"]
+        assert entry["old_normalized_conditions_sha256"] == entry["normalized_conditions_sha256"], old
+        if old in receipt["manifest"]:
+            assert manifest[entry["id"]]["review_status"] == "reviewed"
+        else:
+            assert any(guard["path"] == path and fragment in guard["message"] for path, fragment in CONTRACT_GUARDS)

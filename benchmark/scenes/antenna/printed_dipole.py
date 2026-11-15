@@ -23,7 +23,7 @@ def _box(position,size):
 
 def printed_dipole_scene(*,lateral_dl=.001,substrate_cells=4,air_dl=.002,
         edge_dl=None,metal="pec",dielectric_sigma=0.,frequencies=(2.5e9,3e9,3.5e9),
-        pml_layers=12,air_padding=0.,radiation_monitor=True,device="cuda",boundary_cell_widths=None,
+        pml_layers=12,air_padding=0.,radiation_monitor=True,boundary_cell_widths=None,
         vacuum_reference_y_nodes=None,coupon_y_dl=None,vacuum_reference_z_nodes=None):
     """46 mm tip-to-tip arms on a fixed 1 mm, epsilon=2.2 dielectric coupon.
 
@@ -119,27 +119,27 @@ def printed_dipole_scene(*,lateral_dl=.001,substrate_cells=4,air_dl=.002,
         mw.Material(eps_r=SUBSTRATE_EPS,sigma_e=dielectric_sigma),name="substrate")]
     for name,lo,hi in (("positive_arm",FEED_GAP/2,ARM_END),("negative_arm",-ARM_END,-FEED_GAP/2)):
         if metal=="pec":
-            geometry=mw.PlanarPEC.rectangle(((lo,hi),(-STRIP_WIDTH/2,STRIP_WIDTH/2)),
+            geometry=mw.geometry.PlanarPEC.rectangle(((lo,hi),(-STRIP_WIDTH/2,STRIP_WIDTH/2)),
                 coordinate=0.,physical_thickness=35e-6)
             material=mw.Material.pec()
         else:
             geometry=_box(((lo+hi)/2,0.,0.),(hi-lo,STRIP_WIDTH,0.))
-            material=mw.CopperFoil(thickness=35e-6,frequency_range=(.1e9,10e9))
+            material=mw.media.CopperFoil(thickness=35e-6,frequency_range=(.1e9,10e9))
         structures.append(mw.Structure(geometry,material,name=name))
-    port=mw.TerminalPort("feed",mw.TerminalRef("positive_arm"),mw.TerminalRef("negative_arm"),
+    port=mw.rf.TerminalPort("feed",mw.rf.TerminalRef("positive_arm"),mw.rf.TerminalRef("negative_arm"),
         mw.AxisPath("x"),.0005,current_surface=_box((.0005,0.,0.),(0.,.007,.005)),
         voltage_aperture=_box((0.,0.,0.),(FEED_GAP,STRIP_WIDTH,0.)))
     monitors=[]
     if radiation_monitor:
-        monitors.append(mw.ClosedSurfaceMonitor.box("radiation",position=(0.,0.,0.),
+        monitors.append(mw.monitors.ClosedSurfaceMonitor.box("radiation",position=(0.,0.,0.),
             size=(.064,.040,.034),frequencies=tuple(frequencies)))
     if dielectric_sigma:
-        monitors.append(mw.PowerLossMonitor("substrate_loss",position=(0.,0.,-SUBSTRATE_HEIGHT/2),
+        monitors.append(mw.monitors.PowerLossMonitor("substrate_loss",position=(0.,0.,-SUBSTRATE_HEIGHT/2),
             size=(2*COUPON_HALF_X,2*COUPON_HALF_Y,SUBSTRATE_HEIGHT),
             frequencies=tuple(frequencies),channels=("conduction",)))
     return mw.Scene(domain=mw.Domain(bounds=bounds),grid=mw.GridSpec.custom(x,y,z),
         boundary=mw.BoundarySpec.pml(num_layers=pml_layers),structures=structures,ports=(port,),
-        monitors=monitors,device=device,metadata={"physical_model":"fixed-geometry-printed-dipole-v1",
+        monitors=monitors,metadata={"physical_model":"fixed-geometry-printed-dipole-v1",
             "metal":metal,"physical_copper_thickness_m":35e-6,"dielectric_sigma_S_per_m":dielectric_sigma,
             "lateral_dl_m":lateral_dl,"edge_dl_m":edge_dl,"substrate_cells":int(substrate_cells),
             "air_dl_m":air_dl,"air_padding_m":air_padding,"pml_layers":pml_layers,

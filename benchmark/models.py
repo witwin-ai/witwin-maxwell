@@ -28,6 +28,12 @@ class ScenarioDefinition:
     # Simulation.fdtd absorber. "auto" is the solver default; rows whose validated
     # results depend on the CPML path in closed-transverse PML topologies pin "cpml".
     absorber: str = "auto"
+    # "incident" scales the flux runtime change by the incident power instead of each monitored
+    # power: for rows whose monitored flux is zero or near zero by construction.
+    flux_change_scale: str = "monitor"
+    # False for rows whose display field cannot settle (undamped closed cavities): their field
+    # metrics are reported but not scored, and the row is scored on its scalar observables.
+    score_fields: bool = True
 
 
 @dataclass
@@ -57,6 +63,7 @@ class ScenarioMetrics:
     maxwell_peak_gpu_memory_mb: float | None = None
     diagnostic_plot: Path | None = None
     scalar_plot: Path | None = None
+    fields_scored: bool = True
     notes: list[str] = field(default_factory=list)
     per_frequency: list[dict[str, float]] = field(default_factory=list)
     scalar_metrics: list[dict[str, object]] = field(default_factory=list)

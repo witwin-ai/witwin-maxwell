@@ -1,34 +1,39 @@
 from __future__ import annotations
 
+import copy
+
 import pytest
+import torch
 
 from witwin.maxwell.fdtd.cuda import build as cuda_build
 
 
 @pytest.mark.parametrize(
     "marker_contents",
-    [None, "stable_abi_v1\n", "stable_abi_v2\n", "stable_abi_v3\n", "stable_abi_v4\n", "stable_abi_v5\n", "stable_abi_v6\n", "stable_abi_v7\n", "stable_abi_v8\n", "stable_abi_v9\n", "stable_abi_v10\n", "stable_abi_v11\n", "stable_abi_v12\n", "garbage\n"],
+    [None, "stable_abi_v1\n", "stable_abi_v2\n", "stable_abi_v3\n", "stable_abi_v4\n", "stable_abi_v5\n", "stable_abi_v6\n", "stable_abi_v7\n", "stable_abi_v8\n", "stable_abi_v9\n", "stable_abi_v10\n", "stable_abi_v11\n", "stable_abi_v12\n", "stable_abi_v13\n", "stable_abi_v14\n", "stable_abi_v15\n", "stable_abi_v16\n", "garbage\n"],
 )
+@pytest.mark.parametrize("native_library", cuda_build.LIBRARIES)
 def test_stale_or_missing_packaged_prebuilt_is_rejected_before_loading(
     monkeypatch,
     tmp_path,
     marker_contents,
+    native_library,
 ):
-    library = tmp_path / f"witwin_maxwell_fdtd_cuda{cuda_build.extension_suffix()}"
+    library = tmp_path / f"{native_library.name}{cuda_build.extension_suffix()}"
     library.write_bytes(b"not-loaded")
     marker = cuda_build.prebuilt_abi_marker_path(library)
     if marker_contents is not None:
         marker.write_text(marker_contents, encoding="utf-8")
 
     load_calls = []
-    monkeypatch.setattr(cuda_build, "prebuilt_extension_path", lambda: library)
+    monkeypatch.setattr(cuda_build, "prebuilt_extension_path", lambda selected=cuda_build.MAIN: library)
     monkeypatch.setattr(
         cuda_build,
         "_load_extension_file",
-        lambda path: load_calls.append(path),
+        lambda path, library=cuda_build.MAIN: load_calls.append(path),
     )
 
-    assert cuda_build._load_packaged_prebuilt_extension() is None
+    assert cuda_build._load_packaged_prebuilt_extension(native_library) is None
     assert load_calls == []
 
 
@@ -42,13 +47,13 @@ def test_matching_packaged_prebuilt_load_failure_is_fail_fast_without_jit(
         f"{cuda_build.STABLE_ABI_VERSION}\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(cuda_build, "prebuilt_extension_path", lambda: library)
+    monkeypatch.setattr(cuda_build, "prebuilt_extension_path", lambda selected=cuda_build.MAIN: library)
     monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_SKIP_PREBUILT", raising=False)
     monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_PREBUILT", raising=False)
 
     jit_calls = []
 
-    def fail_load(path):
+    def fail_load(path, library=cuda_build.MAIN):
         raise RuntimeError(f"failed to load {path}")
 
     monkeypatch.setattr(cuda_build, "_load_extension_file", fail_load)
@@ -61,7 +66,7 @@ def test_matching_packaged_prebuilt_load_failure_is_fail_fast_without_jit(
 
 
 def test_trilinear_sampling_source_gather_adjoint_and_indexed_point_operators_are_part_of_the_stable_v12_contract():
-    assert cuda_build.STABLE_ABI_VERSION == "stable_abi_v13"
+    assert cuda_build.STABLE_ABI_VERSION == "stable_abi_v17"
     assert {
         "trilinear_border_forward",
         "trilinear_border_entries",
@@ -103,8 +108,8 @@ def test_old_v3_packaged_marker_uses_only_explicit_current_prebuilt(monkeypatch,
     current=current_dir/packaged.name;current.write_bytes(b'explicit-reviewed-v4-binary')
     cuda_build.prebuilt_abi_marker_path(current).write_text(f'{cuda_build.STABLE_ABI_VERSION}\n')
     loaded=[];sentinel=object()
-    monkeypatch.setattr(cuda_build,'prebuilt_extension_path',lambda:packaged)
-    monkeypatch.setattr(cuda_build,'_load_extension_file',lambda path:loaded.append(path)or sentinel)
+    monkeypatch.setattr(cuda_build,'prebuilt_extension_path',lambda selected=cuda_build.MAIN:packaged)
+    monkeypatch.setattr(cuda_build,'_load_extension_file',lambda path, library=cuda_build.MAIN:loaded.append(path)or sentinel)
     monkeypatch.setattr(cuda_build,'load',lambda **kwargs:pytest.fail('A stale packaged marker must not trigger JIT when explicit prebuilt is required.'))
     monkeypatch.delenv('WITWIN_MAXWELL_FDTD_CUDA_SKIP_PREBUILT',raising=False)
     monkeypatch.setenv('WITWIN_MAXWELL_FDTD_CUDA_PREBUILT','1')
@@ -114,37 +119,49 @@ def test_old_v3_packaged_marker_uses_only_explicit_current_prebuilt(monkeypatch,
 
 
 @pytest.mark.parametrize("marker_contents", [None, "stable_abi_v6\n", "garbage\n"])
-def test_explicit_prebuilt_with_stale_or_missing_marker_fails_closed(monkeypatch, tmp_path, marker_contents):
+@pytest.mark.parametrize("native_library", cuda_build.LIBRARIES)
+def test_explicit_prebuilt_with_stale_or_missing_marker_fails_closed(monkeypatch, tmp_path, marker_contents, native_library):
     build_dir = tmp_path / "pinned"
-    build_dir.mkdir()
-    library = build_dir / f"witwin_maxwell_fdtd_cuda{cuda_build.extension_suffix()}"
+    (build_dir / native_library.subdirectory).mkdir(parents=True)
+    library = build_dir / native_library.subdirectory / f"{native_library.name}{cuda_build.extension_suffix()}"
     library.write_bytes(b"stale-binary-must-not-load")
     if marker_contents is not None:
         cuda_build.prebuilt_abi_marker_path(library).write_text(marker_contents, encoding="utf-8")
-    monkeypatch.setattr(cuda_build, "prebuilt_extension_path", lambda: tmp_path / "absent.so")
-    monkeypatch.setattr(cuda_build, "_load_extension_file", lambda path: pytest.fail("stale binary was loaded"))
+    monkeypatch.setattr(cuda_build, "prebuilt_extension_path", lambda selected=cuda_build.MAIN: tmp_path / "absent.so")
+    monkeypatch.setattr(cuda_build, "_load_extension_file", lambda path, library=cuda_build.MAIN: pytest.fail("stale binary was loaded"))
     monkeypatch.setattr(cuda_build, "load", lambda **kwargs: pytest.fail("explicit prebuilt must not trigger JIT"))
     monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_SKIP_PREBUILT", raising=False)
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_PREBUILT", "1")
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR", str(build_dir))
-    with pytest.raises(ImportError, match=f"expected '{cuda_build.STABLE_ABI_VERSION}'"):
-        cuda_build.build_extension()
+    with pytest.raises(ImportError, match=f"expected '{native_library.abi}'"):
+        cuda_build.build_extension(library=native_library)
 
 
-def test_jit_build_writes_abi_marker_in_overridden_build_dir(monkeypatch, tmp_path):
+@pytest.mark.parametrize("native_library", cuda_build.LIBRARIES)
+def test_jit_build_writes_abi_marker_in_overridden_build_dir(monkeypatch, tmp_path, native_library):
     build_dir = tmp_path / "override"
-    library = build_dir / f"witwin_maxwell_fdtd_cuda{cuda_build.extension_suffix()}"
+    library = build_dir / native_library.subdirectory / f"{native_library.name}{cuda_build.extension_suffix()}"
 
     def fake_load(**kwargs):
-        assert kwargs["build_directory"] == str(build_dir)
+        assert kwargs["build_directory"] == str(build_dir / native_library.subdirectory)
         library.write_bytes(b"built")
         return str(library)
 
-    monkeypatch.setattr(cuda_build, "prebuilt_extension_path", lambda: tmp_path / "absent.so")
+    monkeypatch.setattr(cuda_build, "prebuilt_extension_path", lambda selected=cuda_build.MAIN: tmp_path / "absent.so")
     monkeypatch.setattr(cuda_build, "load", fake_load)
     monkeypatch.setattr(cuda_build, "_ensure_windows_build_tools_on_path", lambda: None)
     monkeypatch.setattr(cuda_build, "_ensure_cuda_home_from_nvcc", lambda: None)
     monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_PREBUILT", raising=False)
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR", str(build_dir))
-    cuda_build.build_extension()
-    assert cuda_build.prebuilt_abi_marker_path(library).read_text(encoding="utf-8").strip() == cuda_build.STABLE_ABI_VERSION
+    cuda_build.build_extension(library=native_library)
+    assert cuda_build.prebuilt_abi_marker_path(library).read_text(encoding="utf-8").strip() == native_library.abi
+
+
+@pytest.mark.parametrize("duplicate", [copy.copy, copy.deepcopy])
+def test_ops_view_survives_copy(duplicate):
+    # Batch lanes copy solvers that hold the extension view; the copy must not
+    # recurse through __getattr__ and must still resolve operators.
+    view = cuda_build._StableOpsModule("library.so", "aten")
+    copied = duplicate(view)
+    assert copied.__file__ == "library.so"
+    assert copied.add is torch.ops.aten.add

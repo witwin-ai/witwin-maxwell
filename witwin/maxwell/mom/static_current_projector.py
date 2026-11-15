@@ -1,7 +1,9 @@
 """Cellwise conservative current projection without a global projector array."""
 import torch
 from .static_current import FaceCurrentBalance,FixedStaticCurrentInverse
+from .ordered_reduction import ordered_index_add_
 from .fixed_tangent_inverse import _streamed_inverse_bounds
+from ..errors import ConvergenceError
 
 
 class _Product(torch.autograd.Function):
@@ -61,7 +63,7 @@ class StaticCurrentProjector:
     def _weak(self,field,weighted):
         if weighted:field=field*self.block.volume.volumes[:,None]
         local=torch.einsum('tai,...ti->...ta',self.block.gradients,field)
-        return field.new_zeros(*field.shape[:-2],self.block.n_dofs).index_add(
+        return ordered_index_add_(field.new_zeros(*field.shape[:-2],self.block.n_dofs),
             -1,self.block.cell_dofs.flatten(),local.flatten(-2))[...,1:]
 
     def _product(self,value,mode):
@@ -90,7 +92,7 @@ class StaticCurrentProjector:
     def recover_adjoint(self,value):return _Product.apply(value,self,'recover_adjoint')
 
 
-class CurrentProjectionAdmissionError(RuntimeError):
+class CurrentProjectionAdmissionError(ConvergenceError):
     def __init__(self,receipt):
         super().__init__('Current projection tangent bound is inconclusive')
         self.receipt=receipt

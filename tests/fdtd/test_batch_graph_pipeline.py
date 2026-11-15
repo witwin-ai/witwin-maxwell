@@ -12,8 +12,8 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires 
 @pytest.mark.parametrize("fields", [(), ("Ez",)])
 def test_required_graph_chunks_match_eager_and_reuse_monitor_captures(monkeypatch, fields):
     sims = [simulation(i, steps=31, frequencies=(.8e9, 1e9, 1.2e9)) for i in range(3)]
-    options = dict(variation=mw.BatchVariation(sources=("drive",)), outputs=mw.BatchOutput(fields=fields))
-    eager = mw.Simulation.batch(sims, execution=mw.BatchExecution(devices=("cuda:0",),
+    options = dict(variation=mw.execution.BatchVariation(sources=("drive",)), outputs=mw.execution.BatchOutput(fields=fields))
+    eager = mw.Simulation.batch(sims, execution=mw.execution.BatchExecution(devices=("cuda:0",),
                                 batch_size=3, graph="off"), **options).run()
     calls = []
     original = CudaGraphRunner.capture
@@ -21,7 +21,7 @@ def test_required_graph_chunks_match_eager_and_reuse_monitor_captures(monkeypatc
         calls.append(1)
         return original(runner, function)
     monkeypatch.setattr(CudaGraphRunner, "capture", capture)
-    with mw.Simulation.batch(sims, execution=mw.BatchExecution(devices=("cuda:0",),
+    with mw.Simulation.batch(sims, execution=mw.execution.BatchExecution(devices=("cuda:0",),
             batch_size=3, graph="required", graph_steps=7), **options).prepare() as prepared:
         first = prepared.run()
         first.results()
@@ -38,8 +38,8 @@ def test_required_graph_chunks_match_eager_and_reuse_monitor_captures(monkeypatc
         torch.testing.assert_close(first[i].raw_monitor("probe")["components"]["Ez"],
                                    eager[i].raw_monitor("probe")["components"]["Ez"], rtol=0, atol=0)
         for name in fields:
-            torch.testing.assert_close(first[i].tensor(name), eager[i].tensor(name), rtol=0, atol=0)
-            torch.testing.assert_close(second[i].tensor(name), first[i].tensor(name), rtol=0, atol=0)
+            torch.testing.assert_close(first[i].field(name).values, eager[i].field(name).values, rtol=0, atol=0)
+            torch.testing.assert_close(second[i].field(name).values, first[i].field(name).values, rtol=0, atol=0)
 
 
 def test_concurrent_capture_participant_forces_auto_eager_and_required_failure():
@@ -53,7 +53,7 @@ def test_concurrent_capture_participant_forces_auto_eager_and_required_failure()
     try:
         assert entered.wait(10)
         for policy in ("auto", "required"):
-            batch = mw.Simulation.batch([simulation(steps=8)], execution=mw.BatchExecution(
+            batch = mw.Simulation.batch([simulation(steps=8)], execution=mw.execution.BatchExecution(
                 devices=("cuda:0",), batch_size=1, graph=policy))
             with batch.prepare() as prepared:
                 results = prepared.run()

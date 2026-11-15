@@ -27,7 +27,7 @@ def test_ewald_fft_canonical_identity_and_public_precision():
         'first_wave_min_v1', 'direct_positive_tail_min_v1', 'direct_first_wave_min_v1')
     for rule in rules:
         for shift in ('dense', 'separable_v1'):
-            cfg = mw.FMMConfig(near_storage='full_matrix',table_storage='fft_ewald_v1', kernel_bound_rule=rule, shift_storage=shift)
+            cfg = mw.mom.FMMConfig(near_storage='full_matrix',table_storage='fft_ewald_v1', kernel_bound_rule=rule, shift_storage=shift)
             payload = cfg.payload()
             assert payload['version'] == 'cartesian_fmm_ewald_fft_config_v1'
             assert cfg.near_storage == 'full_matrix'
@@ -35,36 +35,36 @@ def test_ewald_fft_canonical_identity_and_public_precision():
             for name, default in omitted_defaults.items():
                 assert getattr(cfg, name) == default
                 bad = copy.deepcopy(payload); bad['parameters'][name] = default
-                with pytest.raises(ValueError): mw.FMMConfig.restore(bad)
-            assert mw.FMMConfig.restore(payload) == cfg
+                with pytest.raises(ValueError): mw.mom.FMMConfig.restore(bad)
+            assert mw.mom.FMMConfig.restore(payload) == cfg
             for version in ('cartesian_fmm_fft_config_v1', 'cartesian_fmm_config_v7',
                     'cartesian_fmm_separable_config_v1', 'cartesian_fmm_real_support_config_v1',
                     'cartesian_fmm_positive_tail_config_v1', 'cartesian_fmm_first_wave_config_v1',
                     'cartesian_fmm_direct_positive_tail_config_v1', 'cartesian_fmm_direct_first_wave_config_v1'):
                 bad = copy.deepcopy(payload); bad['version'] = version
-                with pytest.raises(ValueError): mw.FMMConfig.restore(bad)
+                with pytest.raises(ValueError): mw.mom.FMMConfig.restore(bad)
             for storage in ('dense', 'compact', 'fft_v1'):
                 bad = copy.deepcopy(payload); bad['parameters']['table_storage'] = storage
-                with pytest.raises(ValueError): mw.FMMConfig.restore(bad)
+                with pytest.raises(ValueError): mw.mom.FMMConfig.restore(bad)
     for order in (13,):
         with pytest.raises(ValueError, match='native order'):
-            mw.FMMConfig(near_storage='full_matrix',table_storage='fft_ewald_v1', order=order)
+            mw.mom.FMMConfig(near_storage='full_matrix',table_storage='fft_ewald_v1', order=order)
     with pytest.raises(ValueError, match='native order'):
-        mw.FMMConfig(near_storage='full_matrix',table_storage='fft_ewald_v1', max_order=13, kernel_error_budget=mw.KernelErrorBudget(1e-6, 1e-5))
-    periodic = mw.MoMPeriodicConfig(((1., 0., 0.),))
+        mw.mom.FMMConfig(near_storage='full_matrix',table_storage='fft_ewald_v1', max_order=13, kernel_error_budget=mw.mom.KernelErrorBudget(1e-6, 1e-5))
+    periodic = mw.mom.MoMPeriodicConfig(((1., 0., 0.),))
     kw = dict(operator_backend='fmm', riesz_storage='local_rwg_v1',
-        fmm=mw.FMMConfig(near_storage='full_matrix',table_storage='fft_ewald_v1'), stopping=StoppingRule(rtol=1e-9, preconditioner='rwg_diagonal'))
-    valid = mw.MoMConfig(periodic=periodic, **kw)
+        fmm=mw.mom.FMMConfig(near_storage='full_matrix',table_storage='fft_ewald_v1'), stopping=StoppingRule(rtol=1e-9, preconditioner='rwg_diagonal'))
+    valid = mw.mom.MoMConfig(periodic=periodic, **kw)
     assert valid.dtype == torch.complex128
     with pytest.raises(ValueError, match='complex128'):
-        mw.MoMConfig(periodic=periodic, dtype=torch.complex64, **kw)
+        mw.mom.MoMConfig(periodic=periodic, dtype=torch.complex64, **kw)
     with pytest.raises(ValueError, match='explicit periodic'):
-        mw.MoMConfig(**kw)
+        mw.mom.MoMConfig(**kw)
     with pytest.raises(NotImplementedError, match='free space'):
-        mw.MoMConfig(periodic=periodic, **dict(kw, fmm=mw.FMMConfig(table_storage='fft_v1')))
+        mw.mom.MoMConfig(periodic=periodic, **dict(kw, fmm=mw.mom.FMMConfig(table_storage='fft_v1')))
     with pytest.raises(NotImplementedError, match='fixed order'):
-        mw.MoMConfig(periodic=periodic, **dict(kw, fmm=replace(kw['fmm'], max_order=8,
-            kernel_error_budget=mw.KernelErrorBudget(1e-6, 1e-5))))
+        mw.mom.MoMConfig(periodic=periodic, **dict(kw, fmm=replace(kw['fmm'], max_order=8,
+            kernel_error_budget=mw.mom.KernelErrorBudget(1e-6, 1e-5))))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA required')
@@ -89,9 +89,9 @@ def test_ewald_fft_native_binding_and_capacity_guards_precede_projections(monkey
         cls(provider, kernel.lattice, action_retained_budget_bytes=1, **kw)
     with pytest.raises(ValueError, match='matching original'):
         cls(provider, None, **kw)
-    for key, value in (('interior_kernel_error_budget', mw.KernelErrorBudget(1e-6, 1e-5)),
-            ('exterior_kernel_error_budget', mw.KernelErrorBudget(1e-6, 1e-5)),
-            ('remote_kernel_error_budget', mw.KernelErrorBudget(1e-6, 1e-5)), ('max_order', 8), ('max_shells', 3)):
+    for key, value in (('interior_kernel_error_budget', mw.mom.KernelErrorBudget(1e-6, 1e-5)),
+            ('exterior_kernel_error_budget', mw.mom.KernelErrorBudget(1e-6, 1e-5)),
+            ('remote_kernel_error_budget', mw.mom.KernelErrorBudget(1e-6, 1e-5)), ('max_order', 8), ('max_shells', 3)):
         with pytest.raises(NotImplementedError, match='Ewald'):
             cls(provider, kernel.lattice, **dict(kw, **{key: value}))
     with pytest.raises(ValueError, match='cutoff'):

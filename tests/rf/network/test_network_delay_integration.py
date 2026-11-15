@@ -11,12 +11,14 @@ from witwin.maxwell.fdtd.delay import (
 )
 from witwin.maxwell.fdtd.networks import apply_network_runtimes
 from witwin.maxwell.network import voltage_current_to_power_waves
+from witwin.maxwell.compiler import compile_networks
+from witwin.maxwell.scene import prepare_scene
 
 
 def _delayed_two_port(
     frequencies: torch.Tensor,
     delays: tuple[float, float],
-) -> tuple[mw.NetworkData, mw.StateSpaceNetwork]:
+) -> tuple[mw.rf.NetworkData, mw.rf.rational.StateSpaceNetwork]:
     core = torch.tensor(
         ((0.1, 0.25), (0.25, 0.1)),
         dtype=torch.float64,
@@ -25,13 +27,13 @@ def _delayed_two_port(
     scattering = core.to(torch.complex128)[None, ...] * delay_phase_matrix(
         frequencies, delays
     )
-    data = mw.NetworkData(
+    data = mw.rf.NetworkData(
         frequencies=frequencies,
         s=scattering,
         z0=50.0,
         port_names=("left", "right"),
     )
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.zeros((0, 0), dtype=torch.float64),
         B=torch.zeros((0, 2), dtype=torch.float64),
         C=torch.zeros((2, 0), dtype=torch.float64),
@@ -57,9 +59,9 @@ def _port(name: str, x: float) -> mw.LumpedPort:
 
 
 def _scene(
-    block: mw.NetworkBlock,
+    block: mw.rf.NetworkBlock,
     *,
-    device: str,
+    
     sources: tuple[object, ...] | None = None,
 ) -> mw.Scene:
     if sources is None:
@@ -79,7 +81,6 @@ def _scene(
         sources=sources,
         ports=(_port("p_left", -0.01), _port("p_right", 0.01)),
         networks=(block,),
-        device=device,
     )
 
 
@@ -87,7 +88,7 @@ def test_compiler_builds_passive_scattering_core_and_delay_descriptor() -> None:
     frequencies = torch.linspace(0.0, 4.0e9, 81, dtype=torch.float64)
     delays = (0.2e-9, 0.3e-9)
     data, model = _delayed_two_port(frequencies, delays)
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="delayed_link",
         network=data,
         connections={"left": "p_left", "right": "p_right"},
@@ -97,9 +98,8 @@ def test_compiler_builds_passive_scattering_core_and_delay_descriptor() -> None:
         max_delay_steps=128,
     )
 
-    (compiled,) = _scene(block, device="cpu").compile_networks(
+    (compiled,) = compile_networks(prepare_scene(_scene(block), device="cpu"),
         dt=0.01e-9,
-        device="cpu",
     )
 
     assert compiled.continuous.representation == "S"
@@ -112,11 +112,11 @@ def test_compiler_builds_passive_scattering_core_and_delay_descriptor() -> None:
         torch.full((2,), 50.0, dtype=torch.float64),
     )
 
-    automatic = mw.NetworkBlock(
+    automatic = mw.rf.NetworkBlock(
         name="automatic_link",
         network=data,
         connections={"left": "p_left", "right": "p_right"},
-        fit=mw.RationalFitConfig(
+        fit=mw.rf.rational.RationalFitConfig(
             order=1,
             iterations=2,
             relative_tolerance=1.0e-3,
@@ -124,9 +124,8 @@ def test_compiler_builds_passive_scattering_core_and_delay_descriptor() -> None:
         delay_seconds="auto",
         max_delay_steps=128,
     )
-    (automatic_compiled,) = _scene(automatic, device="cpu").compile_networks(
+    (automatic_compiled,) = compile_networks(prepare_scene(_scene(automatic), device="cpu"),
         dt=0.01e-9,
-        device="cpu",
     )
     assert automatic_compiled.delay is not None
     assert automatic_compiled.delay.delay_seconds == pytest.approx(delays, abs=1.0e-15)
@@ -140,7 +139,7 @@ def test_delayed_two_port_fdtd_runs_bounded_graph_path() -> None:
     frequencies = torch.linspace(0.0, 4.0e9, 81, dtype=torch.float64)
     delays = (0.0, 0.3e-9)
     data, model = _delayed_two_port(frequencies, delays)
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="delayed_link",
         network=data,
         connections={"left": "p_left", "right": "p_right"},
@@ -152,14 +151,16 @@ def test_delayed_two_port_fdtd_runs_bounded_graph_path() -> None:
     requested = (2.0e9,)
 
     result = mw.Simulation.fdtd(
-        _scene(block, device="cuda"),
+        _scene(block),
         frequencies=requested,
-        run_time=mw.TimeConfig(time_steps=64),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        cuda_graph=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=64),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            cuda_graph=True,
+        ),
     ).run()
 
-    diagnostics = result.embedded_network("delayed_link")
+    diagnostics = mw.rf.embedded_network(result, "delayed_link")
     assert bool(torch.all(torch.isfinite(diagnostics.voltage)))
     assert bool(torch.all(torch.isfinite(diagnostics.current)))
     assert torch.max(torch.abs(diagnostics.voltage)) > 0.0
@@ -173,7 +174,7 @@ def test_delayed_network_block_fdtd_runtime_matches_frequency_response() -> None
     frequencies = torch.linspace(0.0, 6.0e9, 121, dtype=torch.float64)
     delays = (0.0, 0.3e-9)
     data, model = _delayed_two_port(frequencies, delays)
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="delayed_link",
         network=data,
         connections={"left": "p_left", "right": "p_right"},
@@ -184,11 +185,13 @@ def test_delayed_network_block_fdtd_runtime_matches_frequency_response() -> None
     )
     requested = (2.0e9,)
     solver = mw.Simulation.fdtd(
-        _scene(block, device="cuda", sources=()),
+        _scene(block, sources=()),
         frequencies=requested,
-        run_time=mw.TimeConfig(time_steps=1),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        cuda_graph=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            cuda_graph=False,
+        ),
     ).prepare().solver
     runtime = solver._network_runtimes[0]
     warmup_steps = 256

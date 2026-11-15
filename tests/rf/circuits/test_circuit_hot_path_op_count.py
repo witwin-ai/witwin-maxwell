@@ -48,13 +48,13 @@ def _port():
 
 
 def _rlc_ladder_circuit():
-    circuit = mw.Circuit("rlc_ladder")
+    circuit = mw.circuits.Circuit("rlc_ladder")
     a = circuit.node("a")
     b = circuit.node("b")
-    circuit.add(mw.Resistor("R1", a, b, 60.0))
-    circuit.add(mw.Inductor("L1", b, circuit.ground, 1.2e-9))
-    circuit.add(mw.Capacitor("C1", a, circuit.ground, 0.8e-12))
-    circuit.add(mw.Capacitor("C2", b, circuit.ground, 0.5e-12))
+    circuit.add(mw.rf.Resistor("R1", a, b, 60.0))
+    circuit.add(mw.rf.Inductor("L1", b, circuit.ground, 1.2e-9))
+    circuit.add(mw.rf.Capacitor("C1", a, circuit.ground, 0.8e-12))
+    circuit.add(mw.rf.Capacitor("C2", b, circuit.ground, 0.5e-12))
     circuit.bind_port("feed", positive=a, negative=circuit.ground)
     return circuit
 
@@ -66,14 +66,15 @@ def _circuit_solver(*, cuda_graph):
         boundary=mw.BoundarySpec.none(),
         ports=(_port(),),
         circuits=(_rlc_ladder_circuit(),),
-        device="cuda",
     )
     solver = mw.Simulation.fdtd(
         scene,
-        frequency=3.0e9,
-        run_time=mw.TimeConfig(time_steps=96),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        frequencies=3.0e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=96),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     ).prepare().solver
     prepare_port_spectral_accumulators(solver, 96, "none")
     prepare_circuit_time_series(solver, 96)

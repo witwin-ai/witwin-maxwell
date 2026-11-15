@@ -53,44 +53,43 @@ def _build_simulations(*, n: int, grid_cells: int, steps: int) -> list[Any]:
     cell = domain_size / grid_cells
     simulations: list[Any] = []
     for index in range(n):
+        # A tiny per-index amplitude perturbation keeps the Scenes independent
+        # objects with comparable cost, satisfying the ensemble's distinct-Scene
+        # contract without changing the launch-count profile.
         scene = mw.Scene(
-            domain=mw.Domain(
+                    domain=mw.Domain(
                 bounds=(
                     (-0.5 * domain_size, 0.5 * domain_size),
                     (-0.5 * domain_size, 0.5 * domain_size),
                     (-0.5 * domain_size, 0.5 * domain_size),
                 )
-            ),
-            grid=mw.GridSpec.uniform(cell),
-            boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-            device="cuda",
-        )
-        # A tiny per-index amplitude perturbation keeps the Scenes independent
-        # objects with comparable cost, satisfying the ensemble's distinct-Scene
-        # contract without changing the launch-count profile.
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, 0.0),
-                polarization="Ez",
-                width=1.5 * cell,
-                source_time=mw.GaussianPulse(
-                    frequency=FREQUENCY_HZ,
-                    fwidth=0.5 * FREQUENCY_HZ,
-                    amplitude=1.0 + 1.0e-3 * index,
                 ),
-            )
-        )
-        scene.add_monitor(
-            mw.PointMonitor(name="probe", position=(0.1, 0.0, 0.0), fields=("Ez",))
-        )
+                    grid=mw.GridSpec.uniform(cell),
+                    boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, 0.0),
+                    polarization="Ez",
+                    width=1.5 * cell,
+                    source_time=mw.GaussianPulse(
+                        frequency=FREQUENCY_HZ,
+                        fwidth=0.5 * FREQUENCY_HZ,
+                        amplitude=1.0 + 1.0e-3 * index,
+                    ),
+                ),
+                ),
+                    monitors=(mw.PointMonitor(name="probe", position=(0.1, 0.0, 0.0), fields=("Ez",)),),
+                )
         simulations.append(
             mw.Simulation.fdtd(
                 scene,
-                frequency=FREQUENCY_HZ,
-                run_time=mw.TimeConfig(time_steps=steps),
-                spectral_sampler=mw.SpectralSampler(window="none"),
-                full_field_dft=False,
-                cuda_graph=False,
+                frequencies=FREQUENCY_HZ,
+                config=mw.FDTDConfig(
+                    run_time=mw.TimeConfig(time_steps=steps),
+                    spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                    full_field_dft=False,
+                    cuda_graph=False,
+                ),
             )
         )
     return simulations
@@ -99,17 +98,17 @@ def _build_simulations(*, n: int, grid_cells: int, steps: int) -> list[Any]:
 def _time_run_many(
     simulations: list[Any], *, devices: tuple[str, ...], max_concurrency: int
 ) -> dict[str, Any]:
-    execution = mw.MultiGPUExecution.ensemble(
+    execution = mw.execution.MultiGPUExecution.ensemble(
         devices=list(devices), max_concurrency=max_concurrency
     )
     for device in devices:
         torch.cuda.synchronize(torch.device(device))
     start = time.perf_counter()
-    sequence = mw.run_many(simulations, execution=execution)
+    sequence = mw.execution.run_many(simulations, execution=execution)
     for device in devices:
         torch.cuda.synchronize(torch.device(device))
     wall_s = time.perf_counter() - start
-    failures = [entry for entry in sequence.entries if isinstance(entry, mw.DistributedFailure)]
+    failures = [entry for entry in sequence.entries if isinstance(entry, mw.execution.DistributedFailure)]
     if failures:
         raise RuntimeError(
             f"ensemble run reported {len(failures)} failure(s): "

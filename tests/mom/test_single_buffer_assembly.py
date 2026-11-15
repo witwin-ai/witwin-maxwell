@@ -12,7 +12,9 @@ import pytest
 
 
 PATH = Path(__file__).resolve().parents[2] / 'benchmark/sie_single_buffer_equivalence_v3.py'
-# Local checkout of the compact-Riesz provider baseline.
+# Local checkout of the compact-Riesz provider baseline (driver.BASE_COMMIT e95ab35a8). Rebuild it with
+#   git clone --shared --no-checkout <this repo> <dir> && git -C <dir> checkout --detach e95ab35a87e4259f329fbf8b0dfaecbea45eb0c7
+# into a durable directory and set WITWIN_SIE_COMPACT_RIESZ_BASELINE=<dir>; without it the replay tests skip.
 COMPACT_RIESZ_BASELINE = Path(os.environ.get('WITWIN_SIE_COMPACT_RIESZ_BASELINE', Path(tempfile.gettempdir())/'witwin-maxwell-compact-riesz'))
 SPEC = importlib.util.spec_from_file_location('single_buffer_equivalence_driver', PATH)
 driver = importlib.util.module_from_spec(SPEC)
@@ -157,6 +159,10 @@ def test_actual_fresh_entrypoint_preflight_no_cuda(tmp_path):
 @pytest.fixture(scope='module')
 def historical_driver(tmp_path_factory):
     """Replay unchanged V3 in a local immutable assembly-epoch checkout."""
+    if not (COMPACT_RIESZ_BASELINE/'.git').exists():
+        pytest.skip(f'compact-Riesz baseline checkout {COMPACT_RIESZ_BASELINE} is absent: create it with '
+                    f'git clone --shared --no-checkout <this repo> <dir> && git -C <dir> checkout --detach '
+                    f'{driver.BASE_COMMIT} and set WITWIN_SIE_COMPACT_RIESZ_BASELINE=<dir>')
     root = tmp_path_factory.mktemp('historical-assembly')/'provider'
     commit = '4ba0bb5bde0e8f2c2d01d461135f6ecaeb5b0f9c'
     subprocess.run(['git','clone','-q','--shared','--no-checkout',str(PATH.parents[1]),str(root)],check=True)

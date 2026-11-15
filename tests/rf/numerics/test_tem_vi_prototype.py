@@ -13,8 +13,7 @@ def _prepared_scene():
             domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
             grid=mw.GridSpec.uniform(0.1),
             boundary=mw.BoundarySpec.none(),
-            device="cpu",
-        )
+        ), device="cpu"
     )
 
 

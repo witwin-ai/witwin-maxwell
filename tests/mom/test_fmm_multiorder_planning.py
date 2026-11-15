@@ -93,7 +93,7 @@ def test_chunked_planner_matches_frozen_scalar_decisions_and_shares_geometry(mon
     for g,h,maximum,cap in [(1e-6,1e-5,10,2**60),(1e-50,1e-50,18,2**60),
                               (1e-30,1e-30,30,2**60),(1e-6,1e-5,10,1)]:
         calls.clear()
-        budget=mw.KernelErrorBudget(g,h)
+        budget=mw.mom.KernelErrorBudget(g,h)
         args=dict(min_order=2,max_order=maximum,separation_ratio=.25,table_storage=storage,table_budget_bytes=cap)
         actual=invoke(plan_multipole_order,regions,budget,**args)
         expected=invoke(reference,regions,budget,**args)
@@ -105,7 +105,7 @@ def test_chunked_planner_matches_frozen_scalar_decisions_and_shares_geometry(mon
     # Strict table precedence applies even to exact-zero point-support bounds.
     points=build_support_octree(lower,lower,leaf_size=1)
     for cap in (1,2**60):
-        budget=mw.KernelErrorBudget(1.,1.)
+        budget=mw.mom.KernelErrorBudget(1.,1.)
         actual=invoke(plan_multipole_order,((points,medium),),budget,max_order=20,table_budget_bytes=cap,table_storage=storage)
         expected=invoke(reference,((points,medium),),budget,max_order=20,table_budget_bytes=cap,table_storage=storage)
         assert actual[0]==expected[0];compare(actual[1],expected[1])
@@ -123,4 +123,4 @@ def test_shared_traversal_rejects_tree_mutation(monkeypatch):
         tree.lower.add_(1e-6)
     monkeypatch.setattr(module,"sphere_block_partition",changed)
     with pytest.raises(ValueError,match="changed"):
-        plan_multipole_order(((tree,compile_medium(mw.Material(),3e8)),),mw.KernelErrorBudget(1.,1.),max_order=4)
+        plan_multipole_order(((tree,compile_medium(mw.Material(),3e8)),),mw.mom.KernelErrorBudget(1.,1.),max_order=4)

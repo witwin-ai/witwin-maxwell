@@ -1,4 +1,5 @@
 """Ordinary-forward finite differences of analytic-CW source and foil spectra."""
+from dataclasses import replace
 import cmath
 import math
 import pytest
@@ -18,11 +19,10 @@ class AnalyticFoil(mw.SceneModule):
         self.graph,self.stride=graph,stride
 
     def to_scene(self):
-        return mw.Scene(domain=mw.Domain(bounds=((- .03,.03),)*3),grid=mw.GridSpec.uniform(.005),device='cuda',
-            boundary=mw.BoundarySpec.faces(default='none',x='pml',y='bloch',z='bloch',
+        return mw.Scene(domain=mw.Domain(bounds=((- .03,.03),)*3),grid=mw.GridSpec.uniform(.005),boundary=mw.BoundarySpec.faces(default='none',x='pml',y='bloch',z='bloch',
                 bloch_wavevector=(0.,5.,-7.),num_layers=6),
             structures=(mw.Structure(name='foil',geometry=mw.Box(position=(0.,0.,0.),size=(0.,.02,.02)),
-                material=mw.CopperFoil(thickness=self.log_thickness.exp(),conductivity=self.log_sigma.exp(),
+                material=mw.media.CopperFoil(thickness=self.log_thickness.exp(),conductivity=self.log_sigma.exp(),
                     frequency_range=(2e9,4e9),mode_count=16)),
                 mw.Structure(geometry=mw.Box(position=(-.01,0.,0.),size=(.015,.02,.02)),
                     material=mw.Material(eps_r=self.log_eps.exp()))),
@@ -31,13 +31,13 @@ class AnalyticFoil(mw.SceneModule):
             monitors=(mw.PointMonitor('probe',(.01,0.,0.),fields=('Ez','Hy')),))
 
     def objective(self,kind):
-        simulation=mw.Simulation.fdtd(self,frequency=3e9,full_field_dft=True,cuda_graph=self.graph,
-            run_time=mw.TimeConfig(time_steps=96),spectral_sampler=mw.SpectralSampler(window='none',normalize_source=True))
-        simulation.config.adjoint_checkpoint_stride=self.stride
+        simulation=mw.Simulation.fdtd(self,frequencies=3e9,config=mw.FDTDConfig(full_field_dft=True,cuda_graph=self.graph,
+            run_time=mw.TimeConfig(time_steps=96),spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=True)))
+        simulation.config = replace(simulation.config, adjoint_checkpoint_stride=self.stride)
         result=simulation.run()
         if kind=='field':
-            return result.monitor('probe')['Ez'].abs().square().sum(),result
-        return result.conductor_losses['foil']['surface_power'].sum(),result
+            return result.raw_monitor('probe')['Ez'].abs().square().sum(),result
+        return mw.rf.conductor_losses(result)['foil']['surface_power'].sum(),result
 
 
 @pytest.mark.parametrize('kind',('field','surface_power'))
@@ -86,8 +86,7 @@ class IncidentDielectric(mw.SceneModule):
         injection=(mw.TFSF.slab(axis='x',bounds=(-.08,.08)) if self.bloch else
                    mw.TFSF(bounds=((- .08,.08),(-.025,.025),(-.025,.025))))
         return mw.Scene(domain=mw.Domain(bounds=bounds),
-            grid=mw.GridSpec.uniform(.005),device='cuda',
-            boundary=boundary,
+            grid=mw.GridSpec.uniform(.005),boundary=boundary,
             structures=(mw.Structure(geometry=mw.Box(position=(0.,0.,0.),size=(.02,.02,.02)),
                 material=mw.Material(eps_r=self.log_eps.exp())),),
             sources=(mw.PlaneWave(direction=(1.,0.,0.),polarization=(0.,0.,1.),source_time=waveform,
@@ -95,10 +94,10 @@ class IncidentDielectric(mw.SceneModule):
             monitors=(mw.PointMonitor('probe',(.025,0.,0.),fields=('Ez',)),))
 
     def objective(self):
-        simulation=mw.Simulation.fdtd(self,frequency=1e9,cuda_graph=True,
-            run_time=mw.TimeConfig(time_steps=256),spectral_sampler=mw.SpectralSampler(window='none'))
-        simulation.config.adjoint_checkpoint_stride=13
-        value=simulation.run().monitor('probe')['Ez'].sum()
+        simulation=mw.Simulation.fdtd(self,frequencies=1e9,config=mw.FDTDConfig(cuda_graph=True,
+            run_time=mw.TimeConfig(time_steps=256),spectral_sampler=mw.fdtd.SpectralSampler(window='none')))
+        simulation.config = replace(simulation.config, adjoint_checkpoint_stride=13)
+        value=simulation.run().monitor('probe', freq_index=0).sel(component="Ez").values.sum()
         # A phase-sensitive linear objective cannot hide a common source sign.
         return value.real+.37*value.imag
 
@@ -132,9 +131,9 @@ def test_analytic_cw_foil_graph_disk_resume_preserves_window_and_absolute_spectr
     model=AnalyticFoil(graph=graph)
     model.requires_grad_(False)
     def simulation(capture):
-        return mw.Simulation.fdtd(model,frequency=3e9,full_field_dft=True,cuda_graph=capture,
+        return mw.Simulation.fdtd(model,frequencies=3e9,config=mw.FDTDConfig(full_field_dft=True,cuda_graph=capture,
             run_time=mw.TimeConfig.auto(transient_cycles=0,steady_cycles=6),
-            spectral_sampler=mw.SpectralSampler(window='hanning',normalize_source=True))
+            spectral_sampler=mw.fdtd.SpectralSampler(window='hanning',normalize_source=True)))
     reference=simulation(False).run()
     complete=simulation(graph).run()
     if graph:
@@ -144,20 +143,20 @@ def test_analytic_cw_foil_graph_disk_resume_preserves_window_and_absolute_spectr
     checkpoint=prepared.run_until((plan['spectral_start_step']+plan['total_steps'])//2)
     path=tmp_path/'analytic-copper-mid-window.pt'
     checkpoint.save(path)
-    restored=simulation(graph).prepare().run(resume_from=mw.FDTDResumeCheckpoint.load(path))
+    restored=simulation(graph).prepare().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path))
     if graph:
         assert restored.stats()['cuda_graph_active']
     for result in (complete,restored):
         assert result.stats()['time_plan']['source_representation']=='analytic_cw'
         assert result.stats()['time_plan']['spectral_phasor_factor']==1
         for component in ('Ex','Ey','Ez'):
-            torch.testing.assert_close(result.tensor(component),reference.tensor(component),rtol=2e-5,atol=1e-10)
+            torch.testing.assert_close(result.field(component).isel(f=0).values,reference.field(component).isel(f=0).values,rtol=2e-5,atol=1e-10)
         for component in ('Ez','Hy'):
-            torch.testing.assert_close(torch.as_tensor(result.monitor('probe')[component]),
-                torch.as_tensor(reference.monitor('probe')[component]),rtol=2e-5,atol=1e-11)
-        losses=result.conductor_losses['foil']
+            torch.testing.assert_close(torch.as_tensor(result.raw_monitor('probe')[component]),
+                torch.as_tensor(reference.raw_monitor('probe')[component]),rtol=2e-5,atol=1e-11)
+        losses=mw.rf.conductor_losses(result)['foil']
         assert losses['energy_representation']=='combined_real_imaginary_algorithmic_state'
-        torch.testing.assert_close(losses['surface_power'],reference.conductor_losses['foil']['surface_power'],rtol=2e-5,atol=1e-22)
+        torch.testing.assert_close(losses['surface_power'],mw.rf.conductor_losses(reference)['foil']['surface_power'],rtol=2e-5,atol=1e-22)
         # The analytic CW reference is sampled at its additive-J injection instant (n+1/2)dt and
         # Fourier-labelled at the physical post-step time (n+1)dt (observer origin, beta=1), so the
         # normalised source DFT is exp(-i omega dt (1/2 - 1)) = exp(+i omega dt/2).

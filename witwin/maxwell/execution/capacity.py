@@ -124,11 +124,14 @@ def estimate_scene_footprint_bytes(
     *,
     frequencies=None,
     full_field_dft: bool = False,
+    magnetic_volume_dft: bool = False,
 ) -> int | None:
     """Estimate one Simulation's resident device footprint for placement.
 
     Returns ``None`` when the grid shape cannot be resolved cheaply, in which
     case the scheduler falls back to order-based placement for that task.
+    ``magnetic_volume_dft`` budgets the H volume DFT (``FDTDConfig.volume_dft_components``)
+    as a second E-sized working set.
     """
 
     counts = _node_counts(scene)
@@ -141,6 +144,8 @@ def estimate_scene_footprint_bytes(
         dft_frequency=tuple(frequencies) if frequencies else None,
         full_field_dft=full_field_dft,
     )
+    if magnetic_volume_dft:
+        dft_bytes *= 2
     return int(resident + dft_bytes)
 
 
@@ -161,6 +166,7 @@ def estimate_simulation_footprint_bytes(simulation) -> int | None:
         scene,
         frequencies=frequencies,
         full_field_dft=full_field_dft,
+        magnetic_volume_dft=bool(getattr(config, "records_magnetic_volume_dft", False)),
     )
 
 

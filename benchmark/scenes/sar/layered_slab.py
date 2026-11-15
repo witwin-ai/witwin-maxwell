@@ -36,7 +36,7 @@ def layer_bounds() -> dict[str, tuple[float, float]]:
     return {"skin_dry": (z0, z1), "fat": (z1, z2), "muscle": (z2, z3)}
 
 
-def build_scene(*, dx: float = 0.004, device: str = "cuda") -> mw.Scene:
+def build_scene(*, dx: float = 0.004) -> mw.Scene:
     half = 0.06
     bounds = layer_bounds()
     stack_end = bounds["muscle"][1]
@@ -44,11 +44,11 @@ def build_scene(*, dx: float = 0.004, device: str = "cuda") -> mw.Scene:
         domain=mw.Domain(bounds=((-half, half), (-half, half), (-0.05, stack_end + 0.05))),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.pml(num_layers=10),
-        device=device,
     )
     for tissue, (z_lo, z_hi) in bounds.items():
         thickness = z_hi - z_lo
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=mw.Box(
                     position=(0.0, 0.0, 0.5 * (z_lo + z_hi)),
@@ -56,34 +56,33 @@ def build_scene(*, dx: float = 0.004, device: str = "cuda") -> mw.Scene:
                 ),
                 material=tissue_material(tissue),
                 name=tissue,
-            )
-        )
-    scene.add_source(
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(0.0, 0.0, 1.0),
             polarization=(1.0, 0.0, 0.0),
             source_time=mw.GaussianPulse(frequency=BENCHMARK_FREQUENCY, fwidth=0.5 * BENCHMARK_FREQUENCY),
             name="pw",
-        )
-    )
-    scene.add_monitor(
-        mw.PowerLossMonitor(
+        ),
+    ), monitors=(
+        *scene.monitors,
+        mw.monitors.PowerLossMonitor(
             "loss",
             position=(0.0, 0.0, 0.5 * stack_end),
             size=(2.0 * half, 2.0 * half, stack_end),
             frequencies=FREQUENCIES,
             channels=("conduction",),
-        )
-    )
-    scene.add_monitor(
-        mw.IncidentPowerDensityMonitor(
+        ),
+        mw.sar.IncidentPowerDensityMonitor(
             "incident", axis="z", position=-0.03, frequencies=FREQUENCIES, spatial_average=4e-4
-        )
-    )
+        ),
+    ))
     return scene
 
 
-def build_conservation_scene(*, dx: float = 0.004, device: str = "cuda") -> mw.Scene:
+def build_conservation_scene(*, dx: float = 0.004) -> mw.Scene:
     """Periodic-transverse variant for a clean 1-D power-conservation balance.
 
     The shipped :func:`build_scene` uses PML on every face: it illuminates a
@@ -113,11 +112,11 @@ def build_conservation_scene(*, dx: float = 0.004, device: str = "cuda") -> mw.S
         ),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec(kind="pml", num_layers=10, x="periodic", y="periodic"),
-        device=device,
     )
     for tissue, (z_lo, z_hi) in bounds.items():
         thickness = z_hi - z_lo
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=mw.Box(
                     position=(0.0, 0.0, 0.5 * (z_lo + z_hi)),
@@ -125,33 +124,30 @@ def build_conservation_scene(*, dx: float = 0.004, device: str = "cuda") -> mw.S
                 ),
                 material=tissue_material(tissue),
                 name=tissue,
-            )
-        )
-    scene.add_source(
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(0.0, 0.0, 1.0),
             polarization=(1.0, 0.0, 0.0),
             source_time=mw.GaussianPulse(frequency=BENCHMARK_FREQUENCY, fwidth=0.5 * BENCHMARK_FREQUENCY),
             name="pw",
-        )
-    )
-    scene.add_monitor(
-        mw.PowerLossMonitor(
+        ),
+    ), monitors=(
+        *scene.monitors,
+        mw.monitors.PowerLossMonitor(
             "loss",
             position=(0.0, 0.0, 0.5 * stack_end),
             size=(lat, lat, stack_end),
             frequencies=FREQUENCIES,
             channels=("conduction",),
-        )
-    )
-    scene.add_monitor(
-        mw.FluxMonitor("flux_in", axis="z", position=-0.02, frequencies=FREQUENCIES, normal_direction="+")
-    )
-    scene.add_monitor(
+        ),
+        mw.FluxMonitor("flux_in", axis="z", position=-0.02, frequencies=FREQUENCIES, normal_direction="+"),
         mw.FluxMonitor(
             "flux_out", axis="z", position=stack_end + 0.02, frequencies=FREQUENCIES, normal_direction="+"
-        )
-    )
+        ),
+    ))
     return scene
 
 

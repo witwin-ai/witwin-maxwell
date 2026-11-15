@@ -1,6 +1,6 @@
 """Experimental scalar H-matrix with exact leaves and verified far factors."""
 from contextlib import contextmanager
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 import hashlib
 import math
 import torch
@@ -10,8 +10,19 @@ from .lowrank import streamed_cross_approximation, CompressionFailure, LowRankBl
 from .riesz import LocalRWGRiesz
 from .packed_near import PackedNearBlocks
 from .operator_protocol import IterativeState
+from .._enums import parse_enum
+from .._stability import experimental
+from .options import MoMOption, option_asdict
 
 
+@experimental("mom")
+class ACAPivoting(MoMOption):
+    """Adaptive-cross pivot search selected by ``HMatrixConfig.pivoting``."""
+    COMPLETE = 'complete'
+    ADAPTIVE = 'adaptive'
+
+
+@experimental("mom")
 @dataclass(frozen=True)
 class HMatrixConfig:
     leaf_size: int = 32
@@ -22,11 +33,10 @@ class HMatrixConfig:
     solve_dual_tolerance: float = 1e-8
     original_sample_tolerance: float = 1e-8
     retained_budget_bytes: int = 1024**3
-    pivoting: str = 'complete'
+    pivoting: ACAPivoting = ACAPivoting.COMPLETE
 
     def __post_init__(self):
-        if self.pivoting not in ('complete', 'adaptive'):
-            raise ValueError('pivoting must be complete or adaptive')
+        object.__setattr__(self, 'pivoting', parse_enum(ACAPivoting, self.pivoting, name='HMatrixConfig.pivoting'))
         for name in ('leaf_size', 'max_rank', 'row_batch', 'retained_budget_bytes'):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(name+' must be a positive integer')
@@ -37,7 +47,7 @@ class HMatrixConfig:
 
 
     def payload(self):
-        return {'version': 'scalar_hmatrix_config_v2', 'parameters': asdict(self)}
+        return {'version': 'scalar_hmatrix_config_v2', 'parameters': option_asdict(self)}
 
     @classmethod
     def restore(cls, payload):
@@ -105,7 +115,7 @@ class HierarchicalOperator:
                         value = streamed_cross_approximation(sampler.sample_rows, sampler.sample_column,
                             sampler.shape, device=self.device, dtype=self.dtype, max_rank=config.max_rank,
                             rtol=config.tolerance, row_batch=config.row_batch, row_scale=rs, column_scale=cs,
-                            pivoting=config.pivoting)
+                            pivoting=config.pivoting.value)
                     except CompressionFailure as failure:
                         failures.append({'test_node': a, 'source_node': b, 'reason': str(failure), **failure.receipt})
                         ac = self.tree.children[a][self.tree.children[a] >= 0]
@@ -158,7 +168,7 @@ class HierarchicalOperator:
         self._versions = tuple((id(t), t._version) for t in self._block_tensors())
         self._layout = tuple((id(r), id(c), id(v)) for r, c, v in self.blocks)
         self.metadata = {'version': 'scalar_hmatrix_reference_v1', 'operator_backend': 'hmatrix',
-            'configuration': asdict(config), 'retained_bytes': retained, 'prepared_geometry_bytes': geometry_bytes,
+            'configuration': option_asdict(config), 'retained_bytes': retained, 'prepared_geometry_bytes': geometry_bytes,
             'exact_blocks': sum(not isinstance(v, LowRankBlock) for _, _, v in self.blocks),
             'far_blocks': sum(isinstance(v, LowRankBlock) for _, _, v in self.blocks),
             'compression_rejections': failures, 'physical_qualification': False,
@@ -357,7 +367,7 @@ class HierarchicalOperator:
         self.refresh()
         def digest(t):
             return hashlib.sha256(t.detach().contiguous().cpu().numpy().tobytes()).hexdigest()
-        return {'version': self.metadata['version'], 'configuration': asdict(self.config),
+        return {'version': self.metadata['version'], 'configuration': option_asdict(self.config),
             'exact_storage': None if self.packed_near is None else self.packed_near.receipt(),
             'near_csr_hashes': [] if self.packed_near is None else
                 [digest(t) for t in self.packed_near.tensors()[:4]],

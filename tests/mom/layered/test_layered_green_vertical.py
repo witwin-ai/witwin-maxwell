@@ -12,6 +12,7 @@ from tests.support.layered_green_oracle import C0, vertical_spectral, vertical_s
 from tests.mom.layered.test_layered_green import rfic_stack
 
 pytestmark = pytest.mark.cuda
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")
 
 
 def spectral_samples(stack, frequencies, q, sources, observers):
@@ -26,6 +27,7 @@ def spectral_samples(stack, frequencies, q, sources, observers):
         tensor(observers, torch.float64), stack.bottom == "pec", stack.top == "pec")
 
 
+@requires_cuda
 def test_vertical_spectral_impedance_transfer(record_property):
     stack = rfic_stack()
     frequencies = (1e9, 100e9)
@@ -49,6 +51,7 @@ def test_vertical_spectral_impedance_transfer(record_property):
         assert torch.equal(values, spectral_samples(stack, frequencies, q, sources, observers))
 
 
+@requires_cuda
 def test_vertical_spectral_homogeneous_and_pec(record_property):
     f, epsilon = 10e9, 4.1 + .04j
     q = np.array([2 * np.pi * f / C0 * (np.geomspace(.3, 100, 31) - .1j)])
@@ -90,6 +93,7 @@ def test_vertical_external_oracle_convention(record_property):
     record_property("external_oracle_component_errors", errors)
 
 
+@requires_cuda
 def test_vertical_homogeneous_table(record_property):
     from witwin.maxwell.mom.layered import LayeredGreenTable
     f, epsilon = 10e9, 4.1 + .04j
@@ -113,6 +117,7 @@ def test_vertical_homogeneous_table(record_property):
         table.evaluate_vertical(rho * 2, source, observer)
 
 
+@requires_cuda
 @pytest.mark.parametrize("frequency", (1e9, 100e9))
 def test_vertical_lossy_table(frequency, record_property):
     from witwin.maxwell.mom.layered import LayeredGreenTable
@@ -136,6 +141,7 @@ def test_vertical_lossy_table(frequency, record_property):
     assert np.all(errors <= 1e-6)
 
 
+@requires_cuda
 @pytest.mark.parametrize("sigma_index", (0, 1))
 @pytest.mark.parametrize("pair_index", (0, 1, 2))
 def test_vertical_external_table(sigma_index, pair_index, record_property):
@@ -158,6 +164,7 @@ def test_vertical_external_table(sigma_index, pair_index, record_property):
     assert np.all(errors <= 1e-3)
 
 
+@requires_cuda
 def test_vertical_ground_table(record_property):
     from witwin.maxwell.mom.layered import LayeredGreenTable
     f, epsilon = 10e9, 3.2 + .02j
@@ -177,6 +184,7 @@ def test_vertical_ground_table(record_property):
     assert np.all(errors <= 1e-9)
 
 
+@requires_cuda
 def test_vertical_three_builds_and_horizontal_identity(record_property):
     from dataclasses import fields
     from witwin.maxwell.mom.layered import LayeredGreenTable
@@ -203,6 +211,7 @@ def test_vertical_three_builds_and_horizontal_identity(record_property):
     record_property("rho_admission", tables[0].vertical.rho_interpolation_error.item())
 
 
+@requires_cuda
 def test_vertical_z_admission_refuses(monkeypatch):
     from witwin.maxwell.mom.layered import LayeredGreenTable
     ext = build_extension()
@@ -213,6 +222,7 @@ def test_vertical_z_admission_refuses(monkeypatch):
                                 via_spans=((.1e-3, .4e-3),))
 
 
+@requires_cuda
 def test_complex_order_one_bessel():
     from scipy.special import jv, hankel1, hankel2
     ext = build_extension()
@@ -232,6 +242,7 @@ def test_complex_order_one_bessel():
         np.testing.assert_allclose(actual, fn(1,z)*z/(2*np.pi), rtol=1e-13, atol=1e-16)
 
 
+@requires_cuda
 @pytest.mark.parametrize("frequency", (1e9, 100e9))
 @pytest.mark.parametrize("epsilon", (1., 4.1+.04j))
 def test_vertical_forced_sommerfeld(frequency, epsilon, record_property):
@@ -260,6 +271,7 @@ def test_vertical_forced_sommerfeld(frequency, epsilon, record_property):
     assert cross <= 1e-9
 
 
+@requires_cuda
 def test_vertical_span_ends_on_ground(record_property):
     from witwin.maxwell.mom.layered import LayeredGreenTable
     epsilon, frequency = 3.2+.02j, 10e9

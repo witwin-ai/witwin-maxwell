@@ -21,8 +21,10 @@ from collections.abc import Iterable
 import torch
 
 from .projection import BetaSchedule
+from .._stability import experimental
 
 
+@experimental("invdes")
 @torch.no_grad()
 def clip_to_bounds_(parameters: Iterable[torch.Tensor], lower=0.0, upper=1.0) -> None:
     """Clamp parameters in place to ``[lower, upper]`` (scalars or broadcastable tensors)."""
@@ -43,6 +45,7 @@ def _scalar(value) -> float:
     return float(value)
 
 
+@experimental("invdes")
 class OptimizationHistory:
     """Per-iteration record of the loss, beta, gradient norm and named metrics."""
 
@@ -83,6 +86,7 @@ class OptimizationHistory:
         return {name: self.column(name) for name in names}
 
 
+@experimental("invdes")
 class DesignLoop:
     """Bookkeeping around a user-owned PyTorch optimizer.
 

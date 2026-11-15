@@ -23,7 +23,7 @@ from witwin.maxwell.compiler.wire_impedance import (
     fit_series_impedance,
     internal_impedance,
 )
-from witwin.maxwell.fdtd.surface_impedance_reference import (
+from tests.oracles.surface_impedance_reference import (
     SURFACE_ACCEPTANCE_BUDGET as BUDGET,
     good_conductor_surface_impedance,
 )

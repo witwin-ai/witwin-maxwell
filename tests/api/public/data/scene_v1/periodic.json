@@ -1,0 +1,287 @@
+{
+ "schema": "witwin.scene/1",
+ "unit": {
+  "length": "m",
+  "frequency": "Hz"
+ },
+ "background": {
+  "material": null
+ },
+ "materials": {
+  "m0": {
+   "type": "Material",
+   "eps_r": 2.0,
+   "mu_r": 1.0,
+   "sigma_e": 0.0,
+   "name": null,
+   "sigma_m": 0.0,
+   "debye_poles": [],
+   "drude_poles": [
+    {
+     "type": "DrudePole",
+     "plasma_frequency": 200000000.0,
+     "gamma": 100000000.0
+    }
+   ],
+   "lorentz_poles": [
+    {
+     "type": "LorentzPole",
+     "delta_eps": 0.4,
+     "resonance_frequency": 2000000000.0,
+     "gamma": 100000000.0,
+     "allow_gain": false
+    }
+   ],
+   "mu_debye_poles": [],
+   "mu_drude_poles": [],
+   "mu_lorentz_poles": [],
+   "epsilon_tensor": null,
+   "mu_tensor": null,
+   "sigma_e_tensor": null,
+   "orientation": null,
+   "kerr_chi3": null,
+   "nonlinearity": [],
+   "modulation": null,
+   "pec": false,
+   "pmc": false,
+   "breakdown": null,
+   "mass_density": null,
+   "kind": "medium"
+  }
+ },
+ "domain": {
+  "type": "Domain",
+  "bounds": [
+   [
+    -0.03,
+    0.03
+   ],
+   [
+    -0.03,
+    0.03
+   ],
+   [
+    -0.03,
+    0.03
+   ]
+  ]
+ },
+ "grid": {
+  "type": "GridSpec",
+  "dx": 0.005,
+  "dy": 0.005,
+  "dz": 0.005,
+  "x_coords": null,
+  "y_coords": null,
+  "z_coords": null,
+  "min_steps_per_wavelength": null,
+  "wavelength": null,
+  "max_ratio": null,
+  "override_structures": [],
+  "layer_refinement": null,
+  "kind": "uniform"
+ },
+ "boundary": {
+  "type": "BoundarySpec",
+  "kind": "none",
+  "num_layers": 2,
+  "strength": 1.0,
+  "bloch_wavevector": "auto",
+  "x": [
+   "bloch",
+   "bloch"
+  ],
+  "y": [
+   "bloch",
+   "bloch"
+  ],
+  "z": [
+   "pml",
+   "pml"
+  ],
+  "x_low": "bloch",
+  "x_high": "bloch",
+  "y_low": "bloch",
+  "y_high": "bloch",
+  "z_low": "pml",
+  "z_high": "pml",
+  "mur_abc": {
+   "type": "MurABC",
+   "order": 1,
+   "permittivity": null
+  },
+  "mode_abc": null
+ },
+ "structures": [
+  {
+   "type": "Structure",
+   "geometry": {
+    "type": "box",
+    "position": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    },
+    "size": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      0.009999999776482582,
+      0.009999999776482582,
+      0.009999999776482582
+     ]
+    },
+    "rotation": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   },
+   "material": "m0",
+   "name": null,
+   "priority": 0,
+   "enabled": true,
+   "tags": [],
+   "metadata": {},
+   "structure_id": 7,
+   "material_id": 6,
+   "assignment_id": 7,
+   "surface_id": 7,
+   "primitive_ids": null,
+   "phase_screen": null,
+   "uv": null,
+   "face_uv": null
+  }
+ ],
+ "thin_wires": [],
+ "sources": [
+  {
+   "type": "PlaneWave",
+   "direction": [
+    0.30000000000000004,
+    0.4000000000000001,
+    0.8660254037844387
+   ],
+   "polarization": [
+    0.8,
+    -0.6,
+    0.0
+   ],
+   "source_time": {
+    "type": "CW",
+    "frequency": 1000000000.0,
+    "amplitude": 1.0,
+    "phase": 0.2,
+    "kind": "cw"
+   },
+   "injection": {
+    "type": "TFSF",
+    "bounds": null,
+    "mode": "slab",
+    "axis": "z",
+    "axis_bounds": [
+     -0.02,
+     0.02
+    ],
+    "kind": "tfsf"
+   },
+   "injection_axis": null,
+   "name": null
+  }
+ ],
+ "ports": [
+  {
+   "type": "LumpedPort",
+   "name": "loaded",
+   "positive": [
+    0.0,
+    0.0,
+    0.015
+   ],
+   "negative": [
+    0.0,
+    0.0,
+    0.01
+   ],
+   "voltage_path": {
+    "type": "AxisPath",
+    "axis": "z"
+   },
+   "current_surface": {
+    "type": "box",
+    "position": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      0.0,
+      0.0,
+      0.012500000186264515
+     ]
+    },
+    "size": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      0.009999999776482582,
+      0.009999999776482582,
+      0.0
+     ]
+    },
+    "rotation": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   },
+   "reference_impedance": 50.0,
+   "reference_plane": null,
+   "termination": {
+    "type": "ParallelRLC",
+    "r": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": 100.0
+    },
+    "l": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": 1.999999943436137e-09
+    },
+    "c": {
+     "type": "Tensor",
+     "dtype": "float32",
+     "values": 1.9999999920083944e-12
+    }
+   },
+   "wire_binding": null,
+   "voltage_aperture": null
+  }
+ ],
+ "lumped_elements": [],
+ "monitors": [],
+ "subpixel": {
+  "type": "SubpixelSpec",
+  "samples": [
+   4,
+   4,
+   4
+  ],
+  "averaging": "kottke_edge",
+  "pec": "staircase"
+ },
+ "metadata": {}
+}

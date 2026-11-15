@@ -38,16 +38,16 @@ def _isotropic_dipole_basis(spacing, *, frequency=1.0e9):
     ]
     e_theta = torch.stack(columns, dim=0)[None]
     e_phi = torch.zeros_like(e_theta)
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies, port_names=("a", "b"), theta=theta, phi=phi,
         e_theta=e_theta, e_phi=e_phi,
         phase_center=torch.zeros(3, dtype=dtype), frame=torch.eye(3, dtype=dtype),
     )
-    network = mw.NetworkData(
+    network = mw.rf.NetworkData(
         frequencies=frequencies, s=torch.zeros((1, 2, 2), dtype=cdtype), z0=50.0,
         port_names=("a", "b"),
     )
-    return mw.ArrayBasisData(network=network, embedded_patterns=patterns, fingerprint=f"iso-{spacing}"), wave_number
+    return mw.antenna.ArrayBasisData(network=network, embedded_patterns=patterns, fingerprint=f"iso-{spacing}"), wave_number
 
 
 @pytest.mark.parametrize("spacing", (0.05, 0.15, 0.35, 0.6))
@@ -60,7 +60,7 @@ def test_ecc_matches_closed_form_two_isotropic_sensors(spacing):
     """
 
     basis, wave_number = _isotropic_dipole_basis(spacing)
-    environment = mw.MultipathEnvironment(
+    environment = mw.antenna.MultipathEnvironment(
         theta=basis.eep.theta, phi=basis.eep.phi, cross_polar_ratio_db=6.0
     )
 
@@ -85,12 +85,12 @@ def test_mean_effective_gain_of_ideal_isotropic_antenna_is_half():
     """
 
     basis, _ = _isotropic_dipole_basis(0.2)
-    balanced = mw.MultipathEnvironment(theta=basis.eep.theta, phi=basis.eep.phi, cross_polar_ratio_db=0.0)
+    balanced = mw.antenna.MultipathEnvironment(theta=basis.eep.theta, phi=basis.eep.phi, cross_polar_ratio_db=0.0)
     meg = basis.mimo(balanced).mean_effective_gain
     torch.testing.assert_close(meg, torch.full_like(meg, 0.5), rtol=0.0, atol=1.0e-6)
 
     # 6 dB XPR biases MEG toward the (theta-only) polarization: XPR/(1+XPR).
-    biased = mw.MultipathEnvironment(theta=basis.eep.theta, phi=basis.eep.phi, cross_polar_ratio_db=6.0)
+    biased = mw.antenna.MultipathEnvironment(theta=basis.eep.theta, phi=basis.eep.phi, cross_polar_ratio_db=6.0)
     xpr = 10.0 ** 0.6
     expected = xpr / (1.0 + xpr)
     meg_biased = basis.mimo(biased).mean_effective_gain
@@ -106,29 +106,29 @@ def test_orthogonal_and_identical_patterns_reach_ecc_limits():
     base = torch.sin(theta).to(cdtype)
     e_theta = torch.stack((base, torch.zeros_like(base)), dim=0)[None]
     e_phi = torch.stack((torch.zeros_like(base), base), dim=0)[None]
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies, port_names=("a", "b"), theta=theta, phi=phi,
         e_theta=e_theta, e_phi=e_phi,
         phase_center=torch.zeros(3, dtype=dtype), frame=torch.eye(3, dtype=dtype),
     )
-    basis = mw.ArrayBasisData(
-        network=mw.NetworkData(
+    basis = mw.antenna.ArrayBasisData(
+        network=mw.rf.NetworkData(
             frequencies=frequencies, s=torch.zeros((1, 2, 2), dtype=cdtype), z0=50.0, port_names=("a", "b")
         ),
         embedded_patterns=patterns, fingerprint="ortho",
     )
-    environment = mw.MultipathEnvironment(theta=theta, phi=phi, cross_polar_ratio_db=0.0)
+    environment = mw.antenna.MultipathEnvironment(theta=theta, phi=phi, cross_polar_ratio_db=0.0)
     mimo = basis.mimo(environment)
     assert float(mimo.ecc[0, 0, 1]) <= ARRAY_ACCEPTANCE_BUDGET.reference_ecc_error
 
     # Identical co-polarized patterns -> ECC 1 and diagonal ECC exactly 1.
-    identical = mw.EmbeddedElementPatternData(
+    identical = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies, port_names=("a", "b"), theta=theta, phi=phi,
         e_theta=torch.stack((base, base), dim=0)[None],
         e_phi=torch.zeros((1, 2, *base.shape), dtype=cdtype),
         phase_center=torch.zeros(3, dtype=dtype), frame=torch.eye(3, dtype=dtype),
     )
-    same_basis = mw.ArrayBasisData(
+    same_basis = mw.antenna.ArrayBasisData(
         network=basis.network, embedded_patterns=identical, fingerprint="identical"
     )
     same = same_basis.mimo(environment)
@@ -138,7 +138,7 @@ def test_orthogonal_and_identical_patterns_reach_ecc_limits():
 
 def test_correlation_matrix_is_hermitian_positive_semidefinite():
     basis, _ = _isotropic_dipole_basis(0.25)
-    environment = mw.MultipathEnvironment(theta=basis.eep.theta, phi=basis.eep.phi, cross_polar_ratio_db=3.0)
+    environment = mw.antenna.MultipathEnvironment(theta=basis.eep.theta, phi=basis.eep.phi, cross_polar_ratio_db=3.0)
     correlation = basis.mimo(environment).correlation
     tolerance = 512.0 * torch.finfo(torch.float64).eps
     torch.testing.assert_close(correlation, correlation.mH, rtol=tolerance, atol=tolerance)
@@ -149,7 +149,7 @@ def test_correlation_matrix_is_hermitian_positive_semidefinite():
 
 def test_diversity_gain_tracks_envelope_correlation():
     basis, _ = _isotropic_dipole_basis(0.15)
-    environment = mw.MultipathEnvironment(theta=basis.eep.theta, phi=basis.eep.phi)
+    environment = mw.antenna.MultipathEnvironment(theta=basis.eep.theta, phi=basis.eep.phi)
     mimo = basis.mimo(environment)
     expected = 10.0 * torch.sqrt(torch.clamp(1.0 - mimo.ecc, min=0.0))
     torch.testing.assert_close(mimo.diversity_gain, expected)
@@ -162,14 +162,14 @@ def test_scattering_ecc_approximation_is_a_distinct_named_method():
     s = torch.tensor([[[0.1 + 0.0j, 0.3 + 0.1j], [0.3 + 0.1j, -0.2 + 0.0j]]], dtype=dtype)
     theta, phi = _sphere(9, 17)
     base = torch.sin(theta).to(dtype)
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies, port_names=("a", "b"), theta=theta, phi=phi,
         e_theta=torch.stack((base, base), dim=0)[None],
         e_phi=torch.zeros((1, 2, *base.shape), dtype=dtype),
         phase_center=torch.zeros(3, dtype=torch.float64), frame=torch.eye(3, dtype=torch.float64),
     )
-    basis = mw.ArrayBasisData(
-        network=mw.NetworkData(frequencies=frequencies, s=s, z0=50.0, port_names=("a", "b")),
+    basis = mw.antenna.ArrayBasisData(
+        network=mw.rf.NetworkData(frequencies=frequencies, s=s, z0=50.0, port_names=("a", "b")),
         embedded_patterns=patterns, fingerprint="s-ecc",
     )
     ecc = basis.ecc_from_scattering()
@@ -190,14 +190,14 @@ def test_scattering_ecc_rejects_non_passive_or_reflective_columns():
     s = torch.tensor([[[0.9 + 0.0j, 0.5 + 0.0j], [0.5 + 0.0j, 0.9 + 0.0j]]], dtype=torch.complex128)
     theta, phi = _sphere(9, 17)
     base = torch.sin(theta).to(torch.complex128)
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies, port_names=("a", "b"), theta=theta, phi=phi,
         e_theta=torch.stack((base, base), dim=0)[None],
         e_phi=torch.zeros((1, 2, *base.shape), dtype=torch.complex128),
         phase_center=torch.zeros(3, dtype=torch.float64), frame=torch.eye(3, dtype=torch.float64),
     )
-    basis = mw.ArrayBasisData(
-        network=mw.NetworkData(frequencies=frequencies, s=s, z0=50.0, port_names=("a", "b")),
+    basis = mw.antenna.ArrayBasisData(
+        network=mw.rf.NetworkData(frequencies=frequencies, s=s, z0=50.0, port_names=("a", "b")),
         embedded_patterns=patterns, fingerprint="lossy-s",
     )
     with pytest.raises(ValueError, match="non-passive or fully-reflective columns"):
@@ -208,16 +208,16 @@ def test_environment_grid_and_power_density_are_validated():
     basis, _ = _isotropic_dipole_basis(0.2)
     coarse_theta, coarse_phi = _sphere(5, 7)
     with pytest.raises(ValueError, match="must match the embedded-pattern grid"):
-        basis.mimo(mw.MultipathEnvironment(theta=coarse_theta, phi=coarse_phi))
+        basis.mimo(mw.antenna.MultipathEnvironment(theta=coarse_theta, phi=coarse_phi))
     with pytest.raises(ValueError, match="non-negative"):
         basis.mimo(
-            mw.MultipathEnvironment(
+            mw.antenna.MultipathEnvironment(
                 theta=basis.eep.theta, phi=basis.eep.phi,
                 power_density=-torch.ones_like(basis.eep.theta),
             )
         )
     with pytest.raises(ValueError, match="magnitude must be <= 1"):
-        mw.MultipathEnvironment(
+        mw.antenna.MultipathEnvironment(
             theta=basis.eep.theta, phi=basis.eep.phi, polarization_correlation=1.5
         )
 
@@ -236,16 +236,16 @@ def test_mimo_metrics_stay_in_the_torch_autograd_graph():
     theta, phi = _sphere(9, 17, dtype=dtype)
     base = torch.sin(theta).to(cdtype)
     raw = torch.stack((base, 0.9 * base), dim=0)[None].clone().requires_grad_(True)
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies, port_names=("a", "b"), theta=theta, phi=phi,
         e_theta=raw, e_phi=torch.zeros((1, 2, *base.shape), dtype=cdtype),
         phase_center=torch.zeros(3, dtype=dtype), frame=torch.eye(3, dtype=dtype),
     )
-    basis = mw.ArrayBasisData(
-        network=mw.NetworkData(frequencies=frequencies, s=torch.zeros((1, 2, 2), dtype=cdtype), z0=50.0, port_names=("a", "b")),
+    basis = mw.antenna.ArrayBasisData(
+        network=mw.rf.NetworkData(frequencies=frequencies, s=torch.zeros((1, 2, 2), dtype=cdtype), z0=50.0, port_names=("a", "b")),
         embedded_patterns=patterns, fingerprint="grad",
     )
-    environment = mw.MultipathEnvironment(theta=theta, phi=phi, cross_polar_ratio_db=2.0)
+    environment = mw.antenna.MultipathEnvironment(theta=theta, phi=phi, cross_polar_ratio_db=2.0)
     mimo = basis.mimo(environment)
     (mimo.ecc[0, 0, 1] + mimo.mean_effective_gain.sum()).backward()
     assert raw.grad is not None
@@ -280,20 +280,20 @@ def test_polarization_correlation_cross_term_matches_brute_force_integral():
         ],
         dim=0,
     )[None]
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies, port_names=("a", "b"), theta=theta, phi=phi,
         e_theta=e_theta, e_phi=e_phi,
         phase_center=torch.zeros(3, dtype=dtype), frame=torch.eye(3, dtype=dtype),
     )
-    basis = mw.ArrayBasisData(
-        network=mw.NetworkData(
+    basis = mw.antenna.ArrayBasisData(
+        network=mw.rf.NetworkData(
             frequencies=frequencies, s=torch.zeros((1, 2, 2), dtype=cdtype), z0=50.0, port_names=("a", "b")
         ),
         embedded_patterns=patterns, fingerprint="rho-cross",
     )
     rho = 0.3 + 0.4j
     xpr_db = 5.0
-    environment = mw.MultipathEnvironment(
+    environment = mw.antenna.MultipathEnvironment(
         theta=theta, phi=phi, cross_polar_ratio_db=xpr_db, polarization_correlation=rho
     )
     correlation = basis.mimo(environment).correlation[0]
@@ -335,16 +335,16 @@ def test_mimo_fails_closed_on_a_dark_zero_power_port():
     theta, phi = _sphere(9, 17, dtype=dtype)
     base = torch.sin(theta).to(cdtype)
     e_theta = torch.stack((base, torch.zeros_like(base)), dim=0)[None]
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies, port_names=("a", "b"), theta=theta, phi=phi,
         e_theta=e_theta, e_phi=torch.zeros_like(e_theta),
         phase_center=torch.zeros(3, dtype=dtype), frame=torch.eye(3, dtype=dtype),
     )
-    basis = mw.ArrayBasisData(
-        network=mw.NetworkData(
+    basis = mw.antenna.ArrayBasisData(
+        network=mw.rf.NetworkData(
             frequencies=frequencies, s=torch.zeros((1, 2, 2), dtype=cdtype), z0=50.0, port_names=("a", "b")
         ),
         embedded_patterns=patterns, fingerprint="dark-mimo",
     )
     with pytest.raises(ValueError, match="non-positive"):
-        basis.mimo(mw.MultipathEnvironment(theta=theta, phi=phi))
+        basis.mimo(mw.antenna.MultipathEnvironment(theta=theta, phi=phi))

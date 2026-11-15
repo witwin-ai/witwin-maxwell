@@ -1,4 +1,5 @@
 """End-to-end tensor-interface density gradients at a fixed discrete time step."""
+from dataclasses import replace
 import pytest
 import torch
 
@@ -15,19 +16,25 @@ class _TensorInterfaceDesign(mw.SceneModule):
         self.register_buffer("direction", torch.tensor([1., -.4, .2, .5, -.3, .6, .1, -.2], device="cuda").reshape(2, 2, 2))
 
     def to_scene(self):
-        scene = mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=((-0.6, .6),) * 3),
-            grid=mw.GridSpec.uniform(.12), boundary=mw.BoundarySpec.pml(num_layers=2), device="cuda")
-        scene.add_structure(mw.Structure(
-            geometry=mw.Box(position=(0., 0., 0.), size=(.36, .36, .12)),
-            material=mw.Material(epsilon_tensor=mw.Tensor3x3(((5., 1.5, .8), (1.5, 4., .7), (.8, .7, 3.))))))
         # The interface variant places the design boundary through the tensor's
         # central node, making its off-diagonal inverse depend on the density.
-        scene.add_material_region(mw.MaterialRegion(name="design",
-            geometry=mw.Box(position=(.06, .06, .12 if self.interface else .30), size=(.24, .24, .24)),
-            density=.5 + self.theta * self.direction, eps_bounds=(1., 6.)))
-        scene.add_source(mw.PointDipole(position=(0., 0., -.24), polarization="Ez", width=.04,
-            source_time=mw.GaussianPulse(frequency=1e9, fwidth=.25e9, amplitude=50.)))
-        scene.add_monitor(mw.PointMonitor("probe", (0., 0., .24), fields=("Ez",)))
+        scene = mw.Scene(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=((-0.6, .6),) * 3),
+                    grid=mw.GridSpec.uniform(.12), boundary=mw.BoundarySpec.pml(num_layers=2),
+                         structures=(
+                             mw.Structure(
+                                 geometry=mw.Box(position=(0., 0., 0.), size=(.36, .36, .12)),
+                                 material=mw.Material(epsilon_tensor=mw.media.Tensor3x3(((5., 1.5, .8), (1.5, 4., .7), (.8, .7, 3.))))),
+                         ),
+                         material_regions=(
+                             mw.MaterialRegion(name="design",
+                                 geometry=mw.Box(position=(.06, .06, .12 if self.interface else .30), size=(.24, .24, .24)),
+                                 density=.5 + self.theta * self.direction, eps_bounds=(1., 6.)),
+                         ),
+                         sources=(
+                             mw.PointDipole(position=(0., 0., -.24), polarization="Ez", width=.04,
+                                 source_time=mw.GaussianPulse(frequency=1e9, fwidth=.25e9, amplitude=50.)),
+                         ),
+                         monitors=(mw.PointMonitor("probe", (0., 0., .24), fields=("Ez",)),))
         return scene
 
 
@@ -35,13 +42,15 @@ class _TensorInterfaceDesign(mw.SceneModule):
 @pytest.mark.parametrize("stride,delta", [(1, .01), (7, .005), (31, .02)])
 def test_anisotropic_density_gradient_matches_fixed_step_finite_difference(interface, stride, delta):
     model = _TensorInterfaceDesign(interface)
-    simulation = mw.Simulation.fdtd(model, frequency=1e9,
-        run_time=mw.TimeConfig(time_steps=200, dt=1.8e-11),
-        spectral_sampler=mw.SpectralSampler(window="none"), full_field_dft=False, cuda_graph=False)
-    simulation.config.adjoint_checkpoint_stride = stride
+    simulation = mw.Simulation.fdtd(model, frequencies=1e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=200, dt=1.8e-11),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"), full_field_dft=False, cuda_graph=False,
+        ))
+    simulation.config = replace(simulation.config, adjoint_checkpoint_stride=stride)
 
     def loss():
-        field = simulation.run().monitor("probe")["data"]
+        field = simulation.run().monitor("probe", freq_index=0).sel(component="Ez").values
         return field.abs().square().sum()
 
     baseline = model.theta.detach().clone()

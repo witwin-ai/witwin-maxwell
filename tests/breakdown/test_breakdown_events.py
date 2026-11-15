@@ -12,6 +12,7 @@ from witwin.maxwell.breakdown import (
 )
 
 from tests.breakdown._common import build_breakdown_scene, run_breakdown
+import witwin.maxwell as mw
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="FDTD breakdown requires CUDA"
@@ -33,14 +34,14 @@ def _triggering_scene():
 
 def test_triggering_run_populates_event_log():
     result = run_breakdown(_triggering_scene(), time_steps=90)
-    data = result.breakdown_data
+    data = mw.breakdown.breakdown_data(result)
     assert data is not None
     assert data.triggered_count > 0
-    assert len(result.breakdown_events) == data.triggered_count
+    assert len(mw.breakdown.breakdown_events(result)) == data.triggered_count
     assert data.total_dissipated_energy > 0.0
 
     # Every event is a typed record with a conducting transition and a global id.
-    for event in result.breakdown_events:
+    for event in mw.breakdown.breakdown_events(result):
         assert isinstance(event, BreakdownEvent)
         assert event.state_before == BREAKDOWN_STATE_INTACT
         assert event.state_after == BREAKDOWN_STATE_CONDUCTING
@@ -49,7 +50,7 @@ def test_triggering_run_populates_event_log():
         assert event.field_before >= event.field_before  # finite (not NaN)
 
     # Events are ordered by (step, cell_index).
-    keys = [(e.step, e.cell_index) for e in result.breakdown_events]
+    keys = [(e.step, e.cell_index) for e in mw.breakdown.breakdown_events(result)]
     assert keys == sorted(keys)
 
     # Final-state mask marks the triggered cells conducting, and only them.
@@ -63,7 +64,7 @@ def test_event_log_is_deterministic():
     a = run_breakdown(_triggering_scene(), time_steps=90)
     b = run_breakdown(_triggering_scene(), time_steps=90)
 
-    ea, eb = a.breakdown_events, b.breakdown_events
+    ea, eb = mw.breakdown.breakdown_events(a), mw.breakdown.breakdown_events(b)
     assert len(ea) == len(eb) and len(ea) > 0
     for x, y in zip(ea, eb):
         assert x.step == y.step
@@ -72,9 +73,9 @@ def test_event_log_is_deterministic():
         assert x.field_before == y.field_before
         assert x.deposited_energy_at_trigger == y.deposited_energy_at_trigger
 
-    assert torch.equal(a.breakdown_data.final_state, b.breakdown_data.final_state)
-    assert torch.equal(a.breakdown_data.dissipated_energy, b.breakdown_data.dissipated_energy)
-    assert a.breakdown_data.total_dissipated_energy == b.breakdown_data.total_dissipated_energy
+    assert torch.equal(mw.breakdown.breakdown_data(a).final_state, mw.breakdown.breakdown_data(b).final_state)
+    assert torch.equal(mw.breakdown.breakdown_data(a).dissipated_energy, mw.breakdown.breakdown_data(b).dissipated_energy)
+    assert mw.breakdown.breakdown_data(a).total_dissipated_energy == mw.breakdown.breakdown_data(b).total_dissipated_energy
 
 
 def test_no_trigger_run_has_empty_log_and_intact_state():
@@ -85,9 +86,9 @@ def test_no_trigger_run_has_empty_log_and_intact_state():
         source_amplitude=100.0,
     )
     result = run_breakdown(scene, time_steps=60)
-    data = result.breakdown_data
+    data = mw.breakdown.breakdown_data(result)
     assert data is not None  # the material is present
     assert data.triggered_count == 0
-    assert result.breakdown_events == ()
+    assert mw.breakdown.breakdown_events(result) == ()
     assert torch.all(data.final_state == BREAKDOWN_STATE_INTACT)
     assert data.total_dissipated_energy == 0.0

@@ -3,6 +3,7 @@
 No fake FDTD solver and no CPU field time integration are used. CUDA tests
 construct the actual public Scene -> Simulation.prepare() background.
 """
+from dataclasses import replace
 import json
 import math
 import os
@@ -25,12 +26,12 @@ from tests.materials.surface_impedance.test_split_copper_local_cn import high_pr
 
 
 def foil():
-    return mw.CopperFoil(thickness=math.sqrt(2/(2*math.pi*1e9*MU_0*5.8e7)), frequency_range=(.5e9, 2e9))
+    return mw.media.CopperFoil(thickness=math.sqrt(2/(2*math.pi*1e9*MU_0*5.8e7)), frequency_range=(.5e9, 2e9))
 
 
 def layout_case(polarization='Ez', alpha=.3, complex_fields=True):
     simulation = build_native_simulation(device='cpu', polarization=polarization, complex_fields=complex_fields)
-    scene = PreparedScene(simulation.scene, lazy_meshgrid=True)
+    scene = PreparedScene(simulation.scene, device='cpu', lazy_meshgrid=True)
     layout = compile_native_plane_layout(scene, cut=alpha*.005, polarization=polarization, implicit_bounds=(-.005, .01))
     return simulation, scene, layout
 
@@ -90,41 +91,41 @@ def test_inside_ordinary_query_cannot_publish_discarded_or_one_sided_workspace(x
 
 def test_ordinary_inside_monitor_rejects_before_native_prepare():
     simulation = build_native_simulation(device='cpu')
-    simulation.scene.monitors = (mw.PointMonitor('invalid-inside', (.0015, 0., 0.), fields=('Ez',)),)
+    scene = simulation.scene.updated(monitors=(mw.PointMonitor('invalid-inside', (.0015, 0., 0.), fields=('Ez',)),))
     with pytest.raises(NotImplementedError, match='side-aware cut records'):
-        compile_native_plane_layout(simulation.scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
+        compile_native_plane_layout(scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
 
 
 def test_real_dielectric_geometry_is_not_silently_removed_to_make_vacuum():
     simulation = build_native_simulation(device='cpu')
     body = mw.Structure(geometry=mw.Box(position=(0., 0., 0.), size=(.01, .01, .01)), material=mw.Material(eps_r=2.))
-    simulation.scene.structures = (body,)
+    scene = simulation.scene.updated(structures=(body,))
     with pytest.raises(NotImplementedError, match='rejects structures'):
-        compile_native_plane_layout(simulation.scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
-    assert simulation.scene.structures == (body,)
+        compile_native_plane_layout(scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
+    assert scene.structures == (body,)
 
 
 def test_actual_feed_is_rejected_instead_of_decoupled():
     simulation = build_native_simulation(device='cpu')
     port = mw.LumpedPort(name='feed', positive=(0., 0., .005), negative=(0., 0., -.005),
         voltage_path=mw.AxisPath('z'), current_surface=mw.Box(position=(0., 0., -.0025), size=(.015, .015, 0.)))
-    simulation.scene.ports = (port,)
+    scene = simulation.scene.updated(ports=(port,))
     with pytest.raises(NotImplementedError, match='rejects ports'):
-        compile_native_plane_layout(simulation.scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
-    assert simulation.scene.ports == (port,)
+        compile_native_plane_layout(scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
+    assert scene.ports == (port,)
 
 
 def test_tfsf_overlap_rejects_actual_injection_faces():
     simulation = build_native_simulation(device='cpu')
-    simulation.scene.sources = (mw.PlaneWave(direction=(1., 0., 0.), polarization=(0., 0., 1.),
-        source_time=mw.CW(1e9), injection=mw.TFSF.slab(axis='x', bounds=(-.005, .1))),)
+    scene = simulation.scene.updated(sources=(mw.PlaneWave(direction=(1., 0., 0.), polarization=(0., 0., 1.),
+        source_time=mw.CW(1e9), injection=mw.TFSF.slab(axis='x', bounds=(-.005, .1))),))
     with pytest.raises(NotImplementedError, match='TFSF correction face'):
-        compile_native_plane_layout(simulation.scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
+        compile_native_plane_layout(scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
 
 
 def test_pml_patch_rejects_actual_compiled_extension_nodes():
     simulation = build_native_simulation(device='cpu')
-    scene = PreparedScene(simulation.scene, lazy_meshgrid=True)
+    scene = PreparedScene(simulation.scene, device='cpu', lazy_meshgrid=True)
     bound = float(scene.x_nodes64[3])
     with pytest.raises(NotImplementedError, match='outside PML'):
         compile_native_plane_layout(scene, cut=.0015, polarization='Ez', implicit_bounds=(bound, .01))
@@ -134,15 +135,15 @@ def test_pml_patch_rejects_actual_compiled_extension_nodes():
 def test_nonuniform_or_unqualified_sources_fail_before_gpu(kind):
     simulation = build_native_simulation(device='cpu')
     if kind == 'oblique':
-        simulation.scene.sources = (mw.PlaneWave(direction=(1., .1, 0.), polarization=(0., 0., 1.),
-            source_time=mw.CW(1e9), injection=mw.TFSF.slab(axis='x', bounds=(-.15, .15))),)
+        scene = simulation.scene.updated(sources=(mw.PlaneWave(direction=(1., .1, 0.), polarization=(0., 0., 1.),
+            source_time=mw.CW(1e9), injection=mw.TFSF.slab(axis='x', bounds=(-.15, .15))),))
     elif kind == 'phase':
-        simulation.scene.boundary = mw.BoundarySpec.faces(default='pml', num_layers=12, y='bloch', z='bloch',
-            bloch_wavevector=(0., 10., 0.))
+        scene = simulation.scene.updated(boundary=mw.BoundarySpec.faces(default='pml', num_layers=12, y='bloch', z='bloch',
+            bloch_wavevector=(0., 10., 0.)))
     else:
-        simulation.scene.sources = (mw.PlaneWave(direction=(1., 0., 0.), polarization=(0., 0., 1.), source_time=mw.CW(1e9)),)
+        scene = simulation.scene.updated(sources=(mw.PlaneWave(direction=(1., 0., 0.), polarization=(0., 0., 1.), source_time=mw.CW(1e9)),))
     with pytest.raises(NotImplementedError):
-        compile_native_plane_layout(simulation.scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
+        compile_native_plane_layout(scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
 
 
 @pytest.mark.parametrize('option', ('graph', 'fields', 'shutoff', 'gradient', 'normalization'))
@@ -150,15 +151,15 @@ def test_execution_guards_use_real_declarative_simulation(option):
     simulation = build_native_simulation(device='cpu')
     material = foil()
     if option == 'graph':
-        simulation.config.cuda_graph = True
+        simulation.config = replace(simulation.config, cuda_graph=True)
     elif option == 'fields':
-        simulation.config.full_field_dft = True
+        simulation.config = replace(simulation.config, full_field_dft=True)
     elif option == 'shutoff':
-        simulation.config.shutoff = .01
+        simulation.config = replace(simulation.config, shutoff=.01)
     elif option == 'gradient':
-        material = mw.CopperFoil(thickness=torch.tensor(2e-6, requires_grad=True), mode_count=16, frequency_range=(.5e9, 2e9))
+        material = mw.media.CopperFoil(thickness=torch.tensor(2e-6, requires_grad=True), mode_count=16, frequency_range=(.5e9, 2e9))
     else:
-        simulation.config.spectral_sampler = mw.SpectralSampler(normalize_source=True)
+        simulation.config = replace(simulation.config, spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True))
     with pytest.raises(NotImplementedError):
         require_native_plane_execution(simulation, material)
 
@@ -172,10 +173,10 @@ def test_unsupported_real_native_lifecycle_options_reject_before_kernel_executio
 
 def test_zero_actual_carrier_cannot_produce_a_scattering_qualification():
     simulation = build_native_simulation(device='cpu')
-    simulation.scene.sources = (mw.PlaneWave(direction=(1., 0., 0.), polarization=(0., 0., 1.), source_time=mw.CW(1e9, amplitude=0.),
-        injection=mw.TFSF.slab(axis='x', bounds=(-.15, .15))),)
+    scene = simulation.scene.updated(sources=(mw.PlaneWave(direction=(1., 0., 0.), polarization=(0., 0., 1.), source_time=mw.CW(1e9, amplitude=0.),
+        injection=mw.TFSF.slab(axis='x', bounds=(-.15, .15))),))
     with pytest.raises(ValueError, match='nonzero actual incident carrier'):
-        compile_native_plane_layout(simulation.scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
+        compile_native_plane_layout(scene, cut=.0015, polarization='Ez', implicit_bounds=(-.005, .01))
 
 
 def test_adapter_never_accepts_a_fake_or_standalone_solver():
@@ -258,8 +259,8 @@ def test_missing_gpu_window_fails_with_bound_evidence_without_native_preparation
 @pytest.mark.parametrize('alpha', (1e-12, .3, 1-1e-12))
 def test_actual_prepared_native_kernel_and_joint_patch_step(polarization, alpha):
     simulation = build_native_simulation(device='cuda', polarization=polarization, complex_fields=True)
-    simulation.config.run_time = mw.TimeConfig(time_steps=1, transient_cycles=0, steady_cycles=1)
-    simulation.config.spectral_sampler = mw.SpectralSampler(window='none', normalize_source=False)
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=1, transient_cycles=0, steady_cycles=1),
+                                spectral_sampler=mw.fdtd.SpectralSampler(window='none', normalize_source=False))
     prepared = simulation.prepare()
     adapter = NativeSplitPlane(prepared, cut=alpha*.005, polarization=polarization, material=foil(), implicit_bounds=(-.005, .01))
     # Seed a nontrivial transverse-uniform physical local state. The real native

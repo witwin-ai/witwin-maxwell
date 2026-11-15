@@ -72,7 +72,7 @@ def campaign(spacings, output, *, cycles=12, subdivisions=2):
     points = .032*directions
     expected_e, expected_h = pec_sphere_fields(radius, k, points)
     mesh = sphere_mesh(radius, subdivisions=subdivisions)
-    geometry = mw.SurfaceMesh(mesh.vertices, mesh.faces)
+    geometry = mw.geometry.SurfaceMesh(mesh.vertices, mesh.faces)
     geometry_hash = hashlib.sha256(mesh.vertices.cpu().numpy().tobytes()+mesh.faces.cpu().numpy().tobytes()).hexdigest()
     report = dict(frequency_hz=frequency, radius_m=radius, geometry_hash=geometry_hash,
         triangles=len(mesh.faces), points_m=points.tolist(), cycles_per_window=cycles,
@@ -84,16 +84,15 @@ def campaign(spacings, output, *, cycles=12, subdivisions=2):
     for spacing in spacings:
         start = time.perf_counter()
         scene = mw.Scene(domain=mw.Domain(bounds=((-0.12, .12),)*3), grid=mw.GridSpec.uniform(spacing),
-            boundary=mw.BoundarySpec.pml(num_layers=math.ceil(.06/spacing)), device="cuda",
-            structures=(mw.Structure(geometry=geometry, material=mw.Material.pec()),),
+            boundary=mw.BoundarySpec.pml(num_layers=math.ceil(.06/spacing)), structures=(mw.Structure(geometry=geometry, material=mw.Material.pec()),),
             sources=(mw.PlaneWave(direction=(0., 0., 1.), polarization=(1., 0., 0.),
                 source_time=mw.CW(frequency), injection=mw.TFSF(bounds=((-0.05,.05),)*3)),))
-        run = dict(frequency=frequency, run_time=mw.TimeConfig(transient_cycles=cycles,
+        run = mw.FDTDConfig(run_time=mw.TimeConfig(transient_cycles=cycles,
             steady_cycles=cycles, dt=.8*spacing/(mw.constants.C_0*math.sqrt(3))),
-            spectral_sampler=mw.SpectralSampler(window="hanning"), full_field_dft=True, cuda_graph=True)
-        add_query_stencils(scene, points)
-        background = mw.Simulation.fdtd(scene.clone(structures=()), **run).run()
-        total = mw.Simulation.fdtd(scene, **run).run()
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"), full_field_dft=True, cuda_graph=True)
+        scene = add_query_stencils(scene, points)
+        background = mw.Simulation.fdtd(scene.updated(structures=()), frequencies=frequency, config=run).run()
+        total = mw.Simulation.fdtd(scene, frequencies=frequency, config=run).run()
         numerical_e, numerical_h = total.query_fields(query, region_id="exterior", field_kind="scattered", reference=background)
         incident_e, incident_h = background.query_fields(query, region_id="exterior", field_kind="total")
         analytic_incident = np.exp(1j*k*points[:, 2])

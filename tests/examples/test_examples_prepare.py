@@ -24,9 +24,11 @@ def test_examples_prepare(entrypoint):
         simulation = mw.Simulation.fdtd(
             model,
             frequencies=[example.FREQUENCY],
-            run_time=mw.TimeConfig.auto(steady_cycles=20, transient_cycles=25),
-            spectral_sampler=mw.SpectralSampler(window="none"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=20, transient_cycles=25),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+                full_field_dft=False,
+            ),
         )
         prepared = simulation.prepare()
         assert prepared.solver._compiled_sources[0]["prepared_mode_power"] == 1.0

@@ -47,9 +47,9 @@ from ..networks import replay_network_runtimes
 from ..ports import replay_port_runtimes
 from .circuits import replay_circuit_runtimes
 from ..wire import deposit_replayed_wire_current, replay_wire_state
+from ...errors import UnsupportedFeatureError
 
 _TFSF_REFERENCE_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned"}
-_TFSF_AUXILIARY_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned", "plane_wave_aux"}
 
 
 def _monitor_template_is_point(template):
@@ -118,6 +118,7 @@ def _prepare_plane_monitor_template(payload, start_index):
         "aligned_coords": payload.get("coords"),
         "source_normalization_spectra": payload.get("source_normalization_spectra"),
         "source_normalization_frequencies": payload.get("source_normalization_frequencies"),
+        "symmetry_image_planes": payload.get("symmetry_image_planes"),
     }
     return template, next_index
 
@@ -226,7 +227,6 @@ def _finalize_point_monitor_payload(payload):
         payload[component_name] = value
     if len(payload["components"]) == 1:
         payload["component"] = primary_component.lower()
-        payload["data"] = payload["components"][primary_component]
         payload["field_index"] = payload["field_indices"][primary_component]
     return payload
 
@@ -239,7 +239,6 @@ def _finalize_plane_monitor_payload(payload):
     if len(payload["components"]) == 1:
         component_payload = payload["components"][primary_component]
         payload["component"] = primary_component.lower()
-        payload["data"] = component_payload["data"]
         payload["coords"] = component_payload["coords"]
         payload["plane_index"] = component_payload["plane_index"]
         payload["plane_sample_indices"] = component_payload["plane_indices"]
@@ -324,7 +323,7 @@ def _rebuild_monitors(monitor_templates, output_tensors, field_offset):
             "normal_direction": template["normal_direction"],
             "mode_spec": template.get("mode_spec"),
         }
-        for key in ("cell_widths", "sample_spacing", "sample_cell_widths", "aligned_coords", "source_normalization_spectra", "source_normalization_frequencies"):
+        for key in ("cell_widths", "sample_spacing", "sample_cell_widths", "aligned_coords", "source_normalization_spectra", "source_normalization_frequencies", "symmetry_image_planes"):
             if template.get(key) is not None:
                 payload[key] = template[key]
         for component_name in template["fields"]:
@@ -439,9 +438,10 @@ def _source_time_kind_code(source_time) -> int:
 def _custom_source_time_tensor(source_time, sample_time: torch.Tensor) -> torch.Tensor:
     table = source_time.get("table")
     if table is None:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Callable CustomSourceTime(fn) is not supported in the FDTD adjoint; "
-            "provide a sampled (times, amplitudes) table instead."
+            "provide a sampled (times, amplitudes) table instead.",
+            feature="guard:e110ef48", method="fdtd"
         )
     # Same table and segment formula as the forward host and native kernels.
     return float(source_time["amplitude"]) * table.evaluate_torch(sample_time)
@@ -772,7 +772,8 @@ def _source_term_signal_patch(term, *, source_time, omega, time_value):
 def _bloch_source_term_signal_patch(term, *, source_time, omega, time_value) -> torch.Tensor:
     source_time, omega = _resolve_term_source(term, source_time, omega)
     if term["cw_cos_patch"] is not None or term["delay_patch"] is not None:
-        raise NotImplementedError("Bloch source-term reverse currently supports uniform point-source patches only.")
+        raise UnsupportedFeatureError("Bloch source-term reverse currently supports uniform point-source patches only.",
+                                      feature="boundary.bloch", method="fdtd")
     scalar_signal = float(evaluate_source_time(source_time, float(time_value)))
     signal_sin = (_resolve_cw_signal(source_time, omega, time_value)[1]
                   if source_time["kind"] == "cw" else 0.0)
@@ -1085,7 +1086,7 @@ def _complex_inner_real(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
 
 def _axis_uses_complex_source_wrap(solver, axis: int) -> bool:
     scene = getattr(solver, "scene", None)
-    boundary = None if scene is None else getattr(scene, "boundary", None)
+    boundary = None if scene is None else getattr(scene.scene, "boundary", None)
     if boundary is None:
         return getattr(solver, "boundary_kind", None) == "bloch"
     return boundary.axis_kind("xyz"[int(axis)]) in {"bloch", "periodic"}
@@ -3094,7 +3095,8 @@ def _step_state(
     resolved_source_terms=None,
 ):
     if getattr(solver, "modulation_enabled", False):
-        raise NotImplementedError("FDTD adjoint replay does not support time-modulated media.")
+        raise UnsupportedFeatureError("FDTD adjoint replay does not support time-modulated media.",
+                                      feature="material.modulation", method="fdtd")
     if resolved_source_terms is None:
         resolved_source_terms = _resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez)
     source_terms, electric_source_terms, magnetic_source_terms = resolved_source_terms
@@ -3295,12 +3297,13 @@ def _step_state(
 
             pml_axis = _bloch_cpml_pml_axis(solver)
             if pml_axis is None:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Complex-field CPML adjoint replay requires exactly one PML axis and two Bloch axes: "
                     "the reverse split-field update carries the transverse wrap phase on the two periodic "
                     "axes and the recursive-convolution stretch on the single absorbing axis, so a face "
                     "layout mixing Bloch and PML on one axis or leaving more than one absorbing axis is "
-                    "not expressible on that split."
+                    "not expressible on that split.",
+                    feature="boundary.bloch", method="fdtd"
                 )
             if pml_axis == "z":
                 electric_fields, electric_cpml_state = _update_mixed_bloch_cpml_electric_fields(

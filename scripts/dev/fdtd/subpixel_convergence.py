@@ -159,25 +159,30 @@ def run_planar(args):
             f_cont = solver(kx, eps, d, h) / (2 * math.pi)
             pulse = mw.GaussianPulse(frequency=f_cont, fwidth=0.5 * f_cont)
             for method in args.methods:
-                scene = mw.Scene(
-                    domain=mw.Domain(bounds=((0.0, PLANAR_L), (0.0, 2 * dl), (0.0, h))),
-                    grid=mw.GridSpec.custom(x_nodes, y_nodes, z_nodes),
-                    boundary=mw.BoundarySpec.faces(default="pec", y="periodic", z=z_kind),
-                    device="cuda",
-                    subpixel_samples=subpixel_spec(method, _samples_for(args)),
-                )
-                scene.add_structure(mw.Structure(
-                    geometry=mw.Box(position=(0.5 * PLANAR_L, dl, d - h), size=(4 * PLANAR_L, 8 * dl, 2 * h)),
-                    material=mw.Material(eps_r=eps), name="layer"))
                 # Off the x standing-wave node and inside the dielectric.
-                scene.add_source(mw.UniformCurrentSource(size=(dl, dl, 0.5 * dz), center=(0.43 * PLANAR_L, dl, 0.3 * d),
-                                                         polarization=component, source_time=pulse, name="src"))
-                scene.add_monitor(mw.FieldTimeMonitor("probe", components=(component,),
-                                                      position=(0.57 * PLANAR_L, dl, 0.61 * d)))
+                scene = mw.Scene(
+                            domain=mw.Domain(bounds=((0.0, PLANAR_L), (0.0, 2 * dl), (0.0, h))),
+                            grid=mw.GridSpec.custom(x_nodes, y_nodes, z_nodes),
+                            boundary=mw.BoundarySpec.faces(default="pec", y="periodic", z=z_kind),
+                            subpixel=subpixel_spec(method, _samples_for(args)),
+                            structures=(
+                        mw.Structure(
+                            geometry=mw.Box(position=(0.5 * PLANAR_L, dl, d - h), size=(4 * PLANAR_L, 8 * dl, 2 * h)),
+                            material=mw.Material(eps_r=eps), name="layer"),
+                        ),
+                            sources=(
+                        mw.UniformCurrentSource(size=(dl, dl, 0.5 * dz), center=(0.43 * PLANAR_L, dl, 0.3 * d),
+                                                polarization=component, source_time=pulse, name="src"),
+                        ),
+                            monitors=(
+                        mw.monitors.FieldTimeMonitor("probe", components=(component,),
+                                            position=(0.57 * PLANAR_L, dl, 0.61 * d)),
+                        ),
+                        )
                 dt_estimate = 0.9 / (C_0 * math.sqrt(2 / dl**2 + 1 / dz**2))
                 steps = int(math.ceil((args.cycles / f_cont + 3 * pulse.delay) / dt_estimate))
-                sim = mw.Simulation.fdtd(scene, frequency=f_cont, run_time=mw.TimeConfig(time_steps=steps),
-                                         full_field_dft=False)
+                sim = mw.Simulation.fdtd(scene, frequencies=f_cont, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps),
+                                         full_field_dft=False))
                 result, stats = _timed_run(sim)
                 payload = result.monitor("probe")
                 found = find_resonances(payload, (0.9 * f_cont, 1.1 * f_cont), start_time=2.5 * pulse.delay)
@@ -226,35 +231,42 @@ def run_pair(args):
     f_guess = C_0 * kx / (2 * math.pi * math.sqrt(1.907))
     for method in args.methods:
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((0.0, length), (y_nodes[0], y_nodes[-1]), (z_nodes[0], z_nodes[-1]))),
-            grid=mw.GridSpec.custom(x_nodes, y_nodes, z_nodes),
-            boundary=mw.BoundarySpec.pec(),
-            device="cuda",
-            subpixel_samples=subpixel_spec(method, args.samples),
-        )
-        scene.add_structure(mw.Structure(
-            mw.Box(position=(0.5 * length, 0.0, -PAIR_HEIGHT / 2), size=(2 * length, 1.0, PAIR_HEIGHT)),
-            mw.Material(eps_r=PAIR_EPS), name="substrate"))
-        for name, center in (("positive", PAIR_OFFSET), ("negative", -PAIR_OFFSET)):
-            scene.add_structure(mw.Structure(
-                mw.PlanarPEC.rectangle(((-length, 2 * length), (center - PAIR_WIDTH / 2, center + PAIR_WIDTH / 2)),
-                                       coordinate=0.0, physical_thickness=35e-6),
-                mw.Material.pec(), name=name))
+                    domain=mw.Domain(bounds=((0.0, length), (y_nodes[0], y_nodes[-1]), (z_nodes[0], z_nodes[-1]))),
+                    grid=mw.GridSpec.custom(x_nodes, y_nodes, z_nodes),
+                    boundary=mw.BoundarySpec.pec(),
+                    subpixel=subpixel_spec(method, args.samples),
+                    structures=(
+                mw.Structure(
+                    mw.Box(position=(0.5 * length, 0.0, -PAIR_HEIGHT / 2), size=(2 * length, 1.0, PAIR_HEIGHT)),
+                    mw.Material(eps_r=PAIR_EPS), name="substrate"),
+                ),
+                )
+        scene = scene.updated(structures=(
+            *scene.structures,
+            *(mw.Structure(
+                  mw.geometry.PlanarPEC.rectangle(((-length, 2 * length), (center - PAIR_WIDTH / 2, center + PAIR_WIDTH / 2)),
+                     coordinate=0.0, physical_thickness=35e-6),
+                  mw.Material.pec(), name=name) for name, center in (("positive", PAIR_OFFSET), ("negative", -PAIR_OFFSET))),
+        ))
         pulse = mw.GaussianPulse(frequency=f_guess, fwidth=0.4 * f_guess)
-        for sign, name in ((1.0, "src_p"), (-1.0, "src_n")):
-            # Equal (even) excitation under both strips.
-            scene.add_source(mw.UniformCurrentSource(size=(PAIR_DL, 1.0e-3, 2.0e-3),
-                                                     center=(0.41 * length, sign * PAIR_OFFSET, -2.5e-3),
-                                                     polarization="Ez", source_time=pulse, name=name))
-        scene.add_monitor(mw.FieldTimeMonitor("probe", components=("Ez",),
-                                              position=(0.5 * length + 0.3 * PAIR_DL, PAIR_OFFSET, -1.9e-3)))
-        scene.add_monitor(mw.FieldTimeMonitor("probe_n", components=("Ez",),
-                                              position=(0.5 * length + 0.3 * PAIR_DL, -PAIR_OFFSET, -1.9e-3)))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            *(mw.UniformCurrentSource(size=(PAIR_DL, 1.0e-3, 2.0e-3),
+                                      center=(0.41 * length, sign * PAIR_OFFSET, -2.5e-3),
+                                      polarization="Ez", source_time=pulse, name=name) for sign, name in ((1.0, "src_p"), (-1.0, "src_n"))),
+        ))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.monitors.FieldTimeMonitor("probe", components=("Ez",),
+                                position=(0.5 * length + 0.3 * PAIR_DL, PAIR_OFFSET, -1.9e-3)),
+            mw.monitors.FieldTimeMonitor("probe_n", components=("Ez",),
+                                position=(0.5 * length + 0.3 * PAIR_DL, -PAIR_OFFSET, -1.9e-3)),
+        ))
         dmin = min(PAIR_DL, float(np.min(np.diff(y_nodes))), float(np.min(np.diff(z_nodes))))
         dt_estimate = 0.9 / (C_0 * math.sqrt(1 / PAIR_DL**2 + 2 / dmin**2))
         steps = int(math.ceil((args.cycles / f_guess + 3 * pulse.delay) / dt_estimate))
-        sim = mw.Simulation.fdtd(scene, frequency=f_guess, run_time=mw.TimeConfig(time_steps=steps),
-                                 full_field_dft=False)
+        sim = mw.Simulation.fdtd(scene, frequencies=f_guess, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps),
+                                 full_field_dft=False))
         result, stats = _timed_run(sim)
         traces = {}
         for name in ("probe", "probe_n"):
@@ -356,25 +368,33 @@ def _sphere_scene(args, method, *, radius, pec, offset, dx, include_sphere=True)
         domain=mw.Domain(bounds=((-domain_half, domain_half),) * 3),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.pml(num_layers=layers),
-        device="cuda",
-        subpixel_samples=subpixel_spec(method, args.samples),
+        subpixel=subpixel_spec(method, args.samples),
     )
     center = tuple(float(o) * dx for o in offset)
     if include_sphere:
         material = mw.Material.pec() if pec else mw.Material(eps_r=float(args.eps))
-        scene.add_structure(mw.Structure(geometry=mw.Sphere(position=center, radius=radius), material=material, name="sphere"))
-    scene.add_source(mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
-                                  source_time=mw.CW(frequency=FREQUENCY),
-                                  injection=mw.TFSF(bounds=((-tfsf_half, tfsf_half),) * 3), name="pw"))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=mw.Sphere(position=center, radius=radius), material=material, name="sphere"),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
+                     source_time=mw.CW(frequency=FREQUENCY),
+                     injection=mw.TFSF(bounds=((-tfsf_half, tfsf_half),) * 3), name="pw"),
+    ))
     theta_gl, _ = _gauss_theta(int(args.theta_points))
     theta = np.r_[0.0, theta_gl, math.pi]
     phi = np.arange(int(args.phi_points)) * 2 * math.pi / int(args.phi_points)
     if include_sphere:
-        scene.add_monitor(mw.AngleProjectionMonitor("far", position=center, size=(2 * box_half,) * 3,
-                                                    theta=tuple(theta), phi=tuple(phi), frequencies=(FREQUENCY,),
-                                                    radius=1.0e3 * WAVELENGTH, origin=center))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.monitors.AngleProjectionMonitor("far", position=center, size=(2 * box_half,) * 3,
+                                      theta=tuple(theta), phi=tuple(phi), frequencies=(FREQUENCY,),
+                                      radius=1.0e3 * WAVELENGTH, origin=center),
+        ))
     else:
-        scene.add_monitor(mw.PointMonitor("incident", (0.0, 0.0, 0.0), fields=("Ex",)))
+        scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("incident", (0.0, 0.0, 0.0), fields=("Ex",))))
     return scene, theta, phi
 
 
@@ -389,12 +409,12 @@ def run_sphere(args, *, pec=False):
     size_parameter = float(args.size_parameter)
     radius = size_parameter * WAVELENGTH / (2 * math.pi)
     methods = args.methods
-    sim_kw = dict(frequencies=[FREQUENCY], run_time=_run_time(args),
-                  spectral_sampler=mw.SpectralSampler(window="hanning"), full_field_dft=False)
+    sim_kw = dict(frequencies=[FREQUENCY], config=mw.FDTDConfig(
+        run_time=_run_time(args), spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"), full_field_dft=False))
     # Incident amplitude at the TFSF centre, same grid, no sphere.
     scene0, _, _ = _sphere_scene(args, "staircase", radius=radius, pec=pec, offset=(0, 0, 0), dx=dx, include_sphere=False)
     result0, stats0 = _timed_run(mw.Simulation.fdtd(scene0, **sim_kw))
-    incident = abs(complex(torch.as_tensor(result0.monitor("incident")["data"]).reshape(-1)[0].item()))
+    incident = abs(complex(torch.as_tensor(result0.monitor("incident").isel(component=0).values).reshape(-1)[0].item()))
     del result0
     torch.cuda.empty_cache()
     k = 2 * math.pi / WAVELENGTH
@@ -456,8 +476,8 @@ def run_cylinder(args):
     box_half = tfsf_half + max(4 * dx, 0.06 * WAVELENGTH)
     domain_half = box_half + float(args.padding) * WAVELENGTH
     zlen = 2 * dx
-    sim_kw = dict(frequencies=[FREQUENCY], run_time=_run_time(args),
-                  spectral_sampler=mw.SpectralSampler(window="hanning"), full_field_dft=False)
+    sim_kw = dict(frequencies=[FREQUENCY], config=mw.FDTDConfig(
+        run_time=_run_time(args), spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"), full_field_dft=False))
     offsets = SPHERE_OFFSETS[: int(args.offsets)]
     for polarization in [p.upper() for p in args.modes]:
         e_pol = (0.0, 0.0, 1.0) if polarization == "TM" else (0.0, 1.0, 0.0)
@@ -467,18 +487,23 @@ def run_cylinder(args):
                 domain=mw.Domain(bounds=((-domain_half, domain_half), (-domain_half, domain_half), (0.0, zlen))),
                 grid=mw.GridSpec.uniform(dx),
                 boundary=mw.BoundarySpec.faces(default="pml", num_layers=int(args.pml_layers), z="periodic"),
-                device="cuda",
-                subpixel_samples=subpixel_spec(method, args.samples),
+                subpixel=subpixel_spec(method, args.samples),
             )
             center = (float(offset[0]) * dx, float(offset[1]) * dx, 0.5 * zlen)
             if with_cylinder:
-                scene.add_structure(mw.Structure(
-                    geometry=mw.Cylinder(position=center, radius=radius, height=100 * zlen, axis="z"),
-                    material=mw.Material(eps_r=float(args.eps)), name="cylinder"))
-            scene.add_source(mw.PlaneWave(direction=(1.0, 0.0, 0.0), polarization=e_pol,
-                                          source_time=mw.CW(frequency=FREQUENCY),
-                                          injection=mw.TFSF(bounds=((-tfsf_half, tfsf_half), (-tfsf_half, tfsf_half),
-                                                                    (-zlen, 2 * zlen))), name="pw"))
+                scene = scene.updated(structures=(
+                    *scene.structures,
+                    mw.Structure(
+                        geometry=mw.Cylinder(position=center, radius=radius, height=100 * zlen, axis="z"),
+                        material=mw.Material(eps_r=float(args.eps)), name="cylinder"),
+                ))
+            scene = scene.updated(sources=(
+                *scene.sources,
+                mw.PlaneWave(direction=(1.0, 0.0, 0.0), polarization=e_pol,
+                             source_time=mw.CW(frequency=FREQUENCY),
+                             injection=mw.TFSF(bounds=((-tfsf_half, tfsf_half), (-tfsf_half, tfsf_half),
+                                                       (-zlen, 2 * zlen))), name="pw"),
+            ))
             if with_cylinder:
                 for name, axis, pos, direction in (("xn", "x", -box_half, "-"), ("xp", "x", box_half, "+"),
                                                    ("yn", "y", -box_half, "-"), ("yp", "y", box_half, "+")):
@@ -487,16 +512,22 @@ def run_cylinder(args):
                     i = "xyz".index(axis)
                     p[i] = pos
                     size[i] = 0.0
-                    scene.add_monitor(mw.FinitePlaneMonitor(name, position=tuple(p), size=tuple(size),
-                                                            fields=_flux_fields(axis), frequencies=(FREQUENCY,),
-                                                            compute_flux=True, normal_direction=direction))
+                    scene = scene.updated(monitors=(
+                        *scene.monitors,
+                        mw.FinitePlaneMonitor(name, position=tuple(p), size=tuple(size),
+                                              fields=_flux_fields(axis), frequencies=(FREQUENCY,),
+                                              compute_flux=True, normal_direction=direction),
+                    ))
             else:
-                scene.add_monitor(mw.PointMonitor("incident", (0.0, 0.0, 0.5 * zlen),
-                                                  fields=("Ez" if polarization == "TM" else "Ey",)))
+                scene = scene.updated(monitors=(
+                    *scene.monitors,
+                    mw.PointMonitor("incident", (0.0, 0.0, 0.5 * zlen),
+                                    fields=("Ez" if polarization == "TM" else "Ey",)),
+                ))
             return scene
 
         result0, stats0 = _timed_run(mw.Simulation.fdtd(build("staircase", (0, 0), False), **sim_kw))
-        incident = abs(complex(torch.as_tensor(result0.monitor("incident")["data"]).reshape(-1)[0].item()))
+        incident = abs(complex(torch.as_tensor(result0.monitor("incident").isel(component=0).values).reshape(-1)[0].item()))
         del result0
         q = A.mie_cylinder_efficiencies(size_parameter, index, polarization=polarization)
         width_ref = q["q_sca"] * 2 * radius

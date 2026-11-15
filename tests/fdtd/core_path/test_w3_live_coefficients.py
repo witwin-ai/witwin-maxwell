@@ -6,11 +6,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from benchmark.core_path.scenes import CORE_SCENES, CORE_REFUSED_BENCHMARK_SCENES, W3_SCENES, build_core_case
+from benchmark.core_path.scenes import CORE_SCENES, W3_SCENES, build_core_case
 from witwin.maxwell.breakdown_stress import BreakdownStressAccumulator
 from witwin.maxwell.fdtd.boundary.runtime import closed_transverse_pml
 from witwin.maxwell.fdtd.runtime import core_path, stepping
 from witwin.maxwell.fdtd.runtime.breakdown import advance_breakdown_state
+from tests.support import frozen_oracles
+import witwin.maxwell as mw
 
 
 @pytest.fixture(autouse=True)
@@ -32,7 +34,7 @@ def test_live_launch_owns_the_existing_coefficient_storage(name, monkeypatch):
     general = name == "tpa_slab" or name.endswith("_tpa")
     # Also exercise the existing Kerr + modulation composition.
     modulation = name.startswith("modulated") or "modulation" in name or name == "kerr_slab_strong"
-    solver = SimpleNamespace(scene=case.scene, device="cpu", Nx=4, Ny=5, Nz=6,
+    solver = SimpleNamespace(scene=SimpleNamespace(scene=case.scene), device="cpu", Nx=4, Ny=5, Nz=6,
                              active_absorber_type=case.absorber or "cpml",
                              uses_cpml=False, nonlinear_enabled=nonlinear,
                              nonlinear_general_enabled=general, modulation_enabled=modulation,
@@ -58,10 +60,7 @@ def test_live_launch_owns_the_existing_coefficient_storage(name, monkeypatch):
         return torch.empty(0, dtype=torch.uint16), torch.empty(0), [1.] * 6, True
     monkeypatch.setattr(core_path, "_compress_coefficients", compress)
     core_path.CorePathRuntime(solver)
-    refused = name in CORE_REFUSED_BENCHMARK_SCENES
-    assert (name in CORE_SCENES) is not refused
-    expected_blockers = (["closed-transverse CPML (passivity guard)"] if refused else []) + ["non-CUDA execution"]
-    assert core_path.core_path_blockers(solver) == expected_blockers
+    assert name in CORE_SCENES
     assert core_path.core_path_step_loop_blockers(solver) == []
     h, e = calls
     assert h[-2:] == (False, False)
@@ -73,9 +72,9 @@ def test_live_launch_owns_the_existing_coefficient_storage(name, monkeypatch):
     assert torch.equal(e[0][12], expected[1])
     if modulation:
         assert e[0][-1] is solver._modulation_time
-    # W6 admits electric ADE; composing it with live coefficients adds no blocker.
+    # W6 admits electric ADE; composing it with live coefficients keeps the whole-step graph.
     solver.dispersive_enabled = True
-    assert core_path.core_path_blockers(solver) == expected_blockers
+    assert core_path.core_path_step_loop_blockers(solver) == []
 
 
 @pytest.mark.host_validation
@@ -177,28 +176,23 @@ def test_modulated_phase_core_topology_admission(name, closed, monkeypatch):
     import witwin.maxwell as mw
 
     # Prepare the real solver on the host without loading or executing CUDA kernels.
-    monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda *a, **kw: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.solver._require_cuda_scene", lambda *a: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.solver._get_fdtd_module", lambda: object())
-    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.initialization.require_cuda_scene", lambda *a: None)
-    monkeypatch.setattr("witwin.maxwell.fdtd.runtime.initialization.get_fdtd_module", lambda: object())
+    from tests.support.host_preparation import stub_cuda_preparation
+    stub_cuda_preparation(monkeypatch)
     case = build_core_case(name)
     assert closed_transverse_pml(case.scene) is closed
     solver = mw.Simulation.fdtd(
-        case.scene, frequencies=case.frequencies, run_time=mw.TimeConfig(time_steps=109),
-        cpml_config={"memory_mode": case.cpml_memory, "kappa_max": case.cpml_kappa_max},
-        **({"absorber": case.absorber} if case.absorber is not None else {}),
+        case.scene, frequencies=case.frequencies, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=109),
+        cpml=mw.fdtd.CPMLConfig(memory_mode=case.cpml_memory, kappa_max=case.cpml_kappa_max), device="cpu",
+        **({"absorber": case.absorber} if case.absorber is not None else {})),
     ).prepare().solver
     assert solver.modulation_enabled
     assert solver.active_absorber_type == "cpml"
-    expected = (["closed-transverse CPML (passivity guard)"] if closed else [])
-    assert core_path.core_path_blockers(solver) == expected + ["non-CUDA execution"]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Core path requires CUDA.")
 def test_modulated_phase_checkpoint_resume_bitwise(tmp_path):
     import witwin.maxwell as mw
-    from benchmark.core_path.gates import make_simulation, tensors
+    from benchmark.core_path.gates import api_dialect, make_simulation, tensors
 
     total_steps, checkpoint_step, chunk_size = 109, 45, 32
     # Override the fixture's 256-step horizon to preserve this off-chunk resume case.
@@ -206,9 +200,7 @@ def test_modulated_phase_checkpoint_resume_bitwise(tmp_path):
     assert not closed_transverse_pml(case.scene)
 
     def prepare():
-        prepared = make_simulation(
-            case, arm="candidate", steps=total_steps, full_field_dft=True,
-        ).prepare()
+        prepared = make_simulation(case, steps=total_steps, full_field_dft=True).prepare()
         prepared.solver._core_runtime.chunk_size = chunk_size
         assert prepared.solver.modulation_enabled
         return prepared
@@ -226,7 +218,7 @@ def test_modulated_phase_checkpoint_resume_bitwise(tmp_path):
     assert checkpoint.auxiliary["modulation_step"].item() == checkpoint_step - 1
     path = tmp_path / "modulated-phase.pt"
     checkpoint.save(path)
-    checkpoint = mw.FDTDResumeCheckpoint.load(path)
+    checkpoint = mw.fdtd.FDTDResumeCheckpoint.load(path)
     assert "modulation_time" not in checkpoint.auxiliary
     resumed_prepared = prepare()
     assert resumed_prepared.solver is not partial.solver
@@ -235,16 +227,14 @@ def test_modulated_phase_checkpoint_resume_bitwise(tmp_path):
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz", "_modulation_step", "_modulation_time"):
         assert torch.equal(getattr(direct.solver, name), getattr(resumed.solver, name)), name
     # Graph capture is asserted on the fresh runs above only. Resumed runs never re-enter
-    # whole-step capture (run_chunks refuses resume_from). The eager magnetic-surface
-    # fallback of modulated_slab_phase is no longer covered here because the passivity
-    # guard refuses closed-transverse CPML on the core path.
+    # whole-step capture (run_chunks refuses resume_from).
     # This open scene's soft plane wave also has a host-evaluated magnetic surface
     # source, so its resumed per-step fallback remains eager.
     assert direct.solver._modulation_step.item() == total_steps - 1
-    assert direct.solver_stats["steps_run"] == resumed.solver_stats["steps_run"] == total_steps
+    assert direct.stats()["steps_run"] == resumed.stats()["steps_run"] == total_steps
     assert torch.count_nonzero(direct.solver.Ez)
-    expected = tensors(direct.fields, "phasors") | tensors(direct.monitors, "monitors")
-    actual = tensors(resumed.fields, "phasors") | tensors(resumed.monitors, "monitors")
+    expected = tensors(api_dialect.fields(direct), "phasors") | tensors(api_dialect.monitors(direct), "monitors")
+    actual = tensors(api_dialect.fields(resumed), "phasors") | tensors(api_dialect.monitors(resumed), "monitors")
     assert expected.keys() == actual.keys()
     for prefix in ("phasors/", "monitors/"):
         assert any(name.startswith(prefix) and value.is_complex() and torch.count_nonzero(value)
@@ -266,7 +256,7 @@ def test_breakdown_core_arms_match_eager_existing_path(arm, monkeypatch):
     """Breakdown under a core runtime: the whole-step graph and its per-step fallback
     both match the eager existing path (Rule 2; discrete breakdown state exact), and
     the fallback never captures a per-step graph over the mutable coefficients."""
-    from benchmark.core_path.gates import make_simulation, tensors
+    from benchmark.core_path.gates import api_dialect, make_simulation, tensors
     from tests.support.numerical_equivalence import (
         assert_numerically_equivalent, assert_run_level_equivalent,
     )
@@ -280,16 +270,22 @@ def test_breakdown_core_arms_match_eager_existing_path(arm, monkeypatch):
         return (tensors({name: getattr(solver, name) for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}, "fields")
                 | tensors(dict(solver.breakdown_runtime), "breakdown"))
 
-    def run(simulation_arm, steps=total_steps):
+    # The eager existing-path arm (half and full horizon) is frozen.
+    frozen = frozen_oracles.load("tests/fdtd/core_path/test_w3_live_coefficients.py::breakdown_slab")
+
+    def section(prefix):
+        return {name[len(prefix):]: value for name, value in frozen.items() if name.startswith(prefix)}
+
+    def run(steps=total_steps):
         # Breakdown refuses checkpoint execution (stop_step/resume), so the half
         # horizon is its own shorter run from the same seeded state.
         with monkeypatch.context() as patch:
-            if simulation_arm == "candidate" and arm == "forced_fallback":
+            if arm == "forced_fallback":
                 patch.setattr(core_path.CorePathRuntime, "run_chunks", lambda self, solver, **kwargs: None)
-            prepared = make_simulation(case, arm=simulation_arm, steps=steps, full_field_dft=True).prepare()
+            prepared = make_simulation(case, steps=steps, full_field_dft=True).prepare()
             solver = prepared.solver
             assert solver.breakdown_enabled
-            assert (getattr(solver, "_core_runtime", None) is not None) is (simulation_arm == "candidate")
+            assert getattr(solver, "_core_runtime", None) is not None
             # The G1 fixture's seeded fields, so breakdown triggers inside the horizon.
             for index, name in enumerate(("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")):
                 field = getattr(solver, name)
@@ -297,26 +293,25 @@ def test_breakdown_core_arms_match_eager_existing_path(arm, monkeypatch):
                             * (2.0 ** (-20 - index)))
             return solver, prepared.run()
 
-    eager_half, _ = run("baseline", total_steps // 2)
-    eager_full, eager_result = run("baseline")
-    core_half, _ = run("candidate", total_steps // 2)
-    core_full, core_result = run("candidate")
+    eager_half, eager_full, eager_outputs = section("half/"), section("full/"), section("outputs/")
+    core_half, _ = run(total_steps // 2)
+    core_full, core_result = run()
 
-    for solver in (eager_full, eager_half):
-        assert not any(getattr(solver, flag, False) for flag in graph_flags)
+    # Frozen with the eager arm: none of its graph flags was set at either horizon.
+    assert not frozen["state/eager_graph_flags"].any()
     if arm == "chunked":
         assert core_full._core_step_graph_active
     else:
         assert not getattr(core_full, "_core_step_graph_active", False)
         assert not any(getattr(core_full, flag, False) for flag in graph_flags)
-    assert (eager_full.breakdown_runtime["trigger_step"] >= 0).any().item()
-    assert eager_full.breakdown_runtime["total_dissipated"].item() > 0
+    assert (eager_full["breakdown/trigger_step"] >= 0).any().item()
+    assert eager_full["breakdown/total_dissipated"].item() > 0
 
-    assert_run_level_equivalent(state(eager_half), state(core_half), state(eager_full), state(core_full),
+    assert_run_level_equivalent(eager_half, state(core_half), eager_full, state(core_full),
                                 name=f"breakdown_slab/{arm}", family=_field_family)
-    outputs = {"breakdown": eager_result.breakdown_data, "monitors": eager_result.monitors}
-    core_outputs = {"breakdown": core_result.breakdown_data, "monitors": core_result.monitors}
-    assert_numerically_equivalent(tensors(outputs, "outputs"), tensors(core_outputs, "outputs"),
+    core_outputs = {"breakdown": mw.breakdown.breakdown_data(core_result), "monitors": api_dialect.monitors(core_result)}
+    assert_numerically_equivalent({f"outputs/{name}": value for name, value in eager_outputs.items()},
+                                  tensors(core_outputs, "outputs"),
                                   level="run", name=f"breakdown_slab/{arm}/outputs")
 
 
@@ -329,10 +324,13 @@ def test_breakdown_refuses_lumped_coupling_on_core_path():
     from benchmark.core_path.scenes import _w1_case
 
     case = _w1_case("w1_lumped_port")
-    case.scene.add_structure(mw.Structure(
-        mw.Box(position=(-.01, 0, 0), size=(.01, .02, .02), device="cpu"),
-        mw.Material(eps_r=2., breakdown=mw.DielectricBreakdown(
-            critical_field=1e-8, minimum_duration=2e-10, post_breakdown_conductivity=0.1, ramp_time=1e-9))))
-    for arm in ("baseline", "candidate"):
-        with pytest.raises(NotImplementedError, match="dynamic dielectric breakdown"):
-            make_simulation(case, arm=arm, steps=8, full_field_dft=False).prepare()
+    case = replace(case, scene=case.scene.updated(structures=(
+        *case.scene.structures,
+        mw.Structure(
+            mw.Box(position=(-.01, 0, 0), size=(.01, .02, .02), device="cpu"),
+            mw.Material(eps_r=2., breakdown=mw.breakdown.DielectricBreakdown(
+            critical_field=1e-8, minimum_duration=2e-10, post_breakdown_conductivity=0.1, ramp_time=1e-9))),
+    )))
+    # The refusal precedes the execution-path decision.
+    with pytest.raises(NotImplementedError, match="dynamic dielectric breakdown"):
+        make_simulation(case, steps=8, full_field_dft=False).prepare()

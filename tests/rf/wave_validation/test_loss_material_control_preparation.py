@@ -31,7 +31,7 @@ def baseline(contour_helpers): return build_case(PilotCase())
 def test_fixed_mesh_material_controls_keep_actual_source_apertures_grid_exterior_and_VI(changes,baseline):
     original, groups, bounds, schema, rows, expected, _ = baseline
     scene, other_groups, other_bounds, other_schema, other_rows, other_expected, _ = build_case(replace(PilotCase(),**changes))
-    a,b=prepare_scene(original),prepare_scene(scene)
+    a,b=prepare_scene(original, device="cpu"),prepare_scene(scene, device="cpu")
     assert original.domain == scene.domain and original.boundary == scene.boundary
     for axis in 'xyz':np.testing.assert_array_equal(getattr(a,axis+'_nodes64'),getattr(b,axis+'_nodes64'))
     assert groups == other_groups and bounds == other_bounds and rows == other_rows and expected == other_expected
@@ -69,13 +69,13 @@ def test_fixed_functional_coarse_mesh_is_exactly_the_original_native_integrals(b
 @pytest.mark.parametrize('affine',[False,True])
 def test_fixed_physical_curve_and_quadrature_reproduce_independent_constant_affine_fields(dx,affine):
     scene,_,_,_,rows,expected,_=build_case(replace(PilotCase(),dx=dx,longitudinal_dl=.0025,probe_reference_dx=.0025))
-    monitors={m.name:m for m in scene.monitors};prepared=prepare_scene(scene)
+    monitors={m.name:m for m in scene.monitors};prepared=prepare_scene(scene, device="cpu")
     def field(component,position):
         x,y,z=position
         if not affine:return {'Ez':2.,'Hy':3.,'Hz':7.}[component]
         return {'Ez':2+3*x+4*y+5*z,'Hy':2+3*z+4*x+5*y,'Hz':7+11*y-13*z+2*x}[component]
     for name,(component,index) in expected.items():
-        axes=component_coords(prepared,component)
+        axes=component_coords(prepared,component, device=prepared.device)
         assert monitors[name].position == tuple(float(axis[i]) for axis,i in zip(axes,index))
     for station,pair in zip(PilotCase().positions,rows):
         values=[sum(weight*field(component,monitors[name].position) for name,component,weight in row) for row in pair]
@@ -94,7 +94,7 @@ def test_fixed_H_stencil_cannot_cross_conductor_interface(metal):
 
 
 def test_fixed_physical_stencil_cannot_cross_periodic_seam(baseline):
-    scene=baseline[0].clone(boundary=mw.BoundarySpec.periodic())
+    scene=baseline[0].updated(boundary=mw.BoundarySpec.periodic())
     with pytest.raises(ValueError,match='seams'):
         fixed_physical_probe_monitors(scene,scene,[],[])
 
@@ -106,7 +106,7 @@ def test_empty_copper_basis_is_permitted_only_for_declared_PEC():
 
 
 def test_alternative_actual_compiled_source_H_measurement_does_not_change_Norton_field_stamp(baseline):
-    scene=baseline[0];prepared=prepare_scene(scene);port=scene.ports[0]
+    scene=baseline[0];prepared=prepare_scene(scene, device="cpu");port=scene.ports[0]
     position=port.current_surface.position.clone();position[2]+=.0025
     other=mw.LumpedPort(port.name,positive=port.positive,negative=port.negative,voltage_path=port.voltage_path,
         voltage_aperture=port.voltage_aperture,current_surface=mw.Box(position=position,size=port.current_surface.size),reference_impedance=50.)
@@ -114,7 +114,7 @@ def test_alternative_actual_compiled_source_H_measurement_does_not_change_Norton
     assert any(not torch.equal(x,y) for x,y in zip(a.current_indices,b.current_indices))
     torch.testing.assert_close(a.voltage_indices,b.voltage_indices,rtol=0,atol=0)
     torch.testing.assert_close(a.voltage_weights,b.voltage_weights,rtol=0,atol=0)
-    shape=tuple(len(axis) for axis in component_coords(prepared,a.voltage_component))
+    shape=tuple(len(axis) for axis in component_coords(prepared,a.voltage_component, device=prepared.device))
     eps=torch.full(shape,2.25*EPSILON_0,dtype=torch.float64)
     coefficient=1e-12/(eps+.5e-12*.01)
     runtimes=[prepare_lumped_runtime(g,dt=1e-12,eps_edge=eps,electric_update_coefficient=coefficient,
@@ -132,7 +132,7 @@ def test_alternative_actual_compiled_source_H_measurement_does_not_change_Norton
 @pytest.mark.parametrize('dx',[.00125,.000625])
 def test_transverse_refinement_holds_axial_source_aperture_and_exterior_nodes_exactly(dx,baseline):
     original=baseline[0];scene=build_case(replace(PilotCase(),dx=dx,longitudinal_dl=.0025,probe_reference_dx=.0025))[0]
-    a,b=prepare_scene(original),prepare_scene(scene)
+    a,b=prepare_scene(original, device="cpu"),prepare_scene(scene, device="cpu")
     assert original.domain==scene.domain and original.boundary==scene.boundary
     np.testing.assert_array_equal(a.x_nodes64,b.x_nodes64)
     for axis in 'yz':

@@ -18,7 +18,7 @@ def _result_with_differentiable_surface(monkeypatch, *, device="cpu"):
     frequencies = torch.tensor([1.0e9], device=device, dtype=torch.float64)
     a = torch.tensor([2.0 + 0.1j], device=device, dtype=torch.complex128, requires_grad=True)
     b = torch.tensor([0.4 - 0.2j], device=device, dtype=torch.complex128, requires_grad=True)
-    port = mw.PortData.from_power_waves(
+    port = mw.rf.PortData.from_power_waves(
         port_name="feed",
         frequencies=frequencies,
         a=a,
@@ -50,7 +50,7 @@ def _result_with_differentiable_surface(monkeypatch, *, device="cpu"):
     solver = SimpleNamespace(c=_C0, eps0=_EPS0, mu0=_MU0)
     result = mw.Result(
         method="fdtd",
-        scene=SimpleNamespace(monitors=()),
+        scene=mw.Scene(),
         frequency=1.0e9,
         solver=solver,
         ports={"feed": port},
@@ -59,7 +59,7 @@ def _result_with_differentiable_surface(monkeypatch, *, device="cpu"):
 
 
 def _closed_surface_result():
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(0.4, 0.4, 0.4),
@@ -68,8 +68,8 @@ def _closed_surface_result():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
         grid=mw.GridSpec.uniform(0.1),
-        device="cpu",
-    ).add_monitor(surface)
+        monitors=(surface,),
+    )
     coords = torch.linspace(-0.3, 0.3, 7, dtype=torch.float64)
     monitors = {}
     for face_index, face in enumerate(surface.faces):
@@ -107,7 +107,7 @@ def _closed_surface_result():
             }
         monitors[face.name] = payload
     frequencies = torch.tensor([1.0e9], dtype=torch.float64)
-    port = mw.PortData.from_power_waves(
+    port = mw.rf.PortData.from_power_waves(
         port_name="feed",
         frequencies=frequencies,
         a=torch.tensor([2.0 + 0.0j], dtype=torch.complex128),
@@ -129,16 +129,14 @@ def test_result_antenna_connects_port_power_far_field_and_surface_current(monkey
         monkeypatch
     )
 
-    data = result.antenna(
-        surface="nf2ff",
+    data = mw.antenna.antenna(result, surface="nf2ff",
         driven_port="feed",
         theta_points=19,
         phi_points=25,
         radius=8.0,
-        phase_center=torch.tensor([0.01, -0.02, 0.03], dtype=torch.float64),
-    )
+        phase_center=torch.tensor([0.01, -0.02, 0.03], dtype=torch.float64),)
 
-    assert isinstance(data, mw.AntennaData)
+    assert isinstance(data, mw.antenna.AntennaData)
     assert data.e_theta.shape == (1, 19, 25)
     assert data.surface_currents == (currents,)
     torch.testing.assert_close(data.p_accepted, port.accepted_power)
@@ -157,13 +155,11 @@ def test_result_antenna_connects_port_power_far_field_and_surface_current(monkey
 def test_result_antenna_consumes_a_first_class_closed_surface_monitor():
     result = _closed_surface_result()
 
-    data = result.antenna(
-        surface="nf2ff",
+    data = mw.antenna.antenna(result, surface="nf2ff",
         driven_port="feed",
         theta_points=11,
         phi_points=17,
-        radius=4.0,
-    )
+        radius=4.0,)
 
     assert data.surface_currents is not None
     assert len(data.surface_currents[0].surfaces) == 6
@@ -184,33 +180,27 @@ def test_result_antenna_frame_rotates_pattern_and_phase_center_changes_only_phas
     result, _, _, _, _, _, _ = _result_with_differentiable_surface(monkeypatch)
     theta = torch.linspace(0.0, math.pi, 13, dtype=torch.float64)
     phi = torch.linspace(0.0, 2.0 * math.pi, 17, dtype=torch.float64)
-    identity = result.antenna(
-        surface="nf2ff",
+    identity = mw.antenna.antenna(result, surface="nf2ff",
+        driven_port="feed",
+        theta=theta,
+        phi=phi,
+        radius=6.0,)
+    shifted = mw.antenna.antenna(result, surface="nf2ff",
         driven_port="feed",
         theta=theta,
         phi=phi,
         radius=6.0,
-    )
-    shifted = result.antenna(
-        surface="nf2ff",
-        driven_port="feed",
-        theta=theta,
-        phi=phi,
-        radius=6.0,
-        phase_center=torch.tensor([0.02, 0.01, -0.03], dtype=torch.float64),
-    )
+        phase_center=torch.tensor([0.02, 0.01, -0.03], dtype=torch.float64),)
     frame = torch.tensor(
         [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
         dtype=torch.float64,
     )
-    rotated = result.antenna(
-        surface="nf2ff",
+    rotated = mw.antenna.antenna(result, surface="nf2ff",
         driven_port="feed",
         theta=theta,
         phi=phi,
         radius=6.0,
-        frame=frame,
-    )
+        frame=frame,)
 
     torch.testing.assert_close(shifted.radiation_intensity, identity.radiation_intensity)
     assert not torch.allclose(shifted.e_theta, identity.e_theta)
@@ -219,7 +209,7 @@ def test_result_antenna_frame_rotates_pattern_and_phase_center_changes_only_phas
 
 def test_result_antenna_rejects_frequency_and_grid_contract_violations(monkeypatch):
     result, port, _, _, _, _, _ = _result_with_differentiable_surface(monkeypatch)
-    mismatched = mw.PortData.from_power_waves(
+    mismatched = mw.rf.PortData.from_power_waves(
         port_name="other",
         frequencies=torch.tensor([1.1e9], dtype=torch.float64),
         a=torch.ones(1, dtype=torch.complex128),
@@ -228,9 +218,9 @@ def test_result_antenna_rejects_frequency_and_grid_contract_violations(monkeypat
     )
 
     with pytest.raises(ValueError, match="must match"):
-        result.antenna(surface="nf2ff", driven_port=mismatched)
+        mw.antenna.antenna(result, surface="nf2ff", driven_port=mismatched)
     with pytest.raises(ValueError, match="theta_points"):
-        result.antenna(surface="nf2ff", driven_port=port, theta_points=2)
+        mw.antenna.antenna(result, surface="nf2ff", driven_port=port, theta_points=2)
 
 
 def test_result_antenna_rejects_a_lossy_exterior(monkeypatch):
@@ -242,7 +232,7 @@ def test_result_antenna_rejects_a_lossy_exterior(monkeypatch):
     )
 
     with pytest.raises(NotImplementedError, match="homogeneous lossless exterior"):
-        result.antenna(surface="nf2ff", driven_port=port, theta_points=3, phi_points=2)
+        mw.antenna.antenna(result, surface="nf2ff", driven_port=port, theta_points=3, phi_points=2)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
@@ -251,13 +241,11 @@ def test_result_antenna_keeps_the_complete_workflow_on_one_cuda_device(monkeypat
         monkeypatch, device="cuda"
     )
 
-    data = result.antenna(
-        surface="nf2ff",
+    data = mw.antenna.antenna(result, surface="nf2ff",
         driven_port="feed",
         theta_points=11,
         phi_points=13,
-        radius=5.0,
-    )
+        radius=5.0,)
 
     assert data.device.type == "cuda"
     assert data.surface_currents[0].device.type == "cuda"
@@ -277,8 +265,8 @@ def test_exterior_loss_check_does_not_mix_impedance_and_wavenumber_units(monkeyp
                                 background_mu_r=1+1e-8j)
     monkeypatch.setattr("witwin.maxwell.postprocess.stratton_chu.equivalent_surface_currents_from_monitor",
                         lambda *args, **kwargs: lossy)
-    port = mw.PortData.from_power_waves(port_name="feed", frequencies=torch.tensor([frequency], dtype=torch.float64), a=a, b=b, z0=50.)
+    port = mw.rf.PortData.from_power_waves(port_name="feed", frequencies=torch.tensor([frequency], dtype=torch.float64), a=a, b=b, z0=50.)
     scaled = mw.Result(method="fdtd", scene=result.scene, frequency=frequency,
                        solver=result.solver, ports={"feed":port})
     with pytest.raises(NotImplementedError, match="homogeneous lossless exterior"):
-        scaled.antenna(surface="nf2ff", driven_port="feed", theta_points=3, phi_points=2)
+        mw.antenna.antenna(scaled, surface="nf2ff", driven_port="feed", theta_points=3, phi_points=2)

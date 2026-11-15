@@ -165,7 +165,7 @@ def test_dipole_source_phasor_and_rejections():
         source_phasor(dipole(source_time=mw.GaussianPulse(frequency=FREQUENCY, fwidth=1e8)), FREQUENCY)
     with pytest.raises(ValueError, match='frequencies must match'):
         source_phasor(dipole(source_time=mw.CW(frequency=2*FREQUENCY)), FREQUENCY)
-    magnetic = mw.CustomCurrentSource(mw.CurrentDataset(
+    magnetic = mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(
         ([0.0, 1e-3], [0.0, 1e-3], [0.0, 1e-3]), {'Mz': np.ones((2, 2, 2))}))
     for source in (magnetic, mw.UniformCurrentSource(size=(0, 0, 0))):
         with pytest.raises(ValueError, match='magnetic dipoles'):
@@ -175,7 +175,7 @@ def test_dipole_source_phasor_and_rejections():
 @pytest.mark.host_validation
 def test_dipole_scope_is_explicit_for_every_scene_path():
     structure = mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=2))
-    scene = mw.Scene(device='cpu', structures=[structure], sources=[dipole()])
+    scene = mw.Scene(structures=[structure], sources=[dipole()])
     assert validate_scene_structure(scene, FREQUENCY, point_dipoles=True)
     with pytest.raises(ValueError, match='linear dense free-space scalar runtime'):
         validate_scene_structure(scene, FREQUENCY)

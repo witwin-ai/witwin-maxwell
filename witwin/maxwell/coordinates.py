@@ -8,6 +8,9 @@ import torch
 import numpy as np
 from collections.abc import Mapping
 
+from .errors import UnsupportedFeatureError
+from ._stability import experimental
+
 
 def _has_gradient(value):
     if torch.is_tensor(value):
@@ -19,6 +22,7 @@ def _has_gradient(value):
     return isinstance(value,(tuple,list)) and any(_has_gradient(item) for item in value)
 
 
+@experimental("coordinates")
 class BendCoordinates:
     """Fixed orthogonal constant-curvature chart q=(s,u,z), in SI metres.
 
@@ -31,7 +35,8 @@ class BendCoordinates:
     def __init__(self, *, curvature, origin=(0.,0.,0.), frame=None, device=None):
         for value in (curvature, origin, frame):
             if _has_gradient(value):
-                raise NotImplementedError("BendCoordinates currently requires fixed chart geometry.")
+                raise UnsupportedFeatureError("BendCoordinates currently requires fixed chart geometry.",
+                                              feature="coordinates", method=None)
         self._curvature = float(curvature)
         if not math.isfinite(self.curvature):
             raise ValueError("BendCoordinates curvature must be finite.")
@@ -120,6 +125,7 @@ class BendCoordinates:
                     origin=self._origin.detach().cpu().tolist(),frame=self._frame.detach().cpu().tolist())
 
 
+@experimental("coordinates")
 @dataclass(frozen=True)
 class FieldFrame:
     kind: str
@@ -129,6 +135,7 @@ class FieldFrame:
         return dict(schema_version=1,kind=self.kind,coordinates=self.coordinates.snapshot())
 
 
+@experimental("coordinates")
 class FramedFieldData:
     """Native covariant chart arrays with explicit component/sample identity."""
     _NATIVE = dict(E_s="Ex",E_u="Ey",E_z="Ez",H_s="Hx",H_u="Hy",H_z="Hz")
@@ -153,7 +160,8 @@ class FramedFieldData:
         from .fdtd.coords import component_coords
         field = self.tensor(component)
         return tuple(torch.as_tensor(axis,dtype=torch.float64,device=field.device)
-                     for axis in component_coords(self._result.prepared_scene,self._NATIVE[component]))
+                     for axis in component_coords(self._result.prepared_scene,self._NATIVE[component],
+                                                 device=self._result.prepared_scene.device))
 
     def positions(self, component, *, coordinates="chart"):
         if coordinates not in ("chart","world"):
@@ -185,3 +193,13 @@ def _frame_monitor_payload(payload, frame):
         selected["power_unit"]="W"
         selected["flux_frame"]="physical integrated flux from invariant chart tangential fields"
     return selected
+
+
+@experimental("coordinates")
+def chart_fields(result) -> FramedFieldData:
+    """The covariant chart field arrays of a mapped-coordinate ``result`` with their explicit frame."""
+    return result._chart_fields()
+
+
+# Public namespace ``mw.coordinates``.
+__all__ = ["BendCoordinates", "FieldFrame", "FramedFieldData", "chart_fields"]

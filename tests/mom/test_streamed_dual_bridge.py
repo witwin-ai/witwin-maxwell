@@ -3,7 +3,7 @@ import copy
 from dataclasses import replace
 import pytest
 import torch
-from witwin.maxwell.mom.harmonic_state import HarmonicCoupledState
+from witwin.maxwell.mom.harmonic_recovery import HarmonicCoupledState
 from witwin.maxwell.mom.harmonic_dual_bridge import validate_dual,query_dual
 from witwin.maxwell.mom.streamed_dual_state_snapshot import snapshot_streamed_dual_state
 from witwin.maxwell.mom.dual_static_current import DualStaticExterior

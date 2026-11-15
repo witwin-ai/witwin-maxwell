@@ -1,4 +1,5 @@
 """Tensor-current material derivatives when the source overlaps a design interface."""
+from dataclasses import replace
 import numpy as np
 import pytest
 import torch
@@ -13,15 +14,19 @@ def _loss(value, kind, stride, *, trainable=False, nonuniform=False):
     direction = torch.tensor([.3, -.7, .5, .2, -.4, .8, -.2, .6], device="cuda").reshape(2, 2, 2)
     nodes = np.array([-.6, -.48, -.36, -.25, -.13, 0., .09, .21, .36, .48, .6])
     grid = mw.GridSpec.custom(x_coords=nodes, y_coords=nodes, z_coords=nodes) if nonuniform else mw.GridSpec.uniform(.12)
-    scene = mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=((-0.6, .6),) * 3), grid=grid,
-        boundary=mw.BoundarySpec.pml(num_layers=2), device="cuda")
-    scene.add_structure(mw.Structure(geometry=mw.Box(position=(0.,) * 3, size=(.36, .36, .12)),
-        material=mw.Material(epsilon_tensor=mw.Tensor3x3(((5., 1.5, .8), (1.5, 4., .7), (.8, .7, 3.))))))
-    scene.add_material_region(mw.MaterialRegion(name="interface",
-        # Its lower z face passes through the tensor's central node, retaining
-        # a fractional tensor/design blend and a density-dependent cross inverse.
-        geometry=mw.Box(position=(.03, .03, .12), size=(.24,) * 3),
-        density=torch.sigmoid(.3 + parameter * direction), eps_bounds=(1., 6.)))
+    scene = mw.Scene(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=((-0.6, .6),) * 3), grid=grid,
+                boundary=mw.BoundarySpec.pml(num_layers=2),
+                     structures=(
+                         mw.Structure(geometry=mw.Box(position=(0.,) * 3, size=(.36, .36, .12)),
+                             material=mw.Material(epsilon_tensor=mw.media.Tensor3x3(((5., 1.5, .8), (1.5, 4., .7), (.8, .7, 3.))))),
+                     ),
+                     material_regions=(
+                         mw.MaterialRegion(name="interface",
+                             # Its lower z face passes through the tensor's central node, retaining
+                             # a fractional tensor/design blend and a density-dependent cross inverse.
+                             geometry=mw.Box(position=(.03, .03, .12), size=(.24,) * 3),
+                             density=torch.sigmoid(.3 + parameter * direction), eps_bounds=(1., 6.)),
+                     ))
     waveform = mw.GaussianPulse(frequency=1e9, fwidth=.25e9, amplitude=50.)
     if kind in {"point", "point_cross"}:
         position = (0., 0., 0.) if kind == "point_cross" else (0., 0., .06)
@@ -33,16 +38,20 @@ def _loss(value, kind, stride, *, trainable=False, nonuniform=False):
     else:
         axes = ((-.06, .06), (-.06, .06), (0., .12))
         currents = (("My", 40.),) if kind == "magnetic" else (("Jx", .4), ("Jy", -.3), ("Jz", 1.))
-        dataset = mw.CurrentDataset(axes, {name: value * np.ones((2, 2, 2))
+        dataset = mw.sources.CurrentDataset(axes, {name: value * np.ones((2, 2, 2))
             for name, value in currents})
-        source = mw.CustomCurrentSource(dataset, source_time=waveform)
-    scene.add_source(source)
-    scene.add_monitor(mw.PointMonitor("probe", (.12, .12, .18), fields=("Ex", "Ey", "Ez")))
-    simulation = mw.Simulation.fdtd(scene, frequency=1e9,
-        run_time=mw.TimeConfig(time_steps=240, dt=2e-11),
-        spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False)
-    simulation.config.adjoint_checkpoint_stride = stride
-    components = simulation.run().monitor("probe")["components"]
+        source = mw.sources.CustomCurrentSource(dataset, source_time=waveform)
+    scene = scene.updated(sources=(*scene.sources, source), monitors=(
+        *scene.monitors,
+        mw.PointMonitor("probe", (.12, .12, .18), fields=("Ex", "Ey", "Ez")),
+    ))
+    simulation = mw.Simulation.fdtd(scene, frequencies=1e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=240, dt=2e-11),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False,
+        ))
+    simulation.config = replace(simulation.config, adjoint_checkpoint_stride=stride)
+    components = simulation.run().raw_monitor("probe")["components"]
     field = torch.stack([components[name] for name in ("Ex", "Ey", "Ez")]).to(torch.complex128)
     weights = [0., 1., 0.] if kind == "point_cross" else [.7, 1.2, .9]
     return (field.abs().square() * field.real.new_tensor(weights)[:, None]).sum(), parameter

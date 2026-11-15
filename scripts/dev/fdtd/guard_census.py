@@ -22,8 +22,18 @@ BASELINE_SHA256='ca0e1ed05e4dcb0a9c301369c3a70f7cfda44d96609168c98bc9aac6179e99f
 BASELINE_DETAILED=BASELINE.with_name('baseline-detailed.json')
 BASELINE_DETAILED_SHA256='f1751feb7d0b06c0c0be05b06e78d2e3c102e983fd5518dce9d793d737e1034c'
 RENAME_RECEIPT=ROOT/'scripts/dev/mom_rename_receipt.json'
+# 0.7.0 phase 3b: identities of raises migrated to UnsupportedFeatureError, written by
+# scripts/dev/codemods/070_p3b_raise_migration.py (old identity -> new identity and expression).
+RAISE_RECEIPT=ROOT/'scripts/dev/fdtd/raise_migration_receipt.json'
+# 0.7.0 phase 7b: guard predicates read prepared declarations through prepared.scene; identities whose
+# enclosing conditions changed (old identity -> new identity and conditions).
+P7B_RECEIPT=ROOT/'scripts/dev/fdtd/p7b_guard_receipt.json'
+# fix/strict-scene-reads-2: simulation.py reads Scene fields strictly; identities whose enclosing conditions
+# changed (old identity -> new identity and conditions), applied after the p7b re-key.
+STRICT_READS_2_RECEIPT=ROOT/'scripts/dev/fdtd/strict_reads_2_guard_receipt.json'
 # the coordinator, 2026-10-31: 740c6fdd changed an invalid-input check to ValueError; contract list 29->28.
-CONTRACT_SHA256='2cc8f6e4034ae01bec74b32b6435863588c1df8b952930201adcd662b1b71e1f'
+# 0.7.0 plan Q10 (user decision 2026-11-08), api070/p5b: the BJT/MOSFET placeholders are removed; 28->26.
+CONTRACT_SHA256='fd1468d1baa2d4b36e80e6db4d76f906e069285236e6ddb92b0d9cc9094ec3e2'
 
 
 # These safety boundaries are capability refusals even though their public
@@ -33,12 +43,60 @@ SAFETY_GUARDS = {
     ("witwin/maxwell/fdtd/boundary/runtime.py", "resolve_absorber", "ValueError"),
     ("witwin/maxwell/fdtd/runtime/passivity.py", "check_passivity", "FDTDPassivityError"),
     ("witwin/maxwell/fdtd/runtime/passivity.py", "preflight_passivity", "ValueError"),
-    ("witwin/maxwell/fdtd/runtime/core_path.py", "validate_core_path_request", "ValueError"),
+    # RFIC G1: graded vertical Green-table z admission fails closed at the last level.
+    ("witwin/maxwell/mom/layered/vertical_refine.py", "admitted_vertical_table", "ConvergenceError"),
 }
 
 
+TRACKED_EXCEPTIONS = ("NotImplementedError", "UnsupportedFeatureError")
+
+
 def tracked_exception(path, scope, name):
-    return name == "NotImplementedError" or (path, scope, name) in SAFETY_GUARDS
+    return name in TRACKED_EXCEPTIONS or (path, scope, name) in SAFETY_GUARDS
+
+
+def _without_scene_layers(node):
+    class Strip(ast.NodeTransformer):
+        def visit_Attribute(self, attribute):
+            self.generic_visit(attribute)
+            return attribute.value if attribute.attr == 'scene' else attribute
+    return Strip().visit(node)
+
+
+def p7b_normalized_condition(condition):
+    """One enclosing condition with every ``.scene`` attribute layer removed (0.7.0 phase 7b indirection)."""
+    def normalized(dump):
+        return ast.dump(_without_scene_layers(eval(dump, vars(ast))), include_attributes=False)
+    text, branch = condition
+    if text.startswith('for '):
+        body = text[len('for '):]
+        for index in range(len(body)):
+            if body.startswith(' in ', index):
+                try:
+                    target, iterator = eval(body[:index], vars(ast)), eval(body[index + 4:], vars(ast))
+                except SyntaxError:
+                    continue
+                return ['for ' + normalized(ast.dump(target)) + ' in ' + normalized(ast.dump(iterator)), branch]
+        raise ValueError(f'Unparsable loop condition {text!r}')
+    if text.startswith('while '):
+        return ['while ' + normalized(text[len('while '):]), branch]
+    if text == 'try':
+        return [text, branch]
+    return [normalized(text), branch]
+
+
+def p7b_guard_hashes(guard):
+    """(body hash, normalized-condition hash) of a detailed guard for the 0.7.0 phase 7b receipt."""
+    body = hashlib.sha256(json.dumps([guard['path'], guard['scope'], guard['expression'], guard['message']]).encode()).hexdigest()
+    conditions = [p7b_normalized_condition(condition) for condition in guard['conditions']]
+    return body, hashlib.sha256(json.dumps(conditions).encode()).hexdigest()
+
+
+def migrated_identities():
+    """Old -> new identity record of every raise the 0.7.0 migration rewrote."""
+    if not RAISE_RECEIPT.exists():
+        return {}
+    return json.loads(RAISE_RECEIPT.read_text())['guard_id_map']
 
 
 def literal_fragments(node):
@@ -152,11 +210,17 @@ def inherited_guards():
     detailed=json.loads(BASELINE_DETAILED.read_text())
     contracts=load_contracts()
     if hashlib.sha256(json.dumps(contracts,separators=(',',':')).encode()).hexdigest()!=CONTRACT_SHA256:
-        raise ValueError('The 28 contract exclusions changed; this reconciliation authorizes no reclassification.')
+        raise ValueError('The 26 contract exclusions changed; this reconciliation authorizes no reclassification.')
     # The baseline predates the SIE -> MoM rename; translate moved raise sites through the
     # line-paired identity map that scripts/dev/mom_rename.py recorded in its receipt.
     renamed=json.loads(RENAME_RECEIPT.read_text())['guard_id_map']
-    return [dict(guard,**renamed.get(guard['id'],{})) for guard in detailed['guards'] if not is_contract(guard,contracts)]
+    migrated=migrated_identities()
+    rekeyed={old:{'id':new['id'],'conditions':new['conditions']} for old,new in json.loads(P7B_RECEIPT.read_text())['guard_id_map'].items()}
+    guards=[dict(guard,**renamed.get(guard['id'],{})) for guard in detailed['guards'] if not is_contract(guard,contracts)]
+    guards=[dict(guard,**migrated.get(guard['id'],{})) for guard in guards]
+    guards=[dict(guard,**rekeyed.get(guard['id'],{})) for guard in guards]
+    strict={old:{'id':new['id'],'conditions':new['conditions']} for old,new in json.loads(STRICT_READS_2_RECEIPT.read_text())['guard_id_map'].items()}
+    return [dict(guard,**strict.get(guard['id'],{})) for guard in guards]
 
 
 def proposal(previous=None):
@@ -168,12 +232,16 @@ def proposal(previous=None):
     previous_messages={(guard['path'],guard['message']) for guard in baseline_guards}
     contracts=load_contracts()
     prior={entry['id']:entry for entry in (previous or {}).get('active',[])}
+    # A migrated raise keeps its review under the new identity.
+    carried={record['id']:prior[old] for old,record in migrated_identities().items() if old in prior}
     active=[]
     for guard in collect_detailed_guards():
         if is_contract(guard,contracts):
             continue
         if guard['id'] in prior:
             entry=dict(prior[guard['id']],line=guard['line'])
+        elif guard['id'] in carried:
+            entry=dict(carried[guard['id']],id=guard['id'],expression=guard['expression'],line=guard['line'])
         else:
             key=(guard['path'],guard['message'])
             origin=('inherited_debt' if guard['id'] in inherited else
@@ -182,9 +250,10 @@ def proposal(previous=None):
                        unsupported_boundary=guard['message'],negative_tests=[],exit_acceptance='',rationale='')
         active.append(entry)
     current_ids={entry['id'] for entry in active}
+    carried_from={carried[identity]['id'] for identity in current_ids if identity in carried}
     retired=list((previous or {}).get('retired',[]))
     for entry in (previous or {}).get('active',[]):
-        if entry['id'] not in current_ids:
+        if entry['id'] not in current_ids and entry['id'] not in carried_from:
             retired.append(dict(entry,retirement_review='pending',positive_tests=[],retirement_reason=''))
     retired_ids={entry['id'] for entry in retired}
     for entry in baseline_guards:

@@ -45,11 +45,13 @@ def build_connected_solver(*, grid_cells: int):
     scene = _scene(dynamic=True, grid_cells=grid_cells)
     simulation = mw.Simulation.fdtd(
         scene,
-        frequency=2.75e9,
-        run_time=mw.TimeConfig(time_steps=16),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
-        cuda_graph=False,
+        frequencies=2.75e9,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=16),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+            cuda_graph=False,
+        ),
     )
     return simulation.prepare().solver
 

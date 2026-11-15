@@ -37,11 +37,11 @@ def run_pilot(*, subdivisions=1, order=4, output):
         frequency=2.5e8+2.5e7*(index//8)
         eps=1.5+.25*(index%8)
         sigma=.002*(index%3)
-        geometry=(mw.Sphere(radius=radius) if index%2==0 else mw.Ellipsoid(radii=(radius,.85*radius,.7*radius)))
+        geometry=(mw.Sphere(radius=radius) if index%2==0 else mw.geometry.Ellipsoid(radii=(radius,.85*radius,.7*radius)))
         scene=mw.Scene(structures=[mw.Structure(geometry,mw.Material(eps_r=eps,sigma_e=sigma))],sources=[mw.PlaneWave()])
-        config=mw.MoMConfig(subdivisions=subdivisions,integration=IntegrationConfig(order=order,singular_order=order))
+        config=mw.mom.MoMConfig(subdivisions=subdivisions,integration=IntegrationConfig(order=order,singular_order=order))
         torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize(); start=time.perf_counter()
-        prepared=mw.Simulation.mom(scene,frequency=frequency,config=config).prepare()
+        prepared=mw.Simulation.mom(scene,frequencies=frequency,config=config).prepare()
         handle=prepared.solver.handle
         b=[]
         for source_index in range(8):

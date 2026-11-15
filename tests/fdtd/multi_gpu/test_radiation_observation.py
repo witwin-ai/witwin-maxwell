@@ -13,7 +13,7 @@ def _simulation(*,parallel=False,copper=False,pml=True,sampled=None,steps=96,
     if copper:
         structures.append(mw.Structure(mw.Box(position=torch.tensor((0.,0.,0.),dtype=torch.float64),
             size=torch.tensor((.02,.02,0.),dtype=torch.float64)),
-            mw.CopperFoil(thickness=2e-6,frequency_range=(.5*frequency,2*frequency)),name='foil'))
+            mw.media.CopperFoil(thickness=2e-6,frequency_range=(.5*frequency,2*frequency)),name='foil'))
     if substrate:
         structures.append(mw.Structure(mw.Box(position=(0.,0.,-.005),size=(.02,.02,.01)),
             mw.Material(eps_r=2.2,sigma_e=.02,debye_poles=(mw.DebyePole(delta_eps=.8,tau=1e-10),)),name='substrate'))
@@ -22,15 +22,15 @@ def _simulation(*,parallel=False,copper=False,pml=True,sampled=None,steps=96,
         x=(-.03,-.025,-.02,-.015,-.01,-.005,0.,.004,.009,.014,.02,.025,.03)
         grid=mw.GridSpec.custom(x,np.linspace(-.03,.03,13),np.linspace(-.03,.03,13))
     frequencies=(frequency,1.2*frequency)
-    surface=mw.ClosedSurfaceMonitor.box('surface',position=(0.,0.,0.),size=(.04,)*3,
+    surface=mw.monitors.ClosedSurfaceMonitor.box('surface',position=(0.,0.,0.),size=(.04,)*3,
         frequencies=frequencies,sample_spacing=sampled)
     scene=mw.Scene(domain=mw.Domain(bounds=((-0.03,.03),)*3),grid=grid,
         boundary=mw.BoundarySpec.pml(num_layers=3) if pml else mw.BoundarySpec.none(),
         structures=structures,sources=[mw.PointDipole(position=(-.005,0.,-.005),polarization='Ez',profile='ideal',
-            source_time=mw.CW(frequency=frequency),name='drive')],monitors=(surface,*extra_monitors),device='cuda:0')
-    config=mw.FDTDParallelConfig(devices=('cuda:0','cuda:1'),transport='cuda_p2p',overlap=True,gather_fields=full_field_dft) if parallel else None
-    return mw.Simulation.fdtd(scene,frequencies=frequencies,parallel=config,cuda_graph=False,
-        full_field_dft=full_field_dft,run_time=mw.TimeConfig(time_steps=steps,dt=5e-12),spectral_sampler=mw.SpectralSampler(window='none'))
+            source_time=mw.CW(frequency=frequency),name='drive')],monitors=(surface,*extra_monitors))
+    config=mw.fdtd.FDTDParallelConfig(devices=('cuda:0','cuda:1'),transport='cuda_p2p',overlap=True,gather_fields=full_field_dft) if parallel else None
+    return mw.Simulation.fdtd(scene,frequencies=frequencies,config=mw.FDTDConfig(parallel=config,cuda_graph=False,
+        full_field_dft=full_field_dft,run_time=mw.TimeConfig(time_steps=steps,dt=5e-12),spectral_sampler=mw.fdtd.SpectralSampler(window='none'), device='cuda:0'))
 
 
 @pytest.mark.parametrize('copper,pml',[(False,False),(False,True),(True,True)])
@@ -40,11 +40,11 @@ def test_owned_closed_surface_nf2ff_and_conductor_loss_match_single_domain(cuda_
     _compare_surface(actual,expected)
     if copper:
         for key in ('surface_power','dissipated_energy','stored_energy'):
-            torch.testing.assert_close(torch.as_tensor(actual.conductor_losses['foil'][key]),torch.as_tensor(expected.conductor_losses['foil'][key]),rtol=4e-4,atol=1e-12)
+            torch.testing.assert_close(torch.as_tensor(mw.rf.conductor_losses(actual)['foil'][key]),torch.as_tensor(mw.rf.conductor_losses(expected)['foil'][key]),rtol=4e-4,atol=1e-12)
 
 
 def _compare_surface(actual,expected,name='surface'):
-    measured,reference=actual.monitor(name),expected.monitor(name)
+    measured,reference=actual.raw_monitor(name),expected.raw_monitor(name)
     for face,expected_face in zip(measured['faces'].values(),reference['faces'].values()):
         assert face['face_label']==expected_face['face_label']
         for axis in 'xyz':
@@ -83,7 +83,7 @@ def test_distributed_radiation_and_copper_resume_restore_all_spectra(cuda_p2p_de
     assert checkpoint.signature['additive_j_injection']=='n+1/2'
     assert any(name.startswith('rank1/') for name in checkpoint.physics.tensors)
     checkpoint.save(tmp_path/'distributed.pt')
-    restored=mw.FDTDResumeCheckpoint.load(tmp_path/'distributed.pt',map_location='cpu')
+    restored=mw.fdtd.FDTDResumeCheckpoint.load(tmp_path/'distributed.pt',map_location='cpu')
     actual=_simulation(parallel=True,copper=True,sampled=sampled).prepare().run(resume_from=restored)
     _compare_surface(actual,reference)
     assert actual.solver.parallel_stats['resumed_from_step']==47
@@ -93,7 +93,7 @@ def test_distributed_radiation_and_copper_resume_restore_all_spectra(cuda_p2p_de
     assert saved.solver is None
     _compare_surface(saved,reference)
     for key in ('surface_power','dissipated_energy','stored_energy'):
-        torch.testing.assert_close(torch.as_tensor(actual.conductor_losses['foil'][key]),torch.as_tensor(reference.conductor_losses['foil'][key]),rtol=3e-5,atol=1e-12)
+        torch.testing.assert_close(torch.as_tensor(mw.rf.conductor_losses(actual)['foil'][key]),torch.as_tensor(mw.rf.conductor_losses(reference)['foil'][key]),rtol=3e-5,atol=1e-12)
 
 
 @pytest.mark.parametrize('convention',[None,'n'])
@@ -108,7 +108,7 @@ def test_distributed_resume_refuses_old_additive_j_timing(cuda_p2p_devices,tmp_p
     target=_simulation(parallel=True,steps=8).prepare()
     before=[shard.solver.Ez.clone() for shard in target.solver.shards]
     with pytest.raises(NotImplementedError,match=r'checkpoint predates the additive-J n\+1/2 source timing; re-run from the start'):
-        target.run(resume_from=mw.FDTDResumeCheckpoint.load(tmp_path/'old-timing.pt'))
+        target.run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(tmp_path/'old-timing.pt'))
     for shard,saved in zip(target.solver.shards,before):
         assert torch.equal(shard.solver.Ez,saved)
 
@@ -120,21 +120,23 @@ def test_nonuniform_lossy_substrate_and_copper_radiation_match_single_domain(cud
     _compare_surface(actual,expected)
 
 
-def test_sampled_observation_halo_is_physically_required(cuda_p2p_devices,monkeypatch):
+def test_core_shards_update_the_sampled_observation_ghosts(cuda_p2p_devices,monkeypatch):
+    # The bounded per-component launches left the Ex low and Hx high ghost planes unupdated, so
+    # this sampled surface needed the observation halo. The whole-shard fused core launch updates
+    # both from the received curl halos (row 15b), so the surface is exact without the refresh;
+    # the halo still refreshes the one-step-old tangential E high ghosts.
     from witwin.maxwell.fdtd.distributed.observations import DistributedObservationHalos
     expected=_simulation(sampled=.006,pml=False).run()
     with monkeypatch.context() as patch:
         patch.setattr(DistributedObservationHalos,'exchange',lambda self:None)
-        incomplete=_simulation(sampled=.006,pml=False,parallel=True).run()
-    differences=[]
-    for face in expected.monitor('surface')['faces']:
-        reference=expected.monitor('surface')['faces'][face]
-        actual=incomplete.monitor('surface')['faces'][face]
+        without=_simulation(sampled=.006,pml=False,parallel=True).run()
+    assert without.solver.parallel_stats['observation_halo_bytes_per_step']>0
+    for face in expected.raw_monitor('surface')['faces']:
+        reference=expected.raw_monitor('surface')['faces'][face]
+        actual=without.raw_monitor('surface')['faces'][face]
         for component in ('Ex','Ey','Ez','Hx','Hy','Hz'):
             if component in reference:
-                scale=reference[component].abs().max().clamp_min(1e-8)
-                differences.append(float((actual[component]-reference[component]).abs().max()/scale))
-    assert max(differences)>.01
+                torch.testing.assert_close(actual[component],reference[component],rtol=5e-5,atol=5e-6)
 
 
 @pytest.mark.parametrize('axis',('y','z'))
@@ -147,13 +149,14 @@ def test_cross_shard_mode_assembly_and_disk_resume(cuda_p2p_devices,tmp_path,axi
     reference=_simulation(parallel=True,**options).run()
     checkpoint=_simulation(parallel=True,**options).prepare().run_until(43)
     checkpoint.save(tmp_path/'modal.pt')
-    restored=mw.FDTDResumeCheckpoint.load(tmp_path/'modal.pt',map_location='cpu')
+    restored=mw.fdtd.FDTDResumeCheckpoint.load(tmp_path/'modal.pt',map_location='cpu')
     actual=_simulation(parallel=True,**options).prepare().run(resume_from=restored)
     for result in (reference,actual):
         _compare_surface(result,expected)
         for index in range(2):
-            for key in ('mode_power','total_power','amplitude_forward','amplitude_backward','power_forward','power_backward'):
-                torch.testing.assert_close(result.monitor('mode',freq_index=index)[key],expected.monitor('mode',freq_index=index)[key],rtol=5e-4,atol=1e-7)
+            got,want=result.monitor('mode',freq_index=index),expected.monitor('mode',freq_index=index)
+            for left,right in ((got.values,want.values),*((got.attrs[key],want.attrs[key]) for key in ('mode_power','total_power','power'))):
+                torch.testing.assert_close(left,right,rtol=5e-4,atol=1e-7)
 
 
 @pytest.mark.parametrize('tamper',('shape','dtype','non_tensor','quadrature','dt'))
@@ -185,10 +188,10 @@ def test_full_field_dft_disk_resume_retains_global_owned_spectra(cuda_p2p_device
     expected=_simulation(**options).run()
     checkpoint=_simulation(**options).prepare().run_until(41)
     checkpoint.save(tmp_path/'full.pt')
-    actual=_simulation(**options).prepare().run(resume_from=mw.FDTDResumeCheckpoint.load(tmp_path/'full.pt',map_location='cpu'))
+    actual=_simulation(**options).prepare().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(tmp_path/'full.pt',map_location='cpu'))
     _compare_surface(actual,expected)
     for component in ('Ex','Ey','Ez'):
-        torch.testing.assert_close(actual.tensor(component),expected.tensor(component),rtol=4e-5,atol=1e-7)
+        torch.testing.assert_close(actual.field(component).values,expected.field(component).values,rtol=4e-5,atol=1e-7)
 
 
 @pytest.mark.parametrize('kind',('circuit','delayed_network','crossing_wire'))
@@ -210,26 +213,28 @@ def test_distributed_owner_histories_and_sampled_spectra_resume_together(cuda_p2
         extent=.08
     def simulation():
         scene=make_scene()
-        surface=mw.ClosedSurfaceMonitor.box('surface',size=(2*extent,)*3,frequencies=(frequency,),sample_spacing=extent/3)
-        scene=scene.clone(monitors=(*scene.monitors,surface))
+        surface=mw.monitors.ClosedSurfaceMonitor.box('surface',size=(2*extent,)*3,frequencies=(frequency,),sample_spacing=extent/3)
+        scene=scene.updated(monitors=(*scene.monitors,surface))
         return mw.Simulation.fdtd(scene,frequencies=(frequency,),
-            parallel=mw.FDTDParallelConfig(devices=cuda_p2p_devices,transport='cuda_p2p',gather_fields=False),
-            cuda_graph=False,full_field_dft=False,run_time=mw.TimeConfig(time_steps=200),
-            spectral_sampler=mw.SpectralSampler(window='none' if kind=='crossing_wire' else 'hanning'))
+            config=mw.FDTDConfig(
+                parallel=mw.fdtd.FDTDParallelConfig(devices=cuda_p2p_devices,transport='cuda_p2p',gather_fields=False),
+                cuda_graph=False,full_field_dft=False,run_time=mw.TimeConfig(time_steps=200),
+                spectral_sampler=mw.fdtd.SpectralSampler(window='none' if kind=='crossing_wire' else 'hanning'),
+            ))
     expected=simulation().run()
     checkpoint=simulation().prepare().run_until(97)
     checkpoint.save(tmp_path/(kind+'.pt'))
-    actual=simulation().prepare().run(resume_from=mw.FDTDResumeCheckpoint.load(tmp_path/(kind+'.pt'),map_location='cpu'))
+    actual=simulation().prepare().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(tmp_path/(kind+'.pt'),map_location='cpu'))
     _compare_surface(actual,expected)
     for name,port in expected.ports.items():
         torch.testing.assert_close(actual.port(name).voltage,port.voltage,rtol=2e-6,atol=1e-10)
         torch.testing.assert_close(actual.port(name).current,port.current,rtol=2e-6,atol=1e-10)
-    for name,circuit in expected.circuits.items():
-        torch.testing.assert_close(actual.circuit(name).node_voltages,circuit.node_voltages,rtol=2e-6,atol=1e-10)
-        torch.testing.assert_close(actual.circuit(name).branch_currents,circuit.branch_currents,rtol=2e-6,atol=1e-10)
-    for name,network in expected.embedded_networks.items():
+    for name,circuit in mw.circuits.circuits(expected).items():
+        torch.testing.assert_close(mw.circuits.circuit(actual, name).node_voltages,circuit.node_voltages,rtol=2e-6,atol=1e-10)
+        torch.testing.assert_close(mw.circuits.circuit(actual, name).branch_currents,circuit.branch_currents,rtol=2e-6,atol=1e-10)
+    for name,network in mw.rf.embedded_networks(expected).items():
         for key in ('port_energy','absorbed_energy','generated_energy'):
-            np.testing.assert_allclose(actual.embedded_networks[name].metadata[key],network.metadata[key],rtol=2e-6,atol=1e-20)
+            np.testing.assert_allclose(mw.rf.embedded_networks(actual)[name].metadata[key],network.metadata[key],rtol=2e-6,atol=1e-20)
     if kind=='crossing_wire':
         torch.testing.assert_close(actual.monitor('wire_state').current,expected.monitor('wire_state').current,rtol=2e-6,atol=1e-10)
         torch.testing.assert_close(actual.monitor('wire_state').charge,expected.monitor('wire_state').charge,rtol=2e-6,atol=1e-10)
@@ -243,20 +248,20 @@ def test_actual_finite_copper_patch_circuit_radiation_and_resume_match_single_do
     def simulation(parallel):
         frequency=3.2e9
         scene=printed_patch_scene(lateral_dl=.002,substrate_cells=3,air_dl=.003,
-            frequencies=(frequency,),metal='copper',device='cuda:0')
-        circuit=mw.Circuit('probe_feed')
+            frequencies=(frequency,),metal='copper')
+        circuit=mw.circuits.Circuit('probe_feed')
         node=circuit.node('feed')
-        circuit.add(mw.Resistor('R',node,circuit.ground,50.))
-        circuit.add(mw.CurrentSource('I',node,circuit.ground,0.,waveform=mw.SineWaveform(0.,1e-3,frequency)))
+        circuit.add(mw.rf.Resistor('R',node,circuit.ground,50.))
+        circuit.add(mw.circuits.CurrentSource('I',node,circuit.ground,0.,waveform=mw.circuits.SineWaveform(0.,1e-3,frequency)))
         circuit.bind_port('feed',positive=node,negative=circuit.ground)
         radiation=scene.monitors[0]
-        monitor=mw.ClosedSurfaceMonitor.box('radiation',position=tuple((lo+hi)/2 for lo,hi in radiation.bounds),
+        monitor=mw.monitors.ClosedSurfaceMonitor.box('radiation',position=tuple((lo+hi)/2 for lo,hi in radiation.bounds),
             size=tuple(hi-lo for lo,hi in radiation.bounds),
             frequencies=(frequency,),sample_spacing=sampled)
-        scene=scene.clone(circuits=(circuit,),monitors=(monitor,))
-        config=mw.FDTDParallelConfig(devices=cuda_p2p_devices,transport='cuda_p2p',gather_fields=False) if parallel else None
-        return mw.Simulation.fdtd(scene,frequencies=(frequency,),parallel=config,cuda_graph=False,
-            full_field_dft=False,run_time=mw.TimeConfig(time_steps=192),spectral_sampler=mw.SpectralSampler(window='none'))
+        scene=scene.updated(circuits=(circuit,), monitors=(monitor,))
+        config=mw.fdtd.FDTDParallelConfig(devices=cuda_p2p_devices,transport='cuda_p2p',gather_fields=False) if parallel else None
+        return mw.Simulation.fdtd(scene,frequencies=(frequency,),config=mw.FDTDConfig(parallel=config,cuda_graph=False,
+            full_field_dft=False,run_time=mw.TimeConfig(time_steps=192),spectral_sampler=mw.fdtd.SpectralSampler(window='none')))
     start=time.perf_counter()
     expected=simulation(False).run()
     single_wall=time.perf_counter()-start
@@ -267,14 +272,14 @@ def test_actual_finite_copper_patch_circuit_radiation_and_resume_match_single_do
     checkpoint=simulation(True).prepare().run_until(91)
     checkpoint.save(tmp_path/'patch.pt')
     start=time.perf_counter()
-    resumed=simulation(True).prepare().run(resume_from=mw.FDTDResumeCheckpoint.load(tmp_path/'patch.pt',map_location='cpu'))
+    resumed=simulation(True).prepare().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(tmp_path/'patch.pt',map_location='cpu'))
     resume_wall=time.perf_counter()-start
     _compare_surface(resumed,expected,name='radiation')
     for result in (actual,resumed):
         torch.testing.assert_close(result.port('feed').voltage,expected.port('feed').voltage,rtol=5e-5,atol=1e-10)
         torch.testing.assert_close(result.port('feed').current,expected.port('feed').current,rtol=5e-5,atol=1e-10)
-        for name,loss in expected.conductor_losses.items():
-            torch.testing.assert_close(result.conductor_losses[name]['surface_power'],loss['surface_power'],rtol=5e-4,atol=1e-16)
+        for name,loss in mw.rf.conductor_losses(expected).items():
+            torch.testing.assert_close(mw.rf.conductor_losses(result)[name]['surface_power'],loss['surface_power'],rtol=5e-4,atol=1e-16)
     def stats(result,wall):
         parallel=getattr(result.solver,'parallel_stats',{})
         return dict(wall_including_prepare_s=wall,solve_loop_s=float(result.solver.last_solve_elapsed_s),

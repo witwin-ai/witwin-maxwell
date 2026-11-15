@@ -10,11 +10,11 @@ from tests.core.scene.fp64_public_scene import scene as fixed_scene
 def leaf(value=2.):return torch.tensor(value,dtype=torch.float64,requires_grad=True)
 
 
-def simulation(value,**kwargs):
-    options=dict(frequency=3e9,run_time=mw.TimeConfig(dt=5e-12,time_steps=96),cuda_graph=False,
-        excitations=mw.PortExcitation('feed',source_time=mw.CW(3e9)),full_field_dft=True)
+def simulation(value,*,frequencies=3e9,excitations=None,**kwargs):
+    options=dict(run_time=mw.TimeConfig(dt=5e-12,time_steps=96),cuda_graph=False,full_field_dft=True)
     options.update(kwargs)
-    return mw.Simulation.fdtd(value,**options)
+    excitations=excitations or mw.rf.PortExcitation('feed',source_time=mw.CW(3e9))
+    return mw.Simulation.fdtd(value,frequencies=frequencies,excitations=excitations,config=mw.FDTDConfig(**options))
 
 
 @pytest.mark.parametrize('kind',('epsilon','sigma','shared','zero_vjp','copper'))
@@ -22,7 +22,7 @@ def test_actual_public_constructor_admits_registered_material_dependencies(kind)
     theta=leaf()
     if kind=='copper':
         value=fixed_scene();old=value.structures[1]
-        value=value.clone(structures=(value.structures[0],replace(old,material=mw.CopperFoil(thickness=theta.exp()*1e-7,conductivity=theta.exp()*1e6,frequency_range=(2e9,4e9),mode_count=16))))
+        value=value.updated(structures=(value.structures[0],replace(old,material=mw.media.CopperFoil(thickness=theta.exp()*1e-7,conductivity=theta.exp()*1e6,frequency_range=(2e9,4e9),mode_count=16))))
     else:
         material=mw.Material(eps_r=theta.exp() if kind in ('epsilon','shared') else 2.,sigma_e=theta.square() if kind in ('sigma','shared') else theta*0 if kind=='zero_vjp' else 0.)
         value=fixed_scene(material=material)
@@ -52,15 +52,15 @@ def test_core_preserved_nested_geometry_dependency_is_rejected(representation):
     value=fixed_scene(material=mw.Material(eps_r=theta.exp()))
     structure=replace(value.structures[0],geometry=mw.Box(position=position,size=(.04,.02,.04)))
     with pytest.raises(NotImplementedError,match='Unregistered'):
-        simulation(value.clone(structures=(structure,value.structures[1])))
+        simulation(value.updated(structures=(structure,value.structures[1])))
 
 
 @pytest.mark.parametrize('role',('rf_amplitude','rf_impedance','time_step'))
 def test_shared_electrical_leaf_forbidden_fixed_input_use(role):
     theta=leaf();value=fixed_scene(material=mw.Material(eps_r=theta.exp()))
     options={}
-    if role=='rf_amplitude':options['excitations']=mw.PortExcitation('feed',amplitude=theta)
-    elif role=='rf_impedance':options['excitations']=mw.PortExcitation('feed',source_impedance=theta*50)
+    if role=='rf_amplitude':options['excitations']=mw.rf.PortExcitation('feed',amplitude=theta)
+    elif role=='rf_impedance':options['excitations']=mw.rf.PortExcitation('feed',source_impedance=theta*50)
     with pytest.raises(NotImplementedError,match='Unregistered|fixed'):
         if role=='time_step':options['run_time']=mw.TimeConfig(dt=theta*1e-12,time_steps=96)
         simulation(value,**options)
@@ -78,7 +78,7 @@ def test_complex_latent_leaf_is_not_misclassified_real_electric_parameter():
         simulation(fixed_scene(material=mw.Material(eps_r=theta.real)))
 
 
-@pytest.mark.parametrize('configuration',(None,mw.TimeConfig(dt=5e-12),mw.TimeConfig(time_steps=96)))
+@pytest.mark.parametrize('configuration',(mw.TimeConfig.auto(),mw.TimeConfig(dt=5e-12),mw.TimeConfig(time_steps=96)))
 def test_adaptive_time_problem_is_rejected(configuration):
     with pytest.raises(NotImplementedError,match='explicit fixed'):
         simulation(fixed_scene(material=mw.Material(eps_r=leaf())),run_time=configuration)
@@ -86,7 +86,7 @@ def test_adaptive_time_problem_is_rejected(configuration):
 
 def test_auto_grid_is_not_silently_differentiated():
     with pytest.raises(NotImplementedError,match='fixed grid'):
-        simulation(fixed_scene(material=mw.Material(eps_r=leaf())).clone(grid=mw.GridSpec.auto(wavelength=.1)))
+        simulation(fixed_scene(material=mw.Material(eps_r=leaf())).updated(grid=mw.GridSpec.auto(wavelength=.1)))
 
 
 @pytest.mark.parametrize('slot',('phase','amplitude','frequency'))
@@ -101,7 +101,7 @@ def test_scalar_parameter_view_ancestry_is_structural():
 
 
 def test_detached_mapped_legacy_default_does_not_need_explicit_time():
-    model=mw.Simulation.fdtd(fixed_scene(),frequency=3e9)
+    model=mw.Simulation.fdtd(fixed_scene(),frequencies=3e9)
     assert not model.has_trainable_parameters and model._mapped_material_admission is None
 
 
@@ -118,7 +118,7 @@ class MaterialModule(mw.SceneModule):
         sigma=self.latent.square() if self.kind=='buffer' else 0.
         value=fixed_scene(material=mw.Material(eps_r=self.epsilon.exp(),sigma_e=sigma))
         if self.kind=='disabled':
-            value=value.clone(structures=(replace(value.structures[0],enabled=False),value.structures[1]))
+            value=value.updated(structures=(replace(value.structures[0],enabled=False),value.structures[1]))
         return value
 
 
@@ -161,26 +161,32 @@ def test_module_to_scene_refresh_rechecks_new_semantic_input_dependencies():
 
 def test_multifrequency_adjoint_has_no_admission_from_single_frequency_proof():
     with pytest.raises(NotImplementedError,match='one fixed frequency'):
-        simulation(fixed_scene(material=mw.Material(eps_r=leaf())),frequency=None,frequencies=(3e9,3.1e9))
+        simulation(fixed_scene(material=mw.Material(eps_r=leaf())),frequencies=(3e9,3.1e9))
 
 
 def test_fixed_terminal_feed_remains_an_explicit_unqualified_combination():
-    port=mw.TerminalPort('feed',positive_terminal=mw.TerminalRef('positive'),negative_terminal=mw.TerminalRef('negative'),
+    port=mw.rf.TerminalPort('feed',positive_terminal=mw.rf.TerminalRef('positive'),negative_terminal=mw.rf.TerminalRef('negative'),
         integration_path=mw.AxisPath('z'),reference_plane=0.)
     value=fixed_scene(material=mw.Material(eps_r=leaf()))
     terminals=tuple(mw.Structure(name=name,geometry=mw.Box(position=( -.015,-.015,z),size=(.01,.01,.005)),
         material=mw.Material.pec(name=name)) for name,z in (('positive',.0125),('negative',-.0125)))
-    value=value.clone(structures=(*value.structures,*terminals),ports=(port,))
+    value=value.updated(structures=(*value.structures,*terminals), ports=(port,))
     with pytest.raises(NotImplementedError,match='LumpedPort Norton'):
         simulation(value)
 
 
 def test_static_phase_screen_cannot_be_misclassified_as_bulk_electrical_material():
     from witwin.core import PhaseScreen
+    from witwin.maxwell.fdtd.adjoint.mapped_admission import assess_mapped_materials
     value=fixed_scene(material=mw.Material(eps_r=leaf()));screen=PhaseScreen(height=torch.zeros(2,2),height_scale_m=1e-6)
-    value=value.clone(structures=(replace(value.structures[0],phase_screen=screen),value.structures[1]))
-    with pytest.raises(NotImplementedError,match='phase-screen'):
+    model=simulation(value)
+    value=value.updated(structures=(replace(value.structures[0],phase_screen=screen),value.structures[1]))
+    with pytest.raises(NotImplementedError,match='optical phase_screen or uv/face_uv assignment'):
         simulation(value)
+    # The mapped admission keeps its own refusal for scenes that reach it directly.
+    with pytest.raises(NotImplementedError,match='phase-screen'):
+        assess_mapped_materials(value,module=None,config=model.config,excitations=model.excitations,
+                                port_sweep=None,frequencies=model.frequencies)
 
 
 def test_core_assignment_switch_cannot_share_material_leaf_and_disappear():
@@ -192,4 +198,4 @@ def test_core_assignment_switch_cannot_share_material_leaf_and_disappear():
 def test_subpixel_sampling_cannot_share_material_leaf_and_disappear():
     theta=leaf()
     with pytest.raises(NotImplementedError,match='fixed'):
-        fixed_scene(material=mw.Material(eps_r=theta.exp())).clone(subpixel_samples=mw.SubpixelSpec(samples=(theta,2,2), averaging="arithmetic"))
+        fixed_scene(material=mw.Material(eps_r=theta.exp())).updated(subpixel=mw.SubpixelSpec(samples=(theta,2,2), averaging="arithmetic"))

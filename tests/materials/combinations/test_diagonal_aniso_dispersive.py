@@ -29,10 +29,10 @@ _AXIS_INDEX = {"Ex": 0, "Ey": 1, "Ez": 2}
 def _advance_solver_one_step(solver, *, time_value):
     """One full Yee step matching the solver's native update ordering."""
     solver._advance_magnetic_dispersive_state()
-    solver._update_magnetic_fields(solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
+    solver._core_runtime.magnetic()
     solver._apply_magnetic_dispersive_corrections()
     solver._advance_dispersive_state()
-    solver._update_electric_fields(solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+    solver._core_runtime.electric()
     # Mirror production stepping: additive electric current is injected at (n + 1/2) dt.
     solver.add_source(time_value=injection_time("electric_current", time_value, solver.dt))
     solver._apply_dispersive_corrections()
@@ -59,7 +59,6 @@ def _measure_axis_susceptibility(component):
         domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(0.02),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
         structures=[
             mw.Structure(
                 geometry=Box(position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 1.0)),
@@ -78,8 +77,10 @@ def _measure_axis_susceptibility(component):
     solver = mw.Simulation.fdtd(
         scene,
         frequencies=[_FREQUENCY],
-        run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=24),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=24),
+            full_field_dft=False,
+        ),
     ).prepare().solver
 
     entry = solver._dispersive_templates[component]["lorentz"][0]
@@ -145,34 +146,35 @@ def _plane_field_mean(data):
 
 def _plane_wave_transmission(polarization, field, *, material):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
-        grid=mw.GridSpec.uniform(0.04),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
+                grid=mw.GridSpec.uniform(0.04),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
                 polarization=polarization,
                 source_time=mw.CW(frequency=_FREQUENCY, amplitude=80.0),
                 name="pw",
             )
-        ],
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=Box(position=(0.1, 0.0, 0.0), size=(0.30, 0.8, 0.8)),
-            material=material,
-        )
-    )
-    scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.34, fields=(field,)))
+            ],
+                structures=(
+            mw.Structure(
+                geometry=Box(position=(0.1, 0.0, 0.0), size=(0.30, 0.8, 0.8)),
+                material=material,
+            ),
+            ),
+                monitors=(mw.PlaneMonitor("post", axis="x", position=0.34, fields=(field,)),),
+            )
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_FREQUENCY],
-        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
-    return _plane_field_mean(result.monitor("post")["components"][field])
+    return _plane_field_mean(result.raw_monitor("post")["components"][field])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")

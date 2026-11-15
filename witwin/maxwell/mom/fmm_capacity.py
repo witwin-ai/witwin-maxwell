@@ -5,9 +5,10 @@ from .direct_capacity import storage_bytes
 from .fmm_storage import m2l_storage_bytes, shared_displacement_catalog, signed_axis_displacement_catalog, signed_axis_catalog_rule, radial_series_pair_catalog, radial_series_pair_storage_bytes, radial_series_catalog_rule
 from .fmm_shift import shift_storage_bytes
 from .packed_near import bounded_original_near_cache_plan
+from ..errors import CapacityError
 
 
-class MultipoleCapacityError(MemoryError):
+class MultipoleCapacityError(CapacityError):
     def __init__(self, receipt):
         super().__init__('Multipole action retained capacity exceeded before numerical expansion setup')
         self.receipt = receipt

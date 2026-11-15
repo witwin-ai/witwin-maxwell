@@ -14,12 +14,12 @@ def test_resume_disk_round_trip_keeps_every_physics_state_family(tmp_path, famil
     values["field_names"] = ("Ex",)
     values[family] = ("auxiliary",)
     schema = FDTDCheckpointSchema(version=2, **values)
-    checkpoint = mw.FDTDResumeCheckpoint(step=3, total_steps=8, dt=1e-12,
+    checkpoint = mw.fdtd.FDTDResumeCheckpoint(step=3, total_steps=8, dt=1e-12,
         physics=FDTDCheckpointState(3, schema, {"Ex": torch.tensor([1.]), "auxiliary": torch.tensor([2.])}),
         signature={}, auxiliary={})
     path = tmp_path / "state.pt"
     checkpoint.save(path)
-    restored = mw.FDTDResumeCheckpoint.load(path)
+    restored = mw.fdtd.FDTDResumeCheckpoint.load(path)
     assert restored.physics.schema == schema
     for name, value in checkpoint.physics.tensors.items():
         assert torch.equal(restored.physics.tensors[name], value)
@@ -33,10 +33,14 @@ def _solver(kind, *, mur=False):
         "magnetic": lambda: mw.Material(mu_lorentz_poles=(mw.LorentzPole(delta_eps=3., resonance_frequency=2e9, gamma=1e8),)),
     }
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.1, 0.1),) * 3), grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.faces(default="mur") if mur else mw.BoundarySpec.pec(), device="cuda")
-    scene.add_structure(mw.Structure(geometry=mw.Box(position=(0., 0., 0.), size=(0.2,) * 3), material=materials[kind]()))
-    scene.add_source(mw.PointDipole(position=(0., 0., 0.), polarization="Ez", source_time=mw.CW(frequency=1e9)))
-    return mw.Simulation.fdtd(scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=32)).prepare().solver
+                boundary=mw.BoundarySpec.faces(default="mur") if mur else mw.BoundarySpec.pec(),
+                     structures=(
+                         mw.Structure(geometry=mw.Box(position=(0., 0., 0.), size=(0.2,) * 3), material=materials[kind]()),
+                     ),
+                     sources=(
+                         mw.PointDipole(position=(0., 0., 0.), polarization="Ez", source_time=mw.CW(frequency=1e9)),
+                     ))
+    return mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=32))).prepare().solver
 
 
 def _physical_tensors(solver):
@@ -101,17 +105,19 @@ def test_tail_capture_preserves_nonzero_mur_history():
 def test_dispersive_electrostatic_initial_condition_graph_matches_eager():
     from tests.electrostatic.test_initial_condition import _uniform_dc_result, BOUNDS, H
 
-    initial = mw.ElectrostaticInitialCondition.from_result(_uniform_dc_result(device="cuda"))
+    initial = mw.electrostatic.ElectrostaticInitialCondition.from_result(_uniform_dc_result(device="cuda"))
     results = []
     for graph in (False, True):
         scene = mw.Scene(domain=mw.Domain(bounds=BOUNDS), grid=mw.GridSpec.uniform(H),
-            boundary=mw.BoundarySpec.periodic(), device="cuda")
-        scene.add_structure(mw.Structure(geometry=mw.Box(position=(0.25,) * 3, size=(1.,) * 3),
-            material=mw.Material.debye(eps_inf=2., delta_eps=3., tau=2e-10)))
-        result = mw.Simulation.fdtd(scene, frequency=1e9, initial_condition=initial,
-            run_time=mw.TimeConfig(time_steps=1200), full_field_dft=True, cuda_graph=graph).run()
+                    boundary=mw.BoundarySpec.periodic(),
+                         structures=(
+                             mw.Structure(geometry=mw.Box(position=(0.25,) * 3, size=(1.,) * 3),
+                                 material=mw.Material.debye(eps_inf=2., delta_eps=3., tau=2e-10)),
+                         ))
+        result = mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(initial_condition=initial,
+            run_time=mw.TimeConfig(time_steps=1200), full_field_dft=True, cuda_graph=graph)).run()
         assert result.stats()["cuda_graph_active"] is graph
         results.append(result)
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         assert torch.equal(getattr(results[0].solver, name), getattr(results[1].solver, name)), name
-    assert torch.equal(results[0].field("Ez"), results[1].field("Ez"))
+    assert torch.equal(results[0].field("Ez").isel(f=0).values, results[1].field("Ez").isel(f=0).values)

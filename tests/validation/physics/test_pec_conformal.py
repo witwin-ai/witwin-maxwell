@@ -50,38 +50,37 @@ def _peak_frequency(signal, dt):
 def _cavity_resonance(wall_x, pec_mode, *, grid=0.01, length=0.6, steps=12000):
     domain = mw.Domain(bounds=((0.0, length), (0.0, 0.05), (0.0, 0.05)))
     scene = mw.Scene(
-        domain=domain,
-        grid=mw.GridSpec.uniform(grid),
-        boundary=mw.BoundarySpec.periodic().with_faces(x_low="pec", x_high="pec"),
-        device="cuda",
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="wall",
-            geometry=mw.Box(
-                position=((wall_x + length) / 2.0, 0.025, 0.025),
-                size=(length - wall_x, 0.2, 0.2),
+                domain=domain,
+                grid=mw.GridSpec.uniform(grid),
+                boundary=mw.BoundarySpec.periodic().with_faces(x_low="pec", x_high="pec"),
+                subpixel=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
+                structures=(
+            mw.Structure(
+                name="wall",
+                geometry=mw.Box(
+                    position=((wall_x + length) / 2.0, 0.025, 0.025),
+                    size=(length - wall_x, 0.2, 0.2),
+                ),
+                material=mw.Material.pec(),
             ),
-            material=mw.Material.pec(),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(wall_x * 0.5, 0.025, 0.025),
-            width=grid * 2,
-            polarization=(0, 0, 1),
-            source_time=mw.RickerWavelet(frequency=5e8, amplitude=1.0),
-            name="src",
-        )
-    )
-    scene.add_monitor(
-        mw.FieldTimeMonitor(position=(wall_x * 0.27, 0.025, 0.025), name="probe", components=("Ez",))
-    )
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(wall_x * 0.5, 0.025, 0.025),
+                width=grid * 2,
+                polarization=(0, 0, 1),
+                source_time=mw.sources.RickerWavelet(frequency=5e8, amplitude=1.0),
+                name="src",
+            ),
+            ),
+                monitors=(
+            mw.monitors.FieldTimeMonitor(position=(wall_x * 0.27, 0.025, 0.025), name="probe", components=("Ez",)),
+            ),
+            )
     result = mw.Simulation.fdtd(
-        scene, frequencies=(5e8,), run_time=mw.TimeConfig(time_steps=steps)
+        scene, frequencies=(5e8,), config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps))
     ).run()
-    signal = result.monitor("probe")["data"].detach().cpu().numpy().reshape(-1)
+    signal = result.monitor("probe").sel(component="Ez").values.detach().cpu().numpy().reshape(-1)
     return _peak_frequency(signal, result.solver.dt)
 
 
@@ -100,38 +99,35 @@ def test_conformal_pec_reproduces_staircase_for_a_grid_parallel_wall():
 def _slab_probe(pec_mode, *, dx=0.02, steps=1500):
     """Ex(t) just outside a node-aligned PEC slab hit by a plane wave."""
     half = 0.3
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pml(num_layers=8).with_faces(
-            x_low="periodic", x_high="periodic", y_low="periodic", y_high="periodic"
-        ),
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
-        device="cuda",
-    )
     # The slab faces at +-0.06 are exact multiples of the 20 mm spacing, so the
     # staircase representation of this geometry is exact and conformal must match it.
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(4.0, 4.0, 0.12)),
-            material=mw.Material.pec(),
-            name="slab",
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0, 0, 1),
-            polarization="Ex",
-            source_time=mw.GaussianPulse(frequency=2.0e9, fwidth=0.7e9),
-        )
-    )
-    scene.add_monitor(
-        mw.FieldTimeMonitor("probe", components=("Ex",), position=(0.0, 0.0, -0.16))
-    )
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.pml(num_layers=8).with_faces(
+            x_low="periodic", x_high="periodic", y_low="periodic", y_high="periodic"
+            ),
+                subpixel=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(4.0, 4.0, 0.12)),
+                material=mw.Material.pec(),
+                name="slab",
+            ),
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=(0, 0, 1),
+                polarization="Ex",
+                source_time=mw.GaussianPulse(frequency=2.0e9, fwidth=0.7e9),
+            ),
+            ),
+                monitors=(mw.monitors.FieldTimeMonitor("probe", components=("Ex",), position=(0.0, 0.0, -0.16)),),
+            )
     result = mw.Simulation.fdtd(
-        scene, absorber="cpml", frequencies=(2.0e9,), run_time=mw.TimeConfig(time_steps=steps)
+        scene, frequencies=(2.0e9,), config=mw.FDTDConfig(absorber="cpml", run_time=mw.TimeConfig(time_steps=steps))
     ).run()
-    return result.monitor("probe")["data"].detach().cpu().numpy().reshape(-1)
+    return result.monitor("probe").sel(component="Ex").values.detach().cpu().numpy().reshape(-1)
 
 
 def test_axis_aligned_pec_slab_reflection_is_identical_under_conformal():
@@ -143,34 +139,31 @@ def test_axis_aligned_pec_slab_reflection_is_identical_under_conformal():
 
 def _cavity_energy(pec_mode, steps, *, dx=0.02, half=0.2):
     """Total EM energy left in a closed PEC cavity holding a PEC sphere."""
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pec(),
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
-        device="cuda",
-    )
     # Off-centre so the sphere surface cuts edges asymmetrically in all three axes.
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Sphere(position=(0.01, 0.0, -0.013), radius=0.083),
-            material=mw.Material.pec(),
-            name="sphere",
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.12, 0.09, 0.11),
-            polarization=(0, 0, 1),
-            source_time=mw.RickerWavelet(frequency=4.0e9, amplitude=1.0),
-            name="src",
-        )
-    )
-    scene.add_monitor(
-        mw.FieldTimeMonitor("probe", components=("Ez",), position=(-0.1, -0.08, 0.06))
-    )
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-half, half), (-half, half), (-half, half))),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.pec(),
+                subpixel=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
+                structures=(
+            mw.Structure(
+                geometry=mw.Sphere(position=(0.01, 0.0, -0.013), radius=0.083),
+                material=mw.Material.pec(),
+                name="sphere",
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.12, 0.09, 0.11),
+                polarization=(0, 0, 1),
+                source_time=mw.sources.RickerWavelet(frequency=4.0e9, amplitude=1.0),
+                name="src",
+            ),
+            ),
+                monitors=(mw.monitors.FieldTimeMonitor("probe", components=("Ez",), position=(-0.1, -0.08, 0.06)),),
+            )
     prepared = mw.Simulation.fdtd(
-        scene, frequencies=(4.0e9,), run_time=mw.TimeConfig(time_steps=steps)
+        scene, frequencies=(4.0e9,), config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps))
     ).prepare()
     prepared.run()
     solver = prepared.solver

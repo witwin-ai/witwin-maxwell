@@ -6,6 +6,8 @@ from .quadrature import triangle_rule
 from .volume_mesh import BoundVolumeRegion
 from .vie_operator import cell_green_potentials, cell_current_field_blocks
 from .linalg import apply_test_riesz_inverse
+from ..errors import ConvergenceError
+from ..errors import UnsupportedFeatureError
 
 
 
@@ -181,7 +183,7 @@ def build_volume_source_matrix(operator, bindings, *, order=3, inner_order=6, qu
         'matrix_storage_bytes':matrix.numel()*matrix.element_size()}
 
 
-class VolumeMatrixConvergenceError(RuntimeError):
+class VolumeMatrixConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         super().__init__(f"Volume source matrix did not converge: {receipt['failure_reason']}")
         self.receipt = receipt
@@ -270,7 +272,9 @@ def prepare_cell_field_response(operator,bindings,*,query_config=None,stopping=N
     from ..constants import EPSILON_0,MU_0
     stopping = StoppingRule(method='direct') if stopping is None else stopping
     if not isinstance(stopping,StoppingRule) or stopping.method != 'direct' or stopping.direct_storage != 'resident':
-        raise NotImplementedError('Harmonic response preparation requires resident direct linear solves')
+        raise UnsupportedFeatureError('Harmonic response preparation requires resident direct linear solves',
+                                      feature="guard:51887ecc", method="mom")
+    stopping = stopping.resolved()
     bindings = tuple(bindings)
     if not bindings:
         raise ValueError('Cell response preparation requires at least one volume region')

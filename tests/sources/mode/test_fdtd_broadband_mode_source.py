@@ -52,37 +52,36 @@ _STEPS = 2000
 
 
 def _guide_scene(source_time):
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.4, 0.4), (-0.4, 0.4))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-    )
     # Strongly guiding core (n_eff ~ 3.3) spanning the full propagation axis: the
     # fundamental profile is nearly frequency independent across the narrow band, so the
     # single center-frequency injection profile reproduces the per-frequency guided mode.
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.6, 0.16, 0.16)),
-            material=mw.Material(eps_r=12.0),
-            name='core',
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(_SRC_X, 0.0, 0.0),
-            size=(0.0, 0.4, 0.4),
-            polarization="Ez",
-            source_time=source_time,
-            name="mode0",
-        )
-    )
-    scene.add_monitor(mw.PlaneMonitor("plane", axis="x", position=_PLANE_X, fields=("Ez",)))
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.4, 0.4), (-0.4, 0.4))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.6, 0.16, 0.16)),
+                material=mw.Material(eps_r=12.0),
+                name='core',
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(_SRC_X, 0.0, 0.0),
+                size=(0.0, 0.4, 0.4),
+                polarization="Ez",
+                source_time=source_time,
+                name="mode0",
+            ),
+            ),
+                monitors=(mw.PlaneMonitor("plane", axis="x", position=_PLANE_X, fields=("Ez",)),),
+            )
     return scene
 
 
 def _plane(result, frequency):
-    payload = result.monitor("plane", frequency=frequency)["Ez"]
+    payload = result.monitor("plane", frequency=frequency).sel(component="Ez").values
     return torch.as_tensor(payload).detach().cpu().to(torch.complex128).reshape(-1)
 
 
@@ -96,8 +95,10 @@ def _run(source_time, frequencies):
     return mw.Simulation.fdtd(
         _guide_scene(source_time),
         frequencies=list(frequencies),
-        run_time=mw.TimeConfig(time_steps=_STEPS),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=_STEPS),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+        ),
     ).run()
 
 
@@ -105,7 +106,7 @@ def _run(source_time, frequencies):
 
 
 def test_callable_custom_source_time_mode_source_is_rejected():
-    scene = _guide_scene(mw.CustomSourceTime(lambda t: 0.0, characteristic_frequency=_CENTER))
+    scene = _guide_scene(mw.sources.CustomSourceTime(lambda t: 0.0, characteristic_frequency=_CENTER))
     with pytest.raises(ValueError, match="Callable CustomSourceTime"):
         mw.Simulation.fdtd(scene, frequencies=[_CENTER]).prepare()
 

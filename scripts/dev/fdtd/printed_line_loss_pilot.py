@@ -29,11 +29,11 @@ def prepare_pilot(kind, *, separation=.12, metal='copper', sigma=.01):
     args = SimpleNamespace(kind=kind, dx=.0025, longitudinal_dl=.0025,
         padding=.02 if kind == 'microstrip' else .08, separation=separation,
         axial_half_length=.14, transverse_refinement_radius=.02, sigma=sigma, metal=metal)
-    scene = configuration(args, 'cpu')
+    scene = configuration(args)
     ports, groups = physical_sources(scene, kind, args.longitudinal_dl)
-    scene = scene.clone(ports=ports)
-    prepared = prepare_scene(scene)
-    compiled = [compile_port_geometry(prepared, port, device='cpu') for port in prepared.ports]
+    scene = scene.updated(ports=ports)
+    prepared = prepare_scene(scene, device='cpu')
+    compiled = [compile_port_geometry(prepared, port, device='cpu') for port in prepared.scene.ports]
     bounds = ((-.015, .015), *tuple(scene.domain.bounds[axis] for axis in (1, 2)))
     frequencies = tuple(float(value) for value in torch.linspace(.8e9, 1.2e9, 5, dtype=torch.float64))
     monitors, schema = regional_monitors(scene, bounds, frequencies, observation='planes')

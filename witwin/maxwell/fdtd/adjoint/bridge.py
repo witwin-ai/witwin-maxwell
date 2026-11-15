@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-import time
-from dataclasses import replace
 from types import SimpleNamespace
 
 import torch
 
 from ...adjoint_inputs import (
     ancestry_safe_trainable_tensors as _ancestry_safe_trainable_tensors,
+    material_channel_message as _material_channel_message,
     material_dependent_inputs as _material_dependent_inputs,
+    require_claimed_trainable_inputs as _require_claimed_trainable_inputs,
+    require_material_gradient_channels as _require_material_gradient_channels,
     rf_dependent_inputs as _rf_dependent_inputs,
     scene_trainable_material_tensors as _scene_trainable_material_tensors,
     scene_trainable_rf_tensors as _scene_trainable_rf_tensors,
     scene_trainable_wire_tensors as _scene_trainable_wire_tensors,
+    ungradable_material_channels as _ungradable_material_channels,
     unique_trainable_tensors as _unique_trainable_tensors,
     wire_dependent_inputs as _wire_dependent_inputs,
 )
@@ -22,33 +24,12 @@ from ...result import Result
 from ...scene import prepare_scene
 from ...sources import ModeSource
 from ..boundary import BOUNDARY_PERIODIC, BOUNDARY_BLOCH, BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PML, has_complex_fields
-from ..excitation.temporal import injection_time
 from .profiler import _BackwardProfiler, _clone_backward_profile, _empty_backward_profile
-from ..excitation import (
-    advance_tfsf_auxiliary_electric,
-    advance_tfsf_auxiliary_magnetic,
-    apply_tfsf_e_correction,
-    apply_tfsf_h_correction,
-)
-from ..runtime.stepping import apply_full_aniso_corrections, apply_mur_boundaries, update_electric_fields_bloch_cpml
 from ..boundary.mur import pullback_mur_boundaries
 from ..ports import (
-    accumulate_port_observers,
-    apply_port_runtimes,
-    finalize_port_data,
-    prepare_port_spectral_accumulators,
     pullback_port_runtimes,
 )
-from ..circuits import finalize_circuit_data, prepare_circuit_time_series
 from .circuits import pullback_circuit_runtimes
-from ..wire import (
-    accumulate_wire_monitors,
-    complete_wire_monitor_normalization,
-    deposit_wire_current,
-    finalize_wire_data,
-    prepare_wire_monitors,
-    sample_and_update_wire,
-)
 from .seeds import (
     _apply_seed_runtime,
     _build_output_seeds,
@@ -56,16 +37,15 @@ from .seeds import (
     _port_sample_adjoints,
     _schedule_to_tensor_pack,
 )
-from ..checkpoint import capture_checkpoint_state
 from ..material_pullback import pullback_material_input_gradients
 from ..networks import (
-    apply_network_runtimes,
-    finalize_embedded_networks,
     pullback_network_runtimes,
+    rebind_embedded_networks,
 )
 from .dispatch import reverse_step
 from .copper_foil import COPPER_COEFFICIENTS
 from .reverse_common import _ReverseScratch
+from ...errors import UnsupportedFeatureError
 
 
 def _runtime():
@@ -116,6 +96,9 @@ def _structure_has_trainable_geometry(structure) -> bool:
 
 
 from ..runtime.timeplan import sources_share_spectrum as _sources_share_spectrum
+from ...compiler.materials import compile_materials
+from ...compiler.networks import compile_networks
+from ...compiler.thin_wire import compile_thin_wires
 
 
 def _require_fixed_trace_poles(scene):
@@ -131,7 +114,7 @@ def _require_fixed_trace_poles(scene):
 
 def _unsupported_adjoint_medium(scene, *, trainable_geometry_indices=()):
     trainable_geometry_indices = frozenset(trainable_geometry_indices)
-    for structure_index, structure in enumerate(getattr(scene, "structures", ())):
+    for structure_index, structure in enumerate(scene.structures):
         material = getattr(structure, "material", None)
         if material is None:
             continue
@@ -141,13 +124,6 @@ def _unsupported_adjoint_medium(scene, *, trainable_geometry_indices=()):
             structure_index in trainable_geometry_indices or _structure_has_trainable_geometry(structure)
         ):
             return "FDTD CopperFoil gradients require fixed planar geometry and fixed modal topology."
-        if getattr(material, "is_pmc", False) and (
-            structure_index in trainable_geometry_indices or _structure_has_trainable_geometry(structure)
-        ):
-            return (
-                "FDTD adjoint does not support trainable PMC geometry: the PMC magnetic-edge "
-                "short is a fixed staircase mask with no occupancy gradient channel."
-            )
         if getattr(material, "is_medium2d", False):
             return "FDTD adjoint does not support 2D sheet (Medium2D) media yet."
         if getattr(material, "is_lossy_metal", False) or getattr(
@@ -191,12 +167,13 @@ def _unsupported_adjoint_medium(scene, *, trainable_geometry_indices=()):
         if getattr(material, "is_anisotropic", False):
             # Diagonal epsilon anisotropy maps onto the per-axis eps_Ex/Ey/Ez
             # coefficient layout, and full 3x3 epsilon is now differentiable too:
-            # the reverse step replicates the off-diagonal curl(H) coupling and
-            # routes to the torch-VJP backend, so a design differentiated through
-            # a full-anisotropic scene gets correct gradients. A magnetic tensor
-            # still has no reverse gradient channel, and a trainable geometry on
-            # a full-anisotropic structure would drop the off-diagonal coefficient
-            # sensitivity, so both stay guarded with a physical reason.
+            # the native reverse (``native_full_aniso``) folds the transposed
+            # off-diagonal curl(H) coupling into the H adjoint, so a design
+            # differentiated through a full-anisotropic scene gets correct
+            # gradients. A magnetic tensor still has no reverse gradient channel,
+            # and a trainable geometry on a full-anisotropic structure would drop
+            # the off-diagonal coefficient sensitivity, so both stay guarded with
+            # a physical reason.
             if getattr(material, "mu_tensor", None) is not None:
                 return (
                     "FDTD adjoint does not support anisotropic magnetic (mu_tensor) media: "
@@ -272,7 +249,8 @@ def _unsupported_adjoint_medium(scene, *, trainable_geometry_indices=()):
             )
         if getattr(material, "is_modulated", False):
             return "FDTD adjoint does not support time-modulated media yet."
-    return None
+    channels = _ungradable_material_channels(scene, trainable_geometry_indices=trainable_geometry_indices)
+    return _material_channel_message(channels) if channels else None
 
 
 def _scene_rf_semantic_values(scene, simulation=None):
@@ -373,8 +351,8 @@ def _mode_source_replay_error(solver, scene, inputs):
     if not mismatches:
         return
 
-    prepared = prepare_scene(scene, material_dtype=solver.scene._material_dtype)
-    context = SimpleNamespace(scene=prepared, _compiled_material_model=prepared.compile_materials())
+    prepared = prepare_scene(scene, device=solver.scene.device, material_dtype=solver.scene._material_dtype)
+    context = SimpleNamespace(scene=prepared, _compiled_material_model=compile_materials(prepared))
     try:
         for source, axis, tangents, plane, replay_kind in mismatches:
             bounds, _ = _resolve_tangential_bounds(prepared, source, axis_coords_by_axis={
@@ -408,7 +386,7 @@ def _mode_source_replay_error(solver, scene, inputs):
 def _validate_mode_source_replay(solver, scene, inputs):
     error = _mode_source_replay_error(solver, scene, inputs)
     if error is not None:
-        raise NotImplementedError(error)
+        raise UnsupportedFeatureError(error, feature="guard:2892c16a", method="fdtd")
     if getattr(solver, "_source_vector_materials", {}):
         solver._source_vector_inputs = inputs
 
@@ -433,10 +411,12 @@ class _FDTDGradientBridge:
             + self.excitation_inputs
             + self.source_scale_inputs
         )
+        self._require_differentiable_inputs()
         if not self.trainable_inputs:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "FDTD backward requires an input that contributes to prepared-scene material tensors, "
-                "series R/L/C values, a thin-wire coefficient, or a port amplitude."
+                "series R/L/C values, a thin-wire coefficient, or a port amplitude.",
+                feature="guard:19c5bde0", method="fdtd"
             )
         if any(not tensor.is_cuda for tensor in self.trainable_inputs):
             raise RuntimeError("Differentiable FDTD RF and material inputs must be CUDA tensors.")
@@ -474,7 +454,7 @@ class _FDTDGradientBridge:
             self._mode_replay_cache = (key, error, getattr(solver, "_source_vector_materials", {}))
         error = self._mode_replay_cache[1]
         if error is not None:
-            raise NotImplementedError(error)
+            raise UnsupportedFeatureError(error, feature="guard:ca5c27d1", method="fdtd")
         # Backward cleanup drops the solver's references. Keep the accepted
         # graph with its verdict so another backward can rebuild torch profiles.
         if self._mode_replay_cache[2]:
@@ -487,6 +467,21 @@ class _FDTDGradientBridge:
         self.simulation._refresh_scene()
         return self.simulation.scene
 
+    def _require_differentiable_inputs(self):
+        """Refuse, by name, every trainable scene input this bridge cannot differentiate.
+
+        Inputs that move a channel without a pullback (permeability, magnetic
+        conductivity, PEC/PMC occupancy) and declared trainable tensors that reach
+        no bridge input would otherwise leave their gradient at ``None`` while the
+        remaining inputs back-propagate normally.
+        """
+        from ...simulation import _scene_trainable_census
+
+        with torch.enable_grad():
+            scene = self._material_graph_scene()
+            _require_material_gradient_channels(scene)
+            _require_claimed_trainable_inputs(scene, _scene_trainable_census(scene), self.trainable_inputs)
+
     def _candidate_material_inputs(self) -> tuple[torch.Tensor, ...]:
         if self.simulation.scene_module is not None:
             return tuple(parameter for parameter in self.simulation.scene_module.parameters() if parameter.requires_grad)
@@ -494,7 +489,8 @@ class _FDTDGradientBridge:
 
     def _resolve_material_inputs(self) -> tuple[torch.Tensor, ...]:
         scene = self._material_graph_scene()
-        return _material_dependent_inputs(scene, self._candidate_material_inputs())
+        return _material_dependent_inputs(scene, self._candidate_material_inputs(),
+                                          device=self.simulation.config.device)
 
     def _resolve_rf_scene_inputs(self) -> tuple[torch.Tensor, ...]:
         scene = self._material_graph_scene()
@@ -562,16 +558,15 @@ class _FDTDGradientBridge:
             )
         else:
             candidates = _scene_trainable_wire_tensors(self.base_scene)
-        return _wire_dependent_inputs(scene, candidates)
+        return _wire_dependent_inputs(scene, candidates, device=self.simulation.config.device)
 
     def _pullback_rf_inputs(self, base_inputs, semantic_grads):
         if not semantic_grads:
             return tuple(torch.zeros_like(tensor) for tensor in base_inputs)
         scene = self._material_graph_scene()
         values = _scene_rf_semantic_values(scene, self.simulation)
-        for compiled in scene.compile_networks(
+        for compiled in compile_networks(prepare_scene(scene, device=self._last_solver.device),
             dt=self._last_solver.dt,
-            device=self._last_solver.device,
         ):
             for name in ("A", "B", "C", "D"):
                 values[("network", compiled.name, name)] = getattr(
@@ -621,9 +616,9 @@ class _FDTDGradientBridge:
         ):
             return tuple(torch.zeros_like(tensor) for tensor in base_inputs)
         scene = self._material_graph_scene()
-        prepared_scene = prepare_scene(scene)
+        prepared_scene = prepare_scene(scene, device=solver.device)
         try:
-            network = prepared_scene.compile_thin_wires(device=solver.device)
+            network = compile_thin_wires(prepared_scene, device=solver.device)
             candidates = (
                 (network.inductance, grad_inductance),
                 (network.node_capacitance, grad_capacitance),
@@ -661,28 +656,31 @@ class _FDTDGradientBridge:
             getattr(solver, "_port_runtimes", ())
             or getattr(solver, "_lumped_element_runtimes", ())
         ):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Complex-field lumped FDTD runs support forward/checkpoint execution only; "
-                "the lumped adjoint/pullback is not supported in v1."
+                "the lumped adjoint/pullback is not supported in v1.",
+                feature="lumped_element", method="fdtd"
             )
         if getattr(solver, "_abc_higdon_state", ()):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "FDTD adjoint does not support second-order Mur faces or broadband (Higdon) "
                 "ModeABC planes: their multi-level plane histories have no discrete transpose. "
                 "First-order Mur, single-frequency ModeABC faces and InternalAbsorber planes "
-                "are differentiable."
+                "are differentiable.",
+                feature="boundary.mur", method="fdtd"
             )
         if getattr(solver, "complex_fields_enabled", False) and getattr(solver, "uses_cpml", False):
             from ..runtime.stepping import _bloch_cpml_multi_axis_layout
 
             if _bloch_cpml_multi_axis_layout(solver) is not None:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "FDTD adjoint supports mixed Bloch/CPML layouts with exactly one PML axis and two "
-                    "Bloch axes; the generalized layouts (several PML axes or a PEC axis) run forward only."
+                    "Bloch axes; the generalized layouts (several PML axes or a PEC axis) run forward only.",
+                    feature="boundary.bloch", method="fdtd"
                 )
-        for block in getattr(solver.scene, "networks", ()):
+        for block in getattr(solver.scene.scene, "networks", ()):
             if block.delay_seconds is not None:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Differentiable embedded-network FDTD does not support explicit "
                     "delay state: the bidirectional reference-plane ring couples "
                     "steps up to max_delay_steps apart (possibly across checkpoint "
@@ -690,7 +688,8 @@ class _FDTDGradientBridge:
                     "neither of which the segment-local network pullback can reverse "
                     "without a delay-aware reverse ring. Forward runs (including "
                     "checkpoint/resume, whose schema now carries the delay ring, "
-                    "filter, and cursor) remain fully supported."
+                    "filter, and cursor) remain fully supported.",
+                    feature="network", method="fdtd"
                 )
             model = block.model
             if isinstance(model, RationalModel):
@@ -700,41 +699,45 @@ class _FDTDGradientBridge:
                     if getattr(model, name).requires_grad
                 )
                 if unsupported:
-                    raise NotImplementedError(
+                    raise UnsupportedFeatureError(
                         "Differentiable embedded RationalModel supports residues and direct "
-                        f"terms only; trainable {unsupported!r} are not supported."
+                        f"terms only; trainable {unsupported!r} are not supported.",
+                        feature="network", method="fdtd"
                     )
             elif isinstance(model, StateSpaceNetwork) and any(
                 getattr(model, name).requires_grad for name in ("A", "B", "C", "D")
             ):
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Differentiable embedded networks accept trainable residues/direct on a "
-                    "pre-fitted RationalModel; direct trainable state-space matrices are not supported."
+                    "pre-fitted RationalModel; direct trainable state-space matrices are not supported.",
+                    feature="network", method="fdtd"
                 )
         unsupported_medium_message = _unsupported_adjoint_medium(
-            solver.scene,
+            solver.scene.scene,
             trainable_geometry_indices=getattr(
                 self, "_trainable_geometry_indices", ()
             ),
         )
         if unsupported_medium_message is not None:
-            raise NotImplementedError(unsupported_medium_message)
+            raise UnsupportedFeatureError(unsupported_medium_message, feature="guard:e487f06b", method="fdtd")
         wire_runtime = getattr(solver, "_wire_runtime", None)
         if wire_runtime is not None:
             if wire_runtime.dt_adjusted:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Differentiable thin-wire FDTD requires a fixed Maxwell time step below the "
-                    "joint wire CFL bound; automatic dt adjustment is not differentiated."
+                    "joint wire CFL bound; automatic dt adjustment is not differentiated.",
+                    feature="thin_wire", method="fdtd"
                 )
             if (
                 getattr(solver, "_lumped_element_runtimes", ())
                 or getattr(solver, "tfsf_enabled", False)
                 or getattr(solver, "magnetic_dispersive_enabled", False)
             ):
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Differentiable thin-wire FDTD requires a wire-aware reverse for TFSF, "
                     "magnetic dispersion, and standalone lumped elements; these coupled state "
-                    "transposes are not part of the axis-aligned PEC wire reverse."
+                    "transposes are not part of the axis-aligned PEC wire reverse.",
+                    feature="thin_wire", method="fdtd"
                 )
         if getattr(solver, "_full_aniso_cpml_overlap", False):
             # The forward off-diagonal correction coordinate-stretches the tensor
@@ -744,10 +747,11 @@ class _FDTDGradientBridge:
             # anisotropic structure overlapping the absorber would receive a
             # gradient inconsistent with its forward. Keep the anisotropic
             # structure clear of the absorber for adjoint runs.
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "FDTD adjoint does not support full (off-diagonal) anisotropic media overlapping "
                 "the CPML absorber: the reverse off-diagonal correction uses the un-stretched "
-                "collocated curl and does not replay the CPML coordinate stretch the forward applies."
+                "collocated curl and does not replay the CPML coordinate stretch the forward applies.",
+                feature="material.full_tensor", method="fdtd"
             )
         face_codes = (
             int(solver.boundary_x_low_code),
@@ -759,17 +763,20 @@ class _FDTDGradientBridge:
         )
         if any(code == BOUNDARY_BLOCH for code in face_codes):
             if not has_complex_fields(solver):
-                raise NotImplementedError("FDTD adjoint requires complex field state for Bloch faces.")
+                raise UnsupportedFeatureError("FDTD adjoint requires complex field state for Bloch faces.",
+                                              feature="boundary.bloch", method="fdtd")
             if getattr(solver, "conductive_enabled", False):
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "FDTD adjoint does not support electric conductivity on Bloch boundaries; the "
                     "complex-field reverse replay applies the semi-implicit conduction-loss "
-                    "coefficient on the real electric update only."
+                    "coefficient on the real electric update only.",
+                    feature="boundary.bloch", method="fdtd"
                 )
         elif any(code not in ({BOUNDARY_NONE, BOUNDARY_PML, BOUNDARY_PEC, BOUNDARY_PERIODIC}
                               if getattr(solver, "_copper_foils", ()) else {BOUNDARY_NONE, BOUNDARY_PML, BOUNDARY_PEC})
                  for code in face_codes):
-            raise NotImplementedError("FDTD adjoint currently supports none, pml, pec, and Bloch faces only.")
+            raise UnsupportedFeatureError("FDTD adjoint currently supports none, pml, pec, and Bloch faces only.",
+                                          feature="boundary.bloch", method="fdtd")
         # Every compiled source kind (point/plane/beam/mode plus the uniform and
         # custom current / field sources) injects an additive current whose patch
         # divides by eps at the injection cell, so the explicit reverse's analytic
@@ -779,31 +786,36 @@ class _FDTDGradientBridge:
             if runtime.lumped is None:
                 if getattr(runtime, "circuit_port", None) is not None:
                     continue
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     f"Differentiable RF port {runtime.port.name!r} requires an active source "
-                    "or a series R/L/C termination; observer-only contour ports are not yet supported."
+                    "or a series R/L/C termination; observer-only contour ports are not yet supported.",
+                    feature="port", method="fdtd"
                 )
             if runtime.lumped.topology != "series":
-                raise NotImplementedError(
-                    f"Differentiable RF port {runtime.port.name!r} requires series R/L/C topology."
+                raise UnsupportedFeatureError(
+                    f"Differentiable RF port {runtime.port.name!r} requires series R/L/C topology.",
+                    feature="port", method="fdtd"
                 )
             if bool(runtime.lumped.resistance_is_open):
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     f"Differentiable RF port {runtime.port.name!r} does not support an open "
-                    "internal series resistance."
+                    "internal series resistance.",
+                    feature="port", method="fdtd"
                 )
         for runtime, _field_name in getattr(solver, "_lumped_element_runtimes", ()):
             if runtime.topology != "series":
-                raise NotImplementedError(
-                    f"Differentiable lumped element {runtime.port_name!r} requires series topology."
+                raise UnsupportedFeatureError(
+                    f"Differentiable lumped element {runtime.port_name!r} requires series topology.",
+                    feature="lumped_element", method="fdtd"
                 )
             if bool(runtime.resistance_is_open):
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     f"Differentiable lumped element {runtime.port_name!r} does not support an "
-                    "open internal series resistance."
+                    "open internal series resistance.",
+                    feature="lumped_element", method="fdtd"
                 )
         circuit_guard_reason = None
-        for port in getattr(solver.scene, "ports", ()):
+        for port in getattr(solver.scene.scene, "ports", ()):
             if ("port", port.name, "reference_impedance") in self._trainable_semantic_keys:
                 circuit_guard_reason = (
                     f"Port {port.name!r} trainable reference_impedance is not supported by "
@@ -821,6 +833,7 @@ class _FDTDGradientBridge:
                 # trainability.  Keep differentiable circuits on the generic
                 # path that the per-step VJP replays exactly.
                 circuit_runtime.rc_fast_plan = None
+                circuit_runtime.adjoint_replay = True
             if any(
                 ("circuit_initial", circuit.name, node_name)
                 in self._trainable_semantic_keys
@@ -867,158 +880,64 @@ class _FDTDGradientBridge:
                 )
                 break
         if circuit_guard_reason is not None:
-            raise NotImplementedError(circuit_guard_reason)
+            raise UnsupportedFeatureError(circuit_guard_reason, feature="circuit", method="fdtd")
 
     def _run_forward_with_checkpoints(self, solver, *, time_steps, dft_frequency, dft_window, full_field_dft, normalize_source):
+        """Run the forward tape: outputs plus the checkpoint states at the adjoint stride."""
         runtime = _runtime()
         if normalize_source and not _sources_share_spectrum(getattr(solver, "_compiled_sources", ())):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "normalize_source divides monitor spectra by a single incident source "
                 "spectrum, which is ill-defined when the scene drives sources with "
                 "different source-time spectra; give the sources a common source_time "
-                "or disable normalize_source."
+                "or disable normalize_source.",
+                feature="guard:c7e416d2", method="fdtd"
             )
-        solver._normalize_source = normalize_source
-        solver._synchronize_device()
-        solve_start = time.perf_counter()
-
-        if dft_frequency is not None and full_field_dft:
-            solver.enable_dft(dft_frequency, window_type=dft_window, end_step=time_steps)
-        else:
-            solver.dft_enabled = False
-            solver._dft_entries = []
-            solver._sync_dft_legacy_state()
-
-        observer_frequency = dft_frequency if dft_frequency is not None else solver.source_frequency
-        if solver.observers:
-            solver._prepare_observers(observer_frequency, dft_window, time_steps)
-        solver._prepare_time_observers(time_steps)
-        prepare_port_spectral_accumulators(solver, time_steps, dft_window)
-        from ..copper_foil import prepare_copper_spectra
-        prepare_copper_spectra(solver, time_steps, observer_frequency, dft_window)
-        prepare_circuit_time_series(solver, time_steps)
-        for circuit_runtime in getattr(solver, "_circuit_runtimes", ()):
-            if any(
-                key[1] == circuit_runtime.circuit.name
-                for key in self._differentiable_circuit_keys
-            ):
-                circuit_runtime.graph_eligible = False
-        prepare_wire_monitors(solver, time_steps, dft_window)
-
         checkpoint_stride = runtime._checkpoint_stride(self.simulation, time_steps)
-        checkpoints = [capture_checkpoint_state(solver, step=0)]
-        joint_field_runner = None
-        if getattr(solver, "_joint_material_adjoint", False):
-            from ..runtime.stepping import _make_field_update_runner
-            joint_field_runner = _make_field_update_runner(solver, self.simulation.config.cuda_graph)
-        for step_index in range(time_steps):
-            if step_index > 0 and step_index % checkpoint_stride == 0:
-                checkpoints.append(capture_checkpoint_state(solver, step=step_index))
+        # The forward tape is the ordinary core solve (W7 row 14); the per-component
+        # forward loop it replaced is deleted with the existing runner (row 16e).
+        return self._run_core_forward(
+            solver, time_steps=time_steps, dft_frequency=dft_frequency, dft_window=dft_window,
+            full_field_dft=full_field_dft, normalize_source=normalize_source,
+            checkpoint_stride=checkpoint_stride)
 
-            time_value = step_index * solver.dt
-            auxiliary_grid = (getattr(solver, "_tfsf_state", None) or {}).get("auxiliary_grid")
-            if auxiliary_grid is not None:
-                auxiliary_grid.prepare_incident_boundary()
-            if joint_field_runner is not None:
-                joint_field_runner(time_value)
-            else:
-                solver._advance_magnetic_dispersive_state()
-                solver._update_magnetic_fields(solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
-                if has_complex_fields(solver):
-                    solver._update_magnetic_fields(
-                        solver.Hx_imag,
-                        solver.Hy_imag,
-                        solver.Hz_imag,
-                        solver.Ex_imag,
-                        solver.Ey_imag,
-                        solver.Ez_imag,
-                        imag=True,
-                    )
-                if getattr(solver, "tfsf_enabled", False):
-                    apply_tfsf_h_correction(solver, time_value)
-                    advance_tfsf_auxiliary_magnetic(solver)
-                if solver._magnetic_source_terms:
-                    from ..excitation import inject_magnetic_surface_source_terms
+    def _run_core_forward(self, solver, *, time_steps, dft_frequency, dft_window, full_field_dft,
+                          normalize_source, checkpoint_stride):
+        """The ordinary solve lifecycle on the core path, capturing checkpoints at the stride.
 
-                    inject_magnetic_surface_source_terms(
-                        solver, time_value=injection_time("magnetic_current", time_value, solver.dt)
-                    )
-                solver._apply_magnetic_dispersive_corrections()
-                sample_and_update_wire(solver)
+        Outputs keep the existing forward's layout: time monitors are recorded apart from
+        the differentiable observers, and embedded networks are kept for rebinding.
+        """
+        from ..runtime.stepping import solve
 
-                solver._advance_dispersive_state()
-                if has_complex_fields(solver):
-                    if getattr(solver, "uses_cpml", False):
-                        update_electric_fields_bloch_cpml(solver)
-                    else:
-                        solver._update_electric_fields_bloch()
-                else:
-                    if getattr(solver, "nonlinear_enabled", False):
-                        solver._update_nonlinear_electric_coefficients()
-                    solver._update_electric_fields(solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
-                    if getattr(solver, "full_aniso_enabled", False):
-                        apply_full_aniso_corrections(solver)
-
-                deposit_wire_current(solver)
-
-            if getattr(solver, "tfsf_enabled", False):
-                apply_tfsf_e_correction(solver, time_value)
-                advance_tfsf_auxiliary_electric(solver)
-            if solver._electric_source_terms:
-                from ..excitation import inject_electric_surface_source_terms
-
-                inject_electric_surface_source_terms(
-                    solver,
-                    time_value=injection_time("equivalent_electric_current", time_value, solver.dt),
-                )
-
-            if solver._source_terms:
-                solver.add_source(time_value=injection_time("electric_current", time_value, solver.dt))
-            apply_port_runtimes(solver)
-            apply_network_runtimes(solver)
-            solver._apply_dispersive_corrections()
-            if not getattr(solver, "tfsf_enabled", False):
-                solver._enforce_pec_boundaries()
-            apply_mur_boundaries(solver)
-            solver.accumulate_dft(step_index)
-            accumulate_port_observers(solver)
-            solver.accumulate_observers(step_index)
-            solver.accumulate_time_observers(step_index)
-            accumulate_wire_monitors(solver, step_index)
-
-        solver._synchronize_device()
-        solver.last_solve_elapsed_s = time.perf_counter() - solve_start
-        from ..runtime.timestep import validate_nonlinear_field_envelope
-
-        validate_nonlinear_field_envelope(solver)
-
-        if solver.dft_enabled:
-            solver._sync_dft_legacy_state()
-        if solver.observers_enabled:
-            solver._sync_observer_legacy_state()
-        complete_wire_monitor_normalization(solver, time_steps)
-
-        raw_output = {}
-        if solver.dft_enabled:
-            raw_output.update(solver.get_frequency_solution(all_frequencies=True))
-        if solver.observers_enabled:
-            raw_output["observers"] = solver.get_observer_results()
+        checkpoints = []
+        output = solve(
+            solver, time_steps, dft_frequency=dft_frequency, dft_window=dft_window,
+            full_field_dft=full_field_dft, normalize_source=normalize_source,
+            use_cuda_graph=self.simulation.config.cuda_graph,
+            checkpoints=checkpoints, checkpoint_stride=checkpoint_stride,
+        )
+        raw_output = dict(output or {})
+        observers = dict(raw_output.pop("observers", {}))
         self._last_time_monitors = solver.get_time_observer_results()
+        for name in self._last_time_monitors:
+            del observers[name]
+        if observers:
+            raw_output["observers"] = observers
         if self._last_time_monitors:
             raw_output["time_observers"] = self._last_time_monitors
-        wire_monitors = finalize_wire_data(solver)
-        if wire_monitors:
-            observers = dict(raw_output.get("observers", {}))
-            observers.update(wire_monitors)
-            raw_output["observers"] = observers
-        ports = finalize_port_data(solver)
-        if ports:
-            raw_output["ports"] = ports
-        circuits = finalize_circuit_data(solver)
-        if circuits:
-            raw_output["circuits"] = circuits
-        self._last_embedded_networks = finalize_embedded_networks(solver, ports)
+        self._last_embedded_networks = raw_output.pop("embedded_networks", {})
         return raw_output or None, tuple(checkpoints)
+
+    def _prepare_solver(self, solver):
+        self._validate_supported_configuration(solver)
+        from .dispatch import validate_native_adjoint_preparation
+
+        solver._trainable_sigma_enabled = any(
+            isinstance(getattr(structure.material, "sigma_e", None), torch.Tensor)
+            for structure in solver.scene.scene.structures
+        )
+        solver._joint_material_adjoint = validate_native_adjoint_preparation(solver).name == "JOINT_MATERIAL"
 
     def forward(self, material_inputs):
         runtime = _runtime()
@@ -1035,14 +954,7 @@ class _FDTDGradientBridge:
                 with torch.enable_grad():
                     solver_scene = self._material_graph_scene()
             solver = self.simulation._build_fdtd_solver_for_scene(solver_scene, initialize=True)
-            self._validate_supported_configuration(solver)
-            from .dispatch import validate_native_adjoint_preparation
-
-            solver._trainable_sigma_enabled = any(
-                isinstance(getattr(structure.material, "sigma_e", None), torch.Tensor)
-                for structure in solver.scene.structures
-            )
-            solver._joint_material_adjoint = validate_native_adjoint_preparation(solver).name == "JOINT_MATERIAL"
+            self._prepare_solver(solver)
 
             time_steps = self.simulation._resolve_fdtd_time_steps(solver, scene)
             dft_cfg = self.simulation.config.spectral_sampler
@@ -1051,14 +963,9 @@ class _FDTDGradientBridge:
             use_full_field_dft = _resolve_full_field_dft(
                 self.simulation.config.full_field_dft, self.simulation.frequencies, scene.ports)
             dft_request = self.simulation.frequency if len(self.simulation.frequencies) == 1 else self.simulation.frequencies
-            raw_output, checkpoints = self._run_forward_with_checkpoints(
-                solver,
-                time_steps=time_steps,
-                dft_frequency=dft_request,
-                dft_window=dft_cfg.window,
-                full_field_dft=use_full_field_dft,
-                normalize_source=dft_cfg.normalize_source,
-            )
+            options = dict(time_steps=time_steps, dft_frequency=dft_request, dft_window=dft_cfg.window,
+                           full_field_dft=use_full_field_dft, normalize_source=dft_cfg.normalize_source)
+            raw_output, checkpoints = self._run_forward_with_checkpoints(solver, **options)
         return self.accept_forward(solver, raw_output, checkpoints, time_steps=time_steps,
                                    use_full_field_dft=use_full_field_dft)
 
@@ -1248,7 +1155,7 @@ class _FDTDGradientBridge:
             **{key: torch.zeros_like(entry[key]) for key in COPPER_COEFFICIENTS},
             "response_alpha": entry.get("response_alpha", 1.),
             "edge_geometry": entry.get("edge_geometry"),
-            "structure_index": next(index for index, structure in enumerate(solver.scene.structures)
+            "structure_index": next(index for index, structure in enumerate(solver.scene.scene.structures)
                                      if structure.material is entry["face"].material)
         } for entry in getattr(solver, "_copper_foils", ()))
         for index, entry in enumerate(getattr(solver, "_copper_foils", ())):
@@ -1644,6 +1551,7 @@ class _FDTDGradientBridge:
                         scene = self._material_graph_scene()
                         material_outputs = pullback_material_input_gradients(
                             scene,
+                            device=self.simulation.config.device,
                             # Pull directly to the ancestry-safe custom-Function
                             # frontier.  A material tensor q=f(p) may have been
                             # pruned when p also drives a circuit semantic value;
@@ -1764,23 +1672,7 @@ def run_fdtd_with_gradient_bridge(simulation) -> Result:
     raw_outputs = _FDTDMaterialGradientFunction.apply(bridge, *bridge.trainable_inputs)
     output_tensors = raw_outputs if isinstance(raw_outputs, tuple) else (raw_outputs,)
     fields, monitors, ports, circuits, raw_output = bridge.rebuild_forward_outputs(output_tensors)
-    embedded_networks = {}
-    for name, template in bridge._last_embedded_networks.items():
-        connection_names = tuple(template.metadata["connections"])
-        connected = tuple(ports[port_name] for port_name in connection_names)
-        voltage = torch.stack(tuple(data.voltage for data in connected), dim=0)
-        current = torch.stack(tuple(-data.current for data in connected), dim=0)
-        port_power = 0.5 * torch.real(voltage * torch.conj(current))
-        net_power = torch.sum(port_power, dim=0)
-        embedded_networks[name] = replace(
-            template,
-            frequencies=connected[0].frequencies,
-            voltage=voltage,
-            current=current,
-            port_power=port_power,
-            absorbed_power=torch.clamp(net_power, min=0.0),
-            generated_power=torch.clamp(-net_power, min=0.0),
-        )
+    embedded_networks = rebind_embedded_networks(bridge._last_embedded_networks, ports)
     return Result(
         method="fdtd",
         scene=simulation.scene,

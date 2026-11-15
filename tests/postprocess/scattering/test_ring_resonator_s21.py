@@ -55,6 +55,7 @@ from witwin.maxwell.postprocess import compute_mode_overlap
 from witwin.maxwell.postprocess.stratton_chu import build_plane_points
 from witwin.maxwell.result import Result
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 _C = 299792458.0
 # All-pass ring: under-coupled so |H| stays bounded away from zero across the
@@ -69,34 +70,33 @@ _APERTURE = (0.0, 0.48, 0.48)
 _TANGENTIAL_FIELDS = ("Ez", "Ey", "Hy", "Hz")
 
 
-def _mode_scene(device: str = "cpu"):
+def _mode_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.none(),
-        device=device,
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=_GUIDE_SIZE),
-            material=mw.Material(eps_r=12.0),
-            name='core',
-        )
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(0.0, 0.0, 0.0),
-            size=_APERTURE,
-            polarization="Ez",
-            source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
-            name="port0",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=_GUIDE_SIZE),
+                material=mw.Material(eps_r=12.0),
+                name='core',
+            ),
+            ),
+                sources=(
+            mw.ModeSource(
+                position=(0.0, 0.0, 0.0),
+                size=_APERTURE,
+                polarization="Ez",
+                source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
+                name="port0",
+            ),
+            ),
+            )
     return scene
 
 
 def _mode_context(scene):
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     return SimpleNamespace(
         scene=prepared,
         dx=prepared.dx,
@@ -104,8 +104,8 @@ def _mode_context(scene):
         dz=prepared.dz,
         Ex=torch.empty((1,), device=prepared.device, dtype=torch.float32),
         c=_C,
-        boundary_kind=prepared.boundary.kind,
-        _compiled_material_model=prepared.compile_materials(),
+        boundary_kind=prepared.scene.boundary.kind,
+        _compiled_material_model=compile_materials(prepared),
     )
 
 
@@ -230,46 +230,45 @@ def test_two_port_fdtd_modeport_reports_guided_forward_dominated_s21():
     amplitude on real fields (the absolute magnitude is Fabry-Perot limited and is
     not asserted to 3%)."""
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.05),
-        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.44, 0.24, 0.32)),
-            material=mw.Material(eps_r=12.0),
-            name='core',
-        )
-    )
-    scene.add_port(
-        mw.ModePort(
-            "in",
-            position=(-0.35, 0.0, 0.0),
-            size=(0.0, 0.48, 0.48),
-            polarization="Ez",
-            source_time=mw.CW(frequency=1.0e9, amplitude=50.0),
-            frequencies=(1.0e9,),
-            monitor_offset=0.1,
-        )
-    )
-    scene.add_port(
-        mw.ModePort(
-            "out",
-            position=(0.35, 0.0, 0.0),
-            size=(0.0, 0.48, 0.48),
-            polarization="Ez",
-            frequencies=(1.0e9,),
-            direction="+",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.6, 0.6), (-0.6, 0.6))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.44, 0.24, 0.32)),
+                material=mw.Material(eps_r=12.0),
+                name='core',
+            ),
+            ),
+                ports=(
+            mw.ModePort(
+                "in",
+                position=(-0.35, 0.0, 0.0),
+                size=(0.0, 0.48, 0.48),
+                polarization="Ez",
+                source_time=mw.CW(frequency=1.0e9, amplitude=50.0),
+                frequencies=(1.0e9,),
+                monitor_offset=0.1,
+            ),
+            mw.ModePort(
+                "out",
+                position=(0.35, 0.0, 0.0),
+                size=(0.0, 0.48, 0.48),
+                polarization="Ez",
+                frequencies=(1.0e9,),
+                direction="+",
+            ),
+            ),
+            )
 
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=20),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=20),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
 
     port_in = compute_mode_overlap(result, "in", direction="+")

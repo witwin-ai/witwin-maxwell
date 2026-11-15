@@ -10,6 +10,7 @@ import contextlib
 import json
 from pathlib import Path
 import sys
+from witwin.maxwell.scene import place_scene
 
 
 def main():
@@ -32,7 +33,7 @@ def main():
         from witwin.maxwell.scene import PreparedScene, prepare_scene
         original = PreparedScene.compile_materials
         def compile_on_cpu(scene, *positional, **keywords):
-            model = original(prepare_scene(scene.clone(device="cpu")), *positional, **keywords)
+            model = original(prepare_scene(place_scene(scene.updated(), "cpu"), device="cpu"), *positional, **keywords)
             model["edge_components"] = runner.move(model["edge_components"], scene.device)
             for prefix in ("", "mu_"):
                 for kind in ("debye", "drude", "lorentz"):

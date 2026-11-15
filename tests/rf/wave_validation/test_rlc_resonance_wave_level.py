@@ -53,7 +53,7 @@ def test_series_rlc_companion_impedance_matches_analytic():
     """analytic-identity (fast contract, non-gating): companion Z == closed form."""
 
     r, l, c = 8.0, 0.5e-9, 1.0e-12  # noqa: E741
-    termination = mw.SeriesRLC(r=r, l=l, c=c)
+    termination = mw.rf.SeriesRLC(r=r, l=l, c=c)
     f0 = 1.0 / (2.0 * math.pi * math.sqrt(l * c))
     omega = 2.0 * math.pi * torch.tensor([0.5 * f0, f0, 1.5 * f0], dtype=torch.float64)
 
@@ -88,12 +88,14 @@ def _interp_extremum(freqs: np.ndarray, mag: np.ndarray, *, mode: str) -> float:
 def _resonance(c: float, *, parallel: bool) -> float:
     freqs = default_frequencies(parallel=parallel)
     result = mw.Simulation.fdtd(
-        series_rlc_scene(l=DEFAULT_L, c=c, parallel=parallel, dx=0.01, device="cuda"),
+        series_rlc_scene(l=DEFAULT_L, c=c, parallel=parallel, dx=0.01),
         frequencies=freqs,
-        excitations=mw.PortExcitation("feed"),
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=12),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=False,
+        excitations=mw.rf.PortExcitation("feed"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=12),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ),
     ).run()
     feed = result.port("feed")
     a = feed.a.cpu().numpy().reshape(len(freqs), -1)[:, 0]

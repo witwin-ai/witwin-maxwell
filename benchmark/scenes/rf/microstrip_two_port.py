@@ -77,7 +77,7 @@ def analytic_microstrip(eps_r: float = SUBSTRATE_EPS, w: float = STRIP_W, h: flo
     return {"eps_eff": eps_eff, "z0": z0}
 
 
-def _strip_port(name: str, x: float, direction: str, *, dx: float) -> mw.WavePort:
+def _strip_port(name: str, x: float, direction: str, *, dx: float) -> mw.rf.WavePort:
     contour_x = x + (0.5 * dx if direction == "+" else -0.5 * dx)
     # The current contour is a rectangular loop around the signal strip. Its edges
     # must land on the Yee transverse half-grid; with the contour centred on a node
@@ -86,7 +86,7 @@ def _strip_port(name: str, x: float, direction: str, *, dx: float) -> mw.WavePor
     contour_hy = 4.5 * dx   # >= STRIP_W/2, encloses the strip in y
     contour_hz = 1.5 * dx   # brackets the strip just above the substrate
     # Quasi-TEM voltage path from strip (top of substrate) down to ground.
-    mode = mw.WaveModeSpec(
+    mode = mw.rf.WaveModeSpec(
         "tem",
         polarization="Ez",
         voltage_path=((x, 0.0, SUBSTRATE_H), (x, 0.0, 0.0)),
@@ -95,7 +95,7 @@ def _strip_port(name: str, x: float, direction: str, *, dx: float) -> mw.WavePor
             size=(0.0, 2.0 * contour_hy, 2.0 * contour_hz),
         ),
     )
-    return mw.WavePort(
+    return mw.rf.WavePort(
         name,
         position=(x, 0.0, 0.03),
         size=(0.0, 0.16, 0.08),
@@ -105,7 +105,7 @@ def _strip_port(name: str, x: float, direction: str, *, dx: float) -> mw.WavePor
     )
 
 
-def microstrip_two_port_scene(*, dx: float = 0.005, device: str = "cuda") -> mw.Scene:
+def microstrip_two_port_scene(*, dx: float = 0.005) -> mw.Scene:
     """Build a two-port grounded-substrate microstrip line."""
 
     length = line_length(dx)
@@ -120,50 +120,45 @@ def microstrip_two_port_scene(*, dx: float = 0.005, device: str = "cuda") -> mw.
     x_nodes = np.arange(-nx, nx + 1) * dx
     y_nodes = np.arange(-ny, ny + 1) * dx
     z_nodes = np.arange(z_lo_cells, z_hi_cells + 1) * dx
+    # Ground plane at z=0.
+    # Dielectric substrate between ground and strip.
+    # Signal strip on top of the substrate.
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (float(x_nodes[0]), float(x_nodes[-1])),
                 (float(y_nodes[0]), float(y_nodes[-1])),
                 (float(z_nodes[0]), float(z_nodes[-1])),
             )
-        ),
-        grid=mw.GridSpec.custom(x_nodes, y_nodes, z_nodes),
-        boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
-        ports=(
+            ),
+                grid=mw.GridSpec.custom(x_nodes, y_nodes, z_nodes),
+                boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
+                ports=(
             _strip_port("in", -PORT_X, "+", dx=dx),
             _strip_port("out", PORT_X, "-", dx=dx),
-        ),
-        device=device,
-    )
-    # Ground plane at z=0.
-    scene.add_structure(
-        mw.Structure(
-            mw.Box(position=(0.0, 0.0, -0.5 * dx), size=(length, GROUND_W, dx)),
-            mw.Material.pec(),
-            name="ground",
-        )
-    )
-    # Dielectric substrate between ground and strip.
-    scene.add_structure(
-        mw.Structure(
-            mw.Box(
-                position=(0.0, 0.0, 0.5 * SUBSTRATE_H),
-                size=(length, GROUND_W, SUBSTRATE_H),
             ),
-            mw.Material(eps_r=SUBSTRATE_EPS),
-            name="substrate",
-        )
-    )
-    # Signal strip on top of the substrate.
-    scene.add_structure(
-        mw.Structure(
-            mw.Box(
-                position=(0.0, 0.0, SUBSTRATE_H + 0.5 * dx),
-                size=(length, STRIP_W, dx),
+                structures=(
+            mw.Structure(
+                mw.Box(position=(0.0, 0.0, -0.5 * dx), size=(length, GROUND_W, dx)),
+                mw.Material.pec(),
+                name="ground",
             ),
-            mw.Material.pec(),
-            name="strip",
-        )
-    )
+            mw.Structure(
+                mw.Box(
+                    position=(0.0, 0.0, 0.5 * SUBSTRATE_H),
+                    size=(length, GROUND_W, SUBSTRATE_H),
+                ),
+                mw.Material(eps_r=SUBSTRATE_EPS),
+                name="substrate",
+            ),
+            mw.Structure(
+                mw.Box(
+                    position=(0.0, 0.0, SUBSTRATE_H + 0.5 * dx),
+                    size=(length, STRIP_W, dx),
+                ),
+                mw.Material.pec(),
+                name="strip",
+            ),
+            ),
+            )
     return scene

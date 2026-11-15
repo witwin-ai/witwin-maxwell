@@ -4,17 +4,23 @@ from dataclasses import dataclass, field
 
 import torch
 
-from ..compiler.electrostatic import CompiledElectrostatics, compile_electrostatics
+from ..compiler.electrostatic import (
+    CompiledElectrostatics,
+    compile_electrostatics,
+)
+from ..errors import SetupError
 from ..scene import Domain
-from .api import ElectrostaticBoundarySpec, ElectrostaticSolverConfig
+from .api import ElectrostaticBoundarySpec, ElectrostaticSolverConfig, _require_boundary_and_solver
 from .runtime import (
     ElectrostaticOperator,
     _pinned_value,
     _reject_trainable_tensor,
     solve_fixed_potential,
 )
+from .._stability import experimental
 
 
+@experimental("electrostatics")
 @dataclass(frozen=True)
 class TruncationEstimate:
     """Opt-in configuration for the domain-extension truncation-error estimate.
@@ -36,10 +42,51 @@ class TruncationEstimate:
     def __post_init__(self):
         pad = int(self.padding_cells)
         if pad <= 0:
-            raise ValueError("TruncationEstimate.padding_cells must be > 0.")
+            raise SetupError("TruncationEstimate.padding_cells must be > 0.")
         object.__setattr__(self, "padding_cells", pad)
 
 
+@experimental("electrostatics")
+@dataclass(frozen=True)
+class CapacitanceConfig:
+    """Run options of ``Simulation.capacitance(scene, config=...)``.
+
+    ``terminals`` selects and orders the electrostatic terminals of the matrix
+    (default: all); ``reference`` names the grounded return conductor excluded
+    from it. ``boundary`` and ``solver`` are as in ``ElectrostaticConfig``.
+    ``truncation_estimate`` (a ``TruncationEstimate``, opt-in) requests one
+    additional enlarged grounded-box solve so ``mw.electrostatic.capacitance(result).truncation_estimate``
+    reports the domain-truncation error of the enclosure; it needs a Dirichlet face.
+    """
+
+    terminals: tuple[str, ...] | None = None
+    reference: str | None = None
+    boundary: ElectrostaticBoundarySpec = field(default_factory=ElectrostaticBoundarySpec.grounded_box)
+    solver: ElectrostaticSolverConfig = field(default_factory=ElectrostaticSolverConfig)
+    device: str = "cuda"
+    truncation_estimate: TruncationEstimate | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "device", str(torch.device(self.device)))
+        if self.terminals is not None:
+            object.__setattr__(self, "terminals", tuple(self.terminals))
+        if self.reference is not None:
+            object.__setattr__(self, "reference", str(self.reference))
+        _require_boundary_and_solver(self)
+        if self.truncation_estimate is None:
+            return
+        if not isinstance(self.truncation_estimate, TruncationEstimate):
+            raise TypeError("truncation_estimate must be a TruncationEstimate or None.")
+        if not self.boundary.has_dirichlet:
+            raise SetupError(
+                "truncation_estimate is defined for a Dirichlet enclosure (e.g. "
+                "ElectrostaticBoundarySpec.grounded_box()): it measures how the capacitance "
+                "changes as the grounded box is pushed outward. The current boundary has no "
+                "Dirichlet face, so there is no enclosure to extend."
+            )
+
+
+@experimental("electrostatics")
 @dataclass
 class TruncationReport:
     """Boundary-truncation error estimate from a domain-extension resolve.
@@ -115,9 +162,10 @@ def _enlarged_scene(scene, padding_cells: int):
     hx, hy, hz = grid.spacing
     pads = (padding_cells * hx, padding_cells * hy, padding_cells * hz)
     new_bounds = tuple((lo - pad, hi + pad) for (lo, hi), pad in zip(scene.domain.bounds, pads))
-    return scene.clone(domain=Domain(new_bounds))
+    return scene.updated(domain=Domain(new_bounds))
 
 
+@experimental("electrostatics")
 @dataclass
 class CapacitanceData:
     """Maxwell capacitance matrix extracted from unit-voltage electrostatic solves.
@@ -318,116 +366,79 @@ def extract_capacitance(
     )
 
 
-class CapacitanceSimulation:
-    """Runner returned by ``Simulation.capacitance(...)``.
+def _truncation_report(scene, compiled: CompiledElectrostatics, config: CapacitanceConfig,
+                       base_data: CapacitanceData) -> TruncationReport:
+    """Run one enlarged grounded-box solve and estimate the truncation error."""
+    if _structure_reaches_boundary(compiled):
+        raise ValueError(
+            "truncation_estimate is confounded: a dielectric structure reaches the base "
+            "domain boundary, so enlarging the domain replaces that structure with "
+            "background medium in the new cells and the reported delta mixes the "
+            "boundary-truncation effect with a change of the surrounding medium. Shrink the "
+            "structure away from the walls (leave a background margin) or enlarge the base "
+            "domain before requesting a truncation estimate."
+        )
+    pad = config.truncation_estimate.padding_cells
+    enlarged_scene = _enlarged_scene(scene, pad)
+    enlarged_compiled = compile_electrostatics(enlarged_scene, config.boundary, dtype=config.solver.dtype,
+                                               device=config.device)
+    enlarged_data = extract_capacitance(enlarged_compiled, config.terminals, config.reference, config.solver)
+    base_m = base_data.matrix
+    enl_m = enlarged_data.matrix
+    delta = enl_m - base_m
+    scale = float(base_m.detach().abs().max()) + 1.0e-300
+    max_rel = float(delta.detach().abs().max()) / scale
 
-    Keeps the public entry ``Scene -> Simulation -> Result``: ``run()`` returns a
-    standard ``Result(method="capacitance")`` whose ``result.capacitance`` accessor
-    is the typed :class:`CapacitanceData`.
+    base_size = _min_domain_extent(scene.domain.bounds)
+    enlarged_size = _min_domain_extent(enlarged_scene.domain.bounds)
+    f = enlarged_size / base_size
+    # 1/L Richardson: C(L) = C_inf + K/L, two sizes give
+    # C_inf = C_enl + (C_enl - C_base) / (f - 1), f = enlarged/base.
+    richardson = enl_m + (enl_m - base_m) / (f - 1.0)
+    rich_shift = float((richardson - enl_m).detach().abs().max()) / scale
+    return TruncationReport(
+        padding_cells=pad,
+        base_matrix=base_m,
+        enlarged_matrix=enl_m,
+        delta=delta,
+        max_relative_delta=max_rel,
+        base_size=base_size,
+        enlarged_size=enlarged_size,
+        richardson_matrix=richardson,
+        richardson_max_relative_shift=rich_shift,
+    )
+
+
+def capacitance_result(scene, compiled: CompiledElectrostatics, config: CapacitanceConfig):
+    """Extract the capacitance matrix of ``compiled`` as a ``Result(method="capacitance")``.
+
+    ``Simulation.capacitance(...).run()`` calls this with the scene it compiled;
+    ``mw.electrostatic.capacitance(result)`` is the typed :class:`CapacitanceData`.
     """
+    from ..result import Result
 
-    def __init__(
-        self, scene, *, terminals=None, reference=None, boundary=None, solver=None,
-        truncation_estimate=None,
-    ):
-        self.scene = scene
-        self.terminals = None if terminals is None else tuple(terminals)
-        self.reference = None if reference is None else str(reference)
-        if boundary is None:
-            boundary = ElectrostaticBoundarySpec.grounded_box()
-        if not isinstance(boundary, ElectrostaticBoundarySpec):
-            raise TypeError("boundary must be an ElectrostaticBoundarySpec.")
-        self.boundary = boundary
-        if solver is None:
-            solver = ElectrostaticSolverConfig()
-        if not isinstance(solver, ElectrostaticSolverConfig):
-            raise TypeError("solver must be an ElectrostaticSolverConfig.")
-        self.solver = solver
-        if truncation_estimate is not None and not isinstance(truncation_estimate, TruncationEstimate):
-            raise TypeError("truncation_estimate must be a TruncationEstimate or None.")
-        self.truncation_estimate = truncation_estimate
-
-    def prepare(self) -> CompiledElectrostatics:
-        return compile_electrostatics(self.scene, self.boundary, dtype=self.solver.dtype)
-
-    def _truncation_report(self, base_data: CapacitanceData) -> TruncationReport:
-        """Run one enlarged grounded-box solve and estimate the truncation error."""
-        if not self.boundary.has_dirichlet:
-            raise ValueError(
-                "truncation_estimate is defined for a Dirichlet enclosure (e.g. "
-                "ElectrostaticBoundarySpec.grounded_box()): it measures how the capacitance "
-                "changes as the grounded box is pushed outward. The current boundary has no "
-                "Dirichlet face, so there is no enclosure to extend."
-            )
-        base_compiled = compile_electrostatics(self.scene, self.boundary, dtype=self.solver.dtype)
-        if _structure_reaches_boundary(base_compiled):
-            raise ValueError(
-                "truncation_estimate is confounded: a dielectric structure reaches the base "
-                "domain boundary, so enlarging the domain replaces that structure with "
-                "background medium in the new cells and the reported delta mixes the "
-                "boundary-truncation effect with a change of the surrounding medium. Shrink the "
-                "structure away from the walls (leave a background margin) or enlarge the base "
-                "domain before requesting a truncation estimate."
-            )
-        pad = self.truncation_estimate.padding_cells
-        enlarged_scene = _enlarged_scene(self.scene, pad)
-        enlarged_compiled = compile_electrostatics(
-            enlarged_scene, self.boundary, dtype=self.solver.dtype
-        )
-        enlarged_data = extract_capacitance(
-            enlarged_compiled, self.terminals, self.reference, self.solver
-        )
-        base_m = base_data.matrix
-        enl_m = enlarged_data.matrix
-        delta = enl_m - base_m
-        scale = float(base_m.detach().abs().max()) + 1.0e-300
-        max_rel = float(delta.detach().abs().max()) / scale
-
-        base_size = _min_domain_extent(self.scene.domain.bounds)
-        enlarged_size = _min_domain_extent(enlarged_scene.domain.bounds)
-        f = enlarged_size / base_size
-        # 1/L Richardson: C(L) = C_inf + K/L, two sizes give
-        # C_inf = C_enl + (C_enl - C_base) / (f - 1), f = enlarged/base.
-        richardson = enl_m + (enl_m - base_m) / (f - 1.0)
-        rich_shift = float((richardson - enl_m).detach().abs().max()) / scale
-        return TruncationReport(
-            padding_cells=pad,
-            base_matrix=base_m,
-            enlarged_matrix=enl_m,
-            delta=delta,
-            max_relative_delta=max_rel,
-            base_size=base_size,
-            enlarged_size=enlarged_size,
-            richardson_matrix=richardson,
-            richardson_max_relative_shift=rich_shift,
-        )
-
-    def run(self):
-        from ..result import Result
-
-        compiled = self.prepare()
-        data = extract_capacitance(compiled, self.terminals, self.reference, self.solver)
-        if self.truncation_estimate is not None:
-            data.truncation_estimate = self._truncation_report(data)
-        return Result(
-            method="capacitance",
-            scene=self.scene,
-            frequency=0.0,
-            solver_stats={
-                "reciprocity_error": data.reciprocity_error,
-                "row_sum_error": data.row_sum_error,
-                "terminal_order": data.terminal_order,
-                "reference": data.reference,
-                **(
-                    {
-                        "truncation_max_relative_delta": data.truncation_estimate.max_relative_delta,
-                        "truncation_richardson_max_relative_shift": (
-                            data.truncation_estimate.richardson_max_relative_shift
-                        ),
-                    }
-                    if data.truncation_estimate is not None
-                    else {}
-                ),
-            },
-            raw_output=data,
-        )
+    data = extract_capacitance(compiled, config.terminals, config.reference, config.solver)
+    if config.truncation_estimate is not None:
+        data.truncation_estimate = _truncation_report(scene, compiled, config, data)
+    return Result(
+        method="capacitance",
+        scene=scene,
+        frequency=0.0,
+        solver_stats={
+            "reciprocity_error": data.reciprocity_error,
+            "row_sum_error": data.row_sum_error,
+            "terminal_order": data.terminal_order,
+            "reference": data.reference,
+            **(
+                {
+                    "truncation_max_relative_delta": data.truncation_estimate.max_relative_delta,
+                    "truncation_richardson_max_relative_shift": (
+                        data.truncation_estimate.richardson_max_relative_shift
+                    ),
+                }
+                if data.truncation_estimate is not None
+                else {}
+            ),
+        },
+        raw_output=data,
+    )

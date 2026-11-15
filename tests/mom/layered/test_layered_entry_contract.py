@@ -11,7 +11,7 @@ from witwin.maxwell.mom.layered.network import prepare_layered_network
 from tests.mom.layered.test_layered_lowfreq import loop
 from tests.mom.layered.test_layered_network import coplanar_strips, rfic_stack
 
-pytestmark = pytest.mark.cuda
+pytestmark = [pytest.mark.cuda, pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA required")]
 
 
 @pytest.mark.parametrize("kind", ("rfic", "rfic_low", "loop", "halfspace"))

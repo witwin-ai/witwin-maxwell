@@ -39,8 +39,10 @@ from .array import ArrayBasisData, _single_beam_weights
 from .execution import MultiGPUExecution
 from .execution.plan import ExecutionPlan, ExecutionTask
 from .execution.records import DistributedFailure
+from ._stability import experimental
 
 
+@experimental("antenna")
 @dataclass(frozen=True)
 class AggregatedSceneGradient:
     """Reduced scene-parameter gradient plus the aggregation provenance.
@@ -117,6 +119,7 @@ def _resolve_reduction_order(
     return order
 
 
+@experimental("antenna")
 def aggregate_scene_gradient_vjp(
     basis: ArrayBasisData,
     *,
@@ -286,6 +289,7 @@ def aggregate_scene_gradient_vjp(
     )
 
 
+@experimental("antenna")
 def ensemble_scene_gradient_vjp(
     basis: ArrayBasisData,
     *,
@@ -314,7 +318,7 @@ def ensemble_scene_gradient_vjp(
     """
 
     if not isinstance(execution, MultiGPUExecution):
-        raise TypeError("execution must be a maxwell.MultiGPUExecution.")
+        raise TypeError("execution must be a maxwell.execution.MultiGPUExecution.")
     _, port_count, _ = basis.network.s.shape
 
     tasks = tuple(

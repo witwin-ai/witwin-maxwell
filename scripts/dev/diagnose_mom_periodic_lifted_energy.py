@@ -37,7 +37,7 @@ def main():
     interior = compile_medium(mw.Material(eps_r=2.), 3e8)
     system = SurfaceSystem.create([(0, 'body0', basis, interior)])
     baseline = IntegrationConfig(order=4, singular_order=6)
-    handle = SystemDecodeHandle(system, exterior, [mw.PlaneWave()], mw.MoMConfig(integration=baseline), {})
+    handle = SystemDecodeHandle(system, exterior, [mw.PlaneWave()], mw.mom.MoMConfig(integration=baseline), {})
     coefficients = saved['coefficients']
     if len(basis.mesh.faces) != 64 or coefficients.shape != (2*system.total_edges,):
         raise ValueError('Snapshot does not match the documented 64-face fixture')
@@ -59,7 +59,7 @@ def main():
         fine = transfer.fine
         fine_system = SurfaceSystem.create([(0, 'body0', fine, interior)])
         fine_handle = SystemDecodeHandle(fine_system, exterior, [mw.PlaneWave()],
-            mw.MoMConfig(integration=integration), {})
+            mw.mom.MoMConfig(integration=integration), {})
         selected = torch.tensor([0, fine.n_edges//3, 2*fine.n_edges//3], device='cuda')
         rhs, receipt = build_selected_lifted_rhs(fine_handle.body_handles[0], selected)
         kernel = EwaldHelmholtzKernel(lattice, 3.5, real_shells=3, reciprocal_shells=8, quadrature_order=64)

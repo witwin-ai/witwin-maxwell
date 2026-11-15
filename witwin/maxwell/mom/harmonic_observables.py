@@ -5,6 +5,7 @@ import math
 from .mesh import SurfaceMesh
 from .quadrature import triangle_rule
 from .observables import integrate_volume_dissipation
+from ..errors import UnsupportedFeatureError
 
 
 def harmonic_power_balance(data,control_surface,*,surface_order=3,volume_order=3,query_config=None,query_batch_size=None,_cache=None):
@@ -50,7 +51,8 @@ def harmonic_power_balance(data,control_surface,*,surface_order=3,volume_order=3
     dual_dc = state.dc_dual_state is not None
     current_dc = dual_dc or state.dc_potential_offsets is not None
     if bool(state.total_volume_current[0].any()) and not current_dc:
-        raise NotImplementedError('DC current power requires the static current formulation')
+        raise UnsupportedFeatureError('DC current power requires the static current formulation',
+                                      feature="guard:f5e1fbd2", method="mom")
     points,weights = triangle_rule(control_surface.triangles,surface_order)
     points,weights = points.reshape(-1,3),weights.flatten()
     normals = normals[:,None].expand(-1,len(weights)//len(normals),-1).reshape(-1,3)

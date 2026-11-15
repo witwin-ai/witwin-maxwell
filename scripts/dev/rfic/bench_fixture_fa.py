@@ -1,6 +1,6 @@
 """F-A stage timing and complete public-path evidence on the assigned GPU 1.
 
-Invoke through codex/runners/gpu1_timing.py; each lock hold is bounded by
+Invoke through the GPU 1 timing runner; each lock hold is bounded by
 that runner. Green build includes admission, with vertical-span time measured
 inside the parent build. Per-frequency timings exclude one-time preparation.
 Logical traffic counts repeated table/rule loads, not physical DRAM traffic.
@@ -25,6 +25,7 @@ from scripts.dev.rfic.bench_layered_network import timed,device_peaks,profile_ke
 from witwin.maxwell.mom.layered.green import LayeredGreenTable
 from witwin.maxwell.mom.layered.vertical import VerticalGreenTable
 from witwin.maxwell.mom.layered import lowfreq,network
+import witwin.maxwell as mw
 
 
 def kernel_model(prepared, chunk_size):
@@ -102,9 +103,9 @@ def kernel_model(prepared, chunk_size):
             samples["wall_analytic_nodes"]+=int(outer[analytic].sum())
     n,t=prepared.layout.basis.n_edges,lt.trees
     nnz,ncharge=lt.sparse_q[1].numel(),lt.sparse_charge[1].numel()
-    # Loss adds a second V-sized congruence. Each sparse term is a real
-    # coefficient times a complex value: 4 real FLOP, 16 B complex input.
-    sparse_terms=4*n*nnz+(faces+t)*ncharge
+    # Loss folds into V before the in-place congruence. Each sparse term is a
+    # real coefficient times a complex value: 4 real FLOP, 16 B complex input.
+    loop_terms=int(lt.sparse_q[0][lt.loops].item())
     rem,static=samples["horizontal_remainder"],samples["horizontal_static"]
     wr,ws=samples["wall_remainder"],samples["wall_ray"]
     analytic=samples["horizontal_analytic_nodes"]+samples["wall_analytic_nodes"]
@@ -135,12 +136,14 @@ def kernel_model(prepared, chunk_size):
         "wall_weights_kernel":{"logical_bytes":8*(2*k+2)*faces*8*65/chunk_size,
                                "real_FLOP":12*k*k*faces*8*65/chunk_size,
                                "note":"Geometry setup executes once per chunk."},
-        "gather_potentials":{"logical_bytes":256*n*n+32*faces*faces,"real_FLOP":32*n*n},
-        "sparse_product_kernel":{"logical_bytes":16*sparse_terms+32*(2*n*n+t*t),"real_FLOP":4*sparse_terms},
-        "scaled_kernel":{"logical_bytes":128*n*n,"real_FLOP":70*n*n},
-        "loss_kernel":{"logical_bytes":6*40*n+16*n*n,"real_FLOP":6*6*n},
-        "port_work_kernel":{"logical_bytes":(8*n*n+16*n*2)/chunk_size,"real_FLOP":2*n*n*2/chunk_size,
-                            "note":"Frequency-independent port setup executes once per chunk."},
+        "gather_system":{"logical_bytes":256*n*n+16*faces*faces,"real_FLOP":32*n*n},
+        "loss_fold_kernel":{"logical_bytes":6*40*n+6*32*n,"real_FLOP":6*14*n},
+        "congruence_rows_kernel":{"logical_bytes":16*n*(loop_terms+lt.loops),"real_FLOP":4*n*loop_terms},
+        "congruence_columns_kernel":{"logical_bytes":16*n*(loop_terms+lt.loops),"real_FLOP":4*n*loop_terms},
+        "system_entries_kernel":{"logical_bytes":32*n*n+64*t*t,"real_FLOP":40*n*n+16*t*t},
+        "factor_cast_kernel":{"logical_bytes":24*n*n,"real_FLOP":0},
+        "sparse_port_work_kernel":{"logical_bytes":(16*nnz+16*n*2)/chunk_size,"real_FLOP":2*nnz*2/chunk_size,
+                                   "note":"Frequency-independent port setup executes once per chunk."},
         "unscale_kernel":{"logical_bytes":40*n*2,"real_FLOP":4*n*2},
         "admittance_kernel":{"logical_bytes":32*4,"real_FLOP":8*4},
         "refinement_check_kernel":{"logical_bytes":32*2,"real_FLOP":20*2},
@@ -192,8 +195,8 @@ def main():
             prepare_time,ready=timed(simulation.prepare)
         prepared=ready.solver.prepared
         print("Prepared",args.mesh,prepared.layout.basis.n_edges,prepare_time,flush=True)
-        with patch.object(lowfreq,"assemble_potentials",new=wrap("assembly",lowfreq.assemble_potentials)), patch.object(
-                lowfreq,"scale_potentials",new=wrap("transform",lowfreq.scale_potentials)), patch.object(
+        with patch.object(lowfreq,"assemble_chunk",new=wrap("assembly",lowfreq.assemble_chunk)), patch.object(
+                lowfreq,"transform_chunk",new=wrap("transform",lowfreq.transform_chunk)), patch.object(
                 network,"solve_scaled_chunk",new=wrap("LU_refinement",network.solve_scaled_chunk)), patch.object(
                 network,"recover_scaled_chunk",new=wrap("recovery",network.recover_scaled_chunk)):
             run_time,result=timed(ready.run)
@@ -202,8 +205,8 @@ def main():
         y=result.network.to_y()
         reciprocity=(torch.linalg.matrix_norm(y-y.transpose(-1,-2))/torch.linalg.matrix_norm(y)).max().item()
         singular=torch.linalg.matrix_norm(result.network.s,ord=2).max().item()
-        equal=True if previous is None else torch.equal(previous[0],result.network.s) and torch.equal(previous[1],result.surface_currents.currents)
-        previous=(result.network.s.clone(),result.surface_currents.currents.clone())
+        equal=True if previous is None else torch.equal(previous[0],result.network.s) and torch.equal(previous[1],mw.mom.surface_currents(result).currents)
+        previous=(result.network.s.clone(),mw.mom.surface_currents(result).currents.clone())
         count=len(frequencies)
         row=dict(unknowns=prepared.layout.basis.n_edges,faces=len(prepared.layout.mesh.faces),
                  prepare=prepare_time,run=run_time,stages=stages,

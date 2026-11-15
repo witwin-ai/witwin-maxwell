@@ -15,6 +15,7 @@ from witwin.maxwell.fdtd.excitation.modes.common import (
     _normalize_mode_profiles_to_unit_power,
 )
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 _DEVICES = ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA"))]
@@ -89,16 +90,17 @@ def test_zero_power_guard_uses_the_yee_reference(device, dtype, staggered, case)
 
 def _waveguide(length, direction, path, device, *, roundoff=False, trainable=False,
                weak_component=0., dtype=torch.float64):
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-length, length),)*3),
-        grid=mw.GridSpec.uniform(.1*length), boundary=mw.BoundarySpec.none(), device=device,
-        subpixel_samples=mw.SubpixelSpec(samples=1, averaging="kottke_edge"),
-    )
-    scene.add_structure(mw.Structure(name="guide", geometry=mw.Box(position=(0.,0.,0.), size=(2*length,.45*length,.25*length)), material=mw.Material(eps_r=12.11)))
     source = mw.ModeSource(position=(0.,0.,0.), size=(0.,1.2*length,.8*length), polarization="Ey", direction=direction, source_time=mw.CW(frequency=C_0/(1.55*length)))
-    scene.add_source(source)
-    prepared = prepare_scene(scene)
-    materials = dict(prepared.compile_materials())
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-length, length),)*3),
+                grid=mw.GridSpec.uniform(.1*length), boundary=mw.BoundarySpec.none(), subpixel=mw.SubpixelSpec(samples=1, averaging="kottke_edge"),
+                structures=(
+            mw.Structure(name="guide", geometry=mw.Box(position=(0.,0.,0.), size=(2*length,.45*length,.25*length)), material=mw.Material(eps_r=12.11)),
+            ),
+                sources=(source,),
+            )
+    prepared = prepare_scene(scene, device=device)
+    materials = dict(compile_materials(prepared))
     # Fix the sampled waveguide cross-section at both scales to isolate the
     # mode-power scale contract from geometry sampling.
     y, z = torch.meshgrid(prepared.y / length, prepared.z / length, indexing="ij")

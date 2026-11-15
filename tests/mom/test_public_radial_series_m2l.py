@@ -56,15 +56,15 @@ def test_new_radial_public_configuration_and_affected_payload_identity(tmp_path)
         dict(near_storage='scalar_reciprocal_cached_dk_v1'),
         dict(table_storage='compact',near_storage='scalar_reciprocal_streamed_dk_v1'))
     for options in choices:
-        old=module.FMMConfig(**options);new=mw.FMMConfig(**options)
+        old=module.FMMConfig(**options);new=mw.mom.FMMConfig(**options)
         assert old.payload()==new.payload() and old.construction()==new.construction()
-        assert mw.FMMConfig.restore(old.payload())==new
+        assert mw.mom.FMMConfig.restore(old.payload())==new
     for near in ('full_matrix','scalar_dk_v1','scalar_reciprocal_dk_v1',
                  'scalar_reciprocal_streamed_dk_v1','scalar_reciprocal_cached_dk_v1'):
-        config=mw.FMMConfig(table_storage='radial_series_shared_radius_v1',near_storage=near)
+        config=mw.mom.FMMConfig(table_storage='radial_series_shared_radius_v1',near_storage=near)
         payload=config.payload()
         assert payload['version']=='cartesian_fmm_radial_series_config_v1'
-        assert mw.FMMConfig.restore(json.loads(json.dumps(payload)))==config
+        assert mw.mom.FMMConfig.restore(json.loads(json.dumps(payload)))==config
         for kind in ('version','policy','missing','extra','order','rows','bool_budget'):
             bad=copy.deepcopy(payload)
             if kind=='version':bad['version']='cartesian_fmm_cached_reciprocal_dk_config_v1'
@@ -74,10 +74,10 @@ def test_new_radial_public_configuration_and_affected_payload_identity(tmp_path)
             elif kind=='order':bad['parameters']['order']=13
             elif kind=='rows':bad['parameters']['m2l_row_batch']=17
             else:bad['parameters']['table_budget_bytes']=True
-            with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
-    for options in (dict(periodic=mw.MoMPeriodicConfig(((1.,0.,0.),))),dict(dtype=torch.complex64)):
+            with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
+    for options in (dict(periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),))),dict(dtype=torch.complex64)):
         with pytest.raises((ValueError,NotImplementedError)):
-            mw.MoMConfig(operator_backend='fmm',fmm=mw.FMMConfig(table_storage='radial_series_shared_radius_v1'),
+            mw.mom.MoMConfig(operator_backend='fmm',fmm=mw.mom.FMMConfig(table_storage='radial_series_shared_radius_v1'),
                 riesz_storage='local_rwg_v1',stopping=StoppingRule(preconditioner='none',fallback='none'),**options)
     _write(tmp_path/'radial-configuration.json',dict(completed=True,new_version_exact=True,
         all_five_near_identities_roundtrip=True,affected_old_payloads_exact=True,
@@ -163,7 +163,7 @@ def test_new_radial_order_accounting_both_paths_include_physical_vectors(rwg,mon
     monkeypatch.setattr(order_module,'multipole_block_error_log',lambda *a,**kw:coords.new_tensor(-30.))
     options=dict(rwg_statistics=(coords.new_zeros((tree.node_count,3)),),rwg_absolute_budget=1.,
         balancing_impedance=1.) if rwg else {}
-    receipt=order_module.plan_multipole_order(((tree,medium),),mw.KernelErrorBudget(1e-6,1e-5),
+    receipt=order_module.plan_multipole_order(((tree,medium),),mw.mom.KernelErrorBudget(1e-6,1e-5),
         min_order=3,max_order=3,separation_ratio=.23,table_storage='radial_series_shared_radius_v1',**options)
     centers=support_spheres(tree)[0]
     pairs=[(a,b) for aa,bb,flags in sphere_block_partition(tree,separation_ratio=.23,pair_batch=32)
@@ -189,9 +189,9 @@ def test_new_radial_public_component_budgets_refuse_before_moments(component,mon
     options[key]=1
     def forbidden(*a,**kw):pytest.fail('Refused radial public capacity reached moments')
     monkeypatch.setattr(NestedRWGMultipoles,'__init__',forbidden)
-    config=mw.MoMConfig(integration=IntegrationConfig(order=4,singular_order=3),operator_backend='fmm',
-        fmm=mw.FMMConfig(**options),riesz_storage='local_rwg_v1',stopping=StoppingRule(preconditioner='none',fallback='none'))
-    with pytest.raises(MemoryError):mw.Simulation.mom(declared,frequency=1.43e8,config=config).prepare()
+    config=mw.mom.MoMConfig(integration=IntegrationConfig(order=4,singular_order=3),operator_backend='fmm',
+        fmm=mw.mom.FMMConfig(**options),riesz_storage='local_rwg_v1',stopping=StoppingRule(preconditioner='none',fallback='none'))
+    with pytest.raises(MemoryError):mw.Simulation.mom(declared,frequencies=1.43e8,config=config).prepare()
 
 
 def test_new_public_radial_native_actions_solve_and_exact_restore(monkeypatch,tmp_path):
@@ -205,7 +205,7 @@ def test_new_public_radial_native_actions_solve_and_exact_restore(monkeypatch,tm
     reference_path=Path(location)
     assert reference_path.is_file(), 'Pinned original public weak reference is unavailable'
     declared,cfg=_fixture()
-    config=mw.MoMConfig(integration=IntegrationConfig(order=4,singular_order=3),operator_backend='fmm',
+    config=mw.mom.MoMConfig(integration=IntegrationConfig(order=4,singular_order=3),operator_backend='fmm',
         fmm=cfg,riesz_storage='local_rwg_v1',stopping=StoppingRule(method='gmres',
             preconditioner='rwg_diagonal',fallback='none',rtol=1e-12,atol=0.,maxiter=240,restart=120))
     # Physical Scene and numerical configuration are independently declared
@@ -226,7 +226,7 @@ def test_new_public_radial_native_actions_solve_and_exact_restore(monkeypatch,tm
     monkeypatch.setattr(regional,'scalar_regional_channels',counted_interior)
     relative=lambda a,b:float(((a-b).norm()/b.norm()).detach())
     try:
-        prepared=mw.Simulation.mom(declared,frequency=1.43e8,config=config).prepare()
+        prepared=mw.Simulation.mom(declared,frequencies=1.43e8,config=config).prepare()
         op=prepared.solver.handle.actions;regions=(op.exterior,*op.interiors)
         from witwin.maxwell.mom.fmm_compact import RadialSeriesElectromagneticM2L
         from witwin.maxwell.mom.fmm_storage import radial_series_m2l_owner_bytes
@@ -283,7 +283,7 @@ def test_new_public_radial_native_actions_solve_and_exact_restore(monkeypatch,tm
         owned=storage_bytes(multipole_action_tensors(op))
         assert owned==op.capacity_plan['planned_bytes']
         result=prepared.run()
-        current=result.surface_currents.scattered_coefficients
+        current=mw.mom.surface_currents(result).scattered_coefficients
         stats=result.stats();residual=relative(current@reference.mT,prepared.solver.rhs)
         state=tmp_path/'radial-public-solver-state.pt'
         torch.save(dict(stats=stats,current=current.detach(),rhs=prepared.solver.rhs.detach()),state)
@@ -322,11 +322,11 @@ def test_new_public_radial_native_actions_solve_and_exact_restore(monkeypatch,tm
             for cls in (MultipoleOperator,MultipoleSystemActions,SystemOperator):patch.setattr(cls,'__init__',forbidden)
             patch.setattr(torch.linalg,'solve',forbidden)
             restored=mw.Result.load(artifact,scene=declared)
-            assert restored.surface_currents.config.fmm==cfg
-            torch.testing.assert_close(restored.surface_currents.scattered_coefficients,current,rtol=0,atol=0)
-            bad=copy.deepcopy(result.surface_currents.snapshot())
+            assert mw.mom.surface_currents(restored).config.fmm==cfg
+            torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,current,rtol=0,atol=0)
+            bad=copy.deepcopy(mw.mom.surface_currents(result).snapshot())
             bad['fmm_config']['parameters']['table_storage']='compact_shared_signed_axis_v1'
-            with pytest.raises(ValueError):SurfaceData.restore(bad,declared,1.43e8)
+            with pytest.raises(ValueError):SurfaceData.restore(bad,declared,1.43e8,'cuda')
         raw.update(completed=True,artifact=str(artifact),artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
             exact_restore=True,whole_peak_qualified=False,independent_EM_reference=False)
         _write(path,raw)

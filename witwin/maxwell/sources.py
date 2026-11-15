@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from ._enums import Direction, FieldComponent, ModePolarization, StrEnum, parse_enum
 from ._fixed_inputs import require_fixed_input
+from .errors import SetupError
 
 from dataclasses import dataclass, replace
 import math
@@ -26,6 +28,7 @@ from .waveforms import (
     solve_broadband_fwidth,
     table_characteristic_frequency,
 )
+from ._stability import experimental
 
 POINT_DIPOLE_REFERENCE_WIDTH = 0.02
 
@@ -63,18 +66,15 @@ def _normalize_axis(axis) -> str | None:
     return normalized
 
 
-def _normalize_point_dipole_profile(value) -> str:
-    normalized = str(value).lower()
-    if normalized not in {"gaussian", "ideal"}:
-        raise ValueError("profile must be 'gaussian' or 'ideal'.")
-    return normalized
+class DipoleProfile(StrEnum):
+    """The spatial profile of a ``PointDipole``: a Gaussian of ``width`` or a single-cell delta."""
+
+    GAUSSIAN = "gaussian"
+    IDEAL = "ideal"
 
 
-def _normalize_mode_direction(value) -> str:
-    normalized = str(value).strip()
-    if normalized not in {"+", "-"}:
-        raise ValueError("direction must be '+' or '-'.")
-    return normalized
+def _normalize_mode_direction(value) -> Direction:
+    return parse_enum(Direction, value, name="direction")
 
 
 def _require_mode_source_size(value) -> tuple[float, float, float]:
@@ -92,19 +92,16 @@ def _resolve_mode_source_normal_axis(size) -> str:
 
 
 def _resolve_mode_source_polarization_axis(normal_axis: str, size, value) -> str:
+    """The tangential axis of a mode polarization: a ``ModePolarization`` or an axis-aligned vector."""
     tangential_axes = tuple(axis for axis in "xyz" if axis != normal_axis)
-    if value is None or (isinstance(value, str) and str(value).lower() == "auto"):
+    if isinstance(value, str):
+        value = parse_enum(ModePolarization, value, name="polarization")
+    if value is ModePolarization.AUTO:
         tangential_sizes = {axis: float(size["xyz".index(axis)]) for axis in tangential_axes}
         return max(tangential_axes, key=lambda axis: (tangential_sizes[axis], axis))
 
-    if isinstance(value, str):
-        token = value.lower()
-        if token in {"ex", "ey", "ez"}:
-            axis = token[-1]
-        elif token in {"x", "y", "z"}:
-            axis = token
-        else:
-            raise ValueError("polarization must be 'auto', Ex/Ey/Ez, x/y/z, or an axis-aligned vector.")
+    if isinstance(value, ModePolarization):
+        axis = value.value[-1].lower()
     else:
         vector = polarization_vector(value)
         active = [axis for axis, component in zip("xyz", vector) if abs(float(component)) > 1e-9]
@@ -148,6 +145,19 @@ def _normalize_bend(bend_radius, bend_axis, normal_axis: str) -> tuple[float | N
     return radius, axis
 
 
+_ELECTRIC_COMPONENTS = (FieldComponent.EX, FieldComponent.EY, FieldComponent.EZ)
+
+
+def _source_polarization(value):
+    """Parse a declared polarization: an electric ``FieldComponent`` member or exact value, or a vector."""
+    if isinstance(value, str):
+        component = parse_enum(FieldComponent, value, name="polarization")
+        if component not in _ELECTRIC_COMPONENTS:
+            raise SetupError(f"polarization must be an electric component Ex, Ey or Ez, got {value!r}.")
+        value = component
+    return polarization_vector(value)
+
+
 def polarization_vector(value) -> tuple[float, float, float]:
     if isinstance(value, str):
         token = value.lower()
@@ -169,7 +179,7 @@ def _validate_transverse_polarization(
     direction_name="direction",
 ) -> tuple[float, float, float]:
     direction = _normalize_vector(direction_name, direction)
-    polarization = polarization_vector(polarization)
+    polarization = _source_polarization(polarization)
     dot = sum(a * b for a, b in zip(direction, polarization))
     if abs(dot) > 1e-6:
         raise ValueError("polarization must be orthogonal to direction.")
@@ -871,7 +881,7 @@ class PointDipole:
     position: tuple[float, float, float]
     polarization: tuple[float, float, float]
     width: float = POINT_DIPOLE_REFERENCE_WIDTH
-    profile: str = "gaussian"
+    profile: DipoleProfile = DipoleProfile.GAUSSIAN
     source_time: SourceTime | None = None
     name: str | None = None
     kind: str = "point_dipole"
@@ -879,16 +889,16 @@ class PointDipole:
     def __init__(
         self,
         position,
-        polarization="Ez",
+        polarization=FieldComponent.EZ,
         width=POINT_DIPOLE_REFERENCE_WIDTH,
-        profile="gaussian",
+        profile=DipoleProfile.GAUSSIAN,
         source_time=None,
         name=None,
     ):
         object.__setattr__(self, "position", _require_length3("position", position))
-        object.__setattr__(self, "polarization", polarization_vector(polarization))
+        object.__setattr__(self, "polarization", _source_polarization(polarization))
         object.__setattr__(self, "width", float(width))
-        object.__setattr__(self, "profile", _normalize_point_dipole_profile(profile))
+        object.__setattr__(self, "profile", parse_enum(DipoleProfile, profile, name="PointDipole.profile"))
         object.__setattr__(self, "source_time", source_time)
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "kind", "point_dipole")
@@ -950,6 +960,7 @@ class PlaneWave:
             raise ValueError("PlaneWave injection must be 'soft' or TFSF(...).")
 
 
+@experimental("mom")
 @dataclass(frozen=True, eq=False)
 class MaxwellPlaneModes:
     """Physical homogeneous Maxwell modes, sampled at one frequency.
@@ -1178,7 +1189,7 @@ class UniformCurrentSource:
     def __init__(
         self,
         size,
-        polarization="Ez",
+        polarization=FieldComponent.EZ,
         source_time=None,
         center=(0.0, 0.0, 0.0),
         name=None,
@@ -1187,7 +1198,7 @@ class UniformCurrentSource:
         if any(component < 0.0 for component in resolved_size):
             raise ValueError("size components must be >= 0.")
         object.__setattr__(self, "size", resolved_size)
-        object.__setattr__(self, "polarization", polarization_vector(polarization))
+        object.__setattr__(self, "polarization", _source_polarization(polarization))
         object.__setattr__(self, "center", _require_length3("center", center))
         object.__setattr__(self, "source_time", source_time)
         object.__setattr__(self, "name", name)
@@ -1259,7 +1270,7 @@ class ModeSource:
     position: tuple[float, float, float]
     size: tuple[float, float, float]
     mode_index: int
-    direction: str
+    direction: Direction
     polarization: tuple[float, float, float]
     source_time: SourceTime | None = None
     injection: Injection = "soft"
@@ -1275,8 +1286,8 @@ class ModeSource:
         position=(0.0, 0.0, 0.0),
         size=(1.0, 1.0, 0.0),
         mode_index=0,
-        direction="+",
-        polarization="auto",
+        direction=Direction.PLUS,
+        polarization=ModePolarization.AUTO,
         source_time=None,
         injection="soft",
         name=None,
@@ -1305,3 +1316,20 @@ class ModeSource:
             raise ValueError("mode_index must be >= 0.")
         if self.injection != "soft":
             raise ValueError("ModeSource injection must currently be 'soft'.")
+
+
+# Public namespace ``mw.sources``: the sources and source-time waveforms beyond the core ones
+# at the top level.
+__all__ = [
+    "AstigmaticGaussianBeam",
+    "BasebandGaussianPulse",
+    "BasebandRectangularPulse",
+    "BroadbandPulse",
+    "CurrentDataset",
+    "CustomCurrentSource",
+    "CustomFieldSource",
+    "CustomSourceTime",
+    "DipoleProfile",
+    "FieldDataset",
+    "RickerWavelet",
+]

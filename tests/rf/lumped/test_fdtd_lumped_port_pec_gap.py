@@ -29,29 +29,28 @@ def _scene(*, embedded: bool) -> mw.Scene:
         grid=mw.GridSpec.uniform(0.002),
         boundary=mw.BoundarySpec.pml(num_layers=4),
         ports=(port,),
-        device="cuda",
     )
     centers = (0.0,) if embedded else (-0.002, 0.002)
-    for index, center in enumerate(centers):
-        scene.add_structure(
-            mw.Structure(
-                name=f"terminal_{index}",
-                geometry=mw.Box(
-                    position=(0.0, 0.0, center),
-                    size=(0.012, 0.008, 0.002),
-                ),
-                material=mw.Material.pec(),
-            )
-        )
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(
+              name=f"terminal_{index}",
+              geometry=mw.Box(
+                  position=(0.0, 0.0, center),
+                  size=(0.012, 0.008, 0.002),
+              ),
+              material=mw.Material.pec(),
+          ) for index, center in enumerate(centers)),
+    ))
     return scene
 
 
 def test_explicit_port_gap_opens_only_the_pec_suppressed_terminal_edge():
     prepared = mw.Simulation.fdtd(
         _scene(embedded=False),
-        frequency=5.0e9,
-        excitations=mw.PortExcitation("feed"),
-        run_time=mw.TimeConfig(time_steps=1),
+        frequencies=5.0e9,
+        excitations=mw.rf.PortExcitation("feed"),
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1)),
     ).prepare()
     solver = prepared.solver
     runtime = solver._port_runtimes[0]
@@ -70,8 +69,8 @@ def test_explicit_port_gap_opens_only_the_pec_suppressed_terminal_edge():
 def test_port_gap_rejects_an_edge_embedded_in_one_pec_conductor():
     simulation = mw.Simulation.fdtd(
         _scene(embedded=True),
-        frequency=5.0e9,
-        excitations=mw.PortExcitation("feed"),
+        frequencies=5.0e9,
+        excitations=mw.rf.PortExcitation("feed"),
     )
 
     with pytest.raises(ValueError, match="same PEC conductor|embedded inside"):
@@ -80,17 +79,19 @@ def test_port_gap_rejects_an_edge_embedded_in_one_pec_conductor():
 
 def test_open_probe_rejects_a_fully_pec_suppressed_gap():
     with pytest.raises(ValueError, match="Port feed is an open probe over a PEC-covered gap.*add a termination"):
-        mw.Simulation.fdtd(_scene(embedded=True), frequency=5.0e9).prepare()
+        mw.Simulation.fdtd(_scene(embedded=True), frequencies=5.0e9).prepare()
 
 
 def test_native_port_roles():
     for excited, role in ((False, "probe"), (True, "coupled")):
         scene = _scene(embedded=False)
-        scene.structures = ()
+        scene = scene.updated(structures=())
         result = mw.Simulation.fdtd(
-            scene, frequency=5.0e9,
-            excitations=mw.PortExcitation("feed") if excited else (),
-            run_time=mw.TimeConfig(time_steps=20),
-            spectral_sampler=mw.SpectralSampler(window="none"),
+            scene, frequencies=5.0e9,
+            excitations=mw.rf.PortExcitation("feed") if excited else (),
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=20),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            ),
         ).run()
         assert result.port("feed").metadata["port_role"] == role

@@ -54,7 +54,8 @@ def main():
            ("native_matrix_default_q1_TM","native_matrix_default_q1","native_matrix_default_q0")]
     paths += [args.evidence/"native_matrix.py",args.evidence/"REPORT.md"]
     paths += [root/"witwin/maxwell/fdtd"/p for p in ("boundary/cpml.py","cuda/kernels/electric.cu","cuda/kernels/magnetic.cu")]
-    report["input_sha256"]={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+    # kernels/magnetic.cu was deleted with the per-component runner (W7 row 16e).
+    report["input_sha256"]={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.exists()}
     if args.variants:
         variants=[]
         for name,cell,target in (("scale1",Cell(alpha_scale=1.,grading=2.),1+2.4641691342752736e-5),

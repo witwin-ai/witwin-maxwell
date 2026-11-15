@@ -148,9 +148,9 @@ def test_new_pair_rule_config_public_guards_and_zero_spatial(monkeypatch, tmp_pa
     assert DyadicIntegrationConfig(**cfg.payload()) == cfg
     assert 'spatial_rule' not in DyadicIntegrationConfig().payload()
     with pytest.raises(ValueError): DyadicIntegrationConfig(radial_map=cfg.radial_map)
-    assert mw.MoMConfig(dyadic_integration=cfg).dyadic_integration == cfg
+    assert mw.mom.MoMConfig(dyadic_integration=cfg).dyadic_integration == cfg
     with pytest.raises(NotImplementedError, match='free-space'):
-        mw.MoMConfig(dyadic_integration=cfg, periodic=mw.MoMPeriodicConfig(((1., 0., 0.),)))
+        mw.mom.MoMConfig(dyadic_integration=cfg, periodic=mw.mom.MoMPeriodicConfig(((1., 0., 0.),)))
     def forbidden(*args, **kwargs):
         raise AssertionError('New strict pair guards and exact-zero spatial path must precede modes')
     for name in ('compile_plane_contrast', 'compile_electrostatic_plane_contrast',

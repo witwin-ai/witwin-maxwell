@@ -12,6 +12,7 @@ from ...waveforms import (
     evaluate_time_shifted_waveform_torch,
     require_waveform_table,
 )
+from ...errors import UnsupportedFeatureError
 
 
 InjectionKind = Literal[
@@ -151,7 +152,7 @@ def _component_name(field_name):
 def _wrap_axes_for_kind(solver, field_name, kind):
     tangential_axes = _COMPONENT_TANGENTIAL_AXES[_component_name(field_name)]
     return tuple(
-        1 if solver.scene.boundary.axis_kind(axis) == kind else 0
+        1 if solver.scene.scene.boundary.axis_kind(axis) == kind else 0
         for axis in tangential_axes
     )
 
@@ -163,7 +164,7 @@ def _periodic_wrap_axes(solver, field_name):
 def _complex_wrap_axes(solver, field_name):
     tangential_axes = _COMPONENT_TANGENTIAL_AXES[_component_name(field_name)]
     return tuple(
-        1 if solver.scene.boundary.axis_kind(axis) in {"bloch", "periodic"} else 0
+        1 if solver.scene.scene.boundary.axis_kind(axis) in {"bloch", "periodic"} else 0
         for axis in tangential_axes
     )
 
@@ -228,14 +229,14 @@ def _bloch_phase_kwargs(solver, field_name):
 
 def _phase_cos_for_axis(solver, axis):
     axis_index = {"x": 0, "y": 1, "z": 2}[axis]
-    if solver.scene.boundary.axis_kind(axis) == "periodic":
+    if solver.scene.scene.boundary.axis_kind(axis) == "periodic":
         return 1.0
     return solver.boundary_phase_cos[axis_index]
 
 
 def _phase_sin_for_axis(solver, axis):
     axis_index = {"x": 0, "y": 1, "z": 2}[axis]
-    if solver.scene.boundary.axis_kind(axis) == "periodic":
+    if solver.scene.scene.boundary.axis_kind(axis) == "periodic":
         return 0.0
     return solver.boundary_phase_sin[axis_index]
 
@@ -352,7 +353,7 @@ def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value,
             if cache_key not in cw_cache:
                 cw_cache[cache_key] = _resolve_cw_signal(term_omega, term_source_time, time_value)
             signal_cos, signal_sin = cw_cache[cache_key]
-            if solver.scene.boundary.uses_kind("bloch"):
+            if solver.scene.scene.boundary.uses_kind("bloch"):
                 _launch_bloch_cw_patch(
                     solver,
                     field_name=field_name,
@@ -370,7 +371,7 @@ def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value,
             )
             continue
         if term["delay_patch"] is not None:
-            if solver.scene.boundary.uses_kind("bloch"):
+            if solver.scene.scene.boundary.uses_kind("bloch"):
                 _launch_bloch_time_shifted_patch(
                     solver,
                     field_name=field_name,
@@ -389,7 +390,7 @@ def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value,
             continue
         if cache_key not in signal_cache:
             signal_cache[cache_key] = evaluate_source_time(term_source_time, time_value)
-        if solver.scene.boundary.uses_kind("bloch"):
+        if solver.scene.scene.boundary.uses_kind("bloch"):
             _launch_bloch_patch(
                 solver,
                 field_name=field_name,
@@ -399,7 +400,7 @@ def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value,
                             if term_source_time["kind"] == "cw" else 0.0),
             )
             continue
-        if solver.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
+        if solver.scene.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
             _launch_periodic_patch(
                 solver,
                 field_name=field_name,
@@ -421,8 +422,8 @@ def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value,
 
 def prepare_source_gathers(solver):
     """Build routes after all periodic ownership and face metadata are final."""
-    bloch = solver.scene.boundary.uses_kind("bloch")
-    periodic = solver.scene.boundary.uses_kind("periodic")
+    bloch = solver.scene.scene.boundary.uses_kind("bloch")
+    periodic = solver.scene.scene.boundary.uses_kind("periodic")
     if not bloch and not periodic:
         return
     state = getattr(solver, "_tfsf_state", None) or {}
@@ -522,7 +523,7 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
             if cache_key not in cw_cache:
                 cw_cache[cache_key] = _resolve_cw_signal(term_omega, term_source_time, time_value)
             signal_cos, signal_sin = cw_cache[cache_key]
-            if solver.scene.boundary.uses_kind("bloch"):
+            if solver.scene.scene.boundary.uses_kind("bloch"):
                 _launch_bloch_cw_patch(
                     solver,
                     field_name=field_name,
@@ -540,7 +541,7 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
             )
             continue
         if term["delay_patch"] is not None:
-            if solver.scene.boundary.uses_kind("bloch"):
+            if solver.scene.scene.boundary.uses_kind("bloch"):
                 _launch_bloch_time_shifted_patch(
                     solver,
                     field_name=field_name,
@@ -562,7 +563,7 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
                 signal_cache[cache_key] = signal
             else:
                 signal_cache[cache_key] = evaluate_source_time(term_source_time, time_value)
-        if solver.scene.boundary.uses_kind("bloch"):
+        if solver.scene.scene.boundary.uses_kind("bloch"):
             _launch_bloch_patch(
                 solver,
                 field_name=field_name,
@@ -572,7 +573,7 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
                             if term_source_time["kind"] == "cw" else 0.0),
             )
             continue
-        if solver.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
+        if solver.scene.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
             _launch_periodic_patch(
                 solver,
                 field_name=field_name,
@@ -610,12 +611,13 @@ class BatchSourceEngine:
                 if ordinal < len(solver._source_terms):
                     term = solver._source_terms[ordinal]
                     if term["delay_patch"] is not None:
-                        raise NotImplementedError("Batch source tables require undelayed point patches.")
+                        raise UnsupportedFeatureError("Batch source tables require undelayed point patches.",
+                                                      feature="guard:98ef2c32", method="fdtd")
                     cw = term["cw_cos_patch"] is not None
                     wrap = 0
                     if not cw and not term.get("periodic_compiled", False):
                         for axis in _COMPONENT_TANGENTIAL_AXES[_component_name(term["field_name"])]:
-                            if solver.scene.boundary.axis_kind(axis) == "periodic":
+                            if solver.scene.scene.boundary.axis_kind(axis) == "periodic":
                                 wrap |= 1 << "xyz".index(axis)
                     by_field.setdefault((term["field_name"], cw, wrap), []).append((lane, solver, term))
             for (name, cw, wrap), terms in by_field.items():

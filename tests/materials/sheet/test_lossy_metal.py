@@ -5,13 +5,14 @@ import torch
 import witwin.maxwell as mw
 from witwin.core import Box
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 _MU0 = 4.0e-7 * np.pi
 
 
 def test_lossy_metal_construction_and_surface_impedance():
     sigma = 5.8e7  # copper [S/m]
-    metal = mw.LossyMetalMedium(conductivity=sigma, name="copper")
+    metal = mw.media.LossyMetalMedium(conductivity=sigma, name="copper")
     assert metal.is_lossy_metal
     assert metal.conductivity == pytest.approx(sigma)
 
@@ -28,34 +29,33 @@ def test_lossy_metal_construction_and_surface_impedance():
     assert abs(z_s) == pytest.approx(np.sqrt(2.0) / (sigma * delta), rel=1e-12)
 
     with pytest.raises(ValueError):
-        mw.LossyMetalMedium(conductivity=0.0)
+        mw.media.LossyMetalMedium(conductivity=0.0)
     with pytest.raises(ValueError):
         metal.surface_impedance(0.0)
 
 
-def _slab_scene(*, device="cpu", conductivity=5.8e7, side="high", pml_layers=4):
+def _slab_scene(*, conductivity=5.8e7, side="high", pml_layers=4):
     # Metal slab flush against the +x domain boundary spanning the full transverse
     # cross-section: a single axis-aligned face at normal incidence.
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.faces(default="periodic", num_layers=pml_layers, strength=1.0, x=("pml", "pml")),
-        device=device,
         structures=[
             mw.Structure(
                 geometry=Box(
                     position=((0.3 if side == "high" else -0.3), 0.0, 0.0),
                     size=(0.4, 0.4, 0.4),
                 ),
-                material=mw.LossyMetalMedium(conductivity=conductivity),
+                material=mw.media.LossyMetalMedium(conductivity=conductivity),
             )
         ],
     )
 
 
 def test_lossy_metal_compiles_to_order0_surface_layout():
-    scene = prepare_scene(_slab_scene())
-    layout = scene.compile_materials().get("surface_impedance")
+    scene = prepare_scene(_slab_scene(), device="cpu")
+    layout = compile_materials(scene).get("surface_impedance")
     assert layout is not None and bool(layout)
     assert len(layout.faces) == 1
     face = layout.faces[0]
@@ -71,8 +71,8 @@ def test_lossy_metal_compiles_to_order0_surface_layout():
 
 
 def test_lossy_metal_low_side_surface_uses_upper_geometry_face():
-    scene = prepare_scene(_slab_scene(side="low"))
-    layout = scene.compile_materials()["surface_impedance"]
+    scene = prepare_scene(_slab_scene(side="low"), device="cpu")
+    layout = compile_materials(scene)["surface_impedance"]
     assert len(layout.faces) == 1
     face = layout.faces[0]
     assert face.axis == 0
@@ -86,9 +86,8 @@ def _box_scene(box):
             domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
             grid=mw.GridSpec.uniform(0.05),
             boundary=mw.BoundarySpec.faces(default="periodic", num_layers=4, strength=1.0, x=("pml", "pml")),
-            device="cpu",
-            structures=[mw.Structure(geometry=box, material=mw.LossyMetalMedium(conductivity=5.8e7))],
-        )
+            structures=[mw.Structure(geometry=box, material=mw.media.LossyMetalMedium(conductivity=5.8e7))],
+        ), device="cpu"
     )
 
 
@@ -96,7 +95,7 @@ def test_lossy_metal_finite_block_exposes_all_faces():
     # A laterally finite block now compiles: every axis-aligned exposed face is a
     # surface-impedance plane (S1.1 replaced the single-plane restriction).
     scene = _box_scene(Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2)))
-    layout = scene.compile_materials()["surface_impedance"]
+    layout = compile_materials(scene)["surface_impedance"]
     assert len(layout.faces) == 6
     assert layout.total_area == pytest.approx(0.24)
 
@@ -104,7 +103,7 @@ def test_lossy_metal_finite_block_exposes_all_faces():
 def test_lossy_metal_mid_domain_double_sided_plate_compiles():
     # A slab with vacuum on both sides now compiles to a two-face double-sided plate.
     scene = _box_scene(Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.4, 0.4)))
-    layout = scene.compile_materials()["surface_impedance"]
+    layout = compile_materials(scene)["surface_impedance"]
     assert len(layout.faces) == 2
     assert sorted(face.metal_side for face in layout.faces) == ["high", "low"]
 
@@ -115,16 +114,15 @@ def test_lossy_metal_multiple_slabs_compile():
             domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
             grid=mw.GridSpec.uniform(0.05),
             boundary=mw.BoundarySpec.faces(default="periodic", num_layers=4, strength=1.0, x=("pml", "pml")),
-            device="cpu",
             structures=[
                 mw.Structure(geometry=Box(position=(0.3, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
-                             material=mw.LossyMetalMedium(conductivity=5.8e7)),
+                             material=mw.media.LossyMetalMedium(conductivity=5.8e7)),
                 mw.Structure(geometry=Box(position=(-0.3, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
-                             material=mw.LossyMetalMedium(conductivity=5.8e7)),
+                             material=mw.media.LossyMetalMedium(conductivity=5.8e7)),
             ],
-        )
+        ), device="cpu"
     )
-    layout = scene.compile_materials()["surface_impedance"]
+    layout = compile_materials(scene)["surface_impedance"]
     assert len(layout.metals) == 2
     # Each full-span slab flush against a domain boundary exposes one illuminated face.
     assert len(layout.faces) == 2
@@ -141,7 +139,7 @@ def test_lossy_metal_adjoint_is_rejected():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_lossy_metal_simulation_prepare_configures_surface_impedance():
-    solver = mw.Simulation.fdtd(_slab_scene(device="cuda", pml_layers=40), frequencies=[1.0e9]).prepare().solver
+    solver = mw.Simulation.fdtd(_slab_scene(pml_layers=40), frequencies=[1.0e9]).prepare().solver
     assert solver.surface_impedance_enabled
     state = solver._surface_impedance
     # One full-plane order-0 face -> two tangential-component writes, each a resistive

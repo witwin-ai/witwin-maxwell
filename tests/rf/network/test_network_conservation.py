@@ -75,13 +75,12 @@ def _scene(port_layout, block):
         sources=(),
         ports=tuple(_lumped_port(name, x) for name, x in port_layout),
         networks=(block,),
-        device=DEVICE,
     )
 
 
 def _lossy_scenario():
     conductance = torch.tensor([[0.03, -0.02], [-0.02, 0.03]], dtype=torch.float64, device=DEVICE)
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.zeros((0, 0), dtype=torch.float64, device=DEVICE),
         B=torch.zeros((0, 2), dtype=torch.float64, device=DEVICE),
         C=torch.zeros((2, 0), dtype=torch.float64, device=DEVICE),
@@ -89,13 +88,13 @@ def _lossy_scenario():
         representation="Y",
         port_order=("n0", "n1"),
     )
-    data = mw.NetworkData.from_y(
+    data = mw.rf.NetworkData.from_y(
         frequencies=FULL_GRID,
         y=conductance.to(torch.complex128).expand(FULL_GRID.numel(), 2, 2),
         z0=50.0,
         port_names=("n0", "n1"),
     )
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="lossy",
         network=data,
         connections={"n0": "d1", "n1": "d2"},
@@ -111,7 +110,7 @@ def _reactive_scenario():
     capacitance = 5.0e-12
     shunt = 2.0e-3
     incidence = torch.tensor((1.0, -1.0), dtype=torch.float64, device=DEVICE)
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.tensor(((-1.0 / (resistance * capacitance),),), dtype=torch.float64, device=DEVICE),
         B=(incidence / (resistance * capacitance)).reshape(1, 2),
         C=(-incidence / resistance).reshape(2, 1),
@@ -120,13 +119,13 @@ def _reactive_scenario():
         representation="Y",
         port_order=("n0", "n1"),
     )
-    data = mw.NetworkData.from_y(
+    data = mw.rf.NetworkData.from_y(
         frequencies=FULL_GRID,
         y=model.evaluate(FULL_GRID),
         z0=50.0,
         port_names=("n0", "n1"),
     )
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="reactive",
         network=data,
         connections={"n0": "d1", "n1": "d2"},
@@ -143,7 +142,7 @@ def _four_port_scenario():
         + 0.001 * torch.ones((4, 4), dtype=torch.float64, device=DEVICE)
     )
     names = tuple(f"n{i}" for i in range(4))
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.zeros((0, 0), dtype=torch.float64, device=DEVICE),
         B=torch.zeros((0, 4), dtype=torch.float64, device=DEVICE),
         C=torch.zeros((4, 0), dtype=torch.float64, device=DEVICE),
@@ -151,13 +150,13 @@ def _four_port_scenario():
         representation="Y",
         port_order=names,
     )
-    data = mw.NetworkData.from_y(
+    data = mw.rf.NetworkData.from_y(
         frequencies=FULL_GRID,
         y=conductance.to(torch.complex128).expand(FULL_GRID.numel(), 4, 4),
         z0=50.0,
         port_names=names,
     )
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="fourport",
         network=data,
         connections={f"n{i}": f"d{i + 1}" for i in range(4)},
@@ -179,11 +178,13 @@ def _run(layout, block, steps):
     result = mw.Simulation.fdtd(
         _scene(layout, block),
         frequencies=MEASURE_FREQUENCIES,
-        excitations=mw.PortExcitation("d0", source_time=SOURCE_TIME),
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        excitations=mw.rf.PortExcitation("d0", source_time=SOURCE_TIME),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
-    return result.embedded_network(block.name)
+    return mw.rf.embedded_network(result, block.name)
 
 
 @pytest.mark.parametrize("scenario", tuple(SCENARIOS))

@@ -12,9 +12,10 @@ from .runtime import _compile_basis,_signature,_same_metadata,_numerical_identit
 from .mesh import SurfaceSystem
 from .tensor_medium import sampled_medium_payload
 from .tensor_harmonic_preparation import prepare_mixed_tensor_harmonic_balance
-from .harmonic_state import preparation_signature
+from .harmonic_recovery import preparation_signature
 from .static_tensor_material import StaticTensorChannel
 from ..constants import EPSILON_0,MU_0
+from ..errors import UnsupportedFeatureError
 
 SCHEMA=21
 KIND='coupled_sie_vie_hb_mixed_tensor_spd'
@@ -24,11 +25,11 @@ MAGNETIC_SCHEMA=23
 MAGNETIC_KIND='coupled_sie_vie_hb_mixed_tensor_current_magnetic'
 
 
-def _materials(scene,frequency,count,dtype):
+def _materials(scene,frequency,count,dtype,device):
     structures=validate_scene_structure(scene,frequency)
-    return tuple(compile_tensor_harmonic_material(s.material,frequency,count,device=scene.device,dtype=dtype,tensor_sources=True)
+    return tuple(compile_tensor_harmonic_material(s.material,frequency,count,device=device,dtype=dtype,tensor_sources=True)
         if isinstance(s.material,GyromagneticFerrite) or getattr(s.material,'is_anisotropic',False)
-        else compile_harmonic_material(s.material,frequency,count,device=scene.device,dtype=dtype,
+        else compile_harmonic_material(s.material,frequency,count,device=device,dtype=dtype,
             tensor_sources=True) for s in structures)
 
 
@@ -36,11 +37,14 @@ def _admit(config,materials,exterior):
     hb=config.harmonic_balance
     current_regions=tuple(i+1 for i,m in enumerate(materials) if m.tpa_scale!=0 or m.electric_dc.kind=='conductive_limit')
     if config.operator_backend not in ('dense','hmatrix','h2') or config.periodic is not None:
-        raise NotImplementedError('Mixed tensor HB requires free-space dense or H/H2 preparation')
+        raise UnsupportedFeatureError('Mixed tensor HB requires free-space dense or H/H2 preparation',
+                                      feature="guard:1eee0ed4", method="mom")
     if (hb.dc_tangent_rule is not None and not current_regions) or hb.dc_testing_order!=4:
-        raise NotImplementedError('Mixed tensor HB uses regional collocation; tangent policy requires current regions')
+        raise UnsupportedFeatureError('Mixed tensor HB uses regional collocation; tangent policy requires current regions',
+                                      feature="guard:a1fc19f0", method="mom")
     if config.operator_backend=='dense' and (config.stopping.method!='direct' or config.stopping.direct_storage!='resident'):
-        raise NotImplementedError('Mixed tensor HB preparation requires resident direct linear solves')
+        raise UnsupportedFeatureError('Mixed tensor HB preparation requires resident direct linear solves',
+                                      feature="guard:875340db", method="mom")
     if config.operator_backend!='dense' and (config.stopping.method not in ('gmres','block_gmres')
             or config.stopping.fallback!='none' or config.stopping.recycle_size
             or config.stopping.preconditioner not in ('none','row_column_norm')):
@@ -53,7 +57,8 @@ def _admit(config,materials,exterior):
     for volume in hb.volumes:
         if not 1<=volume.region_id<=len(materials):raise ValueError('Mixed volume region is outside the body table')
         if any(not isinstance(m,Medium) for m in materials[volume.region_id-1].linear_samples):
-            raise NotImplementedError('Mixed tensor HB volume sources require scalar regional AC kernels')
+            raise UnsupportedFeatureError('Mixed tensor HB volume sources require scalar regional AC kernels',
+                                          feature="guard:fb12de9f", method="mom")
     if hb.dc_magnetic_volumes is not None:
         if not current_regions or len(hb.dc_magnetic_volumes)!=len(materials):
             raise ValueError('DC magnetic volumes require current closure and every body')
@@ -67,14 +72,15 @@ class MixedTensorHarmonicRuntime(HarmonicRuntime):
     def __init__(self,simulation):
         self.simulation=simulation;self.config=config=simulation.config
         if simulation.has_trainable_parameters:
-            raise NotImplementedError('Public harmonic material/geometry parameter compilation is not differentiable yet')
+            raise UnsupportedFeatureError('Public harmonic material/geometry parameter compilation is not differentiable yet',
+                                          feature="guard:1656a3bc", method="mom")
         settings=config.harmonic_balance
-        _validate_surface_queries(simulation.scene)
-        self.materials=_materials(simulation.scene,simulation.frequency,settings.harmonics,config.dtype)
+        _validate_surface_queries(simulation.scene,config.device)
+        self.materials=_materials(simulation.scene,simulation.frequency,settings.harmonics,config.dtype,config.device)
         self.exterior=compile_harmonic_material(Material(),simulation.frequency,settings.harmonics)
         current_regions=_admit(config,self.materials,self.exterior)
         enabled=[(i,s) for i,s in enumerate(simulation.scene.structures) if s.enabled]
-        bases=tuple(_compile_basis(simulation.scene,s.geometry,config) for _,s in enabled)
+        bases=tuple(_compile_basis(s.geometry,config) for _,s in enabled)
         linear=replace(config,harmonic_balance=None)
         operators=tuple(_harmonic_operator(SurfaceSystem.create([
             (index,s.name,basis,material.linear_samples[n])
@@ -90,7 +96,7 @@ class MixedTensorHarmonicRuntime(HarmonicRuntime):
         self.signature=self._signature()
 
     def _cutoff_materials(self,count):
-        return _materials(self.simulation.scene,self.simulation.frequency,count,self.config.dtype)
+        return _materials(self.simulation.scene,self.simulation.frequency,count,self.config.dtype,self.config.device)
 
     def _prepare_cutoff_response(self,operators,materials,exterior,config,previous):
         current_regions=_admit(config,materials,exterior)
@@ -152,7 +158,7 @@ def validate_result_metadata(data,metadata,solver_stats=None):
         raise ValueError('Mixed harmonic Result metadata differs from native identity')
 
 
-def restore(payload,scene):
+def restore(payload,scene,device):
     from .tensor_harmonic_bundle import restore_mixed_tensor_harmonic_bundle,_config
     from .linalg import StoppingRule
     from .carrier import IncidentCarrier
@@ -162,8 +168,8 @@ def restore(payload,scene):
     if (type(payload) is not dict or set(payload)!={'schema_version','payload_kind','bundle','binding','numerical','harmonic_config','scene_signature'}
             or type(payload['schema_version']) is not int or payload['schema_version']!=schema or payload['payload_kind']!=kind):
         raise ValueError('Invalid public mixed tensor harmonic payload')
-    if torch.device(scene.device).type!='cuda':raise ValueError('Mixed harmonic Result requires CUDA Scene')
-    model,prepared,state=restore_mixed_tensor_harmonic_bundle(payload['bundle'],expected_binding=payload['binding'],device=scene.device)
+    if torch.device(device).type!='cuda':raise ValueError('Mixed harmonic Result requires a CUDA device')
+    model,prepared,state=restore_mixed_tensor_harmonic_bundle(payload['bundle'],expected_binding=payload['binding'],device=device)
     settings=copy.deepcopy(payload['harmonic_config'])
     if type(settings) is not dict:raise ValueError('Invalid public mixed harmonic policy')
     if settings.get('cutoff') is not None:settings['cutoff']=HarmonicCutoffConfig(**settings['cutoff'])
@@ -176,8 +182,8 @@ def restore(payload,scene):
     compressed=isinstance(numerical,dict) and numerical.get('operator_backend') in ('hmatrix','h2')
     if compressed:
         from .physical_surface_snapshot import _restore_config
-        config=replace(_restore_config(numerical),harmonic_balance=hb)
-    else:config=replace(_config(numerical),harmonic_balance=hb)
+        config=replace(_restore_config(numerical),harmonic_balance=hb,device=device)
+    else:config=replace(_config(numerical),harmonic_balance=hb,device=device)
     if prepared['response_backend']!=('compressed' if compressed else 'dense'):
         raise ValueError('Public mixed harmonic response backend differs from preparation')
     if (not _same_metadata(hb.numerical_payload(),payload['harmonic_config'])
@@ -189,16 +195,16 @@ def restore(payload,scene):
         if compressed:_validate_response_policy(part,config)
         else:_validate_dense_response_policy(part,config,operator=operator,bindings=bindings)
     frequency=prepared['fundamental_frequency']
-    materials=_materials(scene,frequency,hb.harmonics,config.dtype)
+    materials=_materials(scene,frequency,hb.harmonics,config.dtype,device)
     exterior=compile_harmonic_material(Material(),frequency,hb.harmonics)
-    current_regions=_admit(config,materials,exterior);_validate_surface_queries(scene)
+    current_regions=_admit(config,materials,exterior);_validate_surface_queries(scene,device)
     if current!=bool(current_regions) or current!=bool(state.dc_current_regions):
         raise ValueError('Mixed harmonic current schema differs from Scene or state')
     signature=(_signature(scene,exterior.linear_samples[0],tuple(m.linear_samples[0] for m in materials)),
         tuple(material_signature(s.material) for s in scene.structures if s.enabled),frequency)
     if not _same_metadata(signature,payload['scene_signature']):raise ValueError('Mixed harmonic Scene identity differs')
     enabled=[(i,s) for i,s in enumerate(scene.structures) if s.enabled]
-    bases=tuple(_compile_basis(scene,s.geometry,config) for _,s in enabled)
+    bases=tuple(_compile_basis(s.geometry,config) for _,s in enabled)
     for n,operator in enumerate(prepared['operators']):
         if (_numerical_identity(operator._public_config)!=_numerical_identity(config)
                 or len(operator.system.bodies)!=len(materials)
@@ -236,14 +242,14 @@ def restore(payload,scene):
             continue
         channel=material.electric_dc
         coefficient=(channel.dielectric_sample() if isinstance(channel,StaticTensorChannel) else
-                     channel.dielectric_sample(EPSILON_0)*torch.eye(3,device=scene.device,dtype=kernel.coefficient.dtype))
+                     channel.dielectric_sample(EPSILON_0)*torch.eye(3,device=device,dtype=kernel.coefficient.dtype))
         if not torch.equal(kernel.coefficient,coefficient):raise ValueError('Mixed harmonic DC coefficient differs from Scene')
     if magnetic:
         response=state.dc_magnetic_volume
         for kernel,material in zip((response.exterior,*response.interiors),(exterior,*materials)):
             channel=material.magnetic_dc
             coefficient=(channel.dielectric_sample() if isinstance(channel,StaticTensorChannel) else
-                channel.dielectric_sample(MU_0)*torch.eye(3,device=scene.device,dtype=kernel.coefficient.dtype))
+                channel.dielectric_sample(MU_0)*torch.eye(3,device=device,dtype=kernel.coefficient.dtype))
             if not torch.equal(coefficient,kernel.coefficient):
                 raise ValueError('Mixed magnetic DC coefficient differs from Scene')
     if (state.receipt['pump_scale']!=hb.pump_scales[-1]

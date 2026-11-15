@@ -89,7 +89,6 @@ def measure_sheet_scattering(
         boundary=mw.BoundarySpec.faces(
             default="pml", num_layers=pml_layers, strength=1.0, y="pmc", z="pec"
         ),
-        device="cuda",
         sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
@@ -110,12 +109,12 @@ def measure_sheet_scattering(
     )
     result = mw.Simulation.fdtd(
         scene,
-        frequencies=[frequency], absorber=absorber,
+        frequencies=[frequency], config=mw.FDTDConfig(absorber=absorber,
         run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+        full_field_dft=True),
     ).run()
-    ez = result.E.z
+    ez = result.E.z.isel(f=0).values
     if ez.ndim == 4:
         ez = ez[0]
     profile = ez[:, ez.shape[1] // 2, ez.shape[2] // 2].detach().cpu().numpy()

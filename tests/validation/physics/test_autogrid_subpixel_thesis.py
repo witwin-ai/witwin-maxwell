@@ -93,29 +93,30 @@ def _build(grid, with_sphere):
         domain=mw.Domain(bounds=BOUNDS),
         grid=grid,
         boundary=mw.BoundarySpec.pml(num_layers=8),
-        device="cuda",
-        subpixel_samples=mw.SubpixelSpec(samples=(2, 2, 2), averaging="polarized"),
+        subpixel=mw.SubpixelSpec(samples=(2, 2, 2), averaging="polarized"),
     )
     if with_sphere:
-        scene.add_structure(
+        scene = scene.updated(structures=(
+            *scene.structures,
             mw.Structure(
                 geometry=mw.Sphere(position=(0, 0, 0), radius=RADIUS),
                 material=mw.Material(eps_r=EPS_R, sigma_e=SIGMA_E),
-            )
-        )
-    scene.add_source(
+            ),
+        ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(0, 0, 1.0),
             polarization=(1.0, 0, 0),
             source_time=mw.CW(frequency=FREQ),
             name="pw",
-        )
-    )
+        ),
+    ))
     return scene
 
 
 def _cell_count(grid):
-    s = mw.Simulation.fdtd(_build(grid, True), frequency=FREQ).prepare().solver.scene
+    s = mw.Simulation.fdtd(_build(grid, True), frequencies=FREQ).prepare().solver.scene
     nx = len(np.asarray(s.x_nodes64)) - 1
     ny = len(np.asarray(s.y_nodes64)) - 1
     nz = len(np.asarray(s.z_nodes64)) - 1
@@ -131,7 +132,7 @@ def _sphere_intensity(res):
     uniform or graded.
     """
     s = res.solver.scene
-    ex = res.raw_output["Ex"].detach()
+    ex = res._raw_output["Ex"].detach()
     dev = ex.device
     xa = torch.as_tensor(np.asarray(s.x_half64).copy()[: ex.shape[0]], device=dev, dtype=torch.float64)
     ya = torch.as_tensor(np.asarray(s.y_nodes64).copy()[: ex.shape[1]], device=dev, dtype=torch.float64)
@@ -148,10 +149,12 @@ def _sphere_intensity(res):
 def _run(scene):
     return mw.Simulation.fdtd(
         scene,
-        frequency=FREQ,
-        run_time=mw.TimeConfig.auto(steady_cycles=STEADY, transient_cycles=TRANSIENT),
-        spectral_sampler=mw.SpectralSampler(window="hanning"),
-        full_field_dft=True,
+        frequencies=FREQ,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=STEADY, transient_cycles=TRANSIENT),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+            full_field_dft=True,
+        ),
     ).run()
 
 

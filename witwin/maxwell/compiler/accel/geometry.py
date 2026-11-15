@@ -101,7 +101,7 @@ def torch_fills(scene, structures, native, axes, spacing, delta, shifts, selecte
     from ..subpixel import _broadcast_spacing, _cached_mesh_subsample_fill, _coverage_fill
     from .primitives import sampling_geometry
 
-    periodic = any(scene.boundary.axis_kind(a) in ("periodic", "bloch") for a in "xyz")
+    periodic = any(scene.scene.boundary.axis_kind(a) in ("periodic", "bloch") for a in "xyz")
     geometries = [s.geometry if fused else sampling_geometry(s.geometry, spacing=spacing if periodic else None)
                   for s, fused in zip(structures, native)]
     rows = []

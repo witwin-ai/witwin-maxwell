@@ -212,30 +212,30 @@ def build_config(args, subdivisions):
     if args.backend == 'dense':
         # Row-only scaling mixes the J (A/m) and M (V/m) test rows badly; the
         # balanced row/column scaling is the dense diagonal baseline.
-        return mw.MoMConfig(**common, riesz_storage='compact_rwg_v1',
+        return mw.mom.MoMConfig(**common, riesz_storage='compact_rwg_v1',
                             stopping=StoppingRule(method='gmres', preconditioner='row_column_norm', **rule))
     tolerances = dict(solve_dual_tolerance=args.admission_rtol, original_sample_tolerance=args.admission_rtol)
     if args.backend in ('hmatrix', 'h2'):
-        extra = {'h2': mw.H2Config(retained_budget_bytes=budget, **tolerances)} if args.backend == 'h2' else {}
-        return mw.MoMConfig(**common, operator_backend=args.backend, riesz_storage='local_rwg_v1',
-                            hierarchical=mw.HMatrixConfig(leaf_size=args.leaf_size, tolerance=args.compression_tol,
+        extra = {'h2': mw.mom.H2Config(retained_budget_bytes=budget, **tolerances)} if args.backend == 'h2' else {}
+        return mw.mom.MoMConfig(**common, operator_backend=args.backend, riesz_storage='local_rwg_v1',
+                            hierarchical=mw.mom.HMatrixConfig(leaf_size=args.leaf_size, tolerance=args.compression_tol,
                                                           retained_budget_bytes=budget, **tolerances),
                             stopping=StoppingRule(method='gmres', preconditioner='none', **rule), **extra)
     if args.backend == 'direct_h2':
-        return mw.MoMConfig(**common, operator_backend='direct_h2', riesz_storage='local_rwg_v1',
-                            direct_h2=mw.DirectH2Config(order=args.fmm_order, leaf_size=args.leaf_size,
+        return mw.mom.MoMConfig(**common, operator_backend='direct_h2', riesz_storage='local_rwg_v1',
+                            direct_h2=mw.mom.DirectH2Config(order=args.fmm_order, leaf_size=args.leaf_size,
                                                         action_retained_budget_bytes=budget, **tolerances),
                             stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal', **rule))
     if args.backend == 'fmm':
-        fmm = mw.FMMConfig(order=args.fmm_order, table_storage='compact_shared_displacement_v1',
+        fmm = mw.mom.FMMConfig(order=args.fmm_order, table_storage='compact_shared_displacement_v1',
                            shift_storage='separable_v1', near_storage='scalar_reciprocal_dk_v1',
                            leaf_size=args.leaf_size, separation_ratio=args.separation_ratio,
                            action_retained_budget_bytes=budget, table_budget_bytes=budget//2,
                            near_budget_bytes=budget//2, projection_budget_bytes=budget//2, **tolerances)
     else:
-        fmm = mw.DirectionalFMMConfig(near_storage='scalar_reciprocal_dk_v1', regional_near_budget_bytes=budget//2,
+        fmm = mw.mom.DirectionalFMMConfig(near_storage='scalar_reciprocal_dk_v1', regional_near_budget_bytes=budget//2,
                                       regional_table_budget_bytes=budget//2, **tolerances)
-    return mw.MoMConfig(**common, operator_backend='fmm', fmm=fmm, riesz_storage='local_rwg_v1',
+    return mw.mom.MoMConfig(**common, operator_backend='fmm', fmm=fmm, riesz_storage='local_rwg_v1',
                         stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal', **rule))
 
 
@@ -244,12 +244,12 @@ def preconditioner_factory(name):
     if name == 'diag':
         return None
     if name == 'none':
-        return mw.IdentityRightPreconditioner()
+        return mw.mom.IdentityRightPreconditioner()
     if name.startswith('leaf:'):
         # Dense handles build their support tree here, so the leaf size equals
         # the block bound; hierarchical handles keep their own tree leaves.
         edges = int(name.split(':')[1])
-        return mw.LeafBlockRightPreconditioner(edges, budget_bytes=4*1024**3, leaf_size=edges)
+        return mw.mom.LeafBlockRightPreconditioner(edges, budget_bytes=4*1024**3, leaf_size=edges)
     if name == 'body':
         def factory(context):
             blocks = []
@@ -264,7 +264,7 @@ def preconditioner_factory(name):
                     result[index] = torch.linalg.lu_solve(factor, pivot, residual[index, None])[:, 0]
                 return result
             return apply
-        return mw.FunctionRightPreconditioner(factory, name='body_block_lu')
+        return mw.mom.FunctionRightPreconditioner(factory, name='body_block_lu')
     raise ValueError(f'Unknown preconditioner {name}')
 
 
@@ -343,7 +343,7 @@ def run_case(args):
               'maxiter': args.maxiter, 'restart': args.restart}
     _phase_reset()
     start = _sync()
-    prepared = mw.Simulation.mom(scene, frequency=args.frequency, config=config).prepare()
+    prepared = mw.Simulation.mom(scene, frequencies=args.frequency, config=config).prepare()
     record['prepare_seconds'] = _sync()-start
     record['prepare_peak_bytes'] = _peak()
     runtime = prepared.solver
@@ -364,7 +364,7 @@ def run_case(args):
     rhs = runtime.rhs
     runs = {'diag': {**_summary(baseline.stats()), 'wall_seconds': baseline_seconds, 'peak_bytes': _peak(),
                      'preconditioner_setup_seconds': 0.}}
-    solutions = {'diag': baseline.surface_currents.scattered_coefficients}
+    solutions = {'diag': mw.mom.surface_currents(baseline).scattered_coefficients}
     for name in args.preconditioners:
         if name == 'diag':
             continue
@@ -391,7 +391,7 @@ def run_case(args):
     elif args.reference == 'tight':
         stopping = StoppingRule(method='gmres', preconditioner=config.stopping.preconditioner, rtol=1e-10, atol=0.,
                                 maxiter=4*args.maxiter, restart=args.restart, stagnation_window=args.stagnation_window)
-        bound, _ = bind_right_preconditioner(mw.LeafBlockRightPreconditioner(32, budget_bytes=4*1024**3),
+        bound, _ = bind_right_preconditioner(mw.mom.LeafBlockRightPreconditioner(32, budget_bytes=4*1024**3),
                                              handle, args.frequency)
         solver = (lambda: solve_reference(handle, rhs, stopping, right_preconditioner=bound.apply)) \
             if args.backend == 'dense' else (lambda: handle.solve(rhs, stopping, right_preconditioner=bound.apply))
@@ -439,7 +439,7 @@ def run_case(args):
         _phase_reset()
         start = _sync()
         # Direct (default adaptive) evaluation; cost is independent of which solution is decoded.
-        baseline.surface_currents.query_fields(points, 'exterior', 'total')
+        mw.mom.surface_currents(baseline).query_fields(points, 'exterior', 'total')
         record['query'] = {'points': args.queries, 'seconds': _sync()-start, 'peak_bytes': _peak(),
                            'radius_lambda': 0.5*args.extent+args.query_offset,
                            'log': {k: v for k, v in handle.last_field_query_log.items() if k != 'last_body_queries'}}

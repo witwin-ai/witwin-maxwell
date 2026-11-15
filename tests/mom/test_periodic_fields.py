@@ -16,7 +16,7 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 def test_periodic_fields_shift_native_gradient_and_free_interior(monkeypatch):
     original,_=runpy.run_path('tests/mom/test_surface_volume.py')['problem']()
     wave=mw.PlaneWave(direction=(.2,0.,math.sqrt(.96)),polarization=(0.,1.,0.))
-    handle=SystemDecodeHandle(original.system,original.exterior,[wave],mw.MoMConfig(integration=original.integration),{})
+    handle=SystemDecodeHandle(original.system,original.exterior,[wave],mw.mom.MoMConfig(integration=original.integration),{})
     sample=handle.system.bodies[0].mesh.vertices
     lattice=LatticeSpec(sample.new_tensor([[2.,0.,0.]]),sample.new_tensor([.2*handle.exterior.k.real,0.,0.]))
     kernel=EwaldHelmholtzKernel(lattice,2.,real_shells=2,reciprocal_shells=6,quadrature_order=64)
@@ -54,7 +54,7 @@ def test_periodic_fields_match_direct_images_and_complete_field_refinement():
     from witwin.maxwell.mom.periodic_fields import PeriodicFieldConvergenceError
     original,_=runpy.run_path('tests/mom/test_surface_volume.py')['problem']()
     exterior=compile_medium(mw.Material(sigma_e=.02),3e8)
-    handle=SystemDecodeHandle(original.system,exterior,[mw.PlaneWave()],mw.MoMConfig(integration=original.integration),{})
+    handle=SystemDecodeHandle(original.system,exterior,[mw.PlaneWave()],mw.mom.MoMConfig(integration=original.integration),{})
     sample=handle.system.bodies[0].mesh.vertices
     lattice=LatticeSpec(sample.new_tensor([[2.,0.,0.]]),sample.new_zeros(3))
     kernel=EwaldHelmholtzKernel(lattice,2.,real_shells=2,reciprocal_shells=8,quadrature_order=64)
@@ -89,7 +89,7 @@ def test_analytic_incident_carrier_has_no_regular_image_field():
     from witwin.maxwell.mom.quadrature import triangle_rule
     original,_=runpy.run_path('tests/mom/test_surface_volume.py')['problem']()
     wave=mw.PlaneWave(direction=(.2,0.,math.sqrt(.96)),polarization=(0.,1.,0.))
-    handle=SystemDecodeHandle(original.system,original.exterior,[wave],mw.MoMConfig(integration=original.integration),{})
+    handle=SystemDecodeHandle(original.system,original.exterior,[wave],mw.mom.MoMConfig(integration=original.integration),{})
     sample=handle.system.bodies[0].mesh.vertices
     lattice=LatticeSpec(sample.new_tensor([[2.,0.,0.]]),sample.new_tensor([.2*handle.exterior.k.real,0.,0.]))
     kernel=EwaldHelmholtzKernel(lattice,2.,real_shells=2,reciprocal_shells=8,quadrature_order=96)
@@ -142,7 +142,7 @@ def test_periodic_field_ewald_check_detects_skew_heat_error_and_preserves_gradie
     system=SurfaceSystem.create([(body.structure_index,body.name,body.basis,body.interior)])
     wave=mw.PlaneWave(direction=(.6,0.,.8),polarization=(0.,1.,0.))
     handle=SystemDecodeHandle(system,original.exterior,[wave],
-        mw.MoMConfig(integration=replace(original.integration,order=6,singular_order=6)),{})
+        mw.mom.MoMConfig(integration=replace(original.integration,order=6,singular_order=6)),{})
     sample=body.mesh.vertices
     lattice=LatticeSpec(sample.new_tensor([[1.5,.2,0.],[.1,1.4,0.]]),sample.new_zeros(3))
     lattice=LatticeSpec(lattice.vectors,sample.new_tensor([handle.exterior.k.real*.6,0.,0.])-lattice.reciprocal[0])

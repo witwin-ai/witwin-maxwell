@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .assembly import assemble_potentials
+from .assembly import assemble_system
 from .build import build_extension
 
 
@@ -34,33 +34,46 @@ C0 = 299792458.0
 
 @dataclass
 class LoopTree:
-    transform: torch.Tensor
+    """Sparse loop/tree basis; only O(N) and O(nnz) tensors persist.
+
+    ``sparse_transform`` holds the raw fundamental columns (+-1/l), ``sparse_q``
+    the same pattern divided by ``norms``, ``sparse_q_rows`` the CSC of Q^T for
+    current recovery and ``sparse_charge`` the face charge D*Q_tree.
+    """
     order: torch.Tensor
     parents: torch.Tensor
     components: int
     loops: int
-    q: torch.Tensor
-    r: torch.Tensor
-    charge: torch.Tensor
+    norms: torch.Tensor
     omega0: float
+    sparse_transform: list[torch.Tensor]
     sparse_q: list[torch.Tensor]
+    sparse_q_rows: list[torch.Tensor]
     sparse_charge: list[torch.Tensor]
 
     @property
     def trees(self):
-        return self.transform.shape[1] - self.loops
-
-    @property
-    def lam(self):
-        return self.transform[:, :self.loops]
-
-    @property
-    def tree(self):
-        return self.transform[:, self.loops:]
+        return len(self.norms) - self.loops
 
 
-def build_loop_tree(layout, *, length_scale):
-    """Deterministic CUDA forest/cycles; one small setup count transfer."""
+def _transpose_columns(columns, rows):
+    """CSC of A^T from the CSC of A; setup-only integer sort with unique keys."""
+    offsets, indices, values = columns
+    count = len(offsets) - 1
+    owners = torch.repeat_interleave(torch.arange(count, device=offsets.device), offsets.diff())
+    permutation = torch.argsort(indices * count + owners)
+    counts = torch.bincount(indices, minlength=rows)
+    return [torch.cat((counts.new_zeros(1), torch.cumsum(counts, 0))),
+            owners[permutation].contiguous(), values[permutation].contiguous()]
+
+
+def build_loop_tree(layout, *, length_scale, dense_setup=True):
+    """Deterministic CUDA forest/cycles; one small setup count transfer.
+
+    ``dense_setup=False`` (the matrix-free backend) never forms the dense
+    cycle matrix: the cycle walk emits sparse columns directly and the column
+    norms are fixed-order fp64 sums of squares (not the vendor dense norm).
+    """
     build_extension()
     op = torch.ops.witwin_maxwell_mom_layered
     basis = layout.basis
@@ -71,49 +84,96 @@ def build_loop_tree(layout, *, length_scale):
         signs = torch.cat((signs, torch.zeros_like(signs[:1])))
     order, parents, counts = op.forest(basis.plus_faces, minus, edges.contiguous(), signs.contiguous())
     components, loops = counts.tolist()
-    transform = op.cycles(basis.plus_faces, minus, basis.edge_lengths.contiguous(),
-                          order, parents, loops)
-    # Column normalization retains sparse fundamental cycles and singleton
-    # trees. Dense orthogonalization would turn each frequency into N^3 work.
+    if not dense_setup:
+        return _sparse_loop_tree(layout, basis, minus, order, parents, components, loops, length_scale)
+    # The dense [N,N] fp64 cycle matrix exists only during setup: the vendor
+    # column norm keeps the established normalization, then only sparse
+    # columns persist. Column normalization retains sparse fundamental cycles
+    # and singleton trees; dense orthogonalization would be N^3 per frequency.
+    transform = op.cycles(basis.plus_faces, minus, basis.edge_lengths.contiguous(), order, parents, loops)
     norms = torch.linalg.vector_norm(transform, dim=0)
-    q = (transform / norms).contiguous()
-    r = torch.diag(norms)
-    charge = op.divergence(q[:, loops:].contiguous(), basis.face_edges.contiguous(),
-                           basis.face_signs.contiguous(), basis.edge_lengths.contiguous())
-    sparse_q = op.sparse_columns(q)
-    sparse_charge = op.sparse_columns(charge)
-    return LoopTree(transform, order, parents, components, loops,
-                    q.to(torch.complex128), r.to(torch.complex128), charge.to(torch.complex128),
-                    C0 / length_scale, sparse_q, sparse_charge)
+    raw = op.sparse_columns(transform)
+    del transform
+    owners = torch.repeat_interleave(torch.arange(len(norms), device=norms.device), raw[0].diff())
+    sparse_q = [raw[0], raw[1], (raw[2] / norms[owners]).contiguous()]
+    sparse_charge = op.tree_charge(sparse_q, torch.stack((basis.plus_faces, basis.minus_faces), -1).contiguous(),
+                                   basis.face_edges.contiguous(), basis.face_signs.contiguous(),
+                                   basis.edge_lengths.contiguous(), loops)
+    return LoopTree(order, parents, components, loops, norms, C0 / length_scale, raw, sparse_q,
+                    _transpose_columns(sparse_q, len(norms)), sparse_charge)
 
 
-def scale_potentials(prepared, vector, scalar, *, frequency_start=0):
-    """Transform one chunk with batch-size-independent vendor GEMM dispatch."""
-    lt = prepared.loop_tree
+def _sparse_loop_tree(layout, basis, minus, order, parents, components, loops, length_scale):
     op = torch.ops.witwin_maxwell_mom_layered
-    count = vector.shape[0]
-    frequencies = prepared.table.frequencies[frequency_start:frequency_start + count]
-    magnetic = op.sparse_product(op.sparse_product(vector, lt.sparse_q, True), lt.sparse_q, False)
-    charge = op.sparse_product(op.sparse_product(scalar, lt.sparse_charge, True),
-                               lt.sparse_charge, False)
-    loss = torch.empty(0, device=vector.device, dtype=vector.dtype)
+    n = len(order)
+    columns, rows, values = op.cycle_entries(basis.plus_faces, minus, basis.edge_lengths.contiguous(), order,
+                                             parents, loops)
+    # Ascending edge order within each column, as the dense column packing.
+    permutation = torch.sort(columns * n + rows).indices
+    columns, rows, values = columns[permutation], rows[permutation], values[permutation].contiguous()
+    offsets = torch.cat((columns.new_zeros(1), torch.cumsum(torch.bincount(columns, minlength=n), 0)))
+    norms = op.segment_sum(values.square().to(torch.complex128), offsets).real.sqrt()
+    raw = [offsets, rows.contiguous(), values]
+    sparse_q = [offsets, raw[1], (values / norms[columns]).contiguous()]
+    sparse_charge = op.tree_charge(sparse_q, torch.stack((basis.plus_faces, basis.minus_faces), -1).contiguous(),
+                                   basis.face_edges.contiguous(), basis.face_signs.contiguous(),
+                                   basis.edge_lengths.contiguous(), loops)
+    return LoopTree(order, parents, components, loops, norms, C0 / length_scale, raw, sparse_q,
+                    _transpose_columns(sparse_q, n), sparse_charge)
+
+
+def port_drive(prepared):
+    """Normalized loop/tree port drive [N,P] for the delta-gap excitation.
+
+    Integer cycle work preserves topological zero loop excitation at DC.
+    """
+    lt = prepared.loop_tree
+    work = torch.ops.witwin_maxwell_mom_layered.sparse_port_work(
+        lt.sparse_q, prepared.layout.basis.edge_lengths.contiguous(), prepared.excitation.contiguous())
+    return (work / lt.norms[:, None]).contiguous()
+
+
+def assemble_chunk(prepared, *, frequency_start=0, frequency_stop=None):
+    """Allocate one chunk's storage and gather V (basis positions) and packed P.
+
+    Storage is one complex128 [K,N,N] system plus one complex64 workspace per
+    frequency (packed P, then the LU); see operator.dense_frequency_bytes.
+    """
+    from .operator import DenseLayeredSystem
+    lt, table = prepared.loop_tree, prepared.table
+    frequencies = table.frequencies[frequency_start:frequency_stop]
+    system = DenseLayeredSystem.allocate(len(frequencies), len(lt.norms), len(prepared.layout.mesh.faces),
+                                         frequencies, lt.loops)
+    assemble_system(prepared.layout, table, system.matrix, system.workspace, lt.order,
+                    frequency_start=frequency_start, frequency_stop=frequency_stop,
+                    far_dtype=torch.float32, _network_accuracy=True)
+    return system
+
+
+def transform_chunk(prepared, system, *, frequency_start=0, admittance_blocks=None):
+    """Fold loss, apply the sparse congruence and equilibrate, all in place."""
+    lt, op = prepared.loop_tree, torch.ops.witwin_maxwell_mom_layered
+    count = len(system.frequencies)
     if prepared.loss is not None:
         sheet = prepared.loss
-        resistance = op.loss_matrix(
-            sheet.blocks.contiguous(), sheet.columns.contiguous(), sheet.supports.contiguous(),
-            sheet.impedance[frequency_start:frequency_start + count].contiguous())
-        loss = op.sparse_product(op.sparse_product(resistance, lt.sparse_q, True), lt.sparse_q, False)
-    # Integer cycle work preserves topological zero loop excitation at DC.
-    work = op.port_work(lt.transform, prepared.layout.basis.edge_lengths.contiguous(),
-                        prepared.excitation.contiguous())
-    rhs = torch.linalg.solve_triangular(lt.r.T, work, upper=False).contiguous()
-    return op.scaled(magnetic, charge, loss, rhs, frequencies, lt.loops, lt.omega0)
+        op.loss_fold(system.matrix, sheet.blocks.contiguous(), sheet.columns.contiguous(),
+                     sheet.supports.contiguous(),
+                     sheet.impedance[frequency_start:frequency_start + count].contiguous(), lt.order,
+                     system.frequencies)
+    if prepared.admittance is not None:
+        # Dense per-body surface-admittance blocks, in the same Z/(-i w mu0) units.
+        prepared.admittance.fold(system, lt.order, admittance_blocks)
+    op.congruence(system.matrix, lt.sparse_q, lt.order, lt.loops)
+    system.rhs, system.recovery = op.scale_system(system.matrix, system.workspace, lt.sparse_charge,
+                                                  port_drive(prepared), system.frequencies, lt.loops, lt.omega0)
+    return system
 
 
 def scaled_system(prepared, *, frequency_start=0, frequency_stop=None):
-    """Return equilibrated blocks/RHS/recovery for the requested frequency chunk."""
-    vector, scalar = assemble_potentials(
-        prepared.layout, prepared.table, frequency_index=-1,
-        frequency_start=frequency_start, frequency_stop=frequency_stop,
-        far_dtype=torch.float32, _network_accuracy=True)
-    return scale_potentials(prepared, vector, scalar, frequency_start=frequency_start)
+    """Assemble the equilibrated loop/tree system of one frequency chunk in place."""
+    # Surface-admittance blocks first: their per-body interior work sets are
+    # released before the dense chunk storage exists.
+    blocks = None if prepared.admittance is None else prepared.admittance.blocks(
+        prepared.table.frequencies[frequency_start:frequency_stop].tolist())
+    system = assemble_chunk(prepared, frequency_start=frequency_start, frequency_stop=frequency_stop)
+    return transform_chunk(prepared, system, frequency_start=frequency_start, admittance_blocks=blocks)

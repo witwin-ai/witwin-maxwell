@@ -5,9 +5,10 @@ conversion/SVD workspace and shared physical inputs; it is not an OOM guarantee.
 """
 import torch
 from .lowrank import LowRankBlock
+from ..errors import CapacityError
 
 
-class H2CapacityError(MemoryError):
+class H2CapacityError(CapacityError):
     def __init__(self, receipt):
         super().__init__('H2 owned retained-storage bound exceeds its budget before conversion')
         self.receipt = receipt

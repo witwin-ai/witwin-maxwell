@@ -38,14 +38,14 @@ def test_native_spectral_material_work_matches_independent_time_recurrence(kind)
 def _simulation(kind="debye", *, graph=False, steps=256, pulse=False, normalize_source=True):
     from tests.materials.surface_impedance.test_copper_foil_material_ade import _local_scene
     scene = _local_scene(kind, one_side=True)
-    scene.monitors = (*scene.monitors, mw.PowerLossMonitor("bulk", position=(0., 0., 0.), size=(.04, .04, .04),
+    scene = scene.updated(monitors=(*scene.monitors, mw.monitors.PowerLossMonitor("bulk", position=(0., 0., 0.), size=(.04, .04, .04),
         channels=("conduction", "electric_dispersion")),
-        mw.PowerLossMonitor("subset", position=(0., 0., 0.), size=(.04, .04, .04),
-            frequencies=(3.e9,), channels=("conduction", "electric_dispersion")))
-    return mw.Simulation.fdtd(scene, frequencies=(2.5e9, 3.e9), cuda_graph=graph,
+        mw.monitors.PowerLossMonitor("subset", position=(0., 0., 0.), size=(.04, .04, .04),
+            frequencies=(3.e9,), channels=("conduction", "electric_dispersion"))))
+    return mw.Simulation.fdtd(scene, frequencies=(2.5e9, 3.e9), config=mw.FDTDConfig(cuda_graph=graph,
         run_time=mw.TimeConfig(time_steps=steps), full_field_dft=True,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=normalize_source),
-        excitations=mw.PortExcitation("feed", source_time=mw.GaussianPulse(3.e9, fwidth=1.e9) if pulse else mw.CW(3.e9)))
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=normalize_source)),
+        excitations=mw.rf.PortExcitation("feed", source_time=mw.GaussianPulse(3.e9, fwidth=1.e9) if pulse else mw.CW(3.e9)))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -53,7 +53,7 @@ def _simulation(kind="debye", *, graph=False, steps=256, pulse=False, normalize_
 def test_shared_loss_preserves_sparse_integrals_and_graph_resume(kind, tmp_path):
     simulation = _simulation(kind, graph=True)
     result = simulation.run()
-    data = result.power_loss("bulk")
+    data = result.monitor("bulk")
     for channel in ("conduction", "electric_dispersion"):
         independent = sum((density*data.component_volumes[component][None]).sum(-1)
                           for component, density in data.volume_density[channel].items())
@@ -62,12 +62,12 @@ def test_shared_loss_preserves_sparse_integrals_and_graph_resume(kind, tmp_path)
     checkpoint = _simulation(kind, graph=True).prepare().run_until(91)
     path = tmp_path/"state.pt"
     checkpoint.save(path)
-    resumed = _simulation(kind, graph=True).prepare().run(resume_from=mw.FDTDResumeCheckpoint.load(path))
-    torch.testing.assert_close(resumed.power_loss("bulk").total, data.total, rtol=2e-5, atol=1e-20)
+    resumed = _simulation(kind, graph=True).prepare().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path))
+    torch.testing.assert_close(resumed.monitor("bulk").total, data.total, rtol=2e-5, atol=1e-20)
     saved = tmp_path/"result.pt"
     result.save(saved)
     loaded = mw.Result.load(saved, scene=result.scene, map_location="cuda:0")
-    torch.testing.assert_close(loaded.power_loss("bulk").total, data.total, rtol=2e-5, atol=1e-20)
+    torch.testing.assert_close(loaded.monitor("bulk").total, data.total, rtol=2e-5, atol=1e-20)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -86,7 +86,7 @@ def test_two_trace_bulk_loss_uses_known_side_amplitudes_and_physical_half_volume
         assert entry["right_width"] == pytest.approx(.0025)
         torch.testing.assert_close(entry["area"], torch.full_like(entry["area"], .005**2))
     result._metadata["conductor_losses"] = copper_loss_report(result.solver)
-    actual = result.power_loss("bulk")
+    actual = result.monitor("bulk")
     monitor = next(m for m in result.scene.monitors if m.name == "bulk")
     compiled = compile_power_loss_monitor(result.prepared_scene, monitor)
     frequencies = torch.tensor(result.frequencies, device=compiled.device, dtype=torch.float64)
@@ -114,22 +114,22 @@ def test_two_trace_bulk_loss_uses_known_side_amplitudes_and_physical_half_volume
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_split_bulk_loss_records_survive_repeated_native_graph_batch():
     simulation = _simulation(graph=False, steps=128)
-    reference = simulation.run().power_loss("bulk")
-    batch = mw.Simulation.batch([simulation, simulation], outputs=mw.BatchOutput(fields=("Ex", "Ey", "Ez")),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required", graph_steps=7))
+    reference = simulation.run().monitor("bulk")
+    batch = mw.Simulation.batch([simulation, simulation], outputs=mw.execution.BatchOutput(fields=("Ex", "Ey", "Ez")),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required", graph_steps=7))
     with batch.prepare() as prepared:
         first = prepared.run().results()
         second = prepared.run().results()
         for result in (*first, *second):
-            torch.testing.assert_close(result.power_loss("bulk").total, reference.total, rtol=2e-4, atol=1e-20)
+            torch.testing.assert_close(result.monitor("bulk").total, reference.total, rtol=2e-4, atol=1e-20)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("normalize", (False, True))
 def test_pulse_bulk_loss_frequency_selection_uses_same_source_normalization(normalize):
     result = _simulation(graph=True, steps=512, pulse=True, normalize_source=normalize).run()
-    full = result.power_loss("bulk")
-    subset = result.power_loss("subset")
+    full = result.monitor("bulk")
+    subset = result.monitor("subset")
     torch.testing.assert_close(subset.total, full.total[1:])
     for channel in ("conduction", "electric_dispersion"):
         torch.testing.assert_close(subset.channel_power[channel], full.channel_power[channel][1:])
@@ -142,7 +142,7 @@ def test_split_spectral_bulk_loss_rejects_an_unregistered_side_gradient():
     for value in result._fields.values():
         value.requires_grad_(True)
     with pytest.raises(NotImplementedError, match="differentiable side spectra"):
-        result.power_loss("bulk")
+        result.monitor("bulk")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -155,18 +155,18 @@ def test_complex_bloch_bulk_loss_combines_replicas_before_sparse_replacement(pul
     scene = design.to_scene()
     if pulse:
         source = scene.sources[0]
-        scene = scene.clone(sources=(mw.UniformCurrentSource(name=source.name,
+        scene = scene.updated(sources=(mw.UniformCurrentSource(name=source.name,
             size=source.size, center=source.center, polarization=source.polarization,
             source_time=mw.GaussianPulse(3.e9, fwidth=2.4e9)),))
-    scene.structures = (*scene.structures, mw.Structure(name="substrate", geometry=mw.Box(
-        position=(0., 0., 0.), size=(.06, .06, .06)), material=_local_material("debye")))
-    scene.monitors = (*scene.monitors, mw.PowerLossMonitor("bulk", position=(0., 0., 0.), size=(.06, .06, .06),
-        channels=("conduction", "electric_dispersion")))
-    result = mw.Simulation.fdtd(scene, frequencies=(2.5e9, 3.e9), run_time=mw.TimeConfig(time_steps=128),
-        full_field_dft=True, cuda_graph=True, spectral_sampler=mw.SpectralSampler(window="none")).run()
+    scene = scene.updated(structures=(*scene.structures, mw.Structure(name="substrate", geometry=mw.Box(
+        position=(0., 0., 0.), size=(.06, .06, .06)), material=_local_material("debye"))))
+    scene = scene.updated(monitors=(*scene.monitors, mw.monitors.PowerLossMonitor("bulk", position=(0., 0., 0.), size=(.06, .06, .06),
+        channels=("conduction", "electric_dispersion"))))
+    result = mw.Simulation.fdtd(scene, frequencies=(2.5e9, 3.e9), config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=128),
+        full_field_dft=True, cuda_graph=True, spectral_sampler=mw.fdtd.SpectralSampler(window="none"))).run()
     assert result.solver.complex_fields_enabled
     assert any(bool(entry["spectral_real"].abs().sum() > 0) for entry in result.solver._copper_foils if entry["imaginary"])
-    traces = result.conductor_losses["foil"]["bulk_electric_traces"]
+    traces = mw.rf.conductor_losses(result)["foil"]["bulk_electric_traces"]
     assert sorted(trace["component"] for trace in traces) == ["Ey", "Ez"]
     for trace in traces:
         entry = next(entry for entry in result.solver._copper_foils if entry["electric_name"] == trace["component"])
@@ -180,7 +180,7 @@ def test_complex_bloch_bulk_loss_combines_replicas_before_sparse_replacement(pul
         combined = (torch.complex(entry["spectral_real"], entry["spectral_imag"])
             + 1j*torch.complex(partner["spectral_real"], partner["spectral_imag"])) * scale
         torch.testing.assert_close(trace["electric_fields"], combined.cpu())
-    data = result.power_loss("bulk")
+    data = result.monitor("bulk")
     for channel in ("conduction", "electric_dispersion"):
         assert bool(torch.all(data.channel_power[channel] > 0))
         torch.testing.assert_close(data.channel_power[channel], sum((density*data.component_volumes[component][None]).sum(-1)
@@ -193,7 +193,7 @@ def test_source_patch_overlapping_foil_fails_before_injecting_unbalanced_power()
     design = BlochFoilDesign()
     design.requires_grad_(False)
     scene = design.to_scene()
-    scene.sources = (mw.PointDipole(name="overlap", position=(-.01, 0., 0.), polarization="Ez", width=.003,
-                                   source_time=mw.CW(3.e9)),)
+    scene = scene.updated(sources=(mw.PointDipole(name="overlap", position=(-.01, 0., 0.), polarization="Ez", width=.003,
+                                   source_time=mw.CW(3.e9)),))
     with pytest.raises(NotImplementedError, match="joint source/trace elimination"):
-        mw.Simulation.fdtd(scene, frequency=3.e9).prepare()
+        mw.Simulation.fdtd(scene, frequencies=3.e9).prepare()

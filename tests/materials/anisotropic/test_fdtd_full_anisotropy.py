@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import witwin.maxwell as mw
 from witwin.core import Box
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 def _rotated_uniaxial_tensor(eps_xx, eps_ordinary, eps_extraordinary):
@@ -16,7 +17,7 @@ def _rotated_uniaxial_tensor(eps_xx, eps_ordinary, eps_extraordinary):
     """
     mean = 0.5 * (eps_ordinary + eps_extraordinary)
     delta = 0.5 * (eps_extraordinary - eps_ordinary)
-    return mw.Tensor3x3(((eps_xx, 0.0, 0.0), (0.0, mean, delta), (0.0, delta, mean)))
+    return mw.media.Tensor3x3(((eps_xx, 0.0, 0.0), (0.0, mean, delta), (0.0, delta, mean)))
 
 
 # ---------------------------------------------------------------------------
@@ -26,12 +27,12 @@ def _rotated_uniaxial_tensor(eps_xx, eps_ordinary, eps_extraordinary):
 
 def test_tensor3x3_epsilon_requires_symmetry():
     with pytest.raises(ValueError, match="symmetric"):
-        mw.Material(epsilon_tensor=mw.Tensor3x3(((2.0, 0.9, 0.0), (0.1, 2.0, 0.0), (0.0, 0.0, 2.0))))
+        mw.Material(epsilon_tensor=mw.media.Tensor3x3(((2.0, 0.9, 0.0), (0.1, 2.0, 0.0), (0.0, 0.0, 2.0))))
 
 
 def test_tensor3x3_epsilon_requires_positive_definite():
     with pytest.raises(ValueError, match="positive-definite"):
-        mw.Material(epsilon_tensor=mw.Tensor3x3(((1.0, 2.0, 0.0), (2.0, 1.0, 0.0), (0.0, 0.0, 1.0))))
+        mw.Material(epsilon_tensor=mw.media.Tensor3x3(((1.0, 2.0, 0.0), (2.0, 1.0, 0.0), (0.0, 0.0, 1.0))))
 
 
 def test_tensor3x3_epsilon_with_conductivity_constructs():
@@ -52,7 +53,7 @@ def test_tensor3x3_epsilon_with_conductivity_constructs():
 
 
 def test_tensor3x3_mu_and_full_sigma_static_samples_stay_rejected():
-    diagonal = mw.Tensor3x3(((2.0, 0.0, 0.0), (0.0, 2.0, 0.0), (0.0, 0.0, 2.0)))
+    diagonal = mw.media.Tensor3x3(((2.0, 0.0, 0.0), (0.0, 2.0, 0.0), (0.0, 0.0, 2.0)))
     with pytest.raises(NotImplementedError, match="mu_tensor"):
         mw.Material(mu_tensor=diagonal).evaluate_static()
     with pytest.raises(NotImplementedError, match="sigma_e_tensor"):
@@ -61,21 +62,20 @@ def test_tensor3x3_mu_and_full_sigma_static_samples_stay_rejected():
 
 def _build_cpu_scene(material, **scene_kwargs):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=2),
-        device="cpu",
-        **scene_kwargs,
-    )
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)), material=material)
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.pml(num_layers=2),
+                **scene_kwargs,
+                structures=(
+            mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)), material=material),
+            ),
+            )
     return scene
 
 
 def test_compiled_model_carries_offdiagonal_permittivity():
     material = mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0))
-    model = prepare_scene(_build_cpu_scene(material)).compile_materials()
+    model = compile_materials(prepare_scene(_build_cpu_scene(material), device="cpu"))
 
     from witwin.maxwell.compiler.materials import material_model_has_full_anisotropy
 
@@ -90,14 +90,14 @@ def test_compiled_model_carries_offdiagonal_permittivity():
 
 def test_diagonal_tensor3x3_compiles_identically_to_diagonal_tensor3():
     full = mw.Material(
-        epsilon_tensor=mw.Tensor3x3(((1.0, 0.0, 0.0), (0.0, 2.25, 0.0), (0.0, 0.0, 7.0)))
+        epsilon_tensor=mw.media.Tensor3x3(((1.0, 0.0, 0.0), (0.0, 2.25, 0.0), (0.0, 0.0, 7.0)))
     )
     diagonal = mw.Material(epsilon_tensor=mw.DiagonalTensor3(1.0, 2.25, 7.0))
 
     from witwin.maxwell.compiler.materials import material_model_has_full_anisotropy
 
-    full_model = prepare_scene(_build_cpu_scene(full)).compile_materials()
-    diagonal_model = prepare_scene(_build_cpu_scene(diagonal)).compile_materials()
+    full_model = compile_materials(prepare_scene(_build_cpu_scene(full), device="cpu"))
+    diagonal_model = compile_materials(prepare_scene(_build_cpu_scene(diagonal), device="cpu"))
 
     assert not material_model_has_full_anisotropy(full_model)
     for axis in ("x", "y", "z"):
@@ -109,19 +109,17 @@ def test_diagonal_tensor3x3_compiles_identically_to_diagonal_tensor3():
 def test_polarized_subpixel_rejects_full_tensor():
     material = mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0))
     scene = _build_cpu_scene(
-        material, subpixel_samples=mw.SubpixelSpec(samples=(2, 2, 2), averaging="polarized")
+        material, subpixel=mw.SubpixelSpec(samples=(2, 2, 2), averaging="polarized")
     )
     with pytest.raises(NotImplementedError, match="Polarized"):
-        prepare_scene(scene).compile_materials()
+        compile_materials(prepare_scene(scene, device="cpu"))
 
 
 def test_fdfd_rejects_full_anisotropy():
-    from witwin.maxwell.fdfd.solver import _validate_supported_fdfd_materials
-
     material = mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0))
     scene = _build_cpu_scene(material)
     with pytest.raises(NotImplementedError, match="off-diagonal"):
-        _validate_supported_fdfd_materials(scene)
+        mw.Simulation.fdfd(scene, frequencies=1.0e9, config=mw.FDFDConfig(device="cpu"))
 
 
 def test_adjoint_bridge_accepts_full_anisotropy():
@@ -149,7 +147,6 @@ def _build_plane_wave_scene(
         domain=mw.Domain(bounds=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4))),
         grid=mw.GridSpec.uniform(spacing),
         boundary=boundary or mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device="cuda",
         sources=[
             mw.PlaneWave(
                 direction=(1.0, 0.0, 0.0),
@@ -166,13 +163,14 @@ def test_diagonal_tensor3x3_solver_matches_diagonal_path():
     frequency = 1.0e9
     solvers = []
     for material in (
-        mw.Material(epsilon_tensor=mw.Tensor3x3(((1.0, 0.0, 0.0), (0.0, 2.25, 0.0), (0.0, 0.0, 7.0)))),
+        mw.Material(epsilon_tensor=mw.media.Tensor3x3(((1.0, 0.0, 0.0), (0.0, 2.25, 0.0), (0.0, 0.0, 7.0)))),
         mw.Material(epsilon_tensor=mw.DiagonalTensor3(1.0, 2.25, 7.0)),
     ):
         scene = _build_plane_wave_scene(frequency, spacing=0.04)
-        scene.add_structure(
-            mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.2, 0.4, 0.4)), material=material)
-        )
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.2, 0.4, 0.4)), material=material),
+        ))
         solvers.append(mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare().solver)
 
     full, diagonal = solvers
@@ -256,16 +254,17 @@ def _reference_corrections(solver):
 def test_full_aniso_correction_kernels_match_torch_reference():
     frequency = 1.0e9
     material = mw.Material(
-        epsilon_tensor=mw.Tensor3x3(((2.0, 0.3, 0.2), (0.3, 2.5, 0.4), (0.2, 0.4, 3.0)))
+        epsilon_tensor=mw.media.Tensor3x3(((2.0, 0.3, 0.2), (0.3, 2.5, 0.4), (0.2, 0.4, 3.0)))
     )
     scene = _build_plane_wave_scene(
         frequency,
         spacing=0.04,
         boundary=mw.BoundarySpec.none(),
     )
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.3, 0.16, 0.16)), material=material)
-    )
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.3, 0.16, 0.16)), material=material),
+    ))
     solver = mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare().solver
     assert solver.full_aniso_enabled
 
@@ -301,18 +300,17 @@ def test_rotated_uniaxial_update_matches_principal_axis_superposition():
 
     def build_uniform_solver(material):
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.5, 0.5), (-0.3, 0.3), (-0.3, 0.3))),
-            grid=mw.GridSpec.uniform(0.05),
-            boundary=mw.BoundarySpec.none(),
-            device="cuda",
-        )
-        scene.add_structure(
-            mw.Structure(
-                geometry=Box(position=(0.0, 0.0, 0.0), size=(2.0, 2.0, 2.0)),
-                material=material,
-            )
-        )
-        return mw.Simulation.fdtd(scene, frequency=1.0e9).prepare().solver
+                    domain=mw.Domain(bounds=((-0.5, 0.5), (-0.3, 0.3), (-0.3, 0.3))),
+                    grid=mw.GridSpec.uniform(0.05),
+                    boundary=mw.BoundarySpec.none(),
+                    structures=(
+                mw.Structure(
+                    geometry=Box(position=(0.0, 0.0, 0.0), size=(2.0, 2.0, 2.0)),
+                    material=material,
+                ),
+                ),
+                )
+        return mw.Simulation.fdtd(scene, frequencies=1.0e9).prepare().solver
 
     full = build_uniform_solver(
         mw.Material(
@@ -344,7 +342,7 @@ def test_rotated_uniaxial_update_matches_principal_axis_superposition():
     )
 
     for solver in (full, extraordinary, ordinary):
-        update_electric_fields(solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+        update_electric_fields(solver)
         if solver.full_aniso_enabled:
             apply_full_aniso_corrections(solver)
     torch.cuda.synchronize()
@@ -371,9 +369,10 @@ def test_full_aniso_structure_inside_cpml_is_supported():
     material = mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0))
     scene = _build_plane_wave_scene(frequency, spacing=0.04)
     # Full-cross-section slab reaches into the transverse PML layers.
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.2, 0.8, 0.8)), material=material)
-    )
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.2, 0.8, 0.8)), material=material),
+    ))
     solver = mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare().solver
     assert solver.full_aniso_enabled
     assert solver.uses_cpml
@@ -392,11 +391,12 @@ def test_full_aniso_structure_inside_split_field_absorber_is_rejected():
     frequency = 1.0e9
     material = mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0))
     scene = _build_plane_wave_scene(frequency, spacing=0.04)
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.2, 0.8, 0.8)), material=material)
-    )
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.2, 0.8, 0.8)), material=material),
+    ))
     with pytest.raises(NotImplementedError, match="split-field"):
-        mw.Simulation.fdtd(scene, frequencies=[frequency], absorber="pml").prepare()
+        mw.Simulation.fdtd(scene, frequencies=[frequency], config=mw.FDTDConfig(absorber="pml")).prepare()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -404,21 +404,20 @@ def test_full_aniso_rejects_bloch_boundaries():
     frequency = 1.0e9
     material = mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0))
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.05),
-        boundary=mw.BoundarySpec.bloch((0.1, 0.0, 0.0)),
-        device="cuda",
-        sources=[
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.bloch((0.1, 0.0, 0.0)),
+                sources=[
             mw.PointDipole(
                 position=(0.0, 0.0, 0.0),
                 polarization="Ez",
                 source_time=mw.CW(frequency=frequency),
             )
-        ],
-    )
-    scene.add_structure(
-        mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(0.3, 0.3, 0.3)), material=material)
-    )
+            ],
+                structures=(
+            mw.Structure(geometry=Box(position=(0.0, 0.0, 0.0), size=(0.3, 0.3, 0.3)), material=material),
+            ),
+            )
     with pytest.raises(NotImplementedError, match="Bloch"):
         mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare()
 
@@ -434,22 +433,17 @@ def test_full_aniso_composes_with_dispersive_structures():
     """
     frequency = 1.0e9
     scene = _build_plane_wave_scene(frequency, spacing=0.04)
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=Box(position=(-0.4, 0.0, 0.0), size=(0.2, 0.4, 0.4)),
             material=mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=1.0e-10),
-        )
-    )
-    # The anisotropic structure stays clear of the transverse PML here so the
-    # off-diagonal current correction is a no-op; the isotropic dispersive slab
-    # above may touch it. (Anisotropic overlap of the CPML absorber is covered
-    # separately by the reflection test.)
-    scene.add_structure(
+        ),
         mw.Structure(
             geometry=Box(position=(0.3, 0.0, 0.0), size=(0.2, 0.16, 0.16)),
             material=mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0)),
-        )
-    )
+        ),
+    ))
     solver = mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare().solver
     assert solver.full_aniso_enabled
     assert solver.electric_dispersive_enabled
@@ -482,33 +476,30 @@ def test_full_tensor_eigenpolarization_ring_resonance_matches_analytic_eigenvalu
     dx = 0.01
     half_t = 4 * dx
     lz = 0.64
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-half_t, half_t), (-half_t, half_t), (-lz / 2, lz / 2))),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.periodic(),
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="arithmetic"),
-        device="cuda",
-    )
-    tensor = mw.Tensor3x3(((3.0, 0.2, 0.0), (0.2, 2.5, 0.0), (0.0, 0.0, 2.0)))
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(10.0, 10.0, 10.0)),
-            material=mw.Material(epsilon_tensor=tensor),
-            name="uniform",
-        )
-    )
+    tensor = mw.media.Tensor3x3(((3.0, 0.2, 0.0), (0.2, 2.5, 0.0), (0.0, 0.0, 2.0)))
     # Transversely uniform current sheet pumping both eigenmodes at once.
-    scene.add_source(
-        mw.UniformCurrentSource(
-            size=(2 * half_t, 2 * half_t, dx),
-            center=(0.0, 0.0, -0.17),
-            polarization=(1.0, 1.0, 0.0),
-            source_time=mw.GaussianPulse(frequency=1.2e9, fwidth=0.9e9),
-        )
-    )
-    scene.add_monitor(
-        mw.FieldTimeMonitor("probe", components=("Ex", "Ey"), position=(0.0, 0.0, 0.11))
-    )
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-half_t, half_t), (-half_t, half_t), (-lz / 2, lz / 2))),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.periodic(),
+                subpixel=mw.SubpixelSpec(samples=3, averaging="arithmetic"),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(10.0, 10.0, 10.0)),
+                material=mw.Material(epsilon_tensor=tensor),
+                name="uniform",
+            ),
+            ),
+                sources=(
+            mw.UniformCurrentSource(
+                size=(2 * half_t, 2 * half_t, dx),
+                center=(0.0, 0.0, -0.17),
+                polarization=(1.0, 1.0, 0.0),
+                source_time=mw.GaussianPulse(frequency=1.2e9, fwidth=0.9e9),
+            ),
+            ),
+                monitors=(mw.monitors.FieldTimeMonitor("probe", components=("Ex", "Ey"), position=(0.0, 0.0, 0.11)),),
+            )
 
     steps = 60_000
     sim = mw.Simulation(
@@ -519,9 +510,9 @@ def test_full_tensor_eigenpolarization_ring_resonance_matches_analytic_eigenvalu
     )
     result = sim.run()
     mon = result.monitor("probe")
-    ex = np.asarray(torch.as_tensor(mon["components"]["Ex"]).cpu(), dtype=np.float64).ravel()
-    ey = np.asarray(torch.as_tensor(mon["components"]["Ey"]).cpu(), dtype=np.float64).ravel()
-    t = np.asarray(torch.as_tensor(mon["t"]).cpu(), dtype=np.float64).ravel()
+    ex = np.asarray(torch.as_tensor(mon.sel(component="Ex").values).cpu(), dtype=np.float64).ravel()
+    ey = np.asarray(torch.as_tensor(mon.sel(component="Ey").values).cpu(), dtype=np.float64).ravel()
+    t = np.asarray(torch.as_tensor(mon.coords["t"]).cpu(), dtype=np.float64).ravel()
     dt = float(t[1] - t[0])
 
     window = np.hanning(ex.size)

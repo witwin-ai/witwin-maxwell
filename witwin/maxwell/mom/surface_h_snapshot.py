@@ -1,6 +1,7 @@
 """Exact scalar surface H/H2 numerical states for guarded inverse recovery."""
 import copy
 from dataclasses import asdict
+from .options import option_asdict
 import torch
 from .hmatrix import HierarchicalOperator,HMatrixConfig
 from .h2_operator import HierarchicalH2Operator
@@ -200,7 +201,7 @@ def restore(payload,provider,*,sources=()):
         operator._tree,operator._metric=tree,metric
         operator._versions=tuple((id(t),t._version) for t in operator._block_tensors())
         operator._layout=tuple((id(r),id(c),id(v)) for r,c,v in blocks)
-        if (metadata.get('configuration')!=asdict(config) or metadata.get('retained_bytes')!=fixed+near_bytes+far_bytes
+        if (metadata.get('configuration')!=option_asdict(config) or metadata.get('retained_bytes')!=fixed+near_bytes+far_bytes
                 or metadata.get('prepared_geometry_bytes')!=geometry_bytes
                 or metadata.get('exact_blocks')!=len(records) or metadata.get('far_blocks')!=len(raw['far'])
                 or metadata.get('exact_storage')!=(None if near is None else near.receipt())):
@@ -218,7 +219,7 @@ def encode_inverse(inverse):
     if type(inverse) is not FixedSurfaceInverse:raise TypeError('Expected exact fixed surface inverse')
     inverse.assert_current()
     payload={'version':'exact_fixed_surface_inverse_v1','operator':encode(inverse.operator),
-        'stopping':asdict(inverse.rule),'refinement_steps':inverse.refinement_steps,
+        'stopping':option_asdict(inverse.rule),'refinement_steps':inverse.refinement_steps,
         'diagnostics':_cpu(inverse.receipt)}
     payload['sha256']=_digest(payload)
     return payload

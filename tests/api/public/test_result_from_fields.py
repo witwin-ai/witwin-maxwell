@@ -35,6 +35,16 @@ def _assert_equal(actual, expected):
         assert actual == expected
 
 
+def _phasors(result):
+    """The single-frequency phasor tensors, as an external producer supplies them."""
+    return {name: data.isel(f=0).values for name, data in result.fields.items()}
+
+
+def _payloads(result):
+    # The recorded payload dicts, before Result.monitor types them and raw_monitor crops finite planes.
+    return dict(result._monitors)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_from_fields_matches_native_payloads_and_snapshot(tmp_path):
     frequency = 2.75e9
@@ -42,7 +52,6 @@ def test_from_fields_matches_native_payloads_and_snapshot(tmp_path):
         domain=mw.Domain(bounds=((-0.02, 0.02),) * 3),
         grid=mw.GridSpec.uniform(0.005),
         boundary=mw.BoundarySpec.none(),
-        device="cuda",
         ports=[mw.LumpedPort(
             "feed", positive=(0., 0., .005), negative=(0., 0., -.005),
             voltage_path=mw.AxisPath("z"),
@@ -53,32 +62,31 @@ def test_from_fields_matches_native_payloads_and_snapshot(tmp_path):
             mw.FinitePlaneMonitor("sampled", position=(0., 0., .005),
                                   size=(.015, .015, 0.), sample_spacing=.004),
             mw.FluxMonitor("flux", axis="z", position=.005),
-            mw.ClosedSurfaceMonitor.box("surface", size=(.021,) * 3, sample_spacing=.004),
-            mw.AngleProjectionMonitor("projection", size=(.021,) * 3, sample_spacing=.004,
+            mw.monitors.ClosedSurfaceMonitor.box("surface", size=(.021,) * 3, sample_spacing=.004),
+            mw.monitors.AngleProjectionMonitor("projection", size=(.021,) * 3, sample_spacing=.004,
                                       theta=(.4, 1.2), phi=(0.,), radius=1.),
         ],
     )
     native = mw.Simulation.fdtd(
-        scene, frequency=frequency, full_field_dft=True, cuda_graph=False,
-        excitations=mw.PortExcitation(
+        scene, frequencies=frequency, excitations=mw.rf.PortExcitation(
             "feed", source_time=mw.GaussianPulse(frequency=frequency, fwidth=1e9),
-        ),
+        ), config=mw.FDTDConfig(full_field_dft=True, cuda_graph=False,
         run_time=mw.TimeConfig(time_steps=96, transient_cycles=0, steady_cycles=1),
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False)),
     ).run()
     port = native.ports["feed"]
     assert torch.any(port.voltage != 0)
     # Single-run FDTD retains fields and ports; assemble its one-port network
     # through the public payload constructor without running a second solve.
-    network = mw.NetworkData(
+    network = mw.rf.NetworkData(
         frequencies=port.frequencies, s=(port.b / port.a).reshape(-1, 1, 1),
         z0=port.z0, port_names=("feed",),
     )
     native = mw.Result(
         method=native.method, scene=native.scene, prepared_scene=native.prepared_scene,
-        frequencies=native.frequencies, fields=native.fields, monitors=native.monitors,
+        frequencies=native.frequencies, fields=_phasors(native), monitors=_payloads(native),
         ports=native.ports, network=network, solver=native.solver,
-        metadata=native.metadata, solver_stats=native.solver_stats,
+        metadata=native.metadata, solver_stats=native._solver_stats,
     )
     projected = FieldProjector.from_monitor(native, "surface").angles((.4, 1.2), (0.,), radius=1.)
     _assert_equal(native.monitor("projection"), projected)
@@ -86,14 +94,25 @@ def test_from_fields_matches_native_payloads_and_snapshot(tmp_path):
     metadata = {"origin": "test", "kernel": "test-kernel"}
     rebuilt = mw.Result.from_fields(
         native.scene, frequencies=native.frequencies, kernel="test-kernel",
-        fields=native.fields, monitors=native.monitors, ports=native.ports,
+        fields=_phasors(native), monitors=_payloads(native), ports=native.ports,
         network=native.network, metadata=metadata, prepared_scene=native.prepared_scene,
     )
-    assert native.fields
-    _assert_equal(rebuilt.fields, native.fields)
+    assert native.fields and rebuilt.fields.keys() == native.fields.keys()
+    for name, data in native.fields.items():
+        # Only a solver record states the Yee sample-time label of its phasors (E: 0.0 steps);
+        # an external producer supplies none. Everything else matches the native record.
+        external = rebuilt.fields[name]
+        assert type(external) is type(data)
+        assert data.attrs["field_time_offset_steps"] == 0.0
+        assert "field_time_offset_steps" not in external.attrs
+        for item in fields(data):
+            expected = getattr(data, item.name)
+            if item.name == "attrs":
+                expected = {key: value for key, value in expected.items() if key != "field_time_offset_steps"}
+            _assert_equal(getattr(external, item.name), expected)
     for component in ("x", "y", "z"):
-        assert torch.equal(getattr(rebuilt.E, component), getattr(native.E, component))
-        assert torch.equal(rebuilt.field(f"E{component}"), native.field(f"E{component}"))
+        assert torch.equal(getattr(rebuilt.E, component).values, getattr(native.E, component).values)
+        assert torch.equal(rebuilt.field(f"E{component}").isel(f=0).values, native.field(f"E{component}").isel(f=0).values)
     for name in {*native.monitors, *(monitor.name for monitor in scene.monitors)}:
         _assert_equal(rebuilt.monitor(name), native.monitor(name))
     _assert_equal(rebuilt.ports, native.ports)
@@ -108,7 +127,7 @@ def test_from_fields_matches_native_payloads_and_snapshot(tmp_path):
 
     path = tmp_path / "external.pt"
     rebuilt.save(path)
-    restored = mw.Result.load(path, scene=native.scene, map_location=scene.device)
+    restored = mw.Result.load(path, scene=native.scene, map_location="cuda")
     assert restored.method == "external"
     assert restored.metadata == rebuilt.metadata
     _assert_equal(restored.fields, rebuilt.fields)
@@ -120,7 +139,7 @@ def test_from_fields_matches_native_payloads_and_snapshot(tmp_path):
 
 def test_from_fields_rejects_invalid_kernel_metadata_on_cpu():
     scene = mw.Scene(domain=mw.Domain(bounds=((-1., 1.),) * 3),
-                     grid=mw.GridSpec.uniform(.5), device="cpu")
+                     grid=mw.GridSpec.uniform(.5))
     for kernel in ("", None, 1):
         with pytest.raises(ValueError, match="non-empty string"):
             mw.Result.from_fields(scene, frequencies=(1e9,), kernel=kernel)

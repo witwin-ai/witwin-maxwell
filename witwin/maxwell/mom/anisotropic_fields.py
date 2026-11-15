@@ -7,7 +7,9 @@ from ..constants import EPSILON_0, MU_0
 from .dyadic_green import electrostatic_kernel
 from .fields import _validate_arrays, classify_queries, _triangle_distance
 from .operator import local_geometry
+from .ordered_reduction import ordered_index_add_
 from .quadrature import triangle_rule, duffy_fan, triangle_outside_inscribed_disk
+from ..errors import ConvergenceError
 
 
 def tensor_current_potentials(basis, coefficients, queries, kernel, *, order=6,
@@ -240,7 +242,7 @@ def _tensor_surface_potentials(basis, queries, kernel, sample, *, order, pair_ba
                         j0[own], m0[own], dj0[own], dm0[own], order)
                     integrated = integrated.index_add(0, torch.nonzero(own).flatten(), constant)
                     receipt = {**receipt, 'principal_value_constant_term': annulus_receipt}
-                values = values.index_add(0, oi, integrated)
+                values = ordered_index_add_(values.clone(), 0, oi, integrated)
                 receipts.append({'panel_pairs': len(batch), 'projected_fan': use_fan, 'kernel': receipt})
         chunks.append(values)
     result = torch.cat(chunks) if chunks else template.new_empty((0,6) if columns is None else (0,6,columns))
@@ -281,7 +283,7 @@ def _odd_face_integral(points, triangles, kernel, j, m, divj, divm, order):
                    'disk_radius_min_m': float(radius.min()), 'order': order}
 
 
-class TensorFieldConvergenceError(RuntimeError):
+class TensorFieldConvergenceError(ConvergenceError):
     """A tensor field query exhausted its surface quadrature budget."""
     def __init__(self, receipt):
         self.receipt = receipt

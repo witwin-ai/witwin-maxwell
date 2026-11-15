@@ -6,6 +6,7 @@ struct GreenTableView {
   const double *rho, *distances, *plane_z, *frequency_hz, *sigma;
   const C *values, *slopes, *images, *epsilon;
   const int64_t *image_offsets;
+  int64_t epsilon_stride;
   int frequencies, pairs, nodes, image_count, metal_planes, exact_mode;
   double ground,rho_max;
 };
@@ -66,7 +67,7 @@ __device__ inline C green_remainder(const GreenTableView& t,int f,int pair,int c
     j+=i;
     if(t.exact_mode>1 && (t.plane_z[i]==t.ground || t.plane_z[j]==t.ground)) return C(0);
     double w=2*pi*t.frequency_hz[f];
-    C epsilon=eps(t.epsilon,t.sigma,1,w),k=root((w/c0)*(w/c0)*epsilon);
+    C epsilon=eps(t.epsilon+f*t.epsilon_stride,t.sigma,1,w),k=root((w/c0)*(w/c0)*epsilon);
     C value=wave_remainder(k,hypot(rho,t.plane_z[i]-t.plane_z[j]));
     if(t.exact_mode>1) value-=wave_remainder(k,hypot(rho,t.plane_z[i]+t.plane_z[j]-2*t.ground));
     return component ? value/epsilon : value;
@@ -85,7 +86,7 @@ __device__ inline C green_value(const GreenTableView& t,int f,int pair,int compo
     while(j>=t.metal_planes-i) {j-=t.metal_planes-i;++i;}
     j+=i;
     double w=2*pi*t.frequency_hz[f];
-    return exact_value(eps(t.epsilon,t.sigma,1,w),w,rho,t.plane_z[i],t.plane_z[j],
+    return exact_value(eps(t.epsilon+f*t.epsilon_stride,t.sigma,1,w),w,rho,t.plane_z[i],t.plane_z[j],
                        component,t.exact_mode,t.ground);
   }
   int lo=radial_interval(t.rho,t.nodes,rho),hi=lo+1;
@@ -127,6 +128,7 @@ struct VerticalGreenTableView {
   const C *values,*slopes,*images,*epsilon;
   const C *horizontal_values,*horizontal_slopes,*horizontal_images;
   const int64_t *direct,*offsets;
+  int64_t epsilon_stride;
   int F,N,Z,S,K,I,L;
   double rho_max;
 };
@@ -215,8 +217,8 @@ __device__ inline C vertical_green_images(const VerticalGreenTableView& t,int f,
   for(int i=t.offsets[pair];i<t.offsets[pair+1];++i) {
     C term;
     if(t.direct[i]) {
-      Stack stack{t.epsilon,t.sigma,t.edges,t.L,0,0};
-      C epsilon=eps(t.epsilon,t.sigma,region(stack,(t.segments[2*a]+t.segments[2*a+1])*.5),2*pi*t.frequencies[f]);
+      Stack stack{t.epsilon,t.sigma,t.edges,t.L,0,0,t.epsilon_stride};
+      C epsilon=eps(t.epsilon+f*t.epsilon_stride,t.sigma,region(stack,(t.segments[2*a]+t.segments[2*a+1])*.5),2*pi*t.frequencies[f]);
       C k=root(pow(2*pi*t.frequencies[f]/c0,2)*epsilon);
       double distance=t.direct[i]==1 ? fabs(zo-zs):
           fmax(0.0,t.geometry[3*i]*zs+t.geometry[3*i+1]*zo+t.geometry[3*i+2]);
@@ -262,7 +264,7 @@ __device__ inline C horizontal_vertical_images(const VerticalGreenTableView& v,i
   int a=vertical_segment(v,zs),b=vertical_segment(v,zo);
   int pair=a*v.S-a*(a-1)/2+b-a;
   C value(0);
-  Stack stack{v.epsilon,v.sigma,v.edges,v.L,0,0};
+  Stack stack{v.epsilon,v.sigma,v.edges,v.L,0,0,v.epsilon_stride};
   for(int i=v.offsets[pair];i<v.offsets[pair+1];++i) {
     C coefficient=v.horizontal_images[f*v.I+i];
     if(coefficient==C(0)) continue;
@@ -273,7 +275,7 @@ __device__ inline C horizontal_vertical_images(const VerticalGreenTableView& v,i
                 zs==v.boundaries[1]||zo==v.boundaries[1])) continue;
     C term=coefficient/(4*pi*R);
     if(v.direct[i]) {
-      C epsilon=eps(v.epsilon,v.sigma,region(stack,(v.segments[2*a]+v.segments[2*a+1])*.5),2*pi*v.frequencies[f]);
+      C epsilon=eps(v.epsilon+f*v.epsilon_stride,v.sigma,region(stack,(v.segments[2*a]+v.segments[2*a+1])*.5),2*pi*v.frequencies[f]);
       term*=ex(C(0,1)*root(pow(2*pi*v.frequencies[f]/c0,2)*epsilon)*R);
     }
     value+=term;

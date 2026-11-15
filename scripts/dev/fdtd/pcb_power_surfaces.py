@@ -1,6 +1,7 @@
 """Compare independent enclosing vacuum surfaces without changing the PCB model."""
 from __future__ import annotations
 
+from dataclasses import replace
 import argparse
 import hashlib
 import json
@@ -42,27 +43,27 @@ def main():
         if not 0 < factor < 2:
             raise ValueError('Surface factor must remain strictly inside the physical PML interface.')
         bounds = active+(np.asarray(default[0].bounds)-active)*factor
-        surfaces.append(mw.ClosedSurfaceMonitor.box(f'radiation_{factor:g}',
+        surfaces.append(mw.monitors.ClosedSurfaceMonitor.box(f'radiation_{factor:g}',
             position=bounds.mean(1), size=np.diff(bounds).ravel(), frequencies=(frequency,),
             sample_spacing=None if args.native_planes else args.sample_spacing))
-    scene = scene.clone(monitors=surfaces+[default[1]])
+    scene = scene.updated(monitors=surfaces+[default[1]])
     config = simulation(scene, frequency, with_power=True)
     prepared = config.prepare()
-    config.config.run_time = mw.TimeConfig(time_steps=math.ceil(args.duration/prepared.solver.dt))
+    config.config = replace(config.config, run_time=mw.TimeConfig(time_steps=math.ceil(args.duration/prepared.solver.dt)))
     start = time.perf_counter()
     result = prepared.run()
     torch.cuda.synchronize()
     seconds = time.perf_counter()-start
     args.output.mkdir(parents=True, exist_ok=True)
     result.save(args.output/'result.pt')
-    bulk = result.power_loss('bulk_loss').conduction
-    copper = sum((row['surface_power'].to(bulk.device) for row in result.conductor_losses.values()), torch.zeros_like(bulk))
+    bulk = result.monitor('bulk_loss').conduction
+    copper = sum((row['surface_power'].to(bulk.device) for row in mw.rf.conductor_losses(result).values()), torch.zeros_like(bulk))
     records = []
     for monitor in surfaces:
-        antenna = result.antenna(surface=monitor.name, driven_port=scene.ports[0].name,
+        antenna = mw.antenna.antenna(result, surface=monitor.name, driven_port=scene.ports[0].name,
                                  theta_points=91, phi_points=73, radius=10.)
         flux = sum((p*w).sum() for p, w in
-                   (plane_normal_poynting(face) for face in result.monitor(monitor.name)['faces'].values()))
+                   (plane_normal_poynting(face) for face in result.raw_monitor(monitor.name)['faces'].values()))
         record = {'surface': monitor.name, 'bounds_m': monitor.bounds, 'accepted_w': float(antenna.p_accepted[0]),
                   'radiated_w': float(antenna.p_rad[0]), 'surface_flux_w': float(flux),
                   'bulk_loss_w': float(bulk[0]), 'copper_loss_w': float(copper[0]),
@@ -77,8 +78,8 @@ def main():
               'sample_spacing_m': None if args.native_planes else args.sample_spacing,
               'driver_sha256': driver_sha256,
               'driver_unchanged': driver_sha256 == hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-              'physical_pml_interfaces_m': {axis: [float(getattr(prepared.solver.scene, axis+'_nodes64')[prepared.solver.scene.pml_thickness_for_face(axis, 'low')]),
-                    float(getattr(prepared.solver.scene, axis+'_nodes64')[-prepared.solver.scene.pml_thickness_for_face(axis, 'high')-1])]
+              'physical_pml_interfaces_m': {axis: [float(getattr(prepared.solver.scene, axis+'_nodes64')[prepared.solver.scene.scene.pml_thickness_for_face(axis, 'low')]),
+                    float(getattr(prepared.solver.scene, axis+'_nodes64')[-prepared.solver.scene.scene.pml_thickness_for_face(axis, 'high')-1])]
                     for axis in 'xyz'},
               'steps': config.config.run_time.time_steps, 'dt_s': prepared.solver.dt,
               'actual_duration_s': config.config.run_time.time_steps*prepared.solver.dt,

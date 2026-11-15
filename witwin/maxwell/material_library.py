@@ -15,8 +15,8 @@ Usage::
 
     import witwin.maxwell as mw
 
-    silica = mw.library_material("SiO2")
-    entry = mw.MATERIAL_LIBRARY["Au"]
+    silica = mw.media.library.library_material("SiO2")
+    entry = mw.media.library.MATERIAL_LIBRARY["Au"]
     entry.reference, entry.wavelength_range  # citation and valid range [m]
 """
 
@@ -282,3 +282,7 @@ def library_material(key: str, *, name: str | None = None) -> Material:
     except KeyError:
         raise KeyError(f"Unknown library material {key!r}; available: {sorted(MATERIAL_LIBRARY)}.") from None
     return entry.material(name)
+
+
+# Public namespace ``mw.media.library``.
+__all__ = ["MATERIAL_LIBRARY", "MaterialLibraryEntry", "library_material"]

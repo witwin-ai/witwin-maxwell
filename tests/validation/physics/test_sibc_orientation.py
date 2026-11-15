@@ -35,7 +35,7 @@ _BOUND = 0.26
 
 
 def _field(result, component):
-    value = result.field(component)
+    value = result.field(component).isel(f=0).values
     value = value["data"] if isinstance(value, dict) else value
     return value.detach().cpu().numpy()
 
@@ -65,7 +65,6 @@ def _run_plate(perm, *, sigma=50.0, base_size=(0.06, 10.0, 10.0)):
         domain=mw.Domain(bounds=domain),
         grid=mw.GridSpec.uniform(_DX),
         boundary=mw.BoundarySpec.faces(default="pml", num_layers=8, strength=1.0),
-        device="cuda",
         sources=[
             mw.PointDipole(
                 position=source_pos,
@@ -78,15 +77,17 @@ def _run_plate(perm, *, sigma=50.0, base_size=(0.06, 10.0, 10.0)):
         structures=[
             mw.Structure(
                 geometry=Box(position=center, size=size),
-                material=mw.LossyMetalMedium(conductivity=sigma),
+                material=mw.media.LossyMetalMedium(conductivity=sigma),
             )
         ],
     )
     return mw.Simulation.fdtd(
         scene,
         frequencies=[_F],
-        run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=12),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=10, transient_cycles=12),
+            full_field_dft=True,
+        ),
     ).run()
 
 
@@ -144,7 +145,6 @@ def test_double_sided_plate_exercises_both_signs_and_stays_passive():
         boundary=mw.BoundarySpec.faces(
             default="periodic", num_layers=10, strength=1.0, x=("pml", "pml")
         ),
-        device="cuda",
         sources=[
             mw.PointDipole(
                 position=(-0.18, 0.0, 0.0),
@@ -157,15 +157,14 @@ def test_double_sided_plate_exercises_both_signs_and_stays_passive():
         structures=[
             mw.Structure(
                 geometry=Box(position=(0.0, 0.0, 0.0), size=(0.1, 1.0, 1.0)),
-                material=mw.LossyMetalMedium(conductivity=50.0),
+                material=mw.media.LossyMetalMedium(conductivity=50.0),
             )
         ],
     )
     result = mw.Simulation.fdtd(
-        scene, absorber="cpml",
-        frequencies=[_F],
+        scene, frequencies=[_F], config=mw.FDTDConfig(absorber="cpml",
         run_time=mw.TimeConfig(time_steps=6000),
-        full_field_dft=True,
+        full_field_dft=True),
     ).run()
     ez = _field(result, "Ez")
     # A plate bounded along x exposes its -x face (sn = +1) and its +x face (sn = -1)
@@ -189,7 +188,6 @@ def test_mixed_orientation_finite_block_is_stable(sigma):
         domain=mw.Domain(bounds=((-_BOUND, _BOUND), (-_BOUND, _BOUND), (-_BOUND, _BOUND))),
         grid=mw.GridSpec.uniform(_DX),
         boundary=mw.BoundarySpec.faces(default="pml", num_layers=8, strength=1.0),
-        device="cuda",
         sources=[
             mw.PointDipole(
                 position=(-0.15, 0.02, -0.03),
@@ -202,15 +200,17 @@ def test_mixed_orientation_finite_block_is_stable(sigma):
         structures=[
             mw.Structure(
                 geometry=Box(position=(0.0, 0.0, 0.0), size=(0.12, 0.12, 0.12)),
-                material=mw.LossyMetalMedium(conductivity=sigma),
+                material=mw.media.LossyMetalMedium(conductivity=sigma),
             )
         ],
     )
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_F],
-        run_time=mw.TimeConfig(time_steps=6000),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=6000),
+            full_field_dft=True,
+        ),
     ).run()
     ez = _field(result, "Ez")
     assert np.isfinite(ez).all(), f"sigma={sigma}: mixed-orientation block diverged"

@@ -15,7 +15,6 @@ def _scene() -> mw.Scene:
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
     )
 
 
@@ -50,6 +49,8 @@ def test_monitor_first_result_round_trip_preserves_order_and_stats_without_runti
             "frequencies": _FREQUENCIES,
             "data": right,
             "components": {"Ez": right},
+            "field_indices": {"Ez": (1, 2, 2)},
+            "position": (-0.25, 0.0, 0.0),
         },
         "plane_declared_second": {
             "kind": "plane",
@@ -60,6 +61,8 @@ def test_monitor_first_result_round_trip_preserves_order_and_stats_without_runti
             "x": coords,
             "z": np.asarray((-0.1, 0.1), dtype=np.float64),
             "data": left[:, None, None].expand(-1, coords.size, 2),
+            "components": {"Ez": {"data": left[:, None, None].expand(-1, coords.size, 2),
+                                  "coords": (coords, np.asarray((-0.1, 0.1), dtype=np.float64))}},
         },
     }
     result = Result(
@@ -83,10 +86,10 @@ def test_monitor_first_result_round_trip_preserves_order_and_stats_without_runti
         "right_declared_first",
         "plane_declared_second",
     )
-    torch.testing.assert_close(loaded.monitors["right_declared_first"]["data"], right.cpu())
-    np.testing.assert_array_equal(loaded.monitors["plane_declared_second"]["x"], coords)
-    assert loaded.monitors["plane_declared_second"]["data"].device.type == "cpu"
-    stats = loaded.solver_stats["parallel_stats"]
+    torch.testing.assert_close(loaded.monitors["right_declared_first"].isel(component=0).values, right.cpu())
+    np.testing.assert_array_equal(loaded.raw_monitor("plane_declared_second")["x"], coords)
+    assert loaded.monitors["plane_declared_second"].isel(component=0).values.device.type == "cpu"
+    stats = loaded.stats()["parallel_stats"]
     assert stats["devices"] == ("cuda:0", "cuda:1")
     assert stats["partition_extents"] == ((0, 4), (4, 8))
     assert stats["halo_bytes_total"] == 4096
@@ -94,7 +97,7 @@ def test_monitor_first_result_round_trip_preserves_order_and_stats_without_runti
     torch.testing.assert_close(stats["device_counter"], torch.tensor((7, 9)))
     assert loaded._metadata["rank_metric"].device.type == "cpu"
     assert loaded.solver is None
-    assert loaded.raw_output is None
+    assert loaded._raw_output is None
 
 
 def test_gathered_field_result_round_trip_preserves_frequency_selection_on_cpu(
@@ -102,13 +105,10 @@ def test_gathered_field_result_round_trip_preserves_frequency_selection_on_cpu(
     cuda_p2p_devices,
     cuda_memory_cleanup,
 ):
-    ex = torch.arange(48, device=cuda_p2p_devices[1], dtype=torch.float32).reshape(
-        2,
-        4,
-        3,
-        2,
-    )
-    ez = (ex + 1.0).to(torch.complex64)
+    # Full Yee-grid shapes of the 8 x 4 x 4 cell scene: EX (Nx, Ny + 1, Nz + 1), EZ (Nx + 1, Ny + 1, Nz).
+    ex = torch.arange(2 * 8 * 5 * 5, device=cuda_p2p_devices[1], dtype=torch.float32).reshape(2, 8, 5, 5)
+    ez = (torch.arange(2 * 9 * 5 * 4, device=cuda_p2p_devices[1], dtype=torch.float32).reshape(2, 9, 5, 4)
+          + 1.0).to(torch.complex64)
     result = Result(
         method="fdtd",
         scene=_scene(),
@@ -125,7 +125,7 @@ def test_gathered_field_result_round_trip_preserves_frequency_selection_on_cpu(
     assert loaded.frequencies == _FREQUENCIES
     assert tuple(loaded.fields) == ("EX", "EZ")
     assert all(tensor.device.type == "cpu" for tensor in loaded.fields.values())
-    torch.testing.assert_close(loaded.tensor("EX", freq_index=1), ex[1].cpu())
-    torch.testing.assert_close(loaded.tensor("EZ", frequency=_FREQUENCIES[0]), ez[0].cpu())
+    torch.testing.assert_close(loaded.field("EX", freq_index=1).values, ex[1].cpu())
+    torch.testing.assert_close(loaded.field("EZ", frequency=_FREQUENCIES[0]).values, ez[0].cpu())
     assert loaded.stats()["num_fields"] == 2
     assert loaded.stats()["num_monitors"] == 0

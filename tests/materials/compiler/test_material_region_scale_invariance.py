@@ -5,22 +5,24 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 def _region_profile(scale, *, trainable):
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0 * scale, 1.0 * scale), (-0.4 * scale, 0.4 * scale), (-0.4 * scale, 0.4 * scale))),
-        grid=mw.GridSpec.uniform(0.04 * scale),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cpu",
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-    )
     density = torch.full((20, 10, 1), 0.5, requires_grad=trainable)
-    scene.add_material_region(mw.MaterialRegion(
-        name="design", geometry=mw.Box(position=(0.4 * scale, 0.0, 0.0), size=(0.8 * scale, 0.4 * scale, 0.22 * scale)),
-        density=density, eps_bounds=(1.0, 12.0)))
-    prepared = prepare_scene(scene)
-    eps = prepared.compile_materials()["eps_r"].detach()
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-1.0 * scale, 1.0 * scale), (-0.4 * scale, 0.4 * scale), (-0.4 * scale, 0.4 * scale))),
+                grid=mw.GridSpec.uniform(0.04 * scale),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design", geometry=mw.Box(position=(0.4 * scale, 0.0, 0.0), size=(0.8 * scale, 0.4 * scale, 0.22 * scale)),
+                density=density, eps_bounds=(1.0, 12.0)),
+            ),
+            )
+    prepared = prepare_scene(scene, device="cpu")
+    eps = compile_materials(prepared)["eps_r"].detach()
     iy, iz = int(torch.argmin(prepared.y.abs())), int(torch.argmin(prepared.z.abs()))
     # Sample the x row at the region face and 1, 2, 5 and 15 cells outside it.
     indices = [int(torch.argmin((prepared.x + cells * 0.04 * scale).abs())) for cells in (0, 1, 2, 5, 15)]

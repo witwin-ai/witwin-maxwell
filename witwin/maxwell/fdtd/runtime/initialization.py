@@ -10,7 +10,8 @@ from ...compiler.monitors import (
     compile_fdtd_time_observers,
 )
 from ...compiler.sources import compile_fdtd_sources
-from ..boundary import DEFAULT_CPML_CONFIG
+from ...fdtd_cpml import require_cpml_config
+from ..boundary.cpml import resolve_cpml_grading
 from .module_cache import get_fdtd_module, require_cuda_scene
 
 
@@ -110,12 +111,10 @@ def maximum_declared_frequency(scene, base_frequency, excitations=()) -> float:
     return frequency
 
 
-def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_config=None):
+def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml=None):
     from .materials import validate_nonlinear_tensor_materials
     validate_nonlinear_tensor_materials(scene)
-    cpu_reference = bool(getattr(scene, "_fdtd_cpu_reference", False))
-    if not cpu_reference:
-        require_cuda_scene(scene)
+    require_cuda_scene(scene)
     solver.scene = scene
     solver.Nx = scene.Nx
     solver.Ny = scene.Ny
@@ -124,13 +123,13 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver.min_dy = float(scene.dy_primal64.min())
     solver.min_dz = float(scene.dz_primal64.min())
     solver.device = torch.device(scene.device)
-    solver.verbose = bool(scene.verbose)
+    solver.verbose = False
     solver.c = C_0
     solver.mu0 = MU_0
     solver.eps0 = EPSILON_0
     solver.plot_interval = 50
     solver.progress_update_interval = 25
-    compiled_sources = compile_fdtd_sources(scene, default_frequency=float(frequency))
+    compiled_sources = compile_fdtd_sources(scene.scene, default_frequency=float(frequency))
     solver._compiled_sources = tuple(compiled_sources)
     primary_tfsf_source = next(
         (source for source in solver._compiled_sources if source.get("injection", {}).get("kind") == "tfsf"),
@@ -148,13 +147,13 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver._spectral_reference_frequency = None
     solver._requested_port_frequencies = (float(frequency),)
     time_step_frequency = max(
-        maximum_declared_frequency(scene, frequency),
+        maximum_declared_frequency(scene.scene, frequency),
         max((
             float(source["source_time"].get("characteristic_frequency", source["source_time"]["frequency"]))
             for source in solver._compiled_sources
         ), default=0.0),
     )
-    time_step_frequency = max(time_step_frequency, _scene_material_characteristic_frequency(scene))
+    time_step_frequency = max(time_step_frequency, _scene_material_characteristic_frequency(scene.scene))
     solver.source_frequency = (
         float(solver._source_time["frequency"])
         if solver._source_time is not None
@@ -162,14 +161,14 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     )
     solver.source_omega = 2 * np.pi * solver.source_frequency
     solver.absorber_type = absorber_type.lower()
-    solver.boundary_kind = scene.boundary.kind
+    solver.boundary_kind = scene.scene.boundary.kind
     solver.active_absorber_type = "none"
     solver.complex_fields_enabled = False
-    solver.cpml_config = dict(DEFAULT_CPML_CONFIG)
-    solver._cpml_config_keys = frozenset(cpml_config or ())
-    if cpml_config is not None:
-        solver.cpml_config.update(cpml_config)
-    solver._cpml_memory_mode_requested = str(solver.cpml_config.get("memory_mode", "auto")).strip().lower()
+    solver.cpml = require_cpml_config(cpml)
+    # Boundary setup re-resolves the profile (fixed-k shift, StablePML); until then
+    # auxiliary lines read the real-field profile of the configuration.
+    solver.cpml_grading = resolve_cpml_grading(solver.cpml)
+    solver._cpml_memory_mode_requested = solver.cpml.memory_mode.value
     solver._cpml_memory_mode = "none"
     solver._cpml_memory_layouts = {}
     solver._cpml_layout_cache = {}
@@ -177,7 +176,6 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver._cpml_slab_memory_bytes = 0
     solver._cpml_allocated_memory_bytes = 0
     solver._cpml_dense_memory_limit_bytes = None
-    solver._cpml_auto_free_bytes = None
 
     solver.dt = solver.auto_dt(solver.min_dx, solver.min_dy, solver.min_dz, time_step_frequency)
     # Per-axis spacing arrays: `_e` scales backward diffs in E updates (dual
@@ -189,12 +187,7 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver.inv_dx_h = torch.tensor(1.0 / scene.dx_primal64, dtype=scene.x.dtype, device=solver.device)
     solver.inv_dy_h = torch.tensor(1.0 / scene.dy_primal64, dtype=scene.x.dtype, device=solver.device)
     solver.inv_dz_h = torch.tensor(1.0 / scene.dz_primal64, dtype=scene.x.dtype, device=solver.device)
-    if cpu_reference:
-        from ..cpu_reference import get_cpu_reference_module
-        solver.fdtd_module = get_cpu_reference_module()
-    else:
-        solver.fdtd_module = get_fdtd_module()
-    solver.cpu_reference = cpu_reference
+    solver.fdtd_module = get_fdtd_module()
 
     solver.dft_enabled = False
     solver.dft_frequency = None
@@ -219,8 +212,6 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver.dft_end_steps = ()
     solver.dft_window_normalization = 0.0
     solver.dft_window_normalizations = ()
-    solver.dft_phase_step_cos = None
-    solver.dft_phase_step_sin = None
     solver._dft_entries = []
     solver._dft_batched_fields = {}
     solver._dft_phase_cos = None
@@ -276,24 +267,16 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver.tfsf_enabled = False
     solver._tfsf_state = None
 
-    solver.observers = compile_fdtd_observers(scene)
+    solver.observers = compile_fdtd_observers(scene.scene)
     solver.observers_enabled = False
-    solver.time_observers = compile_fdtd_time_observers(scene)
+    solver.time_observers = compile_fdtd_time_observers(scene.scene)
     solver.time_observers_enabled = False
-    solver.breakdown_observers = compile_fdtd_breakdown_observers(scene)
+    solver.breakdown_observers = compile_fdtd_breakdown_observers(scene.scene)
     solver.breakdown_observers_enabled = False
-    solver.observer_frequency = None
     solver.observer_frequencies = ()
     solver.observer_window_type = "hanning"
-    solver.observer_start_step = None
-    solver.observer_start_steps = ()
-    solver.observer_end_step = None
-    solver.observer_end_steps = ()
-    solver.observer_window_normalization = 0.0
     solver.observer_sample_count = 0
     solver.observer_sample_counts = ()
-    solver.observer_phase_step_cos = None
-    solver.observer_phase_step_sin = None
     solver._observer_spectral_entries = []
     solver._observer_point_groups_by_frequency = []
     solver._observer_plane_groups_by_frequency = []

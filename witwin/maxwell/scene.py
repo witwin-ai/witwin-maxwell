@@ -5,7 +5,9 @@ from ._fixed_inputs import require_fixed_input
 import math
 import copy
 import warnings
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import KW_ONLY, dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
 
 import numpy as np
@@ -28,37 +30,48 @@ from .ports import (
 )
 from .thin_wire import ThinWire
 from .absorbers import InternalAbsorber, ModeABC, MurABC
-from .compiler.materials import (
-    compile_material_model,
-    evaluate_material_components,
-)
+from ._enums import StrEnum, parse_enum
+from .errors import SetupError, UnsupportedFeatureError
 
 
-BoundaryKind: TypeAlias = Literal["none", "pml", "periodic", "bloch", "pec", "pmc", "mur", "mode_abc"]
+class BoundaryKind(StrEnum):
+    """The boundary condition of a domain face.
+
+    ``MIXED`` is never declared: it is the summary ``BoundarySpec.kind`` and
+    ``BoundarySpec.axis_kind`` report when the faces differ.
+    """
+
+    NONE = "none"
+    PML = "pml"
+    PERIODIC = "periodic"
+    BLOCH = "bloch"
+    PEC = "pec"
+    PMC = "pmc"
+    MUR = "mur"
+    MODE_ABC = "mode_abc"
+    MIXED = "mixed"
+
+
 BoundaryAxisOverride: TypeAlias = BoundaryKind | tuple[BoundaryKind, BoundaryKind]
 BlochWavevector: TypeAlias = tuple[float, float, float] | Literal["auto"]
 
-_ResolvedBoundaryKind: TypeAlias = BoundaryKind | Literal["mixed"]
 _BOUNDARY_AXES = ("x", "y", "z")
 _BOUNDARY_AXIS_TO_INDEX = {axis: index for index, axis in enumerate(_BOUNDARY_AXES)}
 _BOUNDARY_SIDE_TO_INDEX = {"low": 0, "high": 1}
-_VALID_BOUNDARY_KINDS = {"none", "pml", "periodic", "bloch", "pec", "pmc", "mur", "mode_abc"}
-_PAIR_ONLY_BOUNDARY_KINDS = {"periodic", "bloch"}
+_PAIR_ONLY_BOUNDARY_KINDS = {BoundaryKind.PERIODIC, BoundaryKind.BLOCH}
 
 
-def _normalize_boundary_kind(value, *, allow_mixed: bool = False) -> str:
-    kind = str(value).lower()
-    if kind == "mixed" and allow_mixed:
-        return kind
-    if kind not in _VALID_BOUNDARY_KINDS:
-        raise ValueError(
-            "Boundary kind must be one of 'none', 'pml', 'periodic', 'bloch', 'pec', 'pmc', 'mur', "
-            "or 'mode_abc'."
-        )
+def _normalize_boundary_kind(value) -> BoundaryKind:
+    try:
+        kind = BoundaryKind(value)
+    except ValueError:
+        kind = BoundaryKind.MIXED
+    if kind is BoundaryKind.MIXED:
+        choices = ", ".join(repr(item.value) for item in BoundaryKind if item is not BoundaryKind.MIXED)
+        raise SetupError(f"Boundary kind must be one of {choices}, got {value!r}.")
     return kind
 
-
-def _normalize_boundary_axis_override(name: str, value) -> tuple[str, str] | None:
+def _normalize_boundary_axis_override(name: str, value) -> tuple[BoundaryKind, BoundaryKind] | None:
     if value is None:
         return None
     if isinstance(value, str):
@@ -69,17 +82,17 @@ def _normalize_boundary_axis_override(name: str, value) -> tuple[str, str] | Non
     return tuple(_normalize_boundary_kind(component) for component in value)
 
 
-def _normalize_boundary_face_override(name: str, value) -> str | None:
+def _normalize_boundary_face_override(name: str, value) -> BoundaryKind | None:
     if value is None:
         return None
     return _normalize_boundary_kind(value)
 
 
-def _summarize_boundary_kind(face_kinds: tuple[tuple[str, str], tuple[str, str], tuple[str, str]]) -> _ResolvedBoundaryKind:
+def _summarize_boundary_kind(face_kinds) -> BoundaryKind:
     first_kind = face_kinds[0][0]
-    if all(low_kind == first_kind and high_kind == first_kind for low_kind, high_kind in face_kinds):
+    if all(low_kind is first_kind and high_kind is first_kind for low_kind, high_kind in face_kinds):
         return first_kind
-    return "mixed"
+    return BoundaryKind.MIXED
 
 
 @dataclass(frozen=True)
@@ -519,7 +532,21 @@ class GridSpec:
 
 @dataclass(frozen=True)
 class BoundarySpec:
-    kind: BoundaryKind | Literal["mixed"] = "none"
+    """Outer boundary of the scene: one kind per face, plus PML depth and strength.
+
+    ``strength`` has two readings, chosen by the FDTD absorber (``FDTDConfig.absorber``):
+
+    - ``"cpml"``, ``"stablepml"``, ``"absorber"`` and the FDFD stretched-coordinate PML read it
+      as a *multiplier* of the reflection-calibrated peak conductivity: a value in (0, 100]
+      scales it, while 0 and any value above 100 (including the ``BoundarySpec.pml`` default
+      1e6) leave the nominal profile unchanged.
+    - ``"pml"`` (the simple quartic PML) reads it as an *absolute* scale: the stored peak
+      conductivity of its quartic ramp is ``2 * strength / (dt * min(dx, dy, dz))``.
+
+    Both readings are kept as they are in 0.7.0; unifying them would change CPML numerics.
+    """
+
+    kind: BoundaryKind = BoundaryKind.NONE
     num_layers: int = 0
     strength: float = 0.0
     bloch_wavevector: BlochWavevector = (0.0, 0.0, 0.0)
@@ -588,12 +615,12 @@ class BoundarySpec:
         resolved_kind = _summarize_boundary_kind(normalized_face_kinds)
 
         uses_pml = any(
-            face_kind == "pml"
+            face_kind is BoundaryKind.PML
             for axis_face_kinds in normalized_face_kinds
             for face_kind in axis_face_kinds
         )
         uses_bloch = any(
-            face_kind == "bloch"
+            face_kind is BoundaryKind.BLOCH
             for axis_face_kinds in normalized_face_kinds
             for face_kind in axis_face_kinds
         )
@@ -605,9 +632,9 @@ class BoundarySpec:
         if uses_bloch:
             for axis, axis_index in _BOUNDARY_AXIS_TO_INDEX.items():
                 axis_face_kinds = normalized_face_kinds[axis_index]
-                if "bloch" not in axis_face_kinds:
+                if BoundaryKind.BLOCH not in axis_face_kinds:
                     continue
-                if axis_face_kinds[0] != "bloch" or axis_face_kinds[1] != "bloch":
+                if axis_face_kinds[0] is not BoundaryKind.BLOCH or axis_face_kinds[1] is not BoundaryKind.BLOCH:
                     raise ValueError(f"{axis}-axis Bloch boundaries must be configured on both faces.")
                 # Zero translation phase is the periodic limit of Bloch data.
                 # It is valid for explicit vectors, including mixed PML faces,
@@ -624,10 +651,10 @@ class BoundarySpec:
             raise TypeError("BoundarySpec.mur_abc must be a MurABC.")
         if self.mode_abc is not None and not isinstance(self.mode_abc, ModeABC):
             raise TypeError("BoundarySpec.mode_abc must be a ModeABC or None.")
-        uses_face_kind = lambda name: any(name in pair for pair in normalized_face_kinds)
-        if not uses_face_kind("mur"):
+        uses_face_kind = lambda kind: any(kind in pair for pair in normalized_face_kinds)
+        if not uses_face_kind(BoundaryKind.MUR):
             object.__setattr__(self, "mur_abc", MurABC())
-        if uses_face_kind("mode_abc"):
+        if uses_face_kind(BoundaryKind.MODE_ABC):
             if self.mode_abc is None:
                 object.__setattr__(self, "mode_abc", ModeABC())
         else:
@@ -655,37 +682,37 @@ class BoundarySpec:
     @classmethod
     def pml(cls, num_layers: int = 15, strength: float = 1e6) -> "BoundarySpec":
         require_fixed_input((num_layers, strength), name="BoundarySpec.pml controls")
-        return cls(kind="pml", num_layers=int(num_layers), strength=float(strength))
+        return cls(kind=BoundaryKind.PML, num_layers=int(num_layers), strength=float(strength))
 
     @classmethod
     def none(cls) -> "BoundarySpec":
-        return cls(kind="none", num_layers=0, strength=0.0)
+        return cls(kind=BoundaryKind.NONE, num_layers=0, strength=0.0)
 
     @classmethod
     def periodic(cls) -> "BoundarySpec":
-        return cls(kind="periodic")
+        return cls(kind=BoundaryKind.PERIODIC)
 
     @classmethod
     def bloch(cls, wavevector) -> "BoundarySpec":
-        return cls(kind="bloch", bloch_wavevector=wavevector)
+        return cls(kind=BoundaryKind.BLOCH, bloch_wavevector=wavevector)
 
     @classmethod
     def pec(cls) -> "BoundarySpec":
-        return cls(kind="pec")
+        return cls(kind=BoundaryKind.PEC)
 
     @classmethod
     def pmc(cls) -> "BoundarySpec":
-        return cls(kind="pmc")
+        return cls(kind=BoundaryKind.PMC)
 
     @classmethod
     def mur(cls, order: int = 1, permittivity: float | None = None) -> "BoundarySpec":
-        return cls(kind="mur", mur_abc=MurABC(order=order, permittivity=permittivity))
+        return cls(kind=BoundaryKind.MUR, mur_abc=MurABC(order=order, permittivity=permittivity))
 
     @classmethod
     def faces(
         cls,
         *,
-        default: BoundaryKind = "none",
+        default: BoundaryKind = BoundaryKind.NONE,
         num_layers: int = 0,
         strength: float = 0.0,
         bloch_wavevector: BlochWavevector = (0.0, 0.0, 0.0),
@@ -732,11 +759,11 @@ class BoundarySpec:
             raise ValueError("axis must be 'x', 'y', or 'z'.")
         return self._face_kinds[_BOUNDARY_AXIS_TO_INDEX[axis_name]]
 
-    def axis_kind(self, axis: str) -> _ResolvedBoundaryKind:
+    def axis_kind(self, axis: str) -> BoundaryKind:
         low_kind, high_kind = self.axis_face_kinds(axis)
-        if low_kind == high_kind:
+        if low_kind is high_kind:
             return low_kind
-        return "mixed"
+        return BoundaryKind.MIXED
 
     def face_kind(self, axis: str, side: str) -> BoundaryKind:
         axis_name = str(axis).lower()
@@ -750,13 +777,13 @@ class BoundarySpec:
     def uses_kind(self, kind: BoundaryKind) -> bool:
         normalized_kind = _normalize_boundary_kind(kind)
         return any(
-            face_kind == normalized_kind
+            face_kind is normalized_kind
             for axis_face_kinds in self._face_kinds
             for face_kind in axis_face_kinds
         )
 
     def pml_layers_for_face(self, axis: str, side: str) -> int:
-        return int(self.num_layers) if self.face_kind(axis, side) == "pml" else 0
+        return int(self.num_layers) if self.face_kind(axis, side) is BoundaryKind.PML else 0
 
     def bloch_phase_factors(
         self,
@@ -773,7 +800,7 @@ class BoundarySpec:
         )
         phases = []
         for axis, length, wave_number in zip(_BOUNDARY_AXES, lengths, self.bloch_wavevector):
-            if self.axis_kind(axis) == "bloch":
+            if self.axis_kind(axis) is BoundaryKind.BLOCH:
                 phases.append(np.exp(1j * wave_number * length))
             else:
                 phases.append(1.0 + 0.0j)
@@ -793,7 +820,7 @@ class BoundarySpec:
         z_high: BoundaryKind | None = None,
     ) -> "BoundarySpec":
         return type(self).faces(
-            default="none",
+            default=BoundaryKind.NONE,
             num_layers=self.num_layers,
             strength=self.strength,
             bloch_wavevector=self.bloch_wavevector,
@@ -830,6 +857,15 @@ class MaterialRegion:
             raise TypeError("MaterialRegion.density must be a torch.Tensor.")
         if self.density.ndim != 3:
             raise ValueError("MaterialRegion.density must have shape (Nx, Ny, Nz).")
+        if self.symmetry is not None:
+            raise UnsupportedFeatureError(
+                "MaterialRegion.symmetry is not consumed by any solver; impose design symmetry on the "
+                "density with witwin.maxwell.invdes.symmetrize(...) or DensityParameterization and "
+                "set symmetry=None.",
+                feature="guard:38381bae", method=None
+            )
+        for field_name in ("bounds", "eps_bounds", "mu_bounds", "filter_radius", "projection_beta"):
+            require_fixed_input(getattr(self, field_name), name=f"MaterialRegion.{field_name}")
 
         density_bounds = (float(self.bounds[0]), float(self.bounds[1]))
         if density_bounds[1] <= density_bounds[0]:
@@ -858,11 +894,30 @@ class MaterialRegion:
 
 
 class SceneModule(torch.nn.Module):
+    """A PyTorch module whose ``to_scene()`` materializes a standard ``Scene``.
+
+    Recommended pattern: build the static part once and replace only what the parameters drive::
+
+        class Design(mw.SceneModule):
+            def __init__(self):
+                super().__init__()
+                self.density = torch.nn.Parameter(torch.full((32, 32, 1), 0.5))
+                self._base = mw.Scene(domain=..., grid=..., boundary=..., structures=(...), sources=(...))
+                self._design_box = mw.Box(position=(0, 0, 0), size=(...))
+
+            def to_scene(self):
+                return self._base.updated(material_regions=(
+                    mw.MaterialRegion(name="design", geometry=self._design_box, density=self.density),))
+
+    ``updated`` shares every static object (structural sharing, about 0.02 ms for 1,000 structures),
+    and preparation reuses the compiled material prefix and PML census of the static structures while
+    the same objects reappear on the same grid, device and dtype
+    (``witwin.maxwell.compiler.static_cache``). Rebuilding the static structures inside ``to_scene()``
+    stays correct but compiles them on every forward.
+    """
+
     def to_scene(self) -> "Scene":
         raise NotImplementedError("SceneModule subclasses must implement to_scene().")
-
-
-_USE_SCENE_SUBPIXEL_SAMPLES = object()
 
 
 def _normalize_subpixel_samples(value) -> tuple[int, int, int]:
@@ -881,8 +936,21 @@ def _normalize_subpixel_samples(value) -> tuple[int, int, int]:
     return normalized
 
 
-_SUBPIXEL_AVERAGING = {"arithmetic", "polarized", "polarized_tensor", "kottke_edge", "kottke_smooth"}
-_SUBPIXEL_PEC = {"staircase", "conformal"}
+class SubpixelAveraging(StrEnum):
+    """The per-Yee-component material blend of ``SubpixelSpec.averaging``."""
+
+    ARITHMETIC = "arithmetic"
+    POLARIZED = "polarized"
+    POLARIZED_TENSOR = "polarized_tensor"
+    KOTTKE_EDGE = "kottke_edge"
+    KOTTKE_SMOOTH = "kottke_smooth"
+
+
+class PECTreatment(StrEnum):
+    """The FDTD handling of PEC material edges, ``SubpixelSpec.pec``."""
+
+    STAIRCASE = "staircase"
+    CONFORMAL = "conformal"
 
 
 @dataclass(frozen=True)
@@ -913,18 +981,14 @@ class SubpixelSpec:
     """
 
     samples: tuple[int, int, int] = (4, 4, 4)
-    averaging: str = "kottke_edge"
-    pec: str = "staircase"
+    averaging: SubpixelAveraging = SubpixelAveraging.KOTTKE_EDGE
+    pec: PECTreatment = PECTreatment.STAIRCASE
 
     def __post_init__(self):
         object.__setattr__(self, "samples", _normalize_subpixel_samples(self.samples))
-        averaging = str(self.averaging).lower()
-        if averaging not in _SUBPIXEL_AVERAGING:
-            raise ValueError("SubpixelSpec.averaging must be 'arithmetic', 'polarized', 'polarized_tensor', 'kottke_edge', or 'kottke_smooth'.")
-        pec = str(self.pec).lower()
-        if pec not in _SUBPIXEL_PEC:
-            raise ValueError("SubpixelSpec.pec must be 'staircase' or 'conformal'.")
-        if averaging in {"polarized", "polarized_tensor"} and self.samples == (1, 1, 1):
+        averaging = parse_enum(SubpixelAveraging, self.averaging, name="SubpixelSpec.averaging")
+        pec = parse_enum(PECTreatment, self.pec, name="SubpixelSpec.pec")
+        if averaging in (SubpixelAveraging.POLARIZED, SubpixelAveraging.POLARIZED_TENSOR) and self.samples == (1, 1, 1):
             raise ValueError(
                 f"SubpixelSpec(averaging='{averaging}') needs more than one subpixel sample: a single "
                 "point sample has a binary fill, so the normal projection would reproduce the "
@@ -932,7 +996,7 @@ class SubpixelSpec:
             )
         object.__setattr__(self, "averaging", averaging)
         object.__setattr__(self, "pec", pec)
-        if pec == "conformal":
+        if pec is PECTreatment.CONFORMAL:
             warnings.warn(
                 'SubpixelSpec(pec="conformal") has a known systematic bias: '
                 'non-converging scattering error of about 30-40% on curved PEC. '
@@ -945,7 +1009,7 @@ class SubpixelSpec:
 def _coerce_subpixel(value) -> SubpixelSpec:
     if isinstance(value, SubpixelSpec):
         return value
-    return SubpixelSpec(samples=_normalize_subpixel_samples(value), averaging="arithmetic")
+    return SubpixelSpec(samples=_normalize_subpixel_samples(value), averaging=SubpixelAveraging.ARITHMETIC)
 
 
 def _normalize_symmetry_entry(axis_value) -> tuple[str, str] | None:
@@ -985,10 +1049,6 @@ def _normalize_symmetry(value) -> tuple[tuple[str, str] | None, ...]:
     return tuple(_normalize_symmetry_entry(axis_value) for axis_value in value)
 
 
-def _to_like_tensor(value, *, reference: torch.Tensor) -> torch.Tensor:
-    return torch.as_tensor(value, device=reference.device, dtype=reference.dtype)
-
-
 def _component_summary(components: dict[str, torch.Tensor]) -> torch.Tensor:
     return (components["x"] + components["y"] + components["z"]) / 3.0
 
@@ -1019,6 +1079,10 @@ def _place_scene_value(value, device, memo):
         memo[id(value)] = moved
         moved.update((k, _place_scene_value(v, device, memo)) for k, v in value.items())
         return moved
+    if isinstance(value, MappingProxyType):
+        moved = MappingProxyType({k: _place_scene_value(v, device, memo) for k, v in value.items()})
+        memo[id(value)] = moved
+        return moved
     if type(value).__module__.startswith("witwin.") and hasattr(value, "__dict__") and not isinstance(value, type):
         moved = copy.copy(value)
         memo[id(value)] = moved
@@ -1028,13 +1092,18 @@ def _place_scene_value(value, device, memo):
     return value
 
 
-def _resolve_scene_device(device) -> str:
+def place_scene(scene: "Scene", device) -> "Scene":
+    """A copy of ``scene`` whose declarative tensors live on ``device``; ``scene`` is untouched."""
+    return _place_scene_value(scene, str(torch.device(device)), {})
+
+
+def _resolve_device(device) -> str:
     requested = "cuda" if device is None else device
     resolved = torch.device(requested)
     if resolved.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError(
-            "Scene requires CUDA by default, but torch.cuda.is_available() is False. "
-            "Pass device='cpu' for scene-only or CPU postprocessing workflows."
+            "Scene preparation targets CUDA by default, but torch.cuda.is_available() is False. "
+            "Set device='cpu' on the solver config for scene-only or CPU postprocessing workflows."
         )
     return str(resolved)
 
@@ -1052,348 +1121,93 @@ def _domain_range_from_bounds(
     )
 
 
-class Scene:
-    """Declarative 3D scene definition for simulation backends."""
+def _require_unique_name(items, item, label):
+    if any(existing.name == item.name for existing in items):
+        raise ValueError(f"{label} name {item.name!r} is already present in the scene.")
 
-    def to_dict(self, arrays=None):
-        """Serialize a fixed scene as a JSON-safe ``witwin.scene/1`` dictionary."""
-        from .scene_dict import scene_to_dict
 
-        return scene_to_dict(self, arrays=arrays)
+def _require_terminals_inside(domain, terminals, describe):
+    for terminal_name, terminal in terminals:
+        for axis, coordinate, (lower, upper) in zip(_BOUNDARY_AXES, terminal, domain.bounds):
+            if not math.isfinite(coordinate) or coordinate < lower or coordinate > upper:
+                raise ValueError(
+                    f"{describe} {terminal_name} terminal {axis}={coordinate:g} lies outside "
+                    f"the Scene domain [{lower:g}, {upper:g}]."
+                )
 
-    @classmethod
-    def from_dict(cls, d, arrays=None, device="cuda"):
-        """Rebuild a ``witwin.scene/1`` dictionary on the requested device."""
-        from .scene_dict import scene_from_dict
 
-        return scene_from_dict(d, arrays=arrays, device=device)
+def _require_coaxial_inside(domain, item):
+    outer = 0.5 * item.outer_diameter
+    normal = "xyz".index(item.normal_axis)
+    for index, (axis, coordinate, (lower, upper)) in enumerate(zip(_BOUNDARY_AXES, item.center, domain.bounds)):
+        reach = 0.0 if index == normal else outer
+        if coordinate - reach < lower or coordinate + reach > upper:
+            raise ValueError(f"{type(item).__name__} {item.name!r} annulus leaves the Scene domain along {axis}.")
 
-    def __init__(
-        self,
-        domain: Domain | None = None,
-        grid: GridSpec | None = None,
-        boundary: BoundarySpec | None = None,
-        *,
-        background=None,
-        structures=None,
-        thin_wires=None,
-        sources=None,
-        monitors=None,
-        ports=None,
-        networks=(),
-        lumped_elements=(),
-        circuits=(),
-        material_regions=None,
-        electrostatic_terminals=None,
-        charge_densities=None,
-        metadata=None,
-        device="cuda",
-        verbose=False,
-        lazy_meshgrid=True,
-        subpixel_samples=SubpixelSpec(),
-        symmetry=None,
-        coordinates=None,
-        internal_absorbers=(),
-    ):
-        resolved_device = _resolve_scene_device(device)
-        from witwin.core import PhysicalMaterial
-        from .layers import LayerStack
-        if background is not None and not isinstance(background, (PhysicalMaterial, LayerStack)):
-            raise TypeError('Scene background must be a homogeneous material, a planar LayerStack or None')
-        self.background = background
-        self.structures = list(structures or [])
-        if any(not isinstance(structure, Structure) for structure in self.structures):
-            raise TypeError("Maxwell Scene structures must be witwin.core.Structure instances.")
-        self._thin_wires = []
-        for wire in thin_wires or ():
-            self.add_thin_wire(wire)
-        self.sources = list(sources or [])
-        self.monitors = list(monitors or [])
-        self.metadata = dict(metadata or {})
-        self.device = resolved_device
-        if coordinates is not None:
-            from .coordinates import BendCoordinates
-            if not isinstance(coordinates,BendCoordinates):
-                raise TypeError("Scene.coordinates must be BendCoordinates or None.")
-            coordinates=coordinates.to(resolved_device)
-        self.coordinates = coordinates
-        require_fixed_input((verbose, lazy_meshgrid), name="Scene execution controls")
-        self.verbose = bool(verbose)
 
-        if domain is None:
-            domain = Domain.from_domain_range((-1.0, 1.0, -1.0, 1.0, -1.0, 1.0))
-        if grid is None:
-            grid = GridSpec.uniform(0.05)
-        if boundary is None:
-            boundary = BoundarySpec.none()
+def _check_background(scene, value):
+    from witwin.core import PhysicalMaterial
+    from .layers import LayerStack
 
-        self.domain = domain
-        if self.coordinates is not None:
-            self.coordinates.validate_bounds(domain.bounds)
-        self.grid = grid
-        self.boundary = boundary
-        self.subpixel = _coerce_subpixel(subpixel_samples)
-        self.symmetry = _normalize_symmetry(symmetry)
-        self.material_regions = list(material_regions or [])
-        self.electrostatic_terminals = []
-        for terminal in electrostatic_terminals or ():
-            self.add_electrostatic_terminal(terminal)
-        self.charge_densities = []
-        for charge_density in charge_densities or ():
-            self.add_charge_density(charge_density)
-        self.ports = []
-        for port in ports or ():
-            self.add_port(port)
-        self.networks = []
-        for network in networks:
-            self.add_network(network)
-        self.lumped_elements = []
-        for element in lumped_elements:
-            self.add_lumped_element(element)
-        self.circuits = []
-        for circuit in circuits:
-            self.add_circuit(circuit)
-        self.internal_absorbers = []
-        for absorber in internal_absorbers:
-            self.add_internal_absorber(absorber)
-        self.lazy_meshgrid = bool(lazy_meshgrid)
+    if value is not None and not isinstance(value, (PhysicalMaterial, LayerStack)):
+        raise TypeError("Scene background must be a homogeneous material, a planar LayerStack or None")
+    return value
 
-    @property
-    def subpixel_samples(self) -> tuple[int, int, int]:
-        return self.subpixel.samples
 
-    def _scalar_grid_step(self, value: float | None) -> float:
-        if self.grid.is_custom or self.grid.is_auto:
-            raise ValueError(
-                "scalar spacing undefined on a nonuniform grid; use scene.x/y/z, x_half, or grid.min_spacing."
-            )
-        return float(value)
+def _check_structures(scene, value):
+    structures = tuple(value or ())
+    if any(not isinstance(structure, Structure) for structure in structures):
+        raise TypeError("Maxwell Scene structures must be witwin.core.Structure instances.")
+    return structures
 
-    @property
-    def dx(self) -> float:
-        return self._scalar_grid_step(self.grid.dx)
 
-    @property
-    def dy(self) -> float:
-        return self._scalar_grid_step(self.grid.dy)
-
-    @property
-    def dz(self) -> float:
-        return self._scalar_grid_step(self.grid.dz)
-
-    @property
-    def grid_spacing(self) -> tuple[float, float, float]:
-        return self.grid.spacing
-
-    @property
-    def domain_size(self) -> float:
-        bounds = self.domain.bounds
-        return max(
-            float(bounds[0][1] - bounds[0][0]),
-            float(bounds[1][1] - bounds[1][0]),
-            float(bounds[2][1] - bounds[2][0]),
-        )
-
-    @property
-    def boundary_type(self):
-        labels = {
-            "none": "None",
-            "pml": "PML",
-            "periodic": "Periodic",
-            "bloch": "Bloch",
-            "pec": "PEC",
-            "pmc": "PMC",
-            "mur": "Mur",
-            "mode_abc": "ModeABC",
-            "mixed": "Mixed",
-        }
-        return labels[self.boundary.kind]
-
-    @property
-    def bc_type(self):
-        return self.boundary_type
-
-    @property
-    def pml_thickness(self):
-        return int(self.boundary.num_layers) if self.boundary.uses_kind("pml") else 0
-
-    @property
-    def pml_strength(self):
-        return float(self.boundary.strength) if self.boundary.uses_kind("pml") else 0.0
-
-    @property
-    def bloch_wavevector(self):
-        if not self.boundary.uses_kind("bloch"):
-            return (0.0, 0.0, 0.0)
-        if self.boundary.bloch_wavevector == "auto":
-            raise ValueError(
-                "Automatic Bloch wavevectors require Simulation.prepare() to resolve the incident wavevector."
-            )
-        return self.boundary.bloch_wavevector
-
-    def boundary_face_kind(self, axis: str, side: str) -> BoundaryKind:
-        return self.boundary.face_kind(axis, side)
-
-    def pml_thickness_for_face(self, axis: str, side: str) -> int:
-        axis_index = {"x": 0, "y": 1, "z": 2}[axis]
-        symmetry = self.symmetry[axis_index]
-        if symmetry is not None and symmetry[1] == side:
-            return 0
-        return self.boundary.pml_layers_for_face(axis, side)
-
-    @property
-    def bloch_phase_factors(self):
-        domain_range = _domain_range_from_bounds(self.domain.bounds)
-        return self.boundary.bloch_phase_factors(domain_range)
-
-    @property
-    def has_symmetry(self) -> bool:
-        return any(mode is not None for mode in self.symmetry)
-
-    def add_structure(self, structure: Structure):
-        if not isinstance(structure, Structure):
-            raise TypeError("Maxwell Scene structures must be witwin.core.Structure instances.")
-        self.structures.append(structure)
-        return self
-
-    @property
-    def thin_wires(self) -> tuple[ThinWire, ...]:
-        """Declared subgrid wires, kept separate from volume structures."""
-
-        return tuple(self._thin_wires)
-
-    def add_thin_wire(self, wire: ThinWire):
+def _check_thin_wires(scene, value):
+    wires = []
+    for wire in value or ():
         if not isinstance(wire, ThinWire):
             raise TypeError("Maxwell Scene thin wires must be ThinWire instances.")
-        if any(existing.name == wire.name for existing in self._thin_wires):
-            raise ValueError(
-                f"Thin-wire name {wire.name!r} is already present in the scene."
-            )
-        self._thin_wires.append(wire)
-        return self
+        _require_unique_name(wires, wire, "Thin-wire")
+        wires.append(wire)
+    return tuple(wires)
 
-    def add_source(self, source):
-        self.sources.append(source)
-        return self
 
-    def add_monitor(self, monitor):
-        self.monitors.append(monitor)
-        return self
-
-    def add_port(self, port: ModePort | LumpedPort | TerminalPort | WavePort | CoaxialLumpedPort):
+def _check_ports(scene, value):
+    ports = []
+    for port in value or ():
         if isinstance(port, CoaxialLumpedPort):
-            return self._add_coaxial_object(port, self.ports, "Port")
-        if isinstance(port, TerminalWavePort):
-            if any(existing.name == port.name for existing in self.ports):
-                raise ValueError(f"Port name {port.name!r} is already present in the scene.")
-            self.ports.append(_resolve_terminal_wave_port(port, self.structures))
-            return self
-        if not isinstance(port, (ModePort, LumpedPort, TerminalPort, WavePort)):
+            _require_unique_name(ports, port, "Port")
+            _require_coaxial_inside(scene.domain, port)
+        elif isinstance(port, TerminalWavePort):
+            _require_unique_name(ports, port, "Port")
+            port = _resolve_terminal_wave_port(port, scene.structures)
+        elif not isinstance(port, (ModePort, LumpedPort, TerminalPort, WavePort)):
             raise TypeError(
                 "Maxwell Scene ports must be ModePort, LumpedPort, TerminalPort, or WavePort instances."
             )
-        if any(existing.name == port.name for existing in self.ports):
-            raise ValueError(f"Port name {port.name!r} is already present in the scene.")
-        if isinstance(port, TerminalPort) and port.wire_binding is None:
-            port = _resolve_terminal_port(port, self.structures, self.domain.bounds)
-        if isinstance(port, LumpedPort) and port.wire_binding is None:
-            for terminal_name, terminal in (
-                ("positive", port.positive),
-                ("negative", port.negative),
-            ):
-                for axis, coordinate, (lower, upper) in zip(
-                    _BOUNDARY_AXES,
-                    terminal,
-                    self.domain.bounds,
-                ):
-                    if not math.isfinite(coordinate) or coordinate < lower or coordinate > upper:
-                        raise ValueError(
-                            f"LumpedPort {port.name!r} {terminal_name} terminal "
-                            f"{axis}={coordinate:g} lies outside the Scene domain "
-                            f"[{lower:g}, {upper:g}]."
-                        )
-        self.ports.append(port)
-        return self
-
-    def _add_coaxial_object(self, item, target, label):
-        if any(existing.name == item.name for existing in target):
-            raise ValueError(f"{label} name {item.name!r} is already present in the scene.")
-        outer = 0.5 * item.outer_diameter
-        normal = "xyz".index(item.normal_axis)
-        for index, (axis, coordinate, (lower, upper)) in enumerate(
-            zip(_BOUNDARY_AXES, item.center, self.domain.bounds)
-        ):
-            reach = 0.0 if index == normal else outer
-            if coordinate - reach < lower or coordinate + reach > upper:
-                raise ValueError(
-                    f"{type(item).__name__} {item.name!r} annulus leaves the Scene domain along {axis}."
+        else:
+            _require_unique_name(ports, port, "Port")
+            if isinstance(port, TerminalPort) and port.wire_binding is None:
+                port = _resolve_terminal_port(port, scene.structures, scene.domain.bounds)
+            if isinstance(port, LumpedPort) and port.wire_binding is None:
+                _require_terminals_inside(
+                    scene.domain, (("positive", port.positive), ("negative", port.negative)),
+                    f"LumpedPort {port.name!r}",
                 )
-        target.append(item)
-        return self
+        ports.append(port)
+    return tuple(ports)
 
-    def add_lumped_element(self, element: Resistor | Capacitor | Inductor | CoaxialLumpedResistor):
-        if isinstance(element, CoaxialLumpedResistor):
-            return self._add_coaxial_object(element, self.lumped_elements, "Lumped element")
-        if not isinstance(element, (Resistor, Capacitor, Inductor)):
-            raise TypeError(
-                "Maxwell Scene lumped elements must be Resistor, Capacitor, or Inductor instances."
-            )
-        if any(existing.name == element.name for existing in self.lumped_elements):
-            raise ValueError(
-                f"Lumped element name {element.name!r} is already present in the scene."
-            )
-        if isinstance(element.positive, CircuitNode) or isinstance(element.negative, CircuitNode):
-            raise TypeError(
-                "Scene-local lumped elements require 3D coordinate terminals; "
-                "add circuit-node elements through Circuit.add(...)."
-            )
 
-        for terminal_name, terminal in (
-            ("positive", element.positive),
-            ("negative", element.negative),
-        ):
-            for axis, coordinate, (lower, upper) in zip(
-                _BOUNDARY_AXES,
-                terminal,
-                self.domain.bounds,
-            ):
-                if not math.isfinite(coordinate) or coordinate < lower or coordinate > upper:
-                    raise ValueError(
-                        f"Lumped element {element.name!r} {terminal_name} terminal "
-                        f"{axis}={coordinate:g} lies outside the Scene domain "
-                        f"[{lower:g}, {upper:g}]."
-                    )
-
-        differing_axes = sum(
-            not math.isclose(positive, negative, rel_tol=0.0, abs_tol=1.0e-12)
-            for positive, negative in zip(element.positive, element.negative)
-        )
-        if differing_axes != 1:
-            raise ValueError(
-                f"Lumped element {element.name!r} terminals must define an axis-aligned path."
-            )
-
-        self.lumped_elements.append(element)
-        return self
-
-    def add_network(self, network: NetworkBlock):
-        """Attach a passive external network to existing terminal ports."""
-
+def _check_networks(scene, value):
+    networks = []
+    ports_by_name = {port.name: port for port in scene.ports}
+    connected = set()
+    for network in value or ():
         if not isinstance(network, NetworkBlock):
             raise TypeError("Maxwell Scene networks must be NetworkBlock instances.")
-        if any(existing.name == network.name for existing in self.networks):
-            raise ValueError(f"Network name {network.name!r} is already present in the scene.")
-        ports_by_name = {port.name: port for port in self.ports}
-        already_connected = {
-            port_name
-            for existing in self.networks
-            for port_name in existing.connected_port_names
-        }
+        _require_unique_name(networks, network, "Network")
         for port_name in network.connected_port_names:
             if port_name not in ports_by_name:
-                raise ValueError(
-                    f"Network {network.name!r} references unknown Scene port {port_name!r}."
-                )
+                raise ValueError(f"Network {network.name!r} references unknown Scene port {port_name!r}.")
             port = ports_by_name[port_name]
             if isinstance(port, WavePort):
                 raise ValueError(
@@ -1411,144 +1225,241 @@ class Scene:
                     f"Network {network.name!r} connections require LumpedPort or TerminalPort "
                     f"targets; {port_name!r} is {type(port).__name__}."
                 )
-            if port_name in already_connected:
+            if port_name in connected:
                 raise ValueError(f"Scene port {port_name!r} is already connected to another network.")
-        self.networks.append(network)
-        return self
+        connected.update(network.connected_port_names)
+        networks.append(network)
+    return tuple(networks)
 
-    def compile_ports(self, *, device=None):
-        """Compile declared port geometry through the solver preparation layer."""
 
-        return prepare_scene(self).compile_ports(device=device)
+def _check_lumped_elements(scene, value):
+    elements = []
+    for element in value or ():
+        if isinstance(element, CoaxialLumpedResistor):
+            _require_unique_name(elements, element, "Lumped element")
+            _require_coaxial_inside(scene.domain, element)
+            elements.append(element)
+            continue
+        if not isinstance(element, (Resistor, Capacitor, Inductor)):
+            raise TypeError("Maxwell Scene lumped elements must be Resistor, Capacitor, or Inductor instances.")
+        _require_unique_name(elements, element, "Lumped element")
+        if isinstance(element.positive, CircuitNode) or isinstance(element.negative, CircuitNode):
+            raise TypeError(
+                "Scene-local lumped elements require 3D coordinate terminals; "
+                "add circuit-node elements through Circuit.add(...)."
+            )
+        _require_terminals_inside(
+            scene.domain, (("positive", element.positive), ("negative", element.negative)),
+            f"Lumped element {element.name!r}",
+        )
+        differing_axes = sum(
+            not math.isclose(positive, negative, rel_tol=0.0, abs_tol=1.0e-12)
+            for positive, negative in zip(element.positive, element.negative)
+        )
+        if differing_axes != 1:
+            raise ValueError(f"Lumped element {element.name!r} terminals must define an axis-aligned path.")
+        elements.append(element)
+    return tuple(elements)
 
-    def compile_thin_wires(self, *, device=None):
-        """Compile declared thin wires through the solver preparation layer."""
 
-        return prepare_scene(self).compile_thin_wires(device=device)
-
-    def compile_wire_monitors(self, *, device=None):
-        """Compile declared thin-wire monitor sampling through preparation."""
-
-        return prepare_scene(self).compile_wire_monitors(device=device)
-
-    def compile_array_monitors(self, **kwargs):
-        """Compile closed-surface sampling contracts for an array basis sweep."""
-
-        from .compiler.array import compile_array_monitors
-
-        return compile_array_monitors(self, **kwargs)
-
-    def compile_waveports(self, *, device=None):
-        """Compile RF wave-port cross sections without solving their modes."""
-
-        return prepare_scene(self).compile_waveports(device=device)
-
-    def compile_lumped_elements(self, *, device=None):
-        """Compile declared R/L/C elements through the preparation layer."""
-
-        return prepare_scene(self).compile_lumped_elements(device=device)
-
-    def add_circuit(self, circuit: Circuit):
+def _check_circuits(scene, value):
+    circuits = []
+    for circuit in value or ():
         if not isinstance(circuit, Circuit):
             raise TypeError("Maxwell Scene circuits must be Circuit instances.")
-        if any(existing.name.casefold() == circuit.name.casefold() for existing in self.circuits):
+        if any(existing.name.casefold() == circuit.name.casefold() for existing in circuits):
             raise ValueError(f"Circuit name {circuit.name!r} is already present in the scene.")
-        self.circuits.append(circuit)
-        return self
+        circuits.append(circuit)
+    return tuple(circuits)
 
-    def compile_circuits(self):
-        """Compile declared circuit topology through the preparation layer."""
 
-        return prepare_scene(self).compile_circuits()
-
-    def compile_networks(self, *, dt: float, device=None):
-        """Compile embedded networks for the FDTD preparation layer."""
-
-        return prepare_scene(self).compile_networks(dt=dt, device=device)
-
-    def add_material_region(self, material_region: MaterialRegion):
-        self.material_regions.append(material_region)
-        return self
-
-    def add_internal_absorber(self, absorber: InternalAbsorber):
-        """Register a one-way absorbing plane inside the FDTD domain."""
+def _check_internal_absorbers(scene, value):
+    absorbers = []
+    for absorber in value or ():
         if not isinstance(absorber, InternalAbsorber):
-            raise TypeError("Scene.add_internal_absorber requires an InternalAbsorber.")
-        if absorber.name is not None and any(existing.name == absorber.name for existing in self.internal_absorbers):
-            raise ValueError(f"Internal absorber name {absorber.name!r} is already present in the scene.")
-        self.internal_absorbers.append(absorber)
-        return self
+            raise TypeError("Scene.internal_absorbers entries must be InternalAbsorber instances.")
+        if absorber.name is not None:
+            _require_unique_name(absorbers, absorber, "Internal absorber")
+        absorbers.append(absorber)
+    return tuple(absorbers)
 
-    def add_electrostatic_terminal(self, terminal):
-        """Register an equipotential conductor for the electrostatic solver.
 
-        Terminals live in a solver-specific collection and never enter the RF
-        ``Scene.ports`` set, so the RF port compiler cannot reinterpret an
-        equipotential constraint as an impedance/power-wave port.
-        """
-        from .electrostatic.api import ElectrostaticTerminal
+def _check_electrostatic_terminals(scene, value):
+    from .electrostatic.api import ElectrostaticTerminal
 
+    terminals = []
+    for terminal in value or ():
+        # Terminals never enter Scene.ports, so the RF port compiler cannot reinterpret
+        # an equipotential constraint as an impedance/power-wave port.
         if not isinstance(terminal, ElectrostaticTerminal):
-            raise TypeError(
-                "Scene.add_electrostatic_terminal requires an ElectrostaticTerminal."
-            )
-        if any(existing.name == terminal.name for existing in self.electrostatic_terminals):
-            raise ValueError(
-                f"Electrostatic terminal name {terminal.name!r} is already present in the scene."
-            )
-        self.electrostatic_terminals.append(terminal)
-        return self
+            raise TypeError("Scene.electrostatic_terminals entries must be ElectrostaticTerminal instances.")
+        _require_unique_name(terminals, terminal, "Electrostatic terminal")
+        terminals.append(terminal)
+    return tuple(terminals)
 
-    def add_charge_density(self, charge_density):
-        """Register a volumetric free-charge source for the electrostatic solver."""
-        from .electrostatic.api import ChargeDensity
 
-        if not isinstance(charge_density, ChargeDensity):
-            raise TypeError("Scene.add_charge_density requires a ChargeDensity.")
-        self.charge_densities.append(charge_density)
-        return self
+def _check_charge_densities(scene, value):
+    from .electrostatic.api import ChargeDensity
 
-    def compile_electrostatics(self, boundary=None, *, dtype=torch.float64):
-        """Compile the electrostatic block (epsilon, free charge, terminal masks)."""
-        from .compiler.electrostatic import compile_electrostatics
+    densities = tuple(value or ())
+    if any(not isinstance(density, ChargeDensity) for density in densities):
+        raise TypeError("Scene.charge_densities entries must be ChargeDensity instances.")
+    return densities
 
-        return compile_electrostatics(self, boundary, dtype=dtype)
 
-    def clone(self, **overrides):
-        params = {
-            "domain": self.domain,
-            "grid": self.grid,
-            "boundary": self.boundary,
-            "background": self.background,
-            "structures": list(self.structures),
-            "thin_wires": list(self.thin_wires),
-            "sources": list(self.sources),
-            "monitors": list(self.monitors),
-            "ports": list(self.ports),
-            "networks": list(self.networks),
-            "lumped_elements": list(self.lumped_elements),
-            "circuits": list(self.circuits),
-            "material_regions": list(self.material_regions),
-            "electrostatic_terminals": list(self.electrostatic_terminals),
-            "charge_densities": list(self.charge_densities),
-            "metadata": dict(self.metadata),
-            "device": self.device,
-            "verbose": self.verbose,
-            "lazy_meshgrid": self.lazy_meshgrid,
-            "subpixel_samples": self.subpixel,
-            "symmetry": self.symmetry,
-            "coordinates": self.coordinates,
-            "internal_absorbers": list(self.internal_absorbers),
-        }
-        params.update(overrides)
-        destination = _resolve_scene_device(params["device"])
-        if destination != self.device:
-            params = _place_scene_value(params, destination, {})
-        return Scene(**params)
+def _check_coordinates(scene, value):
+    if value is None:
+        return None
+    from .coordinates import BendCoordinates
 
-    def physical_positions(self, chart_points):
-        """Map SI chart positions to world Cartesian positions."""
-        return chart_points if self.coordinates is None else self.coordinates.position(chart_points)
+    if not isinstance(value, BendCoordinates):
+        raise TypeError("Scene.coordinates must be BendCoordinates or None.")
+    value.validate_bounds(scene.domain.bounds)
+    return value
+
+
+def _check_metadata(scene, value):
+    return MappingProxyType(dict(value or {}))
+
+
+_SCENE_COLLECTIONS = frozenset((  # thin_wires stays a tuple, as it always was
+    "structures", "sources", "monitors", "ports", "networks", "lumped_elements", "circuits",
+    "material_regions", "electrostatic_terminals", "charge_densities", "internal_absorbers"))
+# Field normalizers in dependency order: a normalizer may read the fields above it.
+_SCENE_CHECKS = {
+    "domain": lambda scene, value: (
+        Domain.from_domain_range((-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)) if value is None else value),
+    "grid": lambda scene, value: GridSpec.uniform(0.05) if value is None else value,
+    "boundary": lambda scene, value: BoundarySpec.none() if value is None else value,
+    "background": _check_background,
+    "structures": _check_structures,
+    "thin_wires": _check_thin_wires,
+    "sources": lambda scene, value: tuple(value or ()),
+    "monitors": lambda scene, value: tuple(value or ()),
+    "ports": _check_ports,
+    "networks": _check_networks,
+    "lumped_elements": _check_lumped_elements,
+    "circuits": _check_circuits,
+    "material_regions": lambda scene, value: tuple(value or ()),
+    "electrostatic_terminals": _check_electrostatic_terminals,
+    "charge_densities": _check_charge_densities,
+    "internal_absorbers": _check_internal_absorbers,
+    "subpixel": lambda scene, value: _coerce_subpixel(value),
+    "symmetry": lambda scene, value: _normalize_symmetry(value),
+    "coordinates": _check_coordinates,
+    "metadata": _check_metadata,
+}
+# Cross-object rules: a field is re-checked by ``Scene.updated`` when one it reads changes.
+_SCENE_READS = {
+    "ports": ("domain", "structures"),
+    "networks": ("ports",),
+    "lumped_elements": ("domain",),
+    "coordinates": ("domain",),
+}
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class Scene:
+    """Immutable declarative 3D scene definition for simulation backends.
+
+    Collections are tuples. Build a scene with the constructor and derive variants with
+    :meth:`updated`, which returns a new ``Scene`` and shares every unchanged object.
+    Equality and hashing are by identity.
+    """
+
+    domain: Domain | None = None
+    grid: GridSpec | None = None
+    boundary: BoundarySpec | None = None
+    _: KW_ONLY
+    background: Any = None
+    structures: tuple[Structure, ...] = ()
+    thin_wires: tuple[ThinWire, ...] = ()
+    sources: tuple = ()
+    monitors: tuple = ()
+    ports: tuple = ()
+    networks: tuple = ()
+    lumped_elements: tuple = ()
+    circuits: tuple = ()
+    material_regions: tuple[MaterialRegion, ...] = ()
+    electrostatic_terminals: tuple = ()
+    charge_densities: tuple = ()
+    internal_absorbers: tuple = ()
+    subpixel: SubpixelSpec = SubpixelSpec()
+    symmetry: tuple = (None, None, None)
+    coordinates: Any = None
+    metadata: Mapping[str, Any] | None = None
+
+    def __post_init__(self):
+        self._check(_SCENE_CHECKS)
+
+    # The read-only metadata view does not pickle; copies and pickles carry a plain dict.
+    def __getstate__(self):
+        return {**self.__dict__, "metadata": dict(self.metadata)}
+
+    def __setstate__(self, state):
+        for name, value in state.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "metadata", MappingProxyType(self.metadata))
+
+    def _check(self, names):
+        for name, check in _SCENE_CHECKS.items():
+            if name in names:
+                object.__setattr__(self, name, check(self, getattr(self, name)))
+
+    def updated(self, **fields) -> "Scene":
+        """A new ``Scene`` with ``fields`` replaced; unchanged objects are shared, not copied.
+
+        Only the replaced fields and the cross-object rules that read them are validated again.
+        """
+        unknown = sorted(set(fields).difference(_SCENE_CHECKS))
+        if unknown:
+            raise TypeError(f"Scene.updated() got unknown field(s) {unknown}; Scene fields are {list(_SCENE_CHECKS)}.")
+        scene = object.__new__(Scene)
+        for name in _SCENE_CHECKS:
+            object.__setattr__(scene, name, fields[name] if name in fields else getattr(self, name))
+        dirty = set(fields)
+        for name, reads in _SCENE_READS.items():
+            if dirty.intersection(reads):
+                dirty.add(name)
+        scene._check(dirty)
+        return scene
+
+    def to_dict(self, arrays: dict | None = None) -> dict:
+        """Serialize the scene as a strict-JSON ``witwin.scene/2`` dictionary.
+
+        Every field and every registered scene object is written; tensors keep their dtype and
+        trainable ones record ``requires_grad``. With ``arrays``, tensors over 4096 elements are
+        stored there by document path instead of inline. An object outside the schema (a
+        callable, an unregistered type) raises :class:`~witwin.maxwell.SchemaError`.
+        """
+        from .io.scene_dict import scene_to_dict
+
+        return scene_to_dict(self, arrays=arrays)
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any], arrays: Mapping[str, Any] | None = None) -> "Scene":
+        """Rebuild a ``witwin.scene/2`` dictionary through the public constructors.
+
+        Tensors come back on the CPU (the solver config places them); a trainable tensor comes
+        back as a fresh leaf with ``requires_grad``.
+        """
+        from .io.scene_dict import scene_from_dict
+
+        return scene_from_dict(d, arrays=arrays)
+
+    def boundary_face_kind(self, axis: str, side: str) -> BoundaryKind:
+        return self.boundary.face_kind(axis, side)
+
+    def pml_thickness_for_face(self, axis: str, side: str) -> int:
+        axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+        symmetry = self.symmetry[axis_index]
+        if symmetry is not None and symmetry[1] == side:
+            return 0
+        return self.boundary.pml_layers_for_face(axis, side)
+
+    @property
+    def has_symmetry(self) -> bool:
+        return any(mode is not None for mode in self.symmetry)
 
     def resolved_sources(self):
         resolved = []
@@ -1578,25 +1489,6 @@ class Scene:
             if isinstance(port, ModePort):
                 resolved.append(port.to_mode_monitor())
         return resolved
-
-    def to_tidy3d(self, *, frequencies=None, run_time=None, **kwargs):
-        """Convert this scene to a ``tidy3d.Simulation``.
-
-        Parameters
-        ----------
-        frequencies : float or sequence of float, optional
-            Monitoring / source frequencies in Hz.
-        run_time : float, optional
-            Simulation run time in seconds.  Estimated from domain size if omitted.
-        **kwargs
-            Extra keyword arguments forwarded to ``tidy3d.Simulation``.
-
-        Returns
-        -------
-        tidy3d.Simulation
-        """
-        from .adapters.tidy3d import scene_to_tidy3d
-        return scene_to_tidy3d(self, frequencies=frequencies, run_time=run_time, **kwargs)
 
 
 def _axis_nodes64(
@@ -1628,10 +1520,10 @@ def _axis_nodes64(
     return coords
 
 
-def _axis_dual_spacing64(primal: np.ndarray, boundary_kind: str) -> np.ndarray:
+def _axis_dual_spacing64(primal: np.ndarray, boundary_kind: BoundaryKind) -> np.ndarray:
     dual = np.empty(primal.size + 1, dtype=np.float64)
     dual[1:-1] = 0.5 * (primal[:-1] + primal[1:])
-    if boundary_kind in ("periodic", "bloch"):
+    if boundary_kind in (BoundaryKind.PERIODIC, BoundaryKind.BLOCH):
         # Distance from the wrap image of the last half-point to the first half-point.
         wrap = 0.5 * (primal[0] + primal[-1])
         dual[0] = wrap
@@ -1745,7 +1637,7 @@ def _pml_contact_faces(scene, geometry):
             nodes = getattr(scene, name)
             for side, bound, outer in (("low", scene.physical_domain_range[2*axis], nodes[0]),
                                        ("high", scene.physical_domain_range[2*axis+1], nodes[-1])):
-                if scene.boundary.face_kind(name, side) != "pml":
+                if scene.scene.boundary.face_kind(name, side) != "pml":
                     continue
                 index = int((nodes - bound).abs().argmin())
                 interface = nodes[index]
@@ -1837,11 +1729,19 @@ def _pml_surface_impedance_material(material):
 
 
 def _extrude_pml_contacts(scene):
-    """Modify only census-flagged prepared assignments, preserving their order."""
+    """Replace only census-flagged prepared assignments, preserving their order; returns the records."""
     from witwin.core import BooleanGeometry
 
+    from .compiler.static_cache import GEOMETRY_MEMO
+
     records = []
-    for collection, density_region in ((scene.structures, False), (scene.material_regions, True)):
+    structures, material_regions = list(scene.scene.structures), list(scene.scene.material_regions)
+    # Everything _pml_contact_faces reads besides the geometry: the census of a static geometry is
+    # reused across preparations of the same grid (SceneModule structural sharing).
+    grid_key = (str(scene.x.device), scene.x.dtype, scene.x_nodes64.tobytes(), scene.y_nodes64.tobytes(),
+                scene.z_nodes64.tobytes(), tuple(float(v) for v in scene.physical_domain_range),
+                tuple(scene.scene.boundary.face_kind(a, s) for a in "xyz" for s in ("low", "high")))
+    for collection, density_region in ((structures, False), (material_regions, True)):
         for index, owner in enumerate(collection):
             geometry = owner.geometry
             exclusion = _pml_geometry_exclusion(geometry)
@@ -1850,7 +1750,8 @@ def _extrude_pml_contacts(scene):
             if exclusion == "sheet" and isinstance(geometry, BooleanGeometry):
                 # A Boolean sheet leaf may not implement an occupancy SDF.
                 continue
-            faces, rejected = _pml_contact_faces(scene, geometry)
+            faces, rejected = (list(found) for found in GEOMETRY_MEMO.get(
+                "pml_contact_faces", geometry, grid_key, lambda: _pml_contact_faces(scene, geometry)))
             if not faces:
                 continue
             if not density_region and _pml_surface_impedance_material(owner.material):
@@ -1904,77 +1805,78 @@ def _extrude_pml_contacts(scene):
             records.append({"structure_index" if not density_region else "material_region_index": index,
                             "name": owner.name, "faces": ["xyz"[a] + "-" + s for a, s, *_ in faces],
                             "kind": "density" if density_region else "box" if is_box else "wrapper"})
+    scene.scene = _prepared_declarations(scene.scene, structures=tuple(structures),
+                                         material_regions=tuple(material_regions))
     return records
 
 
-class PreparedScene(Scene):
-    """Internal solver-ready scene with compiled grid state."""
+def _prepared_declarations(scene: Scene, **fields) -> Scene:
+    """``scene`` with the preparation outputs in ``fields`` replaced.
 
-    def __init__(self, scene: Scene, *, lazy_meshgrid: bool | None = None, material_dtype=torch.float32):
+    The outputs (resolved grid, PML extrusions, placed coordinates) derive from validated declarations, so
+    this skips ``Scene.updated``: ports keep their resolution against the declared structures instead of
+    being resolved again against the extruded ones.
+    """
+    derived = object.__new__(Scene)
+    for name in _SCENE_CHECKS:
+        object.__setattr__(derived, name, fields[name] if name in fields else getattr(scene, name))
+    return derived
+
+
+class PreparedScene:
+    """Internal solver-ready form of a ``Scene``: prepared declarations, grid state and compile caches.
+
+    ``scene`` holds the declarations the runtimes read: the input scene with the resolved grid, the PML
+    extrusions and the coordinates on ``device``. ``_public_scene`` is the input scene. The grid arrays, cell
+    counts and material caches belong to the prepared scene; the ``compile_*`` functions of
+    ``witwin.maxwell.compiler`` take it as their first argument.
+    """
+
+    def __init__(self, scene: Scene, *, device=None, lazy_meshgrid: bool = True, material_dtype=torch.float32):
         if material_dtype not in (torch.float32, torch.float64):
             raise ValueError("Prepared material_dtype must be float32 or float64.")
         self._material_dtype = material_dtype
         from .sources import MaxwellPlaneModes
         if scene.background is not None or any(isinstance(s, MaxwellPlaneModes) for s in scene.sources):
-            raise NotImplementedError('Grid preparation does not yet support homogeneous background declarations or physical Maxwell mode sources')
-        resolved_lazy_meshgrid = scene.lazy_meshgrid if lazy_meshgrid is None else bool(lazy_meshgrid)
-        super().__init__(
-            domain=scene.domain,
-            grid=scene.grid,
-            boundary=scene.boundary,
-            background=scene.background,
-            structures=list(scene.structures),
-            thin_wires=list(scene.thin_wires),
-            sources=list(scene.sources),
-            monitors=list(scene.monitors),
-            ports=list(scene.ports),
-            networks=list(scene.networks),
-            lumped_elements=list(scene.lumped_elements),
-            circuits=list(scene.circuits),
-            material_regions=list(scene.material_regions),
-            electrostatic_terminals=list(scene.electrostatic_terminals),
-            charge_densities=list(scene.charge_densities),
-            metadata=dict(scene.metadata),
-            device=scene.device,
-            verbose=scene.verbose,
-            lazy_meshgrid=resolved_lazy_meshgrid,
-            subpixel_samples=scene.subpixel,
-            symmetry=scene.symmetry,
-            coordinates=scene.coordinates,
-            internal_absorbers=list(scene.internal_absorbers),
-        )
+            raise UnsupportedFeatureError('Grid preparation does not yet support homogeneous background declarations or physical Maxwell mode sources',
+                                          feature="background.homogeneous", method=None)
+        self.device = _resolve_device(device)
+        self.lazy_meshgrid = bool(lazy_meshgrid)
         self._public_scene = scene
-        self.physical_domain_range = _domain_range_from_bounds(self.domain.bounds)
+        declared = _prepared_declarations(
+            scene, coordinates=None if scene.coordinates is None else scene.coordinates.to(self.device))
+        self.physical_domain_range = _domain_range_from_bounds(declared.domain.bounds)
 
-        if self.grid.is_auto:
+        if declared.grid.is_auto:
             from .fdtd.meshing import resolve_auto_grid
 
-            self.grid = GridSpec.custom(*resolve_auto_grid(self))
+            declared = _prepared_declarations(declared, grid=GridSpec.custom(*resolve_auto_grid(declared)))
+        self.scene = declared
 
         x_start, x_end, y_start, y_end, z_start, z_end = self.physical_domain_range
         self.x_nodes64, self.dx_primal64, self.x_half64, self.dx_dual64 = _build_axis_grid64(
-            self.grid,
+            declared.grid,
             "x",
             x_start,
             x_end,
-            self.boundary.axis_kind("x"),
-            (self.pml_thickness_for_face("x", "low"), self.pml_thickness_for_face("x", "high")),
+            declared.boundary.axis_kind("x"),
+            (declared.pml_thickness_for_face("x", "low"), declared.pml_thickness_for_face("x", "high")),
         )
         self.y_nodes64, self.dy_primal64, self.y_half64, self.dy_dual64 = _build_axis_grid64(
-            self.grid,
+            declared.grid,
             "y",
             y_start,
             y_end,
-            self.boundary.axis_kind("y"),
-            (self.pml_thickness_for_face("y", "low"), self.pml_thickness_for_face("y", "high")),
+            declared.boundary.axis_kind("y"),
+            (declared.pml_thickness_for_face("y", "low"), declared.pml_thickness_for_face("y", "high")),
         )
         self.z_nodes64, self.dz_primal64, self.z_half64, self.dz_dual64 = _build_axis_grid64(
-            self.grid,
+            declared.grid,
             "z",
             z_start,
             z_end,
-            self.boundary.axis_kind("z"),
-            (self.pml_thickness_for_face("z", "low"), self.pml_thickness_for_face("z", "high")),
+            declared.boundary.axis_kind("z"),
+            (declared.pml_thickness_for_face("z", "low"), declared.pml_thickness_for_face("z", "high")),
         )
         computational_bounds = []
         for axis_index, (axis, nodes, primal) in enumerate(
@@ -1984,9 +1886,9 @@ class PreparedScene(Scene):
                 ("z", self.z_nodes64, self.dz_primal64),
             )
         ):
-            low_layers = self.pml_thickness_for_face(axis, "low")
-            high_layers = self.pml_thickness_for_face(axis, "high")
-            physical_lo, physical_hi = self.domain.bounds[axis_index]
+            low_layers = declared.pml_thickness_for_face(axis, "low")
+            high_layers = declared.pml_thickness_for_face(axis, "high")
+            physical_lo, physical_hi = declared.domain.bounds[axis_index]
             low_step = float(primal[low_layers]) if low_layers < primal.size else float(primal[0])
             high_index = primal.size - high_layers - 1
             high_step = float(primal[max(high_index, 0)])
@@ -2004,7 +1906,8 @@ class PreparedScene(Scene):
         self.y_half = torch.tensor(self.y_half64, dtype=material_dtype, device=self.device)
         self.z_half = torch.tensor(self.z_half64, dtype=material_dtype, device=self.device)
         self.pml_extrusions = _extrude_pml_contacts(self)
-        self.metadata["pml_extrusions"] = self.pml_extrusions
+        self.scene = _prepared_declarations(
+            self.scene, metadata=MappingProxyType({**declared.metadata, "pml_extrusions": self.pml_extrusions}))
 
         self._xx = None
         self._yy = None
@@ -2036,6 +1939,7 @@ class PreparedScene(Scene):
             self._xx, self._yy, self._zz = torch.meshgrid(self.x, self.y, self.z, indexing="ij")
 
     def _invalidate_material_cache(self):
+        """Drop the compiled material tables; ``Result.release_solver`` frees them and material access recompiles."""
         self._material_model_cache = {}
         self._gyromagnetic_layout_cache = {}
         self._permittivity_components = None
@@ -2044,9 +1948,9 @@ class PreparedScene(Scene):
         self._permeability = None
 
     def _has_dynamic_materials(self) -> bool:
-        if self.material_regions:
+        if self.scene.material_regions:
             return True
-        for structure in self.structures:
+        for structure in self.scene.structures:
             material = getattr(structure, "material", None)
             perturbation = getattr(material, "perturbation", None)
             if isinstance(perturbation, torch.Tensor) and perturbation.requires_grad:
@@ -2054,7 +1958,7 @@ class PreparedScene(Scene):
         return False
 
     def _has_trainable_geometry(self) -> bool:
-        for structure in self.structures:
+        for structure in self.scene.structures:
             geometry = getattr(structure, "geometry", None)
             if geometry is None:
                 continue
@@ -2095,185 +1999,55 @@ class PreparedScene(Scene):
         self._yy = None
         self._zz = None
 
-    def add_structure(self, structure: Structure):
-        super().add_structure(structure)
-        self._invalidate_material_cache()
-        return self
-
-    def add_material_region(self, material_region: MaterialRegion):
-        super().add_material_region(material_region)
-        self._invalidate_material_cache()
-        return self
-
-    def compile_materials(self, subpixel_samples=_USE_SCENE_SUBPIXEL_SAMPLES):
-        spec = (
-            self.subpixel
-            if subpixel_samples is _USE_SCENE_SUBPIXEL_SAMPLES
-            else _coerce_subpixel(subpixel_samples)
-        )
-        key = spec
-        override = getattr(self, "_material_model_override", None)
-        if override is not None and spec == self.subpixel:
-            return override
-        if self._has_dynamic_materials() or self._has_trainable_geometry():
-            model = compile_material_model(
-                self,
-                eps_background=1.0,
-                mu_background=1.0,
-                subpixel=spec,
+    def _scalar_grid_step(self, value: float | None) -> float:
+        if self.scene.grid.is_custom or self.scene.grid.is_auto:
+            raise ValueError(
+                "scalar spacing undefined on a nonuniform grid; use scene.x/y/z, x_half, or grid.min_spacing."
             )
-            self.release_meshgrid()
-            return model
+        return float(value)
 
-        cached = self._material_model_cache.get(key)
-        if cached is None:
-            cached = compile_material_model(
-                self,
-                eps_background=1.0,
-                mu_background=1.0,
-                subpixel=spec,
+    @property
+    def dx(self) -> float:
+        return self._scalar_grid_step(self.scene.grid.dx)
+
+    @property
+    def dy(self) -> float:
+        return self._scalar_grid_step(self.scene.grid.dy)
+
+    @property
+    def dz(self) -> float:
+        return self._scalar_grid_step(self.scene.grid.dz)
+
+    @property
+    def grid_spacing(self) -> tuple[float, float, float]:
+        return self.scene.grid.spacing
+
+    @property
+    def pml_thickness(self):
+        return int(self.scene.boundary.num_layers) if self.scene.boundary.uses_kind("pml") else 0
+
+    @property
+    def pml_strength(self):
+        return float(self.scene.boundary.strength) if self.scene.boundary.uses_kind("pml") else 0.0
+
+    @property
+    def bloch_wavevector(self):
+        if not self.scene.boundary.uses_kind("bloch"):
+            return (0.0, 0.0, 0.0)
+        if self.scene.boundary.bloch_wavevector == "auto":
+            raise ValueError(
+                "Automatic Bloch wavevectors require Simulation.prepare() to resolve the incident wavevector."
             )
-            self._material_model_cache[key] = cached
-            self.release_meshgrid()
-        return cached
+        return self.scene.boundary.bloch_wavevector
 
-    def compile_mass_density(self):
-        """Compile the tissue mass model (rho_cell, occupancy, tissue_id, cell_volume).
+    @property
+    def bloch_phase_factors(self):
+        return self.scene.boundary.bloch_phase_factors(self.physical_domain_range)
 
-        Shares the EM material compiler's soft-occupancy provenance so the SAR mass
-        model and the loss model agree about tissue placement. Returns a
-        :class:`~witwin.maxwell.compiler.mass_density.CompiledMassDensity`.
-        """
-        from .compiler.mass_density import compile_mass_density
+    def refresh_material_grids(self, subpixel=None):
+        from .compiler.materials import compile_material_components
 
-        return compile_mass_density(self)
-
-    def compile_gyromagnetic_materials(self, *, dt=None, device=None):
-        """Compile every gyromagnetic ferrite structure into a layout SoA.
-
-        Returns a
-        :class:`~witwin.maxwell.compiler.gyromagnetic.CompiledGyromagneticLayout`
-        (active-cell indices, occupancy, per-cell bias/local basis, ADE state
-        matrices, and -- when ``dt`` is given -- the implicit-midpoint propagator).
-        Cached per ``(subpixel spec, device)``; the ``dt`` binding is applied on
-        top of the cached dt-independent layout so changing ``dt`` does not
-        re-rasterize.
-        """
-        from .compiler.gyromagnetic import compile_gyromagnetic_layout
-
-        target_device = self.device if device is None else device
-        key = (self.subpixel, str(torch.device(target_device)))
-        if self._has_dynamic_materials() or self._has_trainable_geometry():
-            layout = compile_gyromagnetic_layout(self, device=target_device)
-        else:
-            layout = self._gyromagnetic_layout_cache.get(key)
-            if layout is None:
-                layout = compile_gyromagnetic_layout(self, device=target_device)
-                self._gyromagnetic_layout_cache[key] = layout
-        if dt is not None:
-            layout = layout.with_timestep(dt)
-        return layout
-
-    def compile_ports(self, *, device=None):
-        from .compiler.ports import compile_ports
-
-        return compile_ports(self, device=self.device if device is None else device)
-
-    def compile_thin_wires(self, *, device=None):
-        from .compiler.thin_wire import compile_thin_wires
-
-        return compile_thin_wires(
-            self,
-            device=self.device if device is None else device,
-        )
-
-    def compile_wire_monitors(self, *, device=None):
-        from .compiler.thin_wire import compile_wire_monitors
-
-        network = self.compile_thin_wires(device=device)
-        return compile_wire_monitors(
-            self,
-            network,
-        )
-
-    def compile_array_monitors(self, **kwargs):
-        from .compiler.array import compile_array_monitors
-
-        return compile_array_monitors(self, **kwargs)
-
-    def compile_waveports(self, *, device=None):
-        from .compiler.waveports import compile_waveports
-
-        return compile_waveports(
-            self,
-            device=self.device if device is None else device,
-        )
-
-    def compile_lumped_elements(self, *, device=None):
-        from .compiler.lumped import compile_lumped_elements
-
-        return compile_lumped_elements(
-            self,
-            device=self.device if device is None else device,
-        )
-
-    def compile_circuits(self):
-        from .compiler.circuits import compile_circuits
-
-        return compile_circuits(self)
-
-    def compile_networks(self, *, dt: float, device=None):
-        from .compiler.networks import compile_networks
-
-        return compile_networks(
-            self,
-            dt=dt,
-            device=self.device if device is None else device,
-        )
-
-    def compile_relative_materials(
-        self,
-        subpixel_samples=_USE_SCENE_SUBPIXEL_SAMPLES,
-        frequency=None,
-    ):
-        eps_components, mu_components = self.compile_material_components(
-            subpixel_samples=subpixel_samples,
-            frequency=frequency,
-        )
-        return _component_summary(eps_components), _component_summary(mu_components)
-
-    def compile_material_components(
-        self,
-        subpixel_samples=_USE_SCENE_SUBPIXEL_SAMPLES,
-        frequency=None,
-    ):
-        model = self.compile_materials(subpixel_samples=subpixel_samples)
-        return evaluate_material_components(model, frequency)
-
-    def compile_material_tensors(
-        self,
-        eps_background=1.0,
-        mu_background=1.0,
-        subpixel_samples=_USE_SCENE_SUBPIXEL_SAMPLES,
-        frequency=None,
-    ):
-        eps_r, mu_r = self.compile_relative_materials(
-            subpixel_samples=subpixel_samples,
-            frequency=frequency,
-        )
-        eps_background_tensor = _to_like_tensor(eps_background, reference=eps_r)
-        mu_background_tensor = _to_like_tensor(mu_background, reference=mu_r)
-        if torch.equal(eps_background_tensor, torch.ones_like(eps_background_tensor)) and torch.equal(
-            mu_background_tensor,
-            torch.ones_like(mu_background_tensor),
-        ):
-            return eps_r.clone(), mu_r.clone()
-        return eps_r * eps_background_tensor, mu_r * mu_background_tensor
-
-    def refresh_material_grids(self, subpixel_samples=_USE_SCENE_SUBPIXEL_SAMPLES):
-        eps_components, mu_components = self.compile_material_components(
-            subpixel_samples=subpixel_samples,
-        )
+        eps_components, mu_components = compile_material_components(self, subpixel=subpixel)
         self._permittivity_components = _clone_component_map(eps_components)
         self._permeability_components = _clone_component_map(mu_components)
         self._permittivity = _component_summary(self._permittivity_components)
@@ -2318,12 +2092,37 @@ class PreparedScene(Scene):
         raise ValueError("axis must be 'x', 'y', or 'z'")
 
 
-def prepare_scene(scene: Scene | PreparedScene, *, lazy_meshgrid: bool | None = None, material_dtype=None) -> PreparedScene:
+def scene_declarations(scene: Scene | PreparedScene) -> Scene:
+    """The declarative ``Scene`` of ``scene``: a prepared scene's ``scene``, or ``scene`` itself.
+
+    The port-sweep and wave-port runs carry the scene prepared once in ``Simulation.prepare()`` so their
+    columns reuse its grid and compile caches; they read declarations through this.
+    """
+    return scene.scene if isinstance(scene, PreparedScene) else scene
+
+
+def prepare_scene(
+    scene: Scene | PreparedScene,
+    *,
+    device=None,
+    lazy_meshgrid: bool | None = None,
+    material_dtype=None,
+) -> PreparedScene:
+    """The solver-ready form of ``scene`` with its tensors on ``device`` (default CUDA).
+
+    ``device`` places a declarative Scene; an already prepared scene keeps its device.
+    """
     if isinstance(scene, PreparedScene):
         dtype = scene._material_dtype if material_dtype is None else material_dtype
-        if (lazy_meshgrid is None or scene.lazy_meshgrid == bool(lazy_meshgrid)) and dtype == scene._material_dtype:
+        lazy = scene.lazy_meshgrid if lazy_meshgrid is None else bool(lazy_meshgrid)
+        if (lazy, dtype) == (scene.lazy_meshgrid, scene._material_dtype):
             return scene
-        return PreparedScene(scene._public_scene, lazy_meshgrid=lazy_meshgrid, material_dtype=dtype)
+        return PreparedScene(scene._public_scene, device=scene.device, lazy_meshgrid=lazy, material_dtype=dtype)
     if not isinstance(scene, Scene):
         raise TypeError("prepare_scene() expects a maxwell.Scene instance.")
-    return PreparedScene(scene, lazy_meshgrid=lazy_meshgrid, material_dtype=torch.float32 if material_dtype is None else material_dtype)
+    return PreparedScene(
+        scene,
+        device=device,
+        lazy_meshgrid=True if lazy_meshgrid is None else lazy_meshgrid,
+        material_dtype=torch.float32 if material_dtype is None else material_dtype,
+    )

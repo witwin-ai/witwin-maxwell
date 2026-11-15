@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from ..errors import UnsupportedFeatureError
+
 _PAIRS={'x':(('Ey','Hz',1,1.),('Ez','Hy',0,-1.)),
         'y':(('Ez','Hx',0,1.),('Ex','Hz',1,-1.)),
         'z':(('Ex','Hy',1,1.),('Ey','Hx',0,-1.))}
@@ -104,9 +106,7 @@ def native_plane_poynting(payload):
 def _require_uniform_nonmagnetic(scene):
     materials=[structure.material for structure in scene.structures
                if bool(getattr(structure,'enabled',True)) and not bool(getattr(structure.material,'is_copper_foil',False))]
-    for attribute in ('background','background_material'):
-        material=getattr(scene,attribute,None)
-        if material is not None:materials.append(material)
+    if scene.background is not None:materials.append(scene.background)
     from ..media import GyromagneticFerrite
     for material in materials:
         try:
@@ -116,16 +116,20 @@ def _require_uniform_nonmagnetic(scene):
             elif hasattr(declaration,'rows'):declaration=declaration.rows
             mu=torch.as_tensor(declaration)
         except (AttributeError,TypeError,ValueError,RuntimeError):
-            raise NotImplementedError('Native copper flux requires explicit fixed scalar unit permeability.') from None
+            raise UnsupportedFeatureError('Native copper flux requires explicit fixed scalar unit permeability.',
+                                          feature="material.copper_foil", method="fdtd") from None
         if mu.requires_grad or mu.numel()!=1 or mu.is_complex() or float(mu)!=1.:
-            raise NotImplementedError('Native copper flux currently requires a fixed uniform nonmagnetic background.')
+            raise UnsupportedFeatureError('Native copper flux currently requires a fixed uniform nonmagnetic background.',
+                                          feature="material.copper_foil", method="fdtd")
         sigma_m=torch.as_tensor(getattr(material,'sigma_m',0.))
         if sigma_m.requires_grad or bool((sigma_m!=0).any()) or getattr(material,'sigma_m_tensor',None) is not None or any(getattr(material,key,()) for key in ('mu_debye_poles','mu_drude_poles','mu_lorentz_poles')) or isinstance(material,GyromagneticFerrite) or bool(getattr(material,'is_ferrite',False)):
-            raise NotImplementedError('Native copper flux does not yet support magnetic loss, dispersion or gyrotropy.')
+            raise UnsupportedFeatureError('Native copper flux does not yet support magnetic loss, dispersion or gyrotropy.',
+                                          feature="material.copper_foil", method="fdtd")
     for region in scene.material_regions:
         bounds=torch.as_tensor(region.mu_bounds)
         if bounds.requires_grad or not bool((bounds==1).all()):
-            raise NotImplementedError('Native copper flux requires fixed unit permeability in all material regions.')
+            raise UnsupportedFeatureError('Native copper flux requires fixed unit permeability in all material regions.',
+                                          feature="material.copper_foil", method="fdtd")
 
 
 def enrich_plane_flux(result,payload):
@@ -133,7 +137,7 @@ def enrich_plane_flux(result,payload):
     if payload.get('kind')!='plane' or payload.get('axis') not in _PAIRS:return payload
     if payload.get('native_copper_flux_context')=='collapsed_planar_v4':return payload
     selected=dict(payload)
-    if getattr(result.scene,'coordinates',None) is not None:
+    if result._scene_coordinates is not None:
         selected['native_product_disabled']=True
     entries=selected.get('native_components',selected.get('components',{}))
     required={name for e,h,_,_ in _PAIRS[selected['axis']] for name in (e,h)}
@@ -146,7 +150,7 @@ def enrich_plane_flux(result,payload):
         prepared=result._prepared_scene
         if prepared is None:
             dtype=torch.float64 if result.stats().get('field_dtype')=='torch.float64' else torch.float32
-            prepared=prepare_scene(result.scene,material_dtype=dtype)
+            prepared=prepare_scene(result.scene,device=result._data_device(),material_dtype=dtype)
             result._prepared_scene=prepared
         faces=compile_copper_faces(prepared,device='cpu')
         records=result._metadata.get('conductor_losses',{})
@@ -170,7 +174,7 @@ def enrich_plane_flux(result,payload):
                 candidates=face.indices.cpu().numpy()
                 candidates=candidates[np.isin(candidates[:,normal],active)]
             if not len(candidates):continue
-            axes=component_coords(prepared,component);local=[];valid=np.ones(len(candidates),dtype=bool)
+            axes=component_coords(prepared,component,device=prepared.device);local=[];valid=np.ones(len(candidates),dtype=bool)
             for dim,global_axis in enumerate(tangents):
                 coordinates=array(entry['coords'][dim]).astype(np.float64,copy=False)
                 points=np.asarray(axes[global_axis])[candidates[:,global_axis]]
@@ -199,7 +203,8 @@ def enrich_plane_flux(result,payload):
             flat=flatten(global_indices);order=np.argsort(flat);wanted=flatten(candidates)
             positions=np.searchsorted(flat[order],wanted)
             if np.any(positions>=len(order)) or not np.array_equal(flat[order][positions],wanted):
-                raise NotImplementedError('Native copper flux has unresolved PEC-contact or missing side-trace support.')
+                raise UnsupportedFeatureError('Native copper flux has unresolved PEC-contact or missing side-trace support.',
+                                              feature="material.copper_foil", method="fdtd")
             values=trace['electric_fields']
             frequencies=tuple(float(f) for f in record['frequencies'])
             requested=tuple(float(f) for f in selected.get('frequencies') or (selected['frequency'],))
@@ -209,7 +214,8 @@ def enrich_plane_flux(result,payload):
             spectrum=selected.get('source_normalization_spectra',{}).get(component)
             if result.stats().get('normalize_source',False):
                 if spectrum is None:
-                    raise NotImplementedError('Normalized copper native flux requires the exact applied source normalization spectrum.')
+                    raise UnsupportedFeatureError('Normalized copper native flux requires the exact applied source normalization spectrum.',
+                                                  feature="material.copper_foil", method="fdtd")
                 source_frequencies=tuple(selected.get('source_normalization_frequencies',requested))
                 factor=torch.as_tensor(spectrum,device=values.device)
                 if factor.ndim:
@@ -220,7 +226,8 @@ def enrich_plane_flux(result,payload):
             # Ordinary reports can reside on CPU while native observers remain
             # on CUDA; .to preserves live adjoint outputs in either placement.
             if not isinstance(entry['data'],torch.Tensor):
-                raise NotImplementedError('Copper-sided flux currently requires native Torch observer spectra.')
+                raise UnsupportedFeatureError('Copper-sided flux currently requires native Torch observer spectra.',
+                                              feature="material.copper_foil", method="fdtd")
             values=values.to(device=entry['data'].device)
             if entry['data'].ndim==2:values=values[0]
             negative,positive=(values[:,0],values[:,1]) if values.ndim==3 else (values[0],values[1])
@@ -230,13 +237,15 @@ def enrich_plane_flux(result,payload):
                 position=float(selected.get('yee_plane_position',selected['position']))
                 sheet_position=float(axes[normal][face.normal_index])
                 if position==sheet_position:
-                    raise NotImplementedError('A spectral flux plane exactly on CopperFoil requires an explicit physical side.')
+                    raise UnsupportedFeatureError('A spectral flux plane exactly on CopperFoil requires an explicit physical side.',
+                                                  feature="material.copper_foil", method="fdtd")
                 side=1 if position>sheet_position else -1
                 Hentry=entries[rule[1]]
-                Haxis=component_coords(prepared,rule[1])[normal]
+                Haxis=component_coords(prepared,rule[1],device=prepared.device)[normal]
                 Hpositions=[float(Haxis[index]) for index,weight in zip(Hentry['plane_indices'],Hentry['plane_weights']) if weight!=0]
                 if not Hpositions or any(side*(coordinate-sheet_position)<=0 for coordinate in Hpositions):
-                    raise NotImplementedError('Copper-normal spectral flux requires every active tangential-H sample in the same exterior halfspace.')
+                    raise UnsupportedFeatureError('Copper-normal spectral flux requires every active tangential-H sample in the same exterior halfspace.',
+                                                  feature="material.copper_foil", method="fdtd")
                 correction=entry['data'].to(device=values.device,dtype=values.dtype)*0
                 normal_weight=dict(active_pairs)[face.normal_index]
                 if side>0:

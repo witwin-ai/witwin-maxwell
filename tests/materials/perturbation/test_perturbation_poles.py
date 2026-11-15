@@ -5,6 +5,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.core import Box
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials, compile_relative_materials
 
 _FREQUENCY = 1.0e9
 # Faces mid-cell on the 0.05 grid; the covered node window is 7 x 7 x 7.
@@ -12,25 +13,23 @@ _SLAB_BOX = Box(position=(0.0, 0.0, 0.0), size=(0.35, 0.35, 0.35))
 _GRID_SHAPE = (7, 7, 7)
 
 
-def _build_scene(*structures, device="cpu", subpixel_samples=None):
+def _build_scene(*structures, subpixel_samples=None):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.4, 0.4), (-0.4, 0.4))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-        device=device,
-        **({} if subpixel_samples is None else {"subpixel_samples": subpixel_samples}),
+        **({} if subpixel_samples is None else {"subpixel": subpixel_samples}),
     )
-    for structure in structures:
-        scene.add_structure(structure)
+    scene = scene.updated(structures=(*scene.structures, *structures))
     return scene
 
 
 def _compile(material):
-    return prepare_scene(_build_scene(mw.Structure(geometry=_SLAB_BOX, material=material))).compile_materials()
+    return compile_materials(prepare_scene(_build_scene(mw.Structure(geometry=_SLAB_BOX, material=material)), device="cpu"))
 
 
 def _relative_eps(*structures, frequency=_FREQUENCY, subpixel_samples=None):
-    eps, _ = prepare_scene(_build_scene(*structures, subpixel_samples=subpixel_samples)).compile_relative_materials(
+    eps, _ = compile_relative_materials(prepare_scene(_build_scene(*structures, subpixel_samples=subpixel_samples), device="cpu"),
         frequency=frequency)
     return eps
 
@@ -50,40 +49,40 @@ _SENSITIVITIES = dict(debye_sensitivities=(0.5,), drude_sensitivities=(2.5e8,), 
 def test_pole_perturbation_validation():
     base = _mixed_base()
     with pytest.raises(ValueError, match="lorentz_sensitivities has 2 entries"):
-        mw.PerturbationMedium(base, perturbation=torch.zeros(_GRID_SHAPE), lorentz_sensitivities=(1.0, 1.0))
+        mw.media.PerturbationMedium(base, perturbation=torch.zeros(_GRID_SHAPE), lorentz_sensitivities=(1.0, 1.0))
     with pytest.raises(NotImplementedError, match="fixed perturbation"):
-        mw.PerturbationMedium(
+        mw.media.PerturbationMedium(
             base, perturbation=torch.zeros(_GRID_SHAPE, requires_grad=True), lorentz_sensitivities=(1.0,)
         )
     # A trainable perturbation with only the eps channel stays differentiable.
-    trainable = mw.PerturbationMedium(
+    trainable = mw.media.PerturbationMedium(
         base, perturbation=torch.zeros(_GRID_SHAPE, requires_grad=True), lorentz_sensitivities=(0.0,)
     )
     assert not trainable.perturbs_poles
     assert trainable.lorentz_poles == base.lorentz_poles
     with pytest.raises(ValueError, match=">= 0"):
-        mw.PerturbationMedium(base, perturbation=torch.full(_GRID_SHAPE, -1.0), lorentz_sensitivities=(2.0,))
+        mw.media.PerturbationMedium(base, perturbation=torch.full(_GRID_SHAPE, -1.0), lorentz_sensitivities=(2.0,))
     gain = mw.Material(
         lorentz_poles=(mw.LorentzPole(delta_eps=0.1, resonance_frequency=2.0e9, gamma=2.0e8, allow_gain=True),),
     )
     with pytest.raises(NotImplementedError, match="gain"):
-        mw.PerturbationMedium(gain, perturbation=torch.zeros(_GRID_SHAPE), lorentz_sensitivities=(0.1,))
+        mw.media.PerturbationMedium(gain, perturbation=torch.zeros(_GRID_SHAPE), lorentz_sensitivities=(0.1,))
     custom = mw.Material(
-        lorentz_poles=(mw.CustomLorentzPole(delta_eps=torch.ones(3, 3, 3), resonance_frequency=2.0e9, gamma=2.0e8),),
+        lorentz_poles=(mw.media.CustomLorentzPole(delta_eps=torch.ones(3, 3, 3), resonance_frequency=2.0e9, gamma=2.0e8),),
     )
     with pytest.raises(ValueError, match="grid shape"):
-        mw.PerturbationMedium(custom, perturbation=torch.zeros(_GRID_SHAPE), lorentz_sensitivities=(0.1,))
+        mw.media.PerturbationMedium(custom, perturbation=torch.zeros(_GRID_SHAPE), lorentz_sensitivities=(0.1,))
 
 
 def test_zero_perturbation_with_pole_sensitivities_reproduces_base_exactly():
     base = _mixed_base()
-    perturbed = mw.PerturbationMedium(
+    perturbed = mw.media.PerturbationMedium(
         base, perturbation=torch.zeros(_GRID_SHAPE), eps_sensitivity=0.7, **_SENSITIVITIES
     )
     assert perturbed.perturbs_poles
-    assert isinstance(perturbed.debye_poles[0], mw.CustomDebyePole)
-    assert isinstance(perturbed.drude_poles[0], mw.CustomDrudePole)
-    assert isinstance(perturbed.lorentz_poles[0], mw.CustomLorentzPole)
+    assert isinstance(perturbed.debye_poles[0], mw.media.CustomDebyePole)
+    assert isinstance(perturbed.drude_poles[0], mw.media.CustomDrudePole)
+    assert isinstance(perturbed.lorentz_poles[0], mw.media.CustomLorentzPole)
     expected = _compile(base)
     compiled = _compile(perturbed)
     for kind in ("debye_poles", "drude_poles", "lorentz_poles"):
@@ -99,7 +98,7 @@ def test_zero_perturbation_with_pole_sensitivities_reproduces_base_exactly():
 
 def test_uniform_pole_perturbation_matches_directly_constructed_material():
     value = 0.5
-    perturbed = mw.PerturbationMedium(
+    perturbed = mw.media.PerturbationMedium(
         _mixed_base(), perturbation=torch.full(_GRID_SHAPE, value), eps_sensitivity=0.4, **_SENSITIVITIES
     )
     direct = mw.Material(
@@ -126,7 +125,7 @@ def test_graded_lorentz_strength_perturbation_matches_piecewise_reference():
     perturbation = torch.empty(_GRID_SHAPE)
     perturbation[:4] = 0.0
     perturbation[4:] = 2.0
-    perturbed = mw.PerturbationMedium(
+    perturbed = mw.media.PerturbationMedium(
         base, perturbation=perturbation, eps_sensitivity=0.0, lorentz_sensitivities=(0.75,)
     )
     left = Box(position=(-0.075, 0.0, 0.0), size=(0.2, 0.35, 0.35))
@@ -144,19 +143,23 @@ def test_graded_lorentz_strength_perturbation_matches_piecewise_reference():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_zero_pole_perturbation_run_matches_base_run():
     def run(material):
-        scene = _build_scene(mw.Structure(geometry=_SLAB_BOX, material=material), device="cuda")
-        scene.add_source(mw.PlaneWave(direction=(1.0, 0.0, 0.0), polarization=(0.0, 0.0, 1.0),
-                                      source_time=mw.CW(frequency=_FREQUENCY, amplitude=80.0), name="pw"))
-        scene.add_monitor(mw.PointMonitor("probe", (0.4, 0.0, 0.0), fields=("Ez",)))
+        scene = _build_scene(mw.Structure(geometry=_SLAB_BOX, material=material))
+        scene = scene.updated(sources=(
+            *scene.sources,
+            mw.PlaneWave(direction=(1.0, 0.0, 0.0), polarization=(0.0, 0.0, 1.0),
+                         source_time=mw.CW(frequency=_FREQUENCY, amplitude=80.0), name="pw"),
+        ), monitors=(*scene.monitors, mw.PointMonitor("probe", (0.4, 0.0, 0.0), fields=("Ez",))))
         result = mw.Simulation.fdtd(
             scene, frequencies=[_FREQUENCY],
-            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-            spectral_sampler=mw.SpectralSampler(window="hanning"), full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"), full_field_dft=False,
+            ),
         ).run()
-        return result.monitor("probe")["data"]
+        return result.monitor("probe", freq_index=0).sel(component="Ez").values
 
     base = mw.Material.lorentz(eps_inf=2.0, delta_eps=1.0, resonance_frequency=2.0e9, gamma=2.0e8)
-    perturbed = mw.PerturbationMedium(
+    perturbed = mw.media.PerturbationMedium(
         base, perturbation=torch.zeros(_GRID_SHAPE), eps_sensitivity=0.7, lorentz_sensitivities=(0.25,)
     )
     perturbed_probe = run(perturbed)

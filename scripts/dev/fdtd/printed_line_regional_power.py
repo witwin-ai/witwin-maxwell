@@ -38,21 +38,20 @@ def _regional_support(prepared,compiled):
 
 def regional_monitors(cpu_scene, bounds, frequencies, *, observation="points", include_flux=True):
     """Record every nonzero bulk coefficient and selected foil left trace."""
-    if str(cpu_scene.device) != 'cpu':
-        raise ValueError('Regional observation geometry must be compiled explicitly on CPU.')
     if observation not in ('points','planes'):
         raise ValueError('Regional observation is points or planes.')
     center=tuple((lo+hi)/2 for lo,hi in bounds);size=tuple(hi-lo for lo,hi in bounds)
-    loss=mw.PowerLossMonitor('line_roi_bulk',center,size,frequencies=None if observation=='planes' else frequencies,
+    loss=mw.monitors.PowerLossMonitor('line_roi_bulk',center,size,frequencies=None if observation=='planes' else frequencies,
         quadrature='physical_intersection')
-    surface=mw.ClosedSurfaceMonitor.box('line_roi_flux',position=center,size=size,frequencies=frequencies)
-    prepared=prepare_scene(cpu_scene);compiled=compile_power_loss_monitor(prepared,loss)
+    surface=mw.monitors.ClosedSurfaceMonitor.box('line_roi_flux',position=center,size=size,frequencies=frequencies)
+    # Regional observation geometry is compiled explicitly on the CPU.
+    prepared=prepare_scene(cpu_scene,device='cpu');compiled=compile_power_loss_monitor(prepared,loss)
     selections=_regional_support(prepared,compiled)
     monitors=[loss,*([surface] if include_flux else [])];schema={}
     if observation=='planes':
         from witwin.maxwell.fdtd.coords import component_coords
         for component,selection in selections.items():
-            axes=component_coords(prepared,component)
+            axes=component_coords(prepared,component, device=prepared.device)
             # Reduce masks directly, avoiding a full selected-edge coordinate
             # list or millions of PointMonitor Python objects.
             normal_indices=torch.nonzero(selection.any(0).any(0)).flatten().tolist()
@@ -98,7 +97,7 @@ def _native_plane_field(result,component,selection,frequency):
         if not isinstance(index,int) or not 0<=index<shape[2] or index in seen:
             raise ValueError('Regional native plane indices must be unique valid z indices.')
         seen.add(index)
-        payload=result.monitor(plane['name'],frequency=frequency)
+        payload=result.raw_monitor(plane['name'],frequency=frequency)
         if tuple(payload.get('frequencies',()))!=(frequency,):
             raise ValueError('Regional native plane frequency selection changed.')
         entry=payload['components'][component]
@@ -135,8 +134,6 @@ def regional_plane_power(result,cpu_scene,schema,bounds):
     """
     if result.stats().get('normalize_source',False):
         raise ValueError('This physical benchmark requires raw common spectral normalization.')
-    if str(cpu_scene.device)!='cpu':
-        raise ValueError('Regional loss reduction requires an explicit CPU diagnostic scene.')
     if set(schema)!={'Ex','Ey','Ez'} or any(
         selection.get('observation')!='native_z_planes'
         or tuple(selection['frequencies_hz'])!=tuple(result.frequencies)
@@ -149,12 +146,12 @@ def regional_plane_power(result,cpu_scene,schema,bounds):
         raise ValueError('Regional loss bounds differ from the declared diagnostic monitor.')
     include_flux={selection['include_flux'] for selection in schema.values()}
     if len(include_flux)!=1:raise ValueError('Regional native-plane flux contracts disagree.')
-    prepared=prepare_scene(cpu_scene)
+    prepared=prepare_scene(cpu_scene,device='cpu')  # the explicit CPU diagnostic scene
     compiled=compile_power_loss_monitor(prepared,loss[0])
     supports=_regional_support(prepared,compiled)
     from witwin.maxwell.fdtd.coords import component_coords
     for component,selection in schema.items():
-        axes=component_coords(prepared,component)
+        axes=component_coords(prepared,component, device=prepared.device)
         required=torch.nonzero(supports[component].any(0).any(0)).flatten().tolist()
         if ([plane['normal_index'] for plane in selection['planes']]!=required
             or tuple(selection['full_shape'])!=tuple(compiled.full_component_shapes[component])
@@ -164,7 +161,7 @@ def regional_plane_power(result,cpu_scene,schema,bounds):
                 for plane in selection['planes'])):
             raise ValueError('Regional plane geometry does not cover every compiled conductivity and split trace support.')
     del supports,compiled
-    records=_diagnostic_cpu_tree(result.conductor_losses)
+    records=_diagnostic_cpu_tree(mw.rf.conductor_losses(result))
     copper_full=sum((conductor_region_power(record,bounds) for record in records.values()),
         torch.zeros(len(result.frequencies),dtype=torch.float64))
     for record in records.values():
@@ -176,14 +173,14 @@ def regional_plane_power(result,cpu_scene,schema,bounds):
             for component,selection in schema.items()}
         diagnostics=mw.Result(method='fdtd',scene=cpu_scene,prepared_scene=prepared,
             frequencies=(frequency,),metadata={'conductor_losses':records},solver_stats=result.stats())
-        data=diagnostics.power_loss('line_roi_bulk',electric_fields=fields)
+        data=mw.postprocess.power_loss(diagnostics, 'line_roi_bulk',electric_fields=fields)
         for component,selection in schema.items():
             ids=data.global_ids[component]
             if ids.numel()!=selection['loss_global_id_count'] or _index_digest(ids)!=selection['loss_global_ids_sha256']:
                 raise ValueError('Regional loss support changed from its recorded native-plane contract.')
         conduction.append(float(data.conduction[0]))
         if True in include_flux:
-            payload=result.monitor('line_roi_flux',frequency=frequency)['faces']
+            payload=result.raw_monitor('line_roi_flux',frequency=frequency)['faces']
             faces.append({name:float((density*area).sum().detach().cpu())
                 for name,(density,area) in ((name,plane_normal_poynting(face)) for name,face in payload.items())})
         del data,fields,diagnostics
@@ -218,7 +215,7 @@ def regional_power(result,cpu_scene,schema,bounds):
         # synchronizations; no field solve takes place on CPU.
         native=[]
         for name,index in zip(names,selection['indices']):
-            payload=result.monitor(name)
+            payload=result.raw_monitor(name)
             if tuple(payload['field_indices'][component])!=tuple(index):
                 raise ValueError('Regional electric observation changed its declared native Yee address.')
             native.append(payload['components'][component].reshape(frequency_count))
@@ -228,16 +225,16 @@ def regional_power(result,cpu_scene,schema,bounds):
         if len(indices):dense[(slice(None),*tuple(indices.T))]=values.T
         fields[component]=dense;samples[component]=values
     diagnostics=mw.Result(method='fdtd',scene=cpu_scene,frequencies=result.frequencies,
-        metadata={'conductor_losses':result.conductor_losses},solver_stats=result.stats())
-    data=diagnostics.power_loss('line_roi_bulk',electric_fields=fields)
+        metadata={'conductor_losses':mw.rf.conductor_losses(result)},solver_stats=result.stats())
+    data=mw.postprocess.power_loss(diagnostics, 'line_roi_bulk',electric_fields=fields)
     for component,selection in schema.items():
         if not torch.equal(data.global_ids[component],torch.tensor(selection['loss_global_ids'],dtype=torch.long)):
             raise ValueError('Regional compiled native support differs from its recorded observation contract.')
-    copper=sum((conductor_region_power(record,bounds) for record in diagnostics.conductor_losses.values()),
+    copper=sum((conductor_region_power(record,bounds) for record in mw.rf.conductor_losses(diagnostics).values()),
         torch.zeros(frequency_count,dtype=torch.float64))
     faces=[]
     for frequency in result.frequencies:
-        payload=result.at(frequency=frequency).monitor('line_roi_flux')['faces']
+        payload=result.at(frequency=frequency).raw_monitor('line_roi_flux')['faces']
         faces.append({name:float((density*area).sum().detach().cpu())
             for name,(density,area) in ((name,plane_normal_poynting(face)) for name,face in payload.items())})
     net=np.array([sum(record.values()) for record in faces])

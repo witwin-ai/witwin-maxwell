@@ -12,6 +12,7 @@ import math
 
 import numpy as np
 from scipy import linalg
+from witwin.maxwell.compiler import compile_materials
 
 DT = 1.6666666666666667e-11
 EPS0 = 8.8541878128e-12
@@ -120,20 +121,24 @@ def material_edges(cell, native=True):
         grid=mw.GridSpec.anisotropic(cell.period, cell.dy, cell.dz),
         boundary=mw.BoundarySpec.pml(num_layers=cell.layers).with_faces(
             x_low="periodic", x_high="periodic", y_low=cell.wall, y_high=cell.wall),
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized", pec="staircase"), device="cpu")
+        subpixel=mw.SubpixelSpec(samples=3, averaging="polarized", pec="staircase"))
     if cell.slab:
-        scene.add_structure(mw.Structure(geometry=mw.Box(position=(0.,0.,0.),
-            size=(cell.period,cell.period,.1)), material=mw.Material(eps_r=cell.slab_epsilon)))
-    prepared = PreparedScene(scene, material_dtype=torch.float32 if native else torch.float64)
-    edges = prepared.compile_materials()["edge_components"]["eps"]
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(geometry=mw.Box(position=(0.,0.,0.),
+                size=(cell.period,cell.period,.1)), material=mw.Material(eps_r=cell.slab_epsilon)),
+        ))
+    prepared = PreparedScene(scene, material_dtype=torch.float32 if native else torch.float64, device="cpu")
+    edges = compile_materials(prepared)["edge_components"]["eps"]
     return {k: v[0].numpy().copy() for k, v in edges.items()}
 
 
 def profiles(cell, *, native=False):
     """Import the primary profile builder; dtype=float64 except native replay."""
     import torch
-    from witwin.maxwell.fdtd.boundary.cpml import _cpml_profile_1d, DEFAULT_CPML_CONFIG
-    cfg = dict(DEFAULT_CPML_CONFIG, grading_order=cell.grading, kappa_max=cell.kappa,
+    from dataclasses import asdict
+    from witwin.maxwell.fdtd.boundary.cpml import _cpml_profile_1d, CPMLGrading, DEFAULT_CPML_GRADING
+    cfg = dict(asdict(DEFAULT_CPML_GRADING), grading_order=cell.grading, kappa_max=cell.kappa,
                reflection=cell.reflection)
     rate, floor = None, 0.
     if cell.preset == "cfs":
@@ -158,7 +163,7 @@ def profiles(cell, *, native=False):
             config["alpha_max"] *= MU0/EPS0
         pos = (nodes[:-1]+nodes[1:])/2 if magnetic else nodes
         v = _cpml_profile_1d(pos, nodes, cell.layers, cell.dt, MU0 if magnetic else EPS0,
-                            scale, ETA, config, shift_rate=rate, shift_floor=floor)
+                            scale, ETA, CPMLGrading(**config), shift_rate=rate, shift_floor=floor)
         out.append(tuple(x.numpy().copy() for x in v))
     return tuple(out)
 

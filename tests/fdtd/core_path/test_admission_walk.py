@@ -12,6 +12,8 @@ from witwin.maxwell import simulation as simulation_module
 from witwin.maxwell.compiler.accel import dispatch
 from witwin.maxwell.fdtd.runtime import core_path, core_tables
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.scene import place_scene
+from witwin.maxwell.scene import _prepared_declarations
 
 
 @pytest.fixture(autouse=True)
@@ -26,8 +28,7 @@ def forbid_cuda_init(monkeypatch, request):
 def _scene(count=0):
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
-        grid=mw.GridSpec.uniform(.25), boundary=mw.BoundarySpec.pec(), device="cpu",
-        monitors=[mw.PointMonitor(f"point_{i}", position=(0., 0., 0.), fields=("Ez",))
+        grid=mw.GridSpec.uniform(.25), boundary=mw.BoundarySpec.pec(), monitors=[mw.PointMonitor(f"point_{i}", position=(0., 0., 0.), fields=("Ez",))
                   for i in range(count)],
         metadata={"parameter": torch.tensor(1.)},
     )
@@ -39,13 +40,10 @@ def cpu_backend(monkeypatch):
     checks = []
 
     def cpu_prepare(scene, **kwargs):
-        device = scene.device
-        try:
-            scene.device = "cpu"
-            prepared = prepare_scene(scene, **kwargs)
-        finally:
-            scene.device = device
-        prepared.device = device
+        # Prepare CPU tensors under the configured device label.
+        label = kwargs.pop("device", None)
+        prepared = prepare_scene(scene, device="cpu", **kwargs)
+        prepared.device = "cuda" if label is None else label
         return prepared
 
     class Backend:
@@ -54,12 +52,12 @@ def cpu_backend(monkeypatch):
 
         def init_field(self):
             assert dispatch._requires_grad_memo.get() is not None
-            checks.append(dispatch.eligible(self.scene, 1., 1., self.scene.subpixel))
+            checks.append(dispatch.eligible(self.scene, 1., 1., self.scene.scene.subpixel))
             checks.append(dispatch.eligible(
-                self.scene, 1., 1., self.scene.subpixel, coefficients=True))
+                self.scene, 1., 1., self.scene.scene.subpixel, coefficients=True))
 
     monkeypatch.setattr(simulation_module, "prepare_scene", cpu_prepare)
-    monkeypatch.setattr(simulation_module, "_require_cuda_scene", lambda *args, **kwargs: None)
+    monkeypatch.setattr(simulation_module, "_require_cuda_device", lambda *args, **kwargs: None)
     monkeypatch.setattr(simulation_module, "_resolve_fdtd_backend", lambda: (Backend, None))
     monkeypatch.setattr(mw.Simulation, "_resolve_fdtd_time_steps", lambda *args: 1)
     monkeypatch.setattr(core_path, "CorePathRuntime", lambda solver: object())
@@ -68,9 +66,8 @@ def cpu_backend(monkeypatch):
 
 
 def _simulation(scene):
-    # Device labels exercise admission; the backend fixture creates CPU tensors only.
-    scene.device = "cuda"
-    return mw.Simulation.fdtd(scene, frequency=1e9, fdtd_core_path=True, accelerated_setup=True)
+    # The CUDA config label exercises admission; the backend fixture creates CPU tensors only.
+    return mw.Simulation.fdtd(scene, frequencies=1e9)
 
 
 def _count_walks(monkeypatch):
@@ -111,7 +108,7 @@ def test_one_scene_walk_per_preparation(monkeypatch, cpu_backend, entry):
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Full preparation requires CUDA.")
 def test_one_scene_walk_with_cuda_preparation(monkeypatch):
-    scene = _scene(16_384).clone(device="cuda")
+    scene = place_scene(_scene(16_384), "cuda")
     simulation = _simulation(scene)
     roots, monitors = _count_walks(monkeypatch)
     prepared = simulation.prepare()
@@ -124,29 +121,29 @@ def test_one_scene_walk_with_cuda_preparation(monkeypatch):
 @pytest.mark.host_validation
 def test_flip_between_prepares(monkeypatch, cpu_backend):
     scene = _scene(32)
-    scene.add_structure(mw.Structure(
-        geometry=mw.Sphere(radius=.2, device="cpu"), material=mw.Material(eps_r=2.)))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(
+            geometry=mw.Sphere(radius=.2, device="cpu"), material=mw.Material(eps_r=2.)),
+    ))
     simulation = _simulation(scene)
     parameter = scene.structures[0].geometry.radius
     roots, _ = _count_walks(monkeypatch)
     for trainable in (False, True, False):
         parameter.requires_grad_(trainable)
-        if trainable:
-            with pytest.raises(ValueError, match=(
-                    "^fdtd_core_path=True is blocked by: gradient-requiring scene tensors; "
-                    "adjoint/gradient-requiring execution$")):
-                simulation.prepare()
-        else:
+        # Trainable tensors keep the core path (there is no path decision); only setup refuses them (below).
+        if not trainable:
             assert hasattr(simulation.prepare().solver, "_core_runtime")
         assert dispatch._requires_grad_memo.get() is None
         token = dispatch.setup_enabled.set(True)
         try:
             with dispatch.requires_grad_scope():
                 prepared = simulation_module.prepare_scene(scene)
-                assert dispatch.eligible(prepared, 1., 1., prepared.subpixel) is (not trainable)
+                assert dispatch.eligible(prepared, 1., 1., prepared.scene.subpixel) is (not trainable)
         finally:
             dispatch.setup_enabled.reset(token)
-    assert sum(root is scene for root in roots) == 6
+    # Two prepares and three setup checks; the core decision no longer walks the scene.
+    assert sum(root is scene for root in roots) == 5
 
 
 @pytest.mark.host_validation
@@ -234,10 +231,10 @@ def test_direct_solver_preparation_opens_its_own_scope(monkeypatch, cpu_backend)
 @pytest.mark.parametrize("extra", ["eps", "mu", "subpixel", "prepared_state", "monitors"])
 def test_wrapper_and_extra_arguments_keep_gradient_refusal(extra):
     scene = _scene(4)
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device="cpu")
     prepared.device = "cuda"
     parameter = torch.tensor(1., requires_grad=True)
-    eps, mu, subpixel = 1., 1., prepared.subpixel
+    eps, mu, subpixel = 1., 1., prepared.scene.subpixel
     with dispatch.requires_grad_scope():
         assert not dispatch.requires_grad(scene)
         # Check wrapper-only state even after an earlier eligibility check.
@@ -253,11 +250,8 @@ def test_wrapper_and_extra_arguments_keep_gradient_refusal(extra):
             elif extra == "prepared_state":
                 prepared._runtime_parameter = parameter
             else:
-                prepared.monitors = [SimpleNamespace(parameter=parameter)]
+                prepared.scene = _prepared_declarations(prepared.scene, monitors=[SimpleNamespace(parameter=parameter)])
             assert not dispatch.eligible(prepared, eps, mu, subpixel)
-            if extra in ("prepared_state", "monitors"):
-                assert "gradient-requiring scene tensors" in core_path.core_path_blockers(
-                    SimpleNamespace(scene=prepared))
         finally:
             dispatch.setup_enabled.reset(token)
 

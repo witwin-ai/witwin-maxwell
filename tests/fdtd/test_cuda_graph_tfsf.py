@@ -14,12 +14,11 @@ _TFSF_BOUNDS = ((-0.32, 0.32), (-0.32, 0.32), (-0.32, 0.32))
 
 def _tfsf_scene(source):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.96, 0.96), (-0.96, 0.96), (-0.96, 0.96))),
-        grid=mw.GridSpec.uniform(0.08),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_source(source)
+                domain=mw.Domain(bounds=((-0.96, 0.96), (-0.96, 0.96), (-0.96, 0.96))),
+                grid=mw.GridSpec.uniform(0.08),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                sources=(source,),
+            )
     return scene
 
 
@@ -91,12 +90,14 @@ def _run(scene_factory, *, cuda_graph):
     result = mw.Simulation.fdtd(
         scene_factory(),
         frequencies=(_FREQ,),
-        full_field_dft=True,
-        run_time=mw.TimeConfig(time_steps=250),
-        cuda_graph=cuda_graph,
+        config=mw.FDTDConfig(
+            full_field_dft=True,
+            run_time=mw.TimeConfig(time_steps=250),
+            cuda_graph=cuda_graph,
+        ),
     ).run()
     view = result.at(frequency=_FREQ)
-    fields = {a: np.asarray(getattr(view.E, a).detach().cpu()) for a in ("x", "y", "z")}
+    fields = {a: np.asarray(getattr(view.E, a).values.detach().cpu()) for a in ("x", "y", "z")}
     provider = result.solver._tfsf_state["provider"]
     return fields, result.stats(), provider
 
@@ -149,10 +150,12 @@ def test_cuda_graph_tfsf_matches_non_graph_bitexact(scene_factory, expected_prov
 def test_cuda_graph_tfsf_declines_non_reference_providers(scene_factory, expected_provider):
     solver = mw.Simulation.fdtd(
         scene_factory(),
-        frequency=_FREQ,
-        full_field_dft=True,
-        run_time=mw.TimeConfig(time_steps=60),
-        cuda_graph=True,
+        frequencies=_FREQ,
+        config=mw.FDTDConfig(
+            full_field_dft=True,
+            run_time=mw.TimeConfig(time_steps=60),
+            cuda_graph=True,
+        ),
     ).prepare().solver
     assert solver._tfsf_state["provider"] == expected_provider
     # The graphable predicate declines these providers ...

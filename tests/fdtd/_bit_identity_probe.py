@@ -1,8 +1,8 @@
 """Resume fingerprints and short source-driven field runs for bit-identity checks.
 
 Executed in a fresh interpreter by ``test_bit_identity_baseline.py`` against both
-the current tree and an archived baseline tree. It uses only public API that the
-baseline already had, so it runs unchanged on either tree.
+the current tree and an archived baseline tree. It builds scenes and simulations through
+``tests/support/api_dialect.py``, so it runs unchanged on either tree.
 
 Usage:
   python _bit_identity_probe.py fingerprints <output.pt>
@@ -12,10 +12,14 @@ from __future__ import annotations
 
 import math
 import sys
+from pathlib import Path
 
 import torch
 
-import witwin.maxwell as mw
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "support"))
+import api_dialect as api  # noqa: E402
+
+mw = api.mw
 
 # legacy subpixel pin; default coverage lives in tests/materials/compiler/test_subpixel_default_guard.py and tests/materials/compiler/test_kottke_edge.py
 _LEGACY_SUBPIXEL = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic", pec="staircase")
@@ -39,33 +43,32 @@ def _ricker():
 
 
 def _box_scene(boundary, *, subpixel=1, material=None):
-    scene = mw.Scene(
+    scene = api.scene(
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.35, 0.35), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=boundary,
         subpixel_samples=mw.SubpixelSpec(samples=subpixel, averaging="arithmetic", pec="staircase"),
         device="cuda",
     )
-    scene.add_structure(
+    return api.add(scene, structures=[
         mw.Structure(
             geometry=mw.Box(position=(0.1, 0.0, 0.0), size=(0.2, 0.2, 0.2)),
             material=material or mw.Material(eps_r=3.0),
         )
-    )
-    return scene
+    ])
 
 
 def _dipole(scene, source_time=None, polarization="Ez"):
-    scene.add_source(
-        mw.PointDipole(position=(-0.1, 0.05, 0.0), polarization=polarization, width=0.05,
-                       source_time=source_time or _pulse())
+    return api.add(
+        scene,
+        sources=[mw.PointDipole(position=(-0.1, 0.05, 0.0), polarization=polarization, width=0.05,
+                                source_time=source_time or _pulse())],
+        monitors=[mw.PointMonitor("probe", (0.2, 0.1, 0.05), fields=("Ez",))],
     )
-    scene.add_monitor(mw.PointMonitor("probe", (0.2, 0.1, 0.05), fields=("Ez",)))
-    return scene
 
 
 def _bloch_scene():
-    scene = mw.Scene(
+    scene = api.scene(
         subpixel_samples=_LEGACY_SUBPIXEL,
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
         grid=mw.GridSpec.uniform(0.06),
@@ -75,21 +78,21 @@ def _bloch_scene():
         ),
         device="cuda",
     )
-    scene.add_source(
-        mw.PlaneWave(
+    return api.add(
+        scene,
+        sources=[mw.PlaneWave(
             direction=(0.2, 0.1, 0.9746794344808963),
             polarization=(1.0, 0.0, -0.20519567041703082),
             # Fixed-k Bloch runs accept CW sources only; see the broadband injection note.
             source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
             injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
-        )
+        )],
+        monitors=[mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ex", "Ez"))],
     )
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
-    return scene
 
 
 def _open_scene():
-    return mw.Scene(
+    return api.scene(
         subpixel_samples=_LEGACY_SUBPIXEL,
         domain=mw.Domain(bounds=((-0.45, 0.45), (-0.45, 0.45), (-0.45, 0.45))),
         grid=mw.GridSpec.uniform(0.05),
@@ -99,45 +102,42 @@ def _open_scene():
 
 
 def _soft_plane_wave(source_time):
-    scene = _open_scene()
-    scene.add_source(mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
-                                  source_time=source_time))
-    scene.add_monitor(mw.PointMonitor("probe", (0.05, 0.0, 0.1), fields=("Ex",)))
-    return scene
+    return api.add(_open_scene(),
+                   sources=[mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
+                                         source_time=source_time)],
+                   monitors=[mw.PointMonitor("probe", (0.05, 0.0, 0.1), fields=("Ex",))])
 
 
 def _tfsf_plane_wave(source_time):
-    scene = _open_scene()
-    scene.add_source(mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
-                                  source_time=source_time,
-                                  injection=mw.TFSF(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2)))))
-    scene.add_monitor(mw.PointMonitor("probe", (0.05, 0.0, 0.1), fields=("Ex",)))
-    return scene
+    return api.add(_open_scene(),
+                   sources=[mw.PlaneWave(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
+                                         source_time=source_time,
+                                         injection=mw.TFSF(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))))],
+                   monitors=[mw.PointMonitor("probe", (0.05, 0.0, 0.1), fields=("Ex",))])
 
 
 def _gaussian_beam(source_time):
-    scene = _open_scene()
-    scene.add_source(mw.GaussianBeam(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
-                                     beam_waist=0.2, focus=(0.0, 0.0, 0.0), source_time=source_time))
-    scene.add_monitor(mw.PointMonitor("probe", (0.05, 0.0, 0.1), fields=("Ex",)))
-    return scene
+    return api.add(_open_scene(),
+                   sources=[mw.GaussianBeam(direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
+                                            beam_waist=0.2, focus=(0.0, 0.0, 0.0), source_time=source_time)],
+                   monitors=[mw.PointMonitor("probe", (0.05, 0.0, 0.1), fields=("Ex",))])
 
 
 def _mode_source(source_time):
-    scene = _open_scene()
-    scene.add_structure(mw.Structure(geometry=mw.Box(position=(0, 0, 0), size=(2.0, 0.2, 0.3)),
-                                     material=mw.Material(eps_r=4.0)))
-    scene.add_source(mw.ModeSource(position=(-0.25, 0, 0), size=(0, 0.6, 0.6), polarization="Ez",
-                                   source_time=source_time))
-    scene.add_monitor(mw.PointMonitor("probe", (0.1, 0.0, 0.0), fields=("Ez",)))
-    return scene
+    return api.add(_open_scene(),
+                   structures=[mw.Structure(geometry=mw.Box(position=(0, 0, 0), size=(2.0, 0.2, 0.3)),
+                                            material=mw.Material(eps_r=4.0))],
+                   sources=[mw.ModeSource(position=(-0.25, 0, 0), size=(0, 0.6, 0.6), polarization="Ez",
+                                          source_time=source_time)],
+                   monitors=[mw.PointMonitor("probe", (0.1, 0.0, 0.0), fields=("Ez",))])
 
 
 def _with_monitors(scene):
-    scene.add_monitor(mw.PlaneMonitor("plane", axis="z", position=0.0, fields=("Ex", "Ez")))
-    scene.add_monitor(mw.FluxMonitor("flux", axis="x", position=0.25))
-    scene.add_monitor(mw.FieldTimeMonitor("trace", components=("Ez",), position=(0.0, 0.0, 0.1)))
-    return scene
+    return api.add(scene, monitors=[
+        mw.PlaneMonitor("plane", axis="z", position=0.0, fields=("Ex", "Ez")),
+        mw.FluxMonitor("flux", axis="x", position=0.25),
+        mw.FieldTimeMonitor("trace", components=("Ez",), position=(0.0, 0.0, 0.1)),
+    ])
 
 
 FINGERPRINT_CONFIGS = {
@@ -184,7 +184,7 @@ FIELD_CONFIGS = {
 
 
 def _prepare(factory, steps=80):
-    return mw.Simulation.fdtd(
+    return api.fdtd(
         factory(),
         frequencies=[_FREQUENCY],
         run_time=mw.TimeConfig(time_steps=steps),

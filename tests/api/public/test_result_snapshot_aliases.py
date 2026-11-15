@@ -5,7 +5,7 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.result import _cpu_serializable
+from witwin.maxwell.result import _cpu_serializable, _monitor_mapping_snapshot
 
 
 def test_nested_snapshot_preserves_tensor_aliases_and_detaches_graph():
@@ -37,6 +37,21 @@ def test_distinct_views_retain_their_values_layout_and_flags(kind):
         assert actual.is_neg() == original.is_neg()
 
 
+def test_monitor_snapshot_keeps_schema_aliases_as_one_storage():
+    source = torch.arange(6.).reshape(2, 3)
+    other = source.clone()
+    snapshot = _monitor_mapping_snapshot({
+        'plane': {'kind': 'plane', 'data': source, 'components': {'Ex': {'data': source}}, 'Ex': source,
+                  'nested': [source, (source,)], 'other': other},
+        'second': {'data': source},
+    })
+    plane = snapshot['plane']
+    assert plane['data'] is plane['Ex'] is plane['components']['Ex']['data']
+    assert plane['data'] is plane['nested'][0] is plane['nested'][1][0]
+    assert plane['other'] is not plane['data']
+    torch.testing.assert_close(plane['data'], source, rtol=0, atol=0)
+
+
 def test_equal_values_in_distinct_tensors_are_not_merged():
     first = torch.ones(3)
     second = first.clone()
@@ -58,7 +73,7 @@ def test_snapshot_memo_does_not_persist_across_calls():
 def test_actual_cuda_monitor_aliases_serialize_one_storage(tmp_path, dtype):
     source = torch.arange(4096., device='cuda').to(dtype).reshape(64, 64)
     scene = mw.Scene(domain=mw.Domain(bounds=((-1., 1.),) * 3),
-                     grid=mw.GridSpec.uniform(.5), device='cpu')
+                     grid=mw.GridSpec.uniform(.5))
     result = mw.Result(method='fdtd', scene=scene, frequency=1e9, fields={},
                        monitors={'plane': {'kind': 'plane', 'data': source,
                                           'components': {'Ex': {'data': source}}, 'Ex': source}})

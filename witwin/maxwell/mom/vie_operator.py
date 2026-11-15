@@ -11,6 +11,7 @@ from .lifting_fields import _smooth_background_gradient
 from .quadrature import triangle_rule, duffy_fan
 from .physics import Medium
 from .volume_mesh import TetrahedralVolumeMesh
+from ..errors import ConvergenceError
 
 
 _MAX_PAIR_SAMPLES = 262144
@@ -181,7 +182,7 @@ def cell_current_fields(mesh, currents, points, medium, *, order=6, principal_va
     return electric, magnetic
 
 
-class VolumeFieldConvergenceError(RuntimeError):
+class VolumeFieldConvergenceError(ConvergenceError):
     def __init__(self, message, receipt):
         super().__init__(message)
         self.receipt = receipt

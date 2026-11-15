@@ -107,10 +107,10 @@ def test_actual_mom_electric_and_magnetic_fields_refine_toward_independent_oracl
     for level in (0, 1):
         scene = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=radius), mw.Material(
             eps_r=epsilon.real, sigma_e=epsilon.imag*2*np.pi*frequency*mw.constants.EPSILON_0))], sources=[mw.PlaneWave()])
-        result = mw.Simulation.mom(scene, frequency=frequency, config=mw.MoMConfig(
+        result = mw.Simulation.mom(scene, frequencies=frequency, config=mw.mom.MoMConfig(
             subdivisions=level, integration=IntegrationConfig(order=4, singular_order=6))).run()
         assert result.stats()["converged"]
-        medium = result.surface_currents.handle.exterior
+        medium = mw.mom.surface_currents(result).handle.exterior
         level_errors = []
         for factor, region, kind in ((.3, "interior", "total"), (1.5, "exterior", "total"), (1.5, "exterior", "scattered")):
             points = radius*factor*directions

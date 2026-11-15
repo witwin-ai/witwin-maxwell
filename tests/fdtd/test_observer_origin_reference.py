@@ -15,6 +15,8 @@ from witwin.maxwell.fdtd.runtime.spectral import source_normalization_spectrum, 
 from witwin.maxwell.fdtd.runtime.timeplan import source_reference_label_offset
 from witwin.maxwell.sources import compile_source_time
 
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
+
 
 @pytest.mark.parametrize("provider,waveform,beta", [
     (provider, waveform, beta)
@@ -79,15 +81,15 @@ def test_direct_and_repeated_entry_exports_match_independent_finite_sum(beta, al
 
 def _execution():
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.05, .05),) * 3), grid=mw.GridSpec.uniform(.01),
-        boundary=mw.BoundarySpec.pec(), device="cpu",
-        sources=[mw.PointDipole((0., 0., 0.), source_time=mw.CW(1e9))],
+        boundary=mw.BoundarySpec.pec(), sources=[mw.PointDipole((0., 0., 0.), source_time=mw.CW(1e9))],
         monitors=[mw.PointMonitor("point", (0., 0., 0.), fields=("Ex", "Hy")),
-                  mw.FieldTimeMonitor("trace", components=("Ex", "Hy"), position=(0., 0., 0.))])
-    return mw.Simulation.fdtd(scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=8),
-        backend="cpu_reference", cuda_graph=False, full_field_dft=True,
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=True)).prepare()
+                  mw.monitors.FieldTimeMonitor("trace", components=("Ex", "Hy"), position=(0., 0., 0.))])
+    return mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8),
+        cuda_graph=False, full_field_dft=True,
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=True))).prepare()
 
 
+@requires_cuda
 @pytest.mark.parametrize("distributed", [False, True])
 @pytest.mark.parametrize("key", ["observer_spectral_origin", "source_reference_label", "normalization_reference", "normalization_label_offset"])
 def test_old_observer_checkpoint_is_refused_before_restoring(key, distributed):
@@ -95,7 +97,7 @@ def test_old_observer_checkpoint_is_refused_before_restoring(key, distributed):
     checkpoint = execution.run_until(3)
     solver = execution.solver
     if distributed:
-        solver = SimpleNamespace(shard_layouts=(), logical_scene=solver.scene,
+        solver = SimpleNamespace(shard_layouts=(), logical_scene=solver.scene.scene,
             shards=(SimpleNamespace(rank=0, solver=solver),), _nccl=False, dt=solver.dt,
             _time_plan=solver._time_plan, _normalization_reference=solver._normalization_reference,
             _normalization_label_offset=solver._normalization_label_offset)
@@ -109,24 +111,26 @@ def test_old_observer_checkpoint_is_refused_before_restoring(key, distributed):
     assert torch.equal(execution.solver.Ex, before)
 
 
+@requires_cuda
 def test_format_five_is_refused_and_new_spectral_checkpoint_round_trips(tmp_path):
     expected = _execution().run()
     checkpoint = _execution().run_until(3)
     path = tmp_path / "new.pt"
     checkpoint.save(path)
-    target = _execution().run(resume_from=mw.FDTDResumeCheckpoint.load(path))
-    assert torch.equal(target.field("Ex"), expected.field("Ex"))
+    target = _execution().run(resume_from=mw.fdtd.FDTDResumeCheckpoint.load(path))
+    assert torch.equal(target.field("Ex").isel(f=0).values, expected.field("Ex").isel(f=0).values)
     trace = target.raw_monitor("trace")
     assert trace["field_time_offsets_steps"] == {"E": 0., "H": -.5}
-    torch.testing.assert_close(trace["t"], torch.arange(1, 9, dtype=torch.float64) * target.solver.dt)
+    torch.testing.assert_close(trace["t"].cpu(), torch.arange(1, 9, dtype=torch.float64) * target.solver.dt)
     torch.testing.assert_close(trace["components"]["Ex"], expected.raw_monitor("trace")["components"]["Ex"], rtol=0, atol=0)
     payload = checkpoint._snapshot()
     payload["schema_version"] = 5
     torch.save(payload, path)
     with pytest.raises(ValueError, match="schema_version 5"):
-        mw.FDTDResumeCheckpoint.load(path)
+        mw.fdtd.FDTDResumeCheckpoint.load(path)
 
 
+@requires_cuda
 def test_reference_labels_do_not_change_the_configuration_fingerprint():
     solver = _execution().solver
     stamped = resume._configuration_fingerprint(solver)
@@ -137,23 +141,24 @@ def test_reference_labels_do_not_change_the_configuration_fingerprint():
     assert resume._configuration_fingerprint(solver) == stamped
 
 
+@requires_cuda
 @pytest.mark.parametrize("count", [1, 2, 4])
 def test_public_port_execution_uses_physical_labels_and_finite_reference(count):
     import cmath
-    import os
     from tests.support.observer_origin_probe import port_table_probe, port_unit_probe
 
-    device = os.environ.get("OBSERVER_ORIGIN_DEVICE", "cpu")
     ns = port_table_probe()
     control = port_unit_probe()
     results = []
     for normalized in (False, True):
         result = mw.Simulation.fdtd(ns["scene"], frequencies=(ns["F"],),
-            backend="cpu_reference" if device == "cpu" else "native", cuda_graph=False,
-            field_dtype=torch.float32, full_field_dft=True,
-            excitations=mw.PortExcitation("feed", source_time=mw.CW(ns["F"])),
-            run_time=mw.TimeConfig(time_steps=count, dt=ns["DT"], transient_cycles=0),
-            spectral_sampler=mw.SpectralSampler(window="none", normalize_source=normalized)).run()
+            excitations=mw.rf.PortExcitation("feed", source_time=mw.CW(ns["F"])),
+            config=mw.FDTDConfig(
+                cuda_graph=False,
+                field_dtype=torch.float32, full_field_dft=True,
+                run_time=mw.TimeConfig(time_steps=count, dt=ns["DT"], transient_cycles=0),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=normalized),
+            )).run()
         assert result.stats()["steps_run"] == count
         results.append(result)
     raw, normalized = results

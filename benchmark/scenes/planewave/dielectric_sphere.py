@@ -10,24 +10,29 @@ FREQUENCIES = (2.0e9,)
 
 
 def build_scene() -> mw.Scene:
-    scene = (
-        base_scene()
-        .add_structure(mw.Structure(geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=0.12), material=mw.Material(eps_r=4.0), name="sphere"))
-        .add_source(
-            mw.PlaneWave(
-                direction=(0.0, 0.0, 1.0),
-                polarization=(1.0, 0.0, 0.0),
-                source_time=mw.GaussianPulse(frequency=2.0e9, fwidth=0.5e9),
-            )
-        )
-        .add_monitor(mw.PlaneMonitor(name="field_xz", axis="y", position=0.0, fields=("Ex", "Ez", "Hy"), frequencies=FREQUENCIES))
-        .add_monitor(mw.FluxMonitor(name="forward_flux", axis="z", position=SAFE_FLUX_POSITION, frequencies=FREQUENCIES))
-    )
+    scene = base_scene()
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=0.12), material=mw.Material(eps_r=4.0), name="sphere"),
+    ), sources=(
+        *scene.sources,
+        mw.PlaneWave(
+            direction=(0.0, 0.0, 1.0),
+            polarization=(1.0, 0.0, 0.0),
+            source_time=mw.GaussianPulse(frequency=2.0e9, fwidth=0.5e9),
+        ),
+    ), monitors=(
+        *scene.monitors,
+        mw.PlaneMonitor(name="field_xz", axis="y", position=0.0, fields=("Ex", "Ez", "Hy"), frequencies=FREQUENCIES),
+        mw.FluxMonitor(name="forward_flux", axis="z", position=SAFE_FLUX_POSITION, frequencies=FREQUENCIES),
+    ))
     return with_plot_monitors(scene, frequencies=FREQUENCIES)
 
 
 SCENARIO = ScenarioDefinition(
     name="dielectric_sphere",
+    # 2x the default window: the ring-down settles (benchmark-references-2026-11-11).
+    run_time_factor=16.0,
     description="Plane wave scattering off dielectric sphere (eps_r=4)",
     builder=build_scene,
     frequencies=FREQUENCIES,

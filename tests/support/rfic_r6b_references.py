@@ -6,20 +6,24 @@ import witwin.maxwell as mw
 UM=1e-6
 FREQUENCIES=(1e9,3.4e9)
 
-def plate_fixture(maximum=20., edge=5., device="cuda"):
-    stack=mw.LayerStack((mw.Layer("silicon",300*UM,11.9,10.),
-                         mw.Layer("oxide",6*UM,4.1)),mw.HalfSpace(11.9,10.),mw.HalfSpace())
-    scene=mw.Scene(background=stack,device=device)
+def plate_fixture(maximum=20., edge=5.):
+    stack=mw.mom.LayerStack((mw.mom.Layer("silicon",300*UM,11.9,10.),
+                         mw.mom.Layer("oxide",6*UM,4.1)),mw.mom.HalfSpace(11.9,10.),mw.mom.HalfSpace())
+    scene=mw.Scene(background=stack)
     outer=torch.tensor(((-70,-70),(70,-70),(70,70),(-70,70)),dtype=torch.float64)*UM
     inner=torch.tensor(((-60,-60),(60,-60),(60,60),(-60,60)),dtype=torch.float64)*UM
     square=torch.tensor(((-50,-50),(50,-50),(50,50),(-50,50)),dtype=torch.float64)*UM
-    for vertices,holes in ((square,[]),(outer,[inner])):
-        scene.add_structure(mw.Structure(mw.PlanarPEC(vertices,holes=holes,normal_axis="z",
-                                coordinate=305*UM,physical_thickness=2*UM),mw.Material.pec()))
-    scene.add_port(mw.LumpedPort("plate",positive=(50*UM,0.,305*UM),negative=(60*UM,0.,305*UM),
-                    voltage_path=mw.AxisPath("x"),current_surface=mw.Box(
-                        position=(55*UM,0.,305*UM),size=(10*UM,10*UM,2*UM)),reference_impedance=50.))
-    config=mw.MoMConfig(layered=mw.LayeredSurfaceConfig(bridge_width_m=10*UM,
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(mw.geometry.PlanarPEC(vertices,holes=holes,normal_axis="z",
+              coordinate=305*UM,physical_thickness=2*UM),mw.Material.pec()) for vertices,holes in ((square,[]),(outer,[inner]))),
+    ))
+    scene = scene.updated(ports=(
+        *scene.ports,
+        mw.LumpedPort("plate",positive=(50*UM,0.,305*UM),negative=(60*UM,0.,305*UM),
+         voltage_path=mw.AxisPath("x"),reference_impedance=50.),
+    ))
+    config=mw.mom.MoMConfig(layered=mw.mom.LayeredSurfaceConfig(bridge_width_m=10*UM,
               max_edge_length_m=maximum*UM,edge_cell_m=edge*UM,growth_ratio=1.5))
     return scene,config
 

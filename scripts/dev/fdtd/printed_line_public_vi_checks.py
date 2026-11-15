@@ -8,6 +8,7 @@ import hashlib
 import math
 import numpy as np
 import torch
+import witwin.maxwell as mw
 
 U64=2.**-53
 
@@ -56,15 +57,15 @@ def check_value(value,expected,bound,*,label,nonzero=True):
  return dict(label=label,nonzero=bool(np.any(a!=0)),max_absolute_component_error=float(delta.max()),max_a_priori_absolute_bound=float(bound.max()),operation_model='gamma_(2public_terms)+gamma_(2reference_terms+2), input L1 only; no fitted factor')
 
 def point_spectrum(result,name,component,index,frequencies,total):
- p=result.monitor(name)
+ p=result.raw_monitor(name)
  if tuple(p.get('frequencies',()))!=tuple(frequencies)or tuple(p.get('field_indices',{}).get(component,()))!=tuple(index):raise ValueError('Actual Point frequency order or native support changed.')
  samples=torch.as_tensor(p.get('samples',())).reshape(-1)
  if len(samples)!=len(frequencies)or not bool((samples==total).all()):raise ValueError('Actual Point does not share the complete physical horizon.')
  return array(p['components'][component],torch.complex64).reshape(-1).astype(np.complex128)
 
 def raw_trace(result,term,rows,frequencies,total):
- if term.owner not in result.conductor_losses:raise ValueError('Raw physical owner is missing.')
- record=result.conductor_losses[term.owner];rf=torch.as_tensor(record['frequencies']).reshape(-1).tolist()
+ if term.owner not in mw.rf.conductor_losses(result):raise ValueError('Raw physical owner is missing.')
+ record=mw.rf.conductor_losses(result)[term.owner];rf=torch.as_tensor(record['frequencies']).reshape(-1).tolist()
  if len(set(rf))!=len(rf)or not all(f in rf for f in frequencies):raise ValueError('Raw trace frequency identity is missing or ambiguous.')
  selected=[rf.index(f)for f in frequencies]
  traces=[t for t in record.get('bulk_electric_traces',())if t.get('component')==term.component]
@@ -89,7 +90,7 @@ def independent_public_audit(context,result,VI,evidence,*,total):
  def raw_fingerprints():
   mapping={}
   for owner in sorted({term.owner for term in plan.queries.values()}):
-   record=result.conductor_losses.get(owner,{})
+   record=mw.rf.conductor_losses(result).get(owner,{})
    for j,trace in enumerate(record.get('bulk_electric_traces',())):
     for key in('indices','electric_fields'):
      value=trace.get(key)
@@ -158,7 +159,7 @@ def verify_native_oracle_samples(context,monitors,prepared,*,expected_samples):
             or tuple(entry.get('plane_indices',()))!=(term.normal_index,)):
             raise ValueError('The primitive reference requires one actual uncollocated native plane.')
         data=entry['data'];tangents=[i for i in range(3)if i!='xyz'.index(term.normal_axis)]
-        axes=component_coords(prepared,term.component);local_maps=[]
+        axes=component_coords(prepared,term.component, device=prepared.device);local_maps=[]
         for axis,coordinate in zip(tangents,entry['coords']):
             actual=np.asarray(coordinate,dtype=np.float64);native=np.asarray(axes[axis],dtype=np.float64)
             location=np.searchsorted(native,actual)

@@ -1,4 +1,8 @@
-"""CPU CopperFoil setup profile and exact comparison against an archived master."""
+"""CPU CopperFoil setup profile and exact comparison against an archived master.
+
+Compares the scene-level copper compilation (faces, modal responses, edge tables).
+FDTD runs on CUDA only, so the former CPU runtime-preparation leg is gone.
+"""
 from __future__ import annotations
 
 import argparse
@@ -44,7 +48,6 @@ def worker(root, output):
         copper_edge_feature_cells, copper_free_edge_sides,
     )
     from witwin.maxwell.scene import prepare_scene
-    from witwin.maxwell.fdtd.runtime import stepping
 
     assert Path(mw.__file__).resolve().is_relative_to(root), mw.__file__
     assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
@@ -64,11 +67,11 @@ def worker(root, output):
             return value
 
         if name.startswith("f3_"):
-            sample = stage("build", lambda: next(b for b in scene_builders() if b.name == name).build(device="cpu"))
-            scene, options = sample.scene, sample.fdtd_kwargs
+            sample = stage("build", lambda: next(b for b in scene_builders() if b.name == name).build())
+            scene = sample.scene
         else:
             prepared, _ = stage("build", lambda: _faces(2))
-            scene, options = prepared._public_scene, dict(frequency=1e9)
+            scene = prepared._public_scene
         prepared = stage("prepare_scene", lambda: prepare_scene(scene))
         faces = stage("faces", lambda: compile_copper_faces(prepared, device="cpu"))
         compiled["faces"] = snapshot(faces)
@@ -86,20 +89,6 @@ def worker(root, output):
             return result
 
         compiled["edges"] = snapshot(stage("edge_tables", edges))
-        options = dict(options, backend="cpu_reference", cuda_graph=False,
-                       run_time=mw.TimeConfig(time_steps=1))
-        initialize = stepping.initialize_copper_foils
-
-        def timed_initialize(solver):
-            started = time.perf_counter()
-            initialize(solver)
-            times["runtime_copper_init"] = time.perf_counter() - started
-
-        stepping.initialize_copper_foils = timed_initialize
-        runtime = stage("runtime_prepare", lambda: mw.Simulation.fdtd(scene, **options).prepare())
-        stepping.initialize_copper_foils = initialize
-        compiled["runtime_copper"] = snapshot(runtime.solver._copper_foils)
-        compiled["runtime_faces"] = snapshot(runtime.solver._copper_edge_faces)
         assert not torch.cuda.is_initialized()
         stream = io.StringIO()
         pstats.Stats(profile, stream=stream).strip_dirs().sort_stats("cumulative").print_stats(16)

@@ -11,6 +11,8 @@ from witwin.maxwell.fdtd.checkpoint import (
     network_state_name,
     restore_checkpoint_state,
 )
+from witwin.maxwell.compiler import compile_networks
+from witwin.maxwell.scene import prepare_scene
 
 
 def _port(index: int, count: int) -> mw.LumpedPort:
@@ -28,7 +30,7 @@ def _port(index: int, count: int) -> mw.LumpedPort:
     )
 
 
-def _scene(port_count: int, *, network=None, device: str = "cpu") -> mw.Scene:
+def _scene(port_count: int, *, network=None) -> mw.Scene:
     return mw.Scene(
         domain=mw.Domain(
             bounds=((-0.04, 0.04), (-0.02, 0.02), (-0.02, 0.02))
@@ -44,16 +46,15 @@ def _scene(port_count: int, *, network=None, device: str = "cpu") -> mw.Scene:
         ),
         ports=tuple(_port(index, port_count) for index in range(port_count)),
         networks=() if network is None else (network,),
-        device=device,
     )
 
 
-def _two_port_filter(frequencies: torch.Tensor) -> mw.NetworkData:
+def _two_port_filter(frequencies: torch.Tensor) -> mw.rf.NetworkData:
     resistance = 50.0
     capacitance = 5.0e-12
     shunt = 2.0e-3
     incidence = torch.tensor((1.0, -1.0), dtype=torch.float64)
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.tensor(((-1.0 / (resistance * capacitance),),), dtype=torch.float64),
         B=(incidence / (resistance * capacitance)).reshape(1, 2),
         C=(-incidence / resistance).reshape(2, 1),
@@ -64,7 +65,7 @@ def _two_port_filter(frequencies: torch.Tensor) -> mw.NetworkData:
         representation="Y",
         port_order=("network_0", "network_1"),
     )
-    return mw.NetworkData.from_y(
+    return mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=model.evaluate(frequencies),
         z0=50.0,
@@ -72,13 +73,13 @@ def _two_port_filter(frequencies: torch.Tensor) -> mw.NetworkData:
     )
 
 
-def _four_port_direct(frequencies: torch.Tensor) -> mw.NetworkData:
+def _four_port_direct(frequencies: torch.Tensor) -> mw.rf.NetworkData:
     conductance = (
         0.015 * torch.eye(4, dtype=torch.float64)
         + 0.001 * torch.ones((4, 4), dtype=torch.float64)
     )
     values = conductance.to(torch.complex128).expand(frequencies.numel(), -1, -1)
-    return mw.NetworkData.from_y(
+    return mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=values,
         z0=50.0,
@@ -109,13 +110,13 @@ def test_touchstone_multiport_fit_matches_independent_network_reference(
     )
     path = tmp_path / f"fixture.s{port_count}p"
     reference.to_touchstone(path, format="ri")
-    block = mw.TouchstoneNetwork(
+    block = mw.rf.TouchstoneNetwork(
         name="fixture",
         path=path,
         connections={
             f"network_{index}": f"field_{index}" for index in range(port_count)
         },
-        fit=mw.RationalFitConfig(
+        fit=mw.rf.rational.RationalFitConfig(
             order=1,
             iterations=2,
             relative_tolerance=2.0e-3,
@@ -124,8 +125,8 @@ def test_touchstone_multiport_fit_matches_independent_network_reference(
     )
     scene = _scene(port_count, network=block)
 
-    (compiled,) = scene.compile_networks(dt=1.0e-12, device="cpu")
-    predicted = mw.NetworkData.from_y(
+    (compiled,) = compile_networks(prepare_scene(scene, device="cpu"), dt=1.0e-12)
+    predicted = mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=compiled.continuous.evaluate(frequencies),
         z0=reference.z0,
@@ -139,14 +140,14 @@ def test_touchstone_multiport_fit_matches_independent_network_reference(
     )
 
 
-def _two_port_block(frequencies: torch.Tensor) -> mw.NetworkBlock:
+def _two_port_block(frequencies: torch.Tensor) -> mw.rf.NetworkBlock:
     """A single-pole passive two-port bound to ``field_0``/``field_1``."""
 
     resistance = 50.0
     capacitance = 5.0e-12
     shunt = 2.0e-3
     incidence = torch.tensor((1.0, -1.0), dtype=torch.float64)
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.tensor(((-1.0 / (resistance * capacitance),),), dtype=torch.float64),
         B=(incidence / (resistance * capacitance)).reshape(1, 2),
         C=(-incidence / resistance).reshape(2, 1),
@@ -157,13 +158,13 @@ def _two_port_block(frequencies: torch.Tensor) -> mw.NetworkBlock:
         representation="Y",
         port_order=("network_0", "network_1"),
     )
-    data = mw.NetworkData.from_y(
+    data = mw.rf.NetworkData.from_y(
         frequencies=frequencies,
         y=model.evaluate(frequencies),
         z0=50.0,
         port_names=model.port_order,
     )
-    return mw.NetworkBlock(
+    return mw.rf.NetworkBlock(
         name="two_port_load",
         network=data,
         connections={"network_0": "field_0", "network_1": "field_1"},
@@ -187,10 +188,12 @@ def test_embedded_network_checkpoint_resume_round_trips_carried_voltage(
     block = _two_port_block(band)
 
     result = mw.Simulation.fdtd(
-        _scene(2, network=_two_port_block(band), device="cuda"),
+        _scene(2, network=_two_port_block(band)),
         frequencies=requested,
-        run_time=mw.TimeConfig(time_steps=96),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=96),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     solver = result.solver
     checkpoint = capture_checkpoint_state(solver, step=96)
@@ -205,10 +208,12 @@ def test_embedded_network_checkpoint_resume_round_trips_carried_voltage(
     assert torch.any(torch.abs(checkpoint.tensors[carried_name]) > 0.0)
 
     fresh = mw.Simulation.fdtd(
-        _scene(2, network=block, device="cuda"),
+        _scene(2, network=block),
         frequencies=requested,
-        run_time=mw.TimeConfig(time_steps=96),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=96),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).prepare().solver
     fresh_runtime = fresh._network_runtimes[0]
     assert torch.all(fresh_runtime.carried_voltage == 0.0)
@@ -243,7 +248,7 @@ def test_four_port_fdtd_currents_match_embedded_admittance() -> None:
     frequencies = torch.linspace(1.0e9, 5.0e9, 17, dtype=torch.float64)
     data = _four_port_direct(frequencies)
     conductance = data.to_y()[0].real
-    model = mw.StateSpaceNetwork(
+    model = mw.rf.rational.StateSpaceNetwork(
         A=torch.zeros((0, 0), dtype=torch.float64),
         B=torch.zeros((0, 4), dtype=torch.float64),
         C=torch.zeros((4, 0), dtype=torch.float64),
@@ -251,7 +256,7 @@ def test_four_port_fdtd_currents_match_embedded_admittance() -> None:
         representation="Y",
         port_order=data.port_names,
     )
-    block = mw.NetworkBlock(
+    block = mw.rf.NetworkBlock(
         name="four_port_load",
         network=data,
         connections={
@@ -263,14 +268,16 @@ def test_four_port_fdtd_currents_match_embedded_admittance() -> None:
     requested = (2.5e9, 3.0e9)
 
     result = mw.Simulation.fdtd(
-        _scene(4, network=block, device="cuda"),
+        _scene(4, network=block),
         frequencies=requested,
-        run_time=mw.TimeConfig(time_steps=96),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        cuda_graph=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=96),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            cuda_graph=True,
+        ),
     ).run()
 
-    diagnostics = result.embedded_network("four_port_load")
+    diagnostics = mw.rf.embedded_network(result, "four_port_load")
     expected_current = conductance.to(
         device=diagnostics.voltage.device,
         dtype=diagnostics.voltage.dtype,

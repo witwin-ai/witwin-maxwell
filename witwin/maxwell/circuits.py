@@ -9,6 +9,7 @@ import shlex
 from typing import ClassVar, Literal, Protocol, runtime_checkable
 
 import torch
+from ._stability import experimental
 
 
 def _name(value, *, kind: str) -> str:
@@ -31,6 +32,7 @@ def _scalar_tensor(value, *, name: str) -> torch.Tensor:
     return tensor
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class CircuitNode:
     """Named circuit node; node ``0`` is the unique ground node."""
@@ -45,6 +47,7 @@ class CircuitNode:
         return self.name == "0"
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class PortBinding:
     port_name: str
@@ -59,6 +62,7 @@ class PortBinding:
             raise ValueError("Circuit port binding terminals must be distinct.")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class MNAConfig:
     integration: Literal["trapezoidal", "backward_euler"] = "trapezoidal"
@@ -83,6 +87,7 @@ class MNAConfig:
             raise ValueError("dense_unknown_limit must be a positive integer.")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class PulseWaveform:
     initial: torch.Tensor
@@ -110,6 +115,7 @@ class PulseWaveform:
             object.__setattr__(self, name, tensor)
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class SineWaveform:
     offset: torch.Tensor
@@ -135,6 +141,7 @@ class SineWaveform:
             object.__setattr__(self, name, tensor)
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class PiecewiseLinearWaveform:
     times: torch.Tensor
@@ -186,6 +193,7 @@ class _CircuitDeviceContract:
         return None
 
 
+@experimental("circuits")
 @runtime_checkable
 class CircuitDevice(Protocol):
     name: str
@@ -200,6 +208,7 @@ class CircuitDevice(Protocol):
     def initial_condition(self): ...
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class VoltageSource(_CircuitDeviceContract):
     _parameter_names = ("voltage", "waveform")
@@ -222,6 +231,7 @@ class VoltageSource(_CircuitDeviceContract):
         object.__setattr__(self, "kind", "voltage_source")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class CurrentSource(_CircuitDeviceContract):
     _parameter_names = ("current", "waveform")
@@ -244,6 +254,7 @@ class CurrentSource(_CircuitDeviceContract):
         object.__setattr__(self, "kind", "current_source")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class VoltageControlledVoltageSource(_CircuitDeviceContract):
     _terminal_names = ("positive", "negative", "control_positive", "control_negative")
@@ -271,6 +282,7 @@ class VoltageControlledVoltageSource(_CircuitDeviceContract):
         object.__setattr__(self, "kind", "vcvs")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class VoltageControlledCurrentSource(_CircuitDeviceContract):
     _terminal_names = ("positive", "negative", "control_positive", "control_negative")
@@ -298,6 +310,7 @@ class VoltageControlledCurrentSource(_CircuitDeviceContract):
         object.__setattr__(self, "kind", "vccs")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class CurrentControlledVoltageSource(_CircuitDeviceContract):
     _parameter_names = ("control_source", "transresistance")
@@ -318,6 +331,7 @@ class CurrentControlledVoltageSource(_CircuitDeviceContract):
         object.__setattr__(self, "kind", "ccvs")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class CurrentControlledCurrentSource(_CircuitDeviceContract):
     _parameter_names = ("control_source", "gain")
@@ -338,6 +352,7 @@ class CurrentControlledCurrentSource(_CircuitDeviceContract):
         object.__setattr__(self, "kind", "cccs")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class MutualInductor(_CircuitDeviceContract):
     _terminal_names = ()
@@ -363,6 +378,7 @@ class MutualInductor(_CircuitDeviceContract):
         object.__setattr__(self, "kind", "mutual_inductor")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class TimedSwitch(_CircuitDeviceContract):
     _parameter_names = (
@@ -413,6 +429,7 @@ _CIRCUIT_DEVICE_TYPES = (
 )
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class CircuitData:
     """Torch-native sampled voltages, currents, power, and solver diagnostics."""
@@ -610,6 +627,7 @@ class CircuitData:
         return cls._from_snapshot(payload)
 
 
+@experimental("circuits")
 class Circuit:
     """Declarative linear circuit graph owned by a Maxwell ``Scene``."""
 
@@ -1230,6 +1248,7 @@ def _instantiate_device(
     raise ValueError(f"Unsupported SPICE device {tokens[0]!r}.")
 
 
+@experimental("circuits")
 def parse_spice(
     text: str,
     *,
@@ -1459,6 +1478,22 @@ def _serialize_device(device) -> str:
     raise TypeError(f"Cannot serialize unsupported circuit device {type(device).__name__}.")
 
 
+@experimental("circuits")
+def circuits(result) -> dict[str, CircuitData]:
+    """The recorded circuit co-simulation data of ``result`` by circuit name."""
+    return dict(result._circuits)
+
+
+@experimental("circuits")
+def circuit(result, name: str) -> CircuitData:
+    """The recorded ``CircuitData`` of circuit ``name`` in ``result``."""
+    return result._circuit(name)
+
+
+# Public namespace ``mw.circuits``: the linear circuit model and the nonlinear device models.
+# ``circuit_devices`` imports this module, so its names are read on first access.
+from ._lazy import lazy_attributes  # noqa: E402
+
 __all__ = [
     "Circuit",
     "CircuitData",
@@ -1467,15 +1502,28 @@ __all__ = [
     "CurrentControlledCurrentSource",
     "CurrentControlledVoltageSource",
     "CurrentSource",
+    "Diode",
     "MNAConfig",
     "MutualInductor",
+    "NonlinearSolveConfig",
+    "PiecewiseLinearIV",
     "PiecewiseLinearWaveform",
+    "PolynomialIV",
     "PortBinding",
     "PulseWaveform",
     "SineWaveform",
     "TimedSwitch",
     "VoltageControlledCurrentSource",
     "VoltageControlledVoltageSource",
+    "VoltageDependentCapacitor",
     "VoltageSource",
+    "circuit",
+    "circuits",
     "parse_spice",
 ]
+
+__getattr__, __dir__ = lazy_attributes(__name__, names={
+    ".circuit_devices": ("Diode", "NonlinearSolveConfig", "PiecewiseLinearIV", "PolynomialIV",
+                         "VoltageDependentCapacitor"),
+})
+del lazy_attributes

@@ -65,7 +65,7 @@ changing either solver's consumer routing.
 `prepared.solver._ensure_material_components()`; **prepare alone is lazy and
 does not compile these FDFD materials**. `--entry fdtd` measures ordinary
 `Simulation.fdtd(...).prepare()`, which compiles during runtime initialization.
-The direct mode measures `prepare_scene(scene).compile_materials()`; the current
+The direct mode measures `compile_materials(prepare_scene(scene))`; the current
 public declarative `Scene` does not itself define `compile_materials`.
 
 The converter log named in the request was zero bytes when inspected; the

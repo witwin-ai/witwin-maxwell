@@ -30,9 +30,25 @@ def base_scene() -> mw.Scene:
         # source-free steps under conformal versus 1.00 under staircase). Scenes that
         # want conformal must opt in per scene with an explicit SubpixelSpec.
         # Dielectric scenes are unaffected either way (no PEC material).
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized", pec="staircase"),
-        device="cpu",
+        subpixel=mw.SubpixelSpec(samples=3, averaging="polarized", pec="staircase"),
     )
+
+
+def kept_half(scene: mw.Scene) -> mw.Scene:
+    """The kept part of ``scene`` folded at the center of every symmetry axis.
+
+    ``scene.symmetry`` names the planes; each one moves to the center of its axis
+    (a low-face plane keeps the upper half), so the explicit mirrored domain of the
+    returned scene is ``scene`` itself and its reference is that of ``scene``.
+    """
+    bounds = []
+    for (lower, upper), entry in zip(scene.domain.bounds, scene.symmetry):
+        middle = 0.5 * (float(lower) + float(upper))
+        if entry is None:
+            bounds.append((float(lower), float(upper)))
+        else:
+            bounds.append((middle, float(upper)) if entry[1] == "low" else (float(lower), middle))
+    return scene.updated(domain=mw.Domain(bounds=tuple(bounds)))
 
 
 def with_standard_plane_monitor(
@@ -44,42 +60,42 @@ def with_standard_plane_monitor(
     frequencies: tuple[float, ...],
     fields: tuple[str, ...] = ("Ex", "Ey", "Ez"),
 ) -> mw.Scene:
-    return scene.add_monitor(
+    return scene.updated(monitors=(
+        *scene.monitors,
         mw.PlaneMonitor(
             name=name,
             axis=axis,
             position=position,
             fields=fields,
             frequencies=frequencies,
-        )
-    )
+        ),
+    ))
 
 
 def with_plot_monitors(scene: mw.Scene, *, frequencies: tuple[float, ...]) -> mw.Scene:
-    for axis in ("x", "y", "z"):
-        scene.add_monitor(
-            mw.PlaneMonitor(
-                name=f"plot_field_{axis}",
-                axis=axis,
-                position=0.0,
-                fields=("Ex", "Ey", "Ez"),
-                frequencies=frequencies,
-            )
-        )
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.PlaneMonitor(
+              name=f"plot_field_{axis}",
+              axis=axis,
+              position=0.0,
+              fields=("Ex", "Ey", "Ez"),
+              frequencies=frequencies,
+          ) for axis in ("x", "y", "z")),
+    ))
     return scene
 
 
 def with_standard_flux_monitors(scene: mw.Scene, *, frequencies: tuple[float, ...]) -> mw.Scene:
-    scene.add_monitor(
-        mw.FluxMonitor(name="flux_pos_z", axis="z", position=0.30, frequencies=frequencies)
-    )
-    scene.add_monitor(
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.FluxMonitor(name="flux_pos_z", axis="z", position=0.30, frequencies=frequencies),
         mw.FluxMonitor(
             name="flux_neg_z",
             axis="z",
             position=-0.30,
             frequencies=frequencies,
             normal_direction="-",
-        )
-    )
+        ),
+    ))
     return scene

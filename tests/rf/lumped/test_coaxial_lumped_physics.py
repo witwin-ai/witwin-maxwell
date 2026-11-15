@@ -57,39 +57,45 @@ NOMINAL_IMPEDANCE = ETA0 / (2 * math.pi) * math.log(B / A)
 
 
 def _coax(name, z, **kwargs):
-    return mw.CoaxialLumpedPort(name, center=(0.0, 0.0, z), inner_diameter=2 * A, outer_diameter=2 * B,
+    return mw.rf.CoaxialLumpedPort(name, center=(0.0, 0.0, z), inner_diameter=2 * A, outer_diameter=2 * B,
                                 normal_axis="z", **kwargs)
 
 
 def _add_plane_monitors(scene, planes):
-    for index, z in enumerate(planes):
-        scene.add_monitor(mw.PlaneMonitor(f"plane{index}", axis="z", position=z, fields=("Ex",)))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.PlaneMonitor(f"plane{index}", axis="z", position=z, fields=("Ex",)) for index, z in enumerate(planes)),
+    ))
+    return scene
 
 
 def _scene(*, h=H, load=None, load_port=None, probes=True, monitors=False):
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-HALF, HALF), (-HALF, HALF), (0.0, LENGTH))),
-        grid=mw.GridSpec.uniform(h),
-        boundary=mw.BoundarySpec.pec(),
-        device="cuda",
-    )
     circle = [(B * math.cos(2 * math.pi * k / 96), B * math.sin(2 * math.pi * k / 96)) for k in range(96)]
     square = [(-HALF - h, -HALF - h), (HALF + h, -HALF - h), (HALF + h, HALF + h), (-HALF - h, HALF + h)]
-    scene.add_structure(mw.Structure(mw.ComplexPolySlab([square, circle], bounds=(0.0, LENGTH), axis="z"),
-                                     mw.Material.pec(), name="shield"))
-    scene.add_structure(mw.Structure(mw.Cylinder(position=(0, 0, 0.5 * (Z0 + Z1)), radius=A, height=Z1 - Z0, axis="z"),
-                                     mw.Material.pec(), name="inner"))
-    scene.add_port(_coax("feed", Z0, reference_impedance=50.0))
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-HALF, HALF), (-HALF, HALF), (0.0, LENGTH))),
+                grid=mw.GridSpec.uniform(h),
+                boundary=mw.BoundarySpec.pec(),
+                structures=(
+            mw.Structure(mw.geometry.ComplexPolySlab([square, circle], bounds=(0.0, LENGTH), axis="z"),
+                         mw.Material.pec(), name="shield"),
+            mw.Structure(mw.Cylinder(position=(0, 0, 0.5 * (Z0 + Z1)), radius=A, height=Z1 - Z0, axis="z"),
+                         mw.Material.pec(), name="inner"),
+            ),
+                ports=(_coax("feed", Z0, reference_impedance=50.0),),
+            )
     if probes:
-        for name, z in PROBES:
-            scene.add_port(_coax(name, z))
+        scene = scene.updated(ports=(*scene.ports, *(_coax(name, z) for name, z in PROBES)))
     if load is not None:
-        scene.add_lumped_element(mw.CoaxialLumpedResistor("load", center=(0, 0, Z1), inner_diameter=2 * A,
-                                                          outer_diameter=2 * B, normal_axis="z", resistance=load))
+        scene = scene.updated(lumped_elements=(
+            *scene.lumped_elements,
+            mw.rf.CoaxialLumpedResistor("load", center=(0, 0, Z1), inner_diameter=2 * A,
+                                     outer_diameter=2 * B, normal_axis="z", resistance=load),
+        ))
     if load_port is not None:
-        scene.add_port(load_port)
+        scene = scene.updated(ports=(*scene.ports, load_port))
     if monitors:
-        _add_plane_monitors(scene, ROUND_PLANES)
+        scene = _add_plane_monitors(scene, ROUND_PLANES)
     return scene
 
 
@@ -97,9 +103,11 @@ def _run(scene, *, steps=6000, source_time=PULSE, frequencies=FREQUENCIES):
     return mw.Simulation.fdtd(
         scene,
         frequencies=frequencies,
-        excitations=mw.PortExcitation("feed", source_time=source_time),
-        run_time=mw.TimeConfig(time_steps=steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        excitations=mw.rf.PortExcitation("feed", source_time=source_time),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
 
 
@@ -134,10 +142,25 @@ def _lattice_impedance(solver, z):
     return ETA0 / float(np.sum((incidence @ phi) ** 2))
 
 
+# 2 mm around the mid plane 0.5 * (Z0 + Z1); the span is an exact multiple of every h used.
+SECTION = (7.5e-3, 9.5e-3)
+
+
+def _section_scene(h):
+    """The unported round line cut to a 2 mm section centred on its mid plane.
+
+    Same transverse grid, z spacing and bodies as the full line, so the conductor-node sets
+    and free edges of the mid node plane are the same. The full 18 mm line at 0.0625 mm needs
+    more than 8 GiB of CUDA memory to compile its PEC occupancy; the section needs about 1/9 of it.
+    """
+    return _scene(h=h, probes=False).updated(
+        ports=(), domain=mw.Domain(bounds=((-HALF, HALF), (-HALF, HALF), SECTION)))
+
+
 @lru_cache(maxsize=None)
 def _staircase_impedance(h):
-    solver = mw.Simulation.fdtd(_scene(h=h, probes=False).clone(ports=()), frequencies=(FREQUENCIES[0],),
-                                run_time=mw.TimeConfig(time_steps=1)).prepare().solver
+    solver = mw.Simulation.fdtd(_section_scene(h), frequencies=(FREQUENCIES[0],),
+                                config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare().solver
     return _lattice_impedance(solver, 0.5 * (Z0 + Z1))
 
 
@@ -189,7 +212,7 @@ def _plane_phase_velocity(result, weight, planes):
     """k0 / beta per frequency from a forward + backward fit of a transverse functional over ``planes``."""
     samples = []
     for index in range(len(planes)):
-        monitor = result.monitor(f"plane{index}")
+        monitor = result.raw_monitor(f"plane{index}")
         ex = torch.as_tensor(monitor["Ex"]).cpu().numpy()
         x, y = (np.asarray(c) for c in monitor["coords"])
         xx, yy = np.meshgrid(x, y, indexing="ij")
@@ -323,7 +346,7 @@ def test_coax_fed_loads_match_the_staircase_line_with_its_end_capacitances(runs,
 
 def test_coaxial_resistor_equals_a_terminated_coaxial_port_bitwise():
     resistor = _run(_scene(load=80.0, probes=False), steps=1500)
-    terminated = _run(_scene(load_port=_coax("end", Z1, reference_impedance=80.0, termination=mw.SeriesRLC(r=80.0)),
+    terminated = _run(_scene(load_port=_coax("end", Z1, reference_impedance=80.0, termination=mw.rf.SeriesRLC(r=80.0)),
                              probes=False), steps=1500)
     for component in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         assert torch.equal(getattr(resistor.solver, component), getattr(terminated.solver, component))
@@ -339,9 +362,11 @@ def test_coaxial_port_sweep_matches_the_staircase_line_two_port(ends):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=FREQUENCIES,
-        excitations=mw.PortSweep(source_time=PULSE),
-        run_time=mw.TimeConfig(time_steps=6000),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        excitations=mw.rf.PortSweep(source_time=PULSE),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=6000),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     s = result.network.s.cpu().numpy()
     assert result.network.port_names == ("feed", "end")
@@ -357,35 +382,38 @@ def test_coaxial_port_sweep_matches_the_staircase_line_two_port(ends):
 
 
 def _square_scene(load=None, *, probes=True, monitors=False):
-    scene = mw.Scene(
-        domain=mw.Domain(bounds=((-HALF, HALF), (-HALF, HALF), (0.0, LENGTH))),
-        grid=mw.GridSpec.uniform(H),
-        boundary=mw.BoundarySpec.pec(),
-        device="cuda",
-    )
     square = [(-HALF - H, -HALF - H), (HALF + H, -HALF - H), (HALF + H, HALF + H), (-HALF - H, HALF + H)]
     hole = [(-1.75e-3, -1.75e-3), (1.75e-3, -1.75e-3), (1.75e-3, 1.75e-3), (-1.75e-3, 1.75e-3)]
-    scene.add_structure(mw.Structure(mw.ComplexPolySlab([square, hole], bounds=(0.0, LENGTH), axis="z"),
-                                     mw.Material.pec(), name="shield"))
-    scene.add_structure(mw.Structure(mw.Box(position=(0, 0, 0.5 * (Z0 + Z1)), size=(2e-3, 2e-3, Z1 - Z0)),
-                                     mw.Material.pec(), name="inner"))
     # The annulus spans both discrete square conductors; the harmonic row adapts to them.
-    scene.add_port(_coax("feed", Z0, reference_impedance=50.0))
+    scene = mw.Scene(
+                domain=mw.Domain(bounds=((-HALF, HALF), (-HALF, HALF), (0.0, LENGTH))),
+                grid=mw.GridSpec.uniform(H),
+                boundary=mw.BoundarySpec.pec(),
+                structures=(
+            mw.Structure(mw.geometry.ComplexPolySlab([square, hole], bounds=(0.0, LENGTH), axis="z"),
+                         mw.Material.pec(), name="shield"),
+            mw.Structure(mw.Box(position=(0, 0, 0.5 * (Z0 + Z1)), size=(2e-3, 2e-3, Z1 - Z0)),
+                         mw.Material.pec(), name="inner"),
+            ),
+                ports=(_coax("feed", Z0, reference_impedance=50.0),),
+            )
     if probes:
-        for name, z in PROBES:
-            scene.add_port(_coax(name, z))
+        scene = scene.updated(ports=(*scene.ports, *(_coax(name, z) for name, z in PROBES)))
     if load is not None:
-        scene.add_lumped_element(mw.CoaxialLumpedResistor("load", center=(0, 0, Z1), inner_diameter=2 * A,
-                                                          outer_diameter=2 * B, normal_axis="z", resistance=load))
+        scene = scene.updated(lumped_elements=(
+            *scene.lumped_elements,
+            mw.rf.CoaxialLumpedResistor("load", center=(0, 0, Z1), inner_diameter=2 * A,
+                                     outer_diameter=2 * B, normal_axis="z", resistance=load),
+        ))
     if monitors:
-        _add_plane_monitors(scene, SQUARE_PLANES)
+        scene = _add_plane_monitors(scene, SQUARE_PLANES)
     return scene
 
 
 @lru_cache(maxsize=None)
 def _square_impedance():
-    solver = mw.Simulation.fdtd(_square_scene(probes=False).clone(ports=()), frequencies=(FREQUENCIES[0],),
-                                run_time=mw.TimeConfig(time_steps=1)).prepare().solver
+    solver = mw.Simulation.fdtd(_square_scene(probes=False).updated(ports=()), frequencies=(FREQUENCIES[0],),
+                                config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare().solver
     return _lattice_impedance(solver, 0.5 * (Z0 + Z1))
 
 

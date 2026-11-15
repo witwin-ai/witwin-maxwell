@@ -19,9 +19,11 @@ def _build_simulation(model, *, time_steps=24):
     return mw.Simulation.fdtd(
         model,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
 
 
@@ -33,27 +35,26 @@ def _build_simulation(model, *, time_steps=24):
             "anisotropic magnetic \\(mu_tensor\\) media",
         ),
         (
-            mw.Material(eps_r=2.0, modulation=mw.ModulationSpec(frequency=1.0e8, amplitude=0.1)),
+            mw.Material(eps_r=2.0, modulation=mw.media.ModulationSpec(frequency=1.0e8, amplitude=0.1)),
             "time-modulated media",
         ),
     ],
 )
 def test_fdtd_gradient_bridge_rejects_unsupported_medium_capabilities(material, message):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
-            material=material,
-        )
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+                material=material,
+            ),
+            ),
+            )
 
     bridge = object.__new__(_FDTDGradientBridge)
     with pytest.raises(NotImplementedError, match=message):
-        bridge._validate_supported_configuration(SimpleNamespace(scene=scene))
+        bridge._validate_supported_configuration(SimpleNamespace(scene=SimpleNamespace(scene=scene)))
 
 
 def test_fdtd_gradient_bridge_accepts_full_anisotropic_epsilon():
@@ -63,19 +64,18 @@ def test_fdtd_gradient_bridge_accepts_full_anisotropic_epsilon():
     from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
-            material=mw.Material(
-                eps_r=1.0,
-                epsilon_tensor=mw.Tensor3x3(((2.5, 0.3, 0.0), (0.3, 2.5, 0.0), (0.0, 0.0, 2.5))),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+                material=mw.Material(
+                    eps_r=1.0,
+                    epsilon_tensor=mw.media.Tensor3x3(((2.5, 0.3, 0.0), (0.3, 2.5, 0.0), (0.0, 0.0, 2.5))),
+                ),
             ),
-        )
-    )
+            ),
+            )
 
     assert _unsupported_adjoint_medium(scene) is None
 
@@ -85,43 +85,41 @@ def test_fdtd_gradient_bridge_rejects_trainable_geometry_on_full_anisotropic_med
     off-diagonal coupling coefficients carry no material gradient channel, so the
     geometry sensitivity would be silently dropped."""
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(
-                position=(0.0, 0.0, 0.0),
-                size=torch.tensor([0.5, 0.5, 0.5], requires_grad=True),
+                subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(
+                    position=(0.0, 0.0, 0.0),
+                    size=torch.tensor([0.5, 0.5, 0.5], requires_grad=True),
+                ),
+                material=mw.Material(
+                    eps_r=1.0,
+                    epsilon_tensor=mw.media.Tensor3x3(((2.5, 0.3, 0.0), (0.3, 2.5, 0.0), (0.0, 0.0, 2.5))),
+                ),
             ),
-            material=mw.Material(
-                eps_r=1.0,
-                epsilon_tensor=mw.Tensor3x3(((2.5, 0.3, 0.0), (0.3, 2.5, 0.0), (0.0, 0.0, 2.5))),
             ),
-        )
-    )
+            )
 
     bridge = object.__new__(_FDTDGradientBridge)
     with pytest.raises(NotImplementedError, match="trainable geometry on full \\(off-diagonal\\) anisotropic"):
-        bridge._validate_supported_configuration(SimpleNamespace(scene=scene))
+        bridge._validate_supported_configuration(SimpleNamespace(scene=SimpleNamespace(scene=scene)))
 
 
 def test_fdtd_gradient_bridge_accepts_diagonal_anisotropic_epsilon():
     from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
-            material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+                material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
+            ),
+            ),
+            )
 
     assert _unsupported_adjoint_medium(scene) is None
 
@@ -129,9 +127,9 @@ def test_fdtd_gradient_bridge_accepts_diagonal_anisotropic_epsilon():
 @pytest.mark.parametrize(
     "material",
     [
-        mw.LossyMetalMedium(conductivity=5.8e7),
-        mw.SurfaceImpedanceMedium(
-            impedance=mw.RationalSurfaceImpedance(
+        mw.media.LossyMetalMedium(conductivity=5.8e7),
+        mw.media.SurfaceImpedanceMedium(
+            impedance=mw.media.RationalSurfaceImpedance(
                 poles=torch.tensor([-2.0 * math.pi * 2.0e9], dtype=torch.complex128),
                 residues=torch.tensor(
                     [[[1.0 / (math.sqrt(2.0 * math.pi * 2.0e9 * 1.25663706212e-6 / (2.0 * 50.0)) / (2.0 * math.pi * 2.0e9))]]],
@@ -151,23 +149,22 @@ def test_fdtd_gradient_bridge_rejects_surface_impedance_media(material):
     from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.375, 0.0, 0.0), size=(0.25, 2.0, 2.0)),
-            material=material,
-        )
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.375, 0.0, 0.0), size=(0.25, 2.0, 2.0)),
+                material=material,
+            ),
+            ),
+            )
 
     message = _unsupported_adjoint_medium(scene)
     assert message is not None and "surface-impedance boundary media" in message
 
     bridge = object.__new__(_FDTDGradientBridge)
     with pytest.raises(NotImplementedError, match="surface-impedance boundary media"):
-        bridge._validate_supported_configuration(SimpleNamespace(scene=scene))
+        bridge._validate_supported_configuration(SimpleNamespace(scene=SimpleNamespace(scene=scene)))
 
 
 def _magnetic_dispersive_material():
@@ -180,16 +177,15 @@ def test_fdtd_gradient_bridge_accepts_static_magnetic_dispersive_media():
     from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
-            material=_magnetic_dispersive_material(),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+                material=_magnetic_dispersive_material(),
+            ),
+            ),
+            )
 
     assert _unsupported_adjoint_medium(scene) is None
 
@@ -198,16 +194,15 @@ def test_fdtd_gradient_bridge_accepts_pure_kerr_media():
     from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
-            material=mw.Material(eps_r=2.0, kerr_chi3=1.0e-10),
-        )
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+                material=mw.Material(eps_r=2.0, kerr_chi3=1.0e-10),
+            ),
+            ),
+            )
 
     assert _unsupported_adjoint_medium(scene) is None
 
@@ -215,13 +210,13 @@ def test_fdtd_gradient_bridge_accepts_pure_kerr_media():
 @pytest.mark.parametrize(
     "material",
     [
-        mw.Material(eps_r=2.0, nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-12)),
-        mw.Material(eps_r=2.0, nonlinearity=mw.TwoPhotonAbsorption(beta=1.0e-12)),
+        mw.Material(eps_r=2.0, nonlinearity=mw.media.NonlinearSusceptibility(chi2=1.0e-12)),
+        mw.Material(eps_r=2.0, nonlinearity=mw.media.TwoPhotonAbsorption(beta=1.0e-12)),
         mw.Material(
             eps_r=2.0,
             nonlinearity=(
-                mw.NonlinearSusceptibility(chi2=1.0e-12, chi3=1.0e-10),
-                mw.TwoPhotonAbsorption(beta=1.0e-12),
+                mw.media.NonlinearSusceptibility(chi2=1.0e-12, chi3=1.0e-10),
+                mw.media.TwoPhotonAbsorption(beta=1.0e-12),
             ),
         ),
     ],
@@ -232,40 +227,38 @@ def test_fdtd_gradient_bridge_accepts_general_nonlinear_media(material):
     from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
-            material=material,
-        )
-    )
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+                material=material,
+            ),
+            ),
+            )
 
     assert _unsupported_adjoint_medium(scene) is None
 
 
 def test_fdtd_gradient_bridge_rejects_trainable_geometry_on_magnetic_dispersive_media():
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.25),
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(
-                position=(0.0, 0.0, 0.0),
-                size=torch.tensor([0.5, 0.5, 0.5], requires_grad=True),
+                subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.25),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(
+                    position=(0.0, 0.0, 0.0),
+                    size=torch.tensor([0.5, 0.5, 0.5], requires_grad=True),
+                ),
+                material=_magnetic_dispersive_material(),
             ),
-            material=_magnetic_dispersive_material(),
-        )
-    )
+            ),
+            )
 
     bridge = object.__new__(_FDTDGradientBridge)
     with pytest.raises(NotImplementedError, match="trainable geometry on magnetic dispersive"):
-        bridge._validate_supported_configuration(SimpleNamespace(scene=scene))
+        bridge._validate_supported_configuration(SimpleNamespace(scene=SimpleNamespace(scene=scene)))
 
 
 def _fake_checkpoint_solver():
@@ -1085,35 +1078,32 @@ def _build_material_pullback_scene(device: str):
         dtype=torch.float32,
     )
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((0.0, 0.5), (0.0, 0.4), (0.0, 0.4))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.none(),
-        device=device,
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="region_a",
-            geometry=mw.Box(position=(0.2, 0.15, 0.15), size=(0.3, 0.3, 0.3)),
-            density=density_a,
-            bounds=(-0.5, 1.5),
-            eps_bounds=(1.0, 4.5),
-            mu_bounds=(1.0, 1.0),
-            filter_radius=0.12,
-            projection_beta=5.0,
-        )
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="region_b",
-            geometry=mw.Box(position=(0.3, 0.15, 0.15), size=(0.2, 0.2, 0.2)),
-            density=density_b,
-            eps_bounds=(1.5, 5.0),
-            mu_bounds=(1.0, 1.0),
-            filter_radius=0.16,
-            projection_beta=4.0,
-        )
-    )
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((0.0, 0.5), (0.0, 0.4), (0.0, 0.4))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.none(),
+                material_regions=(
+            mw.MaterialRegion(
+                name="region_a",
+                geometry=mw.Box(position=(0.2, 0.15, 0.15), size=(0.3, 0.3, 0.3)),
+                density=density_a,
+                bounds=(-0.5, 1.5),
+                eps_bounds=(1.0, 4.5),
+                mu_bounds=(1.0, 1.0),
+                filter_radius=0.12,
+                projection_beta=5.0,
+            ),
+            mw.MaterialRegion(
+                name="region_b",
+                geometry=mw.Box(position=(0.3, 0.15, 0.15), size=(0.2, 0.2, 0.2)),
+                density=density_b,
+                eps_bounds=(1.5, 5.0),
+                mu_bounds=(1.0, 1.0),
+                filter_radius=0.16,
+                projection_beta=4.0,
+            ),
+            ),
+            )
     return scene, (density_a, density_b)
 
 
@@ -1127,7 +1117,7 @@ def _build_material_pullback_scene(device: str):
 def test_material_pullback_explicit_matches_autograd_baseline(device):
     torch.manual_seed(101)
     scene, density_tensors = _build_material_pullback_scene(device)
-    prepared_scene = prepare_scene(scene)
+    prepared_scene = prepare_scene(scene, device=device)
     grad_eps_ex = torch.randn((prepared_scene.Nx - 1, prepared_scene.Ny, prepared_scene.Nz), device=device, dtype=torch.float32)
     grad_eps_ey = torch.randn((prepared_scene.Nx, prepared_scene.Ny - 1, prepared_scene.Nz), device=device, dtype=torch.float32)
     grad_eps_ez = torch.randn((prepared_scene.Nx, prepared_scene.Ny, prepared_scene.Nz - 1), device=device, dtype=torch.float32)
@@ -1164,30 +1154,29 @@ class _DensityPointScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.06),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.06),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -1205,28 +1194,27 @@ class _AnalyticBoxPointScene(mw.SceneModule):
             )
         )
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-            subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
-        )
-        scene.add_structure(
-            mw.Structure(
-                name="design_box",
-                geometry=mw.Box(position=position, size=(0.18, 0.18, 0.18)),
-                material=mw.Material(eps_r=20.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.06),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=5000.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)))
+                    domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    subpixel=mw.SubpixelSpec(samples=5, averaging="polarized"),
+                    structures=(
+                mw.Structure(
+                    name="design_box",
+                    geometry=mw.Box(position=position, size=(0.18, 0.18, 0.18)),
+                    material=mw.Material(eps_r=20.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.06),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=5000.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -1258,28 +1246,27 @@ class _DensitySurfaceSourceScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.48, 0.48))),
-            # Resolve the 1 GHz soft surface source above the positive discrete
-            # Poynting-power limit; 0.12 m is too coarse for this wave in 3D.
-            grid=mw.GridSpec.uniform(0.08),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                # The x faces are offset half a cell from the grid nodes so
-                # the voxel window is off the node-aligned knife edge and
-                # matches the placement this test was calibrated against.
-                geometry=mw.Box(position=(-0.06, 0.0, 0.0), size=(0.24, 0.12, 0.12)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(self._build_source())
-        scene.add_monitor(mw.PointMonitor("probe", (0.12, 0.0, 0.0), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.48, 0.48))),
+                    # Resolve the 1 GHz soft surface source above the positive discrete
+                    # Poynting-power limit; 0.12 m is too coarse for this wave in 3D.
+                    grid=mw.GridSpec.uniform(0.08),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    # The x faces are offset half a cell from the grid nodes so
+                    # the voxel window is off the node-aligned knife edge and
+                    # matches the placement this test was calibrated against.
+                    geometry=mw.Box(position=(-0.06, 0.0, 0.0), size=(0.24, 0.12, 0.12)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(self._build_source(),),
+                    monitors=(mw.PointMonitor("probe", (0.12, 0.0, 0.0), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -1291,30 +1278,29 @@ class _DensityFluxScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.06),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.FluxMonitor("flux_probe", axis="z", position=0.06, normal_direction="+"))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.06),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.FluxMonitor("flux_probe", axis="z", position=0.06, normal_direction="+"),),
+                )
         return scene
 
 
@@ -1341,37 +1327,36 @@ class _DensityDispersiveScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_structure(
-            mw.Structure(
-                name=f"{self.material_kind}_host",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.24, 0.24, 0.24)),
-                material=self._build_medium(),
-            )
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, -0.06),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    structures=(
+                mw.Structure(
+                    name=f"{self.material_kind}_host",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.24, 0.24, 0.24)),
+                    material=self._build_medium(),
+                ),
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.12, 0.12, 0.12)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, -0.06),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -1406,23 +1391,22 @@ class _DensityTFSFScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-1.2, 1.2), (-1.2, 1.2), (-1.2, 1.2))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.12, 0.12, 0.12)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(self._build_source())
-        scene.add_monitor(mw.PointMonitor("probe", (0.12, 0.0, 0.0), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-1.2, 1.2), (-1.2, 1.2), (-1.2, 1.2))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.12, 0.12, 0.12)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(self._build_source(),),
+                    monitors=(mw.PointMonitor("probe", (0.12, 0.0, 0.0), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -1434,30 +1418,29 @@ class _DensityBlochScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.15),
-            boundary=mw.BoundarySpec.bloch((math.pi / 1.2, 0.0, 0.0)),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.15, 0.0, 0.0), size=(0.15, 0.15, 0.15)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(-0.55, 0.0, 0.0),
-                polarization="Ez",
-                width=0.12,
-                source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=25.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.15, 0.0, 0.0), fields=("Ez",)))
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.15),
+                    boundary=mw.BoundarySpec.bloch((math.pi / 1.2, 0.0, 0.0)),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.15, 0.0, 0.0), size=(0.15, 0.15, 0.15)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(-0.55, 0.0, 0.0),
+                    polarization="Ez",
+                    width=0.12,
+                    source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=25.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.15, 0.0, 0.0), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -1472,10 +1455,10 @@ class _DensityBlochYPmlScene(mw.SceneModule):
     def to_scene(self):
         density = torch.sigmoid(self.logits)
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.75, 0.75), (-0.6, 0.6))),
-            grid=mw.GridSpec.uniform(0.15),
-            boundary=mw.BoundarySpec.faces(
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=((-0.6, 0.6), (-0.75, 0.75), (-0.6, 0.6))),
+                    grid=mw.GridSpec.uniform(0.15),
+                    boundary=mw.BoundarySpec.faces(
                 default="pml",
                 num_layers=2,
                 strength=1.0,
@@ -1483,27 +1466,26 @@ class _DensityBlochYPmlScene(mw.SceneModule):
                 y="pml",
                 z="bloch",
                 bloch_wavevector=(math.pi / 1.2, 0.0, math.pi / 2.4),
-            ),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.15, 0.15, 0.15)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, -0.55, 0.0),
-                polarization="Ez",
-                width=0.12,
-                source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=25.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",)))
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.15, 0.15, 0.15)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, -0.55, 0.0),
+                    polarization="Ez",
+                    width=0.12,
+                    source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=25.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",)),),
+                )
         return scene
 
 
@@ -1535,39 +1517,36 @@ class _DensityGratingTFSFScene(mw.SceneModule):
         boundary_kinds = {other: "bloch" for other in "xyz"}
         boundary_kinds[axis] = "pml"
         scene = mw.Scene(
-            subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-            domain=mw.Domain(bounds=domain_bounds),
-            grid=mw.GridSpec.uniform(0.15),
-            boundary=mw.BoundarySpec.faces(
+                    subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                    domain=mw.Domain(bounds=domain_bounds),
+                    grid=mw.GridSpec.uniform(0.15),
+                    boundary=mw.BoundarySpec.faces(
                 default="pml",
                 num_layers=2,
                 strength=1.0,
                 bloch_wavevector="auto",
                 **boundary_kinds,
-            ),
-            device="cuda",
-        )
-        scene.add_material_region(
-            mw.MaterialRegion(
-                name="design",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.15, 0.15, 0.15)),
-                density=density,
-                eps_bounds=(1.0, 6.0),
-                mu_bounds=(1.0, 1.0),
-            )
-        )
-        scene.add_source(
-            mw.PlaneWave(
-                name="grating_tfsf",
-                direction=direction,
-                polarization=polarization,
-                source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
-                injection=mw.TFSF.slab(axis=axis, bounds=(-0.30, 0.30)),
-            )
-        )
-        scene.add_monitor(
-            mw.PointMonitor("probe", probe_position, fields=(_GRATING_PROBE_COMPONENT[axis],))
-        )
+                ),
+                    material_regions=(
+                mw.MaterialRegion(
+                    name="design",
+                    geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.15, 0.15, 0.15)),
+                    density=density,
+                    eps_bounds=(1.0, 6.0),
+                    mu_bounds=(1.0, 1.0),
+                ),
+                ),
+                    sources=(
+                mw.PlaneWave(
+                    name="grating_tfsf",
+                    direction=direction,
+                    polarization=polarization,
+                    source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
+                    injection=mw.TFSF.slab(axis=axis, bounds=(-0.30, 0.30)),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", probe_position, fields=(_GRATING_PROBE_COMPONENT[axis],)),),
+                )
         return scene
 
 
@@ -1578,53 +1557,51 @@ class _UnsupportedSceneParam(mw.SceneModule):
 
     def to_scene(self):
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-            grid=mw.GridSpec.uniform(0.12),
-            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-            device="cuda",
-        )
-        scene.add_source(
-            mw.PointDipole(
-                position=(0.0, 0.0, float(self.offset.detach().item())),
-                polarization="Ez",
-                width=0.04,
-                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=20.0),
-            )
-        )
-        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",)))
+                    domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+                    grid=mw.GridSpec.uniform(0.12),
+                    boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                    sources=(
+                mw.PointDipole(
+                    position=(0.0, 0.0, float(self.offset.detach().item())),
+                    polarization="Ez",
+                    width=0.04,
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=20.0),
+                ),
+                ),
+                    monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",)),),
+                )
         return scene
 
 
 def _build_direct_geometry_scene(position: torch.Tensor):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
-        grid=mw.GridSpec.uniform(0.12),
-        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda",
-        subpixel_samples=mw.SubpixelSpec(samples=5, averaging="polarized"),
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="direct_box",
-            geometry=mw.Box(position=position, size=(0.18, 0.18, 0.18)),
-            material=mw.Material(eps_r=20.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, -0.06),
-            polarization="Ez",
-            width=0.04,
-            source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=5000.0),
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)))
+                domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
+                grid=mw.GridSpec.uniform(0.12),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                subpixel=mw.SubpixelSpec(samples=5, averaging="polarized"),
+                structures=(
+            mw.Structure(
+                name="direct_box",
+                geometry=mw.Box(position=position, size=(0.18, 0.18, 0.18)),
+                material=mw.Material(eps_r=20.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, -0.06),
+                polarization="Ez",
+                width=0.04,
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=5000.0),
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (0.0, 0.0, 0.06), fields=("Ez",)),),
+            )
     return scene
 
 
 def _loss_from_point_probe(model):
     result = _build_simulation(model).run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).sel(component="Ez").values
     loss = torch.abs(data) ** 2
     return result, data, loss
 
@@ -1636,49 +1613,49 @@ def _geometry_target_probe(target_x: float):
 
 def _loss_from_point_probe_target(model, target_data: torch.Tensor):
     result = _build_simulation(model).run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe").isel(component=0).values
     loss = torch.abs(data - target_data) ** 2
     return result, data, loss
 
 
 def _loss_from_surface_probe(model):
     result = _build_simulation(model, time_steps=48).run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).sel(component="Ez").values
     loss = torch.abs(data) ** 2
     return result, data, loss
 
 
 def _loss_from_dispersive_probe(model):
     result = _build_simulation(model, time_steps=36).run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).sel(component="Ez").values
     loss = torch.abs(data) ** 2
     return result, data, loss
 
 
 def _loss_from_tfsf_probe(model):
     result = _build_simulation(model, time_steps=48).run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).sel(component="Ez").values
     loss = torch.abs(data) ** 2
     return result, data, loss
 
 
 def _loss_from_bloch_probe(model):
     result = _build_simulation(model, time_steps=40).run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).sel(component="Ez").values
     loss = torch.abs(data) ** 2
     return result, data, loss
 
 
 def _loss_from_grating_tfsf_probe(model):
     result = _build_simulation(model, time_steps=48).run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).isel(component=0).values
     loss = torch.abs(data) ** 2
     return result, data, loss
 
 
 def _loss_from_bloch_y_pml_probe(model):
     result = _build_simulation(model, time_steps=40).run()
-    data = result.monitor("probe")["data"]
+    data = result.monitor("probe", freq_index=0).sel(component="Ez").values
     loss = torch.abs(data) ** 2
     return result, data, loss
 
@@ -1697,7 +1674,7 @@ def test_fdtd_gradient_bridge_backpropagates_to_scene_module_density_parameters(
     assert model.logits.grad is not None
     assert model.logits.grad.shape == model.logits.shape
     assert torch.isfinite(model.logits.grad).all()
-    assert result.monitor("probe")["data"].grad_fn is not None
+    assert result.monitor("probe", freq_index=0).sel(component="Ez").values.grad_fn is not None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -1716,7 +1693,7 @@ def test_fdtd_gradient_bridge_backpropagates_to_direct_scene_geometry_parameters
     assert position.grad.shape == position.shape
     assert torch.isfinite(position.grad).all()
     assert float(position.grad[0].abs() * .1 / loss.detach()) > 1.0e-6
-    assert result.monitor("probe")["data"].grad_fn is not None
+    assert result.monitor("probe").isel(component=0).values.grad_fn is not None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -1734,7 +1711,7 @@ def test_fdtd_gradient_bridge_backpropagates_to_scene_module_geometry_parameters
     assert model.box_x.grad is not None
     assert torch.isfinite(model.box_x.grad).all()
     assert float(model.box_x.grad.abs() * .1 / loss.detach()) > 1.0e-6
-    assert result.monitor("probe")["data"].grad_fn is not None
+    assert result.monitor("probe").isel(component=0).values.grad_fn is not None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -2223,9 +2200,11 @@ def test_fdtd_gradient_bridge_backward_profile_uses_device_batched_dense_seeds()
     simulation = mw.Simulation.fdtd(
         model,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=24),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=24),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=True,
+        ),
     )
     bridge = _FDTDGradientBridge(simulation)
     bridge.forward(tuple(bridge.material_inputs))

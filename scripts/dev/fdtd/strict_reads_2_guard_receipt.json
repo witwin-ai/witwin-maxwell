@@ -1,0 +1,81 @@
+{
+ "schema": "witwin.guard-identity-receipt/1",
+ "description": "fix/strict-scene-reads-2: simulation.py reads Scene fields strictly (getattr(self.scene, 'x', default) -> self.scene.x), so the enclosing conditions of these guards changed. Path, scope, raise expression and message are identical. Old identity -> new identity and conditions, paired by (path, scope, expression, message). body_sha256 hashes (path, scope, raise expression, message); the normalized-conditions hashes hash the enclosing conditions (if tests and for iterables) with every three-argument getattr(X, 'name', default) rewritten to X.name (old side from base eecca456374fc7b8c4b4c5505903874b4e31d407, new side from this tree). 'manifest' lists the identities re-keyed in docs/reference/fdtd-capability-guards.json (the others are contract guards outside the manifest). 'review' lists identities whose normalized conditions differ.",
+ "base": "eecca456374fc7b8c4b4c5505903874b4e31d407",
+ "guard_id_map": {
+  "a998245e70c194559cca17ca7b0fb52052f45b77aecf309462036641ebcf7c5a:0": {
+   "id": "3a5ed1d14fb212c3e95993f5c96d1fd27c8d642fee8d1bd1da4810ee9adc394c:0",
+   "conditions": [
+    [
+     "BoolOp(op=And(), values=[Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='scene', ctx=Load()), attr='networks', ctx=Load()), Compare(left=Attribute(value=Name(id='self', ctx=Load()), attr='method', ctx=Load()), ops=[In()], comparators=[Tuple(elts=[Attribute(value=Name(id='SimulationMethod', ctx=Load()), attr='FDFD', ctx=Load()), Attribute(value=Name(id='SimulationMethod', ctx=Load()), attr='MOM', ctx=Load())], ctx=Load())])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "4ad39a4a4b32114b490c796dd49d8880c48491b965d7a076191718cefdfb93bb",
+   "old_normalized_conditions_sha256": "09c9f719ab5d19a0a960341996cc162b95b21f5fef6ddb808d1e2302e9298066",
+   "normalized_conditions_sha256": "09c9f719ab5d19a0a960341996cc162b95b21f5fef6ddb808d1e2302e9298066"
+  },
+  "e5018afc4534848d25387bd676442b8cd36adb633fba6458532d94a658351f7d:0": {
+   "id": "a0b043e97f933c788ed8da12c9d5e3855815c2f34e363929aac428570648539c:0",
+   "conditions": [
+    [
+     "for Name(id='block', ctx=Store()) in Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='scene', ctx=Load()), attr='networks', ctx=Load())",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='isinstance', ctx=Load()), args=[Name(id='model', ctx=Load()), Name(id='RationalModel', ctx=Load())], keywords=[])",
+     "true"
+    ],
+    [
+     "Name(id='unsupported', ctx=Load())",
+     "true"
+    ]
+   ],
+   "body_sha256": "3f67edc1b7980c6ab94406820b73993d2864f50d6a15ef946a28431c5e1c48ec",
+   "old_normalized_conditions_sha256": "58d393b8a216f65f023bb62db32af7f808d09d2dccca66583667179396de7381",
+   "normalized_conditions_sha256": "58d393b8a216f65f023bb62db32af7f808d09d2dccca66583667179396de7381"
+  },
+  "a2082bd5b65fa0f06dd353e9ffe85896742a98b0d50ea086b6ae81bd0930e44d:0": {
+   "id": "d3966d68d9fea77f339a23da69baf3c6b339349399117b1f94a692717ac2091d:0",
+   "conditions": [
+    [
+     "for Name(id='block', ctx=Store()) in Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='scene', ctx=Load()), attr='networks', ctx=Load())",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='isinstance', ctx=Load()), args=[Name(id='model', ctx=Load()), Name(id='RationalModel', ctx=Load())], keywords=[])",
+     "false"
+    ],
+    [
+     "BoolOp(op=And(), values=[Call(func=Name(id='isinstance', ctx=Load()), args=[Name(id='model', ctx=Load()), Name(id='StateSpaceNetwork', ctx=Load())], keywords=[]), Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Attribute(value=Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='model', ctx=Load()), Name(id='name', ctx=Load())], keywords=[]), attr='requires_grad', ctx=Load()), generators=[comprehension(target=Name(id='name', ctx=Store()), iter=Tuple(elts=[Constant(value='A'), Constant(value='B'), Constant(value='C'), Constant(value='D')], ctx=Load()), ifs=[], is_async=0)])], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "f8a7cbe0ae114feaa25d7a233c3ccb719a243f5416e3b0bf1b7f5755c76a78a4",
+   "old_normalized_conditions_sha256": "c5b3db715006d7a32e92b49b46b07c5b4497b90bcf681fdd1fed528c575468c1",
+   "normalized_conditions_sha256": "c5b3db715006d7a32e92b49b46b07c5b4497b90bcf681fdd1fed528c575468c1"
+  },
+  "18a2cf8d34064eb373ffe789125051e9b5bdf6e0a6198e72c2b480ced577b597:0": {
+   "id": "7b54b401311485a2c6bac194227cae7d8ec705dddb64ae633059cbde1a3debea:0",
+   "conditions": [
+    [
+     "Compare(left=Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='scene', ctx=Load()), attr='coordinates', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ],
+    [
+     "Compare(left=Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='config', ctx=Load()), Constant(value='material_cache'), Constant(value=None)], keywords=[]), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "body_sha256": "8bf9ce6f715079cadff8b42bce5b9160697dc8188cd9b76167cc320a7cebcd93",
+   "old_normalized_conditions_sha256": "a8d7aaf04372a9b1ea61d152a28bef1f9af3d388abbde5f76d15fabfbb504766",
+   "normalized_conditions_sha256": "a8d7aaf04372a9b1ea61d152a28bef1f9af3d388abbde5f76d15fabfbb504766"
+  }
+ },
+ "manifest": [
+  "e5018afc4534848d25387bd676442b8cd36adb633fba6458532d94a658351f7d:0",
+  "a2082bd5b65fa0f06dd353e9ffe85896742a98b0d50ea086b6ae81bd0930e44d:0",
+  "18a2cf8d34064eb373ffe789125051e9b5bdf6e0a6198e72c2b480ced577b597:0"
+ ],
+ "review": []
+}

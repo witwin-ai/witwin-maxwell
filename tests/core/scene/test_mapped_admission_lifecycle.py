@@ -18,18 +18,18 @@ class LifecycleModule(mw.SceneModule):
         if self.kind in ('grad_geometry','forbidden_geometry'):
             x=(.001 if torch.is_grad_enabled() else .002) if self.kind=='grad_geometry' else self.epsilon*0
             geometry=mw.Box(position=(x,.005,0.),size=(.04,.02,.04))
-            value=value.clone(structures=(replace(value.structures[0],geometry=geometry),value.structures[1]))
+            value=value.updated(structures=(replace(value.structures[0],geometry=geometry),value.structures[1]))
         if self.kind=='grad_monitor':
             x=.001 if torch.is_grad_enabled() else .002
-            value=value.clone(monitors=(*value.monitors,mw.PointMonitor('mode-audit',position=(x,.02,.02),fields=('Ez',))))
+            value=value.updated(monitors=(*value.monitors,mw.PointMonitor('mode-audit',position=(x,.02,.02),fields=('Ez',))))
         if self.kind=='grad_source' and not torch.is_grad_enabled():
-            value=value.clone(sources=(mw.PointDipole(position=(-.02,-.02,-.02),source_time=mw.CW(3e9)),))
+            value=value.updated(sources=(mw.PointDipole(position=(-.02,-.02,-.02),source_time=mw.CW(3e9)),))
         return value
 
 
 def simulation(module):
-    return mw.Simulation.fdtd(module,frequency=3e9,run_time=mw.TimeConfig(dt=5e-12,time_steps=96),
-        cuda_graph=False,excitations=mw.PortExcitation('feed',source_time=mw.CW(3e9)))
+    return mw.Simulation.fdtd(module,frequencies=3e9,config=mw.FDTDConfig(run_time=mw.TimeConfig(dt=5e-12,time_steps=96),
+        cuda_graph=False),excitations=mw.rf.PortExcitation('feed',source_time=mw.CW(3e9)))
 
 
 def test_internal_no_grad_refresh_keeps_numerical_scene_detached_and_census_complete():
@@ -99,10 +99,10 @@ def test_independent_buffer_and_plain_tensor_leaves_are_outside_actual_bridge_fr
 
 def test_custom_temporal_callable_does_not_hide_material_parameter_dependency():
     module=LifecycleModule()
-    waveform=mw.CustomSourceTime(lambda t:float(module.epsilon.detach())*t,characteristic_frequency=3e9)
+    waveform=mw.sources.CustomSourceTime(lambda t:float(module.epsilon.detach())*t,characteristic_frequency=3e9)
     with pytest.raises(NotImplementedError,match='declarative fixed temporal'):
-        mw.Simulation.fdtd(module,frequency=3e9,run_time=mw.TimeConfig(dt=5e-12,time_steps=96),
-            excitations=mw.PortExcitation('feed',source_time=waveform))
+        mw.Simulation.fdtd(module,frequencies=3e9,config=mw.FDTDConfig(run_time=mw.TimeConfig(dt=5e-12,time_steps=96)),
+            excitations=mw.rf.PortExcitation('feed',source_time=waveform))
 
 
 class CachedSceneModule(LifecycleModule):
@@ -111,12 +111,21 @@ class CachedSceneModule(LifecycleModule):
             self.cached=fixed_scene()
         factor=2. if self.kind=='cached_branch' and not torch.is_grad_enabled() else 1.
         material=mw.Material(eps_r=self.epsilon.exp()*factor)
-        self.cached.structures[0]=replace(self.cached.structures[0],material=material)
+        self.cached=self.cached.updated(structures=(replace(self.cached.structures[0],material=material),
+                                                    *self.cached.structures[1:]))
         return self.cached
 
 
 @pytest.mark.parametrize('kind',('cached_branch','cached_same_values'))
 def test_rematerialization_cannot_mutate_the_numerical_scene_through_a_cached_alias(kind):
     module=CachedSceneModule(kind);value=simulation(module)
-    with torch.no_grad(),pytest.raises(NotImplementedError,match='grad mode'):
-        value._refresh_scene()
+    before=value.scene;material=before.structures[0].material
+    # Scenes are immutable: rematerializing cannot reach the scene already handed out;
+    # a cached branch whose values depend on grad mode is still refused.
+    with torch.no_grad():
+        if kind=='cached_branch':
+            with pytest.raises(NotImplementedError,match='grad mode'):
+                value._refresh_scene()
+        else:
+            value._refresh_scene()
+    assert before.structures[0].material is material

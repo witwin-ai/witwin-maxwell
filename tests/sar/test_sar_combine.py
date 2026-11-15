@@ -16,8 +16,8 @@ def test_coherent_in_phase_doubles_field_and_quadruples_sar():
     """Two equal in-phase sources sum to 2E, so SAR (quadratic in E) quadruples."""
     a, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0)
     b, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0)
-    single = a.sar("loss")
-    combined = mw.combine_coherent_sar([a, b], monitor="loss")
+    single = mw.sar.sar(a, "loss")
+    combined = mw.sar.combine_coherent_sar([a, b], monitor="loss")
 
     mask = _valid(single)
     ratio = combined.point_sar("total")[mask] / single.point_sar("total")[mask]
@@ -29,7 +29,7 @@ def test_coherent_opposite_phase_cancels():
     """Equal, opposite-phase sources cancel to near-zero SAR (interference)."""
     a, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0)
     b, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0)
-    combined = mw.combine_coherent_sar([a, b], monitor="loss", weights=[1.0, -1.0])
+    combined = mw.sar.combine_coherent_sar([a, b], monitor="loss", weights=[1.0, -1.0])
     total = combined.point_sar("total")
     finite = total[torch.isfinite(total)]
     assert float(finite.abs().max()) < 1e-10
@@ -39,9 +39,9 @@ def test_incoherent_sum_adds_sar_fields():
     """Incoherent combination sums the power-domain SAR fields."""
     a, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0)
     b, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=1.5)
-    sar_a = a.sar("loss")
-    sar_b = b.sar("loss")
-    combined = mw.combine_incoherent_sar([sar_a, sar_b])
+    sar_a = mw.sar.sar(a, "loss")
+    sar_b = mw.sar.sar(b, "loss")
+    combined = mw.sar.combine_incoherent_sar([sar_a, sar_b])
 
     expected = sar_a.point_sar("total")[_valid(sar_a)] + sar_b.point_sar("total")[_valid(sar_b)]
     got = combined.point_sar("total")[_valid(combined)]
@@ -54,10 +54,10 @@ def test_incoherent_recomputes_peaks_on_combined_power():
     a, params = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0)
     b, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0)
     m0 = params["rho"] * 0.3 ** 3
-    averaging = mw.SARAveraging(mass=(m0,))
-    sar_a = a.sar("loss", averaging=averaging)
-    sar_b = b.sar("loss", averaging=averaging)
-    combined = mw.combine_incoherent_sar([sar_a, sar_b], averaging=averaging)
+    averaging = mw.sar.SARAveraging(mass=(m0,))
+    sar_a = mw.sar.sar(a, "loss", averaging=averaging)
+    sar_b = mw.sar.sar(b, "loss", averaging=averaging)
+    combined = mw.sar.combine_incoherent_sar([sar_a, sar_b], averaging=averaging)
 
     single_peak = float(sar_a.peak(m0).sar[0])
     combined_peak = float(combined.peak(m0).sar[0])
@@ -66,10 +66,10 @@ def test_incoherent_recomputes_peaks_on_combined_power():
 
 def test_incoherent_normalization_mismatch_fails_closed():
     a, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0)
-    sar_a = a.sar("loss")
-    sar_scaled = a.sar("loss", normalization=mw.PowerNormalization.source(amplitude=2.0))
+    sar_a = mw.sar.sar(a, "loss")
+    sar_scaled = mw.sar.sar(a, "loss", normalization=mw.sar.PowerNormalization.source(amplitude=2.0))
     with pytest.raises(ValueError, match="normalization"):
-        mw.combine_incoherent_sar([sar_a, sar_scaled])
+        mw.sar.combine_incoherent_sar([sar_a, sar_scaled])
 
 
 def test_incoherent_density_mismatch_raises_value_error():
@@ -79,18 +79,18 @@ def test_incoherent_density_mismatch_raises_value_error():
     only the differing rho_cell can trip the guard."""
     a, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0, rho=1000.0)
     b, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0, rho=1100.0)
-    sar_a = a.sar("loss")
-    sar_b = b.sar("loss")
+    sar_a = mw.sar.sar(a, "loss")
+    sar_b = mw.sar.sar(b, "loss")
     assert not torch.equal(sar_a.rho_cell, sar_b.rho_cell)
     with pytest.raises(ValueError, match="mass-density"):
-        mw.combine_incoherent_sar([sar_a, sar_b])
+        mw.sar.combine_incoherent_sar([sar_a, sar_b])
 
 
 def test_incoherent_requires_two_operands():
     a, _ = _uniform_cube_result(frequencies=(1.0e9,))
-    sar_a = a.sar("loss")
+    sar_a = mw.sar.sar(a, "loss")
     with pytest.raises(ValueError, match="at least two"):
-        mw.combine_incoherent_sar([sar_a])
+        mw.sar.combine_incoherent_sar([sar_a])
 
 
 def test_coherent_rejects_same_shape_different_spacing():
@@ -100,21 +100,21 @@ def test_coherent_rejects_same_shape_different_spacing():
     a, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0, scale=1.0)
     b, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0, scale=2.0)
     # Same field shape, different physical spacing (guards the test's premise).
-    assert a.tensor("Ex", frequency=1.0e9).shape == b.tensor("Ex", frequency=1.0e9).shape
+    assert a.field("Ex", frequency=1.0e9).values.shape == b.field("Ex", frequency=1.0e9).values.shape
     assert not torch.allclose(
         torch.as_tensor(a.prepared_scene.x_nodes64),
         torch.as_tensor(b.prepared_scene.x_nodes64),
     )
     with pytest.raises(ValueError, match="identical grid"):
-        mw.combine_coherent_sar([a, b], monitor="loss")
+        mw.sar.combine_coherent_sar([a, b], monitor="loss")
 
 
 def test_coherent_preserves_field_autograd():
     """The coherent combiner keeps the per-run field autograd graph."""
     a, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0, requires_grad=True)
     b, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0, requires_grad=True)
-    combined = mw.combine_coherent_sar([a, b], monitor="loss")
+    combined = mw.sar.combine_coherent_sar([a, b], monitor="loss")
     total = combined.point_sar("total")
     torch.nansum(total).backward()
-    grad = a.fields["EX"].grad
+    grad = a._fields["EX"].grad  # the stored leaf behind a.E.x
     assert grad is not None and bool((grad.abs() > 0).any())

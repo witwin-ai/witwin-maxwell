@@ -91,7 +91,6 @@ def test_fdtd_sellmeier_slab_imparts_index_phase_delay():
                                      (-1.0 * micron, 1.0 * micron))),
             grid=mw.GridSpec.uniform(0.04 * micron),
             boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
-            device="cuda",
             sources=[
                 mw.PlaneWave(
                     direction=(1.0, 0.0, 0.0),
@@ -102,27 +101,33 @@ def test_fdtd_sellmeier_slab_imparts_index_phase_delay():
             ],
         )
         if with_slab:
-            scene.add_structure(
+            scene = scene.updated(structures=(
+                *scene.structures,
                 mw.Structure(
                     geometry=Box(position=(0.0, 0.0, 0.0),
                                  size=(slab_thickness, 2.0 * micron, 2.0 * micron)),
                     material=material,
-                )
-            )
-        scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=1.5 * micron, fields=("Ez",)))
+                ),
+            ))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.PlaneMonitor("post", axis="x", position=1.5 * micron, fields=("Ez",)),
+        ))
         return scene
 
     def run(with_slab: bool):
         return mw.Simulation.fdtd(
             build_scene(with_slab),
             frequencies=[frequency],
-            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
-            spectral_sampler=mw.SpectralSampler(window="hanning"),
-            full_field_dft=False,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"),
+                full_field_dft=False,
+            ),
         ).run()
 
     def complex_mean(result):
-        data = result.monitor("post")["data"]
+        data = result.monitor("post", freq_index=0).sel(component="Ez").values
         assert torch.is_tensor(data)
         field = data.detach().cpu().numpy()[3:-3, 3:-3]
         return complex(field.mean())

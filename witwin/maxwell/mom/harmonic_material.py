@@ -1,6 +1,8 @@
 """Public linear-background sampling for internal SIE-VIE harmonic balance."""
 from __future__ import annotations
 from typing import TYPE_CHECKING
+
+from ..errors import UnsupportedFeatureError
 if TYPE_CHECKING:
     from .static_tensor_material import StaticTensorChannel
 from dataclasses import dataclass, fields
@@ -22,7 +24,8 @@ class StaticChannel:
 
     def dielectric_sample(self, absolute_scale):
         if self.kind != 'finite_positive_dielectric':
-            raise NotImplementedError(f'DC channel requires its {self.kind} formulation')
+            raise UnsupportedFeatureError(f'DC channel requires its {self.kind} formulation',
+                                          feature="guard:93831814", method="mom")
         return self.finite_relative_part.real*absolute_scale
 
 
@@ -71,7 +74,8 @@ class HarmonicMaterial:
 def _linear_background(material, *, tensor_sources=False):
     """Separate instantaneous sources without changing constitutive declarations."""
     if getattr(material,'has_tensor_nonlinearity',False) and not tensor_sources:
-        raise NotImplementedError('Tensor nonlinear susceptibility HB compilation is not integrated yet')
+        raise UnsupportedFeatureError('Tensor nonlinear susceptibility HB compilation is not integrated yet',
+                                      feature="material.nonlinear", method="mom")
     if type(material) is Material:
         # Material inherits identity fields that its public constructor does
         # not accept, so dataclasses.replace is not a valid cloning operation.

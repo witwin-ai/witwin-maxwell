@@ -43,16 +43,20 @@ def test_fdfd_pec_mask_equals_the_fdtd_staircase_short_set(geometries):
         domain=mw.Domain(bounds=((-2.0e-3, 2.0e-3), (-2.0e-3, 2.0e-3), (-1.0e-3, 1.0e-3))),
         grid=mw.GridSpec.uniform(H),
         boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda",
     )
-    for index, geometry in enumerate(geometries()):
-        scene.add_structure(mw.Structure(geometry, mw.Material.pec(), name=f"pec{index}"))
-    scene.add_source(mw.PointDipole(position=(1.5e-3, 0.0, 0.0), width=2 * H, polarization=(0, 0, 1),
-                                    source_time=mw.CW(frequency=10e9, amplitude=1.0), name="src"))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(geometry, mw.Material.pec(), name=f"pec{index}") for index, geometry in enumerate(geometries())),
+    ))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(1.5e-3, 0.0, 0.0), width=2 * H, polarization=(0, 0, 1),
+                       source_time=mw.CW(frequency=10e9, amplitude=1.0), name="src"),
+    ))
 
-    fdtd = mw.Simulation.fdtd(scene, frequencies=[10e9], run_time=mw.TimeConfig(time_steps=1)).prepare()
+    fdtd = mw.Simulation.fdtd(scene, frequencies=[10e9], config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))).prepare()
     fdtd_open = _pec_edge_open_fractions(fdtd.solver)
-    fdfd = mw.Simulation.fdfd(scene, frequency=10e9, solver=mw.GMRES(max_iter=1)).prepare()
+    fdfd = mw.Simulation.fdfd(scene, frequencies=10e9, config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(max_iter=1))).prepare()
     fdfd_scene = fdfd.solver.scene
     mask = torch.as_tensor(fdfd.solver._ensure_pec_mask(), device="cuda")
     conductor = _pec_signed_distance(fdfd_scene) <= 1.0e-5 * H

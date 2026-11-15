@@ -7,7 +7,7 @@ import numpy as np
 import witwin.maxwell as mw
 from benchmark.models import ScenarioDefinition
 from benchmark.scenes._common import HALF_SPAN
-from benchmark.scenes.planned import FREQUENCIES, _make, _plane_scene, _scatter_scene
+from benchmark.scenes.planned import FREQUENCIES, SCATTER_FREQUENCIES, _make, _plane_scene, _scatter_scene
 
 _C0 = 299_792_458.0
 
@@ -59,14 +59,14 @@ def _autogrid_slab_scene() -> mw.Scene:
 
 def _explicit_mesh_scene() -> mw.Scene:
     """User-supplied watertight triangle mesh, not an implicit primitive fallback."""
-    vertices, faces = mw.Pyramid(
+    vertices, faces = mw.geometry.Pyramid(
         position=(0.0, 0.0, -0.13),
         base_size=0.28,
         height=0.26,
         axis="z",
     ).to_mesh()
     mesh = mw.Mesh(vertices, faces, recenter=False, fill_mode="solid")
-    return _scatter_scene(mesh)
+    return _scatter_scene(mesh, resolved=True)
 
 
 def _autogrid_override_refinement_scene() -> mw.Scene:
@@ -80,9 +80,9 @@ def _autogrid_override_refinement_scene() -> mw.Scene:
         wavelength=_C0 / FREQUENCIES[0],
         max_ratio=1.4,
         override_structures=(
-            mw.MeshOverrideStructure(geometry=override_geometry, dl=0.02),
+            mw.grid.MeshOverrideStructure(geometry=override_geometry, dl=0.02),
         ),
-        layer_refinement=mw.LayerRefinementSpec(min_cells=4, axes=("z",)),
+        layer_refinement=mw.grid.LayerRefinementSpec(min_cells=4, axes=("z",)),
     )
     return _plane_scene(material=mw.Material(eps_r=3.0), grid=grid)
 
@@ -92,43 +92,49 @@ GRID_GEOMETRY_COVERAGE_SCENARIOS = (
         "cylinder_scatter",
         "grid_geometry",
         "analytic cylinder scattering",
-        lambda: _scatter_scene(mw.Cylinder(position=(0, 0, 0), radius=0.14, height=0.24, axis="z")),
+        lambda: _scatter_scene(mw.Cylinder(position=(0, 0, 0), radius=0.14, height=0.24, axis="z"), resolved=True),
+        frequencies=SCATTER_FREQUENCIES,  # default 8x window: 2x-runtime change <= 2e-5 (bench-respec 2026-11-12)
     ),
     _make(
         "cone_scatter",
         "grid_geometry",
         "sidewall-angle cone scattering",
-        lambda: _scatter_scene(mw.Cone(position=(0, 0, -0.12), radius=0.15, height=0.24, axis="z")),
+        lambda: _scatter_scene(mw.geometry.Cone(position=(0, 0, -0.12), radius=0.15, height=0.24, axis="z")),
     ),
     _make(
         "ellipsoid_scatter",
         "grid_geometry",
         "anisotropic ellipsoid scattering",
-        lambda: _scatter_scene(mw.Ellipsoid(position=(0, 0, 0), radii=(0.18, 0.12, 0.09))),
+        lambda: _scatter_scene(mw.geometry.Ellipsoid(position=(0, 0, 0), radii=(0.18, 0.12, 0.09)), resolved=True),
+        frequencies=SCATTER_FREQUENCIES,  # default 8x window: 2x-runtime change <= 2e-5 (bench-respec 2026-11-12)
     ),
     _make(
         "pyramid_scatter",
         "grid_geometry",
         "pyramid mesh scattering",
-        lambda: _scatter_scene(mw.Pyramid(position=(0, 0, -0.13), base_size=0.28, height=0.26, axis="z")),
+        lambda: _scatter_scene(mw.geometry.Pyramid(position=(0, 0, -0.13), base_size=0.28, height=0.26, axis="z"), resolved=True),
+        frequencies=SCATTER_FREQUENCIES,  # default 8x window: 2x-runtime change <= 2e-5 (bench-respec 2026-11-12)
     ),
     _make(
         "prism_scatter",
         "grid_geometry",
         "hexagonal prism scattering",
-        lambda: _scatter_scene(mw.Prism(position=(0, 0, 0), radius=0.16, height=0.22, num_sides=6, axis="z")),
+        lambda: _scatter_scene(mw.geometry.Prism(position=(0, 0, 0), radius=0.16, height=0.22, num_sides=6, axis="z"), resolved=True),
+        frequencies=SCATTER_FREQUENCIES,  # default 8x window: 2x-runtime change <= 2e-5 (bench-respec 2026-11-12)
     ),
     _make(
         "hollow_box_scatter",
         "grid_geometry",
         "hollow-box shell scattering",
-        lambda: _scatter_scene(mw.HollowBox(position=(0, 0, 0), outer_size=(0.32, 0.32, 0.32), inner_size=(0.22, 0.22, 0.22))),
+        lambda: _scatter_scene(mw.geometry.HollowBox(position=(0, 0, 0), outer_size=(0.32, 0.32, 0.32), inner_size=(0.22, 0.22, 0.22))),
+        run_time_factor=64.0,  # 8x the default window: the ring-down settles (benchmark-references-2026-11-11)
     ),
     _make(
         "polyslab_pentagon",
         "grid_geometry",
         "pentagonal PolySlab scattering",
-        lambda: _scatter_scene(mw.PolySlab(vertices=_pentagon(0.18), bounds=(-0.1, 0.1))),
+        lambda: _scatter_scene(mw.PolySlab(vertices=_pentagon(0.18), bounds=(-0.1, 0.1)), resolved=True),
+        frequencies=SCATTER_FREQUENCIES,  # default 8x window: 2x-runtime change <= 2e-5 (bench-respec 2026-11-12)
     ),
     _make(
         "autogrid_slab",
@@ -153,6 +159,7 @@ GRID_GEOMETRY_COVERAGE_SCENARIOS = (
         "grid_geometry",
         "user-supplied watertight triangle-mesh scattering",
         _explicit_mesh_scene,
+        frequencies=SCATTER_FREQUENCIES,  # default 8x window: 2x-runtime change <= 2e-5 (bench-respec 2026-11-12)
     ),
     _make(
         "autogrid_override_refinement",

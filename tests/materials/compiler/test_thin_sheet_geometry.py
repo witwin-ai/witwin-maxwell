@@ -7,6 +7,7 @@ import witwin.maxwell as mw
 from witwin.maxwell.compiler.planar_pec import compile_planar_pec
 from witwin.maxwell.fdtd.runtime.materials import _pec_edge_open_fractions
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_materials
 
 
 def _scene(structures, *, spacing=.6e-3, inserts=(), pec="staircase"):
@@ -14,12 +15,12 @@ def _scene(structures, *, spacing=.6e-3, inserts=(), pec="staircase"):
     return prepare_scene(mw.Scene(
         domain=mw.Domain(bounds=((nodes[0], nodes[-1]),) * 3),
         grid=mw.GridSpec.custom(nodes, nodes, nodes),
-        boundary=mw.BoundarySpec.none(), device="cpu", structures=structures,
-        subpixel_samples=mw.SubpixelSpec(pec=pec, averaging="arithmetic", samples=1)))
+        boundary=mw.BoundarySpec.none(), structures=structures,
+        subpixel=mw.SubpixelSpec(pec=pec, averaging="arithmetic", samples=1)), device="cpu")
 
 
 def _structure(bounds=((-1.2e-3, 1.2e-3),) * 2, **kwargs):
-    return mw.Structure(mw.PlanarPEC.rectangle(bounds, **kwargs), mw.Material.pec())
+    return mw.Structure(mw.geometry.PlanarPEC.rectangle(bounds, **kwargs), mw.Material.pec())
 
 
 def test_rotated_planar_sheet_rejects_without_axis_aligned_projection():
@@ -34,10 +35,10 @@ def test_rotated_planar_sheet_rejects_without_axis_aligned_projection():
 @pytest.mark.parametrize('side', (-1, 1))
 @pytest.mark.parametrize('boundary', (mw.BoundarySpec.periodic(), mw.BoundarySpec.bloch((.2, .3, .4))))
 def test_planar_sheet_rejects_unowned_periodic_normal_seam(axis, side, boundary):
-    interior = prepare_scene(_scene([_structure(normal_axis=axis)]).clone(boundary=boundary))
+    interior = prepare_scene(_scene([_structure(normal_axis=axis)]).scene.updated(boundary=boundary), device="cpu")
     assert compile_planar_pec(interior)['audit']['retention_fraction'] == 1
     endpoint = float(getattr(interior, axis + '_nodes64')[0 if side < 0 else -1])
-    seam = prepare_scene(interior.clone(structures=[_structure(normal_axis=axis, coordinate=endpoint)]))
+    seam = prepare_scene(interior.scene.updated(structures=[_structure(normal_axis=axis, coordinate=endpoint)]), device="cpu")
     with pytest.raises(NotImplementedError, match='periodic normal seam requires duplicate-plane ownership'):
         compile_planar_pec(seam)
 
@@ -64,7 +65,7 @@ def test_sheet_matrix_retains_tangential_edges_after_explicit_plane_insertion(ax
 
 @pytest.mark.parametrize("mode", ["staircase", "conformal"])
 def test_native_sheet_has_no_normal_short_or_fractional_loss(mode):
-    model = _scene([_structure()], pec=mode).compile_materials()
+    model = compile_materials(_scene([_structure()], pec=mode))
     opened = _pec_edge_open_fractions(SimpleNamespace(_compiled_material_model=model))
     assert torch.all(opened["Ez"] == 1)
     for component in ("Ex", "Ey"):
@@ -76,14 +77,14 @@ def test_native_sheet_has_no_normal_short_or_fractional_loss(mode):
 @pytest.mark.parametrize("axis", ["x", "y", "z"])
 def test_offgrid_sheet_rejects_instead_of_snapping(axis):
     with pytest.raises(ValueError, match="off-grid.*Insert.*GridSpec.custom"):
-        _scene([_structure(normal_axis=axis, coordinate=.3e-3)]).compile_materials()
+        compile_materials(_scene([_structure(normal_axis=axis, coordinate=.3e-3)]))
 
 
 @pytest.mark.parametrize("mode", ["staircase", "conformal"])
 def test_legacy_unresolved_35um_box_rejects_instead_of_disappearing(mode):
     geometry = mw.Box(position=(.3e-3, 0, 0), size=(35e-6, 2.4e-3, 2.4e-3))
     with pytest.raises(ValueError, match="would disappear"):
-        _scene([mw.Structure(geometry, mw.Material.pec(), name="foil")], pec=mode).compile_materials()
+        compile_materials(_scene([mw.Structure(geometry, mw.Material.pec(), name="foil")], pec=mode))
 
 
 def test_union_t_contact_overlap_and_gap_have_deterministic_owners():
@@ -103,45 +104,52 @@ def test_union_t_contact_overlap_and_gap_have_deterministic_owners():
 def test_subcell_hole_opens_crossing_edge_even_when_endpoints_and_midpoint_miss_it():
     outer = ((-1.8e-3, -1.8e-3), (1.8e-3, -1.8e-3), (1.8e-3, 1.8e-3), (-1.8e-3, 1.8e-3))
     hole = ((.09e-3, -.2e-3), (.15e-3, -.2e-3), (.15e-3, .2e-3), (.09e-3, .2e-3))
-    layout = compile_planar_pec(_scene([mw.Structure(mw.PlanarPEC(outer, holes=(hole,)), mw.Material.pec())]))
+    layout = compile_planar_pec(_scene([mw.Structure(mw.geometry.PlanarPEC(outer, holes=(hole,)), mw.Material.pec())]))
     assert layout["edges"]["Ex"][4, 4, 4] == 0
     assert layout["edges"]["Ex"][3, 4, 4] == 1
 
 
 def test_nonconvex_polygon_and_plane_intersection_preserve_contacts():
     polygon = ((-1.2e-3, -1.2e-3), (1.2e-3, -1.2e-3), (1.2e-3, 0), (0, 0), (0, 1.2e-3), (-1.2e-3, 1.2e-3))
-    a = mw.Structure(mw.PlanarPEC(polygon), mw.Material.pec())
+    a = mw.Structure(mw.geometry.PlanarPEC(polygon), mw.Material.pec())
     layout = compile_planar_pec(_scene([a, _structure(normal_axis="x")]))
     assert layout["audit"]["contacts"] == [[0, 1]]
     assert layout["edges"]["Ex"][5, 5, 4] == 0
 
 
 def test_invalid_material_unresolved_strip_and_gradient_fail_explicitly():
-    wrong = mw.Structure(mw.PlanarPEC.rectangle(((-1e-3, 1e-3),) * 2), mw.Material(eps_r=4))
+    wrong = mw.Structure(mw.geometry.PlanarPEC.rectangle(((-1e-3, 1e-3),) * 2), mw.Material(eps_r=4))
     with pytest.raises(ValueError, match="requires Material.pec"):
-        _scene([wrong]).compile_materials()
+        compile_materials(_scene([wrong]))
     with pytest.raises(ValueError, match="unresolved lateral support"):
         compile_planar_pec(_scene([_structure(bounds=((-1.2e-3, 1.2e-3), (.1e-3, .2e-3)))]))
     with pytest.raises(NotImplementedError, match="shape gradients"):
-        mw.PlanarPEC(torch.randn(4, 2, requires_grad=True))
+        mw.geometry.PlanarPEC(torch.randn(4, 2, requires_grad=True))
+
+
+def test_trainable_sheet_coordinate_is_a_shape_gradient():
+    """The sheet plane position moves discrete edge ownership; it stays refused."""
+    with pytest.raises(NotImplementedError, match="shape gradients"):
+        mw.geometry.PlanarPEC.rectangle(((-1e-3, 1e-3),) * 2,
+                               coordinate=torch.tensor(0.0, dtype=torch.float64, requires_grad=True))
 
 
 def test_holes_outside_or_crossing_outer_boundary_are_rejected():
     outer = ((-1., -1.), (1., -1.), (1., 1.), (-1., 1.))
     with pytest.raises(ValueError, match="strictly inside"):
-        mw.PlanarPEC(outer, holes=(((2., 2.), (3., 2.), (3., 3.), (2., 3.)),))
+        mw.geometry.PlanarPEC(outer, holes=(((2., 2.), (3., 2.), (3., 3.), (2., 3.)),))
     with pytest.raises(ValueError, match="disjoint"):
-        mw.PlanarPEC(outer, holes=(((.5, .5), (2., .5), (2., 2.), (.5, 2.)),))
+        mw.geometry.PlanarPEC(outer, holes=(((.5, .5), (2., .5), (2., 2.), (.5, 2.)),))
 
 
 def test_auto_grid_inserts_exact_float64_plane_without_copper_cfl_interval():
     coordinate = .123456789e-3
-    geometry = mw.PlanarPEC.rectangle(((-.9e-3, .9e-3),)*2,
+    geometry = mw.geometry.PlanarPEC.rectangle(((-.9e-3, .9e-3),)*2,
                                       coordinate=coordinate, physical_thickness=18e-6)
     public = mw.Scene(domain=mw.Domain(bounds=((-2e-3, 2e-3),)*3),
                       grid=mw.GridSpec.auto(wavelength=.01, min_steps_per_wavelength=10),
-                      device="cpu", structures=[mw.Structure(geometry, mw.Material.pec())])
-    scene = prepare_scene(public)
+                      structures=[mw.Structure(geometry, mw.Material.pec())])
+    scene = prepare_scene(public, device="cpu")
     layout = compile_planar_pec(scene)
     assert coordinate in scene.z_nodes64
     assert np.diff(scene.z_nodes64).min() > 18e-6

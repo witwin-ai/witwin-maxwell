@@ -43,10 +43,12 @@ def _run(scene):
         scene,
         frequencies=list(layered_slab.FREQUENCIES),
         # Periodic-transverse cells with thin PML: keep the CPML reference explicitly.
-        absorber="cpml",
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
-        spectral_sampler=mw.SpectralSampler(normalize_source=True),
-        full_field_dft=True,
+        config=mw.FDTDConfig(
+            absorber="cpml",
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=15),
+            spectral_sampler=mw.fdtd.SpectralSampler(normalize_source=True),
+            full_field_dft=True,
+        ),
     ).run()
     return result
 
@@ -58,12 +60,12 @@ def _volume_absorbed_power(sar) -> float:
 
 def _conservation(dx: float) -> tuple[float, float, float]:
     """Return (volume-absorbed, surface-absorbed, relative closure residual)."""
-    scene = layered_slab.build_conservation_scene(dx=dx, device="cuda")
+    scene = layered_slab.build_conservation_scene(dx=dx)
     result = _run(scene)
-    sar = result.sar("loss", averaging=mw.SARAveraging(mass=(1e-3,)))
+    sar = mw.sar.sar(result, "loss", averaging=mw.sar.SARAveraging(mass=(1e-3,)))
     volume_absorbed = _volume_absorbed_power(sar)
-    flux_in = float(result.monitor("flux_in")["flux"])
-    flux_out = float(result.monitor("flux_out")["flux"])
+    flux_in = float(result.monitor("flux_in", freq_index=0).values)
+    flux_out = float(result.monitor("flux_out", freq_index=0).values)
     surface_absorbed = flux_in - flux_out
     residual = abs(surface_absorbed - volume_absorbed) / abs(volume_absorbed)
     # Sanity: forward net inflow exceeds the transmitted term, both positive.
@@ -102,9 +104,9 @@ def test_layered_slab_peak_1g_sar_three_grid_study():
     peaks_1g = []
     peaks_10g = []
     for dx in _GRIDS:
-        scene = layered_slab.build_scene(dx=dx, device="cuda")
+        scene = layered_slab.build_scene(dx=dx)
         result = _run(scene)
-        sar = result.sar("loss", averaging=mw.SARAveraging(mass=(1e-3, 10e-3)))
+        sar = mw.sar.sar(result, "loss", averaging=mw.sar.SARAveraging(mass=(1e-3, 10e-3)))
         peak_1g = float(sar.peak(1e-3).sar[0])
         peak_10g = float(sar.peak(10e-3).sar[0])
         # Physically robust structure at every grid.

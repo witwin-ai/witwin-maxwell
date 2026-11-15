@@ -22,7 +22,6 @@ def _scene() -> mw.Scene:
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
-        device="cpu",
     )
 
 
@@ -70,8 +69,8 @@ def _artifacts(
     return tuple(by_rank[rank] for rank in order)
 
 
-def _circuit_data(*, requires_grad=False) -> mw.CircuitData:
-    return mw.CircuitData(
+def _circuit_data(*, requires_grad=False) -> mw.circuits.CircuitData:
+    return mw.circuits.CircuitData(
         circuit_name="network",
         times=torch.tensor([0.0, 1.0], dtype=torch.float64),
         node_names=("0", "signal"),
@@ -108,7 +107,9 @@ def _result(artifacts, *, fields=None, circuits=None) -> Result:
                 "kind": "point",
                 "fields": ("Ez",),
                 "frequencies": _FREQUENCIES,
-                "data": monitor_data,
+                "components": {"Ez": monitor_data},
+                "field_indices": {"Ez": (0, 0, 0)},
+                "position": (0.0, 0.0, 0.0),
             }
         },
         circuits=circuits,
@@ -120,15 +121,15 @@ def _result(artifacts, *, fields=None, circuits=None) -> Result:
 def _save_fixture(tmp_path):
     fields = _global_fields()
     directory = tmp_path / "sharded-result"
-    manifest = _result(
+    manifest = mw.execution.save_sharded(_result(
         _artifacts(fields),
         fields={name.upper(): tensor for name, tensor in fields.items()},
-    ).save_sharded(directory)
+    ), directory)
     return directory, manifest, fields
 
 
 def test_mixed_sharded_result_restores_ratio_only_ports(tmp_path):
-    port = mw.PortData.from_power_waves(
+    port = mw.rf.PortData.from_power_waves(
         port_name="feed", frequencies=torch.tensor(_FREQUENCIES),
         a=torch.tensor([1. + .2j, .8 - .1j]), b=torch.tensor([.2j, .1j]), z0=50.,
     )
@@ -138,8 +139,8 @@ def test_mixed_sharded_result_restores_ratio_only_ports(tmp_path):
         solver_stats={"time_plan": {"mixed_sources": True}, "normalize_source": False},
     )
     directory = tmp_path / "mixed-sharded"
-    result.save_sharded(directory)
-    loaded = Result.load_sharded(directory, scene=_scene())
+    mw.execution.save_sharded(result, directory)
+    loaded = mw.execution.load_sharded(directory, scene=_scene())
     from witwin.maxwell.result import _RatioOnlyPortData
     assert isinstance(loaded.port("feed"), _RatioOnlyPortData)
     assert torch.equal(loaded.port("feed").reflection_coefficient, port.reflection_coefficient)
@@ -184,45 +185,45 @@ def test_sharded_round_trip_sorts_ranks_and_gathers_uneven_multifrequency_fields
     assert ex["frequencies"] == _FREQUENCIES
     assert ex["x_axis"] == 1
 
-    lazy = Result.load_sharded(directory, scene=_scene())
-    assert lazy.is_sharded is True
+    lazy = mw.execution.load_sharded(directory, scene=_scene())
+    assert mw.execution.is_sharded(lazy) is True
     assert lazy.fields == {}
-    assert tuple(path.name for path in lazy.shard_paths) == (
+    assert tuple(path.name for path in mw.execution.shard_paths(lazy)) == (
         "rank-0000.pt",
         "rank-0001.pt",
         "rank-0002.pt",
     )
-    assert tuple(shard.rank for shard in lazy.sharded_manifest.shards) == (0, 1, 2)
+    assert tuple(shard.rank for shard in mw.execution.sharded_manifest(lazy).shards) == (0, 1, 2)
     assert tuple(lazy.monitors) == ("probe",)
 
-    gathered = Result.load_sharded(
+    gathered = mw.execution.load_sharded(
         directory,
         scene=_scene(),
         gather_fields=True,
         map_location="cpu",
     )
-    assert tuple(gathered.fields) == ("EX", "EY", "EZ")
+    # The synthetic shards hold arbitrary array shapes, not Yee grids, so read the stored arrays.
     for name, reference in fields.items():
-        torch.testing.assert_close(gathered.fields[name.upper()], reference)
-    torch.testing.assert_close(gathered.tensor("EX", freq_index=1), fields["Ex"][1])
-    assert gathered.solver_stats["parallel_stats"]["devices"] == (
+        torch.testing.assert_close(gathered._fields[name.upper()], reference)
+    torch.testing.assert_close(gathered._fields["EX"][1], fields["Ex"][1])
+    assert gathered.stats()["parallel_stats"]["devices"] == (
         "cuda:0",
         "cuda:1",
     )
 
 
-def test_sharded_v2_stores_circuits_once_in_result_metadata(tmp_path):
+def test_sharded_v3_stores_circuits_once_in_result_metadata(tmp_path):
     fields = _global_fields()
     data = _circuit_data(requires_grad=True)
     directory = tmp_path / "sharded-circuit"
 
-    _result(
+    mw.execution.save_sharded(_result(
         _artifacts(fields),
         circuits={"network": data},
-    ).save_sharded(directory)
+    ), directory)
 
     payload = torch.load(directory / "result.pt", weights_only=True)
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert tuple(payload["circuits"]) == ("network",)
     assert payload["circuits"]["network"]["schema_version"] == 1
     for rank in range(3):
@@ -232,8 +233,8 @@ def test_sharded_v2_stores_circuits_once_in_result_metadata(tmp_path):
         )
         assert "circuits" not in rank_payload
 
-    lazy = Result.load_sharded(directory, scene=_scene())
-    restored = lazy.circuit("network")
+    lazy = mw.execution.load_sharded(directory, scene=_scene())
+    restored = mw.circuits.circuit(lazy, "network")
     torch.testing.assert_close(restored.node_voltages, data.node_voltages.detach())
     torch.testing.assert_close(
         restored.diagnostics["condition"],
@@ -241,13 +242,13 @@ def test_sharded_v2_stores_circuits_once_in_result_metadata(tmp_path):
     )
     assert restored.node_voltages.requires_grad is False
 
-    gathered = Result.load_sharded(
+    gathered = mw.execution.load_sharded(
         directory,
         scene=_scene(),
         gather_fields=True,
     )
     torch.testing.assert_close(
-        gathered.circuit("network").branch_currents,
+        mw.circuits.circuit(gathered, "network").branch_currents,
         data.branch_currents.detach(),
     )
 
@@ -255,27 +256,27 @@ def test_sharded_v2_stores_circuits_once_in_result_metadata(tmp_path):
 def test_sharded_rejects_superseded_v1_and_v2_without_circuits(tmp_path):
     fields = _global_fields()
     directory = tmp_path / "sharded-v1"
-    _result(
+    mw.execution.save_sharded(_result(
         _artifacts(fields),
         circuits={"network": _circuit_data()},
-    ).save_sharded(directory)
+    ), directory)
     result_path = directory / "result.pt"
     payload = torch.load(result_path, weights_only=True)
 
-    # v1 is superseded, not supported alongside v2: there is no backward-support path.
-    payload["schema_version"] = 1
+    # Older schemas are refused with SchemaError: there is no backward-support path.
+    payload["schema_version"] = 2
     torch.save(payload, result_path)
     with pytest.raises(
-        ValueError,
-        match="Unsupported sharded result metadata schema_version=1",
+        mw.SchemaError,
+        match="Unsupported sharded result metadata schema_version=2",
     ):
-        Result.load_sharded(directory, scene=_scene())
+        mw.execution.load_sharded(directory, scene=_scene())
 
-    payload["schema_version"] = 2
+    payload["schema_version"] = 3
     payload.pop("circuits")
     torch.save(payload, result_path)
-    with pytest.raises(ValueError, match="schema v2 is missing required key: circuits"):
-        Result.load_sharded(directory, scene=_scene())
+    with pytest.raises(mw.SchemaError, match="schema v3 is missing required key: circuits"):
+        mw.execution.load_sharded(directory, scene=_scene())
 
 
 def test_save_sharded_prevalidates_circuits_before_calling_exporter(tmp_path):
@@ -298,7 +299,7 @@ def test_save_sharded_prevalidates_circuits_before_calling_exporter(tmp_path):
     directory = tmp_path / "unsafe-circuit"
 
     with pytest.raises(TypeError, match="CircuitData.diagnostics.*object"):
-        result.save_sharded(directory)
+        mw.execution.save_sharded(result, directory)
 
     assert calls == 0
     assert directory.exists() is False
@@ -322,7 +323,7 @@ def test_save_sharded_rejects_existing_destination_before_exporting(tmp_path):
     )
 
     with pytest.raises(FileExistsError, match="already exists"):
-        result.save_sharded(destination)
+        mw.execution.save_sharded(result, destination)
 
     assert calls == 0
 
@@ -332,12 +333,12 @@ def test_lazy_load_does_not_deserialize_existing_corrupt_rank_until_gather(tmp_p
     corrupt = directory / "rank-0001.pt"
     corrupt.write_bytes(b"not a torch shard")
 
-    lazy = Result.load_sharded(directory, scene=_scene(), gather_fields=False)
+    lazy = mw.execution.load_sharded(directory, scene=_scene(), gather_fields=False)
     assert lazy.fields == {}
-    assert lazy.shard_paths[1] == corrupt
+    assert mw.execution.shard_paths(lazy)[1] == corrupt
 
     with pytest.raises(ValueError, match=r"rank 1 file.*Failed|rank 1 file"):
-        Result.load_sharded(directory, scene=_scene(), gather_fields=True)
+        mw.execution.load_sharded(directory, scene=_scene(), gather_fields=True)
 
 
 def test_missing_rank_is_reported_before_lazy_result_is_returned(tmp_path):
@@ -346,7 +347,7 @@ def test_missing_rank_is_reported_before_lazy_result_is_returned(tmp_path):
     missing.unlink()
 
     with pytest.raises(FileNotFoundError, match=r"rank 2 file is missing"):
-        Result.load_sharded(directory, scene=_scene())
+        mw.execution.load_sharded(directory, scene=_scene())
 
 
 def test_corrupt_manifest_is_rejected(tmp_path):
@@ -354,7 +355,7 @@ def test_corrupt_manifest_is_rejected(tmp_path):
     (directory / "manifest.json").write_text("{not-json", encoding="utf-8")
 
     with pytest.raises(ValueError, match="Invalid sharded Result manifest"):
-        Result.load_sharded(directory, scene=_scene())
+        mw.execution.load_sharded(directory, scene=_scene())
 
 
 def test_save_sharded_requires_export_field_shards_provider(tmp_path):
@@ -366,7 +367,7 @@ def test_save_sharded_requires_export_field_shards_provider(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match=r"requires solver\.export_field_shards"):
-        result.save_sharded(tmp_path / "missing-exporter")
+        mw.execution.save_sharded(result, tmp_path / "missing-exporter")
 
 
 def test_noncontiguous_owned_intervals_are_rejected_before_publication(tmp_path):
@@ -388,7 +389,7 @@ def test_noncontiguous_owned_intervals_are_rejected_before_publication(tmp_path)
 
     directory = tmp_path / "nested" / "gap"
     with pytest.raises(ValueError, match="leaves a gap"):
-        _result(tuple(artifacts)).save_sharded(directory)
+        mw.execution.save_sharded(_result(tuple(artifacts)), directory)
     assert directory.exists() is False
     assert directory.parent.exists() is False
 
@@ -398,11 +399,12 @@ def test_rank_tensors_are_detached_and_written_on_cpu(
     cuda_p2p_devices,
     cuda_memory_cleanup,
 ):
+    # Full EX Yee-grid shape of the 10 x 4 x 4 cell scene: (Nx, Ny + 1, Nz + 1).
     global_ex = torch.arange(
-        2 * 6 * 2 * 2,
+        2 * 10 * 5 * 5,
         dtype=torch.float32,
         device=cuda_p2p_devices[0],
-    ).reshape(2, 6, 2, 2)
+    ).reshape(2, 10, 5, 5)
     artifacts = (
         {
             "rank": 1,
@@ -410,8 +412,8 @@ def test_rank_tensors_are_detached_and_written_on_cpu(
             "frequencies": _FREQUENCIES,
             "components": {
                 "Ex": {
-                    "tensor": global_ex[:, 3:].to(cuda_p2p_devices[1]),
-                    "global_x_slice": (3, 6),
+                    "tensor": global_ex[:, 5:].to(cuda_p2p_devices[1]),
+                    "global_x_slice": (5, 10),
                 }
             },
         },
@@ -421,20 +423,20 @@ def test_rank_tensors_are_detached_and_written_on_cpu(
             "frequencies": _FREQUENCIES,
             "components": {
                 "Ex": {
-                    "tensor": global_ex[:, :3].requires_grad_(),
-                    "global_x_slice": (0, 3),
+                    "tensor": global_ex[:, :5].requires_grad_(),
+                    "global_x_slice": (0, 5),
                 }
             },
         },
     )
     directory = tmp_path / "cuda-shards"
 
-    _result(artifacts).save_sharded(directory)
+    mw.execution.save_sharded(_result(artifacts), directory)
 
     for rank in range(2):
         payload = torch.load(directory / f"rank-{rank:04d}.pt", weights_only=True)
         tensor = payload["components"]["Ex"]["tensor"]
         assert tensor.device.type == "cpu"
         assert tensor.requires_grad is False
-    loaded = Result.load_sharded(directory, scene=_scene(), gather_fields=True)
-    torch.testing.assert_close(loaded.fields["EX"], global_ex.cpu())
+    loaded = mw.execution.load_sharded(directory, scene=_scene(), gather_fields=True)
+    torch.testing.assert_close(loaded.fields["EX"].values, global_ex.cpu())

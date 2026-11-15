@@ -7,8 +7,8 @@ import witwin.maxwell as mw
 
 def model(*, parallel=None):
     scene=mw.Scene(domain=mw.Domain(bounds=((-0.02,0.02),)*3),
-        grid=mw.GridSpec.uniform(.01),boundary=mw.BoundarySpec.pml(num_layers=1),device='cpu')
-    return mw.Simulation.fdtd(scene,frequency=1e9,parallel=parallel)
+        grid=mw.GridSpec.uniform(.01),boundary=mw.BoundarySpec.pml(num_layers=1))
+    return mw.Simulation.fdtd(scene,frequencies=1e9,config=mw.FDTDConfig(parallel=parallel, device='cpu'))
 
 
 def stats(simulation, runtime):
@@ -21,10 +21,11 @@ def stats(simulation, runtime):
 def test_partitioned_stats_do_not_require_or_gather_global_fields():
     class PartitionedRuntime:
         dt=1e-12
+        scene=SimpleNamespace(pml_extrusions=())
         parallel_stats={'transport':'cuda_p2p','shards':2}
         def gather_fields(self):
             raise AssertionError('Statistics must not gather global field tensors')
-    simulation=model(parallel=mw.FDTDParallelConfig(devices=('cuda:0','cuda:1'),transport='cuda_p2p'))
+    simulation=model(parallel=mw.fdtd.FDTDParallelConfig(devices=('cuda:0','cuda:1'),transport='cuda_p2p'))
     initialized=torch.cuda.is_initialized()
     result=stats(simulation,PartitionedRuntime())
     assert result['parallel_stats']==PartitionedRuntime.parallel_stats
@@ -36,7 +37,8 @@ def test_partitioned_stats_do_not_require_or_gather_global_fields():
 @pytest.mark.parametrize('field_dtype',[torch.float32,torch.float64])
 @pytest.mark.parametrize('observer_dtype',[torch.float32,torch.float64])
 def test_single_device_precision_reports_actual_runtime_dtypes(field_dtype,observer_dtype):
-    runtime=SimpleNamespace(dt=1e-12,Ex=torch.empty(0,dtype=field_dtype),_observer_dtype=observer_dtype)
+    runtime=SimpleNamespace(dt=1e-12,scene=SimpleNamespace(pml_extrusions=()),Ex=torch.empty(0,dtype=field_dtype),
+        _observer_dtype=observer_dtype)
     result=stats(model(),runtime)
     if torch.float64 in (field_dtype,observer_dtype):
         assert result['field_dtype']==str(field_dtype)

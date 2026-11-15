@@ -30,17 +30,15 @@ def reflection(normal="x", offset=0.0, mode="staircase"):
         domain=mw.Domain(bounds=tuple((a[0], a[-1]) for a in axes)),
         grid=mw.GridSpec.custom(*axes),
         boundary=mw.BoundarySpec.faces(default="pml", num_layers=10, **boundaries),
-        subpixel_samples=mw.SubpixelSpec(pec=mode, averaging="arithmetic", samples=1), device="cuda",
-        structures=[mw.Structure(mw.PlanarPEC.rectangle(((-16*DX, 16*DX),)*2,
+        subpixel=mw.SubpixelSpec(pec=mode, averaging="arithmetic", samples=1), structures=[mw.Structure(mw.geometry.PlanarPEC.rectangle(((-16*DX, 16*DX),)*2,
                               normal_axis=normal, coordinate=offset, physical_thickness=35e-6),
                               mw.Material.pec(), name="foil")],
         sources=[mw.PlaneWave(direction=direction, polarization=polarization,
                              source_time=mw.CW(frequency=FREQUENCY))])
-    prepared = mw.Simulation.fdtd(scene, absorber="cpml", frequency=FREQUENCY,
-        run_time=mw.TimeConfig.auto(transient_cycles=12, steady_cycles=12),
-        spectral_sampler=mw.SpectralSampler(window="hanning"), full_field_dft=True).prepare()
+    prepared = mw.Simulation.fdtd(scene, frequencies=FREQUENCY, config=mw.FDTDConfig(absorber="cpml", run_time=mw.TimeConfig.auto(transient_cycles=12, steady_cycles=12),
+        spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"), full_field_dft=True)).prepare()
     result = prepared.run()
-    field = getattr(result.E, electric_axis)
+    field = getattr(result.E, electric_axis).values
     if field.ndim == 4:
         field = field[0]
     selected = [n//2 for n in field.shape]
@@ -76,14 +74,13 @@ def test_planar_pec_reflection_matches_analytic_boundary(normal, offset, mode):
 def cavity_energy(mode, steps):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.2, .2),)*3), grid=mw.GridSpec.uniform(.02),
-        boundary=mw.BoundarySpec.pec(), device="cuda",
-        subpixel_samples=mw.SubpixelSpec(pec=mode, averaging="arithmetic", samples=1),
-        structures=[mw.Structure(mw.PlanarPEC.rectangle(((-.2, .2),)*2, normal_axis="x"),
+        boundary=mw.BoundarySpec.pec(), subpixel=mw.SubpixelSpec(pec=mode, averaging="arithmetic", samples=1),
+        structures=[mw.Structure(mw.geometry.PlanarPEC.rectangle(((-.2, .2),)*2, normal_axis="x"),
                                 mw.Material.pec())],
-        monitors=[mw.FieldTimeMonitor("probe", components=("Ez",), position=(.1, .08, .06))],
+        monitors=[mw.monitors.FieldTimeMonitor("probe", components=("Ez",), position=(.1, .08, .06))],
         sources=[mw.PointDipole(position=(.12, .09, .11), polarization=(0, 0, 1),
-                    source_time=mw.RickerWavelet(frequency=4e9))])
-    prepared = mw.Simulation.fdtd(scene, frequency=4e9, run_time=mw.TimeConfig(time_steps=steps)).prepare()
+                    source_time=mw.sources.RickerWavelet(frequency=4e9))])
+    prepared = mw.Simulation.fdtd(scene, frequencies=4e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=steps))).prepare()
     prepared.run()
     solver = prepared.solver
     electric = sum(float((getattr(solver, c).double()**2).sum()) for c in ("Ex", "Ey", "Ez"))

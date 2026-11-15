@@ -13,6 +13,7 @@ import torch
 
 from .rational import FitReport, RationalFitConfig, RationalModel, fit_rational
 from .roughness import SurfaceRoughness
+from .errors import UnsupportedFeatureError
 
 from witwin.core import (
     FrequencyMaterialSample,
@@ -21,6 +22,7 @@ from witwin.core import (
     StaticMaterialSample,
 )
 from witwin.core.material import VACUUM_PERMITTIVITY
+from ._stability import experimental
 
 _SPEED_OF_LIGHT = 299_792_458.0
 _DEFAULT_GYROMAGNETIC_RATIO = 1.760859e11  # rad/(s*T), electron gyromagnetic ratio magnitude
@@ -400,6 +402,8 @@ class NonlinearSusceptibility:
     chi3: float = 0.0
 
     def __post_init__(self):
+        require_fixed_input(self.chi2, name="NonlinearSusceptibility.chi2")
+        require_fixed_input(self.chi3, name="NonlinearSusceptibility.chi3")
         object.__setattr__(self, "chi2", _coerce_real_scalar(self.chi2, name="chi2"))
         object.__setattr__(self, "chi3", _coerce_real_scalar(self.chi3, name="chi3"))
         if float(self.chi2) == 0.0 and float(self.chi3) == 0.0:
@@ -486,6 +490,8 @@ class TwoPhotonAbsorption:
     n0: float | None = None
 
     def __post_init__(self):
+        require_fixed_input(self.beta, name="TwoPhotonAbsorption.beta")
+        require_fixed_input(self.n0, name="TwoPhotonAbsorption.n0")
         object.__setattr__(self, "beta", _coerce_positive(self.beta, name="beta"))
         if self.n0 is not None:
             object.__setattr__(self, "n0", _coerce_positive(self.n0, name="n0"))
@@ -583,6 +589,7 @@ class DiagonalTensor3:
     zz: float
 
     def __post_init__(self):
+        require_fixed_input((self.xx, self.yy, self.zz), name="DiagonalTensor3 entries")
         object.__setattr__(self, "xx", float(self.xx))
         object.__setattr__(self, "yy", float(self.yy))
         object.__setattr__(self, "zz", float(self.zz))
@@ -596,6 +603,7 @@ class Tensor3x3:
     rows: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
 
     def __init__(self, rows):
+        require_fixed_input(rows, name="Tensor3x3 rows")
         object.__setattr__(self, "rows", _normalize_tensor_rows(rows, name="rows"))
 
 
@@ -622,6 +630,7 @@ class ComplexTensor3x3:
         object.__setattr__(self, 'reciprocal', reciprocal)
 
 
+@experimental("breakdown")
 @dataclass(frozen=True)
 class DielectricBreakdown:
     """Deterministic field-duration/latching dynamic dielectric breakdown.
@@ -670,25 +679,29 @@ class DielectricBreakdown:
             _coerce_nonnegative(self.minimum_duration, name="minimum_duration"),
         )
         if self.model != "field_duration":
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "DielectricBreakdown v1 supports model='field_duration' only; "
                 f"got {self.model!r}. Other criteria (instantaneous, damage) are a "
-                "later phase."
+                "later phase.",
+                feature="material.breakdown", method=None
             )
         if self.state != "latching":
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "DielectricBreakdown v1 supports state='latching' only; "
-                f"got {self.state!r}. Recovering/failed state machines are a later phase."
+                f"got {self.state!r}. Recovering/failed state machines are a later phase.",
+                feature="material.breakdown", method=None
             )
         if self.recovery is not None:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "DielectricBreakdown.recovery is a reserved field with no v1 behavior; "
-                "leave it unset until the recovery model lands."
+                "leave it unset until the recovery model lands.",
+                feature="material.breakdown", method=None
             )
         if self.damage_parameters is not None:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "DielectricBreakdown.damage_parameters is a reserved field with no v1 "
-                "behavior; leave it unset until the cumulative-damage model lands."
+                "behavior; leave it unset until the cumulative-damage model lands.",
+                feature="material.breakdown", method=None
             )
         if self.ramp_time is not None:
             object.__setattr__(
@@ -791,6 +804,7 @@ class Material(CoreMaterial):
         require_fixed_input(sigma_m, name="Material.sigma_m")
         object.__setattr__(self, "sigma_m", _coerce_nonnegative(sigma_m, name="sigma_m"))
         object.__setattr__(self, "orientation", None if orientation is None else _normalize_tensor_rows(orientation, name="orientation"))
+        require_fixed_input(kerr_chi3, name="Material.kerr_chi3")
         object.__setattr__(self, "kerr_chi3", None if kerr_chi3 is None else _coerce_real_scalar(kerr_chi3, name="kerr_chi3"))
         object.__setattr__(self, "nonlinearity", _normalize_poles(nonlinearity, _NONLINEAR_SPEC_TYPES, name="nonlinearity"))
         if modulation is not None and not isinstance(modulation, ModulationSpec):
@@ -798,12 +812,13 @@ class Material(CoreMaterial):
         object.__setattr__(self, "modulation", modulation)
 
         if self.orientation is not None:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Material.orientation (a separate crystal-frame rotation matrix) is not consumed: the "
                 "tensor material path assembles per-edge Yee coefficients directly from the lab-frame "
                 "permittivity/permeability/conductivity tensor, so a standalone rotation would need the "
                 "tensor rotated into the lab frame before compilation. Pass the already-rotated tensor as "
-                "Tensor3x3 rows (or an axis-aligned DiagonalTensor3) instead of an orientation matrix."
+                "Tensor3x3 rows (or an axis-aligned DiagonalTensor3) instead of an orientation matrix.",
+                feature="guard:39fd0350", method=None
             )
         if self.sigma_e_tensor is not None:
             if isinstance(self.sigma_e_tensor, ComplexTensor3x3):
@@ -852,17 +867,19 @@ class Material(CoreMaterial):
             # per-step modulation factor (electro-optic-modulator physics). Two edges
             # remain physically out of reach for the single instantaneous-tensor path:
             if self.is_anisotropic:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "A time-modulated Material cannot carry anisotropic tensors: modulating the "
                     "crystal-frame permittivity tensor needs a per-step re-inversion of the coupled "
-                    "3x3 tensor, which the diagonalized effective-permittivity update does not provide."
+                    "3x3 tensor, which the diagonalized effective-permittivity update does not provide.",
+                    feature="material.modulation", method=None
                 )
             if float(self.sigma_e) != 0.0:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "A time-modulated Material cannot carry static electric conductivity: the "
                     "semi-implicit loss fold 0.5*sigma*dt/eps must see the modulated eps_inf*m(t), "
                     "which the static decay coefficient does not track. Model loss with a Drude/Debye "
-                    "pole (dispersive path) instead."
+                    "pole (dispersive path) instead.",
+                    feature="material.modulation", method=None
                 )
 
         if self.pec:
@@ -908,36 +925,42 @@ class Material(CoreMaterial):
             # different per-edge coefficient representation the breakdown conductivity
             # scatter does not model yet.
             if self.pec or self.pmc:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "A PEC/PMC Material cannot carry dielectric breakdown: a perfect conductor "
-                    "has no finite field-duration threshold."
+                    "has no finite field-duration threshold.",
+                    feature="material.breakdown", method=None
                 )
             if self.is_anisotropic:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Dielectric breakdown requires an isotropic (scalar) Material: the "
                     "anisotropic tensor update forms a per-edge 3x3 inverse the breakdown "
-                    "conductivity scatter does not model. Use scalar eps_r/sigma_e."
+                    "conductivity scatter does not model. Use scalar eps_r/sigma_e.",
+                    feature="material.breakdown", method=None
                 )
             if self.is_dispersive:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Dielectric breakdown does not compose with dispersive poles yet: the ADE "
                     "polarization current shares the same E-update coefficients the breakdown "
-                    "scatter rewrites. Use a non-dispersive scalar Material."
+                    "scatter rewrites. Use a non-dispersive scalar Material.",
+                    feature="material.breakdown", method=None
                 )
             if self.is_nonlinear:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Dielectric breakdown does not compose with the instantaneous nonlinear "
                     "channels yet: both rewrite the per-step E-update coefficients. Use a linear "
-                    "scalar Material."
+                    "scalar Material.",
+                    feature="material.breakdown", method=None
                 )
             if self.modulation is not None:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     "Dielectric breakdown does not compose with time modulation yet: both scale "
-                    "the E-update coefficients per step. Drop the modulation."
+                    "the E-update coefficients per step. Drop the modulation.",
+                    feature="material.breakdown", method=None
                 )
             if getattr(self, "is_medium2d", False):
-                raise NotImplementedError(
-                    "Dielectric breakdown requires a bulk (3D) Material, not a 2D sheet medium."
+                raise UnsupportedFeatureError(
+                    "Dielectric breakdown requires a bulk (3D) Material, not a 2D sheet medium.",
+                    feature="material.breakdown", method=None
                 )
 
     @property
@@ -1163,13 +1186,16 @@ class Material(CoreMaterial):
 
     def relative_permittivity(self, frequency: float) -> complex:
         if self.is_anisotropic:
-            raise NotImplementedError("relative_permittivity() currently supports isotropic Material only.")
+            raise UnsupportedFeatureError("relative_permittivity() currently supports isotropic Material only.",
+                                          feature="guard:02577674", method=None)
         if self.is_nonlinear:
-            raise NotImplementedError("relative_permittivity() is not defined for nonlinear Material without a field amplitude.")
+            raise UnsupportedFeatureError("relative_permittivity() is not defined for nonlinear Material without a field amplitude.",
+                                          feature="material.nonlinear", method=None)
         if self.has_custom_electric_poles:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "relative_permittivity() is not defined for spatially-varying custom dispersive poles; "
-                "evaluate the compiled scene material model (Scene.compile_relative_materials) instead."
+                "evaluate the compiled scene material model (Scene.compile_relative_materials) instead.",
+                feature="guard:7c759028", method=None
             )
         frequency = _coerce_frequency(frequency, name="frequency")
         angular_frequency = 2.0 * np.pi * frequency
@@ -1184,13 +1210,16 @@ class Material(CoreMaterial):
 
     def relative_permeability(self, frequency: float) -> complex:
         if self.is_anisotropic:
-            raise NotImplementedError("relative_permeability() currently supports isotropic Material only.")
+            raise UnsupportedFeatureError("relative_permeability() currently supports isotropic Material only.",
+                                          feature="guard:55a752cc", method=None)
         if self.is_nonlinear:
-            raise NotImplementedError("relative_permeability() is not defined for nonlinear Material without a field amplitude.")
+            raise UnsupportedFeatureError("relative_permeability() is not defined for nonlinear Material without a field amplitude.",
+                                          feature="material.nonlinear", method=None)
         if self.has_custom_magnetic_poles:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "relative_permeability() is not defined for spatially-varying custom dispersive poles; "
-                "evaluate the compiled scene material model (Scene.compile_relative_materials) instead."
+                "evaluate the compiled scene material model (Scene.compile_relative_materials) instead.",
+                feature="guard:8a7b18f6", method=None
             )
         frequency = _coerce_frequency(frequency, name="frequency")
         permeability = complex(self.mu_r, 0.0)
@@ -1370,10 +1399,11 @@ class Material(CoreMaterial):
             for label, value in (("b", b_value), ("c", c_value)):
                 if torch.is_tensor(value):
                     if value.requires_grad:
-                        raise NotImplementedError(
+                        raise UnsupportedFeatureError(
                             f"Material.custom_sellmeier {label}_coefficients[{index}] requires grad, but "
                             "per-cell pole strengths and resonances carry no solver gradient channel. "
-                            "Use PerturbationMedium for a differentiable permittivity field."
+                            "Use PerturbationMedium for a differentiable permittivity field.",
+                            feature="guard:722cd622", method=None
                         )
                     if value.ndim != 3:
                         raise ValueError(
@@ -1399,11 +1429,12 @@ class Material(CoreMaterial):
                     raise ValueError("Sellmeier c_coefficients must be > 0 (squared resonance wavelength in meters^2).")
                 levels = [c_scalar]
             if len(levels) > _CUSTOM_SELLMEIER_MAX_LEVELS:
-                raise NotImplementedError(
+                raise UnsupportedFeatureError(
                     f"Sellmeier c_coefficients[{index}] takes {len(levels)} distinct values; a spatially "
                     "varying resonance compiles to one ADE pole per distinct C level because the pole "
                     f"recursion constants are scalar, and at most {_CUSTOM_SELLMEIER_MAX_LEVELS} levels "
-                    "per term are supported. Quantize C to a few levels or keep it uniform."
+                    "per term are supported. Quantize C to a few levels or keep it uniform.",
+                    feature="guard:dbf0d9d3", method=None
                 )
             for level in levels:
                 resonance_frequency = _SPEED_OF_LIGHT / np.sqrt(float(level))
@@ -1524,7 +1555,7 @@ def gyromagnetic_state_space(omega_0, omega_m, gilbert_damping, *, dtype=torch.f
     ``P = c*omega_0*[[-alpha, -1], [1, -alpha]]`` and
     ``Q = c*omega_m*[[alpha, 1], [-1, alpha]]``.
 
-    This is the production twin of ``ferrite_reference.state_space_matrices``; the
+    This is the production twin of ``tests/oracles/ferrite_reference.py`` ``state_space_matrices``; the
     two must agree bit-for-bit (a falsification gate). Torch-native and
     differentiable in every argument that is a leaf tensor.
     """
@@ -1563,7 +1594,7 @@ def gyromagnetic_update_matrices(omega_0, omega_m, gilbert_damping, dt, *, dtype
     orthogonal when ``alpha = 0`` (exact energy conservation) and a strict
     contraction when ``alpha > 0``; unconditionally stable for every ``dt > 0``
     (contract section 3.3). The production twin of the Cayley step embedded in
-    ``ferrite_reference.LLGReference``.
+    ``LLGReference`` in ``tests/oracles/ferrite_reference.py``.
     """
     P, Q = gyromagnetic_state_space(omega_0, omega_m, gilbert_damping, dtype=dtype)
     dt_t = torch.as_tensor(dt, dtype=dtype) if not isinstance(dt, torch.Tensor) else dt.to(dtype)
@@ -1774,17 +1805,19 @@ class GyromagneticFerrite(Material):
         )
 
     def relative_permeability(self, frequency: float) -> complex:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "relative_permeability() is not defined for a GyromagneticFerrite: its permeability is a "
             "non-reciprocal complex 3x3 Polder tensor, not a scalar. Use permeability_tensor_at_freq() "
-            "(or polder_tensor() for the angular-frequency form)."
+            "(or polder_tensor() for the angular-frequency form).",
+            feature="material.gyromagnetic", method=None
         )
 
     def evaluate_at_frequency(self, frequency: float) -> FrequencyMaterialSample:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "evaluate_at_frequency() is not defined for a GyromagneticFerrite: a FrequencyMaterialSample "
             "carries a scalar/diagonal mu, which cannot represent the off-diagonal gyromagnetic Polder "
-            "tensor. Use permeability_tensor_at_freq() for the full 3x3 permeability."
+            "tensor. Use permeability_tensor_at_freq() for the full 3x3 permeability.",
+            feature="material.gyromagnetic", method=None
         )
 
     @classmethod
@@ -1906,6 +1939,7 @@ class Medium2D(Material):
 
     def __init__(self, *, sigma_s: float = 0.0, name: str | None = None):
         super().__init__(eps_r=1.0, mu_r=1.0, sigma_e=0.0, name=name)
+        require_fixed_input(sigma_s, name="Medium2D.sigma_s")
         object.__setattr__(self, "sigma_s", _coerce_nonnegative(sigma_s, name="sigma_s"))
 
     @property
@@ -2288,9 +2322,16 @@ class LossyMetalMedium(Material):
         name: str | None = None,
     ):
         super().__init__(eps_r=1.0, mu_r=1.0, sigma_e=0.0, name=name)
-        object.__setattr__(
-            self, "conductivity", _coerce_positive(conductivity, name="conductivity")
-        )
+        # A trainable scalar tensor stays a tensor for layered MoM loss gradients;
+        # every other value is stored as a Python float, as before.
+        if isinstance(conductivity, torch.Tensor) and conductivity.requires_grad:
+            if conductivity.numel() != 1 or conductivity.is_complex():
+                raise ValueError("A trainable conductivity must be one real tensor value.")
+            _coerce_positive(conductivity.detach(), name="conductivity")
+            value = conductivity.reshape(())
+        else:
+            value = _coerce_positive(conductivity, name="conductivity")
+        object.__setattr__(self, "conductivity", value)
         if roughness is not None and not isinstance(roughness, SurfaceRoughness):
             raise TypeError("roughness must be a SurfaceRoughness instance or None.")
         object.__setattr__(self, "roughness", roughness)
@@ -2767,7 +2808,8 @@ def _perturbed_pole(pole, sensitivity: float, perturbation: torch.Tensor):
     if sensitivity == 0.0:
         return pole
     if isinstance(pole, LorentzPole) and pole.allow_gain:
-        raise NotImplementedError("PerturbationMedium cannot perturb a gain (allow_gain) Lorentz pole.")
+        raise UnsupportedFeatureError("PerturbationMedium cannot perturb a gain (allow_gain) Lorentz pole.",
+                                      feature="material.perturbation", method=None)
     is_drude = isinstance(pole, (DrudePole, CustomDrudePole))
     strength = pole.plasma_frequency if is_drude else pole.delta_eps
     if torch.is_tensor(strength) and tuple(strength.shape) != tuple(perturbation.shape):
@@ -2836,11 +2878,12 @@ class PerturbationMedium(Material):
         if not isinstance(base, CoreMaterial):
             raise TypeError("PerturbationMedium base must be a Material.")
         if isinstance(base, GyromagneticFerrite):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "PerturbationMedium cannot wrap a GyromagneticFerrite: it perturbs a scalar permittivity "
                 "background, but a ferrite carries a non-reciprocal gyromagnetic permeability in a local "
                 "magnetization state that this scalar-eps perturbation would silently discard. Perturb the "
-                "ferrite parameters directly instead."
+                "ferrite parameters directly instead.",
+                feature="material.perturbation", method=None
             )
         if bool(getattr(base, "is_pec", False)):
             raise ValueError("PerturbationMedium cannot wrap a PEC base material.")
@@ -2872,10 +2915,11 @@ class PerturbationMedium(Material):
             pole_sensitivities[kind] = values or (0.0,) * len(base_poles)
         perturbs_poles = any(v != 0.0 for values in pole_sensitivities.values() for v in values)
         if perturbs_poles and perturbation.requires_grad:
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "PerturbationMedium pole sensitivities require a fixed perturbation: per-cell pole "
                 "strengths carry no solver gradient channel, so the pole-drive sensitivity would be "
-                "dropped. Keep the pole sensitivities zero to differentiate through eps_sensitivity."
+                "dropped. Keep the pole sensitivities zero to differentiate through eps_sensitivity.",
+                feature="material.perturbation", method=None
             )
 
         super().__init__(
@@ -2912,11 +2956,12 @@ class PerturbationMedium(Material):
         object.__setattr__(self, "lorentz_sensitivities", pole_sensitivities["lorentz"])
 
         if isinstance(self.epsilon_tensor, Tensor3x3):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "PerturbationMedium applies its scalar sensitivity field as an isotropic delta_eps to a "
                 "scalar or axis-aligned (DiagonalTensor3) base permittivity; a full off-diagonal Tensor3x3 "
                 "base has no single principal-axis eps to perturb, so the perturbation direction in the "
-                "coupled tensor is ambiguous. Use a scalar or DiagonalTensor3 base permittivity."
+                "coupled tensor is ambiguous. Use a scalar or DiagonalTensor3 base permittivity.",
+                feature="material.perturbation", method=None
             )
         base_eps = self.epsilon_tensor if self.epsilon_tensor is not None else self.eps_r
         eps_floor = min(base_eps.as_tuple()) if isinstance(base_eps, DiagonalTensor3) else float(base_eps)
@@ -2938,13 +2983,55 @@ class PerturbationMedium(Material):
         )
 
     def evaluate_at_frequency(self, frequency: float) -> FrequencyMaterialSample:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "PerturbationMedium frequency evaluation is spatially varying; evaluate the "
-            "compiled scene material model (Scene.compile_relative_materials) instead."
+            "compiled scene material model (Scene.compile_relative_materials) instead.",
+            feature="material.perturbation", method=None
         )
 
     def relative_permittivity(self, frequency: float) -> complex:
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "relative_permittivity() is not defined for PerturbationMedium; evaluate the "
-            "compiled scene material model (Scene.compile_relative_materials) instead."
+            "compiled scene material model (Scene.compile_relative_materials) instead.",
+            feature="material.perturbation", method=None
         )
+
+
+# Public namespace ``mw.media``: the material models beyond the core ones at the top level
+# (including the causal layer permittivity models of layers.py), with dispersion fitting (``mw.media.fit``) and the bundled library (``mw.media.library``).
+from ._lazy import lazy_attributes  # noqa: E402
+from .roughness import GroisseRoughness, HammerstadRoughness, HurayRoughness  # noqa: E402
+
+__all__ = [
+    "ComplexTensor3x3",
+    "CopperFoil",
+    "CustomDebyePole",
+    "CustomDrudePole",
+    "CustomLorentzPole",
+    "Graphene",
+    "GroisseRoughness",
+    "GyromagneticFerrite",
+    "HammerstadRoughness",
+    "HurayRoughness",
+    "LossyMetalMedium",
+    "Medium2D",
+    "ModulationSpec",
+    "NonlinearSusceptibility",
+    "PerturbationMedium",
+    "PolePermittivity",
+    "RationalSurfaceImpedance",
+    "SurfaceImpedanceMedium",
+    "SurfaceImpedanceModel",
+    "SurfaceRoughness",
+    "Tensor3x3",
+    "TensorNonlinearSusceptibility",
+    "TwoPhotonAbsorption",
+    "WidebandDebye",
+    "fit",
+    "library",
+]
+
+__getattr__, __dir__ = lazy_attributes(__name__, names={".copper_foil": ("CopperFoil",),
+                                                        ".layers": ("PolePermittivity", "WidebandDebye")},
+                                       modules={"fit": ".dispersion_fit", "library": ".material_library"})
+del lazy_attributes

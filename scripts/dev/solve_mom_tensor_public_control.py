@@ -24,7 +24,7 @@ def build_control_scene():
     normals = torch.linalg.cross(triangles[:, 1]-triangles[:, 0], triangles[:, 2]-triangles[:, 0])
     f = torch.where(((normals*triangles.mean(1)).sum(-1) < 0)[:, None], f[:, [0, 2, 1]], f)
     frequency = 3e8
-    material = mw.Material(epsilon_tensor=mw.Tensor3x3(((2., .1, 0.), (.1, 2.4, 0.), (0., 0., 3.))),
+    material = mw.Material(epsilon_tensor=mw.media.Tensor3x3(((2., .1, 0.), (.1, 2.4, 0.), (0., 0., 3.))),
                            sigma_e=.8*2*math.pi*frequency*EPSILON_0)
     scene = mw.Scene(structures=[mw.Structure(mw.Mesh(v, f, recenter=False, fill_mode='solid', device='cuda'),
                                             material, name='anisotropic_body')], sources=[mw.PlaneWave()])
@@ -67,24 +67,24 @@ def main():
     try:
         torch.cuda.reset_peak_memory_stats()
         scene, frequency = build_control_scene()
-        config = mw.MoMConfig(subdivisions=0, riesz_storage='compact_rwg_v1',
+        config = mw.mom.MoMConfig(subdivisions=0, riesz_storage='compact_rwg_v1',
             integration=IntegrationConfig(order=1, singular_order=1, pair_batch=4),
             dyadic_cache_max_bytes=1024**3,
-            dyadic_integration=mw.DyadicIntegrationConfig(radial_order=8, azimuthal_order=8,
+            dyadic_integration=mw.mom.DyadicIntegrationConfig(radial_order=8, azimuthal_order=8,
                 max_radial_order=512, max_azimuthal_order=64, relative_tolerance=1e-4, absolute_tolerance=1e-9),
-            query_config=mw.FieldQueryConfig(adaptive=False))
+            query_config=mw.mom.FieldQueryConfig(adaptive=False))
         if args.periodic_dimension is not None:
-            config=replace(config,periodic=mw.MoMPeriodicConfig(
+            config=replace(config,periodic=mw.mom.MoMPeriodicConfig(
                 vectors_m=((2.,0.,0.),(0.,2.,0.))[:args.periodic_dimension],
                 real_shells=3,reciprocal_shells=4,quadrature_order=128))
             receipt['periodic_config']=config.periodic.payload()
             receipt['scope']='actual_periodic_tensor_public_algebra_and_exact_restore'
             (args.output/'receipt.json').write_text(json.dumps(receipt,indent=2))
         stage('geometry_ready')
-        prepared = mw.Simulation.mom(scene, frequency=frequency, config=config).prepare()
+        prepared = mw.Simulation.mom(scene, frequencies=frequency, config=config).prepare()
         stage('operator_and_rhs_ready')
         result = prepared.run()
-        data, handle = result.surface_currents, prepared.solver.handle
+        data, handle = mw.mom.surface_currents(result), prepared.solver.handle
         current, rhs = data.scattered_coefficients, prepared.solver.rhs
         residual = handle.apply(current)-rhs
         eta = abs(handle.exterior.eta)
@@ -103,7 +103,7 @@ def main():
         assert result.stats()['converged'] and math.isfinite(relative) and relative < 1e-8, receipt
         assert retained <= config.dyadic_cache_max_bytes
         restored = mw.Result.load(args.output/'result.pt', scene=scene)
-        assert torch.equal(restored.surface_currents.scattered_coefficients, current)
+        assert torch.equal(mw.mom.surface_currents(restored).scattered_coefficients, current)
         points = torch.tensor([[.3, .2, .4]], device='cuda', dtype=torch.float64)
         for actual, expected in zip(restored.query_fields(points, region_id='exterior', field_kind='scattered'),
                                     result.query_fields(points, region_id='exterior', field_kind='scattered')):

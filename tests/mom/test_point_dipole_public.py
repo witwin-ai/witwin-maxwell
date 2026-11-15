@@ -54,8 +54,8 @@ def test_cuda_incident_fields_match_host_closed_form_and_carrier():
     frequency = frequency_for(1.0)
     source = dipole((0.0, 0.0, 0.3), frequency)
     scene = sphere_scene(source)
-    config = mw.MoMConfig(subdivisions=1, riesz_storage='compact_rwg_v1', integration=REFERENCE_INTEGRATION)
-    prepared = mw.Simulation.mom(scene, frequency=frequency, config=config).prepare()
+    config = mw.mom.MoMConfig(subdivisions=1, riesz_storage='compact_rwg_v1', integration=REFERENCE_INTEGRATION)
+    prepared = mw.Simulation.mom(scene, frequencies=frequency, config=config).prepare()
     handle = prepared.solver.handle
     points = cuda(EXTERIOR_PROBES)
     e, h = incident_fields(source, points, handle.exterior)
@@ -79,31 +79,31 @@ def test_public_preparation_fails_closed_for_unsupported_dipole_geometry(positio
     frequency = frequency_for(1.0)
     scene = sphere_scene(dipole(position, frequency))
     with pytest.raises(ValueError, match=match):
-        mw.Simulation.mom(scene, frequency=frequency, config=mw.MoMConfig(subdivisions=subdivisions)).prepare()
+        mw.Simulation.mom(scene, frequencies=frequency, config=mw.mom.MoMConfig(subdivisions=subdivisions)).prepare()
 
 
 def test_public_preparation_fails_closed_for_surface_vertex_dipole():
     from witwin.maxwell.mom.runtime import _compile_basis
     frequency = frequency_for(1.0)
     scene = sphere_scene(dipole((0.0, 0.0, 0.5), frequency))
-    basis = _compile_basis(scene, scene.structures[0].geometry, mw.MoMConfig())
+    basis = _compile_basis(scene.structures[0].geometry, mw.mom.MoMConfig())
     vertex = tuple(basis.mesh.vertices[0].tolist())
     with pytest.raises(ValueError, match='on the surface'):
-        mw.Simulation.mom(sphere_scene(dipole(vertex, frequency)), frequency=frequency).prepare()
+        mw.Simulation.mom(sphere_scene(dipole(vertex, frequency)), frequencies=frequency).prepare()
 
 
 @pytest.mark.parametrize('config, match', [
-    (lambda: mw.MoMConfig(operator_backend='hmatrix', riesz_storage='local_rwg_v1',
+    (lambda: mw.mom.MoMConfig(operator_backend='hmatrix', riesz_storage='local_rwg_v1',
                           stopping=StoppingRule(method='gmres')), 'linear dense free-space'),
-    (lambda: mw.MoMConfig(operator_backend='fmm', riesz_storage='local_rwg_v1',
+    (lambda: mw.mom.MoMConfig(operator_backend='fmm', riesz_storage='local_rwg_v1',
                           stopping=StoppingRule(method='gmres', preconditioner='none')), 'linear dense free-space'),
-    (lambda: mw.MoMConfig(integration=IntegrationConfig(order=3, singular_order=4)), 'order'),
+    (lambda: mw.mom.MoMConfig(integration=IntegrationConfig(order=3, singular_order=4)), 'order'),
 ])
 def test_public_preparation_fails_closed_for_unsupported_configurations(config, match):
     frequency = frequency_for(1.0)
     scene = sphere_scene(dipole((0.0, 0.0, 0.3), frequency))
     with pytest.raises(ValueError, match=match):
-        mw.Simulation.mom(scene, frequency=frequency, config=config()).prepare()
+        mw.Simulation.mom(scene, frequencies=frequency, config=config()).prepare()
 
 
 def test_vacuum_bodies_scatter_nothing_and_monitors_report_the_incident_dipole():
@@ -114,26 +114,26 @@ def test_vacuum_bodies_scatter_nothing_and_monitors_report_the_incident_dipole()
         mw.Structure(mw.Sphere(radius=.06, position=(.2, 0., 0.)), mw.Material(eps_r=1.), name='right')],
         sources=[source], monitors=[mw.PointMonitor(name='inside_right', position=(.2, 0.01, 0.), fields=('Ex', 'Ez')),
                                     mw.PointMonitor(name='outside', position=(0., -.2, .1), fields=('Ey', 'Hz'))])
-    config = mw.MoMConfig(subdivisions=1, query_config=FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1',
+    config = mw.mom.MoMConfig(subdivisions=1, query_config=FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1',
                           integration=REFERENCE_INTEGRATION)
-    result = mw.Simulation.mom(scene, frequency=frequency, config=config).run()
-    data = result.surface_currents
+    result = mw.Simulation.mom(scene, frequencies=frequency, config=config).run()
+    data = mw.mom.surface_currents(result)
     assert torch.count_nonzero(data.scattered_coefficients) == 0
     assert data.incident_carrier.dipoles and not data.incident_carrier.waves
     for name, position in (('inside_right', (.2, 0.01, 0.)), ('outside', (0., -.2, .1))):
         e, h = point_dipole_fields(cuda([position]), source.position, tuple(MOMENT), data.handle.exterior)
         values = dict(zip(('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz'), torch.cat((e[0], h[0]))))
-        for component in result.monitors[name]['fields']:
-            torch.testing.assert_close(result.monitors[name][component], values[component], rtol=1e-12, atol=0)
+        for component in result.monitors[name].coords['component']:
+            torch.testing.assert_close(result.monitors[name].sel(component=component).values[0], values[component], rtol=1e-12, atol=0)
 
 
 def _two_body_scattered(source_position, source_moment, probe, frequency):
     scene = mw.Scene(structures=[
         mw.Structure(mw.Sphere(radius=.08, position=(-.12, 0., 0.)), mw.Material(eps_r=4., sigma_e=0.01), name='lossy'),
-        mw.Structure(mw.Ellipsoid(radii=(.05, .07, .06), position=(.13, .02, 0.)), mw.Material(eps_r=2.5), name='clear')],
+        mw.Structure(mw.geometry.Ellipsoid(radii=(.05, .07, .06), position=(.13, .02, 0.)), mw.Material(eps_r=2.5), name='clear')],
         sources=[dipole(source_position, frequency, moment=source_moment)])
-    config = mw.MoMConfig(subdivisions=2, riesz_storage='compact_rwg_v1', integration=REFERENCE_INTEGRATION)
-    result = mw.Simulation.mom(scene, frequency=frequency, config=config).run()
+    config = mw.mom.MoMConfig(subdivisions=2, riesz_storage='compact_rwg_v1', integration=REFERENCE_INTEGRATION)
+    result = mw.Simulation.mom(scene, frequencies=frequency, config=config).run()
     e, _ = result.query_fields(cuda([probe]), region_id=0, field_kind='scattered')
     return e[0]
 
@@ -159,10 +159,10 @@ def lossy_sigma(ka, imaginary_epsilon=1.0):
 def _sphere_case(ka, distance, eps_r, sigma_e, subdivisions):
     frequency = frequency_for(ka)
     position = distance*RADIUS*DIRECTION
-    config = mw.MoMConfig(subdivisions=subdivisions, riesz_storage='compact_rwg_v1', integration=REFERENCE_INTEGRATION)
-    result = mw.Simulation.mom(sphere_scene(dipole(position, frequency), eps_r, sigma_e), frequency=frequency,
+    config = mw.mom.MoMConfig(subdivisions=subdivisions, riesz_storage='compact_rwg_v1', integration=REFERENCE_INTEGRATION)
+    result = mw.Simulation.mom(sphere_scene(dipole(position, frequency), eps_r, sigma_e), frequencies=frequency,
                                config=config).run()
-    assert result.solver_stats['converged']
+    assert result.stats()['converged']
     epsilon = eps_r+1j*sigma_e/(2*math.pi*frequency*series.EPS0)
     reference = series.DipoleSphereSeries(radius=RADIUS, frequency=frequency, epsilon_r=epsilon,
                                           position=position, moment=MOMENT, n_max=60)
@@ -193,12 +193,12 @@ def test_dipole_result_roundtrip_restores_the_exact_carrier(tmp_path):
     frequency = frequency_for(1.0)
     position = 2.5*RADIUS*DIRECTION
     scene = sphere_scene(dipole(position, frequency), 4.0, lossy_sigma(1.0))
-    config = mw.MoMConfig(subdivisions=1, riesz_storage='compact_rwg_v1', integration=REFERENCE_INTEGRATION)
-    result = mw.Simulation.mom(scene, frequency=frequency, config=config).run()
-    data = result.surface_currents
+    config = mw.mom.MoMConfig(subdivisions=1, riesz_storage='compact_rwg_v1', integration=REFERENCE_INTEGRATION)
+    result = mw.Simulation.mom(scene, frequencies=frequency, config=config).run()
+    data = mw.mom.surface_currents(result)
     path = tmp_path/'dipole.pt'
     result.save(path)
-    restored = mw.Result.load(path, scene=scene).surface_currents
+    restored = mw.mom.surface_currents(mw.Result.load(path, scene=scene))
     assert restored.incident_carrier.identity == data.incident_carrier.identity
     assert torch.equal(restored.scattered_coefficients, data.scattered_coefficients)
     points = cuda([[0.0, 0.3, 0.2], [0.01, 0.02, 0.03]])

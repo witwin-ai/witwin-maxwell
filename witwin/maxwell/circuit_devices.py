@@ -10,11 +10,8 @@ surrounding field.
 Every device is a frozen dataclass that satisfies the shared
 ``_CircuitDeviceContract`` (``.terminals`` / ``.parameters`` /
 ``.initial_condition`` / ``.kind``), so scene, checkpoint, and adjoint traversal
-treat it the same way they treat the linear devices.
-
-Transistor devices (``BJT`` / ``MOSFET``) are reserved public surfaces that fail
-closed until their own independent go/no-go phase gate passes; a parser or a
-factory recognising a model card is not the same thing as supported physics.
+treat it the same way they treat the linear devices. Transistor devices are not
+modelled.
 """
 
 from __future__ import annotations
@@ -25,6 +22,7 @@ from typing import Literal
 import torch
 
 from .circuits import CircuitNode, _CircuitDeviceContract, _device_terminals, _scalar_tensor
+from ._stability import experimental
 
 
 def _positive_scalar(value, *, name: str, allow_zero: bool) -> torch.Tensor:
@@ -50,6 +48,7 @@ def _vector_tensor(value, *, name: str) -> torch.Tensor:
     return tensor
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class NonlinearSolveConfig:
     """Newton solve configuration for the nonlinear device path.
@@ -98,6 +97,7 @@ class NonlinearSolveConfig:
         object.__setattr__(self, "gmin_steps", int(self.gmin_steps))
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class Diode(_CircuitDeviceContract):
     """Controlled Shockley junction diode.
@@ -162,6 +162,7 @@ class Diode(_CircuitDeviceContract):
         object.__setattr__(self, "kind", "diode")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class PiecewiseLinearIV(_CircuitDeviceContract):
     """Behavioral device whose current is a continuous piecewise-linear I-V curve.
@@ -198,6 +199,7 @@ class PiecewiseLinearIV(_CircuitDeviceContract):
         object.__setattr__(self, "kind", "piecewise_linear_iv")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class PolynomialIV(_CircuitDeviceContract):
     """Behavioral device with a polynomial current ``i(v) = sum_k c[k] * v**k``.
@@ -222,6 +224,7 @@ class PolynomialIV(_CircuitDeviceContract):
         object.__setattr__(self, "kind", "polynomial_iv")
 
 
+@experimental("circuits")
 @dataclass(frozen=True)
 class VoltageDependentCapacitor(_CircuitDeviceContract):
     """Voltage-dependent capacitor declared by a single-valued charge ``Q(V)``.
@@ -249,30 +252,6 @@ class VoltageDependentCapacitor(_CircuitDeviceContract):
         object.__setattr__(self, "kind", "voltage_dependent_capacitor")
 
 
-class BJT:
-    """Reserved bipolar-junction-transistor surface (fails closed until Phase 5)."""
-
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(
-            "Transistor device BJT is gated behind the independent Phase 5 go/no-go "
-            "transistor evaluation; the diode/behavioral nonlinear device family does "
-            "not define transistor terminal physics, charge conservation, or gradients, "
-            "so this surface fails closed until that gate passes."
-        )
-
-
-class MOSFET:
-    """Reserved MOSFET surface (fails closed until Phase 5)."""
-
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(
-            "Transistor device MOSFET is gated behind the independent Phase 5 go/no-go "
-            "transistor evaluation; the diode/behavioral nonlinear device family does "
-            "not define transistor terminal physics, charge conservation, or gradients, "
-            "so this surface fails closed until that gate passes."
-        )
-
-
 NONLINEAR_DEVICE_TYPES = (
     Diode,
     PiecewiseLinearIV,
@@ -282,9 +261,7 @@ NONLINEAR_DEVICE_TYPES = (
 
 
 __all__ = [
-    "BJT",
     "Diode",
-    "MOSFET",
     "NonlinearSolveConfig",
     "PiecewiseLinearIV",
     "PolynomialIV",

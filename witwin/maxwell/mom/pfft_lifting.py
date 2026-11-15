@@ -10,6 +10,7 @@ from .lifting import (CURRENT_KIND, FORMULATION_ID, KERNEL_DIFFERENCE_VERSION,
                       _anisotropic_touching_values, _incident_traces, _material_kernels,
                       _merge_near, _near_values, _product_values, _touching_split,
                       _touching_values, _validated_batch, difference_kernels, medium_differences)
+from .ordered_reduction import ordered_index_add_
 from .operator import NEAR_FALLBACK_BATCH, _pair_budget, _touching_batch
 from .pfft_grid import PFFTProjection, _inverse_vandermonde
 from .quadrature import _classify_pairs, _pair_geometry, triangle_rule
@@ -118,7 +119,7 @@ class PFFTLifting:
                 # Accumulate analytic quadrature in complex128 before the FFT
                 # conversion, avoiding a carrier-batch-dependent scatter error.
                 grid = torch.zeros(math.prod(self.region.shape), device=self.device, dtype=torch.complex128)
-                grid.index_add_(0, self.source_indices.flatten(), source[..., channel].flatten())
+                ordered_index_add_(grid, 0, self.source_indices.flatten(), source[..., channel].flatten())
                 spectra.append(self.region._forward(grid.reshape(self.region.shape).to(self.dtype)))
             for a, b, c in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
                 curl_j = gradients[b]*spectra[c]-gradients[c]*spectra[b]
@@ -165,7 +166,7 @@ class PFFTLifting:
         budget = _pair_budget(config)
 
         def scatter(rows, values):
-            rhs.index_add_(2, self.basis.face_edges[rows].flatten(), values.permute(0, 2, 1, 3).flatten(2))
+            ordered_index_add_(rhs, 2, self.basis.face_edges[rows].flatten(), values.permute(0, 2, 1, 3).flatten(2))
 
         for start in range(0, len(self.rows), 256):
             rows, cols = self.rows[start:start+256], self.cols[start:start+256]

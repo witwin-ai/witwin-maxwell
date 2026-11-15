@@ -99,6 +99,8 @@ def compile_outside_dependency_audit(nodes, bounds, discarded):
 
 def compile_native_plane_layout(scene, *, cut, polarization, implicit_bounds):
     """Compile actual Scene/PreparedScene metadata without a CPU field solver."""
+    prepared_scene = scene if isinstance(scene, PreparedScene) else None
+    scene = scene.scene if prepared_scene is not None else scene
     if not isinstance(scene, mw.Scene):
         raise TypeError('Native plane compilation requires a real Scene.')
     if polarization not in ('Ey', 'Ez'):
@@ -125,12 +127,9 @@ def compile_native_plane_layout(scene, *, cut, polarization, implicit_bounds):
     injection = source.injection
     if not isinstance(injection, mw.TFSF) or injection.mode != 'slab' or injection.axis != 'x':
         raise NotImplementedError('The actual source must use an x-normal slab TFSF.')
-    if torch.device(scene.device).type == 'cpu':
-        prepared_scene = scene if isinstance(scene, PreparedScene) else PreparedScene(scene, lazy_meshgrid=True)
-    else:
-        if not isinstance(scene, PreparedScene):
-            raise TypeError('CUDA layout compilation must consume the actually prepared native scene.')
-        prepared_scene = scene
+    # A declarative Scene compiles its layout metadata on the CPU; CUDA layouts consume the
+    # actually prepared native scene.
+    prepared_scene = prepared_scene if prepared_scene is not None else PreparedScene(scene, device='cpu', lazy_meshgrid=True)
     geometry = compile_split_plane(prepared_scene.x_nodes64, cut)
     support = compile_local_cn_support(geometry, implicit_bounds)
     low, high = support['bounds']
@@ -163,7 +162,7 @@ def compile_native_plane_layout(scene, *, cut, polarization, implicit_bounds):
     audit = compile_outside_dependency_audit(nodes, (low, high), discarded)
     layout = NativePlaneLayout(geometry, support, polarization, magnetic_name, sign, (ni, nj), native_e, local_e,
         torch.tensor(native_h), torch.tensor(local_h), torch.tensor(discarded, dtype=torch.int64),
-        (ni-1, nj), tuple(area.shape), area, audit, tuple(compile_fdtd_sources(prepared_scene, default_frequency=source.source_time.frequency)))
+        (ni-1, nj), tuple(area.shape), area, audit, tuple(compile_fdtd_sources(scene, default_frequency=source.source_time.frequency)))
     for monitor in scene.monitors:
         if not isinstance(monitor, mw.PointMonitor):
             raise NotImplementedError('Only ordinary exterior PointMonitor records are qualified in the first native integration.')
@@ -229,7 +228,7 @@ class NativeSplitPlane:
             ('native_electric', 'local_electric', 'native_magnetic', 'local_magnetic', 'discarded_native_magnetic')}
         self.maps['outside_magnetic'] = torch.tensor(self.layout.outside_magnetic, device=self.device)
         self.area = self.layout.physical_line_area.flatten().to(self.device)
-        reference_h = abs(float(solver.scene.sources[0].source_time.amplitude))/compiled['eta']
+        reference_h = abs(float(solver.scene.scene.sources[0].source_time.amplitude))/compiled['eta']
         self.uniform_reference_h = torch.tensor(reference_h, device=self.device, dtype=torch.float64)
         lines = self.area.numel()
         self.electric = torch.zeros((len(compiled['electric']), lines), device=self.device, dtype=torch.complex128)

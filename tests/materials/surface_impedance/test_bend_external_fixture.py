@@ -13,7 +13,7 @@ from scripts.dev.fdtd.copper_cylinder_reference import shell_scattering,MU_0
 def test_independent_cylindrical_fixture_has_same_physical_positions_frames_and_aperture(curvature):
     model=fixture(.01,curvature)
     points=np.array(((0.,0.,0.),(.07,.02,-.03),(-.08,-.035,.04),(.01,.01,0.)))
-    chart=mw.BendCoordinates(curvature=curvature)
+    chart=mw.coordinates.BendCoordinates(curvature=curvature)
     np.testing.assert_allclose(cylindrical_world(chart_to_cylinder(points,curvature),curvature),
         chart.position(torch.from_numpy(points)).numpy(),rtol=2e-14,atol=3e-16)
     angles=chart_to_cylinder(points,curvature)[:,1]
@@ -51,7 +51,7 @@ def test_declared_domain_grid_extends_boundary_cell_widths_without_padded_resamp
     spacing=.01;curvature=3.
     model=fixture(spacing,curvature,grid_construction='domain_then_pml')
     scene=PreparedScene(mw.Scene(domain=mw.Domain(bounds=((-0.12,.12),(-.1,.1),(-.12,.12))),
-        grid=mw.GridSpec.uniform(spacing),boundary=mw.BoundarySpec.pml(num_layers=8),device='cpu'))
+        grid=mw.GridSpec.uniform(spacing),boundary=mw.BoundarySpec.pml(num_layers=8)), device="cpu")
     np.testing.assert_array_equal(model['grid'][0],1/curvature-np.asarray(scene.y_nodes64)[::-1])
     np.testing.assert_array_equal(model['grid'][1],curvature*np.asarray(scene.x_nodes64)-math.pi/2)
     np.testing.assert_array_equal(model['grid'][2],np.asarray(scene.z_nodes64))

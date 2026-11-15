@@ -27,8 +27,8 @@ def arguments(kind, *, radius=None, dx=.000625):
 
 @pytest.mark.parametrize('kind', driver.KINDS)
 def test_network_driver_grades_outer_grid_without_changing_physical_fixture(kind):
-    uniform = driver.scene_from_arguments(arguments(kind), device='cpu')
-    graded = driver.scene_from_arguments(arguments(kind, radius=.02), device='cpu')
+    uniform = driver.scene_from_arguments(arguments(kind))
+    graded = driver.scene_from_arguments(arguments(kind, radius=.02))
     assert graded.domain.bounds == uniform.domain.bounds
     assert graded.metadata['pml_physical_thickness_m'] == uniform.metadata['pml_physical_thickness_m']
     assert graded.metadata['transverse_refinement_radius_m'] == .02
@@ -41,7 +41,7 @@ def test_network_driver_grades_outer_grid_without_changing_physical_fixture(kind
         assert first.position == second.position
         assert first.reference_plane == second.reference_plane
         assert first.size == second.size
-    prepared = prepare_scene(graded)
+    prepared = prepare_scene(graded, device='cpu')
     record = driver.grid_record(prepared)
     assert record['node_shape'] == [257, 177, 169]
     for axis in 'xyz':
@@ -56,8 +56,8 @@ def test_network_driver_grades_outer_grid_without_changing_physical_fixture(kind
 
 
 def test_network_driver_refinement_keeps_axial_and_external_nodes_exact():
-    coarse = prepare_scene(driver.scene_from_arguments(arguments('cpw', radius=.02), device='cpu'))
-    fine = prepare_scene(driver.scene_from_arguments(arguments('cpw', radius=.02, dx=.0003125), device='cpu'))
+    coarse = prepare_scene(driver.scene_from_arguments(arguments('cpw', radius=.02)), device='cpu')
+    fine = prepare_scene(driver.scene_from_arguments(arguments('cpw', radius=.02, dx=.0003125)), device='cpu')
     a, b = driver.grid_record(coarse), driver.grid_record(fine)
     assert a['node_sha256']['x'] == b['node_sha256']['x']
     for axis in 'yz':
@@ -68,4 +68,4 @@ def test_network_driver_refinement_keeps_axial_and_external_nodes_exact():
 @pytest.mark.parametrize('radius', (.001, .0201, float('nan'), float('inf')))
 def test_network_driver_rejects_invalid_radius_before_field_preparation(radius):
     with pytest.raises(ValueError, match='transverse_refinement_radius'):
-        driver.scene_from_arguments(arguments('microstrip', radius=radius), device='cpu')
+        driver.scene_from_arguments(arguments('microstrip', radius=radius))

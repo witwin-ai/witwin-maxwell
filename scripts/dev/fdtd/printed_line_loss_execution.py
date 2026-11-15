@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import inspect
 import json
@@ -32,6 +32,7 @@ from scripts.dev.fdtd.printed_line_loss_basis import (
 from scripts.dev.fdtd.printed_line_regional_power import regional_monitors, regional_plane_power
 from witwin.maxwell.fdtd.quadrature import plane_normal_poynting
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.scene import place_scene
 
 
 DRIVE_BASIS = ((1., .25), (.25, 1.))
@@ -118,9 +119,9 @@ def build_case(case):
     scene = printed_line_scene('stripline', dx=case.dx, longitudinal_dl=normal,
         axial_half_length=case.axial_half_length, port_separation=case.separation,
         transverse_padding=case.padding, transverse_refinement_radius=.02,
-        sigma_e=case.sigma, metal=case.metal, copper_frequency_range=(.1e9, 4e9), device='cpu')
+        sigma_e=case.sigma, metal=case.metal, copper_frequency_range=(.1e9, 4e9))
     ports, groups = physical_sources(scene, 'stripline', normal)
-    scene = scene.clone(ports=ports)
+    scene = scene.updated(ports=ports)
     bounds = ((-.015, .015), *tuple(scene.domain.bounds[axis] for axis in (1, 2)))
     regional, schema = regional_monitors(scene, bounds, case.frequencies, observation='planes')
     helper, _ = load_helper('stripline')
@@ -132,11 +133,11 @@ def build_case(case):
         reference = printed_line_scene('stripline', dx=case.probe_reference_dx, longitudinal_dl=normal,
             axial_half_length=case.axial_half_length, port_separation=case.separation,
             transverse_padding=case.padding, transverse_refinement_radius=.02,
-            sigma_e=case.sigma, metal=case.metal, copper_frequency_range=(.1e9, 4e9), device='cpu')
+            sigma_e=case.sigma, metal=case.metal, copper_frequency_range=(.1e9, 4e9))
         original, original_rows, _ = helper.native_probe_monitors(reference, 'stripline', case.probe_reference_dx,
             normal, case.padding, case.positions, case.metal)
         probes, rows, expected, observation_contract = fixed_physical_probe_monitors(scene, reference, original, original_rows)
-        scene = scene.clone(metadata={**scene.metadata, 'fixed_VI_observation_contract': observation_contract})
+        scene = scene.updated(metadata={**scene.metadata, 'fixed_VI_observation_contract': observation_contract})
     if case.record_legacy_native_vi:
         legacy, legacy_rows, legacy_expected = helper.native_probe_monitors(scene, 'stripline', case.dx,
             normal, case.padding, case.positions, case.metal)
@@ -148,14 +149,14 @@ def build_case(case):
             raise ValueError('Primary and secondary native V/I monitor names must be disjoint.')
         probes = [*probes, *(mw.PointMonitor(renamed[monitor.name], monitor.position, fields=monitor.fields) for monitor in legacy)]
         expected = {**expected, **legacy_expected}
-        scene = scene.clone(metadata={**scene.metadata, 'legacy_native_VI_observation_contract': {
+        scene = scene.updated(metadata={**scene.metadata, 'legacy_native_VI_observation_contract': {
             'role': 'secondary_mesh_native', 'state_key': 'legacy_native_physical_state',
             'grid_spacing_m': case.dx, 'primary_reference_spacing_m': case.probe_reference_dx,
             'station_positions_m': case.positions,
             'native_positions_m': {renamed[monitor.name]: monitor.position for monitor in legacy},
             'integration_rows': legacy_rows, 'expected_native_probes': legacy_expected,
             'scope': 'Additional native fine-grid H loop; physical curve varies with dx. Not the fixed primary functional or an unmatched external-reference parity claim.'}})
-    scene = scene.clone(metadata={**scene.metadata, 'VI_observation_roles': {
+    scene = scene.updated(metadata={**scene.metadata, 'VI_observation_roles': {
         'primary': {'state_key': 'physical_state', 'functional': 'fixed_reference' if case.probe_reference_dx is not None else 'mesh_native',
             'reference_spacing_m': case.probe_reference_dx, 'actual_grid_spacing_m': case.dx},
         'secondary': None if not case.record_legacy_native_vi else {'state_key': 'legacy_native_physical_state', 'functional': 'mesh_native', 'actual_grid_spacing_m': case.dx}}})
@@ -163,9 +164,9 @@ def build_case(case):
     tails = []
     for index, (voltage, _) in enumerate(rows):
         name, component, _ = voltage[len(voltage) // 2]
-        tails.append(mw.FieldTimeMonitor(f'loss_tail_{index}', components=(component,),
+        tails.append(mw.monitors.FieldTimeMonitor(f'loss_tail_{index}', components=(component,),
             position=by_name[name].position, interval=32))
-    scene = scene.clone(monitors=[*regional, *probes, *tails])
+    scene = scene.updated(monitors=[*regional, *probes, *tails])
     return scene, groups, bounds, schema, rows, expected, tails
 
 
@@ -179,12 +180,12 @@ def make_simulation(scene, groups, amplitudes, case, *, graph, steps, device='cu
     # columns are nonzero because the active-port spectral API rejects a zero
     # available-power spectrum. They are not pure left/right source columns.
     pulse = mw.GaussianPulse(1e9, fwidth=.8e9)
-    excitations = [mw.PortExcitation(port.name, amplitude=amplitudes[group_by_port[port.name]],
+    excitations = [mw.rf.PortExcitation(port.name, amplitude=amplitudes[group_by_port[port.name]],
         source_impedance=50., source_time=pulse) for port in scene.ports]
-    return mw.Simulation.fdtd(scene.clone(device=device), frequencies=case.frequencies,
-        excitations=excitations, cuda_graph=graph,
-        spectral_sampler=mw.SpectralSampler(window='none', normalize_source=False),
-        run_time=mw.TimeConfig(time_steps=steps))
+    return mw.Simulation.fdtd(place_scene(scene, device), frequencies=case.frequencies,
+        excitations=excitations, config=mw.FDTDConfig(cuda_graph=graph,
+        spectral_sampler=mw.fdtd.SpectralSampler(window='none', normalize_source=False),
+        run_time=mw.TimeConfig(time_steps=steps)))
 
 
 def runtime_operator_signature(solver):
@@ -246,7 +247,7 @@ def run_drive(case, amplitudes, output, *, graph=True, resume=True, planned_step
     split = math.floor(case.checkpoint_time / dt) if stop_step is None else stop_step
     if type(steps) is not int or steps <= 0 or resume and not 0 < split < steps:
         raise ValueError('Checkpoint must lie inside the same positive full planned horizon.')
-    simulation.config.run_time = mw.TimeConfig(time_steps=steps)
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=steps))
     _log('prepared', log_path=output / 'run.log', amplitudes=amplitudes, dt_s=dt, planned_steps=steps, split_step=split,
         requested_duration_s=case.duration, test_override=planned_steps is not None)
     started = time.perf_counter()
@@ -260,7 +261,7 @@ def run_drive(case, amplitudes, output, *, graph=True, resume=True, planned_step
         _log('checkpoint_saved', log_path=output / 'run.log', step=checkpoint.step, total_steps=checkpoint.total_steps)
         del checkpoint, prepared
         torch.cuda.empty_cache()
-        restored = mw.FDTDResumeCheckpoint.load(output / 'checkpoint.pt', map_location='cpu')
+        restored = mw.fdtd.FDTDResumeCheckpoint.load(output / 'checkpoint.pt', map_location='cpu')
         prepared = simulation.prepare()
         if float(prepared.solver.dt) != dt or restored.total_steps != steps:
             raise RuntimeError('Fresh preparation changed actual dt or planned checkpoint horizon.')
@@ -297,7 +298,7 @@ def run_drive(case, amplitudes, output, *, graph=True, resume=True, planned_step
     result.save(output / 'result.pt')
     native = {}
     for name, (component, index) in expected.items():
-        payload = result.monitor(name)
+        payload = result.raw_monitor(name)
         if tuple(payload['field_indices'][component]) != index:
             raise RuntimeError('Actual physical V/I monitor changed native index.')
         native[name] = payload['components'][component].detach().cpu().numpy().astype(np.complex128).reshape(len(case.frequencies))
@@ -306,9 +307,9 @@ def run_drive(case, amplitudes, output, *, graph=True, resume=True, planned_step
     legacy_state = None if legacy_rows is None else np.asarray([[sum(native[name] * weight for name, _, weight in row) for row in pair] for pair in legacy_rows])
     tail = {}
     for monitor in tails:
-        payload = result.monitor(monitor.name)
-        field = torch.as_tensor(payload['field']).detach().cpu().numpy()
-        times = torch.as_tensor(payload['t']).detach().cpu().numpy()
+        trace = result.monitor(monitor.name)
+        field = trace.isel(component=0).values.detach().cpu().numpy()
+        times = trace.coords['t'].detach().cpu().numpy()
         peak = float(abs(field).max())
         selection = times >= steps * dt - 2e-9
         tail[monitor.name] = {'t_s': times, 'field': field,
@@ -372,6 +373,10 @@ class CoherentObservations:
     def stats(self):
         return {'normalize_source': False}
 
+    def _conductor_losses(self):
+        # The Result hook behind mw.rf.conductor_losses(result), read by the shared loss reducer.
+        return self.conductor_losses
+
     @staticmethod
     def _components(payloads, output, weights, component_key='components'):
         keys = output[component_key].keys()
@@ -403,9 +408,9 @@ class CoherentObservations:
             for side in ('negative','positive'):
                 head[side]=coherent_fields([{'Et':torch.as_tensor(candidate[side])[None]} for candidate in originals],weights)['Et'][0]
 
-    def monitor(self, name, *, frequency):
+    def raw_monitor(self, name, *, frequency):
         index = self.frequencies.index(frequency)
-        payloads = [result.monitor(name, frequency=frequency) for result in self.results]
+        payloads = [result.raw_monitor(name, frequency=frequency) for result in self.results]
         if any(tuple(payload['frequencies']) != (frequency,) for payload in payloads):
             raise ValueError('Actual coherent monitor changed requested frequency.')
         output = copy.deepcopy(payloads[0])

@@ -33,7 +33,7 @@ _L = 1.0e-3
 
 
 def _config(tol=1e-12):
-    return mw.ElectrostaticSolverConfig(tolerance=tol)
+    return mw.electrostatic.ElectrostaticSolverConfig(tolerance=tol)
 
 
 def _plate_compiled(n=12):
@@ -41,7 +41,7 @@ def _plate_compiled(n=12):
     domain = mw.Domain(bounds=((0.0, _L), (0.0, _L), (0.0, _L)))
     grid = mw.GridSpec.uniform(_L / n)
     scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    boundary = mw.ElectrostaticBoundarySpec(
+    boundary = mw.electrostatic.ElectrostaticBoundarySpec(
         default="neumann",
         z_low=("dirichlet", 1.0),
         z_high=("dirichlet", 0.0),
@@ -90,16 +90,15 @@ def _center_terminal_compiled(n=14):
     """A small cube conductor inside a grounded (Dirichlet) enclosure."""
     domain = mw.Domain(bounds=((-_L, _L), (-_L, _L), (-_L, _L)))
     grid = mw.GridSpec.uniform(2.0 * _L / n)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(
             name="t",
             geometry=Box(position=(0.0, 0.0, 0.0), size=(0.6 * _L, 0.6 * _L, 0.6 * _L)),
             potential=1.0,
-        )
-    )
+            ),
+            ))
     return compile_electrostatics(
-        scene, mw.ElectrostaticBoundarySpec.grounded_box(), dtype=torch.float64
+        scene, mw.electrostatic.ElectrostaticBoundarySpec.grounded_box(), dtype=torch.float64
     )
 
 
@@ -221,16 +220,15 @@ def test_floating_conductor_gradient_fails_closed():
     """Gradients through the floating-superposition solve are not implemented."""
     domain = mw.Domain(bounds=((-_L, _L), (-_L, _L), (-_L, _L)))
     grid = mw.GridSpec.uniform(2.0 * _L / 12)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(
             name="float",
             geometry=Box(position=(0.0, 0.0, 0.0), size=(0.6 * _L, 0.6 * _L, 0.6 * _L)),
             charge=1.0e-15,
-        )
-    )
+            ),
+            ))
     compiled = compile_electrostatics(
-        scene, mw.ElectrostaticBoundarySpec.grounded_box(), dtype=torch.float64
+        scene, mw.electrostatic.ElectrostaticBoundarySpec.grounded_box(), dtype=torch.float64
     )
     eps = compiled.epsilon_r.detach().clone().requires_grad_(True)
     comp = dataclasses.replace(compiled, epsilon_r=eps)

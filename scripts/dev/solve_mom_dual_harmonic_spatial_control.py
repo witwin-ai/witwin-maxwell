@@ -48,7 +48,7 @@ def main():
         write('mesh.json', {'vertices': volume.vertices, 'cells': volume.cells,
                             'boundary_vertices': volume.boundary.vertices, 'boundary_faces': volume.boundary.faces})
         print('solve', record['volume_cells'], record['surface_faces'], flush=True)
-        result = mw.Simulation.mom(scene, frequency=3e8, config=config).run()
+        result = mw.Simulation.mom(scene, frequencies=3e8, config=config).run()
         result.save(root/'result.pt')
         write('solver-stats.json', result.stats())
         record['result_sha256'] = hashlib.sha256((root/'result.pt').read_bytes()).hexdigest()

@@ -6,30 +6,29 @@ import copy
 
 import torch
 
+from ..errors import UnsupportedFeatureError
+
 
 def validate_material_channels(scene):
     """Reject trainable channels absent from the native material pullback."""
-    def trainable_geometry(geometry):
-        return any(isinstance(value, torch.Tensor) and value.requires_grad
-                   for value in vars(geometry).values())
+    from ..adjoint_inputs import geometry_tensors as trainable_geometry, require_material_gradient_channels
+
+    require_material_gradient_channels(scene)
     for region in scene.material_regions:
         if trainable_geometry(region.geometry):
-            raise NotImplementedError("Batch adjoint does not register material-region geometry inputs; use density parameters.")
-        if region.density.requires_grad and region.mu_bounds[0] != region.mu_bounds[1]:
-            raise NotImplementedError("Batch adjoint has no material magnetic-permeability gradient channel.")
+            raise UnsupportedFeatureError("Batch adjoint does not register material-region geometry inputs; use density parameters.",
+                                          feature="guard:1631e508", method="fdtd")
     if any(trainable_geometry(structure.geometry) for structure in scene.structures):
         for structure in scene.structures:
             material = structure.material
-            if (float(getattr(material, "mu_r", 1.)) != 1.
-                    or float(getattr(material, "sigma_e", 0.)) != 0.
-                    or float(getattr(material, "sigma_m", 0.)) != 0.
-                    or getattr(material, "mu_tensor", None) is not None
+            if (float(getattr(material, "sigma_e", 0.)) != 0.
                     or getattr(material, "sigma_e_tensor", None) is not None
                     or getattr(material, "is_pec", False)
                     or getattr(material, "is_pmc", False)):
-                raise NotImplementedError(
-                    "Batch geometry adjoint requires nonmagnetic, nonconductive dielectric structures; "
-                    "magnetic, conductivity and PEC occupancy gradient channels are not available.")
+                raise UnsupportedFeatureError(
+                    "Batch geometry adjoint requires nonconductive structures without PEC or PMC; the batch "
+                    "material replay has no conductivity or PEC/PMC occupancy gradient channel.",
+                    feature="guard:d8c0be06", method="fdtd")
 
 
 def source_scale_pullback(bridge, inputs):
@@ -52,7 +51,7 @@ def freeze_solver(solver):
     # Runtime face descriptors refer back to these declarative materials.
     # Keep their identity consistent with the already shared Scene; numerical
     # coefficients and every evolving face state are still cloned below.
-    for structure in solver.scene.structures:
+    for structure in solver.scene.scene.structures:
         memo[id(structure.material)] = structure.material
     def share_material(value):
         if isinstance(value, torch.Tensor):
@@ -117,6 +116,9 @@ class BatchAdjointTape:
                                     for checkpoint in checkpoints for value in checkpoint.tensors.values())
         self.outputs = bridge.accept_forward(freeze_solver(solver), raw, tuple(checkpoints),
             time_steps=steps, use_full_field_dft=fields)
+        # The adjoint pack carries ports but not network records; keep the
+        # finalized records so attach() can rebind them to the rebuilt ports.
+        self.embedded_networks = raw.get("embedded_networks", {})
         self.ready = torch.cuda.Event()
         self.ready.record(torch.cuda.current_stream(self.device))
 
@@ -124,7 +126,11 @@ class BatchAdjointTape:
         with torch.enable_grad():
             outputs = _BatchAdjointFunction.apply(self, *self.bridge.trainable_inputs)
             outputs = outputs if isinstance(outputs, tuple) else (outputs,)
-            return self.bridge.rebuild_forward_outputs(outputs)[-1]
+            raw = self.bridge.rebuild_forward_outputs(outputs)[-1]
+            if self.embedded_networks:
+                from ..fdtd.networks import rebind_embedded_networks
+                raw["embedded_networks"] = rebind_embedded_networks(self.embedded_networks, raw["ports"])
+            return raw
 
 
 class _BatchAdjointFunction(torch.autograd.Function):

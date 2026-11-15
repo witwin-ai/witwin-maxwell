@@ -15,8 +15,8 @@ from witwin.maxwell.fdtd.distributed.adjoint import (
 def test_distributed_bridges_bind_requested_timing_before_field_initialization(monkeypatch, bridge_type, explicit_dt):
     import witwin.maxwell.fdtd.distributed as distributed_module
 
-    scene = mw.Scene(device="cpu", sources=(mw.PointDipole((0., 0., 0.), source_time=mw.CW(2e9)),))
-    simulation = mw.Simulation.fdtd(scene, frequency=1e9, run_time=mw.TimeConfig(dt=explicit_dt))
+    scene = mw.Scene(sources=(mw.PointDipole((0., 0., 0.), source_time=mw.CW(2e9)),))
+    simulation = mw.Simulation.fdtd(scene, frequencies=1e9, config=mw.FDTDConfig(run_time=mw.TimeConfig(dt=explicit_dt), device="cpu"))
     simulation._fdtd_optimization_dt = 2e-12
     seen = {}
 
@@ -54,15 +54,21 @@ def test_shard_local_adjoint_outputs_keep_time_records_outside_spectral_pack():
 
 
 def _scene(density, *, time_only):
-    scene = mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=((-0.4, .4),) * 3),
-        grid=mw.GridSpec.uniform(.1), boundary=mw.BoundarySpec.none(), device="cuda:0")
-    scene.add_material_region(mw.MaterialRegion("design", geometry=mw.Box(position=(0., 0., 0.), size=(.4, .4, .4)),
-        density=density, eps_bounds=(1., 4.)))
-    scene.add_source(mw.PointDipole((-.2, 0., 0.), polarization="Ez", profile="ideal",
-        source_time=mw.GaussianPulse(1e9, .5e9)))
-    scene.add_monitor(mw.FieldTimeMonitor("trace", components=("Ez", "Hy"), position=(.1, 0., 0.), interval=3))
+    scene = mw.Scene(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=((-0.4, .4),) * 3),
+                grid=mw.GridSpec.uniform(.1), boundary=mw.BoundarySpec.none(),
+                     material_regions=(
+                         mw.MaterialRegion("design", geometry=mw.Box(position=(0., 0., 0.), size=(.4, .4, .4)),
+                             density=density, eps_bounds=(1., 4.)),
+                     ),
+                     sources=(
+                         mw.PointDipole((-.2, 0., 0.), polarization="Ez", profile="ideal",
+                             source_time=mw.GaussianPulse(1e9, .5e9)),
+                     ),
+                     monitors=(
+                         mw.monitors.FieldTimeMonitor("trace", components=("Ez", "Hy"), position=(.1, 0., 0.), interval=3),
+                     ))
     if not time_only:
-        scene.add_monitor(mw.PointMonitor("spectrum", (.1, 0., 0.), fields=("Ez",)))
+        scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("spectrum", (.1, 0., 0.), fields=("Ez",))))
     return scene
 
 
@@ -71,21 +77,28 @@ def test_distributed_trainable_time_records_and_explicit_dt_match_single_gpu(cud
     results = []
     for distributed, grad in ((False, False), (True, False), (True, True)):
         density = torch.full((2, 2, 2), .5, device="cuda:0", requires_grad=grad)
-        parallel = mw.FDTDParallelConfig(devices=cuda_p2p_devices, gather_fields=False, overlap=False,
+        parallel = mw.fdtd.FDTDParallelConfig(devices=cuda_p2p_devices, gather_fields=False, overlap=False,
             result_device=cuda_p2p_devices[0]) if distributed else None
-        result = mw.Simulation.fdtd(_scene(density, time_only=time_only), frequency=1e9,
-            run_time=mw.TimeConfig(time_steps=100, dt=5e-11),
-            spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False, parallel=parallel).run()
+        result = mw.Simulation.fdtd(_scene(density, time_only=time_only), frequencies=1e9,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=100, dt=5e-11),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False, parallel=parallel,
+            )).run()
         results.append(result)
         assert result.solver.dt == 5e-11
-        trace = result.monitor("trace")
+        trace = result.raw_monitor("trace")
         assert trace["differentiable"] is False
-        assert all(not value.requires_grad for value in trace["components"].values())
+        # A trainable run guards its detached traces: same values, and an objective built
+        # from one fails at backward naming the monitor instead of a silent zero gradient.
+        assert all(value.requires_grad == grad for value in trace["components"].values())
+        if grad:
+            with pytest.raises(RuntimeError, match=r"Monitor 'trace' \(\w+\) records detached time-domain traces"):
+                trace["components"]["Ez"].sum().backward()
         if grad and not time_only:
-            result.monitor("spectrum")["data"].abs().square().sum().backward()
+            result.monitor("spectrum").sel(component="Ez").values.abs().square().sum().backward()
             assert density.grad is not None and torch.isfinite(density.grad).all()
     for result in results[1:]:
-        expected, actual = results[0].monitor("trace"), result.monitor("trace")
+        expected, actual = results[0].raw_monitor("trace"), result.raw_monitor("trace")
         torch.testing.assert_close(actual["t"], expected["t"], rtol=0, atol=0)
         for component in expected["fields"]:
             torch.testing.assert_close(actual["components"][component], expected["components"][component], rtol=1e-5, atol=1e-5)

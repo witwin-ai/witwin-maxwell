@@ -41,7 +41,7 @@ def _basis():
         requires_grad=True,
     )
     calibration = torch.tensor([0.25, 0.75], dtype=real_dtype, requires_grad=True)
-    network = mw.NetworkData(
+    network = mw.rf.NetworkData(
         frequencies=frequencies,
         s=scattering,
         z0=z0,
@@ -73,7 +73,7 @@ def _basis():
         dtype=real_dtype,
         requires_grad=True,
     )
-    patterns = mw.EmbeddedElementPatternData(
+    patterns = mw.antenna.EmbeddedElementPatternData(
         frequencies=frequencies,
         port_names=("left", "right"),
         theta=theta,
@@ -84,7 +84,7 @@ def _basis():
         frame=torch.eye(3, dtype=real_dtype),
         observation_radius=observation_radius,
         wave_impedance=wave_impedance,
-        polarization_basis=mw.Ludwig3(reference_angle=0.37),
+        polarization_basis=mw.antenna.Ludwig3(reference_angle=0.37),
         phase_center_source="array_aabb",
     )
     quality = torch.tensor(0.995, dtype=real_dtype, requires_grad=True)
@@ -96,7 +96,7 @@ def _basis():
         dtype=complex_dtype,
         requires_grad=True,
     )
-    basis = mw.ArrayBasisData(
+    basis = mw.antenna.ArrayBasisData(
         network=network,
         embedded_patterns=patterns,
         fingerprint="persistence-two-port",
@@ -155,7 +155,7 @@ def test_embedded_pattern_round_trip_preserves_contract_and_detaches(tmp_path):
     path = tmp_path / "nested" / "embedded-pattern.pt"
 
     basis.embedded_patterns.save(path)
-    loaded = mw.EmbeddedElementPatternData.load(path, map_location=torch.device("cpu"))
+    loaded = mw.antenna.EmbeddedElementPatternData.load(path, map_location=torch.device("cpu"))
 
     _assert_pattern_equal(loaded, basis.embedded_patterns)
     payload = torch.load(path, weights_only=True)
@@ -173,7 +173,7 @@ def test_array_basis_round_trip_preserves_full_network_metadata_and_behavior(tmp
     path = tmp_path / "nested" / "array-basis.pt"
 
     basis.save(path)
-    loaded = mw.ArrayBasisData.load(path, map_location="cpu")
+    loaded = mw.antenna.ArrayBasisData.load(path, map_location="cpu")
 
     assert loaded.fingerprint == basis.fingerprint
     assert loaded.metadata["provenance"] == basis.metadata["provenance"]
@@ -214,8 +214,8 @@ def test_array_basis_round_trip_preserves_full_network_metadata_and_behavior(tmp
 @pytest.mark.parametrize(
     ("data_type", "loader"),
     [
-        ("EmbeddedElementPatternData", mw.EmbeddedElementPatternData.load),
-        ("ArrayBasisData", mw.ArrayBasisData.load),
+        ("EmbeddedElementPatternData", mw.antenna.EmbeddedElementPatternData.load),
+        ("ArrayBasisData", mw.antenna.ArrayBasisData.load),
     ],
 )
 def test_array_persistence_rejects_unknown_top_level_schema(tmp_path, data_type, loader):
@@ -239,7 +239,7 @@ def test_array_basis_load_validates_nested_schema_versions(tmp_path, nested_key)
     torch.save(payload, path)
 
     with pytest.raises(ValueError, match="Unsupported .* schema_version"):
-        mw.ArrayBasisData.load(path)
+        mw.antenna.ArrayBasisData.load(path)
 
 
 def test_array_basis_save_reuses_safe_network_metadata_contract(tmp_path):
@@ -259,4 +259,4 @@ def test_array_basis_load_rejects_missing_power_operator_key(tmp_path):
     torch.save(payload, path)
 
     with pytest.raises(ValueError, match="missing radiated_power_matrix"):
-        mw.ArrayBasisData.load(path)
+        mw.antenna.ArrayBasisData.load(path)

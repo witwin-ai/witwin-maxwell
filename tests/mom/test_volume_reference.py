@@ -44,9 +44,9 @@ def test_larger_far_batches_preserve_actual_volume_dissipation():
                    sources=[mw.PlaneWave(source_time=mw.CW(frequency=3e8,phase=.23))])
     currents=[];powers=[]
     for batch in (1024,4096):
-        config=mw.MoMConfig(subdivisions=1,integration=replace(INTEGRATION,far_pair_batch=batch))
-        result=mw.Simulation.mom(scene,frequency=3e8,config=config).run()
-        data=result.surface_currents;points,weights=tetrahedral_volume_rule(data.mesh,degree=2)
+        config=mw.mom.MoMConfig(subdivisions=1,integration=replace(INTEGRATION,far_pair_batch=batch))
+        result=mw.Simulation.mom(scene,frequencies=3e8,config=config).run()
+        data=mw.mom.surface_currents(result);points,weights=tetrahedral_volume_rule(data.mesh,degree=2)
         powers.append(data.absorbed_power(points,weights))
         currents.append(data.scattered_coefficients)
     torch.testing.assert_close(currents[0],currents[1],rtol=1e-11,atol=1e-14)

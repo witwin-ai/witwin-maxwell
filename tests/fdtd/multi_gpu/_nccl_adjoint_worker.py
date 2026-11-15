@@ -141,101 +141,98 @@ def _base_density():
     return (0.4 + 0.2 * torch.rand(_DENS_SHAPE)).double()
 
 
-def _standard_scene(density, *, source_x, monitor_x, device):
+def _standard_scene(density, *, source_x, monitor_x):
     x = np.linspace(-0.5, 0.5, 11, dtype=np.float64)
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.none(),
-        device=device,
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
-            density=density,
-            eps_bounds=(1.0, 6.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(source_x, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
-            name="drive",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (monitor_x, 0.0, 0.0), fields=("Ez",)))
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.none(),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(source_x, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+                name="drive",
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (monitor_x, 0.0, 0.0), fields=("Ez",)),),
+            )
     return scene
 
 
-def _plane_scene(density, *, source_x, axis, device):
+def _plane_scene(density, *, source_x, axis):
     x = np.linspace(-0.5, 0.5, 11, dtype=np.float64)
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
-    scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.none(),
-        device=device,
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
-            density=density,
-            eps_bounds=(1.0, 6.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(source_x, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
-            name="drive",
-        )
-    )
     # A y-normal plane at y=0 spans the full x extent, so it is tiled across the x
     # partition seam -- exactly the case the owned-strip seed must handle.
-    scene.add_monitor(mw.PlaneMonitor("plane", axis=axis, position=0.0, fields=("Ez",)))
+    scene = mw.Scene(
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.none(),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(source_x, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+                name="drive",
+            ),
+            ),
+                monitors=(mw.PlaneMonitor("plane", axis=axis, position=0.0, fields=("Ez",)),),
+            )
     return scene
 
 
-def _cpml_scene(density, *, source_x, monitor_x, device):
+def _cpml_scene(density, *, source_x, monitor_x):
     x = np.linspace(-0.6, 0.6, 21, dtype=np.float64)
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device=device,
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
-            density=density,
-            eps_bounds=(1.0, 6.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(source_x, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
-            name="drive",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (monitor_x, 0.0, 0.0), fields=("Ez",)))
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(source_x, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+                name="drive",
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (monitor_x, 0.0, 0.0), fields=("Ez",)),),
+            )
     return scene
 
 
@@ -249,45 +246,45 @@ def _parallel():
     )
 
 
-def _build_scene(kind, density, device):
+def _build_scene(kind, density):
     if kind == "time_record":
-        scene = _standard_scene(density, source_x=-0.3, monitor_x=0.1, device=device)
-        scene.add_monitor(mw.FieldTimeMonitor("trace", components=("Ez", "Hy"),
-            position=(-0.1, 0., 0.), interval=3))
+        scene = _standard_scene(density, source_x=-0.3, monitor_x=0.1)
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.monitors.FieldTimeMonitor("trace", components=("Ez", "Hy"),
+                position=(-0.1, 0., 0.), interval=3),
+        ))
         return scene
     if kind == "standard":
-        return _standard_scene(density, source_x=-0.3, monitor_x=0.1, device=device)
+        return _standard_scene(density, source_x=-0.3, monitor_x=0.1)
     if kind in ("plane", "plane_seam"):
         # Source just left of the x seam (global cell 5 = x=0): both shards' owned
         # plane strips carry comparable field (genuinely dual-sided seeding) AND the
         # seam cell is live, so the rank-0 ghost column that the owned crop discards
         # is non-trivial -- making the seam-ownership falsification bite.
-        return _plane_scene(density, source_x=-0.05, axis="y", device=device)
+        return _plane_scene(density, source_x=-0.05, axis="y")
     if kind == "cpml":
-        return _cpml_scene(density, source_x=-0.18, monitor_x=0.18, device=device)
+        return _cpml_scene(density, source_x=-0.18, monitor_x=0.18)
     if kind == "cpml_psi":
-        return _cpml_scene(density, source_x=-0.18, monitor_x=_PSI_MONITOR_X, device=device)
+        return _cpml_scene(density, source_x=-0.18, monitor_x=_PSI_MONITOR_X)
     raise ValueError(f"unknown scene kind {kind!r}")
 
 
 def _kwargs(kind):
     if kind == "time_record":
-        return dict(frequency=_FREQUENCY, run_time=mw.TimeConfig(time_steps=100, dt=2e-11),
-            spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False)
+        return dict(run_time=mw.TimeConfig(time_steps=100, dt=2e-11),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"), cuda_graph=False)
     if kind in ("standard", "plane", "plane_seam"):
         return dict(
-            frequency=_FREQUENCY,
             run_time=mw.TimeConfig(time_steps=_STD_STEPS),
         )
     if kind == "cpml":
         return dict(
-            frequency=_FREQUENCY,
             run_time=mw.TimeConfig(time_steps=_CPML_STEPS),
             absorber="cpml",
         )
     if kind == "cpml_psi":
         return dict(
-            frequency=_FREQUENCY,
             run_time=mw.TimeConfig(time_steps=_PSI_STEPS),
             absorber="cpml",
         )
@@ -303,8 +300,9 @@ def _objective_for(kind):
 def _distributed_solve(kind, density_values, *, capture=None, objective=None):
     """Run the per-rank NCCL adjoint driver. Returns (total_loss, grad, bridge)."""
     density = density_values.clone().to("cuda:0").requires_grad_(True)
-    scene = _build_scene(kind, density, "cuda:0")
-    simulation = mw.Simulation.fdtd(scene, parallel=_parallel(), **_kwargs(kind))
+    scene = _build_scene(kind, density)
+    simulation = mw.Simulation.fdtd(scene, frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(parallel=_parallel(), device="cuda:0", **_kwargs(kind)))
     total_loss, grads, bridge = _dist_adjoint.run_nccl_distributed_reverse(
         simulation, objective=objective if objective is not None else _objective_for(kind)
     )
@@ -322,12 +320,13 @@ def _reference_solve(kind, density_values):
     the separable per-strip objective must reproduce it (and its gradient).
     """
     density = density_values.clone().to("cuda:0").requires_grad_(True)
-    scene = _build_scene(kind, density, "cuda:0")
-    result = mw.Simulation.fdtd(scene, **_kwargs(kind)).run()
+    scene = _build_scene(kind, density)
+    result = mw.Simulation.fdtd(scene, frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(device="cuda:0", **_kwargs(kind))).run()
     if kind in ("plane", "plane_seam"):
-        spectrum = result.monitors["plane"]["Ez"]
+        spectrum = result.monitor("plane").sel(component="Ez").values
     else:
-        spectrum = result.monitors["probe"]["Ez"]
+        spectrum = result.monitor("probe").sel(component="Ez").values
     loss = (spectrum.real ** 2 + spectrum.imag ** 2).sum()
     loss.backward()
     return float(loss.detach().cpu()), density.grad.detach().cpu().clone()
@@ -419,15 +418,15 @@ def _run_time_record():
         assert trace["differentiable"] is False
         assert all(not value.requires_grad for value in trace["components"].values())
         density = base.to("cuda:0").requires_grad_(True)
-        reference = mw.Simulation.fdtd(_build_scene("time_record", density, "cuda:0"),
-            **_kwargs("time_record")).run()
-        loss = reference.monitor("probe")["data"].abs().square().sum()
+        reference = mw.Simulation.fdtd(_build_scene("time_record", density),
+            frequencies=_FREQUENCY, config=mw.FDTDConfig(device="cuda:0", **_kwargs("time_record"))).run()
+        loss = reference.monitor("probe").sel(component="Ez").values.abs().square().sum()
         loss.backward()
         _assert_parity("time_record", dist_loss, dist_grad, float(loss.detach()), density.grad.cpu())
         expected = reference.monitor("trace")
-        torch.testing.assert_close(trace["t"], expected["t"], rtol=0, atol=0)
+        torch.testing.assert_close(trace["t"], expected.coords["t"], rtol=0, atol=0)
         for component in trace["fields"]:
-            torch.testing.assert_close(trace["components"][component], expected["components"][component],
+            torch.testing.assert_close(trace["components"][component], expected.sel(component=component).values,
                 rtol=1e-5, atol=1e-6)
         print("NCCL_ADJOINT_WORKER_OK[time_record]")
 
@@ -587,37 +586,38 @@ def _run_guard_deadlock():
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device="cuda:0",
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
-            density=density,
-            eps_bounds=(1.0, 6.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.18, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
-            name="drive",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (0.18, 0.0, 0.0), fields=("Ez",)))
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(-0.18, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+                name="drive",
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (0.18, 0.0, 0.0), fields=("Ez",)),),
+            )
     # absorber="pml" -> legacy graded-sigma, rejected at reverse-support validation.
     simulation = mw.Simulation.fdtd(
         scene,
-        frequency=_FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=_CPML_STEPS),
-        absorber="pml",
-        parallel=_parallel(),
+        frequencies=_FREQUENCY,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=_CPML_STEPS),
+            absorber="pml",
+            parallel=_parallel(), device="cuda:0",
+        ),
     )
     rejected = False
     message = ""

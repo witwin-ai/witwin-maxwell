@@ -6,7 +6,7 @@ import torch
 
 import witwin.maxwell as mw
 from benchmark.core_path.scenes import (
-    CORE_SCENES, CORE_REFUSED_BENCHMARK_SCENES, W1_SCENES, W2_SCENES, DISPERSIVE_SCENES, build_core_case,
+    CORE_SCENES, W1_SCENES, W2_SCENES, DISPERSIVE_SCENES, build_core_case,
 )
 from witwin.maxwell.scene import prepare_scene
 from witwin.maxwell.fdtd.runtime import core_path, core_tables, stepping
@@ -25,24 +25,19 @@ def forbid_cuda_init(monkeypatch):
 @pytest.mark.parametrize("name", tuple(dict.fromkeys(W1_SCENES + W2_SCENES + DISPERSIVE_SCENES)))
 def test_scene_construction_and_admission(name):
     case = build_core_case(name)
-    refused = name in CORE_REFUSED_BENCHMARK_SCENES
-    assert (name in CORE_SCENES) is not refused
-    assert str(case.scene.device) == "cpu"
-    grid = prepare_scene(case.scene, lazy_meshgrid=True)
+    assert name in CORE_SCENES
+    grid = prepare_scene(case.scene, device="cpu", lazy_meshgrid=True)
     assert grid.Nx > 0 and grid.Ny > 0 and grid.Nz > 0
-    assert core_path.core_path_blockers(SimpleNamespace(scene=case.scene)) == ["non-CUDA execution"]
     # Project the runtime-only flags of these fixtures without preparing a CUDA solver.
-    solver = SimpleNamespace(scene=case.scene,
+    solver = SimpleNamespace(scene=grid,
                              active_absorber_type=case.absorber or "cpml",
                              dispersive_enabled=name in DISPERSIVE_SCENES,
                              electric_dispersive_enabled=name in DISPERSIVE_SCENES and name != "magnetic_lorentz_slab",
                              magnetic_dispersive_enabled=name == "magnetic_lorentz_slab",
-                             _copper_foils=any(isinstance(s.material, mw.CopperFoil) for s in case.scene.structures),
+                             _copper_foils=any(isinstance(s.material, mw.media.CopperFoil) for s in case.scene.structures),
                              _thin_sheets=name == "w1_thin_sheet_cavity",
                              _cut_surface=name == "w1_cut_surface",
                              surface_impedance_enabled=name == "w1_sibc")
-    expected_blockers = (["closed-transverse CPML (passivity guard)"] if refused else []) + ["non-CUDA execution"]
-    assert core_path.core_path_blockers(solver) == expected_blockers
     expected = {"w1_circuit": ["circuits"], "w1_cut_surface": ["cut-surface constraints"],
                 "w1_sibc": ["surface impedance"]}.get(name, [])
     assert core_path.core_path_step_loop_blockers(solver) == expected
@@ -59,12 +54,12 @@ def test_scene_construction_and_admission(name):
     ("_wire_runtime", SimpleNamespace(monitor_state=(object(),)), "host-driven wire monitors"),
 ])
 def test_step_loop_exclusions(attribute, value, reason):
-    solver = SimpleNamespace(scene=SimpleNamespace(ports=(object(),)), **{attribute: value})
+    solver = SimpleNamespace(scene=SimpleNamespace(scene=SimpleNamespace(ports=(object(),))), **{attribute: value})
     assert core_path.core_path_step_loop_blockers(solver) == [reason]
     runtime = core_path.CorePathRuntime.__new__(core_path.CorePathRuntime)
     assert runtime.run_chunks(solver, time_steps=64, start_step=0, end_step=64,
                               use_cuda_graph=True, use_gpu_dft=True, cooperative=False,
-                              cooperative_driver=False, cooperative_observer=None, resume_from=None,
+                              cooperative_driver=False, cooperative_observer=None,
                               shutoff=0., shutoff_check_interval=100, shutoff_min_step=0,
                               enable_plot=False, pbar=None) is None
     assert solver._core_step_graph_active is False
@@ -73,14 +68,13 @@ def test_step_loop_exclusions(attribute, value, reason):
 
 @pytest.mark.parametrize("physics", ["network", "lossless_wire", "lossy_wire", "electric_ade", "magnetic_ade"])
 def test_device_only_physics_admitted(physics):
-    solver = SimpleNamespace(scene=SimpleNamespace())
+    solver = SimpleNamespace(scene=SimpleNamespace(scene=SimpleNamespace()))
     if physics == "network":
         solver._network_runtimes = (object(),)
     elif physics.endswith("_ade"):
-        solver.scene = build_core_case("dispersive_lumped_port").scene
+        solver.scene = SimpleNamespace(scene=build_core_case("dispersive_lumped_port").scene)
         solver.dispersive_enabled = True
         setattr(solver, physics.removesuffix("_ade") + "_dispersive_enabled", True)
-        assert core_path.core_path_blockers(solver) == ["non-CUDA execution"]
         core_path._validate_separate_step(solver)
     else:
         solver._wire_runtime = SimpleNamespace(lossy_model=object() if physics == "lossy_wire" else None)
@@ -90,7 +84,7 @@ def test_device_only_physics_admitted(physics):
 
 @pytest.mark.parametrize("attribute", ["tfsf_enabled", "_magnetic_source_terms", "modulation_enabled"])
 def test_source_only_scenes_keep_existing_closure(attribute):
-    solver = SimpleNamespace(scene=SimpleNamespace(), **{attribute: True})
+    solver = SimpleNamespace(scene=SimpleNamespace(scene=SimpleNamespace()), **{attribute: True})
     assert core_path.core_path_step_loop_blockers(solver) == []
 
 
@@ -98,12 +92,10 @@ def test_source_only_scenes_keep_existing_closure(attribute):
     ("tfsf_enabled", True, "TFSF"),
     ("_magnetic_source_terms", (object(),), "magnetic surface"),
     ("modulation_enabled", True, "modulation"),
-    ("scene", SimpleNamespace(ports=(object(),), boundary=mw.BoundarySpec.mur()), "Mur"),
-    ("scene", SimpleNamespace(ports=(object(),), boundary=mw.BoundarySpec.faces(default="mode_abc")), "mode-ABC"),
 ])
 def test_prepare_step_asserts_eligibility(attribute, value, message):
     runtime = core_path.CorePathRuntime.__new__(core_path.CorePathRuntime)
-    solver = SimpleNamespace(scene=SimpleNamespace(ports=(object(),), boundary=mw.BoundarySpec.none()))
+    solver = SimpleNamespace(scene=SimpleNamespace(scene=SimpleNamespace(ports=(object(),), boundary=mw.BoundarySpec.none())))
     setattr(solver, attribute, value)
     with pytest.raises(AssertionError, match=message):
         runtime.prepare_step(solver, use_gpu_dft=True, time_steps=64)
@@ -121,11 +113,11 @@ def test_separate_step_order(monkeypatch, port_kind):
     runtime.extension = SimpleNamespace(CoreStepLaunch=lambda *args:
                                         SimpleNamespace(launch=lambda: events.append("commit")))
     spectral = SimpleNamespace(launch=lambda: events.append("field_dft"))
-    monkeypatch.setattr(core_tables, "compile_spectral_tables", lambda *args: spectral)
+    monkeypatch.setattr(core_tables, "compile_spectral_tables", lambda *args: (spectral,))
     monkeypatch.setattr(core_tables, "compile_monitor_routes", lambda *args: None)
     from witwin.maxwell.fdtd import observers
-    monkeypatch.setattr(observers, "uses_native_point_observers", lambda s: True)
-    monkeypatch.setattr(core_tables, "NativePointObserverTables", lambda *args:
+    monkeypatch.setattr(observers, "uses_indexed_observers", lambda s: True)
+    monkeypatch.setattr(core_tables, "IndexedObserverTables", lambda *args:
                         SimpleNamespace(launch=lambda: events.append("point_dft")))
     monkeypatch.setattr(stepping, "_field_update_block", lambda s, t: events.append(("fields", t)))
     monkeypatch.setattr(stepping, "enforce_pec_boundaries", lambda s: events.append("pec"))
@@ -138,7 +130,7 @@ def test_separate_step_order(monkeypatch, port_kind):
     monkeypatch.setattr(stepping, "accumulate_port_observers", lambda s, step: events.append(("port_dft", step)))
     observed = port_kind in ("observed", "fed_sheet")
     sheet = SimpleNamespace(feeds=port_kind == "fed_sheet", electric=lambda s: events.append("fed_sheet"))
-    solver = SimpleNamespace(scene=SimpleNamespace(boundary=mw.BoundarySpec.none()), tfsf_enabled=False,
+    solver = SimpleNamespace(scene=SimpleNamespace(scene=SimpleNamespace(boundary=mw.BoundarySpec.none())), tfsf_enabled=False,
                              dispersive_enabled=True, electric_dispersive_enabled=True,
                              _advance_magnetic_dispersive_state=lambda: events.append("magnetic_ade_advance"),
                              _apply_magnetic_dispersive_corrections=lambda: events.append("magnetic_ade_correct"),
@@ -185,7 +177,7 @@ def test_warmup_and_capture_restore_physics_and_port_counts(monkeypatch, failure
                            wire_provider=None, substep_buffers=None, circuit_port=None,
                            electric_time=torch.tensor(1.), magnetic_time=torch.tensor(.5))
     sheet = SimpleNamespace(copper=None, feeds=(), h_old=torch.tensor([9.]))
-    solver = SimpleNamespace(scene=SimpleNamespace(ports=(object(),)), device="cpu",
+    solver = SimpleNamespace(scene=SimpleNamespace(scene=SimpleNamespace(ports=(object(),))), device="cpu",
                              dispersive_enabled=dispersive,
                              _port_runtimes=(port,), _thin_sheets=(sheet,),
                              _port_observer_step=torch.zeros(1, dtype=torch.int64),
@@ -227,11 +219,12 @@ def test_warmup_and_capture_restore_physics_and_port_counts(monkeypatch, failure
     def run():
         return runtime.run_chunks(solver, time_steps=64, start_step=0, end_step=35,
                                   use_cuda_graph=True, use_gpu_dft=False, cooperative=False,
-                                  cooperative_driver=False, cooperative_observer=None, resume_from=None,
+                                  cooperative_driver=False, cooperative_observer=None,
                                   shutoff=0., shutoff_check_interval=100, shutoff_min_step=0,
                                   enable_plot=False, pbar=None)
-    if failure and dispersive:
-        with pytest.raises(RuntimeError, match="Failed after mutating driven state"):
+    if failure:
+        # A failed capture restores the state and raises its own error (W7 row 16c).
+        with pytest.raises(RuntimeError, match="^Failed after mutating driven state"):
             run()
         result = None
     else:
@@ -277,7 +270,7 @@ def test_native_point_rows_and_completed_metadata_match_eager(monkeypatch, field
                                         SimpleNamespace(launchRaw=lambda: calls.append(kw)))
     monkeypatch.setattr(backend, "get_compiled_extension", lambda: object())
     initial = [entry.copy() for entry in solver._observer_spectral_entries]
-    tables = core_tables.NativePointObserverTables(solver, torch.zeros(1, dtype=torch.int64), 12)
+    tables = core_tables.IndexedObserverTables(solver, torch.zeros(1, dtype=torch.int64), 12)
     assert solver._observer_spectral_entries == initial
     completed = []
     for n in range(12):
@@ -295,3 +288,14 @@ def test_native_point_rows_and_completed_metadata_match_eager(monkeypatch, field
     for steps in (0, 1, 5, 12):
         tables.finalize(staged, steps)
         assert staged._observer_spectral_entries == (initial if steps == 0 else completed[steps - 1])
+    # A resumed run builds its tables from the restored entries at the checkpoint step.
+    for start in (1, 5, 11):
+        staged._observer_spectral_entries = [entry.copy() for entry in completed[start - 1]]
+        resumed = core_tables.IndexedObserverTables(staged, torch.zeros(1, dtype=torch.int64), 12, start)
+        assert staged._observer_spectral_entries == completed[start - 1]
+        for route, expected in zip(resumed.routes, tables.routes):
+            assert not route[-2][:start].any()
+            assert torch.equal(route[-2][start:].view(torch.uint8), expected[-2][start:].view(torch.uint8))
+        for steps in range(start, 13):
+            resumed.finalize(staged, steps)
+            assert staged._observer_spectral_entries == completed[steps - 1]

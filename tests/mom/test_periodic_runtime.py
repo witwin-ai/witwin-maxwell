@@ -18,7 +18,7 @@ def test_periodic_operator_shared_solver_fields_and_kernel_binding():
     sample = original.system.bodies[0].mesh.vertices
     lattice = LatticeSpec(sample.new_tensor([[1., 0., 0.]]), sample.new_zeros(3))
     kernel = EwaldHelmholtzKernel(lattice, 3., reciprocal_shells=4, quadrature_order=128)
-    config = mw.MoMConfig(integration=original.integration, riesz_storage='compact_rwg_v1',
+    config = mw.mom.MoMConfig(integration=original.integration, riesz_storage='compact_rwg_v1',
                           query_config=FieldQueryConfig(adaptive=False))
     operator = PeriodicSystemOperator(original.system, original.exterior,
         iter(original.sources), config, kernel=kernel)
@@ -54,7 +54,7 @@ def test_periodic_cache_identity_includes_bloch_lattice_and_kernel_tolerances():
     sample = original.system.bodies[0].mesh.vertices
     lattice = LatticeSpec(sample.new_tensor([[1., 0., 0.]]), sample.new_zeros(3))
     kernel = EwaldHelmholtzKernel(lattice, 3., reciprocal_shells=4, quadrature_order=128)
-    config = mw.MoMConfig(integration=original.integration)
+    config = mw.mom.MoMConfig(integration=original.integration)
     identity, payload = periodic_operator_identity(original.system, original.exterior, config, kernel)
     assert identity == periodic_operator_identity(original.system, original.exterior, config, kernel)[0]
     alternatives = [replace(kernel, eta=4.), replace(kernel, reciprocal_shells=5),
@@ -73,7 +73,7 @@ def test_amplitude_changes_share_operator_identity_but_not_rhs_identity():
     sample = original.system.bodies[0].mesh.vertices
     lattice = LatticeSpec(sample.new_tensor([[1., 0., 0.]]), sample.new_zeros(3))
     kernel = EwaldHelmholtzKernel(lattice, 3., reciprocal_shells=4, quadrature_order=128)
-    config = mw.MoMConfig(integration=original.integration, riesz_storage='compact_rwg_v1')
+    config = mw.mom.MoMConfig(integration=original.integration, riesz_storage='compact_rwg_v1')
     operators = [PeriodicSystemOperator(original.system, original.exterior,
         [mw.PlaneWave(source_time=mw.CW(frequency=original.exterior.frequency, amplitude=amplitude))], config, kernel=kernel) for amplitude in (1., 2.)]
     rhs = [operator.build_rhs() for operator in operators]

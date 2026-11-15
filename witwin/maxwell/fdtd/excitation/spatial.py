@@ -20,7 +20,7 @@ _SOFT_PLANE_UNIFORM_RTOL = 1e-6
 
 
 def _pml_margin(scene, axis: str, side: str, *, extra: int = 0) -> int:
-    base = scene.pml_thickness_for_face(axis, side)
+    base = scene.scene.pml_thickness_for_face(axis, side)
     return int(base) + int(extra)
 
 
@@ -40,8 +40,8 @@ def resolve_injection_axis(direction, injection_axis=None) -> str:
     return "xyz"[dominant_index]
 
 
-def source_plane_index(scene, axis: str, direction_component: float) -> int:
-    scene = prepare_scene(scene)
+def source_plane_index(scene, axis: str, direction_component: float, *, device) -> int:
+    scene = prepare_scene(scene, device=device)  # a prepared scene keeps its device
     axis_index = _AXIS_TO_INDEX[axis]
     domain_counts = (scene.Nx, scene.Ny, scene.Nz)
     low_margin = min(_pml_margin(scene, axis, "low", extra=1), max(domain_counts[axis_index] - 1, 0))
@@ -51,8 +51,8 @@ def source_plane_index(scene, axis: str, direction_component: float) -> int:
     return max(domain_counts[axis_index] - high_margin - 1, 0)
 
 
-def physical_interior_indices(scene, axis: str) -> tuple[int, int]:
-    scene = prepare_scene(scene)
+def physical_interior_indices(scene, axis: str, *, device) -> tuple[int, int]:
+    scene = prepare_scene(scene, device=device)  # a prepared scene keeps its device
     size = {"x": scene.Nx, "y": scene.Ny, "z": scene.Nz}[axis]
     lo = _pml_margin(scene, axis, "low")
     hi = size - _pml_margin(scene, axis, "high") - 1
@@ -61,10 +61,10 @@ def physical_interior_indices(scene, axis: str) -> tuple[int, int]:
     return lo, hi
 
 
-def soft_plane_wave_index(scene, axis: str, direction_component: float, *, fraction: float = 0.05) -> int:
-    scene = prepare_scene(scene)
+def soft_plane_wave_index(scene, axis: str, direction_component: float, *, fraction: float = 0.05, device) -> int:
+    scene = prepare_scene(scene, device=device)  # a prepared scene keeps its device
     axis_coords = {"x": scene.x, "y": scene.y, "z": scene.z}[axis]
-    lo, hi = physical_interior_indices(scene, axis)
+    lo, hi = physical_interior_indices(scene, axis, device=scene.device)
     lo_coord = float(axis_coords[lo].item())
     hi_coord = float(axis_coords[hi].item())
     span = hi_coord - lo_coord
@@ -76,9 +76,10 @@ def soft_plane_wave_index(scene, axis: str, direction_component: float, *, fract
     return int(torch.argmin(torch.abs(axis_coords - target)).item())
 
 
-def soft_plane_wave_coordinate(scene, axis: str, direction_component: float, *, fraction: float = 0.05) -> float:
-    scene = prepare_scene(scene)
-    index = soft_plane_wave_index(scene, axis, direction_component, fraction=fraction)
+def soft_plane_wave_coordinate(scene, axis: str, direction_component: float, *, fraction: float = 0.05,
+                               device) -> float:
+    scene = prepare_scene(scene, device=device)  # a prepared scene keeps its device
+    index = soft_plane_wave_index(scene, axis, direction_component, fraction=fraction, device=scene.device)
     axis_coords = {"x": scene.x, "y": scene.y, "z": scene.z}[axis]
     return float(axis_coords[index].item())
 
@@ -90,7 +91,8 @@ def _window_is_uniform(cells: np.ndarray) -> bool:
     return (d_max - d_min) <= _SOFT_PLANE_UNIFORM_RTOL * max(d_max, 1e-300)
 
 
-def soft_plane_wave_region_spacing(scene, *, injection_axis: str, plane_index: int, direction_sign: int) -> dict:
+def soft_plane_wave_region_spacing(scene, *, injection_axis: str, plane_index: int, direction_sign: int,
+                                   device) -> dict:
     """Per-axis primal spacing local to the soft plane-wave launch footprint.
 
     The soft plane-wave numerical-dispersion phase correction solves the discrete
@@ -107,7 +109,7 @@ def soft_plane_wave_region_spacing(scene, *, injection_axis: str, plane_index: i
     aperture (the best single scalar for the oblique-incidence phase across the
     plane).
     """
-    scene = prepare_scene(scene)
+    scene = prepare_scene(scene, device=device)  # a prepared scene keeps its device
     primal = {
         "x": np.asarray(scene.dx_primal64, dtype=np.float64),
         "y": np.asarray(scene.dy_primal64, dtype=np.float64),
@@ -116,7 +118,7 @@ def soft_plane_wave_region_spacing(scene, *, injection_axis: str, plane_index: i
     deltas = {}
     for axis in "xyz":
         cells = primal[axis]
-        lo, hi = physical_interior_indices(scene, axis)
+        lo, hi = physical_interior_indices(scene, axis, device=scene.device)
         interior = cells[lo:hi] if hi > lo else cells
         if _window_is_uniform(interior):
             # Uniform interior: exact spacing, bit-for-bit the previous value.
@@ -132,8 +134,13 @@ def soft_plane_wave_region_spacing(scene, *, injection_axis: str, plane_index: i
 
 
 def plane_center(scene, axis: str, plane_coordinate: float, *, device, dtype):
-    scene = prepare_scene(scene)
-    bounds = scene.domain.domain_range
+    scene = prepare_scene(scene, device=device)
+    bounds = list(scene.scene.domain.domain_range)
+    for index, entry in enumerate(scene.scene.symmetry):
+        if entry is not None:
+            # The explicit mirrored domain is centred on the image plane.
+            plane = bounds[2 * index] if entry[1] == "low" else bounds[2 * index + 1]
+            bounds[2 * index] = bounds[2 * index + 1] = plane
     center = torch.tensor(
         [
             0.5 * (bounds[0] + bounds[1]),

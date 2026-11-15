@@ -1,0 +1,20 @@
+{
+ "schema": "witwin.guard-identity-receipt/1",
+ "description": "fix/result-strict-scene-reads: result.py reads Scene fields strictly (getattr(scene, 'x', default) -> scene.x), so the enclosing conditions of these guards changed. Path, scope, raise expression and message are identical. Old identity -> new identity and conditions, paired by (path, scope, expression, message). body_sha256 hashes (path, scope, raise expression, message); the normalized-conditions hashes hash the enclosing conditions with every three-argument getattr(X, 'name', default) rewritten to X.name and X.scene.coordinates rewritten to X._scene_coordinates (the Result property `None if self.scene is None else self.scene.coordinates`; old side from base c9c7e196370beb53b22fbf0d8038c1474855f892, new side from this tree). 'review' lists identities whose normalized conditions differ.",
+ "base": "c9c7e196370beb53b22fbf0d8038c1474855f892",
+ "guard_id_map": {
+  "47372a0117eb6d9808efe4bc38d1427dc116ded2eefd3242f6b2f417ef7c140d:0": {
+   "id": "b995b33c2b0e1741ca8de2b2ffd0f47ebe8bb92f3341358c8006a8fbc822e4ce:0",
+   "conditions": [
+    [
+     "BoolOp(op=And(), values=[Compare(left=Attribute(value=Name(id='self', ctx=Load()), attr='_scene_coordinates', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=None)]), Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Compare(left=Name(id='value', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=None)]), generators=[comprehension(target=Name(id='value', ctx=Store()), iter=Tuple(elts=[Name(id='electric_fields', ctx=Load()), Name(id='volume_channels', ctx=Load()), Name(id='integrated_channels', ctx=Load()), Name(id='surface_channels', ctx=Load()), Name(id='face_areas', ctx=Load()), Name(id='line_channels', ctx=Load()), Name(id='line_lengths', ctx=Load())], ctx=Load()), ifs=[], is_async=0)])], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "611bdd5b7fc34c8187091c3ac13613b768b2e0da5d9e50e572d8e4c5265d5890",
+   "old_normalized_conditions_sha256": "afa9e3d517ad2c3d3de786954c4e9dde24a6378847ee0ca12c5f11e8dc73c016",
+   "normalized_conditions_sha256": "afa9e3d517ad2c3d3de786954c4e9dde24a6378847ee0ca12c5f11e8dc73c016"
+  }
+ },
+ "review": []
+}

@@ -63,8 +63,7 @@ def _coax(case, h, pec_mode="staircase"):
         grid=mw.GridSpec.uniform(h),
         # Conductors run through the z PML so the line is matched at both ends.
         boundary=mw.BoundarySpec.faces(default="pec", num_layers=LAYERS, strength=1.0, z="pml"),
-        subpixel_samples=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
-        device="cuda",
+        subpixel=mw.SubpixelSpec(pec=pec_mode, averaging="arithmetic", samples=1),
     )
     z0, z1 = -(LAYERS + 2) * h, LENGTH + (LAYERS + 2) * h
     if case == "square":
@@ -81,19 +80,28 @@ def _coax(case, h, pec_mode="staircase"):
             "node_centred_boxes": lambda: _node_centred_boxes(h, z0, z1),
             "abutting_slabs": lambda: _abutting_slabs(h, z0, z1),
         }[case]()
-    scene.add_structure(mw.Structure(mw.ComplexPolySlab([_frame(h), hole], bounds=(z0, z1), axis="z"),
-                                     mw.Material.pec(), name="shield"))
-    for index, geometry in enumerate(inner):
-        scene.add_structure(mw.Structure(geometry, mw.Material.pec(), name=f"inner{index}"))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(mw.geometry.ComplexPolySlab([_frame(h), hole], bounds=(z0, z1), axis="z"),
+                     mw.Material.pec(), name="shield"),
+    ))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(geometry, mw.Material.pec(), name=f"inner{index}") for index, geometry in enumerate(inner)),
+    ))
     radius = 0.5 * (A + outer_radius)
     pulse = mw.GaussianPulse(frequency=9.0e9, fwidth=6.0e9)
-    for index, (cx, cy) in enumerate(((1, 0), (-1, 0), (0, 1), (0, -1))):
-        scene.add_source(mw.PointDipole(position=(cx * radius, cy * radius, 4.0e-3), width=2 * h,
-                                        polarization=(cx, cy, 0), source_time=pulse, name=f"src{index}"))
+    scene = scene.updated(sources=(
+        *scene.sources,
+        *(mw.PointDipole(position=(cx * radius, cy * radius, 4.0e-3), width=2 * h,
+                         polarization=(cx, cy, 0), source_time=pulse, name=f"src{index}") for index, (cx, cy) in enumerate(((1, 0), (-1, 0), (0, 1), (0, -1)))),
+    ))
     for index, z in enumerate(PLANES):
-        for component in ("Ex", "Ey"):
-            scene.add_monitor(mw.PlaneMonitor(f"p{index}{component}", axis="z", position=z,
-                                              fields=(component,), frequencies=FREQUENCIES))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            *(mw.PlaneMonitor(f"p{index}{component}", axis="z", position=z,
+                              fields=(component,), frequencies=FREQUENCIES) for component in ("Ex", "Ey")),
+        ))
     return scene, outer_radius
 
 
@@ -121,21 +129,20 @@ def _two_wave_k(z, values, k0):
 def _phase_velocity(case, h, pec_mode="staircase"):
     scene, outer_radius = _coax(case, h, pec_mode)
     result = mw.Simulation.fdtd(
-        scene, absorber="cpml",
-        frequencies=list(FREQUENCIES),
+        scene, frequencies=list(FREQUENCIES), config=mw.FDTDConfig(absorber="cpml",
         run_time=mw.TimeConfig(time_steps=int(round(6000 * 0.25e-3 / h))),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        full_field_dft=False),
     ).run()
     functional = []
     for index in range(len(PLANES)):
         total = 0.0
         for component, axis in (("Ex", 0), ("Ey", 1)):
-            monitor = result.monitor(f"p{index}{component}")
+            monitor = result.raw_monitor(f"p{index}{component}")
             grids = np.meshgrid(*monitor["coords"], indexing="ij")
             radius = np.hypot(grids[0], grids[1])
             weight = np.where((radius > A) & (radius < outer_radius), grids[axis] / np.maximum(radius, 1e-12) ** 2, 0.0)
-            total = total + np.tensordot(monitor["data"].detach().cpu().numpy(), weight, axes=([-2, -1], [0, 1]))
+            total = total + np.tensordot(monitor[component].detach().cpu().numpy(), weight, axes=([-2, -1], [0, 1]))
         functional.append(total)
     functional = np.asarray(functional)
     velocities = []

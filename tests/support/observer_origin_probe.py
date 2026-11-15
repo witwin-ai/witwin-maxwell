@@ -1,5 +1,4 @@
-"""CPU-only public-API measurements against a closed finite Yee recurrence."""
-import os
+"""CUDA public-API measurements against a closed finite Yee recurrence."""
 import sys, json, math, cmath
 from pathlib import Path
 import numpy as np
@@ -27,13 +26,14 @@ def run(kind, count=64, normalized=False):
     values=np.broadcast_to(profile[None,None,:],(2,3,len(profile))).copy()
     values*=np.array([2.,1.,2.])[None,:,None]
     scene=mw.Scene(domain=mw.Domain(bounds=((0.,.1),(0.,.1),(0.,L))),
-        grid=mw.GridSpec.uniform(dx),device=os.environ.get('OBSERVER_ORIGIN_DEVICE', 'cpu'),
-        boundary=mw.BoundarySpec.pec().with_faces(y_low='pmc',y_high='pmc'))
-    scene.add_source(mw.CustomCurrentSource(mw.CurrentDataset(([-.05,.15],[0.,.05,.1],coords),{component:values}),source_time=mw.CW(frequency=f)))
-    scene.add_monitor(mw.PointMonitor(name='probe',position=(.025,.05,.1),fields=('Ex','Hy')))
-    sim=mw.Simulation.fdtd(scene,frequencies=(f,),backend='cpu_reference' if torch.device(scene.device).type == 'cpu' else 'native',cuda_graph=False,
+              grid=mw.GridSpec.uniform(dx),boundary=mw.BoundarySpec.pec().with_faces(y_low='pmc',y_high='pmc'),
+                   sources=(
+                       mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(([-.05,.15],[0.,.05,.1],coords),{component:values}),source_time=mw.CW(frequency=f)),
+                   ),
+                   monitors=(mw.PointMonitor(name='probe',position=(.025,.05,.1),fields=('Ex','Hy')),))
+    sim=mw.Simulation.fdtd(scene,frequencies=(f,),config=mw.FDTDConfig(cuda_graph=False,
         field_dtype=torch.float32,run_time=mw.TimeConfig(time_steps=N,dt=dt,transient_cycles=0),
-        full_field_dft=False,spectral_sampler=mw.SpectralSampler(window='none',normalize_source=normalized,observer_dtype=torch.float32 if normalized else torch.float64))
+        full_field_dft=False,spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=normalized,observer_dtype=torch.float32 if normalized else torch.float64)))
     prepared=sim.prepare()
     result=prepared.run()
     solver=prepared.solver
@@ -86,10 +86,12 @@ def port_table_probe():
     from witwin.maxwell.fdtd.ports import prepare_port_spectral_accumulators
     F=2e9
     DT=9.5238e-12
-    scene=mw.Scene(domain=mw.Domain(bounds=((0.,.1),(0.,.1),(0.,.4))),grid=mw.GridSpec.uniform(.05),device=os.environ.get('OBSERVER_ORIGIN_DEVICE', 'cpu'),boundary=mw.BoundarySpec.pec().with_faces(y_low='pmc',y_high='pmc'))
-    scene.add_port(mw.LumpedPort('feed',negative=(0.,.05,.1),positive=(.1,.05,.1),voltage_path=mw.AxisPath('x'),current_surface=mw.Box(position=(.025,.05,.1),size=(0.,.05,.05)),reference_impedance=50.))
-    scene.add_monitor(mw.PointMonitor('probe',position=(.025,.05,.1),fields=('Ex','Hy')))
-    sim=mw.Simulation.fdtd(scene,frequencies=(F,),backend='cpu_reference' if torch.device(scene.device).type == 'cpu' else 'native',cuda_graph=False,run_time=mw.TimeConfig(time_steps=4,dt=DT),excitations=mw.PortExcitation('feed',source_time=mw.CW(frequency=F)),full_field_dft=False,spectral_sampler=mw.SpectralSampler(window='none',normalize_source=False,observer_dtype=torch.float64))
+    scene=mw.Scene(domain=mw.Domain(bounds=((0.,.1),(0.,.1),(0.,.4))),grid=mw.GridSpec.uniform(.05),boundary=mw.BoundarySpec.pec().with_faces(y_low='pmc',y_high='pmc'), ports=(
+              mw.LumpedPort('feed',negative=(0.,.05,.1),positive=(.1,.05,.1),voltage_path=mw.AxisPath('x'),current_surface=mw.Box(position=(.025,.05,.1),size=(0.,.05,.05)),reference_impedance=50.),
+          ), monitors=(
+              mw.PointMonitor('probe',position=(.025,.05,.1),fields=('Ex','Hy')),
+          ))
+    sim=mw.Simulation.fdtd(scene,frequencies=(F,),excitations=mw.rf.PortExcitation('feed',source_time=mw.CW(frequency=F)), config=mw.FDTDConfig(cuda_graph=False,run_time=mw.TimeConfig(time_steps=4,dt=DT),full_field_dft=False,spectral_sampler=mw.fdtd.SpectralSampler(window='none',normalize_source=False,observer_dtype=torch.float64)))
     prepared=sim.prepare();s=prepared.solver
     prepare_port_spectral_accumulators(s,4,'none')
     r=s._port_runtimes[0]
@@ -125,5 +127,5 @@ def port_unit_probe():
     one=records[0]
     expected_E=float(Fraction(s.dt)*Fraction('.05')/(Fraction(eps)*Fraction('.05')**3)*exact_i)
     expected_H2=-s.dt/mu*expected_E/.05
-    payload=dict(dt=s.dt,frequency=ns['F'],theta=theta,route='public CPU prepare -> unchanged main field/port CPU blocks; excludes CUDA-event wrapper only; no monkeypatch',beta=str(beta),independent_N1_I=float(exact_i),independent_N1_V=float(exact_v),independent_N1_E=expected_E,independent_N2_H=expected_H2,eps=eps,mu=mu,prepared_voltage_weights=r.lumped.voltage_weights.tolist(),records=records,first_V_ratio=[(complex(*one['reported_V'])/(2*one['V'])).real,(complex(*one['reported_V'])/(2*one['V'])).imag],first_I_ratio=[(complex(*one['reported_I'])/(2*one['I'])).real,(complex(*one['reported_I'])/(2*one['I'])).imag])
+    payload=dict(dt=s.dt,frequency=ns['F'],theta=theta,route='public CUDA prepare -> unchanged main field/port blocks; excludes CUDA-event wrapper only; no monkeypatch',beta=str(beta),independent_N1_I=float(exact_i),independent_N1_V=float(exact_v),independent_N1_E=expected_E,independent_N2_H=expected_H2,eps=eps,mu=mu,prepared_voltage_weights=r.lumped.voltage_weights.tolist(),records=records,first_V_ratio=[(complex(*one['reported_V'])/(2*one['V'])).real,(complex(*one['reported_V'])/(2*one['V'])).imag],first_I_ratio=[(complex(*one['reported_I'])/(2*one['I'])).real,(complex(*one['reported_I'])/(2*one['I'])).imag])
     return payload

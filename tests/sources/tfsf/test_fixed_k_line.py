@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from witwin.maxwell.fdtd.boundary.cpml import DEFAULT_CPML_CONFIG
+from witwin.maxwell.fdtd.boundary.cpml import DEFAULT_CPML_GRADING
 from witwin.maxwell.fdtd.excitation.fixed_k import FixedKIncidentLine
 from witwin.maxwell.fdtd.excitation.tfsf_apply import apply_tfsf_e_correction, apply_tfsf_h_correction
 
@@ -15,11 +15,13 @@ def _line(axis=2, k=.7, polarization=(0., 1., 0.)):
                              device="cpu", dt=.2, c=1., eps0=1., mu0=1.,
                              _requested_port_frequencies=(.05, .1, .2),
                              resolved_bloch_wavevector=tuple(k if i == (axis + 1) % 3 else 0. for i in range(3)),
-                             cpml_config=dict(DEFAULT_CPML_CONFIG))
+                             cpml_grading=DEFAULT_CPML_GRADING)
     source = dict(injection=dict(axis="xyz"[axis]), direction=tuple(float(i == axis) for i in range(3)),
                   polarization=polarization,
                   source_time=dict(kind="cw", frequency=.1, amplitude=0., phase=0., delay=0.))
-    return FixedKIncidentLine(solver, source, dict.fromkeys("xyz", 1.), (10, 10, 10))
+    line = FixedKIncidentLine(solver, source, dict.fromkeys("xyz", 1.), (10, 10, 10))
+    line.prepare_tables(1100)  # the drive and phase rows a solve stages at entry
+    return line
 
 
 def test_soft_drive_keeps_integer_step_sampling(monkeypatch):
@@ -34,7 +36,9 @@ def test_soft_drive_keeps_integer_step_sampling(monkeypatch):
     for _ in range(3):
         line.advance_magnetic()
         line.advance_electric()
-    assert times == [step * line.dt for step in range(3)]
+    # Rows are staged once from the integer-step times; the advance reads them by its clock.
+    assert times[:3] == [step * line.dt for step in range(3)] and len(times) == 1100
+    assert int(line.clock) == 3
 
 
 @pytest.mark.parametrize("axis", (0, 1, 2))
@@ -91,6 +95,7 @@ def test_split_bank_corrections_use_complex_line_and_profile():
 def test_line_cpml_pulse_is_bounded_and_state_round_trip_is_exact(tmp_path):
     line = _line()
     line.source_time = dict(kind="gaussian_pulse", frequency=.2, fwidth=.05, amplitude=1., phase=0., delay=20.)
+    line.prepare_tables(1200)
     for _ in range(190):
         line.advance_magnetic()
         line.advance_electric()
@@ -100,6 +105,7 @@ def test_line_cpml_pulse_is_bounded_and_state_round_trip_is_exact(tmp_path):
     torch.save(line.state_tensors(), path)
     restored = _line()
     restored.source_time = line.source_time
+    restored.prepare_tables(1200)
     for name, value in torch.load(path, weights_only=True).items():
         restored.state_tensors()[name].copy_(value)
     peak = 0.

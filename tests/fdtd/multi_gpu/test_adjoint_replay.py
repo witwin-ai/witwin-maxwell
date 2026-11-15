@@ -36,22 +36,21 @@ def _parallel(devices):
     )
 
 
-def _standard_scene(device):
+def _standard_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.none(),
-        device=device,
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.15, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
-            name="drive",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.4, 0.4), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.none(),
+                sources=(
+            mw.PointDipole(
+                position=(-0.15, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+                name="drive",
+            ),
+            ),
+            )
     return scene
 
 
@@ -68,7 +67,7 @@ def test_distributed_replay_reproduces_forward_owned_states_exactly(
     cuda_p2p_devices, cuda_memory_cleanup
 ):
     steps = 40
-    scene = _standard_scene("cuda:0")
+    scene = _standard_scene()
     distributed = DistributedFDTD(
         scene,
         frequency=_FREQUENCY,
@@ -145,16 +144,16 @@ def test_distributed_cpml_replay_reproduces_forward_owned_psi_and_fields(
 
     steps = 80
     distributed = DistributedFDTD(
-        _pml_scene().clone(boundary=_replay_cpml_boundary(cpml_axes)),
+        _pml_scene().updated(boundary=_replay_cpml_boundary(cpml_axes)),
         frequency=_FREQUENCY,
         parallel=_parallel(cuda_p2p_devices),
         absorber_type="cpml",
-        cpml_config={"memory_mode": "dense"} if cpml_axes == "x" else {},
+        cpml=mw.fdtd.CPMLConfig(memory_mode="dense") if cpml_axes == "x" else None,
     )
     distributed.init_field()
     require_distributed_adjoint_support(distributed)
     record_property("requested_cpml_memory_mode",
-                    distributed.cpml_config.get("memory_mode", "auto"))
+                    distributed.cpml.memory_mode.value)
     record_property("resolved_cpml_memory_modes", ",".join(
         shard.solver._cpml_memory_mode for shard in distributed.shards))
 
@@ -224,7 +223,7 @@ def test_distributed_cpml_replay_reproduces_forward_owned_psi_and_fields(
 
 
 def test_replay_requires_matching_partition(cuda_p2p_devices, cuda_memory_cleanup):
-    scene = _standard_scene("cuda:0")
+    scene = _standard_scene()
     distributed = DistributedFDTD(
         scene,
         frequency=_FREQUENCY,
@@ -247,7 +246,6 @@ def _base_scene():
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
-        device="cpu",
     )
 
 
@@ -266,19 +264,20 @@ def test_distributed_solver_accepts_trainable_box_density_directly():
     construction (the joint-solve adjoint bridge differentiates it)."""
 
     scene = _base_scene()
-    scene.subpixel = mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic")
+    scene = scene.updated(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"))
     density = torch.rand((2, 2, 2), requires_grad=True)
-    scene.add_material_region(
+    scene = scene.updated(material_regions=(
+        *scene.material_regions,
         mw.MaterialRegion(
             name="design",
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2)),
             density=density,
             eps_bounds=(1.0, 5.0),
-        )
-    )
+        ),
+    ))
     # Construction validates static capabilities before any hardware use; a
     # trainable Box density is accepted, so this must not raise.
-    DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_cpu_parallel())
+    DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_cpu_parallel(), device="cpu")
 
 
 def test_distributed_solver_rejects_unsupported_trainable_channel_directly():
@@ -287,7 +286,8 @@ def test_distributed_solver_rejects_unsupported_trainable_channel_directly():
     that channel has no verified distributed reverse core."""
 
     scene = _base_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             name="dielectric",
             geometry=mw.Box(
@@ -295,29 +295,28 @@ def test_distributed_solver_rejects_unsupported_trainable_channel_directly():
                 size=(0.2, 0.2, 0.2),
             ),
             material=mw.Material(eps_r=3.0),
-        )
-    )
+        ),
+    ))
     with pytest.raises(ValueError, match="trainable"):
-        DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_cpu_parallel())
+        DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_cpu_parallel(), device="cpu")
 
 
 def _pml_scene():
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"),
-        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
-        device="cuda:0",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.15, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
-            name="drive",
-        )
-    )
+                subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"),
+                domain=mw.Domain(bounds=((-0.4, 0.4), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+                sources=(
+            mw.PointDipole(
+                position=(-0.15, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+                name="drive",
+            ),
+            ),
+            )
     return scene
 
 
@@ -404,9 +403,9 @@ def test_distributed_cpml_replay_detects_actual_key_swap_and_zero_carry(
     import witwin.maxwell.fdtd.distributed.adjoint as replay_module
     from witwin.maxwell.fdtd.boundary.cpml import _CPML_MEMORY_SPECS
     distributed = DistributedFDTD(
-        _pml_scene().clone(boundary=_replay_cpml_boundary("x")),
+        _pml_scene().updated(boundary=_replay_cpml_boundary("x")),
         frequency=_FREQUENCY, parallel=_parallel(cuda_p2p_devices),
-        absorber_type="cpml", cpml_config={"memory_mode": "dense"},
+        absorber_type="cpml", cpml=mw.fdtd.CPMLConfig(memory_mode="dense"),
     )
     distributed.init_field()
     require_distributed_adjoint_support(distributed)
@@ -430,7 +429,7 @@ def test_distributed_cpml_replay_detects_actual_key_swap_and_zero_carry(
     record_property("native_propagated_hy_x_carry", carried)
     assert carried > 10.0e-6
     names = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz") + tuple(_CPML_MEMORY_SPECS)
-    distributed._advance_one_step(80, overlap_active=False)
+    distributed._advance_one_step(80)
     distributed._synchronize_all()
     forward = _owned_cpml_snapshot(distributed, names)
     clean = replay_distributed_segment(distributed, checkpoint, 80, 81)

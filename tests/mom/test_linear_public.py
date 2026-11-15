@@ -18,11 +18,11 @@ def test_public_volume_degenerates_exactly_and_restores_without_solve(tmp_path, 
     scene = mw.Scene(structures=[mw.Structure(mw.Mesh(v.boundary.vertices, v.boundary.faces,
         recenter=False, fill_mode='solid'), mw.Material(eps_r=2.+i)) for i,v in enumerate(volumes)],
         sources=[mw.PlaneWave(source_time=mw.CW(frequency=3e8))])
-    config = mw.MoMConfig(integration=IntegrationConfig(order=2, singular_order=2),
+    config = mw.mom.MoMConfig(integration=IntegrationConfig(order=2, singular_order=2),
         query_config=FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1')
-    reference = mw.Simulation.mom(scene, frequency=3e8, config=config).run()
-    simulation = mw.Simulation.mom(scene, frequency=3e8,
-        config=replace(config, linear_coupled=mw.LinearCoupledConfig(volumes)))
+    reference = mw.Simulation.mom(scene, frequencies=3e8, config=config).run()
+    simulation = mw.Simulation.mom(scene, frequencies=3e8,
+        config=replace(config, linear_coupled=mw.mom.LinearCoupledConfig(volumes)))
     prepared = simulation.prepare()
     # The zero-source contract compares the same regional operator. Independent
     # CUDA assembly can differ at roundoff even with identical declarations.
@@ -30,13 +30,13 @@ def test_public_volume_degenerates_exactly_and_restores_without_solve(tmp_path, 
     reference = prepared.solver.surface_runtime.run()
     # Compare repeatability in the vector norm used by the diagnostic; tiny
     # individual components can have large relative cancellation errors.
-    expected_coefficients = independent.surface_currents.scattered_coefficients
-    repeat_error = (reference.surface_currents.scattered_coefficients-expected_coefficients).norm()
+    expected_coefficients = mw.mom.surface_currents(independent).scattered_coefficients
+    repeat_error = (mw.mom.surface_currents(reference).scattered_coefficients-expected_coefficients).norm()
     assert float(repeat_error/expected_coefficients.norm()) <= 64*torch.finfo(config.dtype).eps
     result = prepared.run()
     assert result.stats()['converged']
-    actual = result.surface_currents
-    assert torch.equal(actual.scattered_coefficients, reference.surface_currents.scattered_coefficients)
+    actual = mw.mom.surface_currents(result)
+    assert torch.equal(actual.scattered_coefficients, mw.mom.surface_currents(reference).scattered_coefficients)
     assert bool(actual.scattered_coefficients.any())
     points = volumes[0].vertices.new_tensor([[.2, -.1, .1]])
     expected = reference.query_fields(points, region_id=0, field_kind='total')
@@ -52,7 +52,7 @@ def test_public_volume_degenerates_exactly_and_restores_without_solve(tmp_path, 
         patch.setattr(SystemOperator, '__init__', forbidden)
         patch.setattr(torch.linalg, 'solve', forbidden)
         restored = mw.Result.load(path, scene=scene)
-    assert torch.equal(restored.surface_currents.scattered_coefficients, actual.scattered_coefficients)
+    assert torch.equal(mw.mom.surface_currents(restored).scattered_coefficients, actual.scattered_coefficients)
     for a,b in zip(restored.query_fields(points, region_id=0, field_kind='total'), expected):
         assert torch.equal(a,b)
     for mutation in ('source', 'volume', 'representation', 'metadata'):
@@ -76,10 +76,10 @@ def test_prepared_and_restore_physical_binding_reject_replacement(tmp_path):
         recenter=False, fill_mode='solid'), mw.Material(eps_r=2.+i)) for i,v in enumerate(volumes)]
     source = mw.PlaneWave(source_time=mw.CW(frequency=3e8))
     scene = mw.Scene(structures=structures, sources=[source])
-    config = mw.MoMConfig(integration=IntegrationConfig(order=2, singular_order=2),
+    config = mw.mom.MoMConfig(integration=IntegrationConfig(order=2, singular_order=2),
         query_config=FieldQueryConfig(adaptive=False), riesz_storage='compact_rwg_v1',
-        linear_coupled=mw.LinearCoupledConfig(volumes))
-    simulation = mw.Simulation.mom(scene, frequency=3e8, config=config)
+        linear_coupled=mw.mom.LinearCoupledConfig(volumes))
+    simulation = mw.Simulation.mom(scene, frequencies=3e8, config=config)
     prepared = simulation.prepare()
     runtime = prepared.solver
     original = runtime.volume_state

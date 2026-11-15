@@ -94,17 +94,17 @@ def test_first_wave_available_minima_identity_and_extreme_scales(rule):
     from witwin.maxwell.mom.runtime import _numerical_identity
     options=dict(operator_backend='fmm',riesz_storage='local_rwg_v1',stopping=StoppingRule(rtol=1e-9, preconditioner='rwg_diagonal'))
     for shift in ('dense','separable_v1'):
-        config=mw.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shift,kernel_bound_rule=rule)
+        config=mw.mom.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shift,kernel_bound_rule=rule)
         payload=config.payload()
         assert payload['version']==config_version
-        assert mw.FMMConfig.restore(payload)==config
-        previous=mw.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shift,kernel_bound_rule=previous_rule)
-        assert _numerical_identity(mw.MoMConfig(fmm=config,**options))!=_numerical_identity(mw.MoMConfig(fmm=previous,**options))
+        assert mw.mom.FMMConfig.restore(payload)==config
+        previous=mw.mom.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shift,kernel_bound_rule=previous_rule)
+        assert _numerical_identity(mw.mom.MoMConfig(fmm=config,**options))!=_numerical_identity(mw.mom.MoMConfig(fmm=previous,**options))
         for field in payload['parameters']:
             bad=copy.deepcopy(payload);del bad['parameters'][field]
-            with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+            with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
         for changed_rule in ('positive_tail_min_v1','real_support_min_v1','bivariate_cauchy_v1'):
             bad=copy.deepcopy(payload);bad['parameters']['kernel_bound_rule']=changed_rule
-            with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+            with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
         with pytest.raises(NotImplementedError,match='free space'):
-            mw.MoMConfig(fmm=config,periodic=mw.MoMPeriodicConfig(((1.,0,0),)),**options)
+            mw.mom.MoMConfig(fmm=config,periodic=mw.mom.MoMPeriodicConfig(((1.,0,0),)),**options)

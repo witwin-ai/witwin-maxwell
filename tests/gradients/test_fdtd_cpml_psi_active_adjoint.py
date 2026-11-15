@@ -47,35 +47,34 @@ _SOURCE_X = -0.18
 _MONITOR_X = 0.48
 
 
-def _scene(density, *, device):
+def _scene(density):
     x = np.linspace(-0.6, 0.6, 21, dtype=np.float64)
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.pml(num_layers=4),
-        device=device,
-    )
-    scene.add_material_region(
-        mw.MaterialRegion(
-            name="design",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
-            density=density,
-            eps_bounds=(1.0, 6.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(_SOURCE_X, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQ, fwidth=5.0e8),
-            name="drive",
-        )
-    )
-    scene.add_monitor(mw.PointMonitor("probe", (_MONITOR_X, 0.0, 0.0), fields=("Ez",)))
+                subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.pml(num_layers=4),
+                material_regions=(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(_SOURCE_X, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQ, fwidth=5.0e8),
+                name="drive",
+            ),
+            ),
+                monitors=(mw.PointMonitor("probe", (_MONITOR_X, 0.0, 0.0), fields=("Ez",)),),
+            )
     return scene
 
 
@@ -83,14 +82,16 @@ def _solve(density_values, *, want_grad, return_solver=False):
     density = density_values.clone().to("cuda:0")
     if want_grad:
         density.requires_grad_(True)
-    scene = _scene(density, device="cuda:0")
+    scene = _scene(density)
     result = mw.Simulation.fdtd(
         scene,
-        frequency=_FREQ,
-        run_time=mw.TimeConfig(time_steps=_STEPS),
-        absorber="cpml",
+        frequencies=_FREQ,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=_STEPS),
+            absorber="cpml",
+        ),
     ).run()
-    spectrum = result.monitors["probe"]["Ez"]
+    spectrum = result.monitor("probe").sel(component="Ez").values
     loss = (spectrum.real ** 2 + spectrum.imag ** 2).sum()
     grad = None
     if want_grad:

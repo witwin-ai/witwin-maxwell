@@ -28,7 +28,7 @@ def test_scalar_volume_current_in_actual_mixed_tensor_system():
     exterior=compile_medium(mw.Material(),3e8)
     system=SurfaceSystem.create([(0,'linear_tensor',RWGBasis(first.boundary),tensor),
                                  (1,'scalar_volume',RWGBasis(second.boundary),scalar)])
-    config=mw.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),
+    config=mw.mom.MoMConfig(integration=IntegrationConfig(order=3,singular_order=3),
                         dyadic_integration=DyadicIntegrationConfig(),riesz_storage='compact_rwg_v1')
     operator=SystemOperator(system,exterior,[],config)
     binding=bind_volume_region(second,system)

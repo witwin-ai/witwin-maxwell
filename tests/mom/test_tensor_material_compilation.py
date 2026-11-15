@@ -13,7 +13,7 @@ def test_public_tensor_compiler_preserves_tensor_overrides_and_poles():
     from witwin.maxwell.mom.tensor_medium import compile_tensor_medium
     pole = mw.DebyePole(delta_eps=.7, tau=1e-10)
     rows = ((2., .2, 0.), (.2, 3., 0.), (0., 0., 4.))
-    material = mw.Material(eps_r=17., mu_r=8., epsilon_tensor=mw.Tensor3x3(rows),
+    material = mw.Material(eps_r=17., mu_r=8., epsilon_tensor=mw.media.Tensor3x3(rows),
         mu_tensor=mw.DiagonalTensor3(1., 1.5, 2.), sigma_e=100.,
         sigma_e_tensor=mw.DiagonalTensor3(.01, .02, .03), debye_poles=(pole,), mu_debye_poles=(pole,))
     sample = compile_tensor_medium(material, 1e9, device='cuda')
@@ -29,7 +29,7 @@ def test_public_ferrite_compiler_retains_full_bias_reversal():
     from witwin.maxwell.mom.tensor_medium import compile_tensor_medium
     samples = []
     for sign in (1, -1):
-        material = mw.GyromagneticFerrite(eps_r=3., saturation_magnetization=1.4e5,
+        material = mw.media.GyromagneticFerrite(eps_r=3., saturation_magnetization=1.4e5,
             bias_field=(0., 0., sign*8e4), gilbert_damping=.01, sigma_e=.01)
         sample = compile_tensor_medium(material, 2e9, device='cuda')
         assert sample.reciprocal is False
@@ -61,7 +61,7 @@ def test_tensor_compiler_does_not_validate_a_discarded_scalar_branch():
 
 def test_public_polder_batch_stays_on_cuda_with_frequency_gradients():
     import witwin.maxwell as mw
-    material = mw.GyromagneticFerrite(saturation_magnetization=1.4e5,
+    material = mw.media.GyromagneticFerrite(saturation_magnetization=1.4e5,
         bias_field=(2e4, 3e4, 8e4), gilbert_damping=.01)
     frequencies = torch.tensor([1.9e9, 2e9], device='cuda', dtype=torch.float64, requires_grad=True)
     sampled = material.permeability_tensor_at_freq(frequencies)
@@ -113,8 +113,8 @@ def test_complex_public_declarations_preserve_both_tensors_and_exact_storage():
     from witwin.maxwell.mom.tensor_medium import compile_tensor_medium, sampled_medium_payload, restore_tensor_medium
     epsilon = ((2+.3j, .1+.02j, 0), (.1+.02j, 3+.4j, 0), (0, 0, 4+.5j))
     mu = ((1.5, .1j, 0), (-.1j, 2., 0), (0, 0, 2.5))
-    material = mw.Material(epsilon_tensor=mw.ComplexTensor3x3(epsilon),
-                          mu_tensor=mw.ComplexTensor3x3(mu, reciprocal=False))
+    material = mw.Material(epsilon_tensor=mw.media.ComplexTensor3x3(epsilon),
+                          mu_tensor=mw.media.ComplexTensor3x3(mu, reciprocal=False))
     sample = compile_tensor_medium(material, 3e8, device='cuda')
     assert not sample.reciprocal
     torch.testing.assert_close(sample.epsilon_r, torch.tensor(epsilon, device='cuda', dtype=torch.complex128), rtol=0, atol=0)
@@ -122,7 +122,7 @@ def test_complex_public_declarations_preserve_both_tensors_and_exact_storage():
     restored = restore_tensor_medium(sampled_medium_payload(sample), device='cuda')
     torch.testing.assert_close(restored.epsilon_r, sample.epsilon_r, rtol=0, atol=0)
     torch.testing.assert_close(restored.mu_r, sample.mu_r, rtol=0, atol=0)
-    real_mu = mw.Tensor3x3(((2, .1, 0), (.1, 3, 0), (0, 0, 4)))
+    real_mu = mw.media.Tensor3x3(((2, .1, 0), (.1, 3, 0), (0, 0, 4)))
     full_real = compile_tensor_medium(mw.Material(mu_tensor=real_mu), 3e8, device='cuda')
     torch.testing.assert_close(full_real.mu_r, torch.tensor(real_mu.rows, device='cuda', dtype=torch.complex128), rtol=0, atol=0)
 
@@ -131,11 +131,11 @@ def test_each_complex_declaration_reciprocity_and_passivity_is_checked():
     from witwin.maxwell.mom.tensor_medium import compile_tensor_medium
     gyro = ((2, .1j, 0), (-.1j, 3, 0), (0, 0, 4))
     # A nonreciprocal mu must not disable an epsilon declaration's own assertion.
-    material = mw.Material(epsilon_tensor=mw.ComplexTensor3x3(gyro),
-        mu_tensor=mw.ComplexTensor3x3(gyro, reciprocal=False))
+    material = mw.Material(epsilon_tensor=mw.media.ComplexTensor3x3(gyro),
+        mu_tensor=mw.media.ComplexTensor3x3(gyro, reciprocal=False))
     with pytest.raises(ValueError, match='reciprocal'):
         compile_tensor_medium(material, 3e8, device='cuda')
     # Positive diagonal imaginary parts do not suffice: the loss matrix is indefinite.
     gain = ((2+.1j, .2j, 0), (.2j, 3+.1j, 0), (0, 0, 4+.1j))
     with pytest.raises(ValueError, match='passive'):
-        compile_tensor_medium(mw.Material(mu_tensor=mw.ComplexTensor3x3(gain)), 3e8, device='cuda')
+        compile_tensor_medium(mw.Material(mu_tensor=mw.media.ComplexTensor3x3(gain)), 3e8, device='cuda')

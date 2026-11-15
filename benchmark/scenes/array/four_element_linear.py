@@ -50,7 +50,7 @@ def _dipole_arm(name: str, x: float, sign: float) -> mw.Structure:
     )
 
 
-def build_four_element_linear_scene(*, device="cuda") -> mw.Scene:
+def build_four_element_linear_scene() -> mw.Scene:
     """Return the frozen 96^3-cell, half-wavelength four-element benchmark."""
 
     spacing = _C0 / (2.0 * ARRAY_BENCHMARK_FREQUENCY)
@@ -76,7 +76,7 @@ def build_four_element_linear_scene(*, device="cuda") -> mw.Scene:
         for index, x in enumerate(positions)
         for side, sign in (("lower", -1.0), ("upper", 1.0))
     )
-    surface = mw.ClosedSurfaceMonitor.box(
+    surface = mw.monitors.ClosedSurfaceMonitor.box(
         "array_nf2ff",
         position=(0.0, 0.0, 0.0),
         size=(0.54, 0.18, 0.18),
@@ -89,7 +89,6 @@ def build_four_element_linear_scene(*, device="cuda") -> mw.Scene:
         structures=structures,
         ports=ports,
         monitors=(surface,),
-        device=device,
     )
 
 

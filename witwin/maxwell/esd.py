@@ -33,7 +33,9 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
+from ._enums import Direction, parse_enum
 from .sources import CustomSourceTime, UniformCurrentSource, polarization_vector
+from ._stability import experimental
 
 
 # Model bookkeeping -----------------------------------------------------------
@@ -93,6 +95,7 @@ def _term_eta(tau_rise: float, tau_decay: float, n: float) -> float:
     return float(torch.max(refined_shape))
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class ESDDiagnostics:
     """Scalar summary of an ESD current waveform.
@@ -122,6 +125,7 @@ class ESDDiagnostics:
         }
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class ESDResampledWaveform:
     """Charge-conserving resampling of a waveform onto an FDTD time grid.
@@ -346,6 +350,7 @@ def _characteristic_frequency(waveform: "_WaveformBase") -> float:
     return 1.0 / span if span > 0.0 else 1.0
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class ESDWaveform(_WaveformBase):
     """Versioned standard ESD current waveform (two-term Heidler sum)."""
@@ -453,6 +458,7 @@ class ESDWaveform(_WaveformBase):
         }
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class MeasuredWaveform(_WaveformBase):
     """User-supplied measured ESD current samples.
@@ -525,6 +531,7 @@ class MeasuredWaveform(_WaveformBase):
 Waveform = ESDWaveform | MeasuredWaveform
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class ESDCurrentSource:
     """Bind an ESD waveform to a terminal port as an ideal current injection.
@@ -538,10 +545,10 @@ class ESDCurrentSource:
     name: str
     port_name: str
     waveform: Waveform
-    direction: str
+    direction: Direction
     kind: str = "esd_current_source"
 
-    def __init__(self, name, *, port, waveform, direction="+"):
+    def __init__(self, name, *, port, waveform, direction=Direction.PLUS):
         resolved_name = str(name).strip()
         if not resolved_name:
             raise ValueError("ESDCurrentSource name must not be empty.")
@@ -550,9 +557,7 @@ class ESDCurrentSource:
             raise ValueError("ESDCurrentSource port must name a terminal port.")
         if not isinstance(waveform, (ESDWaveform, MeasuredWaveform)):
             raise TypeError("waveform must be an ESDWaveform or MeasuredWaveform.")
-        resolved_direction = str(direction).strip()
-        if resolved_direction not in {"+", "-"}:
-            raise ValueError("direction must be '+' or '-'.")
+        resolved_direction = parse_enum(Direction, direction, name="ESDCurrentSource.direction")
         object.__setattr__(self, "name", resolved_name)
         object.__setattr__(self, "port_name", resolved_port)
         object.__setattr__(self, "waveform", waveform)
@@ -604,7 +609,7 @@ class ESDCurrentSource:
         size[axis_index] = gap
         center[axis_index] = 0.5 * (float(positive[axis_index]) + float(negative[axis_index]))
         sign = 1.0 if float(positive[axis_index]) > float(negative[axis_index]) else -1.0
-        if self.direction == "-":
+        if self.direction is Direction.MINUS:
             sign = -sign
         return {
             "axis": axis,
@@ -664,6 +669,7 @@ class ESDCurrentSource:
         return payload
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class ESDPortRecord:
     """Typed ESD injection summary exposed on a run result.
@@ -713,6 +719,7 @@ ESD_STANDARD_DISCHARGE_RESISTANCE = 330.0     # ohms (R_d)
 ESD_STANDARD_STORAGE_CAPACITANCE = 150.0e-12  # farads (C_s)
 
 
+@experimental("esd")
 @dataclass(frozen=True)
 class ESDVoltageSource:
     """ESD generator driven through the standard 330 ohm / 150 pF source network.
@@ -839,11 +846,63 @@ class ESDVoltageSource:
         }
 
 
+@experimental("esd")
+def esd_waveform_names(result) -> tuple[str, ...]:
+    """Names of the ESD current sources declared on the scene of ``result``."""
+    return result._esd_waveform_names()
+
+
+@experimental("esd")
+def esd_waveform(result, name: str) -> ESDPortRecord:
+    """The typed ESD injection record (``ESDPortRecord``) of current source ``name`` in ``result``.
+
+    Capability level: stress-only. Target waveform diagnostics, the charge-conserving
+    projection of the injected current onto the run time grid, provenance, and the
+    ``measured`` terminal-port record when one was recorded for the bound port (``None``
+    on the ideal-current injection path; see :class:`ESDPortRecord`).
+    """
+    return result._esd_waveform(name)
+
+
+@experimental("esd")
+def esd_generator_names(result) -> tuple[str, ...]:
+    """Names of the circuit-driven ESD generator networks (``ESDVoltageSource.build_circuit``) of ``result``."""
+    return result._esd_generator_names()
+
+
+@experimental("esd")
+def esd_generator(result, name: str) -> dict[str, Any]:
+    """The ESD generator-network provenance of circuit ``name``: versioned waveform metadata and the
+    source-network element values. The coupled port series is ``mw.circuits.circuit(result, name)``."""
+    return result._esd_generator(name)
+
+
+@experimental("esd")
+def component_stress_names(result) -> tuple[str, ...]:
+    """Names of the ``ComponentStressMonitor`` bindings declared on the scene of ``result``."""
+    return result._component_stress_names()
+
+
+@experimental("esd")
+def component_stress(result, name: str):
+    """The typed component port-stress summary (``ComponentStressData``) of monitor ``name``.
+
+    Capability level: stress-only. Reduces the bound voltage/current time series to
+    ``P = V I``, cumulative ``integral P dt`` and the exceedance summary versus the
+    declared :class:`ComponentRating` envelope.
+    """
+    return result._component_stress(name)
+
+
+# Public namespace ``mw.esd``: ESD sources and diagnostics with component-stress monitoring.
+from ._lazy import lazy_attributes  # noqa: E402
+
 __all__ = [
-    "ESD_CAPABILITY_LEVEL",
-    "ESD_MODEL_VERSION",
-    "ESD_STANDARD_DISCHARGE_RESISTANCE",
-    "ESD_STANDARD_STORAGE_CAPACITANCE",
+    "BreakdownMonitor",
+    "BreakdownStressData",
+    "ComponentRating",
+    "ComponentStressData",
+    "ComponentStressMonitor",
     "ESDCurrentSource",
     "ESDDiagnostics",
     "ESDPortRecord",
@@ -851,4 +910,16 @@ __all__ = [
     "ESDVoltageSource",
     "ESDWaveform",
     "MeasuredWaveform",
+    "component_stress",
+    "component_stress_names",
+    "esd_generator",
+    "esd_generator_names",
+    "esd_waveform",
+    "esd_waveform_names",
 ]
+
+__getattr__, __dir__ = lazy_attributes(__name__, names={
+    ".breakdown_stress": ("BreakdownStressData", "ComponentRating", "ComponentStressData"),
+    ".monitors": ("BreakdownMonitor", "ComponentStressMonitor"),
+})
+del lazy_attributes

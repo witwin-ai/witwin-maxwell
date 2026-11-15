@@ -22,9 +22,9 @@ def test_tensor_periodic_refinement_separates_fields_and_wraps_trace(varying_fie
     medium=TensorMedium(3e8,torch.diag(eye.new_tensor([2.,3.,4.])),eye)
     basis=basis_at(0.)
     system=SurfaceSystem.create([(0,'tensor',basis,medium)])
-    config=mw.MoMConfig(integration=IntegrationConfig(order=1,singular_order=1),
-        dyadic_integration=mw.DyadicIntegrationConfig(),
-        periodic=mw.MoMPeriodicConfig(((2.,0.,0.),),bloch_rad_per_m=(.2,0.,0.)))
+    config=mw.mom.MoMConfig(integration=IntegrationConfig(order=1,singular_order=1),
+        dyadic_integration=mw.mom.DyadicIntegrationConfig(),
+        periodic=mw.mom.MoMPeriodicConfig(((2.,0.,0.),),bloch_rad_per_m=(.2,0.,0.)))
     handle=SystemDecodeHandle(system,compile_medium(mw.Material(),3e8),[],config,{})
     kernel=config.periodic.compile(device='cuda',dtype=torch.complex128)
     point=(basis.mesh.vertices.mean(0,keepdim=True) if trace_side is None else
@@ -49,7 +49,7 @@ def test_tensor_periodic_refinement_separates_fields_and_wraps_trace(varying_fie
         raise AssertionError('A tensor interior must not receive periodic image potentials')
     monkeypatch.setattr(periodic_fields,'regular_surface_fields',forbidden)
     coefficients=eye.new_zeros(2*basis.n_edges)
-    policy=mw.FieldQueryConfig(relative_tolerance=1e-5,absolute_tolerance=1e-9,max_order=2)
+    policy=mw.mom.FieldQueryConfig(relative_tolerance=1e-5,absolute_tolerance=1e-9,max_order=2)
     with pytest.raises(PeriodicFieldConvergenceError) as failure:
         decode_periodic(handle,coefficients,shifted,1,'total',trace_side,
                         kernel=kernel,query_config=policy)

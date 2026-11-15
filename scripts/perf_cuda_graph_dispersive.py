@@ -40,24 +40,23 @@ def _dispersive_autogrid_scene(*, half_extent: float) -> mw.Scene:
     """
     bounds = ((-half_extent, half_extent),) * 3
     scene = mw.Scene(
-        domain=mw.Domain(bounds=bounds),
-        grid=mw.GridSpec.auto(min_steps_per_wavelength=12, wavelength=3.0e8 / _FREQ),
-        boundary=mw.BoundarySpec.pml(num_layers=8),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(half_extent, half_extent, half_extent)),
-            material=mw.Material.drude(eps_inf=1.0, plasma_frequency=2.0e9, gamma=1.0e8),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.5 * half_extent, 0.0, -0.5 * half_extent),
-            polarization="Ez",
-            source_time=mw.GaussianPulse(frequency=_FREQ, fwidth=0.7e9),
-        )
-    )
+                domain=mw.Domain(bounds=bounds),
+                grid=mw.GridSpec.auto(min_steps_per_wavelength=12, wavelength=3.0e8 / _FREQ),
+                boundary=mw.BoundarySpec.pml(num_layers=8),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(half_extent, half_extent, half_extent)),
+                material=mw.Material.drude(eps_inf=1.0, plasma_frequency=2.0e9, gamma=1.0e8),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(-0.5 * half_extent, 0.0, -0.5 * half_extent),
+                polarization="Ez",
+                source_time=mw.GaussianPulse(frequency=_FREQ, fwidth=0.7e9),
+            ),
+            ),
+            )
     return scene
 
 
@@ -67,14 +66,16 @@ def _run(scene: mw.Scene, *, cuda_graph: bool, time_steps: int):
     result = mw.Simulation.fdtd(
         scene,
         frequencies=(_FREQ,),
-        full_field_dft=True,
-        run_time=mw.TimeConfig(time_steps=time_steps),
-        cuda_graph=cuda_graph,
+        config=mw.FDTDConfig(
+            full_field_dft=True,
+            run_time=mw.TimeConfig(time_steps=time_steps),
+            cuda_graph=cuda_graph,
+        ),
     ).run()
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - start
     view = result.at(frequency=_FREQ)
-    field = np.asarray(view.E.z.detach().cpu())
+    field = np.asarray(view.E.z.values.detach().cpu())
     return result.stats(), elapsed, field
 
 
@@ -91,7 +92,7 @@ def main() -> None:
     print(f"Device: {torch.cuda.get_device_name(0)}")
     grid_scene = _dispersive_autogrid_scene(half_extent=args.half_extent)
     solver = mw.Simulation.fdtd(
-        grid_scene, frequencies=(_FREQ,), run_time=mw.TimeConfig(time_steps=1)
+        grid_scene, frequencies=(_FREQ,), config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1))
     ).prepare().solver
     print(f"AutoGrid resolved grid: {solver.Nx}x{solver.Ny}x{solver.Nz} cells, dt={solver.dt:.3e}s")
     print(f"Time steps: {args.time_steps}\n")

@@ -68,7 +68,7 @@ def test_current_bounded_compact_original_complete_resource_interval(family,freq
         assert system.total_edges==3840
         provider=ScalarSystemBlocks(system,exterior,IntegrationConfig(order=4,singular_order=3))
         return MultipoleSystemActions(provider,order=order,kernel_bound_rule=rule,
-            kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5),leaf_size=30,separation_ratio=.25,
+            kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5),leaf_size=30,separation_ratio=.25,
             table_storage='compact_shared_displacement_v1',shift_storage='separable_v1',
             near_storage='scalar_reciprocal_dk_v1',far_action_batch=32,m2l_row_batch=8,
             action_retained_budget_bytes=2*1024**3,table_budget_bytes=1024**3,

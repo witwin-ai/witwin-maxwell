@@ -33,27 +33,29 @@ def _final_fields(boundary, cells, weights):
         domain=mw.Domain(bounds=((0.0, cells * PERIOD), *TRANSVERSE)),
         grid=mw.GridSpec.uniform(STEP),
         boundary=boundary,
-        device="cuda",
     )
     for index, weight in enumerate(weights):
         if weight == 0.0:
             continue
         x, y, z = SOURCE_OFFSET
-        scene.add_source(
+        scene = scene.updated(sources=(
+            *scene.sources,
             mw.PointDipole(
                 position=(x + index * PERIOD, y, z),
                 polarization="Ez",
                 width=0.03,
                 source_time=mw.GaussianPulse(1.0e9, fwidth=0.6e9, amplitude=float(weight)),
                 name=f"src{index}",
-            )
-        )
-    scene.add_monitor(mw.PointMonitor("probe", (0.4, 0.125, 0.125), fields=("Ez",)))
+            ),
+        ))
+    scene = scene.updated(monitors=(*scene.monitors, mw.PointMonitor("probe", (0.4, 0.125, 0.125), fields=("Ez",))))
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[1.0e9],
-        run_time=mw.TimeConfig(time_steps=TIME_STEPS),
-        spectral_sampler=mw.SpectralSampler(window="none"),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=TIME_STEPS),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+        ),
     ).run()
     solver = result.solver
     assert bool(solver.has_pec_faces)

@@ -56,7 +56,7 @@ def build(kind, *, h, frequency, edge_model, mode="odd", half_x=.06):
 
     def sheet(name, y0, y1, z):
         structures.append(mw.Structure(mw.Box(position=torch.tensor((0., (y0 + y1) / 2, z), dtype=torch.float64),
-            size=torch.tensor((big, y1 - y0, 0.), dtype=torch.float64)), mw.CopperFoil(**foil), name=name))
+            size=torch.tensor((big, y1 - y0, 0.), dtype=torch.float64)), mw.media.CopperFoil(**foil), name=name))
 
     x0 = -round(.6 * half_x / step) * step
     sources = []
@@ -88,9 +88,8 @@ def build(kind, *, h, frequency, edge_model, mode="odd", half_x=.06):
                     center=(x0, y, -.0025), source_time=mw.CW(frequency)) for sign, y in zip(signs, (.005, -.005))]
         boundary = mw.BoundarySpec.pml(num_layers=8)
     scene = mw.Scene(domain=mw.Domain(bounds=((xs[0], xs[-1]), (ys[0], ys[-1]), (zs[0], zs[-1]))),
-                     grid=mw.GridSpec.custom(xs, ys, zs), boundary=boundary, device="cuda", structures=structures)
-    for source in sources:
-        scene.add_source(source)
+                     grid=mw.GridSpec.custom(xs, ys, zs), boundary=boundary, structures=structures)
+    scene = scene.updated(sources=(*scene.sources, *sources))
     return scene
 
 
@@ -107,7 +106,7 @@ def faraday_h(result, frequency):
     """Hy, Hz phasors from the discrete Faraday law of the sampled E (z-normal foils)."""
     solver = result.solver
     xs, ys, zs = (np.asarray(getattr(solver.scene, f"{axis}_nodes64")) for axis in "xyz")
-    E = {name: result.tensor(name).cpu().numpy().astype(np.complex128) for name in ("Ex", "Ey", "Ez")}
+    E = {name: result.field(name, freq_index=0).values.cpu().numpy().astype(np.complex128) for name in ("Ex", "Ey", "Ez")}
     dt = float(solver.dt)
     factor = 1 / (1j * MU0 * 2 * math.sin(math.pi * frequency * dt) / dt)
     dz = np.diff(zs)
@@ -133,12 +132,12 @@ def local_alpha(result, frequency, *, half_y, half_z):
     dy, dz = np.diff(ys), np.diff(zs)
     dyd = np.r_[dy[0] / 2, (dy[:-1] + dy[1:]) / 2, dy[-1] / 2]
     dzd = np.r_[dz[0] / 2, (dz[:-1] + dz[1:]) / 2, dz[-1] / 2]
-    if solver.scene.boundary.axis_kind("y") == "periodic":
+    if solver.scene.scene.boundary.axis_kind("y") == "periodic":
         dyd[0] = dyd[-1] = dy[0] / 2
     inside_y, inside_z = np.abs(ys) < half_y, np.abs(zs) < half_z
     mid_y, mid_z = np.abs((ys[1:] + ys[:-1]) / 2) < half_y, np.abs((zs[1:] + zs[:-1]) / 2) < half_z
-    traces = [trace for record in result.conductor_losses.values() for trace in record["surface_power_traces"]]
-    pml = solver.scene.pml_thickness_for_face("x", "low")
+    traces = [trace for record in mw.rf.conductor_losses(result).values() for trace in record["surface_power_traces"]]
+    pml = solver.scene.scene.pml_thickness_for_face("x", "low")
     rows = []
     for station in range(len(xs) // 2 - 4, len(xs) - pml - 6):
         flux = .5 * np.real(
@@ -165,7 +164,7 @@ def main():
     parser.add_argument("--mode", choices=("odd", "even"), default="odd")
     parser.add_argument("--h", type=float, default=.00125)
     parser.add_argument("--frequency", type=float, default=1e9)
-    parser.add_argument("--edge-model", choices=mw.CopperFoil.EDGE_MODELS, default="auto")
+    parser.add_argument("--edge-model", choices=mw.media.CopperFoil.EDGE_MODELS, default="auto")
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
@@ -173,8 +172,8 @@ def main():
     # About 15 ns transient plus a ten-period Hanning window at 1 GHz.
     steps = args.steps or round((6000 * .0025 if args.kind in ("plate", "stripline") else 9000 * .00125) / args.h)
     start = time.perf_counter()
-    result = mw.Simulation.fdtd(scene, frequencies=[args.frequency], full_field_dft=True,
-        run_time=mw.TimeConfig(time_steps=steps), spectral_sampler=mw.SpectralSampler(window="hanning")).run()
+    result = mw.Simulation.fdtd(scene, frequencies=[args.frequency], config=mw.FDTDConfig(full_field_dft=True,
+        run_time=mw.TimeConfig(time_steps=steps), spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"))).run()
     box = (.03 + 1e-9, .0075 + 1e-9) if args.kind in ("plate", "stripline") else (.14 + 1e-9, .13 + 1e-9)
     rows = local_alpha(result, args.frequency, half_y=box[0], half_z=box[1])
     alpha = np.array([row["alpha_np_per_m"] for row in rows])
@@ -182,7 +181,7 @@ def main():
                   steps=steps, alpha_np_per_m=float(alpha.mean()), alpha_station_std=float(alpha.std()),
                   edge_trace_share=float(np.mean([row["edge_trace_share"] for row in rows])),
                   free_edge_trace_count={name: record["free_edge_trace_count"]
-                                         for name, record in result.conductor_losses.items()},
+                                         for name, record in mw.rf.conductor_losses(result).items()},
                   wall_s=time.perf_counter() - start, stations=rows)
     if args.kind == "plate":
         report["analytic_np_per_m"] = math.sqrt(math.pi * args.frequency * MU0 / 5.8e7) / (

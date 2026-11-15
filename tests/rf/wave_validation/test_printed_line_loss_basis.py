@@ -42,7 +42,7 @@ def basis(amplitude=1., complex_bank=False):
     if complex_bank:
         entries.append(dict(entry, imaginary=True, electric_name='Ex_imag'))
     result = SimpleNamespace(solver=SimpleNamespace(dt=DT, _copper_foils=entries),
-        frequencies=FREQUENCIES, conductor_losses={'signal': record}, stats=lambda: {'normalize_source': False})
+        frequencies=FREQUENCIES, _conductor_losses=lambda: {'signal': record}, stats=lambda: {'normalize_source': False})
     return capture_loss_basis(result, SpectralContract('a' * 64, 'b' * 64, 'c' * 64, 'd' * 64,
         planned_steps=64000, window='none')), result
 
@@ -85,17 +85,17 @@ def test_bulk_sigma_shared_api_retains_same_cross_terms(phase, amplitude_squared
         boundary=mw.BoundarySpec.none(),
         structures=[mw.Structure(name='bulk', geometry=mw.Box(position=(0., 0., 0.), size=(1., 1., 1.)),
             material=mw.Material(sigma_e_tensor=mw.DiagonalTensor3(2., 3., 4.)))],
-        monitors=[mw.PowerLossMonitor('loss', position=(0., 0., 0.), size=(.01, .01, .01),
-            quadrature='physical_intersection')], device='cpu')
+        monitors=[mw.monitors.PowerLossMonitor('loss', position=(0., 0., 0.), size=(.01, .01, .01),
+            quadrature='physical_intersection')])
     from witwin.maxwell.compiler.power_loss import compile_power_loss_monitor
     from witwin.maxwell.scene import prepare_scene
-    prepared = prepare_scene(scene)
+    prepared = prepare_scene(scene, device='cpu')
     compiled = compile_power_loss_monitor(prepared, scene.monitors[0])
     fields = {component: torch.ones((3, *shape), dtype=torch.complex128)
         for component, shape in compiled.full_component_shapes.items()}
     combined = coherent_fields([fields, fields], torch.tensor([[1., phase]] * 3))
     diagnostic = mw.Result(method='fdtd', scene=scene, frequencies=FREQUENCIES)
-    actual = diagnostic.power_loss('loss', electric_fields=combined).conduction
+    actual = mw.postprocess.power_loss(diagnostic, 'loss', electric_fields=combined).conduction
     # Three independent constant native electric components in a 1cm³ ROI.
     expected = torch.full((3,), .5 * 9 * 1e-6 * amplitude_squared, dtype=torch.float64)
     torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-25)

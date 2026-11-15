@@ -1,6 +1,6 @@
 """Decode-only admitted dual current preparation with bounded stored arrays."""
 import copy
-from dataclasses import asdict
+from .options import option_asdict
 import torch
 from .dual_current_action import DualStaticCurrentAction,FixedDualCurrentInverse,StreamedDualCurrentBalance
 from .static_volume_curl import StaticVolumeCurlAction
@@ -35,7 +35,7 @@ def snapshot_dual_action(balance):
         'projectors':tuple(snapshot_projector(p)[0] for p in a.projectors),
         'electric':a.electric.detach().cpu().clone(),'magnetic':a.magnetic.detach().cpu().clone(),
         'curl':_curl_record(a.curl),'action_receipt':copy.deepcopy(a.receipt),
-        'rule':asdict(balance.inverse.rule),'refinement_steps':balance.inverse.refinement_steps,
+        'rule':option_asdict(balance.inverse.rule),'refinement_steps':balance.inverse.refinement_steps,
         'bound':copy.deepcopy(balance.bound)}
     binding=_binding(record)
     restore_dual_action(record,a.blocks,expected_binding=binding)
@@ -87,7 +87,7 @@ def restore_dual_action(record,blocks,*,expected_binding):
     if not isinstance(record['rule'],dict):raise ValueError('Invalid stored dual inverse rule')
     try:rule=StoppingRule(**record['rule'])
     except (TypeError,ValueError) as error:raise ValueError('Invalid stored dual inverse rule') from error
-    if asdict(rule)!=record['rule']:raise ValueError('Noncanonical stored dual inverse rule')
+    if option_asdict(rule)!=record['rule']:raise ValueError('Noncanonical stored dual inverse rule')
     inverse=FixedDualCurrentInverse(action,rule,refinement_steps=record['refinement_steps'])
     _validate_bound(record['bound'],rule,action.shape[0])
     cutoff=64*torch.finfo(action.dtype).eps*action.shape[0]*record['bound']['sigma_max_upper']
@@ -111,7 +111,7 @@ def snapshot_dual_closure(closure):
     record={'schema_version':'streamed-dual-nonlinear-preparation-v1',
         'current':snapshot_dual_action(closure.current)[0],
         'settings':{k:getattr(closure,k) for k in ('relative_tolerance','absolute_tolerance','max_iterations','max_backtracks')},
-        'rule':asdict(closure.streamed_rule),'column_batch':closure.streamed_column_batch}
+        'rule':option_asdict(closure.streamed_rule),'column_batch':closure.streamed_column_batch}
     binding=_closure_binding(record)
     count=len(closure.volumes)
     restore_dual_closure(record,closure.current.action.blocks,sigma_e=closure.material_inputs[:count],
@@ -150,7 +150,7 @@ def restore_dual_closure(record,blocks,*,sigma_e,sigma_m,expected_binding):
     if len(sigma_e)!=len(blocks) or len(sigma_m)!=len(blocks):raise ValueError('Dual material body count differs')
     current=restore_dual_action(record['current'],blocks,expected_binding=_binding(record['current']))
     rule=current.inverse.rule
-    if (record['rule']!=asdict(rule) or current.bound['column_batch']!=record['column_batch']
+    if (record['rule']!=option_asdict(rule) or current.bound['column_batch']!=record['column_batch']
             or current.inverse.refinement_steps!=2 or any(p.inverse.rule!=rule or p.inverse.refinement_steps!=2
                 or p.receipt['tangent_bound']['column_batch']!=record['column_batch'] for p in current.action.projectors)):
         raise ValueError('Stored dual nonlinear and current policies differ')

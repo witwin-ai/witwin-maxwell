@@ -3,6 +3,7 @@ from types import SimpleNamespace as NS
 import copy
 import numpy as np,pytest,torch
 from scripts.dev.fdtd.printed_line_public_vi_checks import independent_public_audit,weighted_reference,check_value
+import witwin.maxwell as mw
 
 
 def fixture(scale=1.):
@@ -24,7 +25,8 @@ def fixture(scale=1.):
  physical_rows=tuple((((f'q{2*j}','Ey',.03),(f'q{2*j+1}','Ey',-.01)),(('H0','Hz',.02),('H1','Hz',-.003)))for j in range(3))
  VI=torch.stack([torch.stack([sum((primitive[n]*w for n,_,w in row),torch.zeros(F,dtype=torch.complex128))for row in pair])for pair in physical_rows])
  trace=dict(component='Ey',normal_axis='z',normal_coordinate=.003,indices=torch.tensor(stored,dtype=torch.int64),electric_fields=torch.tensor(banks),sampling=dict(owner='foil',component='Ey',planned_steps=N,completed_steps=torch.tensor(float(N),dtype=torch.float64),frequencies=torch.tensor(freq,dtype=torch.float64),weight_sums=torch.full((F,),N,dtype=torch.float64)))
- result=NS(conductor_losses={'foil':dict(frequencies=torch.tensor(freq,dtype=torch.float64),bulk_electric_traces=[trace])},monitor=lambda name:monitors[name])
+ losses={'foil':dict(frequencies=torch.tensor(freq,dtype=torch.float64),bulk_electric_traces=[trace])}
+ result=NS(_conductor_losses=lambda:losses,raw_monitor=lambda name:monitors[name])
  context=dict(plan=NS(frequencies=freq,queries=queries,native_rows=rows,expected_points=points,rows=physical_rows),oracle_indices=oracle_indices,query_oracle=oracle)
  return context,result,VI,evidence,trace,monitors
 
@@ -46,7 +48,7 @@ def test_wrong_phase_side_support_dtype_owner_clock_and_zero_reject(failure):
  elif failure=='wrong_normal':t['normal_coordinate']+=.001
  elif failure=='duplicate_row':t['indices'][0]=t['indices'][1]
  elif failure=='missing_row':t['indices'][1,0]=999
- elif failure=='raw_frequency_order':r.conductor_losses['foil']['frequencies']=r.conductor_losses['foil']['frequencies'].flip(0)
+ elif failure=='raw_frequency_order':mw.rf.conductor_losses(r)['foil']['frequencies']=mw.rf.conductor_losses(r)['foil']['frequencies'].flip(0)
  elif failure=='point_native_index':m['corner0']['field_indices']['Ey']=(2,7,4)
  elif failure=='point_clock':m['corner0']['samples']-=1
  elif failure=='trace_clock':t['sampling']['completed_steps']-=1

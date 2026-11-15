@@ -121,11 +121,11 @@ def restore_current_closure(raw,bindings,*,expected_conductivities=None):
     closure.tangent_rule,closure.tangent_column_batch=None,8
     if active:
         from .linalg import StoppingRule
-        from dataclasses import asdict
+        from .options import option_asdict
         if not isinstance(raw['tangent_rule'],dict):raise ValueError('Invalid stored DC tangent rule')
         try:rule=StoppingRule(**raw['tangent_rule'])
         except (TypeError,ValueError) as error:raise ValueError('Invalid stored DC tangent rule') from error
-        if (asdict(rule)!=raw['tangent_rule'] or rule.method!='gmres' or rule.preconditioner!='none'
+        if (option_asdict(rule)!=raw['tangent_rule'] or rule.method!='gmres' or rule.preconditioner!='none'
                 or rule.recycle_size or rule.fallback!='none'
                 or type(raw['tangent_column_batch']) is not int or raw['tangent_column_batch']<1):
             raise ValueError('Invalid stored DC tangent policy')

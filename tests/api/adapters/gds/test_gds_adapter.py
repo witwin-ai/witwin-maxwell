@@ -17,6 +17,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.adapters.gds import from_gds, to_gds_file
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_tensors
 
 try:
     import gdstk
@@ -137,7 +138,7 @@ def test_export_round_trip(tmp_path):
         position=(1.0 * UM, 2.0 * UM, 0.5 * UM),
     )
     hole = np.asarray([(0.5, 0.25), (1.5, 0.25), (1.5, 0.75), (0.5, 0.75)])
-    holed = mw.ComplexPolySlab(
+    holed = mw.geometry.ComplexPolySlab(
         loops=[np.asarray(SQUARE) * UM, hole * UM],
         bounds=(0.0, 0.22 * UM),
     )
@@ -197,15 +198,14 @@ def test_from_gds_scene_compiles_material_tensors_on_gpu(gds_file):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-1 * UM, 5 * UM), (-1 * UM, 3 * UM), (-1 * UM, 1 * UM))),
         grid=mw.GridSpec.uniform(0.1 * UM),
-        device="cuda",
     )
-    for index, slab in enumerate(slabs):
-        scene.add_structure(
-            mw.Structure(name=f"slab_{index}", geometry=slab, material=mw.Material(eps_r=4.0))
-        )
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(name=f"slab_{index}", geometry=slab, material=mw.Material(eps_r=4.0)) for index, slab in enumerate(slabs)),
+    ))
 
     prepared = prepare_scene(scene)
-    eps_r, mu_r = prepared.compile_material_tensors()
+    eps_r, mu_r = compile_material_tensors(prepared)
 
     assert eps_r.device.type == "cuda"
     assert mu_r.device.type == "cuda"

@@ -1,0 +1,165 @@
+file,text,api,method,snapshot,single_unselected
+tests/api/public/test_batch_execution.py,"loaded[0].tensor(""Ez"")",tensor,fdtd,0,1
+tests/api/public/test_batch_execution.py,"result[0].field(""E"")",field,fdtd,0,1
+tests/api/public/test_batch_execution.py,"result[0].tensor(""Ez"")",tensor,fdtd,0,1
+tests/api/public/test_public_api.py,expanded.E.x,acc.x,fdtd,0,1
+tests/api/public/test_public_api.py,expanded.E.y,acc.y,fdtd,0,1
+tests/api/public/test_public_api.py,result.E.x,acc.x,fdfd|fdtd,mixed,mixed
+tests/api/public/test_public_api.py,result.E.y,acc.y,fdfd|fdtd,0,1
+tests/api/public/test_public_api.py,result.E.z,acc.z,fdfd|fdtd,0,1
+tests/api/public/test_public_api.py,result.H.x,acc.x,fdtd,0,1
+tests/api/public/test_public_api.py,result.H.y,acc.y,fdtd,0,1
+tests/api/public/test_public_api.py,result.H.z,acc.z,fdtd,0,1
+tests/api/public/test_public_api.py,result.at(freq_index=0).E.y,acc.y,fdtd,0,0
+tests/api/public/test_public_api.py,result.at(frequency=1.1e9).E.x,acc.x,fdtd,0,0
+tests/api/public/test_public_api.py,"result.tensor(""Ex"", expand_symmetry=True)",tensor,fdtd,0,1
+tests/api/public/test_public_api.py,"result.tensor(""Ez"", expand_symmetry=True)",tensor,fdtd,0,1
+tests/api/public/test_result_from_fields.py,"getattr(native.E, component)",acc.x|acc.y|acc.z,fdtd,0,1
+tests/api/public/test_result_from_fields.py,"getattr(rebuilt.E, component)",acc.x|acc.y|acc.z,external,0,1
+tests/api/public/test_result_from_fields.py,"native.field(f""E{component}"")",field,fdtd,0,1
+tests/api/public/test_result_from_fields.py,"rebuilt.field(f""E{component}"")",field,external,0,1
+tests/api/public/test_simulation_smoke.py,result.E.x,acc.x,fdtd,1,1
+tests/api/public/test_simulation_smoke.py,result.E.z,acc.z,fdfd,0,1
+tests/boundaries/boundary_physics/test_fdtd_boundary_physics.py,"full_result.tensor(""Ex"")",tensor,fdtd,0,1
+tests/boundaries/boundary_physics/test_fdtd_boundary_physics.py,"full_result.tensor(""Ez"")",tensor,fdtd,0,1
+tests/boundaries/boundary_physics/test_fdtd_boundary_physics.py,"half_result.tensor(""Ex"")",tensor,fdtd,0,1
+tests/boundaries/boundary_physics/test_fdtd_boundary_physics.py,"half_result.tensor(""Ez"")",tensor,fdtd,0,1
+tests/boundaries/boundary_physics/test_fdtd_boundary_physics.py,"mw.Simulation.fdtd(scene_x, frequencies=[1.0e9], config=run).run().tensor(""Ez"")",tensor,fdtd,0,1
+tests/boundaries/boundary_physics/test_fdtd_boundary_physics.py,"mw.Simulation.fdtd(scene_y, frequencies=[1.0e9], config=run).run().tensor(""Ez"")",tensor,fdtd,0,1
+tests/boundaries/boundary_physics/test_fdtd_boundary_physics.py,"result.tensor(""Ez"")",tensor,fdtd,0,1
+tests/boundaries/symmetry/test_symmetry_generalization.py,"_run(full).tensor(""Ex"")",tensor,fdtd,0,1
+tests/boundaries/symmetry/test_symmetry_generalization.py,"_run(full).tensor(""Ez"")",tensor,fdtd,0,1
+tests/boundaries/symmetry/test_symmetry_generalization.py,"_run(half).tensor(""Ex"", expand_symmetry=True)",tensor,fdtd,0,1
+tests/boundaries/symmetry/test_symmetry_generalization.py,"_run(half).tensor(""Ez"", expand_symmetry=True)",tensor,fdtd,0,1
+tests/boundaries/symmetry/test_symmetry_generalization.py,"_run(quarter).tensor(""Ez"", expand_symmetry=True)",tensor,fdtd,0,1
+tests/core/scene/test_bend_coordinates.py,ordinary.tensor('Ex'),tensor,fdtd,0,1
+tests/fdfd/test_fdfd_monitor_refusal.py,result.E.z,acc.z,fdfd,0,1
+tests/fdfd/test_local_response.py,actual.tensor('Ez'),tensor,fdfd,0,1
+tests/fdfd/test_local_response.py,expected.tensor('Ez'),tensor,fdfd,0,1
+tests/fdfd/test_local_response.py,result.tensor('Ez'),tensor,fdfd,0,1
+tests/fdfd/test_local_response.py,result.tensor(c),tensor,fdfd,0,1
+tests/fdfd/test_magnetic_response.py,result.tensor(c),tensor,fdfd,0,1
+tests/fdfd/test_response_observations.py,result.tensor(c),tensor,fdfd,0,1
+tests/fdfd/test_typed_results.py,,acc.z,fdfd,0,1
+tests/fdtd/multi_gpu/test_parallel_public_api.py,result.tensor(name),tensor,fdtd,1,1
+tests/fdtd/multi_gpu/test_sharded_persistence.py,"gathered.tensor(""EX"", freq_index=1)",tensor,fdtd,0,0
+tests/fdtd/multi_gpu/test_sharded_persistence.py,gathered.tensor(name.upper()),tensor,fdtd,0,0
+tests/fdtd/test_batch_capacity_budget.py,"first[0].tensor(""Ez"")",tensor,fdtd,0,0
+tests/fdtd/test_batch_graph_pipeline.py,eager[i].tensor(name),tensor,fdtd,0,0
+tests/fdtd/test_batch_graph_pipeline.py,first[i].tensor(name),tensor,fdtd,0,0
+tests/fdtd/test_batch_graph_pipeline.py,second[i].tensor(name),tensor,fdtd,0,0
+tests/fdtd/test_batch_selected_spectra.py,"r.tensor(""Ez"")",tensor,fdtd,0,0
+tests/fdtd/test_batch_selected_spectra.py,reference.tensor(component),tensor,fdtd,0,mixed
+tests/fdtd/test_batch_selected_spectra.py,repeated[i].tensor(component),tensor,fdtd,0,mixed
+tests/fdtd/test_batch_selected_spectra.py,"results[i].field(""E"")",field,fdtd,0,mixed
+tests/fdtd/test_batch_selected_spectra.py,results[i].tensor(component),tensor,fdtd,0,mixed
+tests/fdtd/test_batch_spectral_reuse.py,"a.tensor(""Ez"")",tensor,fdtd,0,0
+tests/fdtd/test_batch_spectral_reuse.py,"b.tensor(""Ez"")",tensor,fdtd,0,0
+tests/fdtd/test_batch_spectral_reuse.py,"first.tensor(""Ez"")",tensor,fdtd,0,0
+tests/fdtd/test_batch_spectral_reuse.py,"r.tensor(""Ez"")",tensor,fdtd,0,0
+tests/fdtd/test_batch_spectral_reuse.py,"second.tensor(""Ez"")",tensor,fdtd,0,0
+tests/fdtd/test_capture_and_resume_state.py,"results[0].field(""Ez"")",field,fdtd,0,1
+tests/fdtd/test_capture_and_resume_state.py,"results[1].field(""Ez"")",field,fdtd,0,1
+tests/fdtd/test_cuda_graph.py,"getattr(result.at(frequency=f).E, a)",acc.x|acc.y|acc.z,fdtd,0,0
+tests/fdtd/test_cuda_graph.py,"getattr(view.E, a)",acc.x|acc.y|acc.z,fdtd,0,0
+tests/fdtd/test_cuda_graph_complex_bloch.py,"getattr(view.E, a)",acc.x|acc.y|acc.z,fdtd,0,0
+tests/fdtd/test_cuda_graph_dispersive.py,"getattr(view.E, a)",acc.x|acc.y|acc.z,fdtd,0,0
+tests/fdtd/test_cuda_graph_nonlinear.py,"getattr(view.E, a)",acc.x|acc.y|acc.z,fdtd,0,0
+tests/fdtd/test_cuda_graph_tfsf.py,"getattr(view.E, a)",acc.x|acc.y|acc.z,fdtd,0,0
+tests/fdtd/test_cuda_graph_tfsf_slab.py,"getattr(view.E, a)",acc.x|acc.y|acc.z,fdtd,0,0
+tests/fdtd/test_full_dft_clock_precision.py,result.field('Ex'),field,fdtd,0,1
+tests/fdtd/test_full_field_dft_request.py,result.E.z,acc.z,fdtd,0,0
+tests/fdtd/test_observer_origin_providers.py,"normalized.field(field, frequency=2e9)",field,fdtd,0,0
+tests/fdtd/test_observer_origin_providers.py,"raw.field(field, frequency=2e9)",field,fdtd,0,0
+tests/fdtd/test_observer_origin_reference.py,"expected.field(""Ex"")",field,fdtd,0,1
+tests/fdtd/test_observer_origin_reference.py,"target.field(""Ex"")",field,fdtd,0,1
+tests/fdtd/test_resume_dft_counter_execution.py,"actual.tensor(component, frequency=frequency)",tensor,fdtd,0,0
+tests/fdtd/test_resume_dft_counter_execution.py,"expected.tensor(component, frequency=frequency)",tensor,fdtd,0,0
+tests/fdtd/test_time_consumer_consistency.py,result.field(component),field,fdtd,0,1
+tests/fdtd/test_time_consumer_consistency.py,"results[0].field(""Ez"")",field,fdtd,0,1
+tests/fdtd/test_time_consumer_consistency.py,"results[1].field(""Ez"")",field,fdtd,0,1
+tests/gradients/test_complex_cw_spectral_adjoint.py,reference.tensor(component),tensor,fdtd,0,1
+tests/gradients/test_complex_cw_spectral_adjoint.py,result.tensor(component),tensor,fdtd,0,1
+tests/gradients/test_fdtd_binary_pole_parameters.py,"result.field(""Ez"")",field,fdtd,0,1
+tests/materials/combinations/test_bloch_dispersive_forward.py,"result.field(""Ez"")",field,fdtd,0,1
+tests/materials/combinations/test_combination_matrix.py,"result.field(""Ez"")",field,fdtd,0,1
+tests/materials/combinations/test_lossy_anisotropic_slab.py,"result.field(""Ey"")",field,fdtd,0,1
+tests/materials/combinations/test_lossy_anisotropic_slab.py,"result.field(""Ez"")",field,fdtd,0,1
+tests/materials/combinations/test_rotated_birefringent_dispersive_slab.py,"result.field(""Ey"")",field,fdtd,0,1
+tests/materials/combinations/test_rotated_birefringent_dispersive_slab.py,"result.field(""Ez"")",field,fdtd,0,1
+tests/materials/compiler/test_copper_foil_material_cache.py,actual.tensor(name),tensor,fdtd,0,1
+tests/materials/compiler/test_copper_foil_material_cache.py,expected.tensor(name),tensor,fdtd,0,1
+tests/materials/compiler/test_fdfd_material_support.py,result.tensor('Ez'),tensor,fdfd,0,1
+tests/materials/compiler/test_pec_material.py,"result.tensor(""Ez"")",tensor,fdfd,0,1
+tests/materials/compiler/test_pec_material.py,result.tensor(component),tensor,fdfd,0,1
+tests/materials/conductive/test_fdtd_conductive.py,result.E.x,acc.x,fdtd,0,1
+tests/materials/conductive/test_fdtd_conductive.py,result.E.y,acc.y,fdtd,0,1
+tests/materials/conductive/test_fdtd_conductive.py,result.E.z,acc.z,fdtd,0,1
+tests/materials/conductive/test_fdtd_magnetic_conductive.py,result.E.y,acc.y,fdtd,0,1
+tests/materials/pmc/test_pmc_medium.py,"result.tensor(""Ez"")",tensor,fdfd|fdtd,0,1
+tests/materials/sheet/sheet_measurement.py,result.E.z,acc.z,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_angles.py,"result.tensor(""E"" + ""xyz""[component])",tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_batch.py,"actual.tensor(""Ez"")",tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_batch.py,expected.tensor(component),tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_batch.py,first[index].tensor(component),tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_batch.py,"reference.tensor(""Ez"")",tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_batch.py,second[index].tensor(component),tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_edge.py,bare.tensor(name),tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_edge.py,edged.tensor(name),tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_edge.py,result.tensor(name),tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_material_batch.py,"actual.tensor(""Ez"")",tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_material_batch.py,"model.simulation().run().tensor(""Ez"")",tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_material_batch.py,"output.tensor(""Ez"")",tensor,fdtd,0,1
+tests/materials/surface_impedance/test_copper_foil_material_batch.py,"reference.tensor(""Ez"")",tensor,fdtd,0,1
+tests/materials/surface_impedance/test_cut_surface.py,eager.tensor(name),tensor,fdtd,0,1
+tests/materials/surface_impedance/test_cut_surface.py,"first[index].tensor(""Ez"")",tensor,fdtd,0,1
+tests/materials/surface_impedance/test_cut_surface.py,graph.tensor(name),tensor,fdtd,0,1
+tests/materials/surface_impedance/test_cut_surface.py,"reference.tensor(""Ez"")",tensor,fdtd,0,1
+tests/materials/surface_impedance/test_cut_surface.py,resumed.tensor(name),tensor,fdtd,0,1
+tests/materials/surface_impedance/test_cut_surface.py,"second[index].tensor(""Ez"")",tensor,fdtd,0,1
+tests/materials/surface_impedance/test_surface_impedance_resume.py,actual.field(name),field,fdtd,1,1
+tests/materials/surface_impedance/test_surface_impedance_resume.py,"corrupted.field(""Ez"")",field,fdtd,1,1
+tests/materials/surface_impedance/test_surface_impedance_resume.py,"expected.field(""Ez"")",field,fdtd,1,1
+tests/materials/surface_impedance/test_surface_impedance_resume.py,expected.field(name),field,fdtd,1,1
+tests/monitors/observers/test_fdtd_observers.py,"full_result.tensor(""Ez"")",tensor,fdtd,0,1
+tests/monitors/observers/test_fdtd_observers.py,full_result.tensor(component),tensor,fdtd,0,1
+tests/monitors/observers/test_fdtd_observers.py,"multi_result.tensor(""Ex"", frequency=frequency)",tensor,fdtd,0,0
+tests/monitors/observers/test_fdtd_observers.py,"multi_result.tensor(""Ey"", frequency=frequency)",tensor,fdtd,0,0
+tests/monitors/observers/test_fdtd_observers.py,"multi_result.tensor(""Ez"", frequency=frequency)",tensor,fdtd,0,0
+tests/monitors/observers/test_fdtd_observers.py,"result.tensor(""Ex"")",tensor,fdtd,0,1
+tests/monitors/observers/test_fdtd_observers.py,"result.tensor(""Ey"")",tensor,fdtd,0,1
+tests/monitors/observers/test_fdtd_observers.py,"result.tensor(""Ez"")",tensor,fdtd,0,1
+tests/monitors/observers/test_fdtd_observers.py,"single_result.tensor(""Ex"")",tensor,fdtd,0,1
+tests/monitors/observers/test_fdtd_observers.py,"single_result.tensor(""Ey"")",tensor,fdtd,0,1
+tests/monitors/observers/test_fdtd_observers.py,"single_result.tensor(""Ez"")",tensor,fdtd,0,1
+tests/monitors/test_fdtd_typed_monitors.py,phasor_run.E.z,acc.z,fdtd,0,1
+tests/monitors/test_fdtd_typed_monitors.py,snapshot_run.E.z,acc.z,fdtd,1,1
+tests/rf/antenna/test_compressed_result_artifact.py,original.tensor(component),tensor,fdtd,0,1
+tests/rf/antenna/test_compressed_result_artifact.py,restored.tensor(component),tensor,fdtd,0,1
+tests/rf/circuits/test_fdtd_circuit_resume.py,actual.field(name),field,fdtd,1,1
+tests/rf/circuits/test_fdtd_circuit_resume.py,expected.field(name),field,fdtd,1,1
+tests/rf/lumped/test_ports_postprocess.py,result.tensor(c),tensor,fdfd|fdtd,0,mixed
+tests/rf/network/test_network_delay_checkpoint.py,"corrupted.field(""Ez"")",field,fdtd,1,1
+tests/rf/network/test_network_delay_checkpoint.py,"reference.field(""Ez"")",field,fdtd,1,1
+tests/rf/network/test_network_delay_checkpoint.py,"resumed.field(""Ez"")",field,fdtd,1,1
+tests/sar/test_point_sar.py,result.E.x,acc.x,fdtd,0,1
+tests/sar/test_point_sar.py,result.E.y,acc.y,fdtd,0,1
+tests/sar/test_point_sar.py,result.E.z,acc.z,fdtd,0,1
+tests/sar/test_sar_combine.py,a.E.x,acc.x,fdtd,0,1
+tests/sar/test_sar_combine.py,"a.tensor(""Ex"", frequency=1.0e9)",tensor,fdtd,0,0
+tests/sar/test_sar_combine.py,"b.tensor(""Ex"", frequency=1.0e9)",tensor,fdtd,0,0
+tests/sar/test_soft_peak.py,result.E.x,acc.x,fdtd,0,1
+tests/sources/definitions/test_custom_field_stencil.py,"result.tensor(""Ex"")",tensor,fdtd,0,1
+tests/sources/definitions/test_custom_uniform_sources.py,"result.tensor(""Ex"")",tensor,fdtd,0,1
+tests/sources/definitions/test_custom_uniform_sources.py,"result.tensor(""Ey"")",tensor,fdtd,0,1
+tests/sources/definitions/test_custom_uniform_sources.py,"result.tensor(""Ez"")",tensor,fdtd,0,1
+tests/sources/tfsf/test_fdtd_grating_tfsf.py,result.tensor(component),tensor,fdtd,0,1
+tests/validation/physics/test_bloch_broadband_vs_cw.py,"result.field(""Ex"", frequency=frequency)",field,fdtd,0,0
+tests/validation/physics/test_dispersive_metasurface_bloch.py,"result.field(""Ex"")",field,fdtd,0,1
+tests/validation/physics/test_fdtd_boundary_tfsf_validation.py,result.tensor(component),tensor,fdtd,0,1
+tests/validation/physics/test_lossy_metal_roughness_fdtd.py,"result.field(""Ez"")",field,fdtd,0,1
+tests/validation/physics/test_lossy_metal_sibc.py,"result.field(""Ez"")",field,fdtd,0,1
+tests/validation/physics/test_planar_pec_sheet.py,"getattr(result.E, electric_axis)",acc.x|acc.y|acc.z,fdtd,0,1
+tests/validation/physics/test_sibc_orientation.py,result.field(component),field,fdtd,0,1
+tests/validation/physics/test_sibc_staircase.py,result.field(component),field,fdtd,0,1
+tests/validation/physics/test_surface_impedance_broadband.py,"result.field(""Ez"")",field,fdtd,0,1

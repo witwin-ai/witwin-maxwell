@@ -9,32 +9,32 @@ from witwin.maxwell.mom.linalg import StoppingRule
 
 
 def test_directional_configuration_canonical_roundtrip_and_all_fields_bound(tmp_path):
-    config = mw.DirectionalFMMConfig(cone_subdivisions=(2, 4), max_candidates=256,
+    config = mw.mom.DirectionalFMMConfig(cone_subdivisions=(2, 4), max_candidates=256,
         global_ideal_rwg_error_budget=3e-5, leaf_factor_kernel='original')
     payload = json.loads(json.dumps(config.payload()))
-    assert mw.DirectionalFMMConfig.restore(payload) == config
-    assert mw.FMMConfig.restore(payload) == config
+    assert mw.mom.DirectionalFMMConfig.restore(payload) == config
+    assert mw.mom.FMMConfig.restore(payload) == config
     assert config.solve_config().original_sample_tolerance == 1e-8
     for field in payload['parameters']:
         bad = copy.deepcopy(payload)
         del bad['parameters'][field]
         with pytest.raises(ValueError, match='incomplete'):
-            mw.FMMConfig.restore(bad)
+            mw.mom.FMMConfig.restore(bad)
     for version in ('cartesian_fmm_config_v7', 'cartesian_fmm_fft_config_v1', 'unknown'):
         bad = copy.deepcopy(payload); bad['version'] = version
         with pytest.raises(ValueError):
-            mw.FMMConfig.restore(bad)
+            mw.mom.FMMConfig.restore(bad)
     bad = copy.deepcopy(payload); bad['parameters']['unbound'] = 1
-    with pytest.raises(ValueError): mw.DirectionalFMMConfig.restore(bad)
+    with pytest.raises(ValueError): mw.mom.DirectionalFMMConfig.restore(bad)
     for field, value in (('cone_subdivisions', (2, 4)), ('kernel_error_budget', None)):
         bad = copy.deepcopy(payload); bad['parameters'][field] = value
-        with pytest.raises(ValueError): mw.DirectionalFMMConfig.restore(bad)
+        with pytest.raises(ValueError): mw.mom.DirectionalFMMConfig.restore(bad)
     (tmp_path/'configuration.json').write_text(json.dumps(dict(payload=payload,
         all_parameters_required=True,JSON_roundtrip=True,qualification=False), indent=2)+'\n')
 
 
 def test_directional_configuration_rejects_invalid_orders_modes_budgets_and_catalogs():
-    config = mw.DirectionalFMMConfig()
+    config = mw.mom.DirectionalFMMConfig()
     invalid = [dict(min_order=True), dict(max_order=13), dict(min_order=8, max_order=7),
         dict(quadrature_order=7), dict(max_families=0), dict(max_candidates=True),
         dict(max_contexts=0), dict(regional_near_budget_bytes=False), dict(embedding_budget_bytes=0),
@@ -49,16 +49,16 @@ def test_directional_configuration_rejects_invalid_orders_modes_budgets_and_cata
 
 
 def test_directional_public_MoM_scope_and_configuration_identity():
-    config = mw.DirectionalFMMConfig()
+    config = mw.mom.DirectionalFMMConfig()
     options = dict(operator_backend='fmm', fmm=config, riesz_storage='local_rwg_v1',
                    stopping=StoppingRule(preconditioner='rwg_diagonal'))
-    accepted = mw.MoMConfig(**options)
+    accepted = mw.mom.MoMConfig(**options)
     assert accepted.fmm is config
-    with pytest.raises(ValueError): mw.MoMConfig(fmm=config)
-    with pytest.raises(NotImplementedError): mw.MoMConfig(**options, periodic=mw.MoMPeriodicConfig(((1., 0., 0.),)))
-    with pytest.raises(ValueError): mw.MoMConfig(**options, dtype=torch.complex64)
-    with pytest.raises(ValueError): mw.MoMConfig(**dict(options, stopping=StoppingRule(method='direct')))
-    with pytest.raises(ValueError): mw.MoMConfig(**dict(options, stopping=StoppingRule(fallback='direct')))
+    with pytest.raises(ValueError): mw.mom.MoMConfig(fmm=config)
+    with pytest.raises(NotImplementedError): mw.mom.MoMConfig(**options, periodic=mw.mom.MoMPeriodicConfig(((1., 0., 0.),)))
+    with pytest.raises(ValueError): mw.mom.MoMConfig(**options, dtype=torch.complex64)
+    with pytest.raises(ValueError): mw.mom.MoMConfig(**dict(options, stopping=StoppingRule(method='direct')))
+    with pytest.raises(ValueError): mw.mom.MoMConfig(**dict(options, stopping=StoppingRule(fallback='direct')))
     from witwin.maxwell.mom.runtime import _numerical_identity
     changed = replace(accepted, fmm=replace(config, max_candidates=257))
     assert _numerical_identity(accepted) != _numerical_identity(changed)

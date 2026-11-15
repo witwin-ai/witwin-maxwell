@@ -20,22 +20,21 @@ def operator(angle, alpha):
     ky = 2 * math.pi * F0 / C0 * math.sin(math.radians(angle))
     scene = mw.Scene(
         domain=mw.Domain(bounds=((0., 2 * SPACING), (0., 2 * SPACING), (-.02, .02))),
-        grid=mw.GridSpec.uniform(SPACING), device="cuda:0",
-        boundary=mw.BoundarySpec.faces(x="bloch", y="bloch", z="pml", num_layers=16,
+        grid=mw.GridSpec.uniform(SPACING), boundary=mw.BoundarySpec.faces(x="bloch", y="bloch", z="pml", num_layers=16,
                                       bloch_wavevector=(0., ky, 0.)),
     )
-    config = {"memory_mode": "slab"}
-    if alpha is not None:
-        config["alpha_max"] = alpha
-    solver = mw.Simulation.fdtd(scene, frequencies=FREQUENCIES, cpml_config=config,
-        full_field_dft=False, cuda_graph=False, run_time=mw.TimeConfig(time_steps=1)).prepare().solver
+    solver = mw.Simulation.fdtd(scene, frequencies=FREQUENCIES,
+        config=mw.FDTDConfig(
+            cpml=mw.CPMLConfig(memory_mode="slab", alpha_max=alpha),
+            full_field_dft=False, cuda_graph=False, run_time=mw.TimeConfig(time_steps=1), device="cuda:0",
+        )).prepare().solver
     entries = []
     for name, field, scale in (("Ex", "Ex", solver.eps0 ** .5),
                                ("Hy", "Hy", solver.mu0 ** .5),
                                ("Hz", "Hz", solver.mu0 ** .5),
                                ("psi_ex_z", "Ex", solver.mu0 ** .5 * SPACING),
                                ("psi_hy_z", "Hy", solver.eps0 ** .5 * SPACING)):
-        y = torch.as_tensor(component_coords(solver.scene, field)[1], device=solver.device)
+        y = torch.as_tensor(component_coords(solver.scene, field, device=solver.scene.device)[1], device=solver.device)
         phase = torch.exp(1j * ky * y).to(torch.complex64)[None, :, None]
         entries.append((name, getattr(solver, name), getattr(solver, name + "_imag"), phase, scale))
     size = sum(real.shape[-1] for _, real, _, _, _ in entries)
@@ -99,7 +98,7 @@ def reflection(angle, alpha):
         fit = torch.linalg.vector_norm(basis @ amplitudes - electric) / torch.linalg.vector_norm(electric)
         ratio = (amplitudes[1] / amplitudes[0]).abs()
         assert fit < 1e-4, (angle, frequency, float(fit))
-        rows.append(dict(angle=angle, frequency=frequency, alpha=solver.cpml_config["alpha_max"],
+        rows.append(dict(angle=angle, frequency=frequency, alpha=solver.cpml_grading.alpha_max,
                          amplitude=float(ratio), fit_error=float(fit)))
     return rows
 

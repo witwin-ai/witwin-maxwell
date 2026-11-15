@@ -13,9 +13,11 @@ _TENSOR = np.array(((2., .5, .2), (.5, 3., -.3), (.2, -.3, 2.5)))
 
 def _scene(kind, axis, boundary):
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.3, 0.3),) * 3), grid=mw.GridSpec.uniform(.1),
-        boundary=boundary, device="cuda")
-    scene.add_structure(mw.Structure(geometry=mw.Box(position=(0.,) * 3, size=(1.,) * 3),
-        material=mw.Material(epsilon_tensor=mw.Tensor3x3(_TENSOR.tolist()))))
+                boundary=boundary,
+                     structures=(
+                         mw.Structure(geometry=mw.Box(position=(0.,) * 3, size=(1.,) * 3),
+                             material=mw.Material(epsilon_tensor=mw.media.Tensor3x3(_TENSOR.tolist()))),
+                     ))
     waveform = mw.CW(frequency=1e9)
     if kind == "point":
         position = [-.3, -.3, -.3] if boundary.uses_kind("periodic") else [0., 0., 0.]
@@ -27,8 +29,8 @@ def _scene(kind, axis, boundary):
     else:
         coords = tuple(np.linspace(-.3, .3, 7) for _ in range(3))
         values = np.ones((7, 7, 7))
-        source = mw.CustomCurrentSource(mw.CurrentDataset(coords, {"J" + "xyz"[axis]: values}), source_time=waveform)
-    scene.add_source(source)
+        source = mw.sources.CustomCurrentSource(mw.sources.CurrentDataset(coords, {"J" + "xyz"[axis]: values}), source_time=waveform)
+    scene = scene.updated(sources=(*scene.sources, source))
     return scene
 
 
@@ -83,7 +85,7 @@ def _independent_current_response(solver, source_axis, periodic):
 @pytest.mark.parametrize("periodic", [False, True])
 def test_current_source_matches_analytic_inverse_tensor(kind, axis, periodic):
     boundary = mw.BoundarySpec.periodic() if periodic else mw.BoundarySpec.none()
-    solver = mw.Simulation.fdtd(_scene(kind, axis, boundary), frequency=1e9).prepare().solver
+    solver = mw.Simulation.fdtd(_scene(kind, axis, boundary), frequencies=1e9).prepare().solver
     expected = _independent_current_response(solver, axis, periodic)
     inject_source_terms(solver, time_value=0.)
     for name, value in zip(("Ex", "Ey", "Ez"), expected):
@@ -92,7 +94,7 @@ def test_current_source_matches_analytic_inverse_tensor(kind, axis, periodic):
 
 
 def test_current_transverse_response_obeys_target_pec_faces():
-    solver = mw.Simulation.fdtd(_scene("uniform", 0, mw.BoundarySpec.pec()), frequency=1e9).prepare().solver
+    solver = mw.Simulation.fdtd(_scene("uniform", 0, mw.BoundarySpec.pec()), frequencies=1e9).prepare().solver
     inject_source_terms(solver, time_value=0.)
     assert bool(solver.Ey[1:-1, :, 1:-1].abs().max() > 0)
     assert torch.count_nonzero(solver.Ey[0]) == 0

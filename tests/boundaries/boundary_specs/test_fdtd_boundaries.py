@@ -9,7 +9,6 @@ from witwin.maxwell.fdtd.boundary import (
     BOUNDARY_PERIODIC,
     BOUNDARY_PMC,
     BOUNDARY_PML,
-    DEFAULT_CPML_CONFIG,
     combine_complex_spectral_components,
     initialize_boundary_state,
 )
@@ -23,9 +22,8 @@ class DummyBoundarySolver:
             grid=mw.GridSpec.uniform(1.0),
             boundary=boundary,
             symmetry=symmetry,
-            device="cpu",
         )
-        self.scene = prepare_scene(scene)
+        self.scene = prepare_scene(scene, device="cpu")
         self.Nx = self.scene.Nx
         self.Ny = self.scene.Ny
         self.Nz = self.scene.Nz
@@ -35,13 +33,12 @@ class DummyBoundarySolver:
         self.dt = 1.0
         self.device = self.scene.device
         self.absorber_type = absorber_type
-        self.cpml_config = dict(DEFAULT_CPML_CONFIG)
+        self.cpml = mw.fdtd.CPMLConfig()
         self.eps0 = 1.0
         self.mu0 = 1.0
         self.c = 1.0
         # Band floor for the complex fixed-k CFS-CPML shift; set by Simulation.prepare().
         self._requested_port_frequencies = (0.1,)
-        self._cpml_config_keys = frozenset()
 
         self.Ex = torch.zeros((self.Nx - 1, self.Ny, self.Nz), dtype=torch.float32)
         self.Ey = torch.zeros((self.Nx, self.Ny - 1, self.Nz), dtype=torch.float32)
@@ -165,48 +162,8 @@ def cuda_fdtd_solver():
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.3),
         boundary=mw.BoundarySpec.periodic(),
-        device="cuda",
     )
     return mw.Simulation.fdtd(scene, frequencies=[1e9]).prepare().solver
-
-
-def _apply_expected_periodic_projection(field, axis):
-    if axis == 0:
-        average = 0.5 * (field[0, :, :] + field[-1, :, :])
-        field[0, :, :] = average
-        field[-1, :, :] = average
-        return
-
-    if axis == 1:
-        average = 0.5 * (field[:, 0, :] + field[:, -1, :])
-        field[:, 0, :] = average
-        field[:, -1, :] = average
-        return
-
-    average = 0.5 * (field[:, :, 0] + field[:, :, -1])
-    field[:, :, 0] = average
-    field[:, :, -1] = average
-
-
-def _apply_expected_bloch_projection(real_field, imag_field, axis, phase):
-    field = real_field + 1j * imag_field
-    if axis == 0:
-        projected_low = 0.5 * (field[0, :, :] + np.conj(phase) * field[-1, :, :])
-        projected_high = phase * projected_low
-        field[0, :, :] = projected_low
-        field[-1, :, :] = projected_high
-    elif axis == 1:
-        projected_low = 0.5 * (field[:, 0, :] + np.conj(phase) * field[:, -1, :])
-        projected_high = phase * projected_low
-        field[:, 0, :] = projected_low
-        field[:, -1, :] = projected_high
-    else:
-        projected_low = 0.5 * (field[:, :, 0] + np.conj(phase) * field[:, :, -1])
-        projected_high = phase * projected_low
-        field[:, :, 0] = projected_low
-        field[:, :, -1] = projected_high
-    real_field[...] = field.real
-    imag_field[...] = field.imag
 
 
 def _apply_expected_pec_clamp(field, axis_a, axis_b):
@@ -220,43 +177,6 @@ def _apply_expected_pec_clamp(field, axis_a, axis_b):
         else:
             field[:, :, 0] = 0.0
             field[:, :, -1] = 0.0
-
-
-@pytest.mark.parametrize("axis", [0, 1, 2])
-def test_generic_periodic_projection_kernel_matches_expected_faces(cuda_fdtd_solver, axis):
-    field = torch.arange(24, device="cuda", dtype=torch.float32).reshape(2, 3, 4)
-    expected = field.detach().cpu().numpy().copy()
-    _apply_expected_periodic_projection(expected, axis)
-
-    cuda_fdtd_solver.fdtd_module.projectPeriodicBoundary3D(
-        field=field,
-        axis=axis,
-    ).launchRaw()
-    torch.cuda.synchronize()
-
-    assert np.allclose(field.detach().cpu().numpy(), expected)
-
-
-@pytest.mark.parametrize("axis", [0, 1, 2])
-def test_generic_bloch_projection_kernel_matches_expected_phase(cuda_fdtd_solver, axis):
-    real_field = torch.arange(24, device="cuda", dtype=torch.float32).reshape(2, 3, 4)
-    imag_field = torch.arange(24, 48, device="cuda", dtype=torch.float32).reshape(2, 3, 4)
-    expected_real = real_field.detach().cpu().numpy().copy()
-    expected_imag = imag_field.detach().cpu().numpy().copy()
-    phase = np.exp(1j * np.pi / 3.0)
-    _apply_expected_bloch_projection(expected_real, expected_imag, axis, phase)
-
-    cuda_fdtd_solver.fdtd_module.projectBlochBoundary3D(
-        fieldReal=real_field,
-        fieldImag=imag_field,
-        axis=axis,
-        phaseCos=float(phase.real),
-        phaseSin=float(phase.imag),
-    ).launchRaw()
-    torch.cuda.synchronize()
-
-    assert np.allclose(real_field.detach().cpu().numpy(), expected_real)
-    assert np.allclose(imag_field.detach().cpu().numpy(), expected_imag)
 
 
 @pytest.mark.parametrize(

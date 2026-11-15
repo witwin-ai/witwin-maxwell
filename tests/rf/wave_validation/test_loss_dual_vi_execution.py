@@ -41,7 +41,7 @@ def test_actual_dual_VI_preserves_source_fields_and_primary_samples(graph,tmp_pa
         for row in pair:
             sums=[]
             for frequency in case.frequencies:
-                value=sum(weight*complex(result.monitor(name,frequency=frequency)['components'][component]) for name,component,weight in row)
+                value=sum(weight*complex(result.raw_monitor(name,frequency=frequency)['components'][component]) for name,component,weight in row)
                 sums.append(value)
             values.append(sums)
         actual.append(values)

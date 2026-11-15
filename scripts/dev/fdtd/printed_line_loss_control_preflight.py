@@ -15,6 +15,7 @@ from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd.runtime.timestep import compile_fdtd_time_step
 from witwin.maxwell.fdtd.runtime.materials import _electric_update_coefficients
 from witwin.maxwell.fdtd.lumped import prepare_lumped_runtime
+from witwin.maxwell.compiler import compile_materials
 
 
 def main():
@@ -29,7 +30,7 @@ def main():
     identity=execution_identity()
     case=PilotCase(metal=args.metal,sigma=args.sigma,dx=args.dx,longitudinal_dl=args.longitudinal_dl,probe_reference_dx=args.probe_reference_dx,record_legacy_native_vi=args.record_legacy_native_vi)
     scene,groups,bounds,schema,rows,expected,tails=build_case(case)
-    prepared=prepare_scene(scene);model=prepared.compile_materials();edge=model['edge_components']
+    prepared=prepare_scene(scene,device='cpu');model=compile_materials(prepared);edge=model['edge_components']
     simulation=make_simulation(scene,groups,DRIVE_BASIS[0],case,graph=True,steps=1,device='cpu')
     frequency=simulation._fdtd_time_step_frequency(prepared)
     context=SimpleNamespace(scene=prepared,c=C_0,eps0=EPSILON_0,mu0=MU_0,full_aniso_enabled=False,

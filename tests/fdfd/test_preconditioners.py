@@ -11,24 +11,23 @@ FREQ = 1.0e9
 
 def _solver(preconditioner):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.uniform(0.02),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1e6),
-        device="cuda",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(0.0, 0.0, 0.0),
-            polarization=(0.0, 0.0, 1.0),
-            width=0.05,
-            source_time=mw.CW(frequency=FREQ, amplitude=100.0),
-            name="src",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.uniform(0.02),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1e6),
+                sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization=(0.0, 0.0, 1.0),
+                width=0.05,
+                source_time=mw.CW(frequency=FREQ, amplitude=100.0),
+                name="src",
+            ),
+            ),
+            )
     return mw.Simulation.fdfd(
         scene,
-        frequency=FREQ,
-        solver=mw.GMRES(max_iter=100, tol=1e-6, restart=25, preconditioner=preconditioner),
+        frequencies=FREQ,
+        config=mw.FDFDConfig(solver=mw.fdfd.FDFDSolverConfig(max_iter=100, tol=1e-6, restart=25, preconditioner=preconditioner)),
     ).prepare().solver
 
 
@@ -64,7 +63,7 @@ def test_rejects_unknown_preconditioner_and_solver_type():
     with pytest.raises(ValueError):
         _solver("cholesky")
     scene_solver = _solver("jacobi")
-    from witwin.maxwell.fdfd import FDFD
+    from witwin.maxwell.fdfd.solver import FDFD
 
     with pytest.raises(ValueError):
         FDFD(scene_solver.scene, frequency=FREQ, solver_type="spectral")

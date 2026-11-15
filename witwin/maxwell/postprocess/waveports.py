@@ -6,9 +6,10 @@ from dataclasses import dataclass
 import torch
 
 from ..constants import EPSILON_0, MU_0, resolve_real_dtype
+from ..errors import MaxwellError
 
 
-class ModeTrackingError(RuntimeError):
+class ModeTrackingError(MaxwellError, RuntimeError):
     """Raised when adjacent-frequency mode identity is not numerically reliable."""
 
 

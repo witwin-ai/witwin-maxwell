@@ -11,10 +11,10 @@ from witwin.maxwell.scene import prepare_scene
 @pytest.mark.parametrize('metal,sigma',[('pec',0.),('pec',.01),('copper',0.),('copper',.01)])
 def test_regional_observations_cover_exact_native_nonzero_sigma_and_split_trace_support(metal,sigma):
     scene=printed_line_scene('stripline',dx=.00125,longitudinal_dl=.0025,metal=metal,sigma_e=sigma,
-        transverse_refinement_radius=.02,transverse_padding=.02,device='cpu')
+        transverse_refinement_radius=.02,transverse_padding=.02)
     bounds=((-0.015,.015),(-.012,.012),(-.007,.007))
     monitors,schema=regional_monitors(scene,bounds,(.8e9,1e9,1.2e9))
-    prepared=prepare_scene(scene);compiled=compile_power_loss_monitor(prepared,monitors[0])
+    prepared=prepare_scene(scene,device='cpu');compiled=compile_power_loss_monitor(prepared,monitors[0])
     by_name={monitor.name:monitor for monitor in monitors}
     for component,record in schema.items():
         selected=torch.zeros_like(compiled.component_masks[component])

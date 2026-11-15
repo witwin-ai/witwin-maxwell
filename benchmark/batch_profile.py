@@ -42,9 +42,9 @@ def audit_scaling(workload, *, devices, variants, capacity, warmups=2, repeats=5
             sims = [build_simulation(workload, index=i, device=devices[0]) for i in range(variants)]
             modes = [(device,) for device in devices] + [tuple(devices)]
             for assigned in modes:
-                batch = mw.Simulation.batch(sims, execution=mw.BatchExecution(devices=assigned,
+                batch = mw.Simulation.batch(sims, execution=mw.execution.BatchExecution(devices=assigned,
                     batch_size=capacity, graph="required", scheduling="static"),
-                    outputs=mw.BatchOutput(result_device="cpu"))
+                    outputs=mw.execution.BatchOutput(result_device="cpu"))
                 started = time.perf_counter()
                 prepared = contexts.enter_context(batch.prepare())
                 rows.append(dict(devices=list(assigned), prepared=prepared,
@@ -98,7 +98,7 @@ def audit_tuning(workload, *, devices, variants, capacity, warmups=2, repeats=5)
     if variants < 1 or capacity < 1 or warmups < 0 or repeats < 1:
         raise ValueError("Tuning audits require positive counts and nonnegative warmups.")
     sims = [build_simulation(workload, index=i, device=devices[0]) for i in range(variants)]
-    batch = mw.Simulation.batch(sims, execution=mw.BatchExecution(
+    batch = mw.Simulation.batch(sims, execution=mw.execution.BatchExecution(
         devices=devices, batch_size="auto", max_batch_size=capacity,
         slots_per_device="auto", graph="required", tune=True))
     with torch.no_grad(), batch.prepare() as prepared:
@@ -138,27 +138,30 @@ def audit_regional_materials(workload, *, device, warmups=2, repeats=5):
     with torch.cuda.device(device), torch.no_grad():
         for mode in ("density", "structure"):
             scene = build_simulation(workload, device=device).scene
-            scene = scene.clone(subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"))
+            scene = scene.updated(subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"))
             if mode == "density":
-                scene.add_material_region(mw.MaterialRegion(name="rho",
-                    geometry=mw.Box(size=(.03, .03, .03), device=device),
-                    density=torch.full((4, 4, 4), .2, device=device), eps_bounds=(1., 4.)))
+                scene = scene.updated(material_regions=(
+                    *scene.material_regions,
+                    mw.MaterialRegion(name="rho",
+                        geometry=mw.Box(size=(.03, .03, .03), device=device),
+                        density=torch.full((4, 4, 4), .2, device=device), eps_bounds=(1., 4.)),
+                ))
                 cache = LocalMaterialCache(prepare_scene(scene), ("rho",))
-                changed = scene.clone()
-                changed.material_regions[0] = replace(changed.material_regions[0],
-                    density=torch.full((4, 4, 4), .7, device=device))
+                changed = scene
+                changed = changed.updated(material_regions=(replace(changed.material_regions[0],
+                    density=torch.full((4, 4, 4), .7, device=device)), *changed.material_regions[1:]))
             else:
                 cache = LocalMaterialCache(prepare_scene(scene), structure_envelopes={
                     "design": mw.Box(position=(.08, 0., 0.), size=(.18, .18, .18), device=device)})
-                changed = scene.clone()
-                changed.structures[0] = mw.Structure(name="design",
+                changed = scene
+                changed = changed.updated(structures=(mw.Structure(name="design",
                     geometry=mw.Box(position=(.09, 0., 0.), size=(.06, .06, .06), device=device),
-                    material=mw.Material(eps_r=3.))
+                    material=mw.Material(eps_r=3.)), *changed.structures[1:]))
             prepared = prepare_scene(changed)
             times = {"full": [], "local": []}
             def compile(kind):
                 return cache.compile(prepared) if kind == "local" else compile_material_model(
-                    prepared, subpixel=prepared.subpixel)
+                    prepared, subpixel=prepared.scene.subpixel)
             for round_index in range(warmups + repeats):
                 for kind in (("full", "local") if round_index % 2 == 0 else ("local", "full")):
                     torch.cuda.synchronize(device)
@@ -181,7 +184,7 @@ def audit_regional_materials(workload, *, device, warmups=2, repeats=5):
             compare(actual, expected)
             medians = {name: statistics.median(values) for name, values in times.items()}
             rows.append({"mode": mode, "wall_seconds": times, "median_seconds": medians,
-                "subpixel_samples": list(prepared.subpixel.samples), "averaging": prepared.subpixel.averaging,
+                "subpixel": list(prepared.scene.subpixel.samples), "averaging": prepared.scene.subpixel.averaging,
                 "speedup": medians["full"]/medians["local"], "max_absolute_error": max(errors),
                 "node_shape": [prepared.Nx, prepared.Ny, prepared.Nz],
                 "patch_shape": [s.stop-s.start for s in cache.node_selection]})
@@ -244,7 +247,7 @@ def profile_batch(workload, *, device, capacity, warmups=2, repeats=5):
     if min(capacity, warmups, repeats) < 1:
         raise ValueError("Capacity, warmups, and repeats must be positive.")
     sims = [build_simulation(workload, index=i, device=device) for i in range(capacity)]
-    batch = mw.Simulation.batch(sims, execution=mw.BatchExecution(
+    batch = mw.Simulation.batch(sims, execution=mw.execution.BatchExecution(
         devices=(device,), batch_size=capacity, graph="off"))
     started = time.perf_counter()
     with batch.prepare() as prepared:
@@ -331,7 +334,7 @@ def audit_capacity(workload, *, device, variants, capacities, repeats=3):
             counter["seconds"] += time.perf_counter() - started
     with patch.object(mw.Simulation, "_build_fdtd_solver_for_scene", measured):
         for capacity in capacities:
-            batch = mw.Simulation.batch(sims, execution=mw.BatchExecution(
+            batch = mw.Simulation.batch(sims, execution=mw.execution.BatchExecution(
                 devices=(device,), batch_size=capacity, graph="off"))
             with batch.prepare() as prepared:
                 _completed_run(prepared)

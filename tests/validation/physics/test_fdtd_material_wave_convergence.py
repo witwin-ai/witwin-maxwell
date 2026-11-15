@@ -1,4 +1,5 @@
 """Continuum plane-wave convergence using a source-free native Yee evolution."""
+from dataclasses import replace
 import math
 
 import pytest
@@ -15,17 +16,16 @@ def test_material_wave_speed_has_second_order_grid_convergence(epsilon, mu):
     for cells in (20, 40, 80):
         dx = 1 / cells
         scene = mw.Scene(domain=mw.Domain(bounds=((0., 1.), (0., 0.2), (0., 0.2))),
-            grid=mw.GridSpec.uniform(dx), boundary=mw.BoundarySpec.periodic(), device="cuda",
-            structures=(mw.Structure(geometry=mw.Box(position=(0.5, 0.1, 0.1), size=(2., 1., 1.)),
+            grid=mw.GridSpec.uniform(dx), boundary=mw.BoundarySpec.periodic(), structures=(mw.Structure(geometry=mw.Box(position=(0.5, 0.1, 0.1), size=(2., 1., 1.)),
                 material=mw.Material(eps_r=epsilon, mu_r=mu)),),
-            monitors=(mw.FieldTimeMonitor("trace", components=("Ez",), position=(0.5, 0.1, 0.1)),))
+            monitors=(mw.monitors.FieldTimeMonitor("trace", components=("Ez",), position=(0.5, 0.1, 0.1)),))
         velocity = 299792458. / math.sqrt(epsilon * mu)
-        simulation = mw.Simulation.fdtd(scene, frequency=velocity,
-            run_time=mw.TimeConfig(time_steps=1), cuda_graph=True)
+        simulation = mw.Simulation.fdtd(scene, frequencies=velocity,
+            config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1), cuda_graph=True))
         prepared = simulation.prepare()
         solver = prepared.solver
         steps = round(2 / velocity / solver.dt)
-        simulation.config.run_time = mw.TimeConfig(time_steps=steps, dt=solver.dt)
+        simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=steps, dt=solver.dt))
         x = torch.as_tensor(solver.scene.x_nodes64, device="cuda", dtype=solver.Ex.dtype)
         xh = (x[:-1] + x[1:]) / 2
         impedance = math.sqrt(solver.mu0 * mu / (solver.eps0 * epsilon))

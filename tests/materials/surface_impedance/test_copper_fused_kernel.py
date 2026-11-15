@@ -21,6 +21,8 @@ from witwin.maxwell.fdtd.copper_foil import (
 )
 from witwin.maxwell.fdtd.cuda import backend
 from witwin.maxwell.fdtd.cuda.backend import prepare_copper_electric
+
+from tests.oracles import copper_torch
 from witwin.maxwell.fdtd.cuda.runtime.graph import CudaGraphRunner
 
 
@@ -37,19 +39,18 @@ def _simulation(case, *, steps=2000, width=.01, graph=True):
         scene, frequencies, excitations = build_scene("copper_port")
     else:
         scene = mw.Scene(domain=mw.Domain(((-.3, .3), (-width, width), (-width, width))),
-            grid=mw.GridSpec.uniform(.005), device="cuda",
-            boundary=mw.BoundarySpec.faces(default="pml", num_layers=12, strength=1., y="pmc", z="pec"),
+            grid=mw.GridSpec.uniform(.005), boundary=mw.BoundarySpec.faces(default="pml", num_layers=12, strength=1., y="pmc", z="pec"),
             structures=[mw.Structure(mw.Box(position=(0., 0., 0.), size=(0., 8*width, 8*width)),
-                mw.CopperFoil(thickness=DELTA, frequency_range=(.5e9, 2e9)), name="foil")],
+                mw.media.CopperFoil(thickness=DELTA, frequency_range=(.5e9, 2e9)), name="foil")],
             sources=[mw.PlaneWave(direction=(1., 0., 0.), polarization=(0., 0., 1.),
                 source_time=mw.CW(FREQUENCY, amplitude=80.), name="pw")],
             monitors=[mw.PointMonitor("probe", position=(.1, 0., 0.), fields=("Ez",))])
         frequencies, excitations = (FREQUENCY,), ()
     # Closed-transverse PML (y = PMC, z = PEC) ran CPML before absorber="auto"; keep CPML (PCB ACK).
-    return mw.Simulation.fdtd(scene, frequencies=frequencies, excitations=excitations, absorber="cpml",
+    return mw.Simulation.fdtd(scene, frequencies=frequencies, excitations=excitations, config=mw.FDTDConfig(absorber="cpml",
         run_time=mw.TimeConfig(time_steps=steps, transient_cycles=0),
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=False),
-        full_field_dft=False, shutoff=0., cuda_graph=graph)
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=False),
+        full_field_dft=False, shutoff=0., cuda_graph=graph))
 
 
 def _tensors(solver):
@@ -214,8 +215,10 @@ def test_e2_trajectory(case, monkeypatch, fused_dispatches):
     outputs = []
     for kernel in ("torch", "fused"):
         fused_dispatches.clear()
-        monkeypatch.setenv("WITWIN_MAXWELL_COPPER_KERNEL", kernel)
-        result = _simulation(case).run()
+        with monkeypatch.context() as patch:
+            if kernel == "torch":
+                copper_torch.install(patch)
+            result = _simulation(case).run()
         outputs.append((torch.cat([getattr(result.solver, name).flatten().double().cpu() for name in FIELDS]),
                         torch.stack([e["cumulative_loss"].cpu() for e in result.solver._copper_foils]),
                         torch.cat([e["state"].flatten().cpu() for e in result.solver._copper_foils]),
@@ -242,7 +245,6 @@ def test_e2_trajectory(case, monkeypatch, fused_dispatches):
 
 
 def test_e3_graph_equals_eager(monkeypatch):
-    monkeypatch.delenv("WITWIN_MAXWELL_COPPER_KERNEL", raising=False)
     prepared = _simulation("g2", width=.05).prepare()
     prepared.run_until(256)
     solver = prepared.solver

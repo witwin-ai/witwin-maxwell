@@ -5,6 +5,7 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.scene import PreparedScene
 from witwin.maxwell.compiler.materials import _compile_edge_component, _mapped_dual_face_weights
+from witwin.maxwell.compiler import compile_materials
 
 
 class SharpBox(mw.Box):
@@ -16,12 +17,11 @@ class SharpBox(mw.Box):
 def layered(curvature,*,eps=4.,sigma=.02,grid=None,sharp=True):
     domain=mw.Domain(bounds=((-0.03,.03),(-.03,.03),(-.03,.03)))
     scene=mw.Scene(domain=domain,grid=mw.GridSpec.uniform(.01) if grid is None else grid,
-        coordinates=None if curvature is None else mw.BendCoordinates(curvature=curvature),device='cpu',
-        structures=(mw.Structure(name='upper',geometry=(SharpBox if sharp else mw.Box)(
+        coordinates=None if curvature is None else mw.coordinates.BendCoordinates(curvature=curvature),structures=(mw.Structure(name='upper',geometry=(SharpBox if sharp else mw.Box)(
             position=torch.tensor((0.,.015,0.),dtype=torch.float64),size=torch.tensor((.2,.03,.2),dtype=torch.float64)),
             material=mw.Material(eps_r=eps,sigma_e=sigma)),),
-        subpixel_samples=mw.SubpixelSpec(samples=(2,2,2),averaging='arithmetic'))
-    return PreparedScene(scene)
+        subpixel=mw.SubpixelSpec(samples=(2,2,2),averaging='arithmetic'))
+    return PreparedScene(scene, device='cpu')
 
 
 def sample(scene,component='Ez',*,samples=(2,2,2),averaging='arithmetic',selection=None):
@@ -32,7 +32,7 @@ def sample(scene,component='Ez',*,samples=(2,2,2),averaging='arithmetic',selecti
 @pytest.mark.parametrize('curvature',(-8.,-3.,3.,8.))
 def test_radial_dual_face_layer_integral_matches_positive_area_quadrature(curvature):
     scene=layered(curvature)
-    model=scene.compile_materials()['edge_components']
+    model=compile_materials(scene)['edge_components']
     # At u=0 the E_z physical dual face has area h_s(u) ds du.
     # Midpoint samples integrate both constant layers times the linear h exactly.
     expected_eps=.5*(1+4)+curvature*.01*(1-4)/8
@@ -47,8 +47,8 @@ def test_radial_dual_face_layer_integral_matches_positive_area_quadrature(curvat
 
 
 def test_cartesian_and_zero_curvature_retain_bitwise_identical_coefficients():
-    cartesian=layered(None).compile_materials()
-    zero=layered(0.).compile_materials()
+    cartesian=compile_materials(layered(None))
+    zero=compile_materials(layered(0.))
     for family in ('eps','mu','sigma_e','sigma_m'):
         for component,values in cartesian['edge_components'][family].items():
             torch.testing.assert_close(zero['edge_components'][family][component],values,rtol=0,atol=0)

@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
+from witwin.maxwell.scene import prepare_scene
 from witwin.maxwell.waveport_sweep import resolve_waveport_run_manifest
 
 
@@ -11,24 +12,23 @@ _FREQUENCY = 8.0e8
 
 
 def _wave_port(*, modes=None):
-    return mw.WavePort(
+    return mw.rf.WavePort(
         "input",
         position=(-0.30, 0.0, 0.0),
         size=(0.0, 0.60, 0.30),
         direction="+",
         reference_plane=-0.30,
-        modes=(mw.WaveModeSpec("te", polarization="Ez"),) if modes is None else modes,
+        modes=(mw.rf.WaveModeSpec("te", polarization="Ez"),) if modes is None else modes,
     )
 
 
-def _guide_scene(*, device, density=None, region_position=(0.05, 0.0, 0.0), modes=None):
+def _guide_scene(*, density=None, region_position=(0.05, 0.0, 0.0), modes=None):
     scene = mw.Scene(
-        subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
+        subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"),
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.5, 0.5), (-0.35, 0.35))),
         grid=mw.GridSpec.uniform(0.05),
         boundary=mw.BoundarySpec.none(),
         ports=(_wave_port(modes=modes),),
-        device=device,
     )
     wall_specs = (
         ((0.0, 0.40, 0.0), (1.0, 0.20, 0.70), "wall_y_high"),
@@ -36,23 +36,24 @@ def _guide_scene(*, device, density=None, region_position=(0.05, 0.0, 0.0), mode
         ((0.0, 0.0, 0.25), (1.0, 0.60, 0.20), "wall_z_high"),
         ((0.0, 0.0, -0.25), (1.0, 0.60, 0.20), "wall_z_low"),
     )
-    for position, size, name in wall_specs:
-        scene.add_structure(
-            mw.Structure(
-                geometry=mw.Box(position=position, size=size),
-                material=mw.Material.pec(),
-                name=name,
-            )
-        )
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(mw.Structure(
+              geometry=mw.Box(position=position, size=size),
+              material=mw.Material.pec(),
+              name=name,
+          ) for position, size, name in wall_specs),
+    ))
     if density is not None:
-        scene.add_material_region(
+        scene = scene.updated(material_regions=(
+            *scene.material_regions,
             mw.MaterialRegion(
                 name="design",
                 geometry=mw.Box(position=region_position, size=(0.10, 0.30, 0.20)),
                 density=density,
                 eps_bounds=(1.0, 5.0),
-            )
-        )
+            ),
+        ))
     return scene
 
 
@@ -63,7 +64,7 @@ class _WaveguideDesign(mw.SceneModule):
 
     def to_scene(self):
         density = torch.sigmoid(self.logit).expand(2, 6, 4)
-        return _guide_scene(device="cuda", density=density)
+        return _guide_scene(density=density)
 
 
 def _simulation(scene, excitations):
@@ -71,45 +72,46 @@ def _simulation(scene, excitations):
         scene,
         frequencies=(_FREQUENCY,),
         excitations=excitations,
-        run_time=mw.TimeConfig(time_steps=240),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=240),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
 
 
 def _reflection_objective(model):
-    result = _simulation(model, mw.PortSweep()).run()
+    result = _simulation(model, mw.rf.PortSweep()).run()
     return torch.abs(result.network.s[0, 0, 0]).square(), result
 
 
 def test_trainable_waveport_rejects_multimode_and_cross_section_designs():
     density = torch.full((2, 6, 4), 0.5, requires_grad=True)
     modes = (
-        mw.WaveModeSpec("te", polarization="Ez"),
-        mw.WaveModeSpec("te", mode_index=1, polarization="Ez"),
+        mw.rf.WaveModeSpec("te", polarization="Ez"),
+        mw.rf.WaveModeSpec("te", mode_index=1, polarization="Ez"),
     )
     with pytest.raises(NotImplementedError, match="exactly one fixed mode"):
         _simulation(
-            _guide_scene(device="cpu", density=density, modes=modes),
-            mw.PortSweep(),
+            _guide_scene(density=density, modes=modes),
+            mw.rf.PortSweep(),
         )
 
     cross_section_density = torch.full((2, 6, 4), 0.5, requires_grad=True)
     cross_section_scene = _guide_scene(
-        device="cpu",
         density=cross_section_density,
         region_position=(-0.30, 0.0, 0.0),
     )
     with pytest.raises(NotImplementedError, match="fixed port cross-sections"):
         resolve_waveport_run_manifest(
             cross_section_scene,
-            mw.PortSweep(),
-            (_FREQUENCY,),
+            mw.rf.PortSweep(),
+            (_FREQUENCY,), device="cpu",
         )
 
     for excitation in (
-        mw.PortSweep(amplitude=torch.tensor(1.0, requires_grad=True)),
-        mw.PortExcitation(
+        mw.rf.PortSweep(amplitude=torch.tensor(1.0, requires_grad=True)),
+        mw.rf.PortExcitation(
             "input",
             amplitude=torch.tensor(1.0, requires_grad=True),
             mode_name="TE0",
@@ -118,11 +120,35 @@ def test_trainable_waveport_rejects_multimode_and_cross_section_designs():
         with pytest.raises(NotImplementedError, match="trainable"):
             _simulation(
                 _guide_scene(
-                    device="cpu",
                     density=torch.full((2, 6, 4), 0.5, requires_grad=True),
                 ),
                 excitation,
             ).run()
+
+
+def test_prepared_waveport_manifest_checks_trainable_cross_sections_on_the_declarations():
+    # Simulation.prepare() resolves the manifest from the PreparedScene; the fixed cross-section check reads its
+    # declarations (a PreparedScene has no ``structures``).
+    cross_section_scene = _guide_scene(
+        density=torch.full((2, 6, 4), 0.5, requires_grad=True),
+        region_position=(-0.30, 0.0, 0.0),
+    )
+    with pytest.raises(NotImplementedError, match="fixed port cross-sections"):
+        resolve_waveport_run_manifest(
+            prepare_scene(cross_section_scene, device="cpu"),
+            mw.rf.PortSweep(),
+            (_FREQUENCY,), device="cpu",
+        )
+
+    design_scene = _guide_scene(density=torch.full((2, 6, 4), 0.5, requires_grad=True))
+    prepared = resolve_waveport_run_manifest(
+        prepare_scene(design_scene, device="cpu"),
+        mw.rf.PortSweep(),
+        (_FREQUENCY,), device="cpu",
+    )
+    declared = resolve_waveport_run_manifest(design_scene, mw.rf.PortSweep(), (_FREQUENCY,), device="cpu")
+    assert prepared.channel_names == declared.channel_names == ("input::TE0",)
+    assert torch.equal(prepared.prepared_ports[0].tracking.beta, declared.prepared_ports[0].tracking.beta)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs one CUDA device")
@@ -130,7 +156,7 @@ def test_direct_waveport_port_data_preserves_single_device_adjoint_graph():
     model = _WaveguideDesign().cuda()
     result = _simulation(
         model,
-        mw.PortExcitation("input", mode_name="TE0"),
+        mw.rf.PortExcitation("input", mode_name="TE0"),
     ).run()
 
     port = result.port("input")

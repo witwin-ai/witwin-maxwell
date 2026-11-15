@@ -117,7 +117,7 @@ def test_versioned_spatial_rule_preserves_default_route(monkeypatch):
     assert 'spatial_rule' not in default.payload()
     selected=dg.DyadicIntegrationConfig(spatial_rule='proportional_spd_closed_form_v1')
     assert dg.DyadicIntegrationConfig(**selected.payload())==selected
-    config=mw.MoMConfig(dyadic_integration=selected,stopping=StoppingRule(method='direct'))
+    config=mw.mom.MoMConfig(dyadic_integration=selected,stopping=StoppingRule(method='direct'))
     numerical=_numerical_identity(config)
     assert _numerical_identity(_config(numerical))==numerical
     m=medium();x=m.epsilon_r.real.new_tensor([[.12,.03,.07]])
@@ -127,7 +127,7 @@ def test_versioned_spatial_rule_preserves_default_route(monkeypatch):
         patch.setattr(dg,'evaluate_spatial_green',sentinel)
         assert dg.DyadicGreenKernel(m,default).evaluate_regular(x)[0]=='original_path'
     assert reached==[True]
-    with pytest.raises(ValueError,match='spatial rule'):
+    with pytest.raises(ValueError,match='spatial_rule must be one of'):
         dg.DyadicIntegrationConfig(spatial_rule='unknown')
 
 

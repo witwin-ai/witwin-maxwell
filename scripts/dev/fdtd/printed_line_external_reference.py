@@ -51,7 +51,7 @@ def export_structures(csx,scene):
     for structure in scene.structures:
         if not structure.enabled:continue
         geometry,material=structure.geometry,structure.material
-        if isinstance(geometry,mw.PlanarPEC):
+        if isinstance(geometry,mw.geometry.PlanarPEC):
             if geometry.holes or len(geometry.vertices)!=4:
                 raise NotImplementedError("Independent line export accepts explicit rectangular PEC supports.")
             normal="xyz".index(geometry.normal_axis);tangent=[i for i in range(3) if i!=normal]
@@ -119,7 +119,7 @@ def reference_line_scene(args):
         "transverse_refinement_radius":args.transverse_refinement_radius}
     return printed_line_scene(args.kind,dx=args.dx,longitudinal_dl=args.longitudinal_dl,
         port_separation=args.separation,axial_half_length=args.axial_half_length,
-        transverse_padding=args.padding,sigma_e=args.sigma,device="cpu",**extra)
+        transverse_padding=args.padding,sigma_e=args.sigma,**extra)
 
 
 def reference_feeds(kind,separation,balanced=False):
@@ -250,7 +250,7 @@ def main():
         directory=output/f"drive-{active}";directory.mkdir(exist_ok=True)
         backend=openEMS(NrTS=steps,EndCriteria=0.,TimeStep=dt)
         backend.SetGaussExcite(1e9,.8e9)
-        backend.SetBoundaryCond([f"PML_{prepared.boundary.num_layers}"]*6)
+        backend.SetBoundaryCond([f"PML_{prepared.scene.boundary.num_layers}"]*6)
         csx=ContinuousStructure();backend.SetCSX(csx);grid=csx.GetGrid();grid.SetDeltaUnit(1.)
         for axis,coordinates in zip("xyz",nodes):grid.AddLine(axis,coordinates)
         geometry=export_structures(csx,scene)

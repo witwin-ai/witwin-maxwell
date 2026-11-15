@@ -86,7 +86,7 @@ def compile_fdtd_time_step(solver, material_model):
             epsilon = min(epsilon, _minimum(relative * (1 - torch.hypot(cosine, sine))))
     # Declared design bounds keep density perturbations on one discrete problem,
     # even when the realized density does not occupy the fastest material.
-    for region in getattr(solver.scene, "material_regions", ()):
+    for region in getattr(solver.scene.scene, "material_regions", ()):
         epsilon = min(epsilon, min(region.eps_bounds) * (1 - modulation))
         permeability = min(permeability, *region.mu_bounds)
     nonlinear_floor = epsilon

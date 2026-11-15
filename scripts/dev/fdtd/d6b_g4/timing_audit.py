@@ -24,7 +24,7 @@ from scripts.dev.fdtd.d6b_g4.root_cause import pole
 
 def clock(scene):
     simulation = mw.Simulation.fdtd(scene, frequencies=[probe.F0],
-                                    run_time=mw.TimeConfig(time_steps=1), backend="native")
+                                    config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1)))
     solver = simulation.prepare().solver
     return float(solver.dt)
 

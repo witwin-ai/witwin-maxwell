@@ -3,6 +3,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_ports
 
 
 def _lumped_port(*, name="feed", reference_impedance=50.0):
@@ -23,8 +24,8 @@ def _lumped_port(*, name="feed", reference_impedance=50.0):
 def test_phase_zero_rf_types_are_top_level_public_api():
     assert mw.AxisPath.__module__ == "witwin.maxwell.ports"
     assert mw.LumpedPort.__module__ == "witwin.maxwell.ports"
-    assert mw.PortData.__module__ == "witwin.maxwell.network"
-    assert mw.NetworkData.__module__ == "witwin.maxwell.network"
+    assert mw.rf.PortData.__module__ == "witwin.maxwell.network"
+    assert mw.rf.NetworkData.__module__ == "witwin.maxwell.network"
 
 
 def test_scene_keeps_lumped_ports_declarative_and_compiles_through_scene_helper():
@@ -34,26 +35,24 @@ def test_scene_keeps_lumped_ports_declarative_and_compiles_through_scene_helper(
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
         ports=(port,),
-        device="cpu",
     )
 
-    assert scene.ports == [port]
+    assert scene.ports == (port,)
     assert scene.resolved_sources() == []
     assert scene.resolved_monitors() == []
-    compiled = scene.compile_ports()
+    compiled = compile_ports(prepare_scene(scene, device="cpu"))
     assert len(compiled) == 1
     assert compiled[0].port_name == "feed"
     assert compiled[0].reference_plane == pytest.approx(0.45)
 
 
 def test_scene_rejects_duplicate_and_unknown_port_objects():
-    scene = mw.Scene(device="cpu")
-    scene.add_port(_lumped_port())
+    scene = mw.Scene(ports=(_lumped_port(),))
 
     with pytest.raises(ValueError, match="already present"):
-        scene.add_port(_lumped_port())
+        scene = scene.updated(ports=(*scene.ports, _lumped_port()))
     with pytest.raises(TypeError, match="Maxwell Scene ports"):
-        scene.add_port(object())
+        scene = scene.updated(ports=(*scene.ports, object()))
 
 
 def test_scene_rejects_lumped_port_terminals_outside_domain_early():
@@ -73,7 +72,6 @@ def test_scene_rejects_lumped_port_terminals_outside_domain_early():
             domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
             grid=mw.GridSpec.uniform(0.1),
             ports=(port,),
-            device="cpu",
         )
 
 
@@ -94,7 +92,6 @@ def test_scene_rejects_nonfinite_lumped_port_terminals_early():
             domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
             grid=mw.GridSpec.uniform(0.1),
             ports=(port,),
-            device="cpu",
         )
 
 
@@ -103,19 +100,18 @@ def test_lumped_port_preserves_trainable_reference_impedance_tensor():
     port = _lumped_port(reference_impedance=z0)
 
     assert port.reference_impedance is z0
-    compiled = prepare_scene(
+    compiled = compile_ports(prepare_scene(
         mw.Scene(
             domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
             grid=mw.GridSpec.uniform(0.1),
             ports=(port,),
-            device="cpu",
-        )
-    ).compile_ports()
+        ), device="cpu"
+    ), device="cpu")
     assert compiled[0].reference_impedance is z0
 
 
 def test_public_scene_has_no_second_solver_entrypoint():
-    scene = mw.Scene(device="cpu")
+    scene = mw.Scene()
     assert not hasattr(mw, "FDTD")
     assert not hasattr(mw, "FDFD")
-    assert hasattr(scene, "compile_ports")
+    assert not hasattr(scene, "compile_ports")

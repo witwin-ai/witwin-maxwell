@@ -11,9 +11,11 @@ from .tensor_medium import TensorMedium
 from .dyadic_green import _electrostatic_components
 from .static_tensor_green import _static_panel_geometry
 from .quadrature import distance_scaled_duffy_fan,distance_scaled_line_rule
+from ..errors import ConvergenceError
+from ..errors import UnsupportedFeatureError
 
 
-class ComplexStaticPanelConvergenceError(RuntimeError):
+class ComplexStaticPanelConvergenceError(ConvergenceError):
     def __init__(self,receipt):
         self.receipt=receipt
         super().__init__('Complex static panel integration exhausted its order budget')
@@ -56,7 +58,8 @@ test divides it by the physical panel diameter. This estimator is not a bound.
         lower=torch.stack(tuple(torch.linalg.eigvalsh(part).amin()
             for part in (symmetric.real,-symmetric.real,symmetric.imag)))
         if not bool(torch.isfinite(scale) & (lower>margin).any()):
-            raise NotImplementedError('Complex static panels require resolved definite real or strictly lossy symmetric parts')
+            raise UnsupportedFeatureError('Complex static panels require resolved definite real or strictly lossy symmetric parts',
+                                          feature="guard:31200a1c", method="mom")
         self.coefficient=self.units*symmetric
         self.relative_tolerance=float(relative_tolerance);self.absolute_tolerance=float(absolute_tolerance)
         self.initial_order=initial_order;self.max_order=max_order;self.pair_batch=pair_batch

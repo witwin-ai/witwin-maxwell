@@ -9,6 +9,8 @@ import witwin.maxwell as mw
 from witwin.maxwell.fdtd.runtime.representation import normalization_sample_time, normalization_signal
 from witwin.maxwell.fdtd.runtime.spectral import source_normalization_spectrum
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
+
 
 CASES = [
     ("axis_pulse", "plane_wave_axis_aligned", 1.),
@@ -37,7 +39,7 @@ def single_cpu_thread():
     torch.set_num_threads(previous)
 
 
-def execution(case, *, device="cpu", normalized=True, steps=512, dt=4.7619e-12,
+def execution(case, *, device="cuda", normalized=True, steps=512, dt=4.7619e-12,
               field_dtype=torch.float32, observer_dtype=torch.float32, full_field_dft=True):
     f = 2e9
     waveform = mw.CW(f) if case.endswith("cw") else mw.GaussianPulse(f, 1e9)
@@ -59,25 +61,21 @@ def execution(case, *, device="cpu", normalized=True, steps=512, dt=4.7619e-12,
                 injection=injection, beam_waist=.3, focus=(0., 0., 0.)) if case.startswith("beam")
               else mw.PlaneWave(direction=direction, polarization=electric, source_time=waveform, injection=injection))
     if case.startswith("astigmatic"):
-        source = mw.AstigmaticGaussianBeam(direction=direction, polarization=electric,
+        source = mw.sources.AstigmaticGaussianBeam(direction=direction, polarization=electric,
             source_time=waveform, injection=injection, beam_waist=(.3, .4), focus=(0., 0., 0.))
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.3, .3),) * 3), grid=mw.GridSpec.uniform(.025),
-        boundary=boundary, device=device, sources=[source], monitors=[
+        boundary=boundary, sources=[source], monitors=[
             mw.PointMonitor("point", (0., 0., 0.), fields=(electric, magnetic)),
-            mw.FieldTimeMonitor("trace", components=(electric, magnetic), position=(0., 0., 0.))])
-    return mw.Simulation.fdtd(scene, frequency=f, backend="cpu_reference" if device == "cpu" else "native",
-        cuda_graph=False, full_field_dft=full_field_dft, field_dtype=field_dtype,
+            mw.monitors.FieldTimeMonitor("trace", components=(electric, magnetic), position=(0., 0., 0.))])
+    return mw.Simulation.fdtd(scene, frequencies=f, config=mw.FDTDConfig(cuda_graph=False, full_field_dft=full_field_dft, field_dtype=field_dtype,
         run_time=mw.TimeConfig(time_steps=steps, dt=dt, transient_cycles=0),
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=normalized,
-                                             observer_dtype=observer_dtype)).prepare(), electric, magnetic
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=normalized,
+                                             observer_dtype=observer_dtype), device=device)).prepare(), electric, magnetic
 
 
 @pytest.mark.parametrize("case,provider,beta", CASES)
 def test_actual_prepared_provider_metadata(case, provider, beta):
-    device = "cuda" if case.startswith("grating") else "cpu"
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("actual Bloch provider preparation requires CUDA")
-    prepared, _, _ = execution(case, steps=1, device=device)
+    prepared, _, _ = execution(case, steps=1)
     solver = prepared.solver
     source = solver._compiled_sources[0]
     assert source["reference_provider_kind"] == provider == solver._normalization_reference_provider
@@ -90,7 +88,6 @@ def test_actual_prepared_provider_metadata(case, provider, beta):
         assert source["reference_incident_projection"] == pytest.approx(expected, abs=1e-15)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="native paired provider gates require CUDA")
 @pytest.mark.parametrize("case,provider,beta", CASES)
 def test_native_provider_origin_matches_unchanged_sample_record(case, provider, beta):
     # Reconstruct the old-label finite numerator/denominator from actual samples;
@@ -129,9 +126,9 @@ def test_native_provider_origin_matches_unchanged_sample_record(case, provider, 
             old_numerator / old_denominator * np.exp(1j * (1 - beta) * theta), rtol=3e-6, atol=1e-10)
         if field == electric:
             index = tuple(raw.raw_monitor("point")["field_indices"][field])
-            np.testing.assert_allclose(raw.field(field, frequency=2e9)[index].cpu(),
+            np.testing.assert_allclose(raw.field(field, frequency=2e9).values[index].cpu(),
                 old_numerator * np.exp(1j * theta), rtol=3e-6, atol=1e-12)
-            np.testing.assert_allclose(normalized.field(field, frequency=2e9)[index].cpu(),
+            np.testing.assert_allclose(normalized.field(field, frequency=2e9).values[index].cpu(),
                 old_numerator / old_denominator * np.exp(1j * (1 - beta) * theta), rtol=3e-6, atol=1e-10)
 
 
@@ -140,10 +137,10 @@ def test_reference_selection_keeps_first_compiled_separate_from_primary_tfsf(nor
     prepared, _, _ = execution("axis_pulse", steps=1)
     scene = prepared.simulation.scene
     plane = scene.sources[0]
-    scene = scene.clone(sources=[mw.PointDipole((0., 0., 0.), source_time=plane.source_time), plane])
-    solver = mw.Simulation.fdtd(scene, frequency=2e9, backend="cpu_reference", cuda_graph=False,
+    scene = scene.updated(sources=[mw.PointDipole((0., 0., 0.), source_time=plane.source_time), plane])
+    solver = mw.Simulation.fdtd(scene, frequencies=2e9, config=mw.FDTDConfig(cuda_graph=False,
         full_field_dft=False, run_time=mw.TimeConfig(time_steps=1),
-        spectral_sampler=mw.SpectralSampler(window="none", normalize_source=normalized)).prepare().solver
+        spectral_sampler=mw.fdtd.SpectralSampler(window="none", normalize_source=normalized))).prepare().solver
     from witwin.maxwell.fdtd.runtime.spectral import source_reference_metadata
     assert solver._normalization_reference_provider == "additive_J"
     assert solver._normalization_label_offset == .5

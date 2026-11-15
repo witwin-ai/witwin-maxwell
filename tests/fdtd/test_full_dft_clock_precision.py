@@ -61,13 +61,12 @@ def test_complex_host_clock_remains_unit_length_at_late_rf_phase(monkeypatch):
 def test_actual_full_field_and_native_point_spectra_share_long_cw_clock(graph):
     import witwin.maxwell as mw
     scene=mw.Scene(domain=mw.Domain(bounds=((-0.2,0.2),)*3),grid=mw.GridSpec.uniform(.05),
-        boundary=mw.BoundarySpec.pml(num_layers=6),device='cuda',
-        sources=(mw.PointDipole(position=(-.1,0.,0.),polarization='Ex',width=.05,source_time=mw.CW(1e9)),),
+        boundary=mw.BoundarySpec.pml(num_layers=6),sources=(mw.PointDipole(position=(-.1,0.,0.),polarization='Ex',width=.05,source_time=mw.CW(1e9)),),
         monitors=(mw.PointMonitor('native',position=(.075,0.,0.),fields=('Ex',)),))
-    result=mw.Simulation.fdtd(scene,frequency=1e9,run_time=mw.TimeConfig(time_steps=8192),
-        spectral_sampler=mw.SpectralSampler(window='hanning'),full_field_dft=True,cuda_graph=graph).run()
-    payload=result.monitor('native');index=tuple(payload['field_indices']['Ex'])
-    full=result.field('Ex').reshape((-1,*result.solver.Ex.shape))[0][index]
+    result=mw.Simulation.fdtd(scene,frequencies=1e9,config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=8192),
+        spectral_sampler=mw.fdtd.SpectralSampler(window='hanning'),full_field_dft=True,cuda_graph=graph)).run()
+    payload=result.raw_monitor('native');index=tuple(payload['field_indices']['Ex'])
+    full=result.field('Ex').isel(f=0).values.reshape((-1,*result.solver.Ex.shape))[0][index]
     point=payload['components']['Ex'].reshape(())
     assert float(point.abs()) > 1e-8
     torch.testing.assert_close(full,point.to(full),rtol=8e-6,atol=1e-9)

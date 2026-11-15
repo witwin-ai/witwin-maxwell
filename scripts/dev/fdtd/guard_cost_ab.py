@@ -78,16 +78,17 @@ def _build(name, steps):
         # which keeps the field-update block eager; an electric point source keeps
         # the same foil, grid and boundaries with graph capture in both arms.
         source = simulation.scene.sources[0]
-        simulation.scene.sources = [mw.PointDipole(position=(-.1, 0., 0.), polarization="Ez",
-                                                   source_time=source.source_time, name="pw")]
-        return simulation
+        scene = simulation.scene.updated(sources=(mw.PointDipole(position=(-.1, 0., 0.), polarization="Ez",
+                                                                 source_time=source.source_time, name="pw"),))
+        return mw.Simulation.fdtd(scene, frequencies=simulation.frequencies, excitations=simulation.excitations,
+                                  config=simulation.config)
     from scripts.dev.fdtd.thin_sheet_overhead import SCENARIOS, _scene
     scene = _scene(SCENARIOS[name], True)
-    scene = scene.clone(boundary=mw.BoundarySpec.faces(
+    scene = scene.updated(boundary=mw.BoundarySpec.faces(
         default="pml", num_layers=10, z=("pec", "pec")))
     return mw.Simulation.fdtd(
-        scene, frequencies=[2.4e9], absorber="cpml", cuda_graph=True, shutoff=0.,
-        run_time=mw.TimeConfig(time_steps=steps, transient_cycles=0))
+        scene, frequencies=[2.4e9], config=mw.FDTDConfig(absorber="cpml", cuda_graph=True, shutoff=0.,
+        run_time=mw.TimeConfig(time_steps=steps, transient_cycles=0)))
 
 
 def _run_arm(name, enabled, args, label, *, sample=False):

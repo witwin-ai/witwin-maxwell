@@ -20,7 +20,7 @@ def refined_definition(definition, *, axes, factor, normal_samples=512):
     if isinstance(normal_samples, bool) or not isinstance(normal_samples, int) or normal_samples < 1:
         raise ValueError('Normal material sample count must be a positive integer.')
     result = copy.deepcopy(definition)
-    original = import_pcb_scene(definition, frequency=2.45e9, device='cpu')
+    original = import_pcb_scene(definition, frequency=2.45e9)
     for record, port in zip(result['ports'], original.ports):
         if 'current_contour_bounds_m' in record:
             continue

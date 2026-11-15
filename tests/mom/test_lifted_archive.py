@@ -34,7 +34,7 @@ def test_offline_archive_preserves_bytes_and_rejects_execution(tmp_path):
     assert archive['executable'] is False and archive['physical_qualification'] is False
     assert archive['unknown_historical_identities'] == ['formulation_id', 'decoder_version', 'source_version']
     with pytest.raises(ValueError, match='historical'):
-        SurfaceData.restore(archive, scene, 3e8)
+        SurfaceData.restore(archive, scene, 3e8, 'cuda')
     changed = mw.Scene(structures=[mw.Structure(mw.Sphere(radius=.1), mw.Material(eps_r=3.))], sources=[mw.PlaneWave()])
     with pytest.raises(ValueError, match='does not match'):
         migrate_surface_v1_to_archive(source, scene=changed, frequency=3e8)

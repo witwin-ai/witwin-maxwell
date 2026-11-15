@@ -9,6 +9,7 @@ from witwin.maxwell.fdtd.distributed import DistributedFDTD
 from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd_parallel import FDTDParallelConfig
 from witwin.maxwell.scene import prepare_scene
+from tests.support.core_solver import bind_core
 
 
 _FREQUENCY = 1.0e9
@@ -41,26 +42,25 @@ def _regular_scene() -> mw.Scene:
     y = np.linspace(-0.2, 0.2, 5, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 5, dtype=np.float64)
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (float(x[0]), float(x[-1])),
                 (float(y[0]), float(y[-1])),
                 (float(z[0]), float(z[-1])),
             )
-        ),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.2, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
-            name="source",
-        )
-    )
+            ),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.none(),
+                sources=(
+            mw.PointDipole(
+                position=(-0.2, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
+                name="source",
+            ),
+            ),
+            )
     return scene
 
 
@@ -72,28 +72,25 @@ def test_nanometer_scale_monitors_on_interface_sides_have_unique_owner(
     y = np.linspace(-2.0e-9, 2.0e-9, 5, dtype=np.float64)
     z = np.linspace(-2.0e-9, 2.0e-9, 5, dtype=np.float64)
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (float(x[0]), float(x[-1])),
                 (float(y[0]), float(y[-1])),
                 (float(z[0]), float(z[-1])),
             )
-        ),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
-    )
-    scene.add_monitor(
-        mw.PointMonitor("left_of_interface", (-0.25e-9, 0.0, 0.0), fields=("Ez",))
-    )
-    scene.add_monitor(
-        mw.PointMonitor("right_of_interface", (0.25e-9, 0.0, 0.0), fields=("Ez",))
-    )
+            ),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.none(),
+                monitors=(
+            mw.PointMonitor("left_of_interface", (-0.25e-9, 0.0, 0.0), fields=("Ez",)),
+            mw.PointMonitor("right_of_interface", (0.25e-9, 0.0, 0.0), fields=("Ez",)),
+            ),
+            )
 
     solver = _direct_distributed(scene, cuda_p2p_devices, gather_fields=False)
     owners = {monitor.name: [] for monitor in scene.monitors}
     for shard in solver.shards:
-        for monitor in shard.solver.scene.monitors:
+        for monitor in shard.solver.scene.scene.monitors:
             owners[monitor.name].append(shard.rank)
 
     assert owners == {
@@ -113,8 +110,10 @@ def test_monitor_output_keeps_scene_declaration_order_across_shards(
         ("right_third", 0.35),
         ("left_fourth", -0.35),
     )
-    for name, x in declared:
-        scene.add_monitor(mw.PointMonitor(name, (x, 0.0, 0.0), fields=("Ez",)))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.PointMonitor(name, (x, 0.0, 0.0), fields=("Ez",)) for name, x in declared),
+    ))
 
     solver = _direct_distributed(scene, cuda_p2p_devices, gather_fields=False)
     output = solver.solve(
@@ -170,28 +169,27 @@ def _ex_interface_scene(image_case: str) -> mw.Scene:
         raise ValueError(f"Unknown image case {image_case!r}.")
 
     scene = mw.Scene(
-        domain=mw.Domain(
+                domain=mw.Domain(
             bounds=(
                 (float(x[0]), float(x[-1])),
                 (float(y[0]), float(y[-1])),
                 (float(z[0]), float(z[-1])),
             )
-        ),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=boundary,
-        symmetry=symmetry,
-        device="cuda:0",
-    )
-    scene.add_source(
-        mw.PointDipole(
-            # The first slab owns x in [-0.5, 0); its final Ex sample is -0.05.
-            position=(-0.05, source_y, 0.0),
-            polarization="Ex",
-            profile="ideal",
-            source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
-            name="interface_adjacent_ex",
-        )
-    )
+            ),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=boundary,
+                symmetry=symmetry,
+                sources=(
+            mw.PointDipole(
+                # The first slab owns x in [-0.5, 0); its final Ex sample is -0.05.
+                position=(-0.05, source_y, 0.0),
+                polarization="Ex",
+                profile="ideal",
+                source_time=mw.CW(frequency=_FREQUENCY, amplitude=1.0),
+                name="interface_adjacent_ex",
+            ),
+            ),
+            )
     return scene
 
 
@@ -211,6 +209,7 @@ def test_interface_adjacent_ideal_ex_source_image_parity(
     scene = _ex_interface_scene(image_case)
     single = FDTD(prepare_scene(scene), frequency=_FREQUENCY, absorber_type="cpml")
     single.init_field()
+    bind_core(single)
     single.solve(
         time_steps=24,
         dft_frequency=_FREQUENCY,

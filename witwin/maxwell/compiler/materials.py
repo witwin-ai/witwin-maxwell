@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 import copy
 from enum import Enum
@@ -32,6 +33,8 @@ from .subpixel import (
     _subsample_fill_fraction,
     _uniform_axis_spacing,
 )
+from ..errors import UnsupportedFeatureError
+from .static_cache import static_prefix, static_prefix_frame
 
 _AXES = ("x", "y", "z")
 _OFFDIAG_AXES = ("xy", "xz", "yz")
@@ -135,11 +138,12 @@ def _component_values_from_sample(value, *, name: str):
     if isinstance(value, DiagonalTensor3):
         return {"x": float(value.xx), "y": float(value.yy), "z": float(value.zz)}
     if isinstance(value, Tensor3x3):
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             f"The Maxwell material compiler stores {name} on the diagonal Yee components; "
             f"off-diagonal Tensor3x3 coupling is realized only for permittivity via the "
             f"coupled-tensor eps kernel. A full off-diagonal {name} tensor has no "
-            f"corresponding coupled update kernel on the Yee grid."
+            f"corresponding coupled update kernel on the Yee grid.",
+            feature="material.full_tensor", method=None
         )
     if isinstance(value, torch.Tensor):
         if value.ndim != 0:
@@ -172,7 +176,8 @@ def _structure_nonlinearity(material):
     fields that blend with structure occupancy exactly like the static eps.
     """
     if getattr(material,'has_tensor_nonlinearity',False):
-        raise NotImplementedError('Tensor nonlinear susceptibility requires a tensor constitutive runtime')
+        raise UnsupportedFeatureError('Tensor nonlinear susceptibility requires a tensor constitutive runtime',
+                                      feature="material.nonlinear", method=None)
     chi3 = getattr(material, "nonlinear_chi3", None)
     if chi3 is None:
         chi3 = getattr(material, "kerr_chi3", 0.0) or 0.0
@@ -202,8 +207,9 @@ def _static_structure_material(structure):
             getattr(material, "sigma_m", 0.0), name="sigma_m"
         )
     except (TypeError, ValueError) as exc:
-        raise NotImplementedError(
-            "The Maxwell material compiler currently supports scalar isotropic or axis-aligned DiagonalTensor3 material samples only."
+        raise UnsupportedFeatureError(
+            "The Maxwell material compiler currently supports scalar isotropic or axis-aligned DiagonalTensor3 material samples only.",
+            feature="guard:44ce4c25", method=None
         ) from exc
     return (
         material,
@@ -264,7 +270,7 @@ def _new_material_model(scene, layout, *, eps_fill, mu_fill):
         # single-frequency-per-scene restriction no longer applies.
         "modulation_omega": _constant_zero_field(shape, device),
     }
-    if any(getattr(s.material, "modulation", None) is not None for s in scene.structures):
+    if any(getattr(s.material, "modulation", None) is not None for s in scene.scene.structures):
         # Positive IDs identify a single fully occupied material; -1 marks a
         # mixed window. Ownership is used only to retain interior bit identity.
         model["modulation_owner"] = torch.zeros(shape, device=device, dtype=torch.int64)
@@ -347,12 +353,13 @@ def _resolve_subpixel(subpixel):
 
 
 def _validate_polarized_materials(scene):
-    for structure in _bulk_structures(scene):
+    for structure in _bulk_structures(scene.scene):
         eps_offdiag = _static_structure_material(structure)[2]
         if any(value != 0.0 for value in eps_offdiag.values()):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "Polarized (Kottke) subpixel averaging is not implemented for full "
-                "(off-diagonal) anisotropic permittivity; use arithmetic subpixel averaging."
+                "(off-diagonal) anisotropic permittivity; use arithmetic subpixel averaging.",
+                feature="material.full_tensor", method=None
             )
 
 
@@ -417,7 +424,7 @@ def _coordinate_grids(scene, sample_offset):
 
 
 def _geometry_beta(scene) -> float:
-    return 0.05 * min(scene.grid.min_spacing)
+    return 0.05 * min(scene.scene.grid.min_spacing)
 
 
 def _pec_geometry_beta(scene) -> float | torch.Tensor:
@@ -441,9 +448,9 @@ def _pec_geometry_beta(scene) -> float | torch.Tensor:
     (no PEC leakage) but under-resolves a wall whose normal lies along a coarser
     axis at that node.
     """
-    grid = scene.grid
+    grid = scene.scene.grid
     if not (grid.is_custom or grid.is_auto):
-        return 0.5 * min(scene.grid.min_spacing)
+        return 0.5 * min(scene.scene.grid.min_spacing)
     dx = torch.as_tensor(scene.dx_dual64, device=scene.device, dtype=_material_dtype(scene))
     dy = torch.as_tensor(scene.dy_dual64, device=scene.device, dtype=_material_dtype(scene))
     dz = torch.as_tensor(scene.dz_dual64, device=scene.device, dtype=_material_dtype(scene))
@@ -469,7 +476,7 @@ def _wrap_periodic_boundary_planes(scene, occupancy, midpoint_occupancy, skip_ax
     for axis_index, axis in enumerate(("x", "y", "z")):
         if axis_index in skip_axes:
             continue
-        if scene.boundary.axis_kind(axis) not in ("periodic", "bloch"):
+        if scene.scene.boundary.axis_kind(axis) not in ("periodic", "bloch"):
             continue
         axis_size = wrapped.shape[axis_index]
         if axis_size < 2:
@@ -497,7 +504,7 @@ def _wrap_periodic_boundary_planes(scene, occupancy, midpoint_occupancy, skip_ax
 def _contains_trainable_tensor(value) -> bool:
     if torch.is_tensor(value):
         return bool(value.requires_grad)
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return any(_contains_trainable_tensor(item) for item in value.values())
     if isinstance(value, (tuple, list)):
         return any(_contains_trainable_tensor(item) for item in value)
@@ -510,7 +517,7 @@ def _static_periodic_shift_options(scene, geometry):
     periodic_axes = [
         axis_index
         for axis_index, axis in enumerate(("x", "y", "z"))
-        if scene.boundary.axis_kind(axis) in ("periodic", "bloch")
+        if scene.scene.boundary.axis_kind(axis) in ("periodic", "bloch")
     ]
     if not periodic_axes:
         return tuple(options)
@@ -528,7 +535,7 @@ def _static_periodic_shift_options(scene, geometry):
 
     for axis_index in periodic_axes:
         axis = "xyz"[axis_index]
-        domain_low, domain_high = scene.domain.bounds[axis_index]
+        domain_low, domain_high = scene.scene.domain.bounds[axis_index]
         span = float(domain_high) - float(domain_low)
         nodes = np.asarray(getattr(scene, f"{axis}_nodes64"), dtype=np.float64)
         padding = 0.5 * float(np.max(np.diff(nodes))) + _geometry_beta(scene)
@@ -617,7 +624,7 @@ def _geometry_occupancy(
             beta=resolved_beta,
         )
         if half_weight_boundary:
-            tolerance = 1.0e-5 * min(scene.grid.min_spacing)
+            tolerance = 1.0e-5 * min(scene.scene.grid.min_spacing)
             signed_distance = geometry.signed_distance(sample_x, sample_y, sample_z)
             half_occupancy = occupancy + (0.5 - occupancy).detach()
             occupancy = torch.where(
@@ -632,7 +639,7 @@ def _geometry_occupancy(
         domain_range = getattr(scene, "physical_domain_range", None)
         shift_options = []
         for axis_index, axis in enumerate(("x", "y", "z")):
-            if domain_range is not None and scene.boundary.axis_kind(axis) in (
+            if domain_range is not None and scene.scene.boundary.axis_kind(axis) in (
                 "periodic",
                 "bloch",
             ):
@@ -664,7 +671,7 @@ def _geometry_occupancy(
             index
             for index, axis in enumerate(("x", "y", "z"))
             if index != axis_index
-            and scene.boundary.axis_kind(axis) in ("periodic", "bloch")
+            and scene.scene.boundary.axis_kind(axis) in ("periodic", "bloch")
             and occupancy.shape[index] == 2
         )
         for reduced_axis in reduced_axes:
@@ -741,7 +748,7 @@ def _build_dispersive_layout(scene):
         ("mu_drude", "mu_drude_poles"),
         ("mu_lorentz", "mu_lorentz_poles"),
     )
-    for structure in _bulk_structures(scene):
+    for structure in _bulk_structures(scene.scene):
         material = _static_structure_material(structure)[0]
         slots = {slot_key: [] for slot_key, _ in slot_pairs}
         for slot_key, layout_key in slot_pairs:
@@ -834,9 +841,10 @@ def _apply_structure_material(
     material, eps_components, eps_offdiag, mu_components, sigma_components, sigma_m_components, nonlinearity = _static_structure_material(structure)
     has_offdiag = any(value != 0.0 for value in eps_offdiag.values())
     if has_offdiag and averaging == "polarized":
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "Polarized (Kottke) subpixel averaging is not implemented for full (off-diagonal) "
-            "anisotropic permittivity; use arithmetic subpixel averaging."
+            "anisotropic permittivity; use arithmetic subpixel averaging.",
+            feature="material.full_tensor", method=None
         )
     occupancy = _geometry_occupancy(
         scene,
@@ -847,7 +855,7 @@ def _apply_structure_material(
         fill_spacing=fill_spacing,
     )
     if "modulation_owner" in model:
-        owner = (next(index for index, item in enumerate(_bulk_structures(scene), 1) if item is structure)
+        owner = (next(index for index, item in enumerate(_bulk_structures(scene.scene), 1) if item is structure)
                  if getattr(structure.material, "modulation", None) is not None else 0)
         model["modulation_owner"] = torch.where(
             occupancy == 1, owner,
@@ -972,46 +980,58 @@ def _compile_material_sample(
     fill_spacing=None,
     full_tensor=False,
     modulation_quadrature=None,
+    prefix_key=None,
 ):
-    model = _new_material_model(scene, layout, eps_fill=eps_background, mu_fill=mu_background)
-    inverse_components = None
-    if collect_inverse:
-        shape = (scene.Nx, scene.Ny, scene.Nz)
-        inverse_components = {
-            "eps_components": _new_component_field(
-                shape,
-                fill_value=1.0 / (float(eps_background) + _HARMONIC_EPS),
-                device=scene.device,
-                dtype=_material_dtype(scene)),
-            "mu_components": _new_component_field(
-                shape,
-                fill_value=1.0 / (float(mu_background) + _HARMONIC_EPS),
-                device=scene.device,
-                dtype=_material_dtype(scene)),
-        }
+    """One node sample of the material model.
+
+    ``prefix_key`` (sample counts and index) names the static structure prefix of this sample for
+    :mod:`.static_cache`; ``None`` always compiles it.
+    """
     coords = _coordinate_grids(scene, sample_offset)
     capture = getattr(scene, "_conductivity_capture", None)
     if capture is not None:
         capture.begin("nodes", coords[0].shape)
     geometry_periodic_shifts = geometry_periodic_shifts or {}
 
-    for structure, structure_slots in zip(_bulk_structures(scene), layout["structure_slots"]):
-        model = _apply_structure_material(
-            scene,
-            model,
-            structure,
-            structure_slots,
-            coords=coords,
-            eps_background=eps_background,
-            mu_background=mu_background,
-            averaging=averaging,
-            half_weight_boundary=half_weight_boundary,
-            periodic_shift_options=geometry_periodic_shifts.get(id(structure.geometry)),
-            inverse_components=inverse_components,
-            fill_spacing=fill_spacing,
-            full_tensor=full_tensor,
-            modulation_quadrature=modulation_quadrature,
-        )
+    def structure_prefix():
+        model = _new_material_model(scene, layout, eps_fill=eps_background, mu_fill=mu_background)
+        inverse_components = None
+        if collect_inverse:
+            shape = (scene.Nx, scene.Ny, scene.Nz)
+            inverse_components = {
+                "eps_components": _new_component_field(
+                    shape,
+                    fill_value=1.0 / (float(eps_background) + _HARMONIC_EPS),
+                    device=scene.device,
+                    dtype=_material_dtype(scene)),
+                "mu_components": _new_component_field(
+                    shape,
+                    fill_value=1.0 / (float(mu_background) + _HARMONIC_EPS),
+                    device=scene.device,
+                    dtype=_material_dtype(scene)),
+            }
+        for structure, structure_slots in zip(_bulk_structures(scene.scene), layout["structure_slots"]):
+            model = _apply_structure_material(
+                scene,
+                model,
+                structure,
+                structure_slots,
+                coords=coords,
+                eps_background=eps_background,
+                mu_background=mu_background,
+                averaging=averaging,
+                half_weight_boundary=half_weight_boundary,
+                periodic_shift_options=geometry_periodic_shifts.get(id(structure.geometry)),
+                inverse_components=inverse_components,
+                fill_spacing=fill_spacing,
+                full_tensor=full_tensor,
+                modulation_quadrature=modulation_quadrature,
+            )
+        return model, inverse_components
+
+    model, inverse_components = static_prefix(scene, None if prefix_key is None else (
+        "nodes", *prefix_key, eps_background, mu_background, averaging, half_weight_boundary,
+        collect_inverse, full_tensor, modulation_quadrature), structure_prefix)
     if region_densities:
         model = _apply_material_regions(
             scene,
@@ -1042,7 +1062,7 @@ def _axis_averaging_width(scene, axis):
     float32 tensor so the offsets scale with the local cell size. It reduces to
     the constant spacing on a uniformly spaced custom axis.
     """
-    grid = scene.grid
+    grid = scene.scene.grid
     if not (grid.is_custom or grid.is_auto):
         return _uniform_axis_spacing(scene, axis)
     dual = getattr(scene, f"d{axis}_dual64")
@@ -1073,7 +1093,7 @@ def _dual_cell_center_offset(scene, axis):
     widths are rounded at sampling precision before subtraction so represented
     uniform axes retain exactly zero displacement.
     """
-    if not (scene.grid.is_custom or scene.grid.is_auto):
+    if not (scene.scene.grid.is_custom or scene.scene.grid.is_auto):
         return 0.0
     primal = torch.as_tensor(getattr(scene, f"d{axis}_primal64"), device=scene.device, dtype=_material_dtype(scene))
     offset = primal.new_zeros(primal.numel()+1)
@@ -1151,7 +1171,7 @@ def _edge_axis_offsets(scene, axis, count, staggered):
     """
     if count == 1:
         return [0.0]
-    grid = scene.grid
+    grid = scene.scene.grid
     if not (grid.is_custom or grid.is_auto):
         width = _uniform_axis_spacing(scene, axis)
     elif staggered:
@@ -1252,7 +1272,7 @@ def _mapped_dual_face_weights(scene, component, y_base64, y_offsets):
     normalized weights are constant for this chart. The metric Hodge is
     still evaluated at the component center by attach_coordinate_metric.
     """
-    chart=getattr(scene,"coordinates",None)
+    chart=getattr(scene.scene,"coordinates",None)
     if chart is None or chart.curvature==0 or component!="Ez" or len(y_offsets)==1:
         return None
     offsets=torch.stack([torch.as_tensor(offset,device=scene.device,dtype=torch.float64).expand_as(y_base64)
@@ -1264,13 +1284,15 @@ def _mapped_dual_face_weights(scene, component, y_base64, y_offsets):
 
 
 def _compile_kottke_edge_component(scene, component, bases, samples, background,
-                                   region_densities, geometry_periodic_shifts, modulation_quadrature=None, *, smooth=False):
+                                   region_densities, geometry_periodic_shifts, modulation_quadrature=None, *, smooth=False,
+                                   constituent_values=None):
     """Local-moment quadrature in interface windows, with later-object priority.
 
     Fixed solid meshes prune center queries by padded world-space bounds. Binary
     samples query each structure only in its straddling windows; smooth samples
     use curvature-corrected fractional coverage. Packed chunks bound temporary
-    sample storage independently of the scene size.
+    sample storage independently of the scene size. ``constituent_values`` is
+    the structure-value override of :func:`_compile_edge_component`.
     """
     from witwin.core import Mesh
 
@@ -1282,7 +1304,7 @@ def _compile_kottke_edge_component(scene, component, bases, samples, background,
     points = torch.stack(coords, -1).reshape(-1, 3)
     widths = []
     for index, a in enumerate(_AXES):
-        if not (scene.grid.is_custom or scene.grid.is_auto):
+        if not (scene.scene.grid.is_custom or scene.scene.grid.is_auto):
             width = points.new_full((len(bases[a]),), _uniform_axis_spacing(scene, a))
         else:
             if index in stagger:
@@ -1303,11 +1325,13 @@ def _compile_kottke_edge_component(scene, component, bases, samples, background,
     lattice = [(torch.arange(n, device=scene.device, dtype=points.dtype) + .5) / n - .5 for n in samples]
     offsets = torch.stack(torch.meshgrid(*lattice, indexing="ij"), -1).reshape(-1, 3)
     entries = []
-    for structure in _bulk_structures(scene):
+    for index, structure in enumerate(_bulk_structures(scene.scene)):
         parts = _static_structure_material(structure)
         value = parts[1 if electric else 3][axis] * background
+        if constituent_values is not None and index in constituent_values:
+            value = constituent_values[index]
         entries.append((structure.geometry, value, structure, None))
-    for region, density in zip(scene.material_regions, region_densities):
+    for region, density in zip(scene.scene.material_regions, region_densities):
         entries.append((region.geometry, None, region, density))
     if modulation_quadrature is None and all(value is not None and not _contains_trainable_tensor(value) and bool(value == background) and
            not (electric and isinstance(owner.material, PerturbationMedium))
@@ -1327,8 +1351,8 @@ def _compile_kottke_edge_component(scene, component, bases, samples, background,
         shifts = geometry_periodic_shifts[id(geometry)]
         if shifts is None:
             shifts = tuple((-float(hi-lo), 0., float(hi-lo))
-                           if scene.boundary.axis_kind(a) in ("periodic", "bloch") else (0.,)
-                           for a, (lo, hi) in zip(_AXES, scene.domain.bounds))
+                           if scene.scene.boundary.axis_kind(a) in ("periodic", "bloch") else (0.,)
+                           for a, (lo, hi) in zip(_AXES, scene.scene.domain.bounds))
         for shift in product(*shifts):
             shifted = query - query.new_tensor(shift)
             active = torch.ones(len(query), device=query.device, dtype=torch.bool)
@@ -1362,8 +1386,8 @@ def _compile_kottke_edge_component(scene, component, bases, samples, background,
         shifts = geometry_periodic_shifts[id(entry[0])]
         if shifts is None:
             shifts = tuple((-float(hi-lo), 0., float(hi-lo))
-                           if scene.boundary.axis_kind(a) in ("periodic", "bloch") else (0.,)
-                           for a, (lo, hi) in zip(_AXES, scene.domain.bounds))
+                           if scene.scene.boundary.axis_kind(a) in ("periodic", "bloch") else (0.,)
+                           for a, (lo, hi) in zip(_AXES, scene.scene.domain.bounds))
         fill = query.new_zeros(len(query))
         for shift in product(*shifts):
             shifted = query - query.new_tensor(shift)
@@ -1417,6 +1441,7 @@ def _compile_edge_component(
     geometry_periodic_shifts,
     selection=None,
     modulation_quadrature=None,
+    constituent_values=None,
 ):
     """Edge-native diagonal permittivity/permeability and conductivity for one component.
 
@@ -1429,6 +1454,10 @@ def _compile_edge_component(
     retaining a one-cell differentiation halo. It does not prove that changing
     a geometry or density has compact support outside that patch. Partial
     periodic-axis selections require a separate opposite-face halo plan.
+
+    ``constituent_values`` maps a bulk-structure index to the relative value that
+    replaces that structure's static eps/mu on this component; the pole-limit
+    weighting samples the same window rule with the static (zero-frequency) media.
     """
     axis = _EDGE_POLARIZATION_AXIS[component]
     stagger = _EDGE_STAGGER_AXES[component]
@@ -1460,9 +1489,10 @@ def _compile_edge_component(
                     or not isinstance(start, int) or not isinstance(stop, int)
                     or not 0 <= start < stop <= size):
                 raise ValueError(f"Invalid edge material selection on {grid_axis}: {selected} for size {size}.")
-            if scene.boundary.axis_kind(grid_axis) in ("periodic", "bloch") and (start != 0 or stop != size):
-                raise NotImplementedError(
-                    "Partial sampling along periodic axes requires opposite-face halo routing."
+            if scene.scene.boundary.axis_kind(grid_axis) in ("periodic", "bloch") and (start != 0 or stop != size):
+                raise UnsupportedFeatureError(
+                    "Partial sampling along periodic axes requires opposite-face halo routing.",
+                    feature="boundary.periodic", method=None
                 )
             # Both signed-distance normals and subpixel normal reconstruction
             # use a radius-one finite difference. Retain global-edge one-sided
@@ -1489,8 +1519,8 @@ def _compile_edge_component(
     polarized = averaging in {"polarized", "polarized_tensor", "kottke_edge", "kottke_smooth"}
     polarized_direct = polarized and len(offset_combos) == 1
 
-    structures = list(_bulk_structures(scene))
-    regions = list(zip(getattr(scene, "material_regions", ()), region_densities))
+    structures = list(_bulk_structures(scene.scene))
+    regions = list(zip(getattr(scene.scene, "material_regions", ()), region_densities))
     if kottke_edge:
         # Only structures can carry conductivity here: MaterialRegion has no sigma
         # (eps/mu bounds only) and PreparedScene rejects background declarations.
@@ -1502,7 +1532,7 @@ def _compile_edge_component(
         if scalar and lossless:
             material = _compile_kottke_edge_component(
                 scene, component, bases, samples, background, region_densities, geometry_periodic_shifts,
-                modulation_quadrature, smooth=averaging == "kottke_smooth")
+                modulation_quadrature, smooth=averaging == "kottke_smooth", constituent_values=constituent_values)
             sigma = torch.zeros_like(material)
             return (material[crop].contiguous(), sigma[crop].contiguous()) if crop is not None else (material.contiguous(), sigma)
 
@@ -1517,63 +1547,72 @@ def _compile_edge_component(
         capture = getattr(scene, "_conductivity_capture", None) if electric else None
         if capture is not None:
             capture.begin(component, shape)
-        material_acc = torch.full(shape, background, device=scene.device, dtype=_material_dtype(scene))
-        sigma_acc = torch.zeros(shape, device=scene.device, dtype=_material_dtype(scene))
-        inverse_acc = (
-            torch.full(shape, 1.0 / (background + _HARMONIC_EPS), device=scene.device, dtype=_material_dtype(scene))
-            if (polarized and not polarized_direct)
-            else None
-        )
-        anisotropic_sample = None
-        for structure in structures:
-            parts = _static_structure_material(structure)
-            eps_components = parts[1]
-            mu_components = parts[3]
-            sigma_components = parts[4]
-            sigma_m_components = parts[5]
-            occupancy = _geometry_occupancy(
-                scene,
-                structure.geometry,
-                coords=coords,
-                half_weight_boundary=half_weight_boundary,
-                periodic_shift_options=geometry_periodic_shifts.get(id(structure.geometry)),
-                wrap_skip_axes=stagger,
-                fill_spacing=fill_spacing,
-            )
-            if kottke_edge:
-                if anisotropic_sample is not None:
-                    anisotropic_sample = anisotropic_sample & (occupancy < 1)
-                components = eps_components if electric else mu_components
-                offdiag = parts[2] if electric else {}
-                if _anisotropic_epsilon(components, offdiag):
-                    occupied = occupancy > 0
-                    anisotropic_sample = occupied if anisotropic_sample is None else anisotropic_sample | occupied
-            if capture is not None:
-                capture.record(structure.name, occupancy)
-            normal_axis = (
-                _interface_normals(scene, structure.geometry, coords=coords)[axis]
-                if polarized_direct
+        def structure_prefix():
+            material_acc = torch.full(shape, background, device=scene.device, dtype=_material_dtype(scene))
+            sigma_acc = torch.zeros(shape, device=scene.device, dtype=_material_dtype(scene))
+            inverse_acc = (
+                torch.full(shape, 1.0 / (background + _HARMONIC_EPS), device=scene.device, dtype=_material_dtype(scene))
+                if (polarized and not polarized_direct)
                 else None
             )
-            if electric:
-                value = eps_components[axis] * float(eps_background)
-                # PerturbationMedium: eps(x) = eps_base + eps_sensitivity *
-                # eps_background * perturbation(x), sampled at this Yee location so
-                # the zero-perturbation limit reduces exactly to the base material.
-                delta = _edge_structure_perturbation_delta(
-                    scene, structure, parts[0], coords, eps_background
+            anisotropic_sample = None
+            for structure_index, structure in enumerate(structures):
+                parts = _static_structure_material(structure)
+                eps_components = parts[1]
+                mu_components = parts[3]
+                sigma_components = parts[4]
+                sigma_m_components = parts[5]
+                occupancy = _geometry_occupancy(
+                    scene,
+                    structure.geometry,
+                    coords=coords,
+                    half_weight_boundary=half_weight_boundary,
+                    periodic_shift_options=geometry_periodic_shifts.get(id(structure.geometry)),
+                    wrap_skip_axes=stagger,
+                    fill_spacing=fill_spacing,
                 )
-                if delta is not None:
-                    value = value + delta
-                value = _modulated_material_value(scene, structure, value, coords, modulation_quadrature)
-                sigma_value = sigma_components[axis]
-            else:
-                value = mu_components[axis] * float(mu_background)
-                sigma_value = sigma_m_components[axis]
-            material_acc, inverse_acc = _blend_edge_component(
-                material_acc, inverse_acc, occupancy, normal_axis, value, polarized_direct=polarized_direct
-            )
-            sigma_acc = _blend_material(sigma_acc, occupancy, value=sigma_value)
+                if kottke_edge:
+                    if anisotropic_sample is not None:
+                        anisotropic_sample = anisotropic_sample & (occupancy < 1)
+                    components = eps_components if electric else mu_components
+                    offdiag = parts[2] if electric else {}
+                    if _anisotropic_epsilon(components, offdiag):
+                        occupied = occupancy > 0
+                        anisotropic_sample = occupied if anisotropic_sample is None else anisotropic_sample | occupied
+                if capture is not None:
+                    capture.record(structure.name, occupancy)
+                normal_axis = (
+                    _interface_normals(scene, structure.geometry, coords=coords)[axis]
+                    if polarized_direct
+                    else None
+                )
+                if electric:
+                    value = eps_components[axis] * float(eps_background)
+                    # PerturbationMedium: eps(x) = eps_base + eps_sensitivity *
+                    # eps_background * perturbation(x), sampled at this Yee location so
+                    # the zero-perturbation limit reduces exactly to the base material.
+                    delta = _edge_structure_perturbation_delta(
+                        scene, structure, parts[0], coords, eps_background
+                    )
+                    if delta is not None:
+                        value = value + delta
+                    value = _modulated_material_value(scene, structure, value, coords, modulation_quadrature)
+                    sigma_value = sigma_components[axis]
+                else:
+                    value = mu_components[axis] * float(mu_background)
+                    sigma_value = sigma_m_components[axis]
+                if constituent_values is not None and structure_index in constituent_values:
+                    value = constituent_values[structure_index]
+                material_acc, inverse_acc = _blend_edge_component(
+                    material_acc, inverse_acc, occupancy, normal_axis, value, polarized_direct=polarized_direct
+                )
+                sigma_acc = _blend_material(sigma_acc, occupancy, value=sigma_value)
+            return material_acc, inverse_acc, sigma_acc, anisotropic_sample
+
+        material_acc, inverse_acc, sigma_acc, anisotropic_sample = static_prefix(
+            scene, None if selection is not None or constituent_values is not None else (
+                "edge", component, tuple(int(n) for n in samples), sample_index, averaging,
+                eps_background, mu_background, modulation_quadrature), structure_prefix)
         for region, density in regions:
             occupancy = _geometry_occupancy(
                 scene,
@@ -1633,7 +1672,7 @@ def _compile_edge_component(
     if kottke_edge:
         window = _compile_kottke_edge_component(
             scene, component, bases, samples, background, region_densities, geometry_periodic_shifts,
-            modulation_quadrature, smooth=averaging == "kottke_smooth"
+            modulation_quadrature, smooth=averaging == "kottke_smooth", constituent_values=constituent_values
         )
         material_mean = window if anisotropic is None else torch.where(anisotropic, material_mean, window)
     if crop is not None:
@@ -1653,15 +1692,18 @@ class _PCBConductivityReplay:
     """
 
     def __init__(self, scene):
-        if scene.subpixel.averaging == "kottke_smooth":
-            raise NotImplementedError("PCB conductivity replay does not support kottke_smooth averaging.")
-        if scene.subpixel.averaging == "kottke_edge":
-            raise NotImplementedError("PCB conductivity replay does not support kottke_edge averaging.")
-        if scene.subpixel.averaging == "polarized_tensor":
-            raise NotImplementedError("PCB conductivity replay does not support polarized_tensor averaging.")
+        if scene.scene.subpixel.averaging == "kottke_smooth":
+            raise UnsupportedFeatureError("PCB conductivity replay does not support kottke_smooth averaging.",
+                                          feature="guard:8fb1d6cf", method=None)
+        if scene.scene.subpixel.averaging == "kottke_edge":
+            raise UnsupportedFeatureError("PCB conductivity replay does not support kottke_edge averaging.",
+                                          feature="guard:0c8c1cee", method=None)
+        if scene.scene.subpixel.averaging == "polarized_tensor":
+            raise UnsupportedFeatureError("PCB conductivity replay does not support polarized_tensor averaging.",
+                                          feature="guard:1e644587", method=None)
         self.samples, self.shapes = {}, {}
         scene._conductivity_capture = self
-        self.model = scene.compile_materials()
+        self.model = compile_materials(scene)
         del scene._conductivity_capture
         self.selections = {}
         for component, samples in self.samples.items():
@@ -1725,7 +1767,7 @@ def _edge_native_eligible(scene, model, surface_layout):
     """
     if material_model_has_full_anisotropy(model) and not model.get('subpixel_full_tensor', False):
         return False
-    if _sheet_structures(scene):
+    if _sheet_structures(scene.scene):
         return False
     if surface_layout is not None and getattr(surface_layout, "metals", ()):
         return False
@@ -1814,7 +1856,7 @@ def _compile_binary_pole_edges(scene, model, layout, *, samples, eps_background,
 
     from ..fdtd.runtime.materials import average_node_to_component, average_node_to_magnetic_component
 
-    structures = _bulk_structures(scene)
+    structures = _bulk_structures(scene.scene)
     parts = [_static_structure_material(s) for s in structures]
     graded = [any(layout[key + "_poles"][slot].get("graded", False)
                   for key, slots in structure_slots.items() for slot in slots)
@@ -1897,7 +1939,7 @@ def _compile_binary_pole_edges(scene, model, layout, *, samples, eps_background,
                     else:
                         touch |= support
             touch &= ~graded_touch
-            for region, density in zip(scene.material_regions, region_densities):
+            for region, density in zip(scene.scene.material_regions, region_densities):
                 inside = _geometry_occupancy(
                     scene, region.geometry, coords=coords64,
                     periodic_shift_options=geometry_periodic_shifts[id(region.geometry)],
@@ -1961,6 +2003,98 @@ def _compile_binary_pole_edges(scene, model, layout, *, samples, eps_background,
                                    geometry_periodic_shifts, graded_masks)
 
 
+_POLE_WEIGHT_SNAP = 1.0e-5
+# Averaging policies whose interface pole weights follow their static window rule;
+# kottke_edge selects centre-owned poles instead (_compile_binary_pole_edges).
+_POLE_WEIGHTED_AVERAGING = ("polarized", "polarized_tensor", "kottke_smooth")
+
+
+def _compile_polarized_pole_edges(scene, model, layout, *, samples, averaging, eps_background,
+                                  mu_background, region_densities, geometry_periodic_shifts):
+    """Interface pole weights consistent with the polarized-family static rule.
+
+    The polarized, polarized_tensor and kottke_smooth rules reconstruct each
+    edge's high-frequency permittivity ``K(eps_inf)`` from its window, while the
+    pole weights are volume fractions. An
+    interface edge then realizes ``K(eps_inf) + <delta_eps>``: the dispersive part
+    of the medium is blended arithmetically. Here each structure's pole weights on
+    a Yee component become ``f_i * s`` with ``f_i`` its arithmetic window fraction
+    and ``s = (K(eps_0) - K(eps_inf)) / (A(eps_0) - A(eps_inf))``, the ratio of the
+    window-rule to the arithmetic increment from the high-frequency to the static
+    (``eps_0 = eps_inf + sum delta_eps``) constituents. The edge reproduces the
+    window rule exactly as omega -> 0 and omega -> inf; pole frequencies keep
+    their bulk values. Drude poles have no finite static limit and keep ``f_i``.
+    Spatially varying, modulated and perturbation media and the gradient modes
+    (design densities, trainable geometry) keep their volume weights.
+    """
+    edge = model["edge_components"]
+    if edge is None:
+        return
+    structures = _bulk_structures(scene.scene)
+    entries = [entry for key in ("debye_poles", "drude_poles", "lorentz_poles",
+                                 "mu_debye_poles", "mu_drude_poles", "mu_lorentz_poles") for entry in layout[key]]
+    if any(entry["amplitude"] is not None or entry.get("graded", False) for entry in entries):
+        return
+    if any(getattr(s.material, "modulation", None) is not None or isinstance(s.material, PerturbationMedium)
+           for s in structures):
+        return
+    # Gradient modes (design densities, trainable geometry) keep the differentiable volume weights.
+    if region_densities or any(_contains_trainable_tensor(value) for s in structures
+                               for value in vars(s.geometry).values()):
+        return
+    parts = [_static_structure_material(structure) for structure in structures]
+    for prefix, components, channel, background, static_index in (
+        ("", _ELECTRIC_EDGE_COMPONENTS, "eps", eps_background, 1),
+        ("mu_", _MAGNETIC_EDGE_COMPONENTS, "mu", mu_background, 3),
+    ):
+        kinds = ("debye", "drude", "lorentz")
+        carriers = [index for index, slots in enumerate(layout["structure_slots"])
+                    if any(slots[prefix + kind] for kind in kinds)]
+        if not carriers:
+            continue
+        static_delta = {
+            index: sum(float(layout[prefix + kind + "_poles"][slot]["pole"].delta_eps)
+                       for kind in ("debye", "lorentz")
+                       for slot in layout["structure_slots"][index][prefix + kind])
+            for index in carriers
+        }
+        for entry in (model[prefix + kind + "_poles"][slot] for index in carriers for kind in kinds
+                      for slot in layout["structure_slots"][index][prefix + kind]):
+            entry.setdefault("edge_weights", {})
+        for component in components:
+            axis = component[-1].lower()
+
+            def sample(values, rule):
+                return _compile_edge_component(
+                    scene, component, eps_background=eps_background, mu_background=mu_background,
+                    averaging=rule, samples=samples, region_densities=region_densities,
+                    geometry_periodic_shifts=geometry_periodic_shifts, constituent_values=values,
+                )[0]
+
+            base = {index: parts[index][static_index][axis] * float(background) for index in carriers}
+            arithmetic_inf = sample({}, "arithmetic")
+            fractions = {}
+            for index in carriers:
+                fraction = (sample({index: base[index] + 1.0}, "arithmetic") - arithmetic_inf).clamp(0.0, 1.0)
+                fraction = torch.where(fraction < _POLE_WEIGHT_SNAP, torch.zeros_like(fraction), fraction)
+                fractions[index] = torch.where(fraction > 1.0 - _POLE_WEIGHT_SNAP, torch.ones_like(fraction), fraction)
+            static = {index: base[index] + static_delta[index] for index in carriers if static_delta[index] != 0.0}
+            scale = None
+            if static:
+                increment = sample(static, averaging) - sample({}, averaging)
+                arithmetic_increment = sum(fractions[index] * static_delta[index] for index in static)
+                resolved = arithmetic_increment > _POLE_WEIGHT_SNAP
+                scale = torch.where(resolved, increment / torch.where(resolved, arithmetic_increment,
+                                                                      torch.ones_like(arithmetic_increment)),
+                                    torch.ones_like(increment))
+                scale = torch.where((scale - 1.0).abs() < _POLE_WEIGHT_SNAP, torch.ones_like(scale), scale)
+            for index in carriers:
+                for kind in kinds:
+                    for slot in layout["structure_slots"][index][prefix + kind]:
+                        weight = fractions[index] if kind == "drude" or scale is None else fractions[index] * scale
+                        model[prefix + kind + "_poles"][slot]["edge_weights"][component] = weight.contiguous()
+
+
 def _compile_pole_tensor_nodes(scene, model, background, region_densities, shifts, graded_masks):
     """Remove subpixel tensor mixing on the support of centre-owned pole edges.
 
@@ -1983,7 +2117,7 @@ def _compile_pole_tensor_nodes(scene, model, background, region_densities, shift
     mask &= ~graded_nodes
     selected = {pair: torch.full_like(reference, float(background) if pair[0] == pair[1] else 0.)
                 for pair in ("xx", "yy", "zz", "xy", "xz", "yz")}
-    for structure in _bulk_structures(scene):
+    for structure in _bulk_structures(scene.scene):
         part = _static_structure_material(structure)
         inside = _geometry_occupancy(scene, structure.geometry,
             periodic_shift_options=shifts[id(structure.geometry)], surface_inclusive=True) >= .5
@@ -1996,7 +2130,7 @@ def _compile_pole_tensor_nodes(scene, model, background, region_densities, shift
             else:
                 value = value * float(background)
             selected[pair] = torch.where(inside, value, selected[pair])
-    for region, density in zip(scene.material_regions, region_densities):
+    for region, density in zip(scene.scene.material_regions, region_densities):
         inside = _geometry_occupancy(scene, region.geometry,
             periodic_shift_options=shifts[id(region.geometry)], surface_inclusive=True) >= .5
         lo, hi = region.eps_bounds
@@ -2077,7 +2211,7 @@ def _box_parameter_field(scene, geometry, values, *, name: str):
 
 def _density_kernel_size(scene, filter_radius: float) -> tuple[int, int, int]:
     kernel = []
-    for spacing in scene.grid.min_spacing:
+    for spacing in scene.scene.grid.min_spacing:
         cells = int(np.ceil(float(filter_radius) / float(spacing)))
         kernel.append(max(1, 2 * cells + 1))
     return tuple(kernel)
@@ -2155,7 +2289,7 @@ def _sample_material_region_density(
 def _material_region_design_mask(scene, reference: torch.Tensor) -> torch.Tensor:
     """Return the nominal hard Box support retained by the public design metadata."""
     mask = torch.zeros(reference.shape, dtype=torch.bool, device=reference.device)
-    for region in getattr(scene, "material_regions", ()):
+    for region in getattr(scene.scene, "material_regions", ()):
         slices = _box_axis_slices(scene, region.geometry)
         if slices is not None:
             mask[slices] = True
@@ -2178,7 +2312,7 @@ def _apply_material_regions(
     eps_base = {axis: model["eps_components"][axis].clone() for axis in _AXES}
     mu_base = {axis: model["mu_components"][axis].clone() for axis in _AXES}
 
-    for region, density in zip(scene.material_regions, region_densities):
+    for region, density in zip(scene.scene.material_regions, region_densities):
         occupancy = _geometry_occupancy(
             scene,
             region.geometry,
@@ -2299,9 +2433,10 @@ def _pmc_occupancy(scene):
     occupancy = None
     for structure in structures:
         if isinstance(structure.geometry, (PlanarPEC, SurfaceMesh)):
-            raise NotImplementedError(
+            raise UnsupportedFeatureError(
                 "A PMC material requires a volumetric geometry; PlanarPEC and SurfaceMesh "
-                "describe zero-thickness electric conductors with no dual magnetic-sheet support."
+                "describe zero-thickness electric conductors with no dual magnetic-sheet support.",
+                feature="material.pmc", method=None
             )
         sample = _geometry_occupancy(
             scene, structure.geometry, beta=beta, half_weight_boundary=True
@@ -2315,7 +2450,7 @@ def _pec_periodic_shift_options(scene):
     domain_range = getattr(scene, "physical_domain_range", None)
     options = []
     for axis_index, axis in enumerate(("x", "y", "z")):
-        if domain_range is not None and scene.boundary.axis_kind(axis) in ("periodic", "bloch"):
+        if domain_range is not None and scene.scene.boundary.axis_kind(axis) in ("periodic", "bloch"):
             span = float(domain_range[2 * axis_index + 1]) - float(domain_range[2 * axis_index])
             options.append((-span, 0.0, span))
         else:
@@ -2343,7 +2478,7 @@ def _pec_signed_distance(scene, coords=None):
             # Float32 geometry arithmetic can put an exactly aligned face a few
             # ulps outside its node plane. Match the existing material-boundary
             # convention; otherwise a one-cell foil loses both tangential faces.
-            tolerance = 1.0e-5 * min(scene.grid.min_spacing)
+            tolerance = 1.0e-5 * min(scene.scene.grid.min_spacing)
             exact_boundary = sample - sample.detach()
             sample = torch.where(sample.abs() <= tolerance, exact_boundary, sample)
             union = sample if union is None else torch.minimum(union, sample)
@@ -2405,15 +2540,17 @@ def _sheet_plane_layout(scene, structure):
     material = _structure_material(structure)
     label = type(material).__name__
     if not isinstance(geometry, Box):
-        raise NotImplementedError(
-            f"{label} sheets currently support Box structure geometry only, got {type(geometry).__name__}."
+        raise UnsupportedFeatureError(
+            f"{label} sheets currently support Box structure geometry only, got {type(geometry).__name__}.",
+            feature="guard:663deac6", method=None
         )
     rotation = getattr(geometry, "rotation", None)
     if rotation is not None:
         # Geometry stores rotations as [w, x, y, z] quaternions; only identity is allowed.
         quaternion = np.asarray(rotation.detach().cpu(), dtype=np.float64)
         if not np.allclose(np.abs(quaternion), (1.0, 0.0, 0.0, 0.0), atol=1.0e-6):
-            raise NotImplementedError(f"{label} sheets require an axis-aligned (unrotated) Box geometry.")
+            raise UnsupportedFeatureError(f"{label} sheets require an axis-aligned (unrotated) Box geometry.",
+                                          feature="guard:74e60932", method=None)
     sizes = tuple(float(value) for value in geometry.size)
     zero_axes = [index for index, value in enumerate(sizes) if value == 0.0]
     if len(zero_axes) != 1:
@@ -2461,7 +2598,7 @@ def _apply_sheet_structures(scene, model):
     are additive with bulk conductivity and with other sheets, matching the
     physical superposition of surface currents.
     """
-    sheets = _sheet_structures(scene)
+    sheets = _sheet_structures(scene.scene)
     if not sheets:
         return model
     for structure in sheets:
@@ -2535,11 +2672,12 @@ def _reject_surface_impedance(reason: str, *, phase: str):
     the oblique/curved (conformal) and Bloch-periodic cases are converged in later
     phases.
     """
-    raise NotImplementedError(
+    raise UnsupportedFeatureError(
         f"Surface-impedance boundary: {reason} "
         f"The runtime is generalized to this case in {phase}; until then resolve the "
         "metal volumetrically with Material(sigma_e=...) or use Material.pec() for a "
-        "lossless conductor."
+        "lossless conductor.",
+        feature="material.surface_impedance", method=None
     )
 
 
@@ -2587,7 +2725,7 @@ def _declared_geometry(scene, structure):
     public = getattr(scene, "_public_scene", None)
     for record in getattr(scene, "pml_extrusions", ()) if public is not None else ():
         index = record.get("structure_index")
-        if index is not None and record["kind"] in ("box", "wrapper") and scene.structures[index] is structure:
+        if index is not None and record["kind"] in ("box", "wrapper") and scene.scene.structures[index] is structure:
             return public.structures[index].geometry
     return getattr(structure, "geometry", None)
 
@@ -2599,7 +2737,7 @@ def _reject_overlapping_surface_ownership(scene, surface_structures):
     (E_t = 0) and a surface impedance (E_t = Z_s (n x H)) on the same face are two
     contradictory owners of the same degree of freedom.
     """
-    others = (*pec_structures(scene), *_sheet_structures(scene))
+    others = (*pec_structures(scene), *_sheet_structures(scene.scene))
     if not others:
         return
     for surface in surface_structures:
@@ -2736,7 +2874,7 @@ def _surface_metal_conductivity(material) -> float | None:
 def _surface_impedance_structures(scene):
     """Enabled structures carrying any surface-impedance material (metal or rational)."""
     structures = []
-    for index, structure in enumerate(scene.structures):
+    for index, structure in enumerate(scene.scene.structures):
         if not getattr(structure, "enabled", True):
             continue
         material = _structure_material(structure)
@@ -2967,7 +3105,7 @@ def compile_surface_impedance_layout(scene):
     surface_structures = [structure for _, structure in indexed]
     _reject_overlapping_surface_ownership(scene, surface_structures)
 
-    physical_bounds = scene.domain.bounds
+    physical_bounds = scene.scene.domain.bounds
     tolerances = tuple(
         1.0e-6 * max(float(upper) - float(lower), 1.0)
         for lower, upper in physical_bounds
@@ -2978,7 +3116,7 @@ def compile_surface_impedance_layout(scene):
     for structure_index, structure in indexed:
         material = _structure_material(structure)
         geometry = structure.geometry
-        if scene.boundary.uses_kind("bloch"):
+        if scene.scene.boundary.uses_kind("bloch"):
             _reject_surface_impedance(
                 "uses a real-valued surface update; a Bloch-periodic run carries complex "
                 "phase-shifted fields for which the real surface update is undefined.",
@@ -3167,26 +3305,27 @@ def compile_material_model(
     subpixel=None,
     include_edges=True,
 ):
-    chart = getattr(scene, "coordinates", None)
+    chart = getattr(scene.scene, "coordinates", None)
     if chart is not None:
         bounds = tuple((float(getattr(scene, axis + "_nodes64")[0]), float(getattr(scene, axis + "_nodes64")[-1])) for axis in "xyz")
         chart.validate_bounds(bounds)
     if subpixel is None:
-        subpixel = scene.subpixel
+        subpixel = scene.scene.subpixel
     samples, averaging, _ = _resolve_subpixel(subpixel)
     if averaging == "kottke_edge" and any(
         _contains_trainable_tensor(value)
-        for item in (*scene.structures, *scene.material_regions)
+        for item in (*scene.scene.structures, *scene.scene.material_regions)
         for value in vars(item.geometry).values()
     ):
         raise ValueError("kottke_edge (the default subpixel averaging) is not differentiable in geometry; set SubpixelSpec(averaging='kottke_smooth') or 'polarized' for shape gradients.")
     if averaging == "kottke_edge" and any(
         _contains_trainable_tensor(value)
-        for region in scene.material_regions
+        for region in scene.scene.material_regions
         for value in vars(region).values()
     ):
         raise ValueError("kottke_edge (the default subpixel averaging) does not support gradients through MaterialRegion design densities; set SubpixelSpec(samples=1, averaging='arithmetic') for density/topology optimization.")
-    with _mesh_fill_cache(scene, samples, include_edges):
+    with _mesh_fill_cache(scene, samples, include_edges), static_prefix_frame(
+            scene, samples, eps_background, mu_background):
         from .accel.dispatch import UNCHANGED, try_compile_material_model
         model = try_compile_material_model(scene, eps_background, mu_background, subpixel, include_edges)
         if model is UNCHANGED:
@@ -3200,9 +3339,9 @@ def compile_material_model(
             grad_enabled = torch.is_grad_enabled()
             with torch.inference_mode(False), torch.set_grad_enabled(grad_enabled):
                 region_densities = tuple(_prepare_material_region_density(scene, region)
-                                         for region in scene.material_regions)
-                geometries = [s.geometry for s in _bulk_structures(scene)]
-                geometries.extend(region.geometry for region in scene.material_regions)
+                                         for region in scene.scene.material_regions)
+                geometries = [s.geometry for s in _bulk_structures(scene.scene)]
+                geometries.extend(region.geometry for region in scene.scene.material_regions)
                 shifts = {id(g): _static_periodic_shift_options(scene, g) for g in geometries}
                 absolute = {}
                 for index, name in enumerate(("cos", "sin")):
@@ -3234,10 +3373,10 @@ def _compile_material_model(scene, eps_background, mu_background, subpixel, incl
     layout = _build_dispersive_layout(scene)
     region_densities = tuple(
         _prepare_material_region_density(scene, region)
-        for region in getattr(scene, "material_regions", ())
+        for region in getattr(scene.scene, "material_regions", ())
     )
-    geometries = [structure.geometry for structure in _bulk_structures(scene)]
-    geometries.extend(region.geometry for region in getattr(scene, "material_regions", ()))
+    geometries = [structure.geometry for structure in _bulk_structures(scene.scene)]
+    geometries.extend(region.geometry for region in getattr(scene.scene, "material_regions", ()))
     geometry_periodic_shifts = {
         id(geometry): _static_periodic_shift_options(scene, geometry)
         for geometry in geometries
@@ -3252,6 +3391,7 @@ def _compile_material_model(scene, eps_background, mu_background, subpixel, incl
             averaging=averaging,
             geometry_periodic_shifts=geometry_periodic_shifts,
             modulation_quadrature=modulation_quadrature,
+            prefix_key=(samples, 0),
         )
         if region_densities:
             model["design_mask"] = _material_region_design_mask(scene, model["eps_r"])
@@ -3280,6 +3420,10 @@ def _compile_material_model(scene, eps_background, mu_background, subpixel, incl
             _compile_binary_pole_edges(scene, model, layout, samples=samples,
                 eps_background=eps_background, mu_background=mu_background,
                 region_densities=region_densities, geometry_periodic_shifts=geometry_periodic_shifts)
+        if include_edges and averaging in _POLE_WEIGHTED_AVERAGING:
+            _compile_polarized_pole_edges(scene, model, layout, samples=samples, averaging=averaging,
+                eps_background=eps_background, mu_background=mu_background,
+                region_densities=region_densities, geometry_periodic_shifts=geometry_periodic_shifts)
         return attach_coordinate_metric(scene,model)
 
     kottke_edge = averaging in {"kottke_edge", "kottke_smooth"}
@@ -3303,7 +3447,7 @@ def _compile_material_model(scene, eps_background, mu_background, subpixel, incl
     sample_offsets = _sample_offsets(scene, samples)
     anisotropic = None
     modulation_owner = None
-    for sample_offset in sample_offsets:
+    for sample_index, sample_offset in enumerate(sample_offsets):
         compiled_sample = _compile_material_sample(
             scene,
             layout,
@@ -3318,6 +3462,7 @@ def _compile_material_model(scene, eps_background, mu_background, subpixel, incl
             fill_spacing=_subsample_spacing(scene, samples),
             full_tensor=full_tensor,
             modulation_quadrature=modulation_quadrature,
+            prefix_key=(samples, sample_index),
         )
         if collect_inverse:
             sample, inverse_sample = compiled_sample
@@ -3447,6 +3592,10 @@ def _compile_material_model(scene, eps_background, mu_background, subpixel, incl
     from .coordinates import attach_coordinate_metric
     if include_edges and averaging == "kottke_edge":
         _compile_binary_pole_edges(scene, model, layout, samples=samples,
+            eps_background=eps_background, mu_background=mu_background,
+            region_densities=region_densities, geometry_periodic_shifts=geometry_periodic_shifts)
+    if include_edges and averaging in _POLE_WEIGHTED_AVERAGING:
+        _compile_polarized_pole_edges(scene, model, layout, samples=samples, averaging=averaging,
             eps_background=eps_background, mu_background=mu_background,
             region_densities=region_densities, geometry_periodic_shifts=geometry_periodic_shifts)
     return attach_coordinate_metric(scene,model)
@@ -3582,30 +3731,32 @@ class LocalMaterialCache:
         self._envelope_definition = _material_definition(self.structure_envelopes, snapshot=True)
         self.full_compilations = 1 if base is None else 0
         self.patch_compilations = 0
-        self.base = scene.compile_materials() if base is None else base
+        self.base = compile_materials(scene) if base is None else base
         if (self.base.get("edge_components") is None or scene._has_trainable_geometry()
-                or any(r.density.requires_grad for r in scene.material_regions)
-                or any(v.requires_grad for r in scene.material_regions for v in vars(r.geometry).values()
+                or any(r.density.requires_grad for r in scene.scene.material_regions)
+                or any(v.requires_grad for r in scene.scene.material_regions for v in vars(r.geometry).values()
                        if isinstance(v, torch.Tensor))
                 or material_model_has_nonlinearity(self.base) or material_model_has_modulation(self.base)
                 or _material_model_has_electric_dispersion(self.base) or _material_model_has_magnetic_dispersion(self.base)):
-            raise NotImplementedError("Local material reuse requires fixed static edge-native materials.")
-        if any(isinstance(s.material, PerturbationMedium) for s in scene.structures):
-            raise NotImplementedError("Local node sampling for perturbation grids requires a physical-coordinate sampler.")
+            raise UnsupportedFeatureError("Local material reuse requires fixed static edge-native materials.",
+                                          feature="guard:51f9c9cb", method=None)
+        if any(isinstance(s.material, PerturbationMedium) for s in scene.scene.structures):
+            raise UnsupportedFeatureError("Local node sampling for perturbation grids requires a physical-coordinate sampler.",
+                                          feature="material.perturbation", method=None)
         # Per-sheet PlanarPEC ownership of the base scene, keyed by base structure
         # index and filled on first reuse.
         self._planar_sheets = {}
-        self._base_kinds = tuple(_local_structure_kind(s) for s in scene.structures)
+        self._base_kinds = tuple(_local_structure_kind(s) for s in scene.scene.structures)
         if base is not None:
             if self.changing or self.structure_envelopes:
                 raise ValueError("An adopted material bank is patched by recompile, not by declared Batch targets.")
             # Snapshot the old bounds now: geometry tensors may be edited in place later.
             self._base_bounds = {i: _circumsphere_bounds(s.geometry)
-                                 for i, (s, kind) in enumerate(zip(scene.structures, self._base_kinds)) if kind == "bulk"}
+                                 for i, (s, kind) in enumerate(zip(scene.scene.structures, self._base_kinds)) if kind == "bulk"}
             self.definition = None
             return
         self.definition = self._definition(scene, snapshot=True)
-        geometries = [r.geometry for r in scene.material_regions if r.name in self.changing]
+        geometries = [r.geometry for r in scene.scene.material_regions if r.name in self.changing]
         if len(geometries) != len(self.changing) or any(type(g) is not Box for g in geometries):
             raise ValueError("Local density compilation requires named Box material regions.")
         self._validate_structures(scene)
@@ -3624,8 +3775,8 @@ class LocalMaterialCache:
         self.edge_selections = self._edge_selections(scene, self.bounds)
 
     def _definition(self, scene, *, snapshot=False):
-        return _material_definition((scene.domain, scene.grid, scene.boundary, scene.subpixel,
-            scene.structures, scene.material_regions), changing=self.changing,
+        return _material_definition((scene.scene.domain, scene.scene.grid, scene.scene.boundary, scene.scene.subpixel,
+            scene.scene.structures, scene.scene.material_regions), changing=self.changing,
             structures=self.structure_envelopes, snapshot=snapshot)
 
     def _validate_structures(self, scene):
@@ -3634,7 +3785,7 @@ class LocalMaterialCache:
         if not _same_material_definition(self._envelope_definition, _material_definition(self.structure_envelopes)):
             raise ValueError("Batch influence envelopes must remain unchanged while their material bank is retained.")
         for name, envelope in self.structure_envelopes.items():
-            matches = [s for s in scene.structures if s.name == name]
+            matches = [s for s in scene.scene.structures if s.name == name]
             if len(matches) != 1 or type(envelope) is not Box:
                 raise ValueError("Local structure reuse requires unique named structures and Box envelopes.")
             structure = matches[0]
@@ -3651,7 +3802,8 @@ class LocalMaterialCache:
                     raise ValueError(f"Structure {name!r} exceeds its conservative Batch influence envelope.")
                 continue
             if type(geometry) not in (Box, Sphere):
-                raise NotImplementedError("Local structure support is proven for Box and Sphere geometry.")
+                raise UnsupportedFeatureError("Local structure support is proven for Box and Sphere geometry.",
+                                              feature="guard:ebf922da", method=None)
             # A circumsphere of the design must fit inside the envelope's
             # inscribed sphere. This proof is conservative for every rotation.
             radius = (float(torch.linalg.vector_norm(geometry.size).item()) / 2
@@ -3667,12 +3819,13 @@ class LocalMaterialCache:
                         "is_medium2d", "is_surface_impedance", "is_lossy_metal", "is_pec", "is_pmc"))
                     or getattr(material, "modulation", None) is not None
                     or isinstance(getattr(material, "epsilon_tensor", None), Tensor3x3)):
-                raise NotImplementedError("Local structure changes require static edge-native volume materials.")
+                raise UnsupportedFeatureError("Local structure changes require static edge-native volume materials.",
+                                              feature="guard:e7c1ed36", method=None)
 
     def _selection(self, scene, axes, bounds=None):
         result = []
         for axis, coordinates, (lo, hi) in zip(_AXES, axes, self.bounds if bounds is None else bounds):
-            if scene.boundary.axis_kind(axis) in ("periodic", "bloch"):
+            if scene.scene.boundary.axis_kind(axis) in ("periodic", "bloch"):
                 result.append(slice(0, len(coordinates)))
                 continue
             values = np.asarray(coordinates)
@@ -3710,16 +3863,16 @@ class LocalMaterialCache:
         self._validate_structures(scene)
         if not _same_material_definition(self.definition, self._definition(scene)):
             raise ValueError("Fixed material definition changed during local Batch compilation.")
-        if any(not bool(torch.isfinite(r.density).all()) for r in scene.material_regions):
+        if any(not bool(torch.isfinite(r.density).all()) for r in scene.scene.material_regions):
             raise ValueError("Local material compilation requires finite density values.")
         model = dict(self.base)
-        named = {i: s for i, s in enumerate(scene.structures) if s.name in self.structure_envelopes}
+        named = {i: s for i, s in enumerate(scene.scene.structures) if s.name in self.structure_envelopes}
         kinds = {self._base_kinds[i] for i in named} | {_local_structure_kind(s) for s in named.values()}
         if self.changing or kinds != {"planar"}:
             self._patch_volumes(scene, model, self.node_selection, self.edge_selections)
         if "planar" in kinds:
             # Batch definitions fix every unnamed structure in place.
-            model = self._attach_planar(scene, model, {i: i for i in range(len(scene.structures)) if i not in named})
+            model = self._attach_planar(scene, model, {i: i for i in range(len(scene.scene.structures)) if i not in named})
         self.patch_compilations += 1
         return model
 
@@ -3738,24 +3891,24 @@ class LocalMaterialCache:
         """
         if self.definition is not None:
             raise ValueError("Declared Batch targets are patched by compile.")
-        if getattr(scene, "material_regions", ()) or getattr(scene, "coordinates", None) is not None:
+        if getattr(scene.scene, "material_regions", ()) or getattr(scene.scene, "coordinates", None) is not None:
             return None
         pairs = sorted(unchanged.items())
         if any(first[1] >= second[1] for first, second in zip(pairs, pairs[1:])):
             return None
         kept = set(unchanged.values())
-        new = {i: _local_structure_kind(s) for i, s in enumerate(scene.structures) if i not in unchanged}
+        new = {i: _local_structure_kind(s) for i, s in enumerate(scene.scene.structures) if i not in unchanged}
         old = {i: kind for i, kind in enumerate(self._base_kinds) if i not in kept}
         kinds = set(new.values()) | set(old.values())
         if None in kinds or ("planar" in kinds and self.base.get("pec_mode") == "conformal"):
             return None
         model = dict(self.base)
         bounds = [self._base_bounds[i] for i, kind in old.items() if kind == "bulk"]
-        bounds += [_circumsphere_bounds(scene.structures[i].geometry) for i, kind in new.items() if kind == "bulk"]
+        bounds += [_circumsphere_bounds(scene.scene.structures[i].geometry) for i, kind in new.items() if kind == "bulk"]
         if bounds:
             # The cropped compile resamples every volume there; only primitives
             # with pointwise occupancy are proven to sample identically on a crop.
-            if any(_local_structure_kind(s) != "bulk" for s in _bulk_structures(scene)):
+            if any(_local_structure_kind(s) != "bulk" for s in _bulk_structures(scene.scene)):
                 return None
             margin = 64 * _geometry_beta(scene) + max(float(np.max(getattr(scene, f"d{a}_dual64"))) for a in _AXES)
             box = tuple((min(b[i][0] for b in bounds) - margin, max(b[i][1] for b in bounds) + margin)
@@ -3780,9 +3933,11 @@ class LocalMaterialCache:
         halo = tuple(slice(max(0, s.start - 2), min(n, s.stop + 2))
                      for s, n in zip(selected, (scene.Nx, scene.Ny, scene.Nz)))
         crop = tuple(slice(s.start - h.start, s.stop - h.start) for s, h in zip(selected, halo))
+        from ..scene import _prepared_declarations
+
         local = _crop_material_scene(scene, halo)
-        local.structures = _bulk_structures(scene)
-        patch = compile_material_model(local, subpixel=scene.subpixel, include_edges=False)
+        local.scene = _prepared_declarations(scene.scene, structures=tuple(_bulk_structures(scene.scene)))
+        patch = compile_material_model(local, subpixel=scene.scene.subpixel, include_edges=False)
         # (container, key, bank tensor, patch, selection); unchanged channels keep bank storage.
         writes = []
         for key in ("eps_components", "mu_components", "sigma_e_components", "sigma_m_components"):
@@ -3795,13 +3950,13 @@ class LocalMaterialCache:
         for key in ("eps_r", "mu_r", "sigma_e", "eps_r_base", "mu_r_base", "eps_r_design", "mu_r_design"):
             if key in patch:
                 writes.append((model, key, self.base[key], patch[key][crop], selected))
-        densities = tuple(_prepare_material_region_density(scene, r) for r in scene.material_regions)
-        geometries = [s.geometry for s in _bulk_structures(scene)] + [r.geometry for r in scene.material_regions]
+        densities = tuple(_prepare_material_region_density(scene, r) for r in scene.scene.material_regions)
+        geometries = [s.geometry for s in _bulk_structures(scene.scene)] + [r.geometry for r in scene.scene.material_regions]
         shifts = {id(g): _static_periodic_shift_options(scene, g) for g in geometries}
         model["edge_components"] = {k: dict(v) for k, v in self.base["edge_components"].items()}
         for component, selection in edge_selections.items():
             material, sigma = _compile_edge_component(scene, component, eps_background=1., mu_background=1.,
-                samples=scene.subpixel.samples, averaging=scene.subpixel.averaging,
+                samples=scene.scene.subpixel.samples, averaging=scene.scene.subpixel.averaging,
                 region_densities=densities, geometry_periodic_shifts=shifts, selection=selection)
             for key, value in (("eps" if component[0] == "E" else "mu", material),
                                ("sigma_e" if component[0] == "E" else "sigma_m", sigma)):
@@ -3942,4 +4097,40 @@ def compile_material_tensors(
         subpixel=subpixel,
     )
     eps_components, mu_components = evaluate_material_components(model, frequency)
+    return _component_average(eps_components), _component_average(mu_components)
+
+
+def compile_materials(prepared, subpixel=None):
+    """The compiled material model of a prepared scene.
+
+    ``subpixel`` (a ``SubpixelSpec`` or sample counts) defaults to the scene's. A model bound by
+    ``FDTDMaterialCache`` stands in for the scene's own spec. Static scenes cache one model per spec;
+    trainable materials or geometry compile on every call.
+    """
+    from ..scene import _coerce_subpixel
+
+    spec = prepared.scene.subpixel if subpixel is None else _coerce_subpixel(subpixel)
+    override = getattr(prepared, "_material_model_override", None)
+    if override is not None and spec == prepared.scene.subpixel:
+        return override
+    if prepared._has_dynamic_materials() or prepared._has_trainable_geometry():
+        model = compile_material_model(prepared, eps_background=1.0, mu_background=1.0, subpixel=spec)
+        prepared.release_meshgrid()
+        return model
+    cached = prepared._material_model_cache.get(spec)
+    if cached is None:
+        cached = compile_material_model(prepared, eps_background=1.0, mu_background=1.0, subpixel=spec)
+        prepared._material_model_cache[spec] = cached
+        prepared.release_meshgrid()
+    return cached
+
+
+def compile_material_components(prepared, subpixel=None, frequency: float | None = None):
+    """Per-axis relative permittivity and permeability of a prepared scene at ``frequency``."""
+    return evaluate_material_components(compile_materials(prepared, subpixel=subpixel), frequency)
+
+
+def compile_relative_materials(prepared, subpixel=None, frequency: float | None = None):
+    """Axis-averaged relative permittivity and permeability of a prepared scene at ``frequency``."""
+    eps_components, mu_components = compile_material_components(prepared, subpixel=subpixel, frequency=frequency)
     return _component_average(eps_components), _component_average(mu_components)

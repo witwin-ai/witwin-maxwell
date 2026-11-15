@@ -19,9 +19,9 @@ BOUNDS=((-0.015,.015),(-.012,.012),(-.007,.007))
 
 
 def prescribed_result(scene,schema):
-    prepared=prepare_scene(scene);payloads={};fields={}
+    prepared=prepare_scene(scene, device="cpu");payloads={};fields={}
     for number,(component,selection) in enumerate(schema.items()):
-        axes=component_coords(prepared,component)
+        axes=component_coords(prepared,component, device=prepared.device)
         x,y,z=torch.meshgrid(*(torch.tensor(axis,dtype=torch.float64) for axis in axes),indexing='ij')
         # Independent affine complex fields differ by component and frequency.
         field=(1+number+.7*x-2*y+3*z).to(torch.complex128)
@@ -46,26 +46,26 @@ def test_native_plane_single_frequency_shared_loss_matches_full_prescribed_field
 
 def _check_native_plane_single_frequency_shared_loss(grading):
     scene=printed_line_scene('stripline',dx=.0025,longitudinal_dl=.005,sigma_e=.01,
-        transverse_refinement_radius=grading,transverse_padding=.02,device='cpu')
+        transverse_refinement_radius=grading,transverse_padding=.02)
     monitors,schema=regional_monitors(scene,BOUNDS,FREQUENCIES,observation='planes',include_flux=False)
-    scene=scene.clone(monitors=monitors)
+    scene=scene.updated(monitors=monitors)
     result,fields=prescribed_result(scene,schema)
-    calls=[];shared_loss=mw.Result.power_loss
+    calls=[];shared_loss=mw.Result._power_loss
     def checked_loss(self,name,**kwargs):
         assert len(self.frequencies)==1
         assert all(values.shape[0]==1 for values in kwargs['electric_fields'].values())
         calls.append(self.frequencies[0])
         return shared_loss(self,name,**kwargs)
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(mw.Result,'power_loss',checked_loss)
+        patch.setattr(mw.Result,'_power_loss',checked_loss)
         actual=regional_plane_power(result,scene,schema,BOUNDS)
     assert tuple(calls)==FREQUENCIES
     full=mw.Result(method='fdtd',scene=scene,frequencies=FREQUENCIES)
-    expected=full.power_loss('line_roi_bulk',electric_fields=fields)
+    expected=mw.postprocess.power_loss(full, 'line_roi_bulk',electric_fields=fields)
     torch.testing.assert_close(torch.tensor(actual['bulk_conduction_w'],dtype=torch.float64),
         expected.conduction,rtol=1e-13,atol=1e-20)
     assert actual['dense_temporary_frequency_count']==1
-    compiled=compile_power_loss_monitor(prepare_scene(scene),monitors[0])
+    compiled=compile_power_loss_monitor(prepare_scene(scene,device="cpu"),monitors[0])
     from witwin.maxwell.compiler.monitors import compile_fdtd_observers
     from witwin.maxwell.fdtd.observers import resolve_plane_observer
     declared={plane['name']:plane for selection in schema.values() for plane in selection['planes']}
@@ -73,7 +73,7 @@ def _check_native_plane_single_frequency_shared_loss(grading):
     # propagation runtime or initializing CUDA.
     for observer in compile_fdtd_observers(scene):
         plane=declared[observer['monitor_name']]
-        samples,coords=resolve_plane_observer(prepare_scene(scene),observer)
+        samples,coords=resolve_plane_observer(prepare_scene(scene,device="cpu"),observer)
         assert samples==({'plane_index':plane['normal_index'],
             'plane_position':plane['normal_position_m'],'weight':1.},)
     for component,selection in schema.items():
@@ -97,7 +97,7 @@ def small_plane():
         'plane_index':2,'plane_indices':(2,),'plane_weights':(1.,),
         'plane_positions':(.003,),'collocated':False}
     class Payload:
-        def monitor(self,name,frequency=None):
+        def raw_monitor(self,name,frequency=None):
             return {'frequencies':(frequency,),'components':{component:entry}}
     return Payload(),component,selection,entry
 
@@ -125,9 +125,9 @@ def test_native_plane_preserves_values_and_rejects_duplicate_planes(small_plane)
 
 
 def test_native_plane_schema_rejects_frequency_loss_configuration_and_normalization():
-    scene=printed_line_scene('stripline',dx=.0025,longitudinal_dl=.005,sigma_e=.01,device='cpu')
+    scene=printed_line_scene('stripline',dx=.0025,longitudinal_dl=.005,sigma_e=.01)
     monitors,schema=regional_monitors(scene,BOUNDS,FREQUENCIES,observation='planes',include_flux=False)
-    scene=scene.clone(monitors=monitors);result,_=prescribed_result(scene,schema)
+    scene=scene.updated(monitors=monitors);result,_=prescribed_result(scene,schema)
     invalid=copy.deepcopy(schema);invalid['Ex']['frequencies_hz'].reverse()
     with pytest.raises(ValueError,match='frequency'):
         regional_plane_power(result,scene,invalid,BOUNDS)
@@ -146,9 +146,9 @@ def test_native_plane_schema_rejects_frequency_loss_configuration_and_normalizat
 def test_native_plane_schema_covers_actual_copper_left_trace_with_and_without_bulk_sigma(sigma):
     from witwin.maxwell.compiler.copper_foil import compile_copper_faces
     scene=printed_line_scene('stripline',dx=.0025,longitudinal_dl=.005,metal='copper',
-        sigma_e=sigma,transverse_refinement_radius=.02,transverse_padding=.02,device='cpu')
+        sigma_e=sigma,transverse_refinement_radius=.02,transverse_padding=.02)
     monitors,schema=regional_monitors(scene,BOUNDS,FREQUENCIES,observation='planes',include_flux=False)
-    prepared=prepare_scene(scene);compiled=compile_power_loss_monitor(prepared,monitors[0])
+    prepared=prepare_scene(scene, device="cpu");compiled=compile_power_loss_monitor(prepared,monitors[0])
     checked=0
     for face in compile_copper_faces(prepared,device='cpu'):
         component='E'+'xyz'[face.component]

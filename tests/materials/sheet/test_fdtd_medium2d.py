@@ -7,6 +7,7 @@ from tests.materials.sheet.sheet_measurement import Z0 as _Z0, measure_sheet_sca
 from witwin.core import Box
 from witwin.core.material import VACUUM_PERMITTIVITY
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.compiler import compile_material_components, compile_materials
 
 
 def _build_cpu_sheet_scene(*, material, size=(0.0, 2.0, 2.0), position=(0.0, 0.0, 0.0)):
@@ -15,16 +16,15 @@ def _build_cpu_sheet_scene(*, material, size=(0.0, 2.0, 2.0), position=(0.0, 0.0
             domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
             grid=mw.GridSpec.uniform(0.05),
             boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-            device="cpu",
             structures=[
                 mw.Structure(geometry=Box(position=position, size=size), material=material)
             ],
-        )
+        ), device="cpu"
     )
 
 
 def test_medium2d_construction_and_sheet_conductivity():
-    sheet = mw.Medium2D(sigma_s=2.5e-3, name="sheet")
+    sheet = mw.media.Medium2D(sigma_s=2.5e-3, name="sheet")
     assert sheet.is_medium2d
     assert sheet.sigma_s == pytest.approx(2.5e-3)
     assert sheet.eps_r == pytest.approx(1.0)
@@ -34,13 +34,13 @@ def test_medium2d_construction_and_sheet_conductivity():
     assert sheet.sheet_conductivity_at_freq(1.0e9) == pytest.approx(2.5e-3)
 
     with pytest.raises(ValueError):
-        mw.Medium2D(sigma_s=-1.0e-3)
+        mw.media.Medium2D(sigma_s=-1.0e-3)
 
 
 def test_medium2d_compiles_to_single_plane_tangential_conductivity():
     sigma_s = 2.0e-3
-    scene = _build_cpu_sheet_scene(material=mw.Medium2D(sigma_s=sigma_s))
-    model = scene.compile_materials()
+    scene = _build_cpu_sheet_scene(material=mw.media.Medium2D(sigma_s=sigma_s))
+    model = compile_materials(scene)
 
     node_index = int(np.argmin(np.abs(scene.x_nodes64 - 0.0)))
     dual = float(scene.dx_dual64[node_index])
@@ -61,8 +61,8 @@ def test_medium2d_compiles_to_single_plane_tangential_conductivity():
 
 def test_medium2d_sheet_is_applied_once_with_subpixel_averaging():
     sigma_s = 2.0e-3
-    scene = _build_cpu_sheet_scene(material=mw.Medium2D(sigma_s=sigma_s))
-    model = scene.compile_materials(subpixel_samples=(2, 2, 2))
+    scene = _build_cpu_sheet_scene(material=mw.media.Medium2D(sigma_s=sigma_s))
+    model = compile_materials(scene, subpixel=(2, 2, 2))
 
     node_index = int(np.argmin(np.abs(scene.x_nodes64 - 0.0)))
     dual = float(scene.dx_dual64[node_index])
@@ -73,8 +73,8 @@ def test_medium2d_sheet_is_applied_once_with_subpixel_averaging():
 def test_medium2d_frequency_evaluation_adds_conductivity_term():
     sigma_s = 2.0e-3
     frequency = 1.0e9
-    scene = _build_cpu_sheet_scene(material=mw.Medium2D(sigma_s=sigma_s))
-    eps_components, _ = scene.compile_material_components(frequency=frequency)
+    scene = _build_cpu_sheet_scene(material=mw.media.Medium2D(sigma_s=sigma_s))
+    eps_components, _ = compile_material_components(scene, frequency=frequency)
 
     node_index = int(np.argmin(np.abs(scene.x_nodes64 - 0.0)))
     dual = float(scene.dx_dual64[node_index])
@@ -87,36 +87,35 @@ def test_medium2d_frequency_evaluation_adds_conductivity_term():
 
 
 def test_medium2d_requires_box_with_exactly_one_zero_axis():
-    thick = _build_cpu_sheet_scene(material=mw.Medium2D(sigma_s=1.0e-3), size=(0.2, 0.3, 0.3))
+    thick = _build_cpu_sheet_scene(material=mw.media.Medium2D(sigma_s=1.0e-3), size=(0.2, 0.3, 0.3))
     with pytest.raises(ValueError, match="exactly one zero-size axis"):
-        thick.compile_materials()
+        compile_materials(thick)
 
-    line = _build_cpu_sheet_scene(material=mw.Medium2D(sigma_s=1.0e-3), size=(0.0, 0.0, 0.3))
+    line = _build_cpu_sheet_scene(material=mw.media.Medium2D(sigma_s=1.0e-3), size=(0.0, 0.0, 0.3))
     with pytest.raises(ValueError, match="exactly one zero-size axis"):
-        line.compile_materials()
+        compile_materials(line)
 
     sphere_scene = prepare_scene(
         mw.Scene(
             domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
             grid=mw.GridSpec.uniform(0.05),
             boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-            device="cpu",
             structures=[
-                mw.Structure(geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=0.1), material=mw.Medium2D(sigma_s=1.0e-3))
+                mw.Structure(geometry=mw.Sphere(position=(0.0, 0.0, 0.0), radius=0.1), material=mw.media.Medium2D(sigma_s=1.0e-3))
             ],
-        )
+        ), device="cpu"
     )
     with pytest.raises(NotImplementedError, match="Box structure geometry"):
-        sphere_scene.compile_materials()
+        compile_materials(sphere_scene)
 
 
 def test_medium2d_is_rejected_by_adjoint_bridges():
     from witwin.maxwell.fdfd.adjoint.bridge import _unsupported_fdfd_adjoint_medium
     from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
 
-    scene = _build_cpu_sheet_scene(material=mw.Medium2D(sigma_s=1.0e-3))
-    fdtd_message = _unsupported_adjoint_medium(scene)
-    fdfd_message = _unsupported_fdfd_adjoint_medium(scene)
+    scene = _build_cpu_sheet_scene(material=mw.media.Medium2D(sigma_s=1.0e-3))
+    fdtd_message = _unsupported_adjoint_medium(scene.scene)
+    fdfd_message = _unsupported_fdfd_adjoint_medium(scene.scene)
     assert fdtd_message is not None and "Medium2D" in fdtd_message
     assert fdfd_message is not None and "Medium2D" in fdfd_message
 
@@ -129,7 +128,7 @@ def test_fdtd_medium2d_sheet_matches_analytic_fresnel():
     for z0_sigma in (0.5, 1.0):
         sigma_s = z0_sigma / _Z0
         t, r = measure_sheet_scattering(
-            mw.Medium2D(sigma_s=sigma_s),
+            mw.media.Medium2D(sigma_s=sigma_s),
             frequency,
             dl=0.025,
             half_length=1.0,

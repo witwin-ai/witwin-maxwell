@@ -3,6 +3,7 @@ import math
 import pytest
 import torch
 
+import witwin.maxwell as mw
 from witwin.maxwell.postprocess import ResonanceModes, find_resonances, harmonic_inversion
 from witwin.maxwell.postprocess.resonance import _fdm_matrices
 
@@ -167,22 +168,14 @@ def test_rejects_invalid_arguments(kwargs, message):
 
 
 def _field_time_payload(buffers, t):
-    first = next(iter(buffers.values()))
-    payload = {
-        "kind": "field_time",
-        "differentiable": False,
-        "name": "probe",
-        "t": t,
-        "components": dict(buffers),
-        "fields": tuple(buffers),
-        "start": 0,
-        "stop": None,
-        "interval": 1,
-    }
-    if len(buffers) == 1:
-        payload["data"] = first
-        payload["field"] = first
-    return payload
+    """What Result.monitor returns for a FieldTimeMonitor: one FieldData for a point trace,
+    per-component FieldData for a plane trace of several components."""
+    if all(buffer.ndim == 1 for buffer in buffers.values()):
+        return mw.FieldData(values=torch.stack(tuple(buffers.values())), dims=("component", "t"),
+                            coords={"component": tuple(buffers), "t": t}, units="V/m")
+    return {name: mw.FieldData(values=buffer, dims=("t", "y", "z"), coords={"t": t},
+                               units="V/m" if name[0] == "E" else "A/m", attrs={"component": name})
+            for name, buffer in buffers.items()}
 
 
 def test_find_resonances_on_point_payload_discards_transient():
@@ -244,5 +237,5 @@ def test_find_resonances_spatial_selection_on_plane_payload():
         find_resonances(payload, window, component="Ex", reduce="sum", sample=(0, 0))
     with pytest.raises(KeyError):
         find_resonances(payload, window, component="Ez", reduce="sum")
-    with pytest.raises(ValueError, match="FieldTimeMonitor payload"):
+    with pytest.raises(ValueError, match="FieldTimeMonitor data"):
         find_resonances({"kind": "flux_time"}, window)

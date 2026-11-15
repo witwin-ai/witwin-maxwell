@@ -10,6 +10,7 @@ from ..dispersion import solve_numerical_wavenumber
 from .spatial import beam_profile_from_source, plane_wave_profile
 from .tfsf_specs import AXIS_INDEX, reference_sample_axis_code
 from .temporal import build_source_term
+from ...errors import UnsupportedFeatureError
 
 
 def nearest_index(axis_coords, value: float) -> int:
@@ -86,8 +87,8 @@ def require_locally_uniform_axis(solver, axis, start, stop, *, context):
 def validate_bounds(solver, lower, upper):
     shape = (solver.Nx, solver.Ny, solver.Nz)
     for axis, lo, hi, size in zip("xyz", lower, upper, shape):
-        low_margin = solver.scene.pml_thickness_for_face(axis, "low") + 2
-        high_margin = solver.scene.pml_thickness_for_face(axis, "high") + 2
+        low_margin = solver.scene.scene.pml_thickness_for_face(axis, "low") + 2
+        high_margin = solver.scene.scene.pml_thickness_for_face(axis, "high") + 2
         if hi <= lo + 1:
             raise ValueError(f"TFSF bounds must span at least two cells along {axis}.")
         if lo < low_margin or hi > size - high_margin - 1:
@@ -404,7 +405,8 @@ def build_term_from_profile(
             omega=omega,
         )
     if scale.is_complex():
-        raise NotImplementedError("Complex lossy modal profiles require a CW source.")
+        raise UnsupportedFeatureError("Complex lossy modal profiles require a CW source.",
+                                      feature="guard:2890fe3f", method="fdtd")
     return build_source_term(
         solver,
         field_name=field_name,

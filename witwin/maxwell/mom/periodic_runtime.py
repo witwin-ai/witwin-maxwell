@@ -13,6 +13,7 @@ from .dyadic_green import DyadicGreenKernel
 from .periodic_operator import assemble_periodic_system, validate_periodic_cell, validate_periodic_sources
 from .periodic_fields import decode_periodic
 from .lifting import FORMULATION_ID, CURRENT_KIND, KERNEL_DIFFERENCE_VERSION
+from ..errors import UnsupportedFeatureError
 
 
 def periodic_operator_identity(system, exterior, config, kernel):
@@ -28,7 +29,8 @@ def periodic_operator_identity(system, exterior, config, kernel):
     if not isinstance(config, MoMConfig):
         raise TypeError('Periodic scalar operator requires MoMConfig')
     if config.harmonic_balance is not None:
-        raise NotImplementedError('Periodic harmonic balance requires its coupled surface-volume runtime')
+        raise UnsupportedFeatureError('Periodic harmonic balance requires its coupled surface-volume runtime',
+                                      feature="boundary.periodic", method="mom")
     if not isinstance(exterior, Medium) or any(not isinstance(body.interior, (Medium, TensorMedium)) for body in system.bodies):
         raise TypeError('Periodic Ewald operators require a scalar exterior and scalar/tensor interiors')
     if config.dyadic_integration is None and any(isinstance(body.interior, TensorMedium) for body in system.bodies):
@@ -45,7 +47,7 @@ def periodic_operator_identity(system, exterior, config, kernel):
             for name in ('epsilon_r', 'mu_r', 'k', 'eta')}}
     from .runtime import _representation_identity
     payload = {'version': 'periodic_sampled_operator_identity_v1', 'dtype': str(config.dtype),
-        'formulation_id': _representation_identity(config)['formulation_id'], 'current_kind': CURRENT_KIND, 'backend': config.operator_backend,
+        'formulation_id': _representation_identity(config)['formulation_id'], 'current_kind': CURRENT_KIND, 'backend': config.operator_backend.value,
         'kernel': kernel.receipt(), 'numerical': _numerical_identity(config),
         'exterior': medium(exterior), 'bodies': [
             {'structure_index': body.structure_index, 'region_id': body.region_id,
@@ -185,10 +187,12 @@ class PeriodicMultipoleSystemOperator(PeriodicMultipoleOperator, SystemDecodeHan
             raise ValueError('Periodic kernel does not match its declared numerical configuration')
         construction = config.fmm.construction()
         if construction.pop('kernel_bound_rule') != 'bivariate_cauchy_v1':
-            raise NotImplementedError('Real-support FMM kernel bounds require free space')
+            raise UnsupportedFeatureError('Real-support FMM kernel bounds require free space',
+                                          feature="guard:5719ae7f", method="mom")
         for name in ('max_order', 'rwg_absolute_budget', 'kernel_error_budget'):
             if construction.pop(name) is not None:
-                raise NotImplementedError('Periodic Ewald FMM requires fixed order without error-budget admission')
+                raise UnsupportedFeatureError('Periodic Ewald FMM requires fixed order without error-budget admission',
+                                              feature="boundary.periodic", method="mom")
         PeriodicMultipoleOperator.__init__(self,
             EwaldSystemBlocks(system, exterior, config.integration, kernel=kernel),
             solve_config=config.fmm.solve_config(), **construction)
@@ -315,7 +319,8 @@ class PeriodicDyadicSystemOperator(DenseOperator, PeriodicDyadicDecodeHandle):
         from ..constants import EPSILON_0, MU_0
         from .periodic_dyadic_operator import assemble_periodic_dyadic_system
         if config.operator_backend != 'dense' or config.harmonic_balance is not None:
-            raise NotImplementedError('Periodic dyadic construction currently requires the linear dense backend')
+            raise UnsupportedFeatureError('Periodic dyadic construction currently requires the linear dense backend',
+                                          feature="boundary.periodic", method="mom")
         metadata = {}
         PeriodicDyadicDecodeHandle.__init__(self, system, exterior, sources, config, metadata, kernel=kernel)
         capacity = _preflight_dense_capacity(system, config)
@@ -381,7 +386,7 @@ class _PeriodicDyadicHierarchyBinding:
         from .runtime import _representation_identity
         identity,payload=periodic_dyadic_operator_identity(self.system,self.exterior,config,self.periodic_kernel)
         self.metadata.update(_representation_identity(config))
-        self.metadata.update(version='tensor_periodic_'+config.operator_backend+'_operator_v1',
+        self.metadata.update(version='tensor_periodic_'+config.operator_backend.value+'_operator_v1',
             operator_identity=identity,operator_identity_payload=payload,
             numerical_identity=_numerical_identity(config),body_count=len(self.system.bodies),
             quadrature=asdict(config.integration),kernel_version=self.periodic_kernel.payload()['version'],

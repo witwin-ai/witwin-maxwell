@@ -15,7 +15,7 @@ def setup(kind,backend):
     original,config,_=runpy.run_path('tests/mom/test_harmonic_public.py')['setup']()
     volumes=config.harmonic_balance.volumes
     material=mw.Material(eps_r=2.,sigma_e=.001,nonlinearity=(
-        mw.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.TwoPhotonAbsorption(beta=5.)))
+        mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001),mw.media.TwoPhotonAbsorption(beta=5.)))
     structures=[mw.Structure(geometry=original.structures[0].geometry,material=material)]
     if kind=='dual':
         scene,config,_,_=runpy.run_path('tests/mom/test_harmonic_dual_public.py')['dual_setup']()
@@ -24,9 +24,9 @@ def setup(kind,backend):
     else:
         if kind=='mixed':
             first=volumes[0]
-            second=mw.TetrahedralVolumeMesh(first.vertices+first.vertices.new_tensor([.18,.02,.01]),first.cells,region_id=2)
+            second=mw.mom.TetrahedralVolumeMesh(first.vertices+first.vertices.new_tensor([.18,.02,.01]),first.cells,region_id=2)
             structures.append(mw.Structure(geometry=mw.Mesh(second.boundary.vertices,second.boundary.faces,recenter=False,fill_mode='solid'),
-                material=mw.Material(eps_r=3.,mu_r=2.,nonlinearity=mw.NonlinearSusceptibility(chi2=.004,chi3=.001))))
+                material=mw.Material(eps_r=3.,mu_r=2.,nonlinearity=mw.media.NonlinearSusceptibility(chi2=.004,chi3=.001))))
             config=replace(config,harmonic_balance=replace(config.harmonic_balance,volumes=(second,first)))
         scene=mw.Scene(structures=structures,sources=original.sources)
     config=replace(config,operator_backend=backend,hierarchical=HMatrixConfig(leaf_size=64),
@@ -43,13 +43,13 @@ def test_public_compressed_state_restore(kind,backend,tmp_path,monkeypatch):
     torch.use_deterministic_algorithms(True)
     try:
         scene,config=setup(kind,backend)
-        prepared=mw.Simulation.mom(scene,frequency=3e8,config=config).prepare()
+        prepared=mw.Simulation.mom(scene,frequencies=3e8,config=config).prepare()
         assert prepared.solver.prepared['response_backend']=='compressed'
         assert not hasattr(prepared.solver.model,'current_response')
         result=prepared.run();path=tmp_path/'result.pt';result.save(path)
         payload=torch.load(path,weights_only=True)['harmonic_data']
         assert payload['schema_version']==15 and payload['numerical']['operator_backend']==backend
-        state=result.harmonic_state
+        state=mw.mom.harmonic_state(result)
         check_newton=runpy.run_path('tests/mom/test_harmonic_newton_krylov.py')['check_compressed_newton']
         check_newton(prepared.solver.model,state.cell_electric,config.harmonic_balance,implicit_solver='streamed_krylov')
         assert len(state.induced_surface_coefficients)==2
@@ -58,7 +58,7 @@ def test_public_compressed_state_restore(kind,backend,tmp_path,monkeypatch):
         if kind=='dual':assert state.dc_dual_state is not None
         point=config.harmonic_balance.volumes[0].vertices.new_tensor([[.16,.1,.09]])
         ac=result.query_fields(point,region_id=0,field_kind='total',harmonic=2)
-        dc=result.query_dc_dual(point,region_id=0) if kind=='dual' else result.query_dc(point,region_id=0)
+        dc=mw.mom.query_dc_dual(result, point,region_id=0) if kind=='dual' else mw.mom.query_dc(result, point,region_id=0)
         def forbidden(*args,**kwargs):raise AssertionError('Public compressed restore/query cannot solve')
         with monkeypatch.context() as patch:
             patch.setattr(FixedSurfaceInverse,'_solve',forbidden)
@@ -70,7 +70,7 @@ def test_public_compressed_state_restore(kind,backend,tmp_path,monkeypatch):
             assert _numerical_identity(restored._harmonic_data.config)==_numerical_identity(config)
             for a,b in zip(restored.query_fields(point,region_id=0,field_kind='total',harmonic=2),ac):
                 torch.testing.assert_close(a,b,rtol=0,atol=0)
-            actual=restored.query_dc_dual(point,region_id=0) if kind=='dual' else restored.query_dc(point,region_id=0)
+            actual=mw.mom.query_dc_dual(restored, point,region_id=0) if kind=='dual' else mw.mom.query_dc(restored, point,region_id=0)
             pairs=((actual[k],v) for k,v in dc.items() if isinstance(v,torch.Tensor)) if kind=='dual' else zip(actual,dc)
             for a,b in pairs:torch.testing.assert_close(a,b,rtol=0,atol=0)
         restored.save(tmp_path/'restored.pt')

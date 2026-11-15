@@ -10,7 +10,7 @@ from witwin.maxwell.mom.harmonic_material import compile_harmonic_material
 
 def test_public_material_harmonics_sample_linear_background_once_and_classify_dc():
     material = mw.Material(eps_r=2.,sigma_e=.02,kerr_chi3=.1,
-        nonlinearity=(mw.NonlinearSusceptibility(chi2=.2,chi3=.3),mw.TwoPhotonAbsorption(beta=1e-9)),
+        nonlinearity=(mw.media.NonlinearSusceptibility(chi2=.2,chi3=.3),mw.media.TwoPhotonAbsorption(beta=1e-9)),
         debye_poles=(mw.DebyePole(.4,1e-10),),drude_poles=(mw.DrudePole(1e8,2e7),),
         lorentz_poles=(mw.LorentzPole(.5,1e9,1e7),))
     model = compile_harmonic_material(material,3e8,3)
@@ -40,7 +40,7 @@ def test_public_nonlinearity_source_and_zero_chi_linear_contrast_falsification()
     wrong_linear_contrast = EPSILON_0*(3.-1)*field
     assert torch.linalg.vector_norm(wrong_linear_contrast) > 0
     nonlinear = compile_harmonic_material(mw.Material(eps_r=3.,
-        nonlinearity=mw.NonlinearSusceptibility(chi2=.2)),3e8,2)
+        nonlinearity=mw.media.NonlinearSusceptibility(chi2=.2)),3e8,2)
     sources = nonlinear.sources(field)
     expected_dc = EPSILON_0*.2*abs(2+.5j)**2/2
     torch.testing.assert_close(sources.polarization[0,0,0].real,field.real.new_tensor(expected_dc),rtol=1e-12,atol=0)

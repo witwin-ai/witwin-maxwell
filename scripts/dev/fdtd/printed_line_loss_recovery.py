@@ -26,6 +26,7 @@ from scripts.dev.fdtd.printed_line_loss_bridge import (
     consume_public_column, copper_operator_signature, evidence_from_v3_completion, grid_of,
     save_capture, sha256_file, spectral_contract,
 )
+import witwin.maxwell as mw
 
 RECEIPT_SCHEMA = 'printed-line-Cu-realization-recovery-receipt/1'
 RAW_FILES = ('completion.json', 'result.pt', 'actual-public-VI.pt', 'checkpoint32ns.pt')
@@ -70,7 +71,7 @@ def recovery_receipt(context, result, completion, *, recompiled_entries, recompi
     mismatched = sorted(k for k in ('Norton', 'material', 'sources', 'copper') if recompiled_operator.get(k) != executed.get(k))
     if mismatched:
         raise RecoveryRefused(f'Recompiled operator signatures differ from execution: {mismatched}.')
-    records = _cpu(result.conductor_losses)
+    records = _cpu(mw.rf.conductor_losses(result))
     realizations = realizations_from_recompiled(recompiled_entries, records)
     copper = copper_operator_signature(realizations)
     if copper != executed['copper']:

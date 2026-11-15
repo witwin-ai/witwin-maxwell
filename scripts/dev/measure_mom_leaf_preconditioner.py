@@ -38,7 +38,7 @@ def main():
         scene = mw.Scene(structures=[mw.Structure(mw.Mesh(body['vertices'].to('cuda'), body['faces'].to('cuda'),
             recenter=False, fill_mode='solid', device='cuda'), mw.Material(eps_r=2.), name='body0')],
             sources=[mw.PlaneWave()])
-        data = SurfaceData.restore(saved, scene, 3e8)
+        data = SurfaceData.restore(saved, scene, 3e8, 'cuda')
         base = PeriodicMultipoleSystemOperator(data.handle.system, data.handle.exterior, scene.sources,
             data.config, kernel=data.handle.periodic_kernel)
         rhs = base.build_rhs()

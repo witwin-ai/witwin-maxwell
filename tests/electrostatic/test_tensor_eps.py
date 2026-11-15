@@ -159,10 +159,9 @@ def test_isotropic_material_stays_on_scalar_path():
         mw.Material(eps_r=2.5),
         mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.5, 2.5, 2.5)),
     ):
-        scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-        scene.add_structure(
-            mw.Structure(geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(0.4, 0.4, 0.4)), material=material)
-        )
+        scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), structures=(
+                    mw.Structure(geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(0.4, 0.4, 0.4)), material=material),
+                ))
         compiled = compile_electrostatics(scene, ElectrostaticBoundarySpec.grounded_box())
         assert compiled.epsilon_tensor is None
 
@@ -208,16 +207,16 @@ def test_diagonal_tensor_has_zero_cross_coupling():
     iso_matrix = np.diag([3.0, 3.0, 3.0]).astype(np.float64)
     iso_tensor = _const_compiled(8, 1.0, iso_matrix, ElectrostaticBoundarySpec.grounded_box())
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 1.0),) * 3),
-        grid=mw.GridSpec.uniform(1.0 / 8),
-        boundary=mw.BoundarySpec.none(),
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(2.0, 2.0, 2.0)),
-            material=mw.Material(eps_r=3.0),
-        )
-    )
+                domain=mw.Domain(bounds=((0.0, 1.0),) * 3),
+                grid=mw.GridSpec.uniform(1.0 / 8),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(2.0, 2.0, 2.0)),
+                material=mw.Material(eps_r=3.0),
+            ),
+            ),
+            )
     iso_scalar = compile_electrostatics(scene, ElectrostaticBoundarySpec.grounded_box())
     op_tensor = ElectrostaticOperator(iso_tensor)
     op_scalar = ElectrostaticOperator(iso_scalar)
@@ -406,34 +405,30 @@ def _anisotropic_capacitance():
     length = 1.0
     domain = mw.Domain(bounds=((0.0, length),) * 3)
     grid = mw.GridSpec.uniform(length / 32)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
     rows = _rotated_spd((2.0, 3.0, 5.0))
     material = mw.Material(
-        epsilon_tensor=mw.Tensor3x3(tuple(tuple(float(v) for v in row) for row in rows))
+        epsilon_tensor=mw.media.Tensor3x3(tuple(tuple(float(v) for v in row) for row in rows))
     )
-    scene.add_structure(
-        mw.Structure(geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(2.0, 2.0, 2.0)), material=material)
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none(), structures=(
+                mw.Structure(geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(2.0, 2.0, 2.0)), material=material),
+            ), electrostatic_terminals=(
+                mw.electrostatic.ElectrostaticTerminal(
             name="a", geometry=mw.Box(position=(0.28, 0.45, 0.5), size=(0.12, 0.3, 0.4)), potential=1.0
-        )
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(
+            ),
+                mw.electrostatic.ElectrostaticTerminal(
             name="b", geometry=mw.Box(position=(0.55, 0.72, 0.42), size=(0.16, 0.12, 0.3)), potential=0.0
-        )
-    )
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(
+            ),
+                mw.electrostatic.ElectrostaticTerminal(
             name="c", geometry=mw.Box(position=(0.72, 0.35, 0.62), size=(0.12, 0.24, 0.16)), potential=0.0
-        )
-    )
-    return mw.Simulation.capacitance(
+            ),
+            ))
+    return mw.electrostatic.capacitance(mw.Simulation.capacitance(
         scene,
-        terminals=("a", "b", "c"),
-        boundary=mw.ElectrostaticBoundarySpec.grounded_box(),
-    ).run().capacitance
+        config=mw.electrostatic.CapacitanceConfig(
+            terminals=("a", "b", "c"),
+            boundary=mw.electrostatic.ElectrostaticBoundarySpec.grounded_box(),
+        ),
+    ).run())
 
 
 def test_anisotropic_capacitance_reciprocity():

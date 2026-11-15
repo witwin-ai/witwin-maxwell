@@ -20,6 +20,7 @@ from .modes import sample_mode_source_component, solve_mode_source_profile
 from .temporal import append_source_term, apply_compiled_source_terms, apply_generic_source_terms, injection_time, prepare_source_gathers
 from .tfsf_common import _component_roundoff_floor, build_term_from_profile, build_terms_from_specs, slice_coeff_patch, solve_numerical_wavenumber
 from .tfsf_specs import E_CURL_ATTR, H_CURL_ATTR, build_discrete_tfsf_specs, magnetic_physical_vector
+from ...errors import UnsupportedFeatureError
 
 
 _FACE_SPEC_RANGES = {
@@ -85,12 +86,12 @@ def _symmetry_plane_source_scale(scene, field_name: str, position) -> float:
     """Scale a source that lies exactly on an image plane to its full-grid weight."""
     field_axis = {"Ex": 0, "Ey": 1, "Ez": 2}[field_name]
     scale = 1.0
-    for axis, symmetry in enumerate(scene.symmetry):
+    for axis, symmetry in enumerate(scene.scene.symmetry):
         if symmetry is None:
             continue
         _mode, face = symmetry
-        plane = float(scene.domain.bounds[axis][0 if face == "low" else 1])
-        span = float(scene.domain.bounds[axis][1] - scene.domain.bounds[axis][0])
+        plane = float(scene.scene.domain.bounds[axis][0 if face == "low" else 1])
+        span = float(scene.scene.domain.bounds[axis][1] - scene.scene.domain.bounds[axis][0])
         if abs(float(position[axis]) - plane) > 1e-9 * max(span, 1.0):
             continue
         # A tangential E component is sampled on the image plane: the half-cell
@@ -137,7 +138,7 @@ def _yee_box_overlap(solver, field_name: str, lo, hi, *, current_dataset=False):
         else:
             lower, upper = float(lo[axis]), float(hi[axis])
             if current_dataset:
-                bounds = solver.scene.domain.bounds[axis]
+                bounds = solver.scene.scene.domain.bounds[axis]
                 lower, upper = max(lower, bounds[0]), min(upper, bounds[1])
             control_bounds = None
             if current_dataset and solver._COMPONENT_HALF_OFFSET_AXES[field_name][axis]:
@@ -256,7 +257,7 @@ def _point_dipole_has_single_image(solver, position, cutoff) -> bool:
     source alone is already the periodic profile and stays bit-identical.
     """
     scene = solver.scene
-    boundary = scene.boundary
+    boundary = scene.scene.boundary
     nodes = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)
     sizes = (solver.Nx, solver.Ny, solver.Nz)
     for axis, name in enumerate("xyz"):
@@ -391,7 +392,7 @@ def _prepare_wrapped_point_dipole_source(solver, source, *, source_index, cutoff
     Bloch profile: real and imaginary parts) regardless of the period.
     """
     scene = solver.scene
-    boundary = scene.boundary
+    boundary = scene.scene.boundary
     position = tuple(float(value) for value in source["position"])
     width = float(source["width"])
     ideal = source.get("profile", "gaussian") == "ideal"
@@ -935,12 +936,12 @@ def _prepare_custom_field_source(solver, source, *, source_index):
             starts[a], stops[a], overlaps[a] = start, stop, overlap
             bounds = (float(nodes[a][0]), float(nodes[a][-1]))
             touches = (region_lo[a] <= bounds[0], region_hi[a] >= bounds[1])
-            kinds = scene.boundary.axis_face_kinds("xyz"[a])
+            kinds = scene.scene.boundary.axis_face_kinds("xyz"[a])
             even_pec = field.startswith("E") == (a == field_axis)
             odd_faces = tuple(touch and ((kind == "pec" and not even_pec) or (kind == "pmc" and even_pec))
                               for touch, kind in zip(touches, kinds))
             phase = None
-            if all(touches) and scene.boundary.axis_kind("xyz"[a]) in _WRAPPED_AXIS_KINDS:
+            if all(touches) and scene.scene.boundary.axis_kind("xyz"[a]) in _WRAPPED_AXIS_KINDS:
                 phase = (complex(float(solver.boundary_phase_cos[a]), float(solver.boundary_phase_sin[a]))
                          if kinds[0] == "bloch" else 1.0 + 0.0j)
             modes.append(_sheet_axis_modes(coordinates[a][start:stop], widths,
@@ -988,9 +989,10 @@ def _prepare_custom_field_source(solver, source, *, source_index):
 
 
 def _prepare_surface_source(solver, source, *, source_index):
-    if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
-        raise NotImplementedError(
-            f"{source['kind']} currently supports only none, pml, pec, or pmc boundaries."
+    if solver.scene.scene.boundary.uses_kind("periodic") or solver.scene.scene.boundary.uses_kind("bloch"):
+        raise UnsupportedFeatureError(
+            f"{source['kind']} currently supports only none, pml, pec, or pmc boundaries.",
+            feature="guard:95f2cbcb", method="fdtd"
         )
 
     source_time = source["source_time"]
@@ -999,7 +1001,7 @@ def _prepare_surface_source(solver, source, *, source_index):
     direction = source["direction"]
     axis = resolve_injection_axis(direction, source.get("injection_axis"))
     axis_index = {"x": 0, "y": 1, "z": 2}[axis]
-    plane_index = source_plane_index(solver.scene, axis, float(direction[axis_index]))
+    plane_index = source_plane_index(solver.scene, axis, float(direction[axis_index]), device=solver.scene.device)
     plane_coordinate = solver._plane_coordinate(axis, plane_index)
     reference_point = plane_center(
         solver.scene,
@@ -1130,8 +1132,9 @@ def _beam_power_scale(source, injection_axis: str) -> float:
 
 def _validate_soft_surface_source_boundary(boundary, direction, injection_axis: str) -> None:
     if boundary.uses_kind("bloch"):
-        raise NotImplementedError(
-            "PlaneWave soft injection does not support Bloch boundaries; use a TFSF source."
+        raise UnsupportedFeatureError(
+            "PlaneWave soft injection does not support Bloch boundaries; use a TFSF source.",
+            feature="source.PlaneWave", method="fdtd"
         )
     incompatible_periodic_axes = [
         axis
@@ -1141,9 +1144,10 @@ def _validate_soft_surface_source_boundary(boundary, direction, injection_axis: 
     ]
     if incompatible_periodic_axes:
         axes = ", ".join(incompatible_periodic_axes)
-        raise NotImplementedError(
+        raise UnsupportedFeatureError(
             "PlaneWave soft injection supports periodic boundaries only on zero-phase "
-            f"transverse axes; incompatible axes: {axes}."
+            f"transverse axes; incompatible axes: {axes}.",
+            feature="source.PlaneWave", method="fdtd"
         )
 
 
@@ -1156,13 +1160,14 @@ def _prepare_power_normalized_surface_source(solver, source, *, source_index):
     direction = source["direction"]
     injection_axis = resolve_injection_axis(direction, source.get("injection_axis"))
     _validate_soft_surface_source_boundary(
-        solver.scene.boundary,
+        solver.scene.scene.boundary,
         direction,
         injection_axis,
     )
     axis_index = _AXIS_TO_INDEX[injection_axis]
     direction_sign = 1 if float(direction[axis_index]) >= 0.0 else -1
-    plane_index = soft_plane_wave_index(solver.scene, injection_axis, float(direction[axis_index]))
+    plane_index = soft_plane_wave_index(solver.scene, injection_axis, float(direction[axis_index]),
+                                        device=solver.scene.device)
 
     lower = []
     upper = []
@@ -1183,12 +1188,18 @@ def _prepare_power_normalized_surface_source(solver, source, *, source_index):
             lo = 0
             hi = {"x": solver.Nx, "y": solver.Ny, "z": solver.Nz}[axis] - 1
             range_offset = 2 * _AXIS_TO_INDEX[axis]
-            aperture_bounds.append(
-                (
-                    float(computational_range[range_offset]),
-                    float(computational_range[range_offset + 1]),
-                )
-            )
+            axis_lo = float(computational_range[range_offset])
+            axis_hi = float(computational_range[range_offset + 1])
+            # A face symmetry plane stands for the explicit mirrored domain, so the
+            # unit-power aperture is the unfolded one: the folded run then equals
+            # its mirrored twin on the kept part.
+            symmetry = solver.scene.scene.symmetry[_AXIS_TO_INDEX[axis]]
+            if symmetry is not None:
+                if symmetry[1] == "low":
+                    axis_lo -= axis_hi - axis_lo
+                else:
+                    axis_hi += axis_hi - axis_lo
+            aperture_bounds.append((axis_lo, axis_hi))
         lower.append(int(lo))
         upper.append(int(hi))
 
@@ -1227,6 +1238,7 @@ def _prepare_power_normalized_surface_source(solver, source, *, source_index):
         injection_axis=injection_axis,
         plane_index=plane_index,
         direction_sign=direction_sign,
+        device=solver.scene.device,
     )
     k_numeric = solve_numerical_wavenumber(solver, direction, deltas)
     if k_numeric > 1e-12:
@@ -1511,7 +1523,7 @@ def _append_full_aniso_current_terms(solver, compiled_sources):
         region = tuple(slice(start, start + size) for start, size in zip(term["offsets"], patch.shape))
         current_patch = -patch * getattr(solver, "eps_" + source_name)[region] / solver.dt
         shape = getattr(solver, source_name).shape
-        periodic = tuple(solver.scene.boundary.axis_kind(axis) == "periodic" for axis in "xyz")
+        periodic = tuple(solver.scene.scene.boundary.axis_kind(axis) == "periodic" for axis in "xyz")
         if not any(periodic):
             # A local current couples only to adjacent transverse edges. Compile
             # bounded patches without allocating full-domain source arrays.

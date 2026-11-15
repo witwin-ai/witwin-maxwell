@@ -1,0 +1,606 @@
+{
+ "schema": "witwin.guard-identity-receipt/1",
+ "description": "0.7.0 phase 7b (api070/p7b-compiler-internal): PreparedScene is a composition, so guard predicates read declarations through prepared.scene (and the compile methods became compiler functions). Only the enclosing conditions changed; path, scope, raise expression and message are identical. Old identity -> new identity and conditions, paired by (path, scope, expression, message). body_sha256 hashes (path, scope, raise expression, message); the normalized-conditions hashes hash the enclosing conditions with every .scene attribute layer removed (old side from the merge base, new side from this tree). 'review' lists the identities whose normalized conditions differ (a predicate changed beyond the .scene indirection).",
+ "guard_id_map": {
+  "078294383f4d71a61dba37d98abe44f567337fd0acb66d273e6ecab2e7996826:0": {
+   "id": "713aba79bda6503f1dfac140d7ba178e33871454ad2d9d1a76ebc0d9202d8a80:0",
+   "conditions": [
+    [
+     "Call(func=Attribute(value=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='uses_kind', ctx=Load()), args=[Constant(value='bloch')], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "9dd2f0079dd97d5409b65da387c6d3850762776173f5f5d920b0dc87d07e63e7",
+   "old_normalized_conditions_sha256": "44a075825033ce9be6bb2a491982a236af6641e506b2064779b68c252ec57520",
+   "normalized_conditions_sha256": "44a075825033ce9be6bb2a491982a236af6641e506b2064779b68c252ec57520"
+  },
+  "0879becdb58027d4fd4c1401bef9acce078011602fed7ecddb0f80181c1db2ee:0": {
+   "id": "5b0b310e3277932dd285fb2ef38d29475f31cd494d1ef07bebfdfac0ebd32530:0",
+   "conditions": [
+    [
+     "Call(func=Attribute(value=Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='uses_kind', ctx=Load()), args=[Constant(value='bloch')], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "913974963c6feffb75b99d241fe89cf47bd091036c124febf8b538ea9105ef3e",
+   "old_normalized_conditions_sha256": "4cfff40d3c8865d1beee24796f2b72b780b60abd4c298ec99a59b9846edb068b",
+   "normalized_conditions_sha256": "4cfff40d3c8865d1beee24796f2b72b780b60abd4c298ec99a59b9846edb068b"
+  },
+  "08fb21c6080c27d4192ce240ad2ff90f62844a5628c32da653d6e86280da789e:0": {
+   "id": "25d7d1be2bd96c6b7c393e29bf7e51a173d353c9df4d60c6bb300a12990180f5:0",
+   "conditions": [
+    [
+     "BoolOp(op=And(), values=[Call(func=Attribute(value=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='uses_kind', ctx=Load()), args=[Constant(value='bloch')], keywords=[]), Call(func=Name(id='material_model_has_full_anisotropy', ctx=Load()), args=[Name(id='material_model', ctx=Load())], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "bcdad642c562c25d274264d3e4074356289bbd04b648a71ef2c9074470c6499b",
+   "old_normalized_conditions_sha256": "fa93cf03a1016fbb63fdbd3521b07641e7773b02c044251891d16adc38ef1469",
+   "normalized_conditions_sha256": "fa93cf03a1016fbb63fdbd3521b07641e7773b02c044251891d16adc38ef1469"
+  },
+  "111a986ee1af5f27b3cf1e84e4c3c8b5de9ccec1f6bf7ac408bbb76f369ee979:0": {
+   "id": "84843bdf6fb885d918df784d192f8b2c05f337f8dfc702bd3fa6cd0db1f2f0e0:0",
+   "conditions": [
+    [
+     "Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Compare(left=Attribute(value=Name(id='binding', ctx=Load()), attr='port_name', ctx=Load()), ops=[Eq()], comparators=[Name(id='port_name', ctx=Load())]), generators=[comprehension(target=Name(id='circuit', ctx=Store()), iter=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='circuits', ctx=Load()), ifs=[], is_async=0), comprehension(target=Name(id='binding', ctx=Store()), iter=Attribute(value=Name(id='circuit', ctx=Load()), attr='bindings', ctx=Load()), ifs=[], is_async=0)])], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "d803fb59188ed91ec0611001bb1be8eca388f896ff655abb095c54b66997a775",
+   "old_normalized_conditions_sha256": "c9440397fa0944b36aac51e6ee449690612d77c0e0fbaffcddb42dc7163041d4",
+   "normalized_conditions_sha256": "c9440397fa0944b36aac51e6ee449690612d77c0e0fbaffcddb42dc7163041d4"
+  },
+  "1c70e287b40a73bf3d57639d6dbc64c1f73fa6c0b174aab156af1de328fb7235:0": {
+   "id": "59397908c03ff54418ec47f99830a921dba8471c09f24cc85fffb4bc73cfca88:0",
+   "conditions": [
+    [
+     "for Name(id='block', ctx=Store()) in Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), Constant(value='networks'), Tuple(elts=[], ctx=Load())], keywords=[])",
+     "body"
+    ],
+    [
+     "Compare(left=Attribute(value=Name(id='block', ctx=Load()), attr='delay_seconds', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "body_sha256": "a029459bf8063069a0e213f7236be2ce97eba8452a33ca7a2a9e981fd892f93d",
+   "old_normalized_conditions_sha256": "ffa608b1f4faaf2db84973f39f1366dd2fcc1aee7ad51fd7fae2ab44c44d25c1",
+   "normalized_conditions_sha256": "ffa608b1f4faaf2db84973f39f1366dd2fcc1aee7ad51fd7fae2ab44c44d25c1"
+  },
+  "1d8389221cf240ba20a00acab40184feae25b057bdf1c0ecc5af810b993ea082:0": {
+   "id": "02f190e460cb5335e964b48b4a427edbae241faeb1b19547b933d2b50e41c8dc:0",
+   "conditions": [
+    [
+     "BoolOp(op=Or(), values=[Compare(left=Call(func=Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='base', ctx=Load()), attr='get', ctx=Load()), args=[Constant(value='edge_components')], keywords=[]), ops=[Is()], comparators=[Constant(value=None)]), Call(func=Attribute(value=Name(id='scene', ctx=Load()), attr='_has_trainable_geometry', ctx=Load()), args=[], keywords=[]), Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Attribute(value=Attribute(value=Name(id='r', ctx=Load()), attr='density', ctx=Load()), attr='requires_grad', ctx=Load()), generators=[comprehension(target=Name(id='r', ctx=Store()), iter=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='material_regions', ctx=Load()), ifs=[], is_async=0)])], keywords=[]), Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Attribute(value=Name(id='v', ctx=Load()), attr='requires_grad', ctx=Load()), generators=[comprehension(target=Name(id='r', ctx=Store()), iter=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='material_regions', ctx=Load()), ifs=[], is_async=0), comprehension(target=Name(id='v', ctx=Store()), iter=Call(func=Attribute(value=Call(func=Name(id='vars', ctx=Load()), args=[Attribute(value=Name(id='r', ctx=Load()), attr='geometry', ctx=Load())], keywords=[]), attr='values', ctx=Load()), args=[], keywords=[]), ifs=[Call(func=Name(id='isinstance', ctx=Load()), args=[Name(id='v', ctx=Load()), Attribute(value=Name(id='torch', ctx=Load()), attr='Tensor', ctx=Load())], keywords=[])], is_async=0)])], keywords=[]), Call(func=Name(id='material_model_has_nonlinearity', ctx=Load()), args=[Attribute(value=Name(id='self', ctx=Load()), attr='base', ctx=Load())], keywords=[]), Call(func=Name(id='material_model_has_modulation', ctx=Load()), args=[Attribute(value=Name(id='self', ctx=Load()), attr='base', ctx=Load())], keywords=[]), Call(func=Name(id='_material_model_has_electric_dispersion', ctx=Load()), args=[Attribute(value=Name(id='self', ctx=Load()), attr='base', ctx=Load())], keywords=[]), Call(func=Name(id='_material_model_has_magnetic_dispersion', ctx=Load()), args=[Attribute(value=Name(id='self', ctx=Load()), attr='base', ctx=Load())], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "c07def7635438ff93337bd2cbcd499a6c3c7defad7c27d8163717200655d88b8",
+   "old_normalized_conditions_sha256": "f915cd0367c5f48b78ae502069f7e0816518881c270bc2b9ac04f1b794786f88",
+   "normalized_conditions_sha256": "f915cd0367c5f48b78ae502069f7e0816518881c270bc2b9ac04f1b794786f88"
+  },
+  "22a36068332d81cdc7aaa52bd795b448ca4f662ac5fa80b1e39d12bb8c8ed673:0": {
+   "id": "47f35ead54858d94ba6c162bc17800294b9eabaf0af5fb3bc4caa5929cc4ef71:0",
+   "conditions": [
+    [
+     "Compare(left=Name(id='selection', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ],
+    [
+     "for Tuple(elts=[Name(id='grid_axis', ctx=Store()), Name(id='selected', ctx=Store())], ctx=Store()) in Call(func=Name(id='zip', ctx=Load()), args=[Name(id='_AXES', ctx=Load()), Name(id='selection', ctx=Load())], keywords=[])",
+     "body"
+    ],
+    [
+     "BoolOp(op=And(), values=[Compare(left=Call(func=Attribute(value=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='axis_kind', ctx=Load()), args=[Name(id='grid_axis', ctx=Load())], keywords=[]), ops=[In()], comparators=[Tuple(elts=[Constant(value='periodic'), Constant(value='bloch')], ctx=Load())]), BoolOp(op=Or(), values=[Compare(left=Name(id='start', ctx=Load()), ops=[NotEq()], comparators=[Constant(value=0)]), Compare(left=Name(id='stop', ctx=Load()), ops=[NotEq()], comparators=[Name(id='size', ctx=Load())])])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "fd530b77b5c252f16b35a5f88c9651d19f49346d248500b52a856d201c44fb4c",
+   "old_normalized_conditions_sha256": "926846cc12ae9549ebdf5f2344bec673d833b4f02e3bc06c77d8777e573f332d",
+   "normalized_conditions_sha256": "926846cc12ae9549ebdf5f2344bec673d833b4f02e3bc06c77d8777e573f332d"
+  },
+  "28319a5fb3b1452c49d33ca29daade468a270bd027e733e33e3a4b42dbf8a981:0": {
+   "id": "02f012ce7815f2a821d71c5a84ad6a580a15d5552f2ec5705f0f43b5d853867d:0",
+   "conditions": [
+    [
+     "Call(func=Attribute(value=Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='uses_kind', ctx=Load()), args=[Constant(value='bloch')], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "ae6fcedee4e429a81c7f3fd36641ff1b80368e6163b6786b157fe4965f5b6bb7",
+   "old_normalized_conditions_sha256": "4cfff40d3c8865d1beee24796f2b72b780b60abd4c298ec99a59b9846edb068b",
+   "normalized_conditions_sha256": "4cfff40d3c8865d1beee24796f2b72b780b60abd4c298ec99a59b9846edb068b"
+  },
+  "3376c9853e9d7525b0fd633595b404170f13c92b63c6dd9f56d5b301b24eda57:0": {
+   "id": "8a5aa5d34156b4669c6694c0e14cc808ab87fa7eccc697479291ba2cec011a30:0",
+   "conditions": [
+    [
+     "BoolOp(op=And(), values=[Call(func=Attribute(value=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='uses_kind', ctx=Load()), args=[Constant(value='bloch')], keywords=[]), Call(func=Name(id='material_model_has_nonlinearity', ctx=Load()), args=[Name(id='material_model', ctx=Load())], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "6ca3e9f39c46417df35bebf8ee2a4afac66ffd392d613081c7071dd0e8df09fd",
+   "old_normalized_conditions_sha256": "f301eb63f9202588918cd4a86e3224a3cc71a00c0cda2dd7ef23cfd4fcf7ce49",
+   "normalized_conditions_sha256": "f301eb63f9202588918cd4a86e3224a3cc71a00c0cda2dd7ef23cfd4fcf7ce49"
+  },
+  "3920785ee8f8ef966b2a45e15f9b95f4786609cdffb8a458b6ad6b5cff6684c5:0": {
+   "id": "9f9a322ecfe0d414f64f9574150291e49d2625790bace7e1f2edfb5f42469fa9:0",
+   "conditions": [
+    [
+     "BoolOp(op=Or(), values=[Call(func=Attribute(value=Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='uses_kind', ctx=Load()), args=[Constant(value='periodic')], keywords=[]), Call(func=Attribute(value=Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='uses_kind', ctx=Load()), args=[Constant(value='bloch')], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "a45ff9b34c7ce7c5de781112c3ee2b68696625df78ad115d668103ddc616b5d5",
+   "old_normalized_conditions_sha256": "fb4fc49fdd997bd737d14dfc30d8b7ac08ecb8150ef2fc8acb87cee77f9449d3",
+   "normalized_conditions_sha256": "fb4fc49fdd997bd737d14dfc30d8b7ac08ecb8150ef2fc8acb87cee77f9449d3"
+  },
+  "3b7f04160aa71495e65fc5bb53e5cda67008301d9108b58bdba2a39b14fe5238:0": {
+   "id": "d4e5a07be29062d63331a4bd1a0523e27e6a3d1bc316086fe8213fdce4045709:0",
+   "conditions": [
+    [
+     "Compare(left=Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), Constant(value='coordinates'), Constant(value=None)], keywords=[]), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "body_sha256": "0b1177f3fbcec42152fead3f744fa50bb64fa28dd5b086e5fdaa4a25fed6bc7b",
+   "old_normalized_conditions_sha256": "c72b2fcec01374e73b16e4306217ef759b4cebd25b02ea8151ca5021dbe01c9b",
+   "normalized_conditions_sha256": "c72b2fcec01374e73b16e4306217ef759b4cebd25b02ea8151ca5021dbe01c9b"
+  },
+  "3c053cefc3d0b28b280d1a665137c00b32b8da9be8966bab0b3943356bdda5dc:0": {
+   "id": "b7a6a09977d6e5a39b9793bf824681a081b09facab051f6b1bb49046814da1d9:0",
+   "conditions": [
+    [
+     "Compare(left=Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), Constant(value='coordinates'), Constant(value=None)], keywords=[]), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "body_sha256": "6fc19e915f7f3a889153501b0e62789853d374440a371ecdc2a9aa73a23e590a",
+   "old_normalized_conditions_sha256": "c72b2fcec01374e73b16e4306217ef759b4cebd25b02ea8151ca5021dbe01c9b",
+   "normalized_conditions_sha256": "c72b2fcec01374e73b16e4306217ef759b4cebd25b02ea8151ca5021dbe01c9b"
+  },
+  "3f69d4e1c056d62e2a432731d48123a166f73f3c1589d09be962681220098807:0": {
+   "id": "cd3e5b4a5e82fd7a07889b5d8429b88a9a3e0e0ed20e84d6bde83e7f6db848b6:0",
+   "conditions": [
+    [
+     "for Name(id='axis', ctx=Store()) in Constant(value='xyz')",
+     "body"
+    ],
+    [
+     "Compare(left=Call(func=Attribute(value=Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='axis_kind', ctx=Load()), args=[Name(id='axis', ctx=Load())], keywords=[]), ops=[In()], comparators=[Tuple(elts=[Constant(value='periodic'), Constant(value='bloch')], ctx=Load())])",
+     "true"
+    ]
+   ],
+   "body_sha256": "92eeefbdd99a6a2f9e2ec7ec6b582bbd64ab6926b851758fb8a3d59cced751e2",
+   "old_normalized_conditions_sha256": "837e95b28cf26db5f2518e2dc502654525891b6ed26f661ccf13d51b11ccb463",
+   "normalized_conditions_sha256": "837e95b28cf26db5f2518e2dc502654525891b6ed26f661ccf13d51b11ccb463"
+  },
+  "43f2d2141ab8965817f23bc0a7c33045ec2d0aee6cd8a033ac5109e4584fef6b:0": {
+   "id": "18a7d711c533ae1ee44e6179ac7d9b863391ed266c4fc51a90d5f9f8479aab09:0",
+   "conditions": [
+    [
+     "Call(func=Attribute(value=Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='uses_kind', ctx=Load()), args=[Constant(value='periodic')], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "1fe9190cf6bab17ab61f85fd84fde9ba93546c0dbfb32d252375b3cde8d2e04d",
+   "old_normalized_conditions_sha256": "d662c8f92a6c7ef82f1c484f57a8b0fb3cda56e5aaed51e78ca40c5061c48528",
+   "normalized_conditions_sha256": "d662c8f92a6c7ef82f1c484f57a8b0fb3cda56e5aaed51e78ca40c5061c48528"
+  },
+  "45d9ec9f9269c54642fdb4f9484f955baa4541c2a50aed5ba35641db1bd07707:0": {
+   "id": "2a312d6dbd7a58d7177e2e61b091b959747f3af3e3920adf35b77adb4e957c2e:0",
+   "conditions": [
+    [
+     "for Name(id='name', ctx=Store()) in Tuple(elts=[Constant(value='material_regions'), Constant(value='thin_wires'), Constant(value='networks'), Constant(value='lumped_elements'), Constant(value='circuits'), Constant(value='electrostatic_terminals'), Constant(value='charge_densities')], ctx=Load())",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), Name(id='name', ctx=Load()), Tuple(elts=[], ctx=Load())], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "953f79de5dd0d140528fa7ffa3ab892e6d0b3416d041601109d9a8ce0c27224d",
+   "old_normalized_conditions_sha256": "d5acf303001ac90d6079e99b62a74b0a19d816d81ca7b28d2b1e51901b94f42f",
+   "normalized_conditions_sha256": "d5acf303001ac90d6079e99b62a74b0a19d816d81ca7b28d2b1e51901b94f42f"
+  },
+  "4869c1e2636fd0311b194b654562c7b36b1cac63b867a164df85dd6a939dc9c1:0": {
+   "id": "d11996ec8254936f64523e4abea47b68af0e13d4da58f4b777a0aa23eb92b2c6:0",
+   "conditions": [
+    [
+     "for Name(id='block', ctx=Store()) in Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), Constant(value='networks'), Tuple(elts=[], ctx=Load())], keywords=[])",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='isinstance', ctx=Load()), args=[Name(id='model', ctx=Load()), Name(id='RationalModel', ctx=Load())], keywords=[])",
+     "false"
+    ],
+    [
+     "BoolOp(op=And(), values=[Call(func=Name(id='isinstance', ctx=Load()), args=[Name(id='model', ctx=Load()), Name(id='StateSpaceNetwork', ctx=Load())], keywords=[]), Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Attribute(value=Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='model', ctx=Load()), Name(id='name', ctx=Load())], keywords=[]), attr='requires_grad', ctx=Load()), generators=[comprehension(target=Name(id='name', ctx=Store()), iter=Tuple(elts=[Constant(value='A'), Constant(value='B'), Constant(value='C'), Constant(value='D')], ctx=Load()), ifs=[], is_async=0)])], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "d7f7a7bbee8a95b2a5443da05052b21f22361e4284ac490094707e50ea3170bb",
+   "old_normalized_conditions_sha256": "0d064ec60fff0ce09a21d0d330351c7105736d1e60b52bcf1cd41c8223fd87b2",
+   "normalized_conditions_sha256": "0d064ec60fff0ce09a21d0d330351c7105736d1e60b52bcf1cd41c8223fd87b2"
+  },
+  "4ba41193cacbe39a845666b14578fa3cf41c0a08c94e1887334db0cd056e5cc4:0": {
+   "id": "e27ea6ee6e12cd12666d107d999b70ac8c251d08a825f0bdab382a33e7517c29:0",
+   "conditions": [
+    [
+     "Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Compare(left=Name(id='port_name', ctx=Load()), ops=[In()], comparators=[Attribute(value=Name(id='network', ctx=Load()), attr='connected_port_names', ctx=Load())]), generators=[comprehension(target=Name(id='network', ctx=Store()), iter=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='networks', ctx=Load()), ifs=[], is_async=0)])], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "33cb5373b7ddbdb4d79591f6de8a1d0c230626c39383158ac628767babbfe788",
+   "old_normalized_conditions_sha256": "3f4edab0f7576ae0681879a618869b3e99ab95460fcb4d12845ff1fa88241218",
+   "normalized_conditions_sha256": "3f4edab0f7576ae0681879a618869b3e99ab95460fcb4d12845ff1fa88241218"
+  },
+  "61f556f366d3a4a0d3473c4fb6978aa83e304c927fb679d6d44bfe6a5e49b62c:0": {
+   "id": "a385fe86e3b3b57fcb3b2142e3b25dd4ea1adf3b6e26b8a8503b8aba4a82d4df:0",
+   "conditions": [
+    [
+     "BoolOp(op=And(), values=[Compare(left=Attribute(value=Name(id='monitor', ctx=Load()), attr='quadrature', ctx=Load()), ops=[Eq()], comparators=[Constant(value='physical_intersection')]), Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Compare(left=Call(func=Attribute(value=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='axis_kind', ctx=Load()), args=[Name(id='axis', ctx=Load())], keywords=[]), ops=[In()], comparators=[Tuple(elts=[Constant(value='periodic'), Constant(value='bloch')], ctx=Load())]), generators=[comprehension(target=Name(id='axis', ctx=Store()), iter=Constant(value='xyz'), ifs=[], is_async=0)])], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "08b391d1ae1e4e82e13a96b78e05f33f64bbb5a9832dce58bbbe6f42f58c4802",
+   "old_normalized_conditions_sha256": "cfe3c5b20f4a48da1b7845b8b7d27848a19357bc281408d4b2f5e904e6d10b2e",
+   "normalized_conditions_sha256": "cfe3c5b20f4a48da1b7845b8b7d27848a19357bc281408d4b2f5e904e6d10b2e"
+  },
+  "62279fe5c3f2a99e713d48e6933fe55266ccf12ed98d77efa4684bba460f496d:0": {
+   "id": "7eb55a6cd45cbd4ec57e9bf1f298e8b27a9818a192d209722c81b841695401cd:0",
+   "conditions": [
+    [
+     "Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Compare(left=Attribute(value=Name(id='port', ctx=Load()), attr='name', ctx=Load()), ops=[NotIn()], comparators=[Name(id='feed_names', ctx=Load())]), generators=[comprehension(target=Name(id='port', ctx=Store()), iter=Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), attr='ports', ctx=Load()), ifs=[], is_async=0)])], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "d632e167aff728ea8db2d5ef454113bc67f6e7dd7dda88dff44ee63c32cbe529",
+   "old_normalized_conditions_sha256": "fcc5ea3c87638dba81423dda78e634b6db7a2a4bf55136a0e8db8f51952a7dcc",
+   "normalized_conditions_sha256": "fcc5ea3c87638dba81423dda78e634b6db7a2a4bf55136a0e8db8f51952a7dcc"
+  },
+  "740903169061a09f1898f34c2d06307676aa0d475f3ac7f25f3aba7c1d8fa773:0": {
+   "id": "9a63d8ede6f90f2325008ddc74fcbc41fbda6e849d188fa0eb6a14829733befa:0",
+   "conditions": [
+    [
+     "BoolOp(op=And(), values=[Call(func=Attribute(value=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='uses_kind', ctx=Load()), args=[Constant(value='bloch')], keywords=[]), Call(func=Name(id='material_model_has_modulation', ctx=Load()), args=[Name(id='material_model', ctx=Load())], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "9ddbb970f063c98e77e46b11a355a68d27aa2b0ad2c869761961a11a4c0792eb",
+   "old_normalized_conditions_sha256": "62069eb695a0475534169948ad2ab070c07ad4d5fcd5567008ffcca39eab514b",
+   "normalized_conditions_sha256": "62069eb695a0475534169948ad2ab070c07ad4d5fcd5567008ffcca39eab514b"
+  },
+  "77e76eb33543a6dbed2b4e819b6664ca53ab835c6aad0770616d6b5b97b4256f:0": {
+   "id": "0a09b61e431b66976ad1741a55cfbc4056157df636e52130ce7d3e94876cc32f:0",
+   "conditions": [
+    [
+     "for Name(id='block', ctx=Store()) in Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), Constant(value='networks'), Tuple(elts=[], ctx=Load())], keywords=[])",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='isinstance', ctx=Load()), args=[Name(id='model', ctx=Load()), Name(id='RationalModel', ctx=Load())], keywords=[])",
+     "true"
+    ],
+    [
+     "Name(id='unsupported', ctx=Load())",
+     "true"
+    ]
+   ],
+   "body_sha256": "8004219ab9143c23f6e4478553633682980441e5998adbde877b72710e8578d1",
+   "old_normalized_conditions_sha256": "33e8c9175f672009903b41a28d5fc3bc76036c492f23d4d184fdd879dd56a3df",
+   "normalized_conditions_sha256": "33e8c9175f672009903b41a28d5fc3bc76036c492f23d4d184fdd879dd56a3df"
+  },
+  "8318234e763b875cf91167a4bd1295eeccd809e068de65997daeed37f277289f:0": {
+   "id": "01e697371a2126ce0e366bf6a176158c7aa2caccbbf090281494d7d71f0e352d:0",
+   "conditions": [
+    [
+     "Compare(left=Attribute(value=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='subpixel', ctx=Load()), attr='averaging', ctx=Load()), ops=[Eq()], comparators=[Constant(value='kottke_edge')])",
+     "true"
+    ]
+   ],
+   "body_sha256": "5d6a4ed0205a625c82a80c7f1a6284aa0d4d0d516c11f5ae73662b5eb88fdcbd",
+   "old_normalized_conditions_sha256": "2f382f2d67f4e0e2107e4d26f03bafc8a3051e7c5a640a3f7f9f68816eba1c3b",
+   "normalized_conditions_sha256": "2f382f2d67f4e0e2107e4d26f03bafc8a3051e7c5a640a3f7f9f68816eba1c3b"
+  },
+  "884afc6e03d7342cb46923d65773d5fd5424becc1029b72d87e6fc3dfc1165e4:0": {
+   "id": "0434a529405610a24c5e5492c06fb48b298290ca1b7eea721bfa82a66c031003:0",
+   "conditions": [
+    [
+     "for Name(id='structure', ctx=Store()) in Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), attr='structures', ctx=Load())",
+     "body"
+    ],
+    [
+     "Name(id='contact', ctx=Load())",
+     "true"
+    ]
+   ],
+   "body_sha256": "6efeac61b713dce806e6e5af272fb349770a2ec2db6e7e359edda79c084d110b",
+   "old_normalized_conditions_sha256": "dcee34c1c15b348f212d7a221ad857ef1fd0c8a3ebef603e9a0dc6b81e1bac00",
+   "normalized_conditions_sha256": "dcee34c1c15b348f212d7a221ad857ef1fd0c8a3ebef603e9a0dc6b81e1bac00"
+  },
+  "8ec4b87fa9f7e9a52ad52b4d7dd2dd4b99ef6dbfa7a77d2d1b374bbda4407185:0": {
+   "id": "5b87681274dc31b291125daba016c8f20c6d2b515172dd8586585407c2561489:0",
+   "conditions": [
+    [
+     "Compare(left=Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), Constant(value='coordinates'), Constant(value=None)], keywords=[]), ops=[IsNot()], comparators=[Constant(value=None)])",
+     "true"
+    ]
+   ],
+   "body_sha256": "9f8e54d57c5e5eb3c03cb695dee88c275f203646c88989c4ac8e7adac052c60b",
+   "old_normalized_conditions_sha256": "c72b2fcec01374e73b16e4306217ef759b4cebd25b02ea8151ca5021dbe01c9b",
+   "normalized_conditions_sha256": "c72b2fcec01374e73b16e4306217ef759b4cebd25b02ea8151ca5021dbe01c9b"
+  },
+  "922a02efc5a77df6d5fa33d949aafab6a37e272602a30e0018bb53617b4fb11c:0": {
+   "id": "3fd5ce53c74ef2689383e15034794765f549da96359e3995451d890f409fb95b:0",
+   "conditions": [
+    [
+     "Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Call(func=Name(id='isinstance', ctx=Load()), args=[Name(id='port', ctx=Load()), Name(id='WavePort', ctx=Load())], keywords=[]), generators=[comprehension(target=Name(id='port', ctx=Store()), iter=Attribute(value=Name(id='declared', ctx=Load()), attr='ports', ctx=Load()), ifs=[], is_async=0)])], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "d28388a8e0ff1549fb64c323bedc295e3fe974cb35f5c65445527cd0b4c94cab",
+   "old_normalized_conditions_sha256": "64165911297fe90b414c975b45c10e65849d85e2b871fe3bfe385761f69c3a39",
+   "normalized_conditions_sha256": "eab561c8afc120e762f89e939099004dc951040807e5064ffdf9f05864fe563b"
+  },
+  "96a8caaf5d9616cc7037d1bd02dbb69bd70ccf3f8333b697dd1e3e5c041e32f8:0": {
+   "id": "aaac1cf830344d91e7ad71d18b5406d0d5806641511c4cc907da0c78c9ab775b:0",
+   "conditions": [
+    [
+     "for Name(id='structure', ctx=Store()) in Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='structures', ctx=Load())",
+     "body"
+    ],
+    [
+     "BoolOp(op=And(), values=[Call(func=Name(id='bool', ctx=Load()), args=[Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='material', ctx=Load()), Constant(value='is_nonlinear'), Constant(value=False)], keywords=[])], keywords=[]), Call(func=Name(id='bool', ctx=Load()), args=[Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='material', ctx=Load()), Constant(value='is_anisotropic'), Constant(value=False)], keywords=[])], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "547efdb2d08fd0712a046b1d33e753366ec96d4a44499f921612865e4ff0bcd6",
+   "old_normalized_conditions_sha256": "bb8d9cf09359830da7110925b58d5064da5a9d398333de1d2141ee199dd8c235",
+   "normalized_conditions_sha256": "bb8d9cf09359830da7110925b58d5064da5a9d398333de1d2141ee199dd8c235"
+  },
+  "a493b567e58780c90a807eb17ef5eefa531a42cd3e4bcabd33a66709329230fe:0": {
+   "id": "f4c28235d1c91090664ccb77ee22a204f9dc7f7dfe1a4d203b81cbce53a9fe88:0",
+   "conditions": [
+    [
+     "Call(func=Name(id='scene_has_breakdown', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load())], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "5d3b13d06c81b89b1b0f922ebd12f5b8762c87a04fe26b2954e9c0b1c7e43355",
+   "old_normalized_conditions_sha256": "e4bc4ef7b0b28f33dd3e84319f808dc349c3758848ba56bed69dd60130583638",
+   "normalized_conditions_sha256": "e4bc4ef7b0b28f33dd3e84319f808dc349c3758848ba56bed69dd60130583638"
+  },
+  "aad5dc8ddd4ce54e972fc59ec27f692ab3b4fbd0164167c5783f1435d79fcc34:0": {
+   "id": "69bf6b77e31c7d9c56d8ae479a20b6101ce03cf3ae3f20a9c08aad85d585fbb5:0",
+   "conditions": [
+    [
+     "for Name(id='structure', ctx=Store()) in Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='structures', ctx=Load())",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='bool', ctx=Load()), args=[Call(func=Attribute(value=Compare(left=Name(id='counts', ctx=Load()), ops=[Gt()], comparators=[Constant(value=0)]), attr='any', ctx=Load()), args=[], keywords=[])], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "78f21688760bfd86fadd95ab22dd5bed4497cf2f9b5d778e33f46e045fb61d2d",
+   "old_normalized_conditions_sha256": "183d0331fd774cb8d90d7dd9263a446f0613882f2a4e9670d2a1aaa6db323add",
+   "normalized_conditions_sha256": "183d0331fd774cb8d90d7dd9263a446f0613882f2a4e9670d2a1aaa6db323add"
+  },
+  "b2565ef151ba9d7ed0b262375e5177032f995af61072d1192ccc1d824105ca3b:0": {
+   "id": "a94922771816ef90f84bc3446d142df247e43e6ba39e9c6e11e775937f45bd5e:0",
+   "conditions": [
+    [
+     "Name(id='complex_fields', ctx=Load())",
+     "true"
+    ],
+    [
+     "BoolOp(op=Or(), values=[Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), Constant(value='circuits'), Tuple(elts=[], ctx=Load())], keywords=[]), Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), Constant(value='networks'), Tuple(elts=[], ctx=Load())], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "0ccd322061b2bc9477a3eb4828fd57c71e538e762ecbd42409df79021a7c1cd7",
+   "old_normalized_conditions_sha256": "ef2ee00836ec50055dfb5805aacf74176bde2f1856eeb0f595a1a640aaec12cb",
+   "normalized_conditions_sha256": "ef2ee00836ec50055dfb5805aacf74176bde2f1856eeb0f595a1a640aaec12cb"
+  },
+  "b3568c19d1de9efd77f2cd0ad721baca014f3b63446ca1ec598f97ec7d08ef28:0": {
+   "id": "85f807d14d3e22ca3168c002a448609e9a2fe670e1551a4424f8f9684307881d:0",
+   "conditions": [
+    [
+     "for Name(id='structure', ctx=Store()) in Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='structures', ctx=Load())",
+     "body"
+    ],
+    [
+     "for Name(id='name', ctx=Store()) in Tuple(elts=[Constant(value='epsilon_tensor'), Constant(value='mu_tensor'), Constant(value='sigma_e_tensor'), Constant(value='orientation'), Constant(value='kerr_chi3'), Constant(value='nonlinearity'), Constant(value='modulation'), Constant(value='breakdown'), Constant(value='mass_density')], ctx=Load())",
+     "body"
+    ],
+    [
+     "BoolOp(op=And(), values=[Compare(left=Name(id='value', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=None)]), Compare(left=Name(id='value', ctx=Load()), ops=[IsNot()], comparators=[Constant(value=False)]), UnaryOp(op=Not(), operand=BoolOp(op=And(), values=[Call(func=Name(id='isinstance', ctx=Load()), args=[Name(id='value', ctx=Load()), Name(id='tuple', ctx=Load())], keywords=[]), UnaryOp(op=Not(), operand=Name(id='value', ctx=Load()))]))])",
+     "true"
+    ]
+   ],
+   "body_sha256": "29ce2ee46874b0f831c97c080397dcc2acafd31f8883f102f94ab157ac44db5c",
+   "old_normalized_conditions_sha256": "74e871797f0662b3cf29313d79f974b9324d77eecffac2e151d39c29aafc66d2",
+   "normalized_conditions_sha256": "74e871797f0662b3cf29313d79f974b9324d77eecffac2e151d39c29aafc66d2"
+  },
+  "ca5f02c00e23ac832ecb54dc205bd83d7c7ef8ba6f5d04417714ba5edc8002f9:0": {
+   "id": "24a361f4d4fe0e662879c5d6d5a326fdaf693789a6ab3adb29c2df35b013cd92:0",
+   "conditions": [
+    [
+     "for Tuple(elts=[Name(id='i', ctx=Store()), Name(id='structure', ctx=Store())], ctx=Store()) in Call(func=Name(id='enumerate', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='structures', ctx=Load())], keywords=[])",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='isinstance', ctx=Load()), args=[Attribute(value=Name(id='structure', ctx=Load()), attr='geometry', ctx=Load()), Name(id='SurfaceMesh', ctx=Load())], keywords=[])",
+     "true"
+    ],
+    [
+     "UnaryOp(op=Not(), operand=Call(func=Name(id='bool', ctx=Load()), args=[Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Name(id='structure', ctx=Load()), attr='material', ctx=Load()), Constant(value='is_pec'), Constant(value=False)], keywords=[])], keywords=[]))",
+     "true"
+    ]
+   ],
+   "body_sha256": "50039eca27f5cdb8de30e9ffa0b32b17c61fa7e6b78b3dd852d72291324f6eb2",
+   "old_normalized_conditions_sha256": "5696353c7d85d0c7a46c10383426d28a0156dfa24ff79475c0479dce2d20619a",
+   "normalized_conditions_sha256": "5696353c7d85d0c7a46c10383426d28a0156dfa24ff79475c0479dce2d20619a"
+  },
+  "e28127a08b09bcb5602364f69b5400d66ff9fae0167c767a9de0ee6c6e4f9082:0": {
+   "id": "4e70cca08e1b9d39cd1c263ace4e23d8408e00f0ea049cce64f3f2cf97c12972:0",
+   "conditions": [
+    [
+     "BoolOp(op=And(), values=[Attribute(value=Name(id='solver', ctx=Load()), attr='complex_fields_enabled', ctx=Load()), Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=BoolOp(op=And(), values=[Compare(left=Name(id='k', ctx=Load()), ops=[NotEq()], comparators=[Constant(value=0.0)]), Compare(left=Call(func=Attribute(value=Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='axis_kind', ctx=Load()), args=[Name(id='axis', ctx=Load())], keywords=[]), ops=[Eq()], comparators=[Constant(value='bloch')])]), generators=[comprehension(target=Tuple(elts=[Name(id='axis', ctx=Store()), Name(id='k', ctx=Store())], ctx=Store()), iter=Call(func=Name(id='zip', ctx=Load()), args=[Constant(value='xyz'), Attribute(value=Name(id='solver', ctx=Load()), attr='resolved_bloch_wavevector', ctx=Load())], keywords=[]), ifs=[], is_async=0)])], keywords=[]), Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=BoolOp(op=And(), values=[Compare(left=Subscript(value=Name(id='source', ctx=Load()), slice=Constant(value='kind'), ctx=Load()), ops=[In()], comparators=[Name(id='_DIRECTIONAL_SOURCE_KINDS', ctx=Load())]), Compare(left=Subscript(value=Subscript(value=Name(id='source', ctx=Load()), slice=Constant(value='source_time'), ctx=Load()), slice=Constant(value='kind'), ctx=Load()), ops=[NotEq()], comparators=[Constant(value='cw')]), UnaryOp(op=Not(), operand=Call(func=Name(id='_fixed_k_exact_broadband', ctx=Load()), args=[Name(id='source', ctx=Load())], keywords=[]))]), generators=[comprehension(target=Name(id='source', ctx=Store()), iter=Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='solver', ctx=Load()), Constant(value='_compiled_sources'), Tuple(elts=[], ctx=Load())], keywords=[]), ifs=[], is_async=0)])], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "5f7ef5e9b60ee8a28ee2564f0fe9ec96cb5b5621d9a29d8ff104bc12cbbfb8f7",
+   "old_normalized_conditions_sha256": "68d00192465a05d07ef33df01464a7feaffe417acb45626a8a933805d13601d6",
+   "normalized_conditions_sha256": "68d00192465a05d07ef33df01464a7feaffe417acb45626a8a933805d13601d6"
+  },
+  "e51317c2aeaad57649b7f529fb8d191f697b0308a24fa7a3739ad02d321ae0c2:0": {
+   "id": "289a691b0a7da1a8e7ea5e2b30676edb03760126ca59713cee7aeaad05dcfbe4:0",
+   "conditions": [
+    [
+     "Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Call(func=Name(id='isinstance', ctx=Load()), args=[Attribute(value=Name(id='s', ctx=Load()), attr='material', ctx=Load()), Name(id='PerturbationMedium', ctx=Load())], keywords=[]), generators=[comprehension(target=Name(id='s', ctx=Store()), iter=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='structures', ctx=Load()), ifs=[], is_async=0)])], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "6a9c4c42c0a1a7c74d556031a8adeb9f7f2e80b1e8989a31eb9aae6fc79deba2",
+   "old_normalized_conditions_sha256": "dbeb7722d094258cbc8bb55874f9c19bb1ccbee94a4a6c768867cbd73361ea8a",
+   "normalized_conditions_sha256": "dbeb7722d094258cbc8bb55874f9c19bb1ccbee94a4a6c768867cbd73361ea8a"
+  },
+  "e54f170d507af20ee620781f4a32b1d33326eccea04ba6b22649c473403f2a2f:0": {
+   "id": "2058183826e888e9f3419f657c05e72a3d71eafad20982e3b535b383cebe5e3c:0",
+   "conditions": [
+    [
+     "for Name(id='structure', ctx=Store()) in Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='structures', ctx=Load())",
+     "body"
+    ],
+    [
+     "BoolOp(op=And(), values=[Compare(left=Call(func=Name(id='type', ctx=Load()), args=[Name(id='material', ctx=Load())], keywords=[]), ops=[Is()], comparators=[Name(id='CopperFoil', ctx=Load())]), Compare(left=Call(func=Name(id='type', ctx=Load()), args=[Name(id='geometry', ctx=Load())], keywords=[]), ops=[IsNot()], comparators=[Name(id='Box', ctx=Load())])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "b78114c8876d3ae4cd7c0f012ce15e06c0a43cad8ef6d939d748988feb995642",
+   "old_normalized_conditions_sha256": "85a08d4449883c4b37ccc0f77973fe79ac8f089da7efddb2825ad3afa3259a1f",
+   "normalized_conditions_sha256": "85a08d4449883c4b37ccc0f77973fe79ac8f089da7efddb2825ad3afa3259a1f"
+  },
+  "e5fee4f1322401481756e14065748fbc6611748b445140cddc002a7d599ad633:0": {
+   "id": "9559a382eaa7de6a00d2045c87d33f310793343c80944cffd32701f977595d73:0",
+   "conditions": [
+    [
+     "Compare(left=Attribute(value=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='subpixel', ctx=Load()), attr='averaging', ctx=Load()), ops=[Eq()], comparators=[Constant(value='polarized_tensor')])",
+     "true"
+    ]
+   ],
+   "body_sha256": "0e171fb4d5dc87b75a0565cfcffcbfc2a96f7ab9a27e80404a7228d78a797f52",
+   "old_normalized_conditions_sha256": "7f57e87976634bd06b21f8db960c644caa507480609c01862aa12201730239ce",
+   "normalized_conditions_sha256": "7f57e87976634bd06b21f8db960c644caa507480609c01862aa12201730239ce"
+  },
+  "e69d5207c07a3b28595616c83b1d87ad3362597d461ce095b6708c65292782a8:0": {
+   "id": "7c69bad63fe678ab638db6d5feac470e5f368d51c8a12bc7c84c7cc6040d9a62:0",
+   "conditions": [
+    [
+     "Compare(left=Attribute(value=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='subpixel', ctx=Load()), attr='averaging', ctx=Load()), ops=[Eq()], comparators=[Constant(value='kottke_smooth')])",
+     "true"
+    ]
+   ],
+   "body_sha256": "074f710575b1e35fa4b64d624d278a5d1c5dfc11e25e920c7821e91821dd6b72",
+   "old_normalized_conditions_sha256": "ae9510fe3adfc785f10e689830e6c2c7d6e4d9b55911bdd685f9cfe82a585bf2",
+   "normalized_conditions_sha256": "ae9510fe3adfc785f10e689830e6c2c7d6e4d9b55911bdd685f9cfe82a585bf2"
+  },
+  "e6bdf1eb67b48446e3bb898dd5e726c4846496b49004a512b9761ebbae655adb:0": {
+   "id": "d9535ecb245ca223fb85512b0cd942c5efe9bb9390b9aef1c234a3825a81fe08:0",
+   "conditions": [
+    [
+     "BoolOp(op=And(), values=[Compare(left=Attribute(value=Name(id='monitor', ctx=Load()), attr='quadrature', ctx=Load()), ops=[Eq()], comparators=[Constant(value='physical_intersection')]), Compare(left=Call(func=Name(id='getattr', ctx=Load()), args=[Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), Constant(value='coordinates'), Constant(value=None)], keywords=[]), ops=[IsNot()], comparators=[Constant(value=None)])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "fc7903db65582839897bb3b6e5dc8f7cc2f8a1c468f3d9829c23f5d8608a9bf0",
+   "old_normalized_conditions_sha256": "befeaac674aed8cbbd4db7676954721b34ad065f7cad9d529d543a011321d86c",
+   "normalized_conditions_sha256": "befeaac674aed8cbbd4db7676954721b34ad065f7cad9d529d543a011321d86c"
+  },
+  "e916e405ebfd1b4c268f094b2403b89d10f72c3ed5855a5e23e551fd5bb53f17:0": {
+   "id": "25ed7df57c47c605cfbc9c87f3aeceb283afe5bb6504bf834e12904ee0641919:0",
+   "conditions": [
+    [
+     "for Name(id='structure', ctx=Store()) in Call(func=Name(id='_bulk_structures', ctx=Load()), args=[Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load())], keywords=[])",
+     "body"
+    ],
+    [
+     "Call(func=Name(id='any', ctx=Load()), args=[GeneratorExp(elt=Compare(left=Name(id='value', ctx=Load()), ops=[NotEq()], comparators=[Constant(value=0.0)]), generators=[comprehension(target=Name(id='value', ctx=Store()), iter=Call(func=Attribute(value=Name(id='eps_offdiag', ctx=Load()), attr='values', ctx=Load()), args=[], keywords=[]), ifs=[], is_async=0)])], keywords=[])",
+     "true"
+    ]
+   ],
+   "body_sha256": "54cbd327e018f94116b3c75d09c221e57e2d72034be3527fc844a491813d058c",
+   "old_normalized_conditions_sha256": "f0f60d16848fb151645e713f15d60221b0c6c3c3d2256bef465a4ba6aace6782",
+   "normalized_conditions_sha256": "f0f60d16848fb151645e713f15d60221b0c6c3c3d2256bef465a4ba6aace6782"
+  },
+  "ea533512a2e1502adb6c01783e4d3f1792a00bdc880d5f352fa2f707296f2a8d:0": {
+   "id": "12cbf2c5742a8db3b26dd2ccbaaf85e45a1762da2e226871039c5108ce3e6b07:0",
+   "conditions": [
+    [
+     "for Name(id='structure', ctx=Store()) in Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='structures', ctx=Load())",
+     "body"
+    ],
+    [
+     "BoolOp(op=Or(), values=[Compare(left=Call(func=Name(id='type', ctx=Load()), args=[Name(id='structure', ctx=Load())], keywords=[]), ops=[IsNot()], comparators=[Name(id='Structure', ctx=Load())]), Compare(left=Call(func=Name(id='type', ctx=Load()), args=[Attribute(value=Name(id='structure', ctx=Load()), attr='geometry', ctx=Load())], keywords=[]), ops=[NotIn()], comparators=[Tuple(elts=[Name(id='Mesh', ctx=Load()), Name(id='Box', ctx=Load()), Name(id='PlanarPEC', ctx=Load())], ctx=Load())]), Compare(left=Call(func=Name(id='type', ctx=Load()), args=[Attribute(value=Name(id='structure', ctx=Load()), attr='material', ctx=Load())], keywords=[]), ops=[NotIn()], comparators=[Tuple(elts=[Name(id='Material', ctx=Load()), Name(id='CopperFoil', ctx=Load())], ctx=Load())])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "980de4f5271b9a306415fd716a7bf0b36809c54458bcf8b8d8f8dbd27a110d94",
+   "old_normalized_conditions_sha256": "429ad88efda337b7af9bdd8d2c9728591fee76638c23ccba91d8ab4f7e94bed0",
+   "normalized_conditions_sha256": "429ad88efda337b7af9bdd8d2c9728591fee76638c23ccba91d8ab4f7e94bed0"
+  },
+  "f31a5f6ba3e3981b7ef89080187b86e604a7e08f410bba12f82ebae7fcc0dcf1:0": {
+   "id": "228cf737c08fc96eb26ff68205eb6f18b430260b65f80db9ae8725891180fd00:0",
+   "conditions": [
+    [
+     "BoolOp(op=Or(), values=[Call(func=Attribute(value=Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='uses_kind', ctx=Load()), args=[Constant(value='periodic')], keywords=[]), Call(func=Attribute(value=Attribute(value=Attribute(value=Attribute(value=Name(id='solver', ctx=Load()), attr='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='uses_kind', ctx=Load()), args=[Constant(value='bloch')], keywords=[])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "fc83d0de512f4c55ec09eed2d0b18ed67b78e6f45f00add0aeafe30fd750f1fb",
+   "old_normalized_conditions_sha256": "fb4fc49fdd997bd737d14dfc30d8b7ac08ecb8150ef2fc8acb87cee77f9449d3",
+   "normalized_conditions_sha256": "fb4fc49fdd997bd737d14dfc30d8b7ac08ecb8150ef2fc8acb87cee77f9449d3"
+  },
+  "fa9cb5146b69e40973ba1348d9973b0fdc1c04accb87851e17d131f160fbad56:0": {
+   "id": "63ff1038636eebef8d0d38afc4e6451a0a3a3b8be8816a50979d352ede82a92f:0",
+   "conditions": [
+    [
+     "for Name(id='geometry', ctx=Store()) in Call(func=Name(id='compile_ports', ctx=Load()), args=[Name(id='prepared_scene', ctx=Load())], keywords=[keyword(arg='device', value=Constant(value='cpu'))])",
+     "body"
+    ],
+    [
+     "for Name(id='point', ctx=Store()) in Call(func=Attribute(value=Attribute(value=Name(id='geometry', ctx=Load()), attr='voltage_indices', ctx=Load()), attr='tolist', ctx=Load()), args=[], keywords=[])",
+     "body"
+    ],
+    [
+     "Compare(left=Tuple(elts=[Attribute(value=Name(id='geometry', ctx=Load()), attr='voltage_component', ctx=Load()), Call(func=Name(id='tuple', ctx=Load()), args=[Name(id='point', ctx=Load())], keywords=[])], ctx=Load()), ops=[In()], comparators=[Name(id='active', ctx=Load())])",
+     "true"
+    ]
+   ],
+   "body_sha256": "7839fe994b6755653d8bb43037ec0ef09dbef394ece891ae3acbac766619f99b",
+   "old_normalized_conditions_sha256": "b8a3108c93068f787a3bb6665f0b85d1d4e0058fcb76810d07c7fb82d8a43901",
+   "normalized_conditions_sha256": "ccc35d70bcbd7f856c4f567ec6362ffe70d94a2a6bd5c271d017822fddb8d508"
+  },
+  "fc36b47d73b39b4618de088b2ab473b79a0ae8e7f3970d4c5f4dd8fb80c21939:0": {
+   "id": "b1c98ac8954d48aa26ee54703399beb98e0aaf75084de80aebb26d112998b10c:0",
+   "conditions": [
+    [
+     "for Tuple(elts=[Name(id='owner', ctx=Store()), Name(id='structure', ctx=Store())], ctx=Store()) in Name(id='indexed', ctx=Load())",
+     "body"
+    ],
+    [
+     "BoolOp(op=And(), values=[Compare(left=Call(func=Attribute(value=Attribute(value=Attribute(value=Name(id='scene', ctx=Load()), attr='scene', ctx=Load()), attr='boundary', ctx=Load()), attr='axis_kind', ctx=Load()), args=[Attribute(value=Name(id='geometry', ctx=Load()), attr='normal_axis', ctx=Load())], keywords=[]), ops=[In()], comparators=[Tuple(elts=[Constant(value='periodic'), Constant(value='bloch')], ctx=Load())]), Compare(left=Name(id='index', ctx=Load()), ops=[In()], comparators=[Tuple(elts=[Constant(value=0), BinOp(left=Call(func=Name(id='len', ctx=Load()), args=[Subscript(value=Name(id='nodes', ctx=Load()), slice=Name(id='normal', ctx=Load()), ctx=Load())], keywords=[]), op=Sub(), right=Constant(value=1))], ctx=Load())])])",
+     "true"
+    ]
+   ],
+   "body_sha256": "11826501ad22128c46536cc0a7973114ee99cbb1e15a40eb48ebebc670ebf2b2",
+   "old_normalized_conditions_sha256": "ee298df19994e5ede02da5a2423aa066365db824142e210b0201a2cec9deefa8",
+   "normalized_conditions_sha256": "ee298df19994e5ede02da5a2423aa066365db824142e210b0201a2cec9deefa8"
+  }
+ },
+ "review": [
+  "922a02efc5a77df6d5fa33d949aafab6a37e272602a30e0018bb53617b4fb11c:0",
+  "fa9cb5146b69e40973ba1348d9973b0fdc1c04accb87851e17d131f160fbad56:0"
+ ]
+}

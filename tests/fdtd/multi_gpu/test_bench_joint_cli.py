@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 import torch
 
+import witwin.maxwell as mw
+
 
 @pytest.fixture(scope="module")
 def bench_joint():
@@ -79,7 +81,6 @@ def test_workload_specs_build_expected_declarative_scene(
         name,
         (17, 9, 9),
         spacing=0.01,
-        device=torch.device("cpu"),
     )
 
     assert spec.frequencies == frequencies
@@ -92,10 +93,10 @@ def test_workload_specs_build_expected_declarative_scene(
 
 
 @pytest.mark.parametrize(
-    ("workload", "expected_cpml_config"),
+    ("workload", "expected_cpml"),
     (
         ("vacuum", None),
-        ("cpml_dielectric", {"memory_mode": "slab"}),
+        ("cpml_dielectric", mw.fdtd.CPMLConfig(memory_mode="slab")),
         ("multifrequency_dft", None),
     ),
 )
@@ -103,7 +104,7 @@ def test_simulation_routes_cpml_memory_mode_only_when_enabled(
     bench_joint,
     monkeypatch,
     workload,
-    expected_cpml_config,
+    expected_cpml,
 ):
     calls = []
     monkeypatch.setattr(
@@ -121,11 +122,8 @@ def test_simulation_routes_cpml_memory_mode_only_when_enabled(
     )
 
     assert len(calls) == 1
-    kwargs = calls[0][1]
-    if expected_cpml_config is None:
-        assert "cpml_config" not in kwargs
-    else:
-        assert kwargs["cpml_config"] == expected_cpml_config
+    config = calls[0][1]["config"]
+    assert config.cpml == (mw.fdtd.CPMLConfig() if expected_cpml is None else expected_cpml)
 
 
 @pytest.mark.parametrize(

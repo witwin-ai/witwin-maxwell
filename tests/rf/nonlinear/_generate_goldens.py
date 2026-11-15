@@ -31,7 +31,7 @@ from pathlib import Path
 import torch
 
 import _rectifier_fixtures as fx
-from witwin.maxwell.compiler.nonlinear_devices import run_nonlinear_transient
+from tests.oracles.nonlinear_devices import run_nonlinear_transient
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "goldens" / "rectifier_goldens.pt"
 
@@ -59,7 +59,7 @@ def _reference_output(builder) -> torch.Tensor:
 def _reference_config():
     import witwin.maxwell as mw
 
-    return mw.NonlinearSolveConfig(max_iterations=40)
+    return mw.circuits.NonlinearSolveConfig(max_iterations=40)
 
 
 def _git_commit() -> str:

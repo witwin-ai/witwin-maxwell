@@ -18,6 +18,7 @@ from ..constants import complex_dtype_for
 from .operator import local_geometry
 from .physics import incident_fields
 from .quadrature import duffy_fan, green, triangle_rule
+from .._stability import experimental
 
 
 # Field-query workspace: queries per distance/selection chunk and quadrature
@@ -33,6 +34,7 @@ def _sum_observation_pairs(values, indices, count):
     return selection @ values
 
 
+@experimental("mom")
 @dataclass(frozen=True)
 class FieldQueryConfig:
     relative_tolerance: float = 1e-5

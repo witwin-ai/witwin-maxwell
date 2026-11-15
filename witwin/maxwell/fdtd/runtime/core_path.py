@@ -1,12 +1,9 @@
 """Admission and prepared launches for the fused Yee update."""
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import torch
 import torch.nn.functional as F
 
-from ...compiler.accel.dispatch import requires_grad
 from ..boundary.common import BOUNDARY_PEC
 
 
@@ -31,69 +28,9 @@ def _device_l2_bytes(device) -> int | None:
     return torch.cuda.get_device_properties(device).L2_cache_size if device.type == "cuda" else None
 
 
-def core_path_blockers(solver) -> list[str]:
-    from ..boundary.runtime import _effective_face_kinds, closed_transverse_pml
-
-    scene = solver.scene
-    # Scene symmetry lowers its plane to a PEC/PMC face; the core kernels have no PMC face.
-    face_kinds = {kind for pair in _effective_face_kinds(scene) for kind in pair}
-    blockers = []
-    if (closed_transverse_pml(scene)
-            and getattr(solver, "active_absorber_type", "none") in ("cpml", "stablepml")):
-        blockers.append("closed-transverse CPML (passivity guard)")
-    for attr, label in (
-        ("gyromagnetic_enabled", "gyromagnetic media"),
-        ("full_aniso_enabled", "full or off-diagonal anisotropy"),
-        ("magnetically_conductive_enabled", "magnetic conductivity"),
-    ):
-        if getattr(solver, attr, False):
-            blockers.append(label)
-    if scene.coordinates is not None:
-        blockers.append("coordinate charts")
-    if scene.boundary.uses_kind("bloch") or getattr(solver, "complex_fields_enabled", False):
-        blockers.append("Bloch/complex fields")
-    for kind in ("mur", "mode_abc", "pmc"):
-        if scene.boundary.uses_kind(kind) or kind in face_kinds:
-            blockers.append(kind.upper() + " boundaries")
-    if any(torch.any(getattr(solver, "mu_" + component) != solver.mu0).item()
-           for component in ("Hx", "Hy", "Hz") if hasattr(solver, "mu_" + component)):
-        blockers.append("magnetic permeability")
-    if any(getattr(solver, name).ndim != 3 for name in ("Ex", "Ey", "Ez") if hasattr(solver, name)):
-        blockers.append("Batch lanes")
-    if hasattr(solver, "shards"):
-        blockers.append("multi-GPU/distributed execution")
-    if hasattr(solver, "Ex") and solver.Ex.dtype != torch.float32:
-        blockers.append("non-float32 fields")
-    if torch.device(scene.device).type != "cuda":
-        blockers.append("non-CUDA execution")
-    if requires_grad(scene):
-        blockers.append("gradient-requiring scene tensors")
-    from ...sources import (
-        PointDipole, PlaneWave, GaussianBeam, AstigmaticGaussianBeam, ModeSource,
-        CustomFieldSource, CustomCurrentSource, UniformCurrentSource,
-    )
-    from ...monitors import (
-        PointMonitor, PlaneMonitor, FluxMonitor, FinitePlaneMonitor, ClosedSurfaceMonitor,
-        ModeMonitor, DiffractionMonitor, PermittivityMonitor, FieldTimeMonitor, FluxTimeMonitor, BreakdownMonitor,
-    )
-    # All admitted sources compile to ordinary, electric/magnetic surface or TFSF terms.
-    if any(not isinstance(source, (PointDipole, PlaneWave, GaussianBeam, AstigmaticGaussianBeam,
-                                   ModeSource, CustomFieldSource, CustomCurrentSource, UniformCurrentSource))
-           for source in scene.sources):
-        blockers.append("unsupported source type")
-    # Spectral planes share grouped observers; material monitors are evaluated at export.
-    # Time monitors retain the per-step observer tail through the run_chunks guard.
-    if any(not isinstance(monitor, (PointMonitor, PlaneMonitor, FluxMonitor, FinitePlaneMonitor,
-                                    ClosedSurfaceMonitor, ModeMonitor, DiffractionMonitor,
-                                    PermittivityMonitor, FieldTimeMonitor, FluxTimeMonitor, BreakdownMonitor))
-           for monitor in scene.monitors):
-        blockers.append("unsupported monitor type")
-    return list(dict.fromkeys(blockers))
-
-
 def core_path_has_separate_physics(solver) -> bool:
     """Pieces that need stepping's ordered field and port blocks around Yee."""
-    return (any(getattr(solver.scene, name, ()) for name in
+    return (any(getattr(solver.scene.scene, name, ()) for name in
                 ("ports", "lumped_elements", "thin_wires", "circuits", "networks"))
             or any(getattr(solver, name, ()) for name in
                    ("_port_runtimes", "_lumped_element_runtimes", "_coaxial_element_runtimes",
@@ -105,7 +42,7 @@ def core_path_has_separate_physics(solver) -> bool:
 def core_path_step_loop_blockers(solver) -> list[str]:
     """W2 capture exclusions; the fused Yee pair still runs in the per-step loop."""
     blockers = []
-    if getattr(solver.scene, "circuits", ()) or getattr(solver, "_circuit_runtimes", ()):
+    if getattr(solver.scene.scene, "circuits", ()) or getattr(solver, "_circuit_runtimes", ()):
         blockers.append("circuits")
     if any(getattr(runtime, "circuit_port", None) is not None
            for runtime in getattr(solver, "_port_runtimes", ())):
@@ -129,8 +66,6 @@ def core_path_step_loop_blockers(solver) -> list[str]:
 
 def _validate_separate_step(solver):
     # The field block receives a fixed time; ADE has no live time input.
-    assert not any(solver.scene.boundary.uses_kind(kind) for kind in ("mur", "mode_abc")), \
-        "Core separate-physics graph requires no Mur or mode-ABC boundaries."
     assert not getattr(solver, "tfsf_enabled", False), "Core separate-physics graph requires no TFSF."
     assert not getattr(solver, "_magnetic_source_terms", ()), \
         "Core separate-physics graph requires no magnetic surface sources."
@@ -149,7 +84,7 @@ def _term_may_write_pec(solver, term) -> bool:
         return False
     if name not in ("Ex", "Ey", "Ez"):
         return True
-    if solver.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
+    if solver.scene.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
         return True
     patch = term.get("cw_cos_patch")
     if patch is None:
@@ -193,7 +128,8 @@ def pec_clamp_plan(solver, sources) -> tuple[bool, bool]:
         "_port_runtimes", "_lumped_element_runtimes", "_coaxial_element_runtimes", "_network_runtimes"))
     if first and not dispersive and not port_phase:
         second = False
-    if not getattr(solver, "has_pec_faces", False) or separate:
+    # Full-aniso corrections write E after the fused update, so its stores no longer decide the faces.
+    if not getattr(solver, "has_pec_faces", False) or separate or getattr(solver, "full_aniso_enabled", False):
         return first, second
     term_groups = [getattr(solver, name, None) for name in ("_source_terms", "_electric_source_terms")]
     if getattr(solver, "tfsf_enabled", False):
@@ -211,62 +147,15 @@ def pec_clamp_plan(solver, sources) -> tuple[bool, bool]:
     return False, second and dispersive
 
 
-class _FDTDCoreFallback(RuntimeError):
-    """Abort an automatic attempt so its owner can rebuild the existing path."""
-
-    def __init__(self, reason, *, setup_failed=False):
-        super().__init__(reason)
-        self.setup_failed = setup_failed
-
-
-def core_path_request_blockers(simulation, scene=None, solver=None):
-    config = simulation.config
-    scene = simulation.scene if scene is None else scene
-    # Before preparation, an explicit cpml/stablepml absorber already decides the guard
-    # blocker; without it automatic admission builds a core solver only to rebuild it.
-    blockers = core_path_blockers(
-        SimpleNamespace(scene=scene, active_absorber_type=config.absorber.value) if solver is None else solver)
-    if config.parallel is not None:
-        blockers.append("multi-GPU/distributed execution")
-    if hasattr(simulation, "_batch_source_scales"):
-        blockers.append("Batch lanes")
-    if simulation.has_trainable_parameters or config.adjoint_checkpoint_stride is not None:
-        blockers.append("adjoint/gradient-requiring execution")
-    if config.field_dtype != torch.float32:
-        blockers.append("non-float32 fields")
-    if config.backend != "native":
-        blockers.append("non-native backend")
-    return list(dict.fromkeys(blockers))
-
-
-def validate_core_path_request(simulation, scene=None, solver=None):
-    blockers = core_path_request_blockers(simulation, scene, solver)
-    if blockers:
-        raise ValueError("fdtd_core_path=True is blocked by: " + "; ".join(dict.fromkeys(blockers)))
-
-
-def core_path_decision(simulation, scene=None, solver=None, *, initialize=True, resume_from=None):
-    """Resolve auto admission with the same blockers as explicit core requests."""
-    if simulation.config.fdtd_core_path is False:
-        return "existing", None
-    if resume_from is not None:
-        return "existing", "resume_from"
-    if not initialize:
-        return "existing", "non-initializing prepare (initialize=False)"
-    if simulation.material_cache is not None:
-        return "existing", "material_cache override"
-    blockers = core_path_request_blockers(simulation, scene, solver)
-    return ("existing", blockers[0]) if blockers else ("core", None)
-
-
 def _compress_coefficients(solver, family):
     names = [f"c{family}{axis}_{kind}" for axis in "xyz" for kind in ("decay", "curl")]
     scalars = [solver._coefficient_uniformity[name] for name in names]
     uniform = all(value is not None for value in scalars)
     shape = (solver.Nx, solver.Ny, solver.Nz)
+    dtype = getattr(solver, names[0]).dtype
     if uniform:
         return (torch.empty(0, device=solver.device, dtype=torch.uint16),
-                torch.empty(0, device=solver.device, dtype=torch.float32), scalars, True)
+                torch.empty(0, device=solver.device, dtype=dtype), scalars, True)
     from ...compiler.accel.dispatch import UNCHANGED
     from ...compiler.accel.tables import compress
 
@@ -279,11 +168,12 @@ def _compress_coefficients(solver, family):
         padding = tuple(size - actual for size, actual in zip(shape, tensor.shape))
         padded.append(F.pad(tensor, (0, padding[2], 0, padding[1], 0, padding[0])))
     tuples = torch.stack(padded, dim=-1).reshape(-1, 6)
-    # Deduplicate float32 bit patterns so signed zeros retain their exact values.
-    table_bits, inverse = torch.unique(tuples.view(torch.int32), dim=0, return_inverse=True)
-    table = table_bits.view(torch.float32)
-    dtype = torch.uint32 if table.shape[0] > 65535 else torch.uint16
-    return inverse.to(dtype).reshape(shape), table, [0.0] * 6, False
+    # Deduplicate bit patterns so signed zeros retain their exact values.
+    bits = torch.int32 if dtype == torch.float32 else torch.int64
+    table_bits, inverse = torch.unique(tuples.view(bits), dim=0, return_inverse=True)
+    table = table_bits.view(dtype)
+    index_dtype = torch.uint32 if table.shape[0] > 65535 else torch.uint16
+    return inverse.to(index_dtype).reshape(shape), table, [0.0] * 6, False
 
 
 def _separate_graph_state_tensors(solver):
@@ -301,11 +191,13 @@ def _separate_graph_state_tensors(solver):
             return
         add(runtime, [name for name in vars(runtime) if name.startswith("last_")] + [
             "inductor_current", "capacitor_voltage", "edge_buffer", "correction_buffer",
-            "fast_state_scratch", "part_voltage",
+            "fast_state_scratch", "part_voltage", "inductor_current_imag", "capacitor_voltage_imag",
         ])
         for part in getattr(runtime, "parts", ()):
             add(part, ("edge_buffer", "correction_buffer"))
         add(getattr(runtime, "electric_history", None), ("edge_buffer", "voltage_buffer"))
+        # Complex fields: the imaginary bank (own state and history currents, shared scratch).
+        branch(getattr(runtime, "imaginary", None))
 
     for entry in getattr(solver, "_copper_foils", ()):
         add(entry, ("old_e",))
@@ -324,7 +216,7 @@ def _separate_graph_state_tensors(solver):
         add(runtime, ("drive_buffer", "_drive_row", "electric_time", "magnetic_time",
                       "observer_current_buffer", "observer_window_buffer",
                       "observer_voltage_kernel_buffer", "observer_current_kernel_buffer"))
-        for accumulator in (runtime.accumulator, runtime.drive_accumulator):
+        for accumulator in (runtime.accumulator, runtime.drive_accumulator, getattr(runtime, "accumulator_imag", None)):
             add(accumulator, ("_voltage_sum", "_current_sum", "_window_weight_sum",
                               "_voltage_term", "_current_term"))
         branch(runtime.lumped)
@@ -370,7 +262,12 @@ def _live_graph_state_tensors(solver):
 
 
 class CorePathRuntime:
-    def __init__(self, solver):
+    def __init__(self, solver, *, coefficient_tables=None):
+        """Prepare the fused Yee launches over the solver's current field storage.
+
+        ``coefficient_tables`` memoizes compressed coefficient tables by storage across
+        solvers bound to one shared coefficient bank (the lanes of a native batch slot).
+        """
         from ..cuda.core.build import build_extension
         from .stepping import cpml_layout_params, _electric_decay_tensors, _electric_curl_tensors
 
@@ -382,10 +279,16 @@ class CorePathRuntime:
         self.point_observers = None
         self.graphs = {}
         self.coefficients = {}
+        self.coefficient_scalars = {}
         self.launches = {}
         self.yee_block_strip = {}
         l2_bytes = _device_l2_bytes(solver.device)
-        for family in ("h", "e"):
+        # Complex (Bloch split) fields: the fused H runs on the real and the imaginary
+        # field sets with their own psi; E stays on the Bloch kernels (prepare_step).
+        self.complex_fields = bool(getattr(solver, "complex_fields_enabled", False))
+        families = ("h", "h_imag") if self.complex_fields else ("h", "e")
+        for name in families:
+            family, suffix = name[0], name[1:]
             electric = family == "e"
             live = electric and any(getattr(solver, flag, False) for flag in
                                     ("nonlinear_enabled", "modulation_enabled", "breakdown_enabled"))
@@ -394,12 +297,21 @@ class CorePathRuntime:
                 indices = torch.empty(0, device=solver.device, dtype=torch.uint16)
                 table = torch.empty(0, device=solver.device, dtype=torch.float32)
                 scalars, uniform = [0.0] * 6, False
-            else:
+            elif suffix:
+                indices, table, scalars, uniform = self.coefficients[family] + self.coefficient_scalars[family]
+            elif coefficient_tables is None:
                 indices, table, scalars, uniform = _compress_coefficients(solver, family)
+            else:
+                storage = (family, *(getattr(solver, f"c{family}{axis}_{kind}").data_ptr()
+                                     for axis in "xyz" for kind in ("decay", "curl")))
+                if storage not in coefficient_tables:
+                    coefficient_tables[storage] = _compress_coefficients(solver, family)
+                indices, table, scalars, uniform = coefficient_tables[storage]
             self.coefficients[family] = (indices, table)
+            self.coefficient_scalars[family] = (scalars, uniform)
             opposite = "H" if electric else "E"
-            tensors = [getattr(solver, family.upper() + axis) for axis in "xyz"]
-            tensors += [getattr(solver, opposite + axis) for axis in "xyz"]
+            tensors = [getattr(solver, family.upper() + axis + suffix) for axis in "xyz"]
+            tensors += [getattr(solver, opposite + axis + suffix) for axis in "xyz"]
             tensors += [getattr(solver, f"inv_d{axis}_{family}") for axis in "xyz"]
             tensors += [indices, table]
             integers = [solver.Nx, solver.Ny, solver.Nz]
@@ -413,7 +325,7 @@ class CorePathRuntime:
                 for component, axes in (("x", "yz"), ("y", "xz"), ("z", "xy")):
                     for axis in axes:
                         attr = f"psi_{family}{component}_{axis}"
-                        tensors.append(getattr(solver, attr))
+                        tensors.append(getattr(solver, attr + suffix))
                         integers.extend(cpml_layout_params(solver, attr) if cpml == 2 else (0, 0, 0))
             if live:
                 tensors += [tensor for pair in zip(_electric_decay_tensors(solver),
@@ -425,24 +337,28 @@ class CorePathRuntime:
             strip = 0 if l2_bytes is None else yee_block_strip(integers[1], integers[2], l2_bytes)
             self.yee_block_strip["electric" if electric else "magnetic"] = strip
             integers.append(strip)
-            self.launches[family] = extension.CoreLaunch(
+            self.launches[name] = extension.CoreLaunch(
                 tensors, integers, scalars, electric, cpml, uniform, indices.dtype == torch.uint32,
                 live, modulated,
             )
 
-    def magnetic(self):
-        self.launches["h"].launch()
+    def magnetic(self, *, imag=False):
+        self.launches["h_imag" if imag else "h"].launch()
 
     def electric(self):
         self.launches["e"].launch()
 
-    def prepare_step(self, solver, *, use_gpu_dft, time_steps):
+    def prepare_step(self, solver, *, use_gpu_dft, time_steps, start_step=0):
         from .core_tables import (
-            compile_spectral_tables, compile_monitor_routes, NativePointObserverTables,
+            compile_spectral_tables, compile_monitor_routes, IndexedObserverTables,
             compile_auxiliary_fusion,
         )
-        from ..observers import uses_native_point_observers
-        from .stepping import enforce_pec_boundaries, apply_mur_boundaries, _field_update_block, _port_step_block
+        from ..observers import uses_indexed_observers
+        from .stepping import (
+            enforce_pec_boundaries, apply_mur_boundaries, _field_update_block, _port_step_block,
+            capture_aniso_conduction_currents, apply_full_aniso_corrections, apply_full_aniso_conduction,
+            update_electric_fields_bloch, update_electric_fields_bloch_cpml,
+        )
         from ..ports import prepare_port_drive_tables
         from ..cut_surface import apply_cut_surface_constraints
         from .breakdown import advance_breakdown_state
@@ -453,10 +369,10 @@ class CorePathRuntime:
         separate = core_path_has_separate_physics(solver)
         if separate:
             _validate_separate_step(solver)
-        spectral = compile_spectral_tables(solver, self.extension, self.step) if use_gpu_dft else None
+        spectral = compile_spectral_tables(solver, self.extension, self.step) if use_gpu_dft else ()
         engine = compile_monitor_routes(solver)
-        self.point_observers = (NativePointObserverTables(solver, self.step, time_steps)
-                                if uses_native_point_observers(solver) and engine is None else None)
+        self.point_observers = (IndexedObserverTables(solver, self.step, time_steps, start_step)
+                                if uses_indexed_observers(solver) and engine is None else None)
         self.observer_groups = engine.groups if engine is not None else []
         self.observer_gather = None
         if engine is not None and engine.state is not None and engine.groups:
@@ -474,6 +390,12 @@ class CorePathRuntime:
         auxiliary_fusion = self.auxiliary_fusion
         clamp_after_sources, clamp_after_dispersion = pec_clamp_plan(solver, sources)
         self.pec_clamp_plan = (clamp_after_sources, clamp_after_dispersion)
+        full_aniso = getattr(solver, "full_aniso_enabled", False)
+        gyromagnetic = getattr(solver, "gyromagnetic_enabled", False)
+        complex_fields = bool(getattr(solver, "complex_fields_enabled", False))
+        bloch_electric = None
+        if complex_fields:
+            bloch_electric = update_electric_fields_bloch_cpml if solver.uses_cpml else update_electric_fields_bloch
 
         def inject(name):
             for launch in sources.groups.get(name, ()):
@@ -486,7 +408,14 @@ class CorePathRuntime:
                     ModulationStep=solver._modulation_step, dt=solver.dt,
                 ).launchRaw()
             solver._advance_magnetic_dispersive_state()
+            if gyromagnetic:
+                # _field_update_block's closure around H: the drive snapshot before the
+                # fused update, the coupled magnetization step after the magnetic sources
+                # and dispersive corrections.
+                solver._snapshot_gyromagnetic_drive()
             self.magnetic()
+            if complex_fields:
+                self.magnetic(imag=True)
             if solver.tfsf_enabled:
                 if auxiliary_fusion is not None:
                     if auxiliary_fusion.boundary is not None:
@@ -503,10 +432,24 @@ class CorePathRuntime:
                     inject("tfsf_magnetic")
             inject("magnetic")
             solver._apply_magnetic_dispersive_corrections()
+            if gyromagnetic:
+                solver._step_gyromagnetic_coupled()
             solver._advance_dispersive_state()
             if getattr(solver, "nonlinear_enabled", False):
                 solver._update_nonlinear_electric_coefficients()
-            self.electric()
+            if full_aniso:
+                # _field_update_block's closure around E: sigma . E^n before the fused
+                # update, then the off-diagonal curl(H) and conduction corrections.
+                capture_aniso_conduction_currents(solver)
+            if complex_fields:
+                # _field_update_block's complex branch: the Bloch split-field E kernels
+                # (wrap phase on the Bloch axes, CPML stretch folded in afterwards).
+                bloch_electric(solver)
+            else:
+                self.electric()
+            if full_aniso:
+                apply_full_aniso_corrections(solver)
+                apply_full_aniso_conduction(solver)
             if solver.tfsf_enabled:
                 if auxiliary_fusion is not None:
                     auxiliary_fusion.electric.launch()
@@ -526,8 +469,8 @@ class CorePathRuntime:
             apply_cut_surface_constraints(solver)
             if getattr(solver, "breakdown_enabled", False):
                 advance_breakdown_state(solver, self.step)
-            if spectral is not None:
-                spectral.launch()
+            for launch in spectral:
+                launch.launch()
 
         if separate:
             runtimes = tuple(getattr(solver, "_port_runtimes", ()))
@@ -548,8 +491,8 @@ class CorePathRuntime:
                 apply_cut_surface_constraints(solver)
                 if getattr(solver, "breakdown_enabled", False):
                     advance_breakdown_state(solver, self.step)
-                if spectral is not None:
-                    spectral.launch()
+                for launch in spectral:
+                    launch.launch()
 
             # Standalone passive elements also need the port phase, even without V/I observers.
             port_phase = bool(runtimes or getattr(solver, "_lumped_element_runtimes", ())
@@ -598,12 +541,20 @@ class CorePathRuntime:
 
     def run_chunks(self, solver, *, time_steps, start_step, end_step, use_cuda_graph,
                    use_gpu_dft, cooperative, cooperative_driver, cooperative_observer,
-                   resume_from, shutoff, shutoff_check_interval, shutoff_min_step,
-                   enable_plot, pbar):
-        """Return completed steps; dispersive capture failures restore state and raise."""
-        from ..checkpoint import graph_state_tensors
+                   shutoff, shutoff_check_interval, shutoff_min_step, enable_plot, pbar,
+                   checkpoints=None, checkpoint_stride=None):
+        """Return completed steps, or None for the per-step loop.
+
+        A resumed run enters at ``start_step`` with the restored state; every table is
+        indexed by the absolute device step. A capture failure restores the state and
+        raises the capture error (there is no other path to continue on). Chunks end on every multiple of
+        ``checkpoint_stride``, where the adjoint checkpoint state is appended to
+        ``checkpoints``.
+        """
+        from ..checkpoint import capture_checkpoint_state, graph_state_tensors
         from ..cuda.runtime.graph import capture_suspended
-        from ..observers import uses_native_point_observers
+        from ..observers import uses_indexed_observers
+        from . import passivity
         from .stepping import _electric_field_energy, visualize_slice
 
         solver._core_step_graph_active = False
@@ -613,22 +564,30 @@ class CorePathRuntime:
         if core_path_step_loop_blockers(solver) or getattr(solver, "time_observers_enabled", False):
             return None
         if (not use_cuda_graph or capture_suspended() or cooperative or cooperative_driver or cooperative_observer is not None
-                or resume_from is not None or start_step != 0 or self.sources is None
+                or self.sources is None
                 or time_steps > self.sources.steps
                 or (solver.observers_enabled and solver._single_observer_engine is None
-                    and not uses_native_point_observers(solver))
+                    and not uses_indexed_observers(solver))
                 or (solver.dft_enabled and not use_gpu_dft)):
             return None
         if self.chunk_size not in (1, 16, 32):
             raise ValueError("Core graph chunk_size must be 1, 16 or 32.")
         if end_step == start_step:
             return 0
+        # The passivity guard samples after every SAMPLE_INTERVAL completed steps, outside the
+        # graph; no chunk crosses a sampling step, so samples match the per-step loop exactly.
+        guarded = getattr(solver, "_passivity_state", None) is not None
         schedule = []
         current = start_step
         while current < end_step:
             boundary = end_step
+            if guarded:
+                interval = passivity.SAMPLE_INTERVAL
+                boundary = min(boundary, (current // interval + 1) * interval)
             if shutoff > 0:
                 boundary = min(boundary, (current // shutoff_check_interval + 1) * shutoff_check_interval)
+            if checkpoints is not None:
+                boundary = min(boundary, (current // checkpoint_stride + 1) * checkpoint_stride)
             if pbar is not None:
                 interval = solver.progress_update_interval
                 boundary = min(boundary, (current // interval + 1) * interval)
@@ -640,7 +599,10 @@ class CorePathRuntime:
             current += count
 
         port_graph_active = getattr(solver, "_port_observer_graph_active", False)
-        step, engine = self.prepare_step(solver, use_gpu_dft=use_gpu_dft, time_steps=time_steps)
+        # The restored DFT and observer counters already equal start_step.
+        self.step.fill_(start_step)
+        step, engine = self.prepare_step(solver, use_gpu_dft=use_gpu_dft, time_steps=time_steps,
+                                         start_step=start_step)
         state = list(graph_state_tensors(solver).values()) + [self.step]
         state.extend(_live_graph_state_tensors(solver))
         if core_path_has_separate_physics(solver):
@@ -648,7 +610,7 @@ class CorePathRuntime:
         if use_gpu_dft:
             state.append(solver._dft_step)
             for buffers in solver._dft_batched_fields.values():
-                state.extend((buffers["real"], buffers["imag"]))
+                state.extend(tensor for tensor in buffers.values() if tensor is not None)
         point_observers = self.point_observers
         if point_observers is not None:
             state.extend(point_observers.state_tensors)
@@ -660,7 +622,8 @@ class CorePathRuntime:
         # Port accumulation also updates a host diagnostic during warmup/recording.
         counts = [(accumulator, accumulator._sample_count)
                   for runtime in getattr(solver, "_port_runtimes", ())
-                  for accumulator in (runtime.accumulator, runtime.drive_accumulator)
+                  for accumulator in (runtime.accumulator, runtime.drive_accumulator,
+                                      getattr(runtime, "accumulator_imag", None))
                   if accumulator is not None]
 
         def restore():
@@ -677,15 +640,11 @@ class CorePathRuntime:
             for count in sorted({1, *(count for _, count in schedule)}):
                 self.graphs[count] = self.capture_chunk(solver, step, count)
                 restore()
-        except Exception as error:
+        except Exception:
             restore()
             solver._port_observer_graph_active = port_graph_active
             self.graphs.clear()
-            if getattr(solver, "_core_path_auto", False):
-                raise _FDTDCoreFallback(f"{type(error).__name__}: {error}") from error
-            if getattr(solver, "dispersive_enabled", False):
-                raise
-            return None
+            raise
         finally:
             saved.clear()
         if use_gpu_dft:
@@ -695,7 +654,9 @@ class CorePathRuntime:
         solver._core_step_graph_active = True
         solver._core_step_graph_k = self.chunk_size
         solver._cuda_graph_active = True
+        # The real auxiliary line keeps a host step; the fixed-k line advances its device clock in replay.
         aux = solver._tfsf_state.get("auxiliary_grid") if solver.tfsf_enabled else None
+        aux = aux if hasattr(aux, "time_step") else None
         for current, count in schedule:
             self.graphs[count]()
             solver._core_step_graph_chunks.append(count)
@@ -705,6 +666,10 @@ class CorePathRuntime:
                 aux.time_step += count
             if pbar is not None:
                 pbar.update(count)
+            if guarded:
+                passivity.sample_completed_step(solver, steps_run)
+            if checkpoints is not None and steps_run % checkpoint_stride == 0 and steps_run < end_step:
+                checkpoints.append(capture_checkpoint_state(solver, step=steps_run))
             if shutoff > 0 and steps_run % shutoff_check_interval == 0:
                 e_energy = _electric_field_energy(solver)
                 solver._shutoff_peak = torch.maximum(solver._shutoff_peak, e_energy)
@@ -728,13 +693,7 @@ class CorePathRuntime:
         return steps_run
 
 
-def activate_core_path(solver, simulation):
-    if simulation.config.fdtd_core_path == "auto":
-        _, reason = core_path_decision(simulation, solver=solver)
-        if reason is not None:
-            raise _FDTDCoreFallback(reason)
-    else:
-        validate_core_path_request(simulation, solver=solver)
+def activate_core_path(solver):
     solver._core_runtime = CorePathRuntime(solver)
     from .core_tables import compile_source_tables, source_tables_supported
 

@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from .._stability import experimental
 
 # Documented default for the discrete-Gauss consistency gate. The residual is a
 # dimensionless relative quantity (see ``_gauss_residual``); ``1e-3`` accepts the
@@ -171,6 +172,7 @@ def _gauss_residual(Ex, Ey, Ez, solver, ic, dtype):
     return residual, abs_res
 
 
+@experimental("electrostatics")
 @dataclass
 class ElectrostaticInitialCondition:
     """A DC electrostatic solution mapped onto the FDTD Yee grid as an initial field.
@@ -212,7 +214,7 @@ class ElectrostaticInitialCondition:
                 "Result(method='electrostatic') produced by Simulation.electrostatic(...); "
                 f"got method {getattr(dc_result, 'method', None)!r}."
             )
-        data = dc_result.electrostatic  # raises AttributeError if not electrostatic
+        data = dc_result._electrostatic()  # raises AttributeError if not electrostatic
         tol = float(tolerance)
         if tol < 0.0:
             raise ValueError("ElectrostaticInitialCondition tolerance must be >= 0.")

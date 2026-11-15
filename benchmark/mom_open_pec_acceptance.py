@@ -63,8 +63,8 @@ def observed_order(values):
 
 def solve(scene, frequency, edge):
     started = time.perf_counter()
-    result = mw.Simulation.mom(scene, frequency=frequency,
-                               config=mw.MoMConfig(open_surface=mw.OpenSurfaceConfig(max_edge_length_m=edge))).run()
+    result = mw.Simulation.mom(scene, frequencies=frequency,
+                               config=mw.mom.MoMConfig(open_surface=mw.mom.OpenSurfaceConfig(max_edge_length_m=edge))).run()
     return result, time.perf_counter()-started
 
 
@@ -81,9 +81,9 @@ def plate(args):
     records = []
     for cells in args.cells:
         scene = mw.Scene(structures=[mw.Structure(mw.Box(size=(side, side, 0)), mw.Material.pec())],
-                         sources=[plane_wave(frequency)], device='cuda')
+                         sources=[plane_wave(frequency)])
         result, seconds = solve(scene, frequency, side/cells)
-        data = result.surface_currents
+        data = mw.mom.surface_currents(result)
         sections = data.plane_wave_cross_sections(directions, weights)
         electric, _ = data.query_fields(near_points, field_kind='scattered')
         records.append({'cells_per_side': cells, 'h_over_lambda': 1/cells*args.side, 'edges': len(data.J),
@@ -95,7 +95,7 @@ def plate(args):
                         'near_edge_inside_absE': float(electric[0].abs().square().sum().sqrt()),
                         'near_edge_outside_absE': float(electric[1].abs().square().sum().sqrt()),
                         'center_quarter_wave_absE': float(electric[2].abs().square().sum().sqrt()),
-                        'seconds': seconds, 'converged': result.solver_stats['converged']})
+                        'seconds': seconds, 'converged': result.stats()['converged']})
         print(json.dumps(records[-1]), flush=True)
     summary = {}
     for key in ('monostatic_rcs_m2', 'bistatic30_rcs_m2', 'scattering_m2', 'near_edge_inside_absE',
@@ -129,24 +129,24 @@ def disk(args):
         for rings in args.rings:
             edge = radius/rings
             normal = mw.Scene(structures=[mw.Structure(mw.Cylinder(radius=radius, height=0), mw.Material.pec())],
-                              sources=[plane_wave(frequency)], device='cuda')
+                              sources=[plane_wave(frequency)])
             result, seconds = solve(normal, frequency, edge)
-            integral, _ = current_moments(result.surface_currents)
+            integral, _ = current_moments(mw.mom.surface_currents(result))
             p = 1j/omega*integral
             alpha_e = complex(p[0])/EPSILON_0  # E0 = 1 V/m along x
             directions, weights = sphere_rule(24, 48)
-            scattering = float(result.surface_currents.plane_wave_cross_sections(directions, weights)['scattering_m2'])
+            scattering = float(mw.mom.surface_currents(result).plane_wave_cross_sections(directions, weights)['scattering_m2'])
             # Edge-on incidence along +x with E along y (in plane) and H = x_hat x E / eta along +z (normal).
             edge_on = mw.Scene(structures=[mw.Structure(mw.Cylinder(radius=radius, height=0), mw.Material.pec())],
-                               sources=[plane_wave(frequency, (1., 0., 0.), (0., 1., 0.))], device='cuda')
+                               sources=[plane_wave(frequency, (1., 0., 0.), (0., 1., 0.))])
             second, _ = solve(edge_on, frequency, edge)
-            integral_b, moment = current_moments(second.surface_currents)
-            h_normal = complex(second.surface_currents.incident_carrier.evaluate(
+            integral_b, moment = current_moments(mw.mom.surface_currents(second))
+            h_normal = complex(mw.mom.surface_currents(second).incident_carrier.evaluate(
                 torch.zeros((1, 3), device='cuda', dtype=torch.float64), second.solver.handle.exterior)[1][0, 2])
             alpha_m = complex(moment[2])/h_normal
             alpha_e_edge = complex(1j/omega*integral_b[1])/EPSILON_0
             rayleigh = 128/(27*math.pi)*k**4*radius**6
-            records.append({'ka': ka, 'rings': rings, 'edges': len(result.surface_currents.J),
+            records.append({'ka': ka, 'rings': rings, 'edges': len(mw.mom.surface_currents(result).J),
                             'alpha_e_over_a3': alpha_e.real/radius**3, 'alpha_e_imag_over_a3': alpha_e.imag/radius**3,
                             'alpha_e_edge_on_over_a3': alpha_e_edge.real/radius**3,
                             'alpha_m_over_a3': alpha_m.real/radius**3,
@@ -186,8 +186,8 @@ def strip(args):
         length = length_ratio*wavelength
         segments = 2*math.ceil(length/(args.segment*wavelength)/2)
         scene = mw.Scene(structures=[mw.Structure(mw.Box(size=(width, 0, length)), mw.Material.pec())],
-                         sources=[plane_wave(frequency, (1., 0., 0.), (0., 0., 1.))], device='cuda')
-        config = mw.MoMConfig(open_surface=mw.OpenSurfaceConfig(max_edge_length_m=length/segments))
+                         sources=[plane_wave(frequency, (1., 0., 0.), (0., 0., 1.))])
+        config = mw.mom.MoMConfig(open_surface=mw.mom.OpenSurfaceConfig(max_edge_length_m=length/segments))
         system, exterior = compile_open_pec_scene(scene, frequency, config)
         handle = OpenPECOperator(system, exterior, scene.sources, config)
         basis = system.bodies[0].basis
@@ -236,8 +236,8 @@ def checks(args):
     for cells in args.cells:
         def run(direction, polarization):
             scene = mw.Scene(structures=[mw.Structure(mw.Box(size=(side, 0.7*side, 0)), mw.Material.pec())],
-                             sources=[plane_wave(frequency, direction, polarization)], device='cuda')
-            return solve(scene, frequency, side/cells)[0].surface_currents
+                             sources=[plane_wave(frequency, direction, polarization)])
+            return mw.mom.surface_currents(solve(scene, frequency, side/cells)[0])
         first, second = run(a_dir, a_pol), run(b_dir, b_pol)
         fa, _ = first.far_field(-torch.tensor([b_dir], device='cuda', dtype=torch.float64))
         fb, _ = second.far_field(-torch.tensor([a_dir], device='cuda', dtype=torch.float64))
@@ -263,25 +263,25 @@ def _solve_iterations(side, cells, frequency, method, rtol, maxiter):
                             preconditioner='row_norm' if method == 'row_norm' else 'none',
                             stagnation_window=maxiter)
     scene = mw.Scene(structures=[mw.Structure(mw.Box(size=(side, side, 0)), mw.Material.pec())],
-                     sources=[plane_wave(frequency, (0.0, 0.6, -0.8), (1.0, 0.0, 0.0))], device='cuda')
-    config = mw.MoMConfig(open_surface=mw.OpenSurfaceConfig(max_edge_length_m=side/cells), stopping=stopping,
+                     sources=[plane_wave(frequency, (0.0, 0.6, -0.8), (1.0, 0.0, 0.0))])
+    config = mw.mom.MoMConfig(open_surface=mw.mom.OpenSurfaceConfig(max_edge_length_m=side/cells), stopping=stopping,
                           right_preconditioner=factory)
     started = time.perf_counter()
-    prepared = mw.Simulation.mom(scene, frequency=frequency, config=config).prepare()
+    prepared = mw.Simulation.mom(scene, frequencies=frequency, config=config).prepare()
     setup = time.perf_counter()-started
     runtime = prepared.solver
     result = prepared.run()
-    stats = result.solver_stats
+    stats = result.stats()
     record = {'method': method, 'iterations': stats['iterations'], 'converged': stats['converged'],
               'relative_residual': stats['relative_residual'], 'edges': runtime.handle.shape[0],
               'setup_seconds': setup, 'solve_seconds': stats.get('solve_seconds')}
     if runtime.right_preconditioner is not None:
         record['receipt'] = {k: v for k, v in runtime.right_preconditioner_receipt.items()
                              if isinstance(v, (int, float, str, bool))}
-        record.update(preconditioned_residual(runtime.handle, result.surface_currents.J, runtime.rhs,
+        record.update(preconditioned_residual(runtime.handle, mw.mom.surface_currents(result).J, runtime.rhs,
                                               runtime.right_preconditioner.apply))
     reference = solve_reference(runtime.handle, runtime.rhs, StoppingRule(method='direct'))[0]
-    record['solution_relative_error'] = float((result.surface_currents.J-reference).norm()/reference.norm())
+    record['solution_relative_error'] = float((mw.mom.surface_currents(result).J-reference).norm()/reference.norm())
     return record
 
 

@@ -15,7 +15,7 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 
 def test_tensor_current_closure_gradient_and_decode_only_codec(tmp_path,monkeypatch):
     vertices=torch.tensor([[0.,0.,0.],[.1,0.,0.],[0.,.1,0.],[0.,0.,.1]],device='cuda',dtype=torch.float64)
-    volume=mw.TetrahedralVolumeMesh(vertices,torch.tensor([[0,1,2,3]],device='cuda'),region_id=1)
+    volume=mw.mom.TetrahedralVolumeMesh(vertices,torch.tensor([[0,1,2,3]],device='cuda'),region_id=1)
     system=SurfaceSystem.create([(0,'body',RWGBasis(volume.boundary),compile_medium(mw.Material(),3e8))])
     binding=bind_volume_region(volume,system)
     strength=vertices.new_tensor(.1,requires_grad=True)
@@ -55,7 +55,7 @@ def test_tensor_current_closure_gradient_and_decode_only_codec(tmp_path,monkeypa
 def test_mixed_scalar_tensor_ohmic_order_and_gradient():
     vertices=torch.tensor([[0.,0.,0.],[.1,0.,0.],[0.,.1,0.],[0.,0.,.1]],device='cuda',dtype=torch.float64)
     cells=torch.tensor([[0,1,2,3]],device='cuda')
-    volumes=[mw.TetrahedralVolumeMesh(vertices+i*.2,cells,region_id=i+1) for i in range(2)]
+    volumes=[mw.mom.TetrahedralVolumeMesh(vertices+i*.2,cells,region_id=i+1) for i in range(2)]
     sigma=vertices.new_tensor([[.3,.02,.01],[.02,.2,.03],[.01,.03,.4]],requires_grad=True)
     closure=HarmonicCurrentClosure(volumes,[.1,sigma])
     field=vertices.new_tensor([[.2,.3,.1],[-.4,.1,.5]],requires_grad=True)

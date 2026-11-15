@@ -3,11 +3,11 @@ import torch
 import witwin.maxwell as mw
 
 
-def _delayed_one_port(*, delay: float, magnitude: float = 0.8) -> mw.NetworkData:
+def _delayed_one_port(*, delay: float, magnitude: float = 0.8) -> mw.rf.NetworkData:
     frequencies = torch.linspace(0.0, 20.0, 257, dtype=torch.float64)
     laplace = -2j * torch.pi * frequencies
     scattering = (magnitude * torch.exp(-laplace * delay)).reshape(-1, 1, 1)
-    return mw.NetworkData(
+    return mw.rf.NetworkData(
         frequencies=frequencies,
         s=scattering,
         z0=50.0,
@@ -33,7 +33,7 @@ def test_physicality_reports_passivity_and_finite_band_causality() -> None:
 
 def test_physicality_marks_nonuniform_sweep_causality_indeterminate() -> None:
     frequencies = torch.logspace(-2, 1, 20, dtype=torch.float64)
-    network = mw.NetworkData(
+    network = mw.rf.NetworkData(
         frequencies=frequencies,
         s=torch.zeros((20, 1, 1), dtype=torch.complex128),
         z0=50.0,
@@ -51,7 +51,7 @@ def test_physicality_marks_truncated_rc_causality_indeterminate() -> None:
     frequencies = torch.linspace(0.0, 20.0, 257, dtype=torch.float64)
     laplace = -2j * torch.pi * frequencies
     scattering = (1.0 / (1.0 + 0.05 * laplace)).reshape(-1, 1, 1)
-    network = mw.NetworkData(
+    network = mw.rf.NetworkData(
         frequencies=frequencies,
         s=scattering,
         z0=50.0,
@@ -69,11 +69,11 @@ def test_network_data_rational_fit_uses_requested_representation() -> None:
     network = _delayed_one_port(delay=0.01)
 
     model = network.fit_rational(
-        mw.RationalFitConfig(order=6, iterations=6, relative_tolerance=1e-3),
+        mw.rf.rational.RationalFitConfig(order=6, iterations=6, relative_tolerance=1e-3),
         representation="S",
     )
 
-    assert isinstance(model, mw.RationalModel)
+    assert isinstance(model, mw.rf.rational.RationalModel)
     assert model.representation == "S"
     assert model.report is not None
     assert model.report.relative_max_error < 1e-3

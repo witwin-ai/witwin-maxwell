@@ -12,7 +12,7 @@ from witwin.maxwell.mom.linalg import StoppingRule
 from witwin.maxwell.mom.harmonic_material import compile_harmonic_material
 from witwin.maxwell.mom.harmonic_preparation import prepare_harmonic_balance
 from witwin.maxwell.mom.tensor_harmonic_preparation import prepare_mixed_tensor_harmonic_balance
-from witwin.maxwell.mom.harmonic_state import recover_harmonic_state
+from witwin.maxwell.mom.harmonic_recovery import recover_harmonic_state
 from witwin.maxwell.mom.harmonic_fields import HarmonicFieldDecoder
 from witwin.maxwell.mom.surface_volume_hmatrix import SurfaceVolumeHConfig
 from witwin.maxwell.mom.interior_volume_hmatrix import InteriorVolumeHConfig
@@ -27,12 +27,12 @@ def test_actual_compressed_material_preparation_root_recovery_and_fields(monkeyp
     vertices=torch.tensor([[0.,0.,0.],[.07,0.,0.],[0.,.07,0.],[0.,0.,.07]],device='cuda',dtype=torch.float64)
     volume=TetrahedralVolumeMesh(vertices,torch.tensor([[0,1,2,3]],device='cuda'),region_id=1)
     basis=RWGBasis(volume.boundary)
-    material=compile_harmonic_material(mw.Material(eps_r=2.,nonlinearity=mw.NonlinearSusceptibility(chi2=.002,chi3=.001)),3e8,1)
+    material=compile_harmonic_material(mw.Material(eps_r=2.,nonlinearity=mw.media.NonlinearSusceptibility(chi2=.002,chi3=.001)),3e8,1)
     if tensor_sources:
         from dataclasses import replace
         from witwin.maxwell.mom.harmonic_material import compile_tensor_harmonic_material
         axis=vertices.new_tensor([1.,2.,3.]);axis=axis/axis.norm()
-        spec=mw.TensorNonlinearSusceptibility(chi2=.002*torch.einsum('i,j,k->ijk',axis,axis,axis),
+        spec=mw.media.TensorNonlinearSusceptibility(chi2=.002*torch.einsum('i,j,k->ijk',axis,axis,axis),
             chi3=.001*torch.einsum('i,j,k,l->ijkl',axis,axis,axis,axis))
         sampled=compile_tensor_harmonic_material(mw.Material(eps_r=2.,nonlinearity=spec),3e8,1,
             device='cuda',tensor_sources=True)
@@ -45,8 +45,8 @@ def test_actual_compressed_material_preparation_root_recovery_and_fields(monkeyp
     source=(mw.PlaneWave(direction=(.3,.4,.5),polarization=(.8,-.6,0.),
         source_time=mw.CW(frequency=3e8,amplitude=.73,phase=.27))
         if prepare is prepare_mixed_tensor_harmonic_balance else mw.PlaneWave())
-    dense=SystemOperator(system,exterior.linear_samples[0],[source],mw.MoMConfig(integration=integration))
-    config=mw.MoMConfig(operator_backend='h2',integration=integration,hierarchical=HMatrixConfig(leaf_size=64),
+    dense=SystemOperator(system,exterior.linear_samples[0],[source],mw.mom.MoMConfig(integration=integration))
+    config=mw.mom.MoMConfig(operator_backend='h2',integration=integration,hierarchical=HMatrixConfig(leaf_size=64),
         riesz_storage='local_rwg_v1',stopping=StoppingRule(method='block_gmres',preconditioner='row_column_norm'))
     operator=HierarchicalH2SystemOperator(system,exterior.linear_samples[0],dense.sources,config)
     options=dict(source_config=SurfaceVolumeHConfig(leaf_size=64),field_config=InteriorVolumeHConfig(leaf_size=64),

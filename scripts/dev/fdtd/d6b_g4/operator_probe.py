@@ -58,11 +58,11 @@ def scene_for(dl, zoff, tilt, *, present, native=False):
         if present:
             geometry = rectangle_mesh(center, normal, .235*probe.C0/probe.F0, .0075,
                                       u_direction=axis, sheet_model="conformal_two_sided")
-            scene.structures[0] = mw.Structure(geometry=geometry, material=probe.pec_material())
-        scene.sources[0] = mw.PlaneWave(direction=tuple(-normal), polarization=tuple(axis),
-                                       source_time=scene.sources[0].source_time)
-        scene.monitors[0] = mw.FieldTimeMonitor("obs", components=("Ex", "Ey"),
-            position=tuple(center + .4*probe.C0/probe.F0*normal))
+            scene = scene.updated(structures=(mw.Structure(geometry=geometry, material=probe.pec_material()), *scene.structures[1:]))
+        scene = scene.updated(sources=(mw.PlaneWave(direction=tuple(-normal), polarization=tuple(axis),
+                                       source_time=scene.sources[0].source_time), *scene.sources[1:]))
+        scene = scene.updated(monitors=(mw.monitors.FieldTimeMonitor("obs", components=("Ex", "Ey"),
+            position=tuple(center + .4*probe.C0/probe.F0*normal)), *scene.monitors[1:]))
     return scene, axis
 
 
@@ -127,8 +127,8 @@ def audit(c, scene):
 def native_dump(dl):
     from witwin.maxwell.compiler.copper_foil import compile_copper_faces, compile_copper_response
     public, _ = scene_for(dl, 0, 0, present=True, native=True)
-    material = mw.CopperFoil(thickness=35e-6, frequency_range=(.5e9, 1.5e9))
-    public.structures[0] = mw.Structure(geometry=public.structures[0].geometry, material=material)
+    material = mw.media.CopperFoil(thickness=35e-6, frequency_range=(.5e9, 1.5e9))
+    public = public.updated(structures=(mw.Structure(geometry=public.structures[0].geometry, material=material), *public.structures[1:]))
     scene = prepare_scene(public)
     faces = compile_copper_faces(scene, device="cuda")
     h = np.array([np.diff(getattr(scene, a+"_nodes64")).mean() for a in "xyz"])
@@ -143,8 +143,8 @@ def native_dump(dl):
     response = compile_copper_response(material)
     # Record actual native rim conductance scaling as well as bare material D.
     # A fixed safe timestep makes these implicit update coefficients reviewable.
-    solver = mw.Simulation.fdtd(public, frequencies=[probe.F0], backend="native",
-                               run_time=mw.TimeConfig(time_steps=1, dt=2e-12)).prepare().solver
+    solver = mw.Simulation.fdtd(public, frequencies=[probe.F0],
+                               config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=1, dt=2e-12))).prepare().solver
     updates, scale_by_trace = [], {}
     for entry in solver._copper_foils:
         component = int(entry["face"].component)
@@ -202,10 +202,10 @@ def main():
                 loaded, axis = scene_for(args.dl, z, tilt, present=True)
                 row = dict(z=z, tilt=tilt, mode=mode)
                 if args.command == "audit":
-                    loaded.structures[0] = mw.Structure(geometry=loaded.structures[0].geometry,
-                        material=mw.CopperFoil(thickness=35e-6, frequency_range=(.5e9, 1.5e9)))
+                    loaded = loaded.updated(structures=(mw.Structure(geometry=loaded.structures[0].geometry,
+                        material=mw.media.CopperFoil(thickness=35e-6, frequency_range=(.5e9, 1.5e9))), *loaded.structures[1:]))
                     scene = prepare_scene(loaded)
-                    c = build(scene, scene.structures[0])
+                    c = build(scene, scene.scene.structures[0])
                     row.update(audit(c, scene))
                     arrays = {key: value for key, value in vars(c).items() if isinstance(value, np.ndarray)}
                     array_path = Path("/tmp")/f"d6b-complex-{args.dl}-{z}-{tilt}-{mode}.npz"

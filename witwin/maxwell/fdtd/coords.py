@@ -6,8 +6,9 @@ from ..monitors import normalize_component
 from ..scene import prepare_scene
 
 
-def component_coords(scene, component: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    resolved_scene = prepare_scene(scene)
+def component_coords(scene, component: str, *, device) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # ``device`` places a declarative scene; a prepared scene keeps its own.
+    resolved_scene = prepare_scene(scene, device=device)
     component_name = normalize_component(component)
     x, y, z = resolved_scene.x_nodes64, resolved_scene.y_nodes64, resolved_scene.z_nodes64
     x_half, y_half, z_half = resolved_scene.x_half64, resolved_scene.y_half64, resolved_scene.z_half64
@@ -27,6 +28,7 @@ def component_coords(scene, component: str) -> tuple[np.ndarray, np.ndarray, np.
     raise ValueError(f"Unsupported field component: {component!r}")
 
 
-def centered_cell_coords(scene) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    resolved_scene = prepare_scene(scene)
+def centered_cell_coords(scene, *, device) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # ``device`` places a declarative scene; a prepared scene keeps its own.
+    resolved_scene = prepare_scene(scene, device=device)
     return resolved_scene.x_half64, resolved_scene.y_half64, resolved_scene.z_half64

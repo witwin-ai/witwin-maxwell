@@ -1,0 +1,34 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "description": "witwin.maxwell.fdtd.distributed.persistence.DistributedResultManifest",
+ "properties": {
+  "components": {
+   "description": "tuple[GlobalFieldManifest, ...]"
+  },
+  "format_version": {
+   "description": "int"
+  },
+  "frequencies": {
+   "description": "tuple[float, ...]"
+  },
+  "result_file": {
+   "description": "str"
+  },
+  "schema": {
+   "description": "str"
+  },
+  "shards": {
+   "description": "tuple[FieldShardManifest, ...]"
+  }
+ },
+ "required": [
+  "schema",
+  "format_version",
+  "result_file",
+  "frequencies",
+  "components",
+  "shards"
+ ],
+ "title": "DistributedResultManifest",
+ "type": "object"
+}

@@ -1,0 +1,547 @@
+{
+  "fixture": "F-D",
+  "description": "MIM capacitor: equal PEC plates on the faces of a 1 um nitride film (eps 7) in oxide (tests/support/rfic_a4_fixtures.mim); vertical delta-gap port at the +x edge. C' = dC/dL from 60/120 um plates at equal width cancels port, ends and corners; squares checked against eps A/d + 4 s f(s).",
+  "reference": {
+    "values": {
+      "fd": {
+        "area_capacitance_F_per_m2": 6.197931468960002e-05,
+        "widths": {
+          "10um": {
+            "C_per_length_F_per_m": 6.87307492892717e-10,
+            "order_spread_rel": 5.735116825889008e-10,
+            "parallel_plate_F_per_m": 6.197931468960002e-10,
+            "fringe_per_edge_F_per_m": 3.3757172998358445e-11
+          },
+          "20um": {
+            "C_per_length_F_per_m": 1.3107491691695647e-09,
+            "order_spread_rel": 8.891121239251731e-08,
+            "parallel_plate_F_per_m": 1.2395862937920003e-09,
+            "fringe_per_edge_F_per_m": 3.55814376887822e-11
+          },
+          "40um": {
+            "C_per_length_F_per_m": 2.5537962100737823e-09,
+            "order_spread_rel": 5.779995893018253e-07,
+            "parallel_plate_F_per_m": 2.4791725875840006e-09,
+            "fringe_per_edge_F_per_m": 3.7311811244890843e-11
+          }
+        }
+      }
+    },
+    "quasi_static_bound": [
+      5.165658034702622e-07,
+      5.1656580347026235e-05
+    ],
+    "provenance": {
+      "generator": "scripts/dev/rfic/quasistatic_sda_r7.py",
+      "generator_sha256": "28e29c034f2722a4b0a5d16bb4cb6d281332a86d2d4b724ea5b45ae7fa2bce54",
+      "version": "witwin-maxwell 33b33110747ab1cc46f42d6b0be3e059d71bbc10 (numpy/scipy, CPU fp64)",
+      "inputs": {
+        "orders": 32,
+        "command": "python scripts/dev/rfic/quasistatic_sda_r7.py references"
+      },
+      "outputs": "<evidence-root>/rfic-mom-20261106/r7-2/sda/references.json",
+      "outputs_sha256": "024d21a0b3b5629759abab7e3848c29a6388a0af123991cc4366fd057eb67d2b",
+      "self_checks": "CPW vs exact finite-ground conformal map 6e-12; microstrip grounded vs image pair 3e-12; Hammerstad-Jensen -0.07% eps_eff (stated 0.2%)"
+    }
+  },
+  "sequences": {
+    "mim": [
+      "fd-e0.5um",
+      "fd-e0.25um",
+      "fd-e0.125um"
+    ]
+  },
+  "fast_record": "fd-e0.5um",
+  "mom": {
+    "fd-e0.5um": {
+      "fixture": "F-D",
+      "edge_m": 5e-07,
+      "max_edge_m": 4e-06,
+      "frequency_Hz": [
+        100000000.0,
+        1000000000.0
+      ],
+      "cases": [
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 5.9999999999999995e-05,
+          "unknowns": 2842,
+          "C_F": [
+            7.973525597041915e-14,
+            7.973569476784893e-14
+          ],
+          "R_ohm": [
+            1.779810567012299e-10,
+            6.161059492785483e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 0.9999999999999999
+        },
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 0.00011999999999999999,
+          "unknowns": 4792,
+          "C_F": [
+            1.5808951468130247e-13,
+            1.5809237518223782e-13
+          ],
+          "R_ohm": [
+            1.1092241444121289e-10,
+            6.260080738584015e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 0.9999999999999999
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 5.9999999999999995e-05,
+          "unknowns": 3622,
+          "C_F": [
+            1.556329176905544e-13,
+            1.556343073823275e-13
+          ],
+          "R_ohm": [
+            1.2062780758336191e-11,
+            6.263221501778482e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 0.9999999999999999
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 0.00011999999999999999,
+          "unknowns": 6112,
+          "C_F": [
+            3.085845730380801e-13,
+            3.0859224787098956e-13
+          ],
+          "R_ohm": [
+            8.975476671834098e-12,
+            6.267262032406065e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 0.9999999999999997
+        },
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 1.9999999999999998e-05,
+          "unknowns": 1542,
+          "C_F": [
+            2.7484415912587914e-14,
+            2.7484445105357875e-14
+          ],
+          "R_ohm": [
+            -9.709019609165538e-10,
+            6.175869856359281e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 3.9999999999999996e-05,
+          "unknowns": 2792,
+          "C_F": [
+            1.0464280179789226e-13,
+            1.0464334119919336e-13
+          ],
+          "R_ohm": [
+            2.8859539710158053e-10,
+            6.263485812047875e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 0.9999999999999999
+        }
+      ],
+      "C_per_length_F_per_m": {
+        "20um": [
+          1.3059043118480555e-09,
+          1.3059446735731482e-09
+        ],
+        "40um": [
+          2.5491942557920953e-09,
+          2.5492990081443678e-09
+        ]
+      },
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fd",
+        "edge": 5e-07,
+        "max": null
+      }
+    },
+    "fd-e0.25um": {
+      "fixture": "F-D",
+      "edge_m": 2.5e-07,
+      "max_edge_m": 4e-06,
+      "frequency_Hz": [
+        100000000.0,
+        1000000000.0
+      ],
+      "cases": [
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 5.9999999999999995e-05,
+          "unknowns": 4481,
+          "C_F": [
+            7.996662301643156e-14,
+            7.996705887156814e-14
+          ],
+          "R_ohm": [
+            2.7234075898652813e-11,
+            6.173016569104707e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0
+        },
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 0.00011999999999999999,
+          "unknowns": 7151,
+          "C_F": [
+            1.5844572914779694e-13,
+            1.584485738463227e-13
+          ],
+          "R_ohm": [
+            -2.3405243910386982e-11,
+            6.298684843841802e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 0.9999999999999999
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 5.9999999999999995e-05,
+          "unknowns": 5369,
+          "C_F": [
+            1.559075920137757e-13,
+            1.5590896498743226e-13
+          ],
+          "R_ohm": [
+            -8.288225134727074e-11,
+            6.234893691611848e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 0.00011999999999999999,
+          "unknowns": 8579,
+          "C_F": [
+            3.08983219607948e-13,
+            3.0899083705970445e-13
+          ],
+          "R_ohm": [
+            1.680225996968939e-12,
+            6.267906277508772e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0
+        },
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 1.9999999999999998e-05,
+          "unknowns": 2701,
+          "C_F": [
+            2.7629417727669137e-14,
+            2.7629446584754045e-14
+          ],
+          "R_ohm": [
+            -3.0988543696564194e-10,
+            5.234908024237522e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0000000000000002
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 3.9999999999999996e-05,
+          "unknowns": 4299,
+          "C_F": [
+            1.048690219296129e-13,
+            1.0486955498025109e-13
+          ],
+          "R_ohm": [
+            -1.085760708632297e-10,
+            6.208505077935509e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0
+        }
+      ],
+      "C_per_length_F_per_m": {
+        "20um": [
+          1.307985102189423e-09,
+          1.3080252495792426e-09
+        ],
+        "40um": [
+          2.551260459902872e-09,
+          2.55136453453787e-09
+        ]
+      },
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fd",
+        "edge": 2.5e-07,
+        "max": null
+      }
+    },
+    "fd-e0.125um": {
+      "fixture": "F-D",
+      "edge_m": 1.25e-07,
+      "max_edge_m": 4e-06,
+      "frequency_Hz": [
+        100000000.0,
+        1000000000.0
+      ],
+      "cases": [
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 5.9999999999999995e-05,
+          "unknowns": 6670,
+          "C_F": [
+            8.011215643782841e-14,
+            8.011259142273572e-14
+          ],
+          "R_ohm": [
+            -2.9109931097681095e-10,
+            6.56026231963083e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0
+        },
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 0.00011999999999999999,
+          "unknowns": 10060,
+          "C_F": [
+            1.586716142026405e-13,
+            1.5867445395589052e-13
+          ],
+          "R_ohm": [
+            9.945120629467802e-14,
+            6.583538114575658e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 5.9999999999999995e-05,
+          "unknowns": 8046,
+          "C_F": [
+            1.560795154907363e-13,
+            1.5608087161530161e-13
+          ],
+          "R_ohm": [
+            -2.0469252764086925e-10,
+            6.592791053047767e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0000000000000002
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 0.00011999999999999999,
+          "unknowns": 12156,
+          "C_F": [
+            3.0923543247638936e-13,
+            3.0924302113956967e-13
+          ],
+          "R_ohm": [
+            -7.372049684256839e-12,
+            6.598004373386346e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0
+        },
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 1.9999999999999998e-05,
+          "unknowns": 4410,
+          "C_F": [
+            2.7721923805379146e-14,
+            2.772195252624198e-14
+          ],
+          "R_ohm": [
+            -2.6905372791334294e-09,
+            6.573828608016372e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 0.9999999999999999
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 3.9999999999999996e-05,
+          "unknowns": 6676,
+          "C_F": [
+            1.0501537405347069e-13,
+            1.0501590431204094e-13
+          ],
+          "R_ohm": [
+            -1.510406505494187e-10,
+            6.563266286989624e-10
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0000000000000002
+        }
+      ],
+      "C_per_length_F_per_m": {
+        "20um": [
+          1.3093242960802015e-09,
+          1.30936437555258e-09
+        ],
+        "40um": [
+          2.552598616427551e-09,
+          2.5527024920711343e-09
+        ]
+      },
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fd",
+        "edge": 1.25e-07,
+        "max": null
+      }
+    }
+  },
+  "checks": {
+    "fd-e0.0625um": {
+      "fixture": "F-D",
+      "edge_m": 6.25e-08,
+      "max_edge_m": 4e-06,
+      "frequency_Hz": [
+        100000000.0,
+        1000000000.0
+      ],
+      "cases": [
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 5.9999999999999995e-05,
+          "unknowns": 9261,
+          "C_F": [
+            8.022587676078681e-14,
+            8.022631204347295e-14
+          ],
+          "R_ohm": [
+            -4.779292072766857e-10,
+            1.1045076772834797e-09
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 0.9999999999999999
+        },
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 0.00011999999999999999,
+          "unknowns": 13461,
+          "C_F": [
+            1.5882951058782051e-13,
+            1.5883235251804329e-13
+          ],
+          "R_ohm": [
+            -1.9649694708505324e-10,
+            1.1023947003983352e-09
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 5.9999999999999995e-05,
+          "unknowns": 10781,
+          "C_F": [
+            1.562077332841709e-13,
+            1.5620909345653405e-13
+          ],
+          "R_ohm": [
+            -2.2564592574630637e-10,
+            1.0991954717964667e-09
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0000000000000002
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 0.00011999999999999999,
+          "unknowns": 15701,
+          "C_F": [
+            3.094076125889054e-13,
+            3.094151830625647e-13
+          ],
+          "R_ohm": [
+            1.296719827550908e-11,
+            1.0982238262898843e-09
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 0.9999999999999999
+        },
+        {
+          "width_m": 1.9999999999999998e-05,
+          "length_m": 1.9999999999999998e-05,
+          "unknowns": 6461,
+          "C_F": [
+            2.780642964534484e-14,
+            2.7806458311269677e-14
+          ],
+          "R_ohm": [
+            4.9574674667181054e-09,
+            1.0156572200089456e-09
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 0.9999999999999999
+        },
+        {
+          "width_m": 3.9999999999999996e-05,
+          "length_m": 3.9999999999999996e-05,
+          "unknowns": 9141,
+          "C_F": [
+            1.0512941683582001e-13,
+            1.0512994417684045e-13
+          ],
+          "R_ohm": [
+            2.1699018707448645e-10,
+            1.0892929493053548e-09
+          ],
+          "reciprocity": 0.0,
+          "max_singular_S": 1.0
+        }
+      ],
+      "C_per_length_F_per_m": {
+        "20um": [
+          1.3100605637838953e-09,
+          1.3101006745761724e-09
+        ],
+        "40um": [
+          2.5533313217455753e-09,
+          2.553434826767178e-09
+        ]
+      },
+      "exact_repeat": true,
+      "producer": {
+        "fixture": "fd",
+        "edge": 6.25e-08,
+        "max": null
+      }
+    }
+  },
+  "acquisition_device": "NVIDIA RTX A6000",
+  "numerical_lock": {
+    "rule": "D-P1 (user decision 2026-11-09): committed numeric evidence is locked by value with the tiers of numerical_equivalence_standard.md (T0 bitwise, T1 within the fp64 run-level bound, T2 only with a per-field user approval); source hashes are not gates. Harness: scripts/dev/rfic/evidence_lock.py.",
+    "renewals": [
+      {
+        "acquisition": "<evidence-root>/rfic-mom-20261106/round67/a4/fd/reacquisition",
+        "acquisition_commit": "b6b88dd2b75302676b9caccb52ec62d3b094a67e",
+        "tier_table": "<evidence-root>/rfic-mom-20261106/round67/a4/fd/reacquisition/tier_table.json",
+        "tier_table_sha256": "f6d3ca52adff264279d55e163a1865e388ee4263f9e9e3e161208164c68a7989",
+        "summary": {
+          "T0": 156,
+          "T1": 0,
+          "accepted_T2": 0,
+          "T2": 0
+        },
+        "renewed_fields": [],
+        "accepted_t2": []
+      }
+    ]
+  }
+}

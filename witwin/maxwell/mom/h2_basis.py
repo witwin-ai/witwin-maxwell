@@ -7,6 +7,7 @@ by itself. Only leaf bases and transfer matrices survive construction.
 from dataclasses import dataclass
 import math
 import torch
+from ..errors import ConvergenceError
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,7 @@ class NestedBasisConfig:
             raise ValueError('Nested tolerance must be positive and finite')
 
 
-class NestedBasisFailure(RuntimeError):
+class NestedBasisFailure(ConvergenceError):
     def __init__(self, message, receipt):
         super().__init__(message)
         self.receipt = receipt

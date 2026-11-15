@@ -25,21 +25,26 @@ def assert_tensors(actual, expected):
 def test_graded_grid_normalized_multifrequency_planes_and_full_fields(boundary):
     sims = []
     for index in range(2):
-        scene = simulation(index, boundary=boundary).scene_input.clone()
+        scene = simulation(index, boundary=boundary).scene_input
         axis = np.linspace(-1., 1., 17)
         coordinates = .2 * (axis + .1 * axis ** 3) / 1.1
-        scene.grid = mw.GridSpec.custom(coordinates, coordinates, coordinates)
-        scene.add_monitor(mw.PlaneMonitor("plane", axis="z", position=.05,
-            fields=("Ex", "Ey", "Hx", "Hy"), compute_flux=True))
-        scene.add_monitor(mw.FluxMonitor("flux", axis="z", position=.05))
+        scene = scene.updated(grid=mw.GridSpec.custom(coordinates, coordinates, coordinates))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.PlaneMonitor("plane", axis="z", position=.05,
+                fields=("Ex", "Ey", "Hx", "Hy"), compute_flux=True),
+            mw.FluxMonitor("flux", axis="z", position=.05),
+        ))
         sims.append(mw.Simulation.fdtd(scene, frequencies=(.8e9, 1e9, 1.2e9),
-            run_time=mw.TimeConfig(time_steps=120, dt=2e-11),
-            spectral_sampler=mw.SpectralSampler(window="hanning", normalize_source=True),
-            cuda_graph=False, full_field_dft=True))
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=120, dt=2e-11),
+                spectral_sampler=mw.fdtd.SpectralSampler(window="hanning", normalize_source=True),
+                cuda_graph=False, full_field_dft=True,
+            )))
     batch = mw.Simulation.batch(sims,
-        variation=mw.BatchVariation(sources=("drive",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=3),
-        outputs=mw.BatchOutput(fields=("Ex", "Ey", "Ez")))
+        variation=mw.execution.BatchVariation(sources=("drive",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=3),
+        outputs=mw.execution.BatchOutput(fields=("Ex", "Ey", "Ez")))
     with batch.prepare() as prepared:
         result = prepared.run()
         result.results()
@@ -62,12 +67,17 @@ def test_shutoff_finishes_one_lane_while_another_keeps_advancing():
     for amplitude in (100., 0.):
         scene = _vacuum_scene(source_time=mw.GaussianPulse(
             frequency=1e9, fwidth=.4e9, amplitude=amplitude))
-        scene.add_monitor(mw.PointMonitor("probe", position=(.1, 0., 0.), fields=("Ez",)))
-        sims.append(mw.Simulation.fdtd(scene, frequency=1e9,
-            run_time=mw.TimeConfig(time_steps=3000), full_field_dft=False,
-            shutoff=5e-2, shutoff_check_interval=50, cuda_graph=False))
-    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("src",)),
-        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2))
+        scene = scene.updated(monitors=(
+            *scene.monitors,
+            mw.PointMonitor("probe", position=(.1, 0., 0.), fields=("Ez",)),
+        ))
+        sims.append(mw.Simulation.fdtd(scene, frequencies=1e9,
+            config=mw.FDTDConfig(
+                run_time=mw.TimeConfig(time_steps=3000), full_field_dft=False,
+                shutoff=5e-2, shutoff_check_interval=50, cuda_graph=False,
+            )))
+    batch = mw.Simulation.batch(sims, variation=mw.execution.BatchVariation(sources=("src",)),
+        execution=mw.execution.BatchExecution(devices=("cuda:0",), batch_size=2))
     results = batch.run()
     results.results()
     assert results[0].stats()["shutoff_triggered"]

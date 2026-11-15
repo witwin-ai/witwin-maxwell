@@ -1,41 +1,51 @@
 import math
+from dataclasses import dataclass, replace
 
 import numpy as np
 import torch
 
+from ...fdtd_cpml import CPMLConfig, CPMLMemoryMode
 from .common import BOUNDARY_PML
 
 
-DEFAULT_CPML_CONFIG = {
-    # A cubic, impedance-matched conductivity ramp is the robust default for
-    # the relatively thin (8-12 cell) layers used by Scene boundaries.  Large
-    # kappa stretching at this thickness creates a resolvable entrance mismatch
-    # for propagating waves. Nonzero fixed-k Bloch runs resolve a frequency shift
-    # at boundary setup; real fields retain the unshifted default below.
-    "grading_order": 3.0,
-    "kappa_max": 1.0,
-    "alpha_max": 0.0,
-    "reflection": 1e-6,
-    "memory_mode": "auto",
-    "dense_memory_limit_mib": 64.0,
-}
+@dataclass(frozen=True)
+class CPMLGrading:
+    """Resolved CPML profile parameters: the ``CPMLConfig`` grading with every default filled in."""
 
-# StablePML overrides: a higher grading order and a larger complex-frequency
+    grading_order: float
+    kappa_max: float
+    alpha_max: float
+    reflection: float
+
+
+# A cubic, impedance-matched conductivity ramp is the robust default for
+# the relatively thin (8-12 cell) layers used by Scene boundaries.  Large
+# kappa stretching at this thickness creates a resolvable entrance mismatch
+# for propagating waves. Nonzero fixed-k Bloch runs resolve a frequency shift
+# at boundary setup; real fields retain the unshifted default below.
+DEFAULT_CPML_GRADING = CPMLGrading(grading_order=3.0, kappa_max=1.0, alpha_max=0.0, reflection=1e-6)
+
+# StablePML profile: a higher grading order and a larger complex-frequency
 # shift (alpha_max) trade a little absorption for markedly improved late-time
 # stability, which suppresses the low-frequency growth that stresses a plain CPML.
-STABLE_PML_CONFIG_OVERRIDES = {
-    "grading_order": 5.0,
-    "kappa_max": 5.0,
-    "alpha_max": 0.24,
-    "reflection": 1e-9,
-}
+STABLE_PML_GRADING = CPMLGrading(grading_order=5.0, kappa_max=5.0, alpha_max=0.24, reflection=1e-9)
+
+
+def resolve_cpml_grading(config: CPMLConfig) -> CPMLGrading:
+    """The real-field profile of ``config``: unset fields take ``DEFAULT_CPML_GRADING``."""
+    default = DEFAULT_CPML_GRADING
+    return CPMLGrading(
+        grading_order=default.grading_order if config.grading_order is None else config.grading_order,
+        kappa_max=config.kappa_max,
+        alpha_max=default.alpha_max if config.alpha_max is None else config.alpha_max,
+        reflection=default.reflection if config.reflection is None else config.reflection,
+    )
+
 
 # Adiabatic absorber grading: gentle cubic conductivity ramp, no kappa/alpha
 # stretching and no auxiliary psi memory.
 ABSORBER_GRADING_ORDER = 3.0
 ABSORBER_REFLECTION = 1e-6
-
-_AUTO_CPML_DENSE_FREE_FRACTION = 0.125
 
 _CPML_VECTOR_ATTRS = (
     "cpml_kappa_e_x",
@@ -125,9 +135,9 @@ def cpml_line_profiles(solver, count, spacing, thickness, *, reflection):
     half64 = nodes64 + .5 * float(spacing)
     eta0 = math.sqrt(solver.mu0 / solver.eps0)
     scale = torch.tensor(1.0, device=solver.device, dtype=solver.Ex.dtype)
-    electric_config = dict(solver.cpml_config, reflection=float(reflection))
-    magnetic_config = dict(electric_config,
-                           alpha_max=solver.cpml_config["alpha_max"] * shift["magnetic_alpha_scale"])
+    electric_config = replace(solver.cpml_grading, reflection=float(reflection))
+    magnetic_config = replace(electric_config,
+                              alpha_max=solver.cpml_grading.alpha_max * shift["magnetic_alpha_scale"])
     profiles = []
     for positions, vacuum, sigma_scale, config in ((nodes64, solver.eps0, scale, electric_config),
                                                    (half64, solver.mu0, scale * (solver.mu0 / solver.eps0), magnetic_config)):
@@ -193,10 +203,10 @@ def _cpml_profile_1d(
             return float(nodes64[-1]) + extra * float(nodes64[-1] - nodes64[-2])
         return float(nodes64[0]) - extra * float(nodes64[1] - nodes64[0])
 
-    grading_order = float(config["grading_order"])
-    kappa_max = float(config["kappa_max"])
-    alpha_max = float(config["alpha_max"])
-    reflection = float(config["reflection"])
+    grading_order = float(config.grading_order)
+    kappa_max = float(config.kappa_max)
+    alpha_max = float(config.alpha_max)
+    reflection = float(config.reflection)
     strength = float(sigma_scale.item())
     sigma_numerator = -(grading_order + 1.0) * math.log(reflection) / (2.0 * float(impedance))
 
@@ -317,36 +327,22 @@ def _estimate_cpml_memory_bytes(layouts, solver):
     return dense_bytes, slab_bytes
 
 
-def _requested_cpml_memory_mode(solver):
-    requested = str(solver.cpml_config.get("memory_mode", "auto")).strip().lower()
-    if requested not in {"auto", "dense", "slab"}:
-        raise ValueError(
-            "cpml_config['memory_mode'] must be one of 'auto', 'dense', or 'slab'."
-        )
-    return requested
-
-
 def _resolve_cpml_memory_mode(solver, dense_bytes):
-    requested = _requested_cpml_memory_mode(solver)
+    """Pick dense or slab psi storage from the scene alone.
+
+    Dense and slab storage round differently, so "auto" must not consult
+    run-time state such as the card's free memory: identical inputs have to
+    give identical bits. A dense allocation that does not fit raises the OOM.
+    """
+    requested = solver.cpml.memory_mode.value
     solver._cpml_memory_mode_requested = requested
-    if requested != "auto":
+    if requested != CPMLMemoryMode.AUTO.value:
         solver._cpml_dense_memory_limit_bytes = None
-        solver._cpml_auto_free_bytes = None
         return requested
 
-    limit_mib = float(
-        solver.cpml_config.get("dense_memory_limit_mib", DEFAULT_CPML_CONFIG["dense_memory_limit_mib"])
-    )
+    limit_mib = float(solver.cpml.dense_memory_limit_mib)
     limit_bytes = max(int(limit_mib * 1024 * 1024), 0)
-    free_bytes = None
-    try:
-        free_bytes, _ = torch.cuda.mem_get_info(solver.device)
-    except (RuntimeError, ValueError):
-        free_bytes = None
-    if free_bytes is not None:
-        limit_bytes = min(limit_bytes, int(float(free_bytes) * _AUTO_CPML_DENSE_FREE_FRACTION))
     solver._cpml_dense_memory_limit_bytes = limit_bytes
-    solver._cpml_auto_free_bytes = None if free_bytes is None else int(free_bytes)
     return "dense" if dense_bytes <= limit_bytes else "slab"
 
 
@@ -423,7 +419,6 @@ def _clear_auxiliary_state(solver):
     solver._cpml_slab_memory_bytes = 0
     solver._cpml_allocated_memory_bytes = 0
     solver._cpml_dense_memory_limit_bytes = None
-    solver._cpml_auto_free_bytes = None
 
 
 def build_cpml_profiles(solver, *, magnetic_alpha_scale=1.0, shift_rate=None, shift_floor=0.0):
@@ -433,10 +428,10 @@ def build_cpml_profiles(solver, *, magnetic_alpha_scale=1.0, shift_rate=None, sh
     thickness = solver.scene.pml_thickness
     eta0 = math.sqrt(solver.mu0 / solver.eps0)
     scene = solver.scene
-    magnetic_config = solver.cpml_config
+    electric_config = solver.cpml_grading
+    magnetic_config = electric_config
     if magnetic_alpha_scale != 1.0:
-        magnetic_config = dict(solver.cpml_config,
-            alpha_max=solver.cpml_config["alpha_max"] * magnetic_alpha_scale)
+        magnetic_config = replace(electric_config, alpha_max=electric_config.alpha_max * magnetic_alpha_scale)
 
     axis_masters = {
         "x": (scene.x_nodes64, scene.x_half64),
@@ -454,7 +449,7 @@ def build_cpml_profiles(solver, *, magnetic_alpha_scale=1.0, shift_rate=None, sh
             solver.eps0,
             scale_tensor,
             eta0,
-            solver.cpml_config,
+            electric_config,
             apply_low=apply_low,
             apply_high=apply_high,
             shift_rate=shift_rate,
@@ -482,13 +477,20 @@ def build_cpml_profiles(solver, *, magnetic_alpha_scale=1.0, shift_rate=None, sh
         setattr(solver, f"cpml_c_h_{axis}", c_h)
 
 
-def initialize_cpml_state(solver):
+def initialize_cpml_state(solver, *, grading=None):
+    """Resolve the CPML profile, build its coefficients and allocate ``psi`` memory.
+
+    ``grading`` replaces the profile resolved from ``solver.cpml`` (StablePML).
+    """
+    config = solver.cpml
+    if grading is None:
+        grading = resolve_cpml_grading(config)
     magnetic_alpha_scale = 1.0
     shift_rate = None
     shift_floor = 0.0
     if solver.active_absorber_type == "cpml" and solver.complex_fields_enabled:
         k_parallel = math.hypot(*(k for axis, k in zip("xyz", solver.resolved_bloch_wavevector)
-                                  if solver.scene.boundary.axis_kind(axis) == "bloch"))
+                                  if solver.scene.scene.boundary.axis_kind(axis) == "bloch"))
         if k_parallel:
             band_min = min(solver._requested_port_frequencies)
             shift_rate = 2. * math.pi * band_min
@@ -499,20 +501,21 @@ def initialize_cpml_state(solver):
             # Alpha/eps0 is an angular frequency. Put the largest shift at the
             # lowest requested frequency so evanescent memory is damped without
             # shifting far above the propagating band and weakening absorption.
-            if "alpha_max" not in solver._cpml_config_keys:
-                solver.cpml_config["alpha_max"] = solver.eps0 * shift_rate
-                if "grading_order" not in solver._cpml_config_keys:
-                    solver.cpml_config["grading_order"] = 2.
-                if "reflection" not in solver._cpml_config_keys:
+            if config.alpha_max is None:
+                grading = replace(grading, alpha_max=solver.eps0 * shift_rate)
+                if config.grading_order is None:
+                    grading = replace(grading, grading_order=2.)
+                if config.reflection is None:
                     # A ray's layer return scales as R**cos(theta). Target
                     # 10^-4.2 at the band edge, with headroom below 1e-4, while
                     # capping the stretch at eight decades near grazing. Excess
                     # stretch suppresses evanescent leakage and slows lossy tails.
                     cutoff = math.sqrt(1.0 - (4.2 / 8.0) ** 2)
                     cosine = math.sqrt(1.0 - min(parallel_fraction, cutoff) ** 2)
-                    solver.cpml_config["reflection"] = 10. ** (-4.2 / cosine)
+                    grading = replace(grading, reflection=10. ** (-4.2 / cosine))
             # Alpha is an electric conductivity: match alpha_e/eps0 = alpha_h/mu0.
             magnetic_alpha_scale = solver.mu0 / solver.eps0
+    solver.cpml_grading = grading
     _clear_auxiliary_state(solver)
     # Auxiliary 1D lines (fixed-k incident line) reuse the same resolved profile.
     solver._cpml_shift = dict(rate=shift_rate, floor=shift_floor, magnetic_alpha_scale=magnetic_alpha_scale)
@@ -524,10 +527,7 @@ def initialize_cpml_state(solver):
 
 def initialize_stable_pml_state(solver):
     # StablePML reuses the full CPML machinery with a stability-oriented profile.
-    config = dict(solver.cpml_config)
-    config.update(STABLE_PML_CONFIG_OVERRIDES)
-    solver.cpml_config = config
-    initialize_cpml_state(solver)
+    initialize_cpml_state(solver, grading=STABLE_PML_GRADING)
 
 
 def initialize_neutral_boundary_state(solver):

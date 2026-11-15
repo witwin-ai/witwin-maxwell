@@ -13,6 +13,7 @@ Falsification records live in
 
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 
 import pytest
@@ -46,22 +47,23 @@ def _run_dipole(design_frequency: float = 3.0e9):
     scene = half_wave_dipole_scene(
         design_frequency=design_frequency,
         frequencies=frequencies,
-        device="cuda",
     )
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=list(frequencies),
-        excitations=mw.PortExcitation(
+        excitations=mw.rf.PortExcitation(
             "feed",
             source_time=mw.GaussianPulse(frequency=design_frequency, fwidth=1.5e9),
         ),
-        run_time=mw.TimeConfig(time_steps=1),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
     prepared = simulation.prepare()
     steps = math.ceil(12.0e-9 / float(prepared.solver.dt))
-    simulation.config.run_time = mw.TimeConfig(time_steps=steps)
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=steps))
     result = prepared.run()
     return result, frequencies
 
@@ -76,21 +78,18 @@ def test_half_wave_dipole_end_to_end_radiation_and_impedance():
 
     # Radiation-resistance class: the real part sweeps THROUGH the thin-dipole
     # ~73 Ohm class within the band (min below, max above), with at least one
-    # sampled frequency inside the 60-90 Ohm band. The input reactance carries a
-    # large positive delta-gap feed offset (documented) and is deliberately NOT
+    # sampled frequency inside the 60-90 Ohm band. The input reactance is not
     # gated here.
     assert float(resistance.min()) < 73.0 < float(resistance.max())
     in_band = (resistance >= 60.0) & (resistance <= 90.0)
     assert bool(torch.any(in_band))
 
-    data = result.antenna(
-        surface="radiation",
+    data = mw.antenna.antenna(result, surface="radiation",
         driven_port="feed",
         theta_points=181,
         phi_points=8,
-        radius=10.0,
-    )
-    assert isinstance(data, mw.AntennaData)
+        radius=10.0,)
+    assert isinstance(data, mw.antenna.AntennaData)
     # The real path built genuine surface currents (six NF2FF faces per frequency).
     assert data.surface_currents is not None
     assert len(data.surface_currents[design_index].surfaces) == 6
@@ -122,36 +121,36 @@ _PATCH_FREQUENCIES = tuple(f * 1e9 for f in (2.9, 3.0, 3.1, 3.2, 3.3, 3.4, 3.5))
 
 @pytest.fixture(scope="module")
 def patch_antenna_run():
-    scene = patch_antenna_scene(frequencies=_PATCH_FREQUENCIES, device="cuda")
+    scene = patch_antenna_scene(frequencies=_PATCH_FREQUENCIES)
     simulation = mw.Simulation.fdtd(
         scene,
         frequencies=list(_PATCH_FREQUENCIES),
-        excitations=mw.PortExcitation(
+        excitations=mw.rf.PortExcitation(
             "feed",
             source_time=mw.GaussianPulse(frequency=3.2e9, fwidth=2.2e9),
         ),
-        run_time=mw.TimeConfig(time_steps=1),
-        spectral_sampler=mw.SpectralSampler(window="none"),
-        full_field_dft=False,
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=1),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            full_field_dft=False,
+        ),
     )
     prepared = simulation.prepare()
     steps = math.ceil(16.0e-9 / float(prepared.solver.dt))
-    simulation.config.run_time = mw.TimeConfig(time_steps=steps)
+    simulation.config = replace(simulation.config, run_time=mw.TimeConfig(time_steps=steps))
     result = prepared.run()
-    data = result.antenna(
-        surface="radiation",
+    data = mw.antenna.antenna(result, surface="radiation",
         driven_port="feed",
         theta_points=91,
         phi_points=73,
-        radius=10.0,
-    )
+        radius=10.0,)
     return result, data
 
 
 def test_patch_antenna_result_antenna_pipeline_is_valid(patch_antenna_run):
     result, data = patch_antenna_run
 
-    assert isinstance(data, mw.AntennaData)
+    assert isinstance(data, mw.antenna.AntennaData)
     assert data.frequencies.numel() == len(_PATCH_FREQUENCIES)
     # NF2FF over the finite grounded slab: six air-exterior faces per frequency.
     assert data.surface_currents is not None

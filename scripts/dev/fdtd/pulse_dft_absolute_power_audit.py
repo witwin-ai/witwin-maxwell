@@ -12,6 +12,7 @@ from pathlib import Path
 import sys
 
 import torch
+import witwin.maxwell as mw
 
 
 AMPLITUDES = ("voltage", "current", "a", "b")
@@ -37,13 +38,13 @@ def capture(tree, output):
     port = result.port("feed")
     for name in AMPLITUDES + POWERS:
         retain("port/" + name, getattr(port, name), 1 if name in AMPLITUDES else 2)
-    record = result.conductor_losses["foil"]
+    record = mw.rf.conductor_losses(result)["foil"]
     retain("copper/surface_power", record["surface_power"], 2)
     retain("copper/regional_power", conductor_region_power(record, ((-.02, .02),)*3), 2)
     for trace in record["bulk_electric_traces"]:
         retain("copper/trace_norm/" + trace["component"],
                torch.linalg.vector_norm(trace["electric_fields"].flatten(1), dim=1), 1)
-    for name, value in result.power_loss("bulk").channel_power.items():
+    for name, value in result.monitor("bulk").channel_power.items():
         retain("bulk/" + name, value, 2)
     torch.save(dict(module=mw.__file__, rows=rows), output)
     print(json.dumps(dict(module=mw.__file__, rows=len(rows))), flush=True)

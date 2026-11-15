@@ -268,7 +268,7 @@ class DirectionalSystemActions:
             raise ValueError('Automatic directional global ideal admission failed before maps')
         regions = [plan.build_region(integration=provider.config,
             table_retained_budget_bytes=config.regional_table_budget_bytes,
-            near_retained_budget_bytes=config.regional_near_budget_bytes,near_storage=config.near_storage,
+            near_retained_budget_bytes=config.regional_near_budget_bytes,near_storage=config.near_storage.value,
             **({} if config.near_storage not in ('scalar_reciprocal_streamed_dk_v1','scalar_reciprocal_cached_dk_v1') else dict(
                 near_coefficient_workspace_budget_bytes=config.near_coefficient_workspace_budget_bytes)),
             **({} if config.near_storage != 'scalar_reciprocal_cached_dk_v1' else dict(

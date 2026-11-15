@@ -1,0 +1,121 @@
+{
+  "store": "w7-20261108/frozen-oracles",
+  "commit": "0888c6cf24e0663642232fd1151b89711c3f8a54",
+  "payloads": 901,
+  "bytes": 28035387656,
+  "manifest_sha256": "2e56d2a289838f1985e0fc101a9bdda313e6346fb3a357c5a3af5dbb61d92869",
+  "addenda": [
+    {
+      "manifest": "addenda/w7-row4/manifest.json",
+      "commit": "fe59b3cd20f995ac8e20775e0701c2addf501efa",
+      "payloads": 120,
+      "manifest_sha256": "c22f4b3bf60e7295214253195cfe7dd7d85b0c7af7c3f6193e4264e9db35fe9e"
+    },
+    {
+      "manifest": "addenda/w7-row6/manifest.json",
+      "commit": "fe59b3cd20f995ac8e20775e0701c2addf501efa",
+      "payloads": 24,
+      "manifest_sha256": "3dcca4f259e1e433bb3b655327819308fb8cfc69a3a0546a25f50c385c0010cf"
+    },
+    {
+      "manifest": "addenda/w7-row5/manifest.json",
+      "commit": "8db250f2146b554106dc3ed420406bd0fabe6381",
+      "payloads": 115,
+      "manifest_sha256": "adda8c8482cef7165881a03c5c0ca17790194fd52a1d99dcba02b134424939af"
+    },
+    {
+      "manifest": "addenda/w7-row9/manifest.json",
+      "commit": "5d1d244dec92d8ee08e4fb4edab9bcd161e15026",
+      "payloads": 32,
+      "manifest_sha256": "b3e5a9bce8a48d80d70ab48cd46323712ea76c7a000d51069d516565f34b8a6e"
+    },
+    {
+      "manifest": "addenda/w7-row12/manifest.json",
+      "commit": "c08963ec07886369fd90e4768a8ea4f84c464c96",
+      "payloads": 32,
+      "manifest_sha256": "1ed0b34c72fa0b9270dcd370fc162c1a663a5229552a000889cf77fc9b54ab10"
+    },
+    {
+      "manifest": "addenda/w7-row13/manifest.json",
+      "commit": "12f63f934eb8382f4bd1e17c46858ecf8cde9211",
+      "payloads": 80,
+      "manifest_sha256": "3089c43ab6b9408fae1cba087265326efa937873a37ec1a7f6f1ff9d924f2dc8"
+    },
+    {
+      "manifest": "addenda/w7-row10/manifest.json",
+      "commit": "12f63f934eb8382f4bd1e17c46858ecf8cde9211",
+      "payloads": 32,
+      "manifest_sha256": "33e874ead09ca3eb2ac015e580bb633a3b52897e0b2dadc6ccd432ec4becc686"
+    },
+    {
+      "manifest": "addenda/dispersive-polarized/manifest.json",
+      "commit": "84a864ad7ec69bdab06025b945dceab1036d007e",
+      "payloads": 166,
+      "manifest_sha256": "b3ba1a2a2ffcd65bd60d3e3c6d4ff6511a78d319b5fdac080138f4c0a5126a3d",
+      "supersedes": true
+    },
+    {
+      "manifest": "addenda/w7-row15a/manifest.json",
+      "commit": "e64438f0ed53114aa044444ec9217476cb195b18",
+      "payloads": 24,
+      "manifest_sha256": "c7270dcbfcca8ec00b618ee00b05a085b16f1205d5bec54a1fe3e54b30621b73"
+    },
+    {
+      "manifest": "addenda/w7-row14/manifest.json",
+      "commit": "afc5b9cd24c5cbe3f05fb56ff48f54abd63bdc85",
+      "payloads": 51,
+      "manifest_sha256": "4ff182e19cb9f0e58b6998f4c916389d074015e15149f51b32c26541f993da6c"
+    },
+    {
+      "manifest": "addenda/w7-row15b/manifest.json",
+      "commit": "8d15267c9a61562b47bb9778483c3b4bfc8e8f6e",
+      "payloads": 30,
+      "manifest_sha256": "456ce6cd951b743b9d799c407fa2dc3d1a09f7ce341a32030b76954e3a54508d"
+    },
+    {
+      "manifest": "addenda/w7-row15b-seam/manifest.json",
+      "commit": "cd72d219bbaee14f547b942af63d8ddbb018fc31",
+      "payloads": 2,
+      "manifest_sha256": "93be74ccbe26717334faa7c8f3e583e2315735e2748d299301f77cdd2e33d1e3",
+      "supersedes": true
+    },
+    {
+      "manifest": "addenda/core-f7f08ca-coax/manifest.json",
+      "commit": "bef1b17b5a25c3867e2d4e0e6572ca06fb9551cc",
+      "payloads": 3,
+      "manifest_sha256": "f04d62150f370a886994418fa7bb78f011cfc45507c73a6504d3b0243b295c2d",
+      "supersedes": true
+    },
+    {
+      "manifest": "addenda/w7-row16a/manifest.json",
+      "commit": "dbac8adecbc00d8aaa46dd387d5aa5e6a8a6f0c3",
+      "payloads": 56,
+      "manifest_sha256": "ef18696db0cae097200810c64249f6cdfce09b478c44e3738ee90d66d6936fa6"
+    },
+    {
+      "manifest": "addenda/w7-row16b/manifest.json",
+      "commit": "dbac8adecbc00d8aaa46dd387d5aa5e6a8a6f0c3",
+      "payloads": 40,
+      "manifest_sha256": "699375184c5424ef020b4f20eb626e753f0bb6287758140eec322f9e2ab81e57"
+    },
+    {
+      "manifest": "addenda/w7-row16b-grad/manifest.json",
+      "commit": "dbac8adecbc00d8aaa46dd387d5aa5e6a8a6f0c3",
+      "payloads": 3,
+      "manifest_sha256": "73690e000caaa980ca5383476017c8a7d3e0bdd455a491bd5aa67a69f9883963"
+    },
+    {
+      "manifest": "addenda/symmetry-fix-pmc-center/manifest.json",
+      "commit": "7c08e1311f612c202a9cc1f3928fd7c1b6e77d00",
+      "payloads": 8,
+      "manifest_sha256": "7205c7d3a82f9aca0934ce46f474f94c369d5c655494a8ad9fdfd8d8e249f344",
+      "supersedes": true
+    },
+    {
+      "manifest": "addenda/w7-row16e/manifest.json",
+      "commit": "a462f31baadec46467a587b29447efb2b3cd0867",
+      "payloads": 19,
+      "manifest_sha256": "8b2291ea62b732f67336a21293739eddc090fb1a67b6e378d316c67fd3f6b2fe"
+    }
+  ]
+}

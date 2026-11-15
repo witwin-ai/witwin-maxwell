@@ -46,7 +46,7 @@ def _as_1d_tensor(value, *, size: int, name: str, device: torch.device, dtype: t
 
 def _monitor_payload(result, name: str) -> dict:
     try:
-        payload = result.monitor(name)
+        payload = result.raw_monitor(name)
     except KeyError as exc:
         raise KeyError(f"Monitor {name!r} is not available in the supplied result.") from exc
     if "flux" not in payload:

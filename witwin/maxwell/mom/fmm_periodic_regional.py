@@ -12,6 +12,7 @@ from .fmm_moments import NestedRWGMultipoles
 from .fmm_regional import MultipoleRegionalOperator
 from .fmm_periodic import PeriodicImageM2L
 from .fmm_periodic_error import periodic_hierarchy_error_bound, require_periodic_multipole_budget
+from ..errors import UnsupportedFeatureError
 
 
 class PeriodicMultipoleRegionalOperator:
@@ -27,15 +28,18 @@ class PeriodicMultipoleRegionalOperator:
                  projection_budget_bytes=1024**3, remote_kernel_error_budget=None,
                  table_storage="dense", m2l_row_batch=16, near_action_batch=32, hierarchy_kernel_error_budget=None, ewald_kernel=None):
         if table_storage == 'fft_v1':
-            raise NotImplementedError('Periodic FFT M2L requires separately admitted screened coefficients')
+            raise UnsupportedFeatureError('Periodic FFT M2L requires separately admitted screened coefficients',
+                                          feature="boundary.periodic", method="mom")
         if table_storage == 'fft_ewald_v1' and ewald_kernel is None:
-            raise NotImplementedError('Ewald FFT requires actual screened Ewald coefficients')
+            raise UnsupportedFeatureError('Ewald FFT requires actual screened Ewald coefficients',
+                                          feature="guard:862026c6", method="mom")
         if type(near_action_batch) is not int or near_action_batch < 1:
             raise ValueError('Near action batch must be a positive integer')
         if not isinstance(test, NestedRWGMultipoles) or not isinstance(source, NestedRWGMultipoles):
             raise TypeError('Periodic region requires nested RWG multipoles')
         if test.tree.expansion_centers is not None or source.tree.expansion_centers is not None:
-            raise NotImplementedError('Dyadic expansion centers currently require free space')
+            raise UnsupportedFeatureError('Dyadic expansion centers currently require free space',
+                                          feature="guard:2e89454f", method="mom")
         if table_storage == 'fft_ewald_v1':
             from .fmm_storage import m2l_storage_bytes
             m2l_storage_bytes(test.order, test.centers.element_size(), 'fft_v1')
@@ -77,7 +81,8 @@ class PeriodicMultipoleRegionalOperator:
             if not isinstance(ewald_kernel, EwaldHelmholtzKernel):
                 raise TypeError('Ewald region requires EwaldHelmholtzKernel')
             if hierarchy_kernel_error_budget is not None or remote_kernel_error_budget is not None:
-                raise NotImplementedError('Ewald hierarchy error admission requires its own complete bound')
+                raise UnsupportedFeatureError('Ewald hierarchy error admission requires its own complete bound',
+                                              feature="guard:9627fc1a", method="mom")
         hierarchy = None
         if hierarchy_kernel_error_budget is not None:
             hierarchy = periodic_hierarchy_error_bound(test.tree, source.tree, lattice, medium.k,

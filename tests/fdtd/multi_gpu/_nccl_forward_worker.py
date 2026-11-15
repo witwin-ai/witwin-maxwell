@@ -26,6 +26,7 @@ from witwin.maxwell.fdtd.distributed import DistributedFDTD
 from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd_parallel import FDTDParallelConfig
 from witwin.maxwell.scene import prepare_scene
+from tests.support.core_solver import bind_core
 
 _FREQUENCY = 1.0e9
 _DFT_FREQUENCIES = (0.8e9, 1.0e9, 1.2e9)
@@ -53,27 +54,26 @@ def _scene() -> mw.Scene:
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.2, 0.2), (-0.2, 0.2))),
-        grid=mw.GridSpec.custom(x, y, z),
-        boundary=mw.BoundarySpec.none(),
-        device="cuda:0",
-    )
-    scene.add_structure(
-        mw.Structure(
-            name="slab",
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.2, 0.2)),
-            material=mw.Material(eps_r=4.0),
-        )
-    )
-    scene.add_source(
-        mw.PointDipole(
-            position=(-0.2, 0.0, 0.0),
-            polarization="Ez",
-            profile="ideal",
-            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=0.4e9, amplitude=10.0),
-            name="drive",
-        )
-    )
+                domain=mw.Domain(bounds=((-0.6, 0.6), (-0.2, 0.2), (-0.2, 0.2))),
+                grid=mw.GridSpec.custom(x, y, z),
+                boundary=mw.BoundarySpec.none(),
+                structures=(
+            mw.Structure(
+                name="slab",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.2, 0.2)),
+                material=mw.Material(eps_r=4.0),
+            ),
+            ),
+                sources=(
+            mw.PointDipole(
+                position=(-0.2, 0.0, 0.0),
+                polarization="Ez",
+                profile="ideal",
+                source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=0.4e9, amplitude=10.0),
+                name="drive",
+            ),
+            ),
+            )
     return scene
 
 
@@ -127,7 +127,7 @@ def _run_timing_pass(distributed) -> None:
 
     import os
 
-    from witwin.maxwell.fdtd.distributed.instrumentation import StepRateInstrument
+    from tests.support.step_rate_instrument import StepRateInstrument
 
     instrument = StepRateInstrument.from_env(
         rank=distributed.rank,
@@ -138,12 +138,11 @@ def _run_timing_pass(distributed) -> None:
         return
     steps = int(os.environ.get("WITWIN_FDTD_STEP_TIMING_STEPS", "200"))
     distributed._prepare_outputs(steps, _DFT_FREQUENCIES, "none", True)
-    overlap_active = distributed._overlap_active()
     distributed._synchronize_all()
     instrument.loop_begin()
     for n in range(steps):
         instrument.step_begin()
-        distributed._advance_one_step(n, overlap_active=overlap_active)
+        distributed._advance_one_step(n)
         instrument.step_end()
     instrument.loop_end()
     distributed._synchronize_all()
@@ -188,6 +187,7 @@ def main() -> None:
             assert output is not None, "rank 0 produced no gathered output"
             single = FDTD(prepare_scene(_scene()), frequency=_FREQUENCY, absorber_type="cpml")
             single.init_field()
+            bind_core(single)
             single_output = single.solve(
                 time_steps=_STEPS,
                 dft_frequency=_DFT_FREQUENCIES,

@@ -8,8 +8,8 @@ from witwin.maxwell.fdtd.excitation.modes.conductors import copper_intersects_mo
 
 
 def _scene(vertices):
-    geometry=mw.SurfaceMesh(vertices,((0,1,2),),device='cpu')
-    return SimpleNamespace(structures=(mw.Structure(geometry,mw.CopperFoil(thickness=35e-6,frequency_range=(.5e9,2e9)),name='curved'),))
+    geometry=mw.geometry.SurfaceMesh(vertices,((0,1,2),),device='cpu')
+    return SimpleNamespace(scene=SimpleNamespace(structures=(mw.Structure(geometry,mw.media.CopperFoil(thickness=35e-6,frequency_range=(.5e9,2e9)),name='curved'),)))
 
 
 @pytest.mark.parametrize('model',(None,'good_conductor'))

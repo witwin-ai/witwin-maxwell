@@ -44,17 +44,16 @@ def _box_scene(dx, half_y, z_low, z_high):
         domain=mw.Domain(bounds=((x[0], x[-1]), (y[0], y[-1]), (z[0], z[-1]))),
         grid=mw.GridSpec.custom(x, y, z),
         boundary=mw.BoundarySpec.pec(),
-        device="cuda",
     ), 2 * x[-1] + 20 * dx
 
 
 def _sheet(name, y_low, y_high, z, length):
     vertices = ((-length / 2, y_low), (length / 2, y_low), (length / 2, y_high), (-length / 2, y_high))
-    return mw.Structure(mw.PlanarPEC(vertices, normal_axis="z", coordinate=z), mw.Material.pec(), name=name)
+    return mw.Structure(mw.geometry.PlanarPEC(vertices, normal_axis="z", coordinate=z), mw.Material.pec(), name=name)
 
 
 def _prepare(scene):
-    manifest = resolve_terminal_waveport_run_manifest(prepare_scene(scene), mw.PortSweep(), (1.0e9,))
+    manifest = resolve_terminal_waveport_run_manifest(prepare_scene(scene), mw.rf.PortSweep(), (1.0e9,))
     return manifest.prepared_ports[0]
 
 
@@ -65,23 +64,34 @@ def _even_odd(prepared):
 
 def _coupled_scene(dx, *, kind, half_y, top, width, gap, height):
     scene, length = _box_scene(dx, half_y, 0.0, top)
-    scene.add_structure(_sheet("ground", -2 * half_y, 2 * half_y, 0.0, length))
+    scene = scene.updated(structures=(*scene.structures, _sheet("ground", -2 * half_y, 2 * half_y, 0.0, length)))
     if kind == "stripline":
-        scene.add_structure(_sheet("cover", -2 * half_y, 2 * half_y, top, length))
-        scene.add_structure(mw.Structure(mw.Box(position=(0, 0, top / 2), size=(length, 4 * half_y, top)),
-                                         mw.Material(eps_r=EPS), name="fill"))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            _sheet("cover", -2 * half_y, 2 * half_y, top, length),
+            mw.Structure(mw.Box(position=(0, 0, top / 2), size=(length, 4 * half_y, top)),
+                         mw.Material(eps_r=EPS), name="fill"),
+        ))
     else:
-        scene.add_structure(mw.Structure(mw.Box(position=(0, 0, height / 2), size=(length, 4 * half_y, height)),
-                                         mw.Material(eps_r=EPS), name="substrate"))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(mw.Box(position=(0, 0, height / 2), size=(length, 4 * half_y, height)),
+                         mw.Material(eps_r=EPS), name="substrate"),
+        ))
     offset = 0.5 * (width + gap)
-    for name, center in (("p", offset), ("n", -offset)):
-        scene.add_structure(_sheet(name, center - width / 2, center + width / 2, height, length))
-    scene.add_port(mw.TerminalWavePort(
-        "P", position=(0.0, 0.0, top / 2), size=(0.0, 2 * half_y - 2 * dx, top), direction="+", reference_plane=0.0,
-        terminals=(mw.TerminalRef("p"), mw.TerminalRef("n")),
-        reference=(mw.TerminalRef("ground"), mw.TerminalRef("cover")) if kind == "stripline" else mw.TerminalRef("ground"),
-        voltage_integrals=tuple(mw.CustomVoltageIntegral(mw.AxisSegment((0.0, c, height), (0.0, c, 0.0)))
-                                for c in (offset, -offset)),
+    scene = scene.updated(structures=(
+        *scene.structures,
+        *(_sheet(name, center - width / 2, center + width / 2, height, length) for name, center in (("p", offset), ("n", -offset))),
+    ))
+    scene = scene.updated(ports=(
+        *scene.ports,
+        mw.rf.TerminalWavePort(
+            "P", position=(0.0, 0.0, top / 2), size=(0.0, 2 * half_y - 2 * dx, top), direction="+", reference_plane=0.0,
+            terminals=(mw.rf.TerminalRef("p"), mw.rf.TerminalRef("n")),
+            reference=(mw.rf.TerminalRef("ground"), mw.rf.TerminalRef("cover")) if kind == "stripline" else mw.rf.TerminalRef("ground"),
+            voltage_integrals=tuple(mw.rf.CustomVoltageIntegral(mw.rf.AxisSegment((0.0, c, height), (0.0, c, 0.0)))
+                     for c in (offset, -offset)),
+        ),
     ))
     return scene
 
@@ -129,35 +139,43 @@ def test_coupled_microstrip_even_odd_matches_kirschning_jansen():
 def _cpw_scene(dx, *, polylines=True):
     height, half_signal, gap = 0.02, 0.01, 0.01
     scene, length = _box_scene(dx, 0.08, -0.06, 0.08)
-    scene.add_structure(mw.Structure(mw.Box(position=(0, 0, height / 2), size=(length, 0.4, height)),
-                                     mw.Material(eps_r=EPS), name="substrate"))
-    scene.add_structure(_sheet("signal", -half_signal, half_signal, height, length))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(mw.Box(position=(0, 0, height / 2), size=(length, 0.4, height)),
+                     mw.Material(eps_r=EPS), name="substrate"),
+        _sheet("signal", -half_signal, half_signal, height, length),
+    ))
     edge = half_signal + gap
-    scene.add_structure(_sheet("ground_left", -0.2, -edge, height, length))
-    scene.add_structure(_sheet("ground_right", edge, 0.2, height, length))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        _sheet("ground_left", -0.2, -edge, height, length),
+        _sheet("ground_right", edge, 0.2, height, length),
+    ))
 
     def path(sign):
-        return mw.CustomVoltageIntegral(mw.PolylinePath((
+        return mw.rf.CustomVoltageIntegral(mw.rf.PolylinePath((
             (0.0, sign * 0.005, height), (0.0, sign * 0.01, height + 0.005),
             (0.0, sign * 0.025, height + 0.005), (0.0, sign * 0.025, height))))
 
     def loop(half_y, low, high):
-        return mw.CustomCurrentIntegral(mw.RectangleLoop(center=(0.0, 0.0, 0.5 * (low + high)),
+        return mw.rf.CustomCurrentIntegral(mw.rf.RectangleLoop(center=(0.0, 0.0, 0.5 * (low + high)),
                                                          size=(0.0, 2 * half_y, high - low)))
 
     near = loop(0.0153, height - 0.0117, height + 0.0117)
     far = loop(0.0188, height - 0.0263, height + 0.0263)
     variants = {
         "right": (path(1.0), near),
-        "composite": (mw.CompositeVoltageIntegral(((0.5, path(1.0)), (0.5, path(-1.0)))),
-                      mw.CompositeCurrentIntegral(((0.5, near), (0.5, far)))),
+        "composite": (mw.rf.CompositeVoltageIntegral(((0.5, path(1.0)), (0.5, path(-1.0)))),
+                      mw.rf.CompositeCurrentIntegral(((0.5, near), (0.5, far)))),
     }
-    for name, (voltage, current) in variants.items():
-        scene.add_port(mw.TerminalWavePort(
-            f"cpw_{name}", position=(0.0, 0.0, 0.01), size=(0.0, 0.16 - 2 * dx, 0.14), direction="+", reference_plane=0.0,
-            terminals=(mw.TerminalRef("signal"),),
-            reference=(mw.TerminalRef("ground_left"), mw.TerminalRef("ground_right")),
-            voltage_integrals=(voltage,) if polylines else None, current_integrals=(current,)))
+    scene = scene.updated(ports=(
+        *scene.ports,
+        *(mw.rf.TerminalWavePort(
+              f"cpw_{name}", position=(0.0, 0.0, 0.01), size=(0.0, 0.16 - 2 * dx, 0.14), direction="+", reference_plane=0.0,
+              terminals=(mw.rf.TerminalRef("signal"),),
+              reference=(mw.rf.TerminalRef("ground_left"), mw.rf.TerminalRef("ground_right")),
+              voltage_integrals=(voltage,) if polylines else None, current_integrals=(current,)) for name, (voltage, current) in variants.items()),
+    ))
     return scene
 
 
@@ -170,7 +188,7 @@ def test_cpw_custom_and_composite_integrals_converge_and_agree_with_power_impeda
     history = {}
     for dx in (0.005, 0.0025, 0.00125):
         scene = _cpw_scene(dx)
-        manifest = resolve_terminal_waveport_run_manifest(prepare_scene(scene), mw.PortSweep(), (1.0e9,))
+        manifest = resolve_terminal_waveport_run_manifest(prepare_scene(scene), mw.rf.PortSweep(), (1.0e9,))
         for prepared in manifest.prepared_ports:
             power = float(prepared.characteristic_impedance[0, 0, 0].real)
             loop = float(prepared.loop_impedance[0, 0, 0].real)
@@ -196,14 +214,14 @@ def _foil_pair_port(scene, loops, conductor_model):
 
     source = scene.ports[0]
     x = source.position[0]
-    return mw.TerminalWavePort(
+    return mw.rf.TerminalWavePort(
         "T", position=source.position, size=source.size, direction=source.direction,
         reference_plane=source.reference_plane,
-        terminals=(mw.TerminalRef("signal_positive"), mw.TerminalRef("signal_negative")),
-        reference=mw.TerminalRef("ground"),
-        voltage_integrals=tuple(mw.CustomVoltageIntegral(mw.AxisSegment((x, s * PAIR_OFFSET, 0.0),
+        terminals=(mw.rf.TerminalRef("signal_positive"), mw.rf.TerminalRef("signal_negative")),
+        reference=mw.rf.TerminalRef("ground"),
+        voltage_integrals=tuple(mw.rf.CustomVoltageIntegral(mw.rf.AxisSegment((x, s * PAIR_OFFSET, 0.0),
                                                                         (x, s * PAIR_OFFSET, -HEIGHT))) for s in (1, -1)),
-        current_integrals=tuple(mw.CustomCurrentIntegral(mw.RectangleLoop(center=(x, s * PAIR_OFFSET, z),
+        current_integrals=tuple(mw.rf.CustomCurrentIntegral(mw.rf.RectangleLoop(center=(x, s * PAIR_OFFSET, z),
                                                                           size=(0.0, 0.0071, height)))
                                 for s, (z, height) in zip((1, -1), loops)),
         conductor_model=conductor_model,
@@ -223,15 +241,15 @@ def test_split_trace_copper_foil_terminals_use_the_two_sided_foil_current():
 
     results = {}
     for metal, model in (("pec", None), ("copper", "good_conductor")):
-        base = printed_line_scene("differential_pair", metal=metal, device="cuda")
-        scene = base.clone(ports=[_foil_pair_port(base, ((0.0, 0.0049), (0.0, 0.0049)), model)])
+        base = printed_line_scene("differential_pair", metal=metal)
+        scene = base.updated(ports=[_foil_pair_port(base, ((0.0, 0.0049), (0.0, 0.0049)), model)])
         results[metal] = _prepare(scene)
     pec, copper = results["pec"], results["copper"]
     assert torch.allclose(copper.characteristic_impedance.real, pec.characteristic_impedance.real, rtol=2e-3)
     assert torch.allclose(copper.loop_impedance.real, copper.characteristic_impedance.real, rtol=1e-6)
     assert bool(torch.all(copper.beta.imag > 0)) and bool(torch.all(pec.beta.imag == 0))
     assert copper.integral_audit["current/T1"]["checked"] == "encloses_terminal"
-    base = printed_line_scene("differential_pair", metal="copper", device="cuda")
-    one_sided = base.clone(ports=[_foil_pair_port(base, ((0.0025, 0.0035), (0.0, 0.0049)), "good_conductor")])
+    base = printed_line_scene("differential_pair", metal="copper")
+    one_sided = base.updated(ports=[_foil_pair_port(base, ((0.0025, 0.0035), (0.0, 0.0049)), "good_conductor")])
     with pytest.raises(ValueError, match="must enclose exactly that terminal"):
         _prepare(one_sided)

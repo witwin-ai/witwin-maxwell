@@ -13,7 +13,7 @@ def build_scene() -> mw.Scene:
     return slab_scene(
         mw.Material(
             eps_r=4.0,
-            modulation=mw.ModulationSpec(frequency=0.2e9, amplitude=0.1, phase=0.0),
+            modulation=mw.media.ModulationSpec(frequency=0.2e9, amplitude=0.1, phase=0.0),
             name="modulated_dielectric",
         ),
         name="modulated_slab",

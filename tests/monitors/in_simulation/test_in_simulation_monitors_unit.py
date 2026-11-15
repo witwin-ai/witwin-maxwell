@@ -12,11 +12,10 @@ from witwin.maxwell.postprocess import FieldProjector
 from witwin.maxwell.postprocess.gaussian_overlap import compute_gaussian_overlap
 
 
-def _scene(device="cpu"):
+def _scene():
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
         grid=mw.GridSpec.uniform(0.1),
-        device=device,
     )
 
 
@@ -26,7 +25,7 @@ def _scene(device="cpu"):
 
 
 def test_projection_monitors_are_public_and_resolve_to_named_faces():
-    monitor = mw.AngleProjectionMonitor(
+    monitor = mw.monitors.AngleProjectionMonitor(
         "proj", size=(0.4, 0.4, 0.4), theta=np.linspace(0.1, 3.0, 5), phi=(0.0, 1.0),
         frequencies=(1e9, 2e9), exclude_surfaces=("z_neg",),
     )
@@ -37,10 +36,11 @@ def test_projection_monitors_are_public_and_resolve_to_named_faces():
     assert all(face.surface_name == "proj" and face.frequencies == (1e9, 2e9) for face in monitor.faces)
     assert monitor.origin == (0.0, 0.0, 0.0)
     assert monitor.theta == pytest.approx(tuple(np.linspace(0.1, 3.0, 5)))
-    scene = _scene().add_monitor(monitor)
+    scene = _scene()
+    scene = scene.updated(monitors=(*scene.monitors, monitor))
     assert tuple(face.name for face in scene.resolved_monitors()) == monitor.face_monitor_names
 
-    planar = mw.CartesianProjectionMonitor(
+    planar = mw.monitors.CartesianProjectionMonitor(
         "cart", position=(0.0, 0.0, 0.2), size=(0.4, 0.4, 0.0), x=(-1.0, 1.0), y=(0.0,),
         distance=3.0, normal_direction="-", window_size=(0.2, 0.1), origin=(0.0, 0.0, 0.0),
     )
@@ -48,9 +48,9 @@ def test_projection_monitors_are_public_and_resolve_to_named_faces():
     assert planar.faces[0].normal_direction == "-" and planar.faces[0].name == "cart::plane"
     assert planar.origin == (0.0, 0.0, 0.0)
 
-    kspace = mw.KSpaceProjectionMonitor("ks", size=(0.4, 0.0, 0.4), ux=(0.0,), uy=(0.0,), axis="y", normal_direction="-")
+    kspace = mw.monitors.KSpaceProjectionMonitor("ks", size=(0.4, 0.0, 0.4), ux=(0.0,), uy=(0.0,), axis="y", normal_direction="-")
     assert kspace.hemisphere == "-"
-    assert mw.KSpaceProjectionMonitor("ks2", size=(0.4, 0.4, 0.4), ux=(0.0,), uy=(0.0,)).hemisphere == "+"
+    assert mw.monitors.KSpaceProjectionMonitor("ks2", size=(0.4, 0.4, 0.4), ux=(0.0,), uy=(0.0,)).hemisphere == "+"
 
 
 @pytest.mark.parametrize(
@@ -71,51 +71,51 @@ def test_projection_monitor_rejects_invalid_declarations(kwargs, message):
     arguments = dict(theta=(0.1,), phi=(0.0,))
     arguments.update(kwargs)
     with pytest.raises(ValueError, match=message):
-        mw.AngleProjectionMonitor("bad", **arguments)
+        mw.monitors.AngleProjectionMonitor("bad", **arguments)
 
 
 def test_projection_monitor_rejects_trainable_grids():
     with pytest.raises(NotImplementedError, match="Trainable"):
-        mw.AngleProjectionMonitor("bad", size=(0.4, 0.4, 0.4), theta=torch.ones(2, requires_grad=True), phi=(0.0,))
+        mw.monitors.AngleProjectionMonitor("bad", size=(0.4, 0.4, 0.4), theta=torch.ones(2, requires_grad=True), phi=(0.0,))
 
 
 def test_gaussian_overlap_monitors_mirror_beam_vocabulary():
-    monitor = mw.GaussianOverlapMonitor("g", position=(0.0, 0.0, 0.3), size=(1.0, 1.0, 0.0), beam_waist=0.2)
+    monitor = mw.monitors.GaussianOverlapMonitor("g", position=(0.0, 0.0, 0.3), size=(1.0, 1.0, 0.0), beam_waist=0.2)
     assert monitor.direction == (0.0, 0.0, 1.0) and monitor.normal_direction == "+"
     assert monitor.focus == (0.0, 0.0, 0.3)
     assert monitor.resolved_monitors()[0].name == "g"
     assert monitor.beam_waists == (0.2, 0.2) and monitor.focus_offsets == (0.0, 0.0)
-    backward = mw.GaussianOverlapMonitor("b", size=(0.0, 1.0, 1.0), beam_waist=0.2, direction=(-1, 0, 0), polarization=(0, 0, 1))
+    backward = mw.monitors.GaussianOverlapMonitor("b", size=(0.0, 1.0, 1.0), beam_waist=0.2, direction=(-1, 0, 0), polarization=(0, 0, 1))
     assert backward.axis == "x" and backward.normal_direction == "-"
-    astig = mw.AstigmaticGaussianOverlapMonitor(
+    astig = mw.monitors.AstigmaticGaussianOverlapMonitor(
         "a", size=(1.0, 1.0, 0.0), beam_waist=(0.2, 0.3), focus=(0, 0, -0.1), focus_u=0.05, focus_v=-0.05
     )
     assert astig.beam_waists == (0.2, 0.3) and astig.focus_offsets == (0.05, -0.05)
     with pytest.raises(ValueError, match="orthogonal"):
-        mw.GaussianOverlapMonitor("x", size=(1, 1, 0), beam_waist=0.2, polarization=(0, 0, 1))
+        mw.monitors.GaussianOverlapMonitor("x", size=(1, 1, 0), beam_waist=0.2, polarization=(0, 0, 1))
     with pytest.raises(ValueError, match="cross the monitor plane"):
-        mw.GaussianOverlapMonitor("x", size=(1, 1, 0), beam_waist=0.2, direction=(1, 0, 0), polarization=(0, 0, 1))
+        mw.monitors.GaussianOverlapMonitor("x", size=(1, 1, 0), beam_waist=0.2, direction=(1, 0, 0), polarization=(0, 0, 1))
     with pytest.raises(ValueError, match="beam_waist"):
-        mw.GaussianOverlapMonitor("x", size=(1, 1, 0), beam_waist=0.0)
+        mw.monitors.GaussianOverlapMonitor("x", size=(1, 1, 0), beam_waist=0.0)
     with pytest.raises(ValueError, match="zero-thickness"):
-        mw.GaussianOverlapMonitor("x", size=(1, 0, 0), beam_waist=0.2)
+        mw.monitors.GaussianOverlapMonitor("x", size=(1, 0, 0), beam_waist=0.2)
 
 
 def test_time_trace_monitors_validate_components_and_schedule():
-    surface = mw.SurfaceFieldTimeMonitor("s", size=(0.4, 0.4, 0.4), components=("ex", "Hz"), start=3, stop=40, interval=4,
+    surface = mw.monitors.SurfaceFieldTimeMonitor("s", size=(0.4, 0.4, 0.4), components=("Ex", "Hz"), start=3, stop=40, interval=4,
                                          exclude_surfaces=("z_neg",))
     assert surface.components == ("Ex", "Hz")
     assert surface.face_labels == ("x_neg", "x_pos", "y_neg", "y_pos", "z_pos")
-    assert mw.SurfaceFieldTimeMonitor("p", size=(0.4, 0.0, 0.4)).face_labels == ("plane",)
+    assert mw.monitors.SurfaceFieldTimeMonitor("p", size=(0.4, 0.0, 0.4)).face_labels == ("plane",)
     with pytest.raises(ValueError, match="stop must be greater"):
-        mw.SurfaceFieldTimeMonitor("s", size=(0.4, 0.4, 0.4), start=5, stop=5)
-    aux = mw.AuxFieldTimeMonitor("a", components=("px", "JPZ", "My"))
+        mw.monitors.SurfaceFieldTimeMonitor("s", size=(0.4, 0.4, 0.4), start=5, stop=5)
+    aux = mw.monitors.AuxFieldTimeMonitor("a", components=("px", "JPZ", "My"))
     assert aux.components == ("Px", "Jpz", "My") and aux.region_kind == "point"
-    assert mw.AuxFieldTimeMonitor("v", size=(0.1, 0.1, 0.1)).region_kind == "volume"
+    assert mw.monitors.AuxFieldTimeMonitor("v", size=(0.1, 0.1, 0.1)).region_kind == "volume"
     with pytest.raises(ValueError, match="components must be drawn"):
-        mw.AuxFieldTimeMonitor("a", components=("Nfx",))
+        mw.monitors.AuxFieldTimeMonitor("a", components=("Nfx",))
     with pytest.raises(ValueError, match="unique"):
-        mw.AuxFieldTimeMonitor("a", components=("Px", "px"))
+        mw.monitors.AuxFieldTimeMonitor("a", components=("Px", "px"))
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +125,13 @@ def test_time_trace_monitors_validate_components_and_schedule():
 
 def test_monitor_compiler_routes_new_monitors():
     scene = _scene()
-    scene.add_monitor(mw.AngleProjectionMonitor("proj", size=(0.4, 0.4, 0.4), theta=(0.1,), phi=(0.0,)))
-    scene.add_monitor(mw.GaussianOverlapMonitor("g", position=(0, 0, 0.2), size=(0.6, 0.6, 0.0), beam_waist=0.2))
-    scene.add_monitor(mw.SurfaceFieldTimeMonitor("s", size=(0.4, 0.4, 0.0), components=("Ez",), interval=2))
-    scene.add_monitor(mw.AuxFieldTimeMonitor("a", components=("Pz", "Jmx"), size=(0.2, 0.2, 0.2)))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.AngleProjectionMonitor("proj", size=(0.4, 0.4, 0.4), theta=(0.1,), phi=(0.0,)),
+        mw.monitors.GaussianOverlapMonitor("g", position=(0, 0, 0.2), size=(0.6, 0.6, 0.0), beam_waist=0.2),
+        mw.monitors.SurfaceFieldTimeMonitor("s", size=(0.4, 0.4, 0.0), components=("Ez",), interval=2),
+        mw.monitors.AuxFieldTimeMonitor("a", components=("Pz", "Jmx"), size=(0.2, 0.2, 0.2)),
+    ))
 
     spectral = compile_fdtd_observers(scene)
     monitor_names = {record["monitor_name"] for record in spectral}
@@ -147,9 +150,11 @@ def test_monitor_compiler_routes_new_monitors():
 
 
 def test_non_fdtd_simulations_reject_in_simulation_monitors():
-    scene = _scene(device="cuda" if torch.cuda.is_available() else "cpu")
-    scene.add_source(mw.PointDipole(position=(0, 0, 0), polarization="Ez", source_time=mw.CW(frequency=1e9)))
-    scene.add_monitor(mw.AuxFieldTimeMonitor("a"))
+    scene = _scene()
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(0, 0, 0), polarization="Ez", source_time=mw.CW(frequency=1e9)),
+    ), monitors=(*scene.monitors, mw.monitors.AuxFieldTimeMonitor("a")))
     with pytest.raises(NotImplementedError, match="not supported by FDFD"):
         mw.Simulation.fdfd(scene, frequencies=[1e9])
 
@@ -201,15 +206,14 @@ def test_projection_monitors_match_field_projector_on_identical_surface_data():
     coords = torch.linspace(-0.2, 0.2, 5, dtype=torch.float64)
     theta, phi = (0.3, 1.2, 2.5), (0.0, 1.7)
     projections = (
-        mw.AngleProjectionMonitor("angle", size=(0.4, 0.4, 0.4), theta=theta, phi=phi, radius=8.0, origin=(0.01, 0.0, 0.0)),
-        mw.CartesianProjectionMonitor("cart", size=(0.4, 0.4, 0.4), x=(-0.3, 0.4), y=(0.0, 0.2), axis="y", distance=1.5),
-        mw.KSpaceProjectionMonitor("ks", size=(0.4, 0.4, 0.4), ux=(-0.5, 0.0, 0.9), uy=(0.0, 0.6), axis="x"),
+        mw.monitors.AngleProjectionMonitor("angle", size=(0.4, 0.4, 0.4), theta=theta, phi=phi, radius=8.0, origin=(0.01, 0.0, 0.0)),
+        mw.monitors.CartesianProjectionMonitor("cart", size=(0.4, 0.4, 0.4), x=(-0.3, 0.4), y=(0.0, 0.2), axis="y", distance=1.5),
+        mw.monitors.KSpaceProjectionMonitor("ks", size=(0.4, 0.4, 0.4), ux=(-0.5, 0.0, 0.9), uy=(0.0, 0.6), axis="x"),
     )
-    reference = mw.ClosedSurfaceMonitor.box("huygens", size=(0.4, 0.4, 0.4))
+    reference = mw.monitors.ClosedSurfaceMonitor.box("huygens", size=(0.4, 0.4, 0.4))
     scene = _scene()
     monitors = {}
-    for monitor in (*projections, reference):
-        scene.add_monitor(monitor)
+    scene = scene.updated(monitors=(*scene.monitors, *(*projections, reference)))
     reference_payloads = _synthetic_surface_payloads(reference.faces, frequencies, coords)
     monitors.update(reference_payloads)
     for monitor in projections:
@@ -247,9 +251,9 @@ def test_gaussian_overlap_of_its_own_profile_is_unit_forward_power():
     frequency = 1.0e9
     eta = math.sqrt(MU_0 / EPSILON_0)
     coords = torch.linspace(-0.6, 0.6, 61, dtype=torch.float64)
-    monitor = mw.GaussianOverlapMonitor("g", position=(0, 0, 0.25), size=(1.2, 1.2, 0.0), beam_waist=0.15, focus=(0, 0, 0))
-    shifted = mw.GaussianOverlapMonitor("shift", position=(0, 0, 0.25), size=(1.2, 1.2, 0.0), beam_waist=0.15, focus=(0.3, 0, 0))
-    crossed = mw.GaussianOverlapMonitor("cross", position=(0, 0, 0.25), size=(1.2, 1.2, 0.0), beam_waist=0.15,
+    monitor = mw.monitors.GaussianOverlapMonitor("g", position=(0, 0, 0.25), size=(1.2, 1.2, 0.0), beam_waist=0.15, focus=(0, 0, 0))
+    shifted = mw.monitors.GaussianOverlapMonitor("shift", position=(0, 0, 0.25), size=(1.2, 1.2, 0.0), beam_waist=0.15, focus=(0.3, 0, 0))
+    crossed = mw.monitors.GaussianOverlapMonitor("cross", position=(0, 0, 0.25), size=(1.2, 1.2, 0.0), beam_waist=0.15,
                                         focus=(0, 0, 0), polarization=(0, 1, 0))
     xx, yy = torch.meshgrid(coords, coords, indexing="ij")
     points = torch.stack((xx, yy, torch.full_like(xx, 0.25)), dim=-1)

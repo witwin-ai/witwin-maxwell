@@ -135,17 +135,17 @@ def test_new_global_integer_grid_supports_and_complete_native_catalog(tmp_path):
 
 
 def config(**options):
-    return mw.FMMConfig(order=6,max_order=12,table_storage='compact_shared_displacement_v1',
+    return mw.mom.FMMConfig(order=6,max_order=12,table_storage='compact_shared_displacement_v1',
         shift_storage='separable_v1',near_storage='scalar_reciprocal_dk_v1',far_action_batch=32,
         leaf_size=8,separation_ratio=.25,expansion_center_policy='binary_lattice_v1',
-        kernel_error_budget=mw.KernelErrorBudget(1e-6,1e-5),
+        kernel_error_budget=mw.mom.KernelErrorBudget(1e-6,1e-5),
         kernel_bound_rule='direct_first_wave_min_v1',**options)
 
 
 def test_new_binary_center_identity_and_strict_public_refusals(monkeypatch):
     cfg=config();payload=cfg.payload()
     assert payload['version']=='cartesian_fmm_binary_lattice_config_v1'
-    assert mw.FMMConfig.restore(json.loads(json.dumps(payload)))==cfg
+    assert mw.mom.FMMConfig.restore(json.loads(json.dumps(payload)))==cfg
     assert cfg.construction()['expansion_center_policy']=='binary_lattice_v1'
     for kind in ('policy','version','missing','extra'):
         bad=copy.deepcopy(payload)
@@ -153,12 +153,12 @@ def test_new_binary_center_identity_and_strict_public_refusals(monkeypatch):
         elif kind=='version':bad['version']='cartesian_fmm_dyadic_centers_config_v1'
         elif kind=='missing':bad['parameters'].pop('expansion_center_policy')
         else:bad['parameters']['coordinate_projection']=True
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
     with pytest.raises(NotImplementedError,match='free space'):
-        mw.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',
-            stopping=StoppingRule(preconditioner='none'),periodic=mw.MoMPeriodicConfig(((1.,0.,0.),)))
+        mw.mom.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',
+            stopping=StoppingRule(preconditioner='none'),periodic=mw.mom.MoMPeriodicConfig(((1.,0.,0.),)))
     with pytest.raises(ValueError,match='complex128'):
-        mw.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',
+        mw.mom.MoMConfig(operator_backend='fmm',fmm=cfg,riesz_storage='local_rwg_v1',
             stopping=StoppingRule(preconditioner='none'),dtype=torch.complex64)
     lower,upper=new_boxes()
     def forbidden(*args,**kwargs):raise AssertionError('Invalid precision reached native sort')
@@ -188,12 +188,12 @@ def test_new_public_binary_centers_all_columns_native_H_gradients_and_solve(tmp_
         mw.Structure(mw.Sphere(radius=.012,position=(-.287,.019,0.)),mw.Material(eps_r=2.2+.01j,mu_r=1.25)),
         mw.Structure(mw.Sphere(radius=.013,position=(.293,-.017,.011)),mw.Material(eps_r=3.1+.02j,mu_r=1.35))],
         sources=[mw.PlaneWave()])
-    cfg=mw.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3),
+    cfg=mw.mom.MoMConfig(subdivisions=0,integration=IntegrationConfig(order=4,singular_order=3),
         operator_backend='fmm',fmm=config(),riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='gmres',preconditioner='rwg_diagonal',fallback='none',
             rtol=1e-12,atol=0.,maxiter=240,restart=120))
     try:
-        prepared=mw.Simulation.mom(scene,frequency=1.05e8,config=cfg).prepare()
+        prepared=mw.Simulation.mom(scene,frequencies=1.05e8,config=cfg).prepare()
         op=prepared.solver.handle.actions
         raw.update(capacity_plan=op.capacity_plan,order_plan=op.order_plan,fmm_config=cfg.fmm.payload())
         write_raw(path,raw)
@@ -237,7 +237,7 @@ def test_new_public_binary_centers_all_columns_native_H_gradients_and_solve(tmp_
         assert owned==op.capacity_plan['planned_bytes']
         result=prepared.run()
         assert result.stats()['converged'] and result.stats()['error_budget']['checked']
-        current=result.surface_currents.scattered_coefficients
+        current=mw.mom.surface_currents(result).scattered_coefficients
         residual=relative(current@reference.mT,prepared.solver.rhs)
         raw.update(complete_original_residual=residual,residual_relative_gate=1e-10,
             residual_absolute_gate=0.,actual_owned_bytes=owned)
@@ -248,11 +248,11 @@ def test_new_public_binary_centers_all_columns_native_H_gradients_and_solve(tmp_
             for cls in (MultipoleOperator,MultipoleSystemActions,SystemOperator):patch.setattr(cls,'__init__',forbidden)
             patch.setattr(torch.linalg,'solve',forbidden)
             restored=mw.Result.load(artifact,scene=scene)
-            assert restored.surface_currents.config.fmm==cfg.fmm
-            torch.testing.assert_close(restored.surface_currents.scattered_coefficients,current,rtol=0,atol=0)
-            bad=copy.deepcopy(result.surface_currents.snapshot())
+            assert mw.mom.surface_currents(restored).config.fmm==cfg.fmm
+            torch.testing.assert_close(mw.mom.surface_currents(restored).scattered_coefficients,current,rtol=0,atol=0)
+            bad=copy.deepcopy(mw.mom.surface_currents(result).snapshot())
             bad['fmm_config']['parameters']['expansion_center_policy']='dyadic_cell_v1'
-            with pytest.raises(ValueError):SurfaceData.restore(bad,scene,1.05e8)
+            with pytest.raises(ValueError):SurfaceData.restore(bad,scene,1.05e8,'cuda')
         raw.update(completed=True,artifact=str(artifact),artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
             exact_restore=True,whole_peak_qualified=False,original_scalar_reference_is_not_independent_EM_reference=True)
         write_raw(path,raw)

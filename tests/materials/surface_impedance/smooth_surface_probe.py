@@ -1,7 +1,8 @@
 """Dump the compiled smooth-conductor surface paths for an exact cross-revision comparison.
 
 Run as a script: ``python smooth_surface_probe.py OUT.pt``. It uses only public APIs that
-predate the opt-in conductor-roughness feature, so the same probe runs unchanged on an
+predate the opt-in conductor-roughness feature, and builds scenes and simulations and reads
+results through ``tests/support/api_dialect.py``, so the same probe runs unchanged on an
 older revision and on the current tree; ``test_roughness_opt_in_bit_identity.py``
 compares both dumps with exact tensor equality. Every configuration here carries no
 roughness, so the dumps must agree bit for bit.
@@ -11,15 +12,22 @@ from __future__ import annotations
 
 import math
 import sys
+from pathlib import Path
 
 import torch
 
-import witwin.maxwell as mw
 from witwin.core import Box, Sphere
 from witwin.maxwell.compiler.copper_foil import compile_copper_response
 from witwin.maxwell.compiler.surface_impedance import fit_surface_impedance
-from witwin.maxwell.fdtd.surface_impedance_reference import good_conductor_surface_impedance
-from witwin.maxwell.scene import prepare_scene
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "support"))
+import api_dialect as api  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "oracles"))
+import copper_torch  # noqa: E402
+from surface_impedance_reference import good_conductor_surface_impedance  # noqa: E402
+
+mw = api.mw
 
 _BAND = (0.5e9, 5.0e9)
 
@@ -62,7 +70,7 @@ def _rational_medium(order=6):
 
 def _metal_scene(material, *, device, geometry=None):
     dx = 0.005
-    return mw.Scene(
+    return api.scene(
         domain=mw.Domain(bounds=((-0.02, 0.02),) * 3),
         grid=mw.GridSpec.uniform(dx),
         boundary=mw.BoundarySpec.faces(default="periodic", num_layers=8, strength=1.0, x=("pml", "pml")),
@@ -82,10 +90,10 @@ def _foil_simulation(steps):
     foil = mw.Structure(geometry=mw.Box(position=torch.tensor([.01, 0., 0.], dtype=torch.float64),
         size=torch.tensor([0., .02, .02], dtype=torch.float64)),
         material=mw.CopperFoil(thickness=2e-6, frequency_range=(.5e9, 2e9)), name="foil")
-    scene = mw.Scene(domain=mw.Domain(bounds=((-0.02, .02),) * 3),
+    scene = api.scene(domain=mw.Domain(bounds=((-0.02, .02),) * 3),
         grid=mw.GridSpec.uniform(.005), boundary=mw.BoundarySpec.none(),
         ports=[port], structures=[foil], device="cuda")
-    return mw.Simulation.fdtd(scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=steps),
+    return api.fdtd(scene, frequency=1e9, run_time=mw.TimeConfig(time_steps=steps),
         excitations=mw.PortExcitation("feed"), full_field_dft=True,
         # The pre-roughness baseline ran CPML; absorber="auto" would pick the graded
         # absorber (>= 40 layers) for this closed-transverse PML probe.
@@ -137,8 +145,8 @@ def collect() -> dict:
         ("box_rational", rational, None),
         ("sphere_lossy", mw.LossyMetalMedium(conductivity=50.0), Sphere(position=(0.008, 0.0, 0.0), radius=0.008)),
     ):
-        scene = prepare_scene(_metal_scene(material, device="cpu", geometry=geometry))
-        compiled = scene.compile_materials()
+        scene = api.prepare(_metal_scene(material, device="cpu", geometry=geometry))
+        compiled = api.compile_materials(scene)
         layout = compiled["surface_impedance"]
         for index, face in enumerate(layout.faces):
             _tree(out, f"layout.{label}.face[{index}]", {
@@ -159,22 +167,22 @@ def collect() -> dict:
             ("sphere_lossy", mw.LossyMetalMedium(conductivity=50.0), Sphere(position=(0.008, 0.0, 0.0), radius=0.008)),
         ):
             def simulation():
-                return mw.Simulation.fdtd(_metal_scene(material, device="cuda", geometry=geometry),
+                return api.fdtd(_metal_scene(material, device="cuda", geometry=geometry),
                                           frequencies=[2.0e9], run_time=mw.TimeConfig(time_steps=60),
                                           full_field_dft=True, absorber="cpml",
                                           spectral_sampler=mw.SpectralSampler(window="none"))
             _solver_tensors(out, f"prepared.{label}", simulation().prepare().solver)
-            solver = simulation().run().solver
+            solver = api.solver(simulation().run())
             for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
                 _put(out, f"run.{label}.{name}", getattr(solver, name))
         _solver_tensors(out, "prepared.foil", _foil_simulation(60).prepare().solver)
         result = _foil_simulation(60).run()
-        solver = result.solver
+        solver = api.solver(result)
         for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
             _put(out, f"run.foil.{name}", getattr(solver, name))
-        _tree(out, "run.foil.dft", result.fields)
+        _tree(out, "run.foil.dft", api.fields(result))
         for name in ("voltage", "current"):
-            _put(out, f"run.foil.port.{name}", getattr(result.port("feed"), name))
+            _put(out, f"run.foil.port.{name}", getattr(api.port(result, "feed"), name))
     out["__module__"] = torch.tensor(list(mw.__file__.encode()), dtype=torch.uint8)
     return out
 
@@ -182,4 +190,6 @@ def collect() -> dict:
 if __name__ == "__main__":
     # Single-threaded host linear algebra keeps the rational fits reproducible run to run.
     torch.set_num_threads(1)
+    # The CopperFoil runtime entries were pinned on the Torch copper step (tests/oracles/copper_torch.py).
+    copper_torch.apply()
     torch.save(collect(), sys.argv[1])

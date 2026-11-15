@@ -11,20 +11,20 @@ from tests.fdtd.cuda.torch_reference import _seed_inject_point
 
 
 def test_default_and_opt_in_sampler_precision_are_explicit():
-    assert mw.SpectralSampler().observer_dtype==torch.float32
-    assert mw.SpectralSampler(observer_dtype=torch.float64).observer_dtype==torch.float64
+    assert mw.fdtd.SpectralSampler().observer_dtype==torch.float32
+    assert mw.fdtd.SpectralSampler(observer_dtype=torch.float64).observer_dtype==torch.float64
 
 
 @pytest.mark.parametrize('dtype',(torch.float16,torch.complex128,'float64',None))
 def test_unregistered_observer_dtype_rejects(dtype):
     with pytest.raises(ValueError,match='observer_dtype'):
-        mw.SpectralSampler(observer_dtype=dtype)
+        mw.fdtd.SpectralSampler(observer_dtype=dtype)
 
 
 def test_source_normalization_precision_has_an_explicit_boundary():
     with pytest.raises(ValueError,match='normalize_source=False'):
-        mw.SpectralSampler(observer_dtype=torch.float64,normalize_source=True)
-    assert mw.SpectralSampler(observer_dtype=torch.float32,normalize_source=True).normalize_source
+        mw.fdtd.SpectralSampler(observer_dtype=torch.float64,normalize_source=True)
+    assert mw.fdtd.SpectralSampler(observer_dtype=torch.float32,normalize_source=True).normalize_source
 
 
 def test_complex_field_observation_rejects_before_allocation():
@@ -88,6 +88,6 @@ def test_fp64_transpose_reduces_before_cast_and_matches_direct_autograd(kind):
 def test_batch_declaration_distinguishes_observer_precisions():
     from witwin.maxwell.execution.plan import _batch_declaration
     unresolved=[]
-    legacy=_batch_declaration(mw.SpectralSampler(), 'sampler', unresolved)
-    high=_batch_declaration(mw.SpectralSampler(observer_dtype=torch.float64), 'sampler', unresolved)
+    legacy=_batch_declaration(mw.fdtd.SpectralSampler(), 'sampler', unresolved)
+    high=_batch_declaration(mw.fdtd.SpectralSampler(observer_dtype=torch.float64), 'sampler', unresolved)
     assert legacy!=high and not unresolved

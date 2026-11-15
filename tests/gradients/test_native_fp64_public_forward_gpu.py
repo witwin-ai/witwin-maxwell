@@ -7,11 +7,11 @@ from tests.core.scene.fp64_public_scene import scene,simulation
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='Native CUDA execution.')
 
 
-def power(result):return result.antenna(surface='radiation',driven_port='feed',theta_points=9,phi_points=13,radius=10.).p_rad
+def power(result):return mw.antenna.antenna(result, surface='radiation',driven_port='feed',theta_points=9,phi_points=13,radius=10.).p_rad
 
 
 def test_direct_public_fp64_forward_and_precision_persistence(tmp_path):
-    value=scene(device='cuda')
+    value=scene()
     low=simulation(value,dtype=torch.float32).run()
     high=simulation(value).run()
     assert high.solver.Ex.dtype==torch.float64
@@ -26,18 +26,18 @@ def test_direct_public_fp64_forward_and_precision_persistence(tmp_path):
     restored=mw.Result.load(path,scene=value,map_location='cuda:0')
     assert restored.prepared_scene.x.dtype==torch.float64
     torch.testing.assert_close(power(restored),power(high),rtol=1e-12,atol=1e-25)
-    with pytest.raises(ValueError,match='frequency-domain volume fields'):high.power_loss('bulk')
+    with pytest.raises(ValueError,match='frequency-domain volume fields'):high.monitor('bulk')
 
 
 def test_public_detached_material_change_uses_actual_native_double_coefficients():
-    first=simulation(scene(device='cuda',bulk_sigma=.15)).run()
-    second=simulation(scene(device='cuda',bulk_sigma=.2)).run()
+    first=simulation(scene(bulk_sigma=.15)).run()
+    second=simulation(scene(bulk_sigma=.2)).run()
     assert first.solver.sigma_e_Ex.dtype==second.solver.sigma_e_Ex.dtype==torch.float64
     assert float((power(first)-power(second)).abs().max())>1e-10
 
 
 def test_actual_public_trainable_fp64_fails_closed_before_field_update():
     parameter=torch.tensor(2.,device='cuda',requires_grad=True)
-    value=scene(device='cuda',curvature=None,material=mw.Material(eps_r=parameter))
+    value=scene(curvature=None,material=mw.Material(eps_r=parameter))
     with pytest.raises(ValueError,match='detached'):
         simulation(value).prepare()

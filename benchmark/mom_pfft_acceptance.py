@@ -70,10 +70,10 @@ def rule(args):
 
 def pfft_config(args, order=None, ppw=None, **extra):
     extra.setdefault('right_preconditioner', preconditioner_factory(args.solve_preconditioner))
-    pfft = mw.PFFTConfig(points_per_wavelength=ppw or args.grid_ppw, order=order or args.order,
+    pfft = mw.mom.PFFTConfig(points_per_wavelength=ppw or args.grid_ppw, order=order or args.order,
                          grid_precision=args.grid_precision, solve_dual_tolerance=args.admission_rtol,
                          original_sample_tolerance=args.original_rtol)
-    return mw.MoMConfig(integration=INTEGRATION, operator_backend='pfft', riesz_storage='local_rwg_v1', pfft=pfft,
+    return mw.mom.MoMConfig(integration=INTEGRATION, operator_backend='pfft', riesz_storage='local_rwg_v1', pfft=pfft,
                         stopping=StoppingRule(method='gmres', preconditioner='rwg_diagonal', **rule(args)), **extra)
 
 
@@ -94,7 +94,7 @@ def _relative(a, b):
 def solve_pfft(args, scene, config, directions, weights):
     _peak_reset()
     start = _sync()
-    prepared = mw.Simulation.mom(scene, frequency=args.frequency, config=config).prepare()
+    prepared = mw.Simulation.mom(scene, frequencies=args.frequency, config=config).prepare()
     prepare_seconds = _sync()-start
     prepare_peak = torch.cuda.max_memory_allocated()
     handle = prepared.solver.handle
@@ -109,8 +109,8 @@ def solve_pfft(args, scene, config, directions, weights):
     result = prepared.run()
     solve_seconds = _sync()-start
     stats = result.stats()
-    far, _ = result.surface_currents.far_field(directions)
-    sections = result.surface_currents.plane_wave_cross_sections(directions, weights)
+    far, _ = mw.mom.surface_currents(result).far_field(directions)
+    sections = mw.mom.surface_currents(result).plane_wave_cross_sections(directions, weights)
     receipt = handle.actions.receipt()
     record = {'unknowns': handle.shape[0], 'prepare_seconds': prepare_seconds, 'prepare_peak_bytes': prepare_peak,
               'solve_seconds': solve_seconds, 'solve_peak_bytes': torch.cuda.max_memory_allocated(),
@@ -146,11 +146,11 @@ def preconditioner_factory(name):
     if name in (None, 'none', 'diag'):
         return None
     if name.startswith('leaf:'):
-        return mw.LeafBlockRightPreconditioner(int(name.split(':')[1]), budget_bytes=4*1024**3)
+        return mw.mom.LeafBlockRightPreconditioner(int(name.split(':')[1]), budget_bytes=4*1024**3)
     if name == 'body':
-        return mw.FunctionRightPreconditioner(_body_lu, name='body_block_lu')
+        return mw.mom.FunctionRightPreconditioner(_body_lu, name='body_block_lu')
     if name == 'sparse-lu':
-        return mw.NearFieldRightPreconditioner()
+        return mw.mom.NearFieldRightPreconditioner()
     raise ValueError(f'Unknown preconditioner {name}')
 
 
@@ -223,7 +223,7 @@ def main(argv=None):
     scene, centres = build_scene(args, args.frequency_mesh)
     prepared, result, far, record = solve_pfft(args, scene, pfft_config(args), directions, weights)
     report['pfft'] = record
-    x = result.surface_currents.scattered_coefficients
+    x = mw.mom.surface_currents(result).scattered_coefficients
     save()
     print(json.dumps({'pfft': {k: record[k] for k in ('unknowns', 'prepare_seconds', 'solve_seconds', 'iterations',
                                                       'converged', 'matvec_seconds_median')}}), flush=True)
@@ -236,11 +236,11 @@ def main(argv=None):
     if args.dense:
         _peak_reset()
         start = _sync()
-        dense = mw.Simulation.mom(scene, frequency=args.frequency, config=mw.MoMConfig(
+        dense = mw.Simulation.mom(scene, frequencies=args.frequency, config=mw.mom.MoMConfig(
             integration=INTEGRATION, riesz_storage='compact_rwg_v1',
             stopping=StoppingRule(method='direct', rtol=1e-10, atol=0.))).run()
-        far_dense, _ = dense.surface_currents.far_field(directions)
-        x_dense = dense.surface_currents.scattered_coefficients
+        far_dense, _ = mw.mom.surface_currents(dense).far_field(directions)
+        x_dense = mw.mom.surface_currents(dense).scattered_coefficients
         report['dense'] = {'seconds': _sync()-start, 'peak_bytes': torch.cuda.max_memory_allocated(),
                            'current_relative_difference': _relative(x, x_dense),
                            'far_field_relative_difference': _relative(far, far_dense)}

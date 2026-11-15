@@ -16,6 +16,10 @@ from scripts.dev.tfsf_aux_line_termination import (
 )
 
 
+# prepare_line prepares the incident line on a CUDA scene (the CPU reference profile is gone).
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+
+
 @pytest.fixture(scope="module", autouse=True)
 def one_thread():
     previous = torch.get_num_threads()
@@ -100,14 +104,13 @@ def test_lossless_sampling_assert_rejects_loss_and_interpolation_neighbour():
 def test_old_termination_checkpoint_refused_before_fingerprint_and_copy(distributed, cw, tmp_path):
     # Use an actual serialized checkpoint container and the real shared preflight.
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.5, .5),) * 3), grid=mw.GridSpec.uniform(.05),
-                     boundary=mw.BoundarySpec.pml(num_layers=8), device="cpu")
-    execution = mw.Simulation.fdtd(scene, frequency=1e9, backend="cpu_reference",
-        run_time=mw.TimeConfig(time_steps=65536), full_field_dft=False).prepare()
+                     boundary=mw.BoundarySpec.pml(num_layers=8))
+    execution = mw.Simulation.fdtd(scene, frequencies=1e9,
+        config=mw.FDTDConfig(run_time=mw.TimeConfig(time_steps=65536), full_field_dft=False)).prepare()
     checkpoint = execution.run_until(2)
     local = _execution(waveform=mw.CW(1e9) if cw else None).solver
-    # The actual affected CPU solver cannot execute native face kernels; its
-    # distributed wrapper exercises the same shared preflight without a GPU.
-    solver = (SimpleNamespace(shard_layouts=(), logical_scene=local.scene,
+    # The distributed wrapper exercises the same shared preflight.
+    solver = (SimpleNamespace(shard_layouts=(), logical_scene=local.scene.scene,
                shards=(SimpleNamespace(rank=0, solver=local),), _nccl=False, dt=local.dt,
                _time_plan=local._time_plan)
               if distributed else local)
@@ -116,7 +119,7 @@ def test_old_termination_checkpoint_refused_before_fingerprint_and_copy(distribu
     signature["configuration_fingerprint"] = "deliberately changed"
     checkpoint = replace(checkpoint, signature=signature, dt=local.dt)
     checkpoint.save(tmp_path / "old.pt")
-    checkpoint = mw.FDTDResumeCheckpoint.load(tmp_path / "old.pt")
+    checkpoint = mw.fdtd.FDTDResumeCheckpoint.load(tmp_path / "old.pt")
     before = local.Ex.clone()
     with pytest.raises(NotImplementedError) as error:
         resume.preflight_resume_checkpoint(solver, checkpoint, total_steps=65536)

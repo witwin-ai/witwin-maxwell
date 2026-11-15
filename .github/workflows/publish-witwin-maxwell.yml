@@ -152,7 +152,7 @@ jobs:
           python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
           python -m pip install build
 
-      - name: Build packaged stable FDTD CUDA extension
+      - name: Build packaged stable FDTD CUDA extensions
         if: runner.os == 'Windows'
         shell: bash
         env:
@@ -194,6 +194,8 @@ jobs:
             python {project}/scripts/build_fdtd_cuda_prebuilt.py --verbose &&
             python {project}/scripts/verify_cuda_binary_arches.py
             --stem witwin_maxwell_fdtd_cuda
+            --stem witwin_maxwell_fdtd_core
+            --stem witwin_maxwell_setup
             {project}/witwin/maxwell/fdtd/cuda/prebuilt
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
             auditwheel repair --plat manylinux_2_28_x86_64
@@ -215,6 +217,8 @@ jobs:
         run: |
           python "$PACKAGE_DIR"/scripts/verify_cuda_binary_arches.py \
             --stem witwin_maxwell_fdtd_cuda \
+            --stem witwin_maxwell_fdtd_core \
+            --stem witwin_maxwell_setup \
             "$PACKAGE_DIR"/witwin/maxwell/fdtd/cuda/prebuilt
 
       - name: Build platform wheel
@@ -243,10 +247,13 @@ jobs:
 
           wheel = next((Path(os.environ["PACKAGE_DIR"]) / "dist").glob("*.whl"))
           names = zipfile.ZipFile(wheel).namelist()
-          native = [name for name in names if "witwin_maxwell_fdtd_cuda" in name and name.endswith((".so", ".pyd"))]
-          assert len(native) == 1, native
-          assert "/prebuilt/" in f"/{native[0]}"
-          assert "torch_" not in native[0]
+          stems = ("witwin_maxwell_fdtd_cuda", "witwin_maxwell_fdtd_core", "witwin_maxwell_setup")
+          for stem in stems:
+              native = [name for name in names if f"/{stem}." in f"/{name}" and name.endswith((".so", ".pyd"))]
+              assert len(native) == 1, (stem, native)
+              assert "/prebuilt/" in f"/{native[0]}"
+              assert "torch_" not in native[0]
+              assert f"{native[0]}.abi" in names, f"{native[0]} has no ABI marker in the wheel"
 
           candidates = []
           for root in site.getsitepackages() + [site.getusersitepackages()]:
@@ -258,11 +265,13 @@ jobs:
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
 
-          path = module.prebuilt_extension_path()
-          assert path.exists(), f"missing packaged prebuilt extension: {path}"
-          assert path.parent.name == "prebuilt"
-          extension = module.build_extension()
-          print(f"Loaded packaged FDTD CUDA extension from {extension.__file__}")
+          for library in module.LIBRARIES:
+              path = module.prebuilt_extension_path(library)
+              assert path.exists(), f"missing packaged prebuilt extension: {path}"
+              assert path.parent.name == "prebuilt"
+              extension = module.build_extension(library=library)
+              assert Path(extension.__file__).resolve() == path.resolve()
+              print(f"Loaded packaged {library.name} ({library.abi}) from {extension.__file__}")
 
           # Import outside the checkout so missing runtime dependencies cannot
           # be hidden by source-tree imports or the build-only ABI smoke test.
@@ -271,7 +280,7 @@ jobs:
           subprocess.run([
               os.sys.executable, "-c",
               "import witwin.maxwell as mw; from importlib.metadata import version; "
-              "assert mw.BatchExecution and mw.Scene and mw.Simulation; "
+              "assert mw.execution.BatchExecution and mw.Scene and mw.Simulation; "
               "print('Installed package:', version('witwin-maxwell'))",
           ], cwd=tempfile.gettempdir(), check=True)
           PY
@@ -349,19 +358,73 @@ jobs:
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
 
+          for library in module.LIBRARIES:
+              library_path = module.prebuilt_extension_path(library)
+              assert library_path.exists(), library_path
+              loaded = module.build_extension(library=library)
+              assert Path(loaded.__file__).resolve() == library_path.resolve()
+              print(f"Loaded {library_path.name} ({library.abi})")
           native_path = module.prebuilt_extension_path()
-          assert native_path.exists(), native_path
           extension = module.build_extension()
-          assert Path(extension.__file__).resolve() == native_path.resolve()
-          assert extension.update_magnetic_hx_standard is not None
+          assert extension.trilinear_border_forward is not None
           import ctypes
           library = ctypes.CDLL(str(native_path))
           for name in ("mw_batch_budget_create", "mw_batch_budget_exchange",
                        "mw_batch_budget_bytes", "mw_batch_budget_close",
                        "mw_batch_malloc", "mw_batch_free"):
               assert getattr(library, name) is not None, name
-          print(f"Loaded {native_path.name} with torch {torch.__version__} on Python {os.sys.version.split()[0]}")
+          print(f"Loaded all packaged libraries with torch {torch.__version__} on Python {os.sys.version.split()[0]}")
           PY
+
+  smoke_no_toolkit:
+    name: No-toolkit wheel smoke / ${{ matrix.os }}
+    needs:
+      - validate_release
+      - build_cuda_wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download stable wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}
+          path: smoke-wheel
+
+      - name: Install the wheel into a fresh environment without a CUDA toolkit
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/smoke-env"
+          if [ "$RUNNER_OS" = "Windows" ]; then smoke_python="$RUNNER_TEMP/smoke-env/Scripts/python.exe"; else smoke_python="$RUNNER_TEMP/smoke-env/bin/python"; fi
+          "$smoke_python" -m pip install --upgrade pip
+          "$smoke_python" -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+          "$smoke_python" -m pip install smoke-wheel/*.whl
+          echo "SMOKE_PYTHON=$smoke_python" >> "$GITHUB_ENV"
+
+      - name: Run the default core path from packaged binaries only
+        shell: bash
+        env:
+          PACKAGE_DIR: ${{ needs.validate_release.outputs.package_dir }}
+        run: |
+          # No nvcc and no toolkit variables: any rebuild attempt must fail, and the
+          # missing build directory shows whether one was tried.
+          unset CUDA_HOME CUDA_PATH CUDA_ROOT CUDA_BIN_PATH CUDACXX
+          export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vi cuda | paste -sd: -)"
+          export WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR="$RUNNER_TEMP/must-not-jit-build"
+          script="$GITHUB_WORKSPACE/$PACKAGE_DIR/scripts/smoke_prebuilt_wheel.py"
+          cd "$RUNNER_TEMP"
+          "$SMOKE_PYTHON" "$script"
 
   build_sdist:
     name: Build source distribution
@@ -398,6 +461,7 @@ jobs:
     needs:
       - build_cuda_wheels
       - test_torch_compatibility
+      - smoke_no_toolkit
       - build_sdist
     runs-on: ubuntu-latest
     permissions:

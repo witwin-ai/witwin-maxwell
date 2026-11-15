@@ -14,7 +14,7 @@ def test_periodic_node_material_gradient_has_one_shared_seam(x):
 
     scene = prepare_scene(mw.Scene(domain=mw.Domain(bounds=((0., 1.),)*3),
         grid=mw.GridSpec.custom(x_coords=x, y_coords=(0., 1.), z_coords=(0., 1.)),
-        boundary=mw.BoundarySpec.periodic(), device="cpu"))
+        boundary=mw.BoundarySpec.periodic()), device="cpu")
     field = torch.arange(len(x), dtype=scene.x.dtype)[:, None, None].expand(-1, 2, 2).clone()
     field[-1] = field[0]
     original = _field_gradients(scene, field)["x"]
@@ -34,7 +34,7 @@ def test_periodic_node_material_gradient_has_one_shared_seam(x):
 def test_interface_normals_match_tilted_plane():
     domain = mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)))
     grid = mw.GridSpec.uniform(0.05)
-    scene = prepare_scene(mw.Scene(domain=domain, grid=grid, device="cpu"))
+    scene = prepare_scene(mw.Scene(domain=domain, grid=grid), device="cpu")
 
     angle = math.radians(30.0)
     geometry = mw.Box(position=(0.0, 0.0, 0.0), size=(1.0, 4.0, 4.0), rotation=(0.0, 0.0, angle))

@@ -13,13 +13,14 @@ using namespace layered;
 // bench includes measured exp/root/divide ceilings in its empirical roofline.
 // Every output and recursive sum has one owner; no floating-point atomics.
 __global__ void nodes_kernel(const double* gl,const double* gw,const double* f,
-                            const C* media,const double* sigma,int layers,
+                            const C* media,int64_t stride,const double* sigma,int layers,
                             C* q,C* weights,int* kinds,int F,int Q,double limit,
                             double rho_min,double rho_max,int linear,int first) {
   int t=blockIdx.x*blockDim.x+threadIdx.x;
   if(t>=F*Q) return;
   int j=first+t%Q, panel=j/32, n=j%32;
   double omega=2*pi*f[t/Q], magnitude=0;
+  media+=(t/Q)*stride;
   for(int l=0;l<layers;++l) magnitude=fmax(magnitude,abs(eps(media,sigma,l,omega)));
   double km=omega/c0*sqrt(magnitude);
   double u=(gl[n]+1)*0.5, v, jac;
@@ -70,20 +71,21 @@ std::vector<at::Tensor> layered_nodes(at::Tensor gl,at::Tensor gw,at::Tensor f,
   auto kinds=at::empty({f.numel(),Q},f.options().dtype(at::kInt));
   int count=q.numel();
   nodes_kernel<<<(count+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
-      gl.data_ptr<double>(),gw.data_ptr<double>(),f.data_ptr<double>(),media.data_ptr<C>(),
-      sigma.data_ptr<double>(),media.numel(),q.data_ptr<C>(),
+      gl.data_ptr<double>(),gw.data_ptr<double>(),f.data_ptr<double>(),media.data_ptr<C>(),media_stride(media),
+      sigma.data_ptr<double>(),media_layers(media),q.data_ptr<C>(),
       w.data_ptr<C>(),kinds.data_ptr<int>(),f.numel(),Q,limit,rho_min,rho_max,linear,first);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {q,w,kinds};
 }
 
-__global__ void images_kernel(const C* media,const double* sigma,const double* frequencies,
+__global__ void images_kernel(const C* media,int64_t stride,const double* sigma,const double* frequencies,
     const int64_t* sources,const int64_t* offsets,const int64_t* events,const double* multiplicities,
     C* out,int F,int I) {
   int t=blockIdx.x*blockDim.x+threadIdx.x;
   if(t>=F*2*I) return;
   int i=t%I, c=(t/I)%2, f=t/(2*I);
   double w=2*pi*frequencies[f];
+  media+=f*stride;
   C coefficient=c ? C(1)/eps(media,sigma,sources[i],w) : C(1);
   for(int e=offsets[i];e<offsets[i+1];++e) {
     int a=events[3*e], b=events[3*e+1], transmission=events[3*e+2];
@@ -104,7 +106,7 @@ at::Tensor layered_images(at::Tensor media,at::Tensor sigma,at::Tensor f,
   auto out=at::empty({f.numel(),2,distances.numel()},media.options());
   int n=out.numel();
   images_kernel<<<(n+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
-      media.data_ptr<C>(),sigma.data_ptr<double>(),f.data_ptr<double>(),sources.data_ptr<int64_t>(),
+      media.data_ptr<C>(),media_stride(media),sigma.data_ptr<double>(),f.data_ptr<double>(),sources.data_ptr<int64_t>(),
       offsets.data_ptr<int64_t>(),events.data_ptr<int64_t>(),multiplicities.data_ptr<double>(),
       out.data_ptr<C>(),f.numel(),distances.numel());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -147,6 +149,7 @@ __global__ void network_kernel(Stack s,const C* q,const double* f,C* network,int
   int t=blockIdx.x*blockDim.x+threadIdx.x;
   if(t>=F*Q) return;
   C kr=q[t];double w=2*pi*f[t/Q];
+  s=s.at(t/Q);
   C* data=network+t*s.n*10;
   for(int l=0;l<s.n;++l) {
     C k=kz(s,l,kr,w),epsilon=eps(s.media,s.sigma,l,w);
@@ -232,9 +235,9 @@ at::Tensor layered_spectral(at::Tensor media,at::Tensor sigma,at::Tensor edges,a
   c10::cuda::CUDAGuard guard(f.device());
   int P=pairs.size(0),Q=q.size(1),F=f.numel();
   auto out=at::empty({F,Q,P*2},media.options());
-  auto network=at::empty({F,Q,media.numel(),10},media.options());
+  auto network=at::empty({F,Q,media_layers(media),10},media.options());
   Stack s{media.data_ptr<C>(),sigma.data_ptr<double>(),edges.data_ptr<double>(),
-          int(media.numel()),int(bottom),int(top)};
+          media_layers(media),int(bottom),int(top),media_stride(media)};
   network_kernel<<<(F*Q+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
       s,q.data_ptr<C>(),f.data_ptr<double>(),network.data_ptr<C>(),F,Q);
   spectral_kernel<<<(F*Q*P+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
@@ -252,6 +255,7 @@ __global__ void tail_kernel(Stack s,const double* planes,const int64_t* pairs,
   int p=t%P,fi=t/P;
   C a(0),b(0);
   double z=planes[pairs[2*p]], zo=planes[pairs[2*p+1]], w=2*pi*f[fi], k0=w/c0;
+  s=s.at(fi);
   if(z==zo) {
     int l=region(s,z);
     C ea=eps(s.media,s.sigma,l,w), eb=ea;
@@ -270,7 +274,8 @@ at::Tensor layered_tail(at::Tensor media,at::Tensor sigma,at::Tensor edges,
                         at::Tensor planes,at::Tensor pairs,at::Tensor f,int64_t bottom,int64_t top) {
   c10::cuda::CUDAGuard guard(f.device());
   auto out=at::empty({f.numel(),pairs.size(0),2},media.options());
-  Stack s{media.data_ptr<C>(),sigma.data_ptr<double>(),edges.data_ptr<double>(),int(media.numel()),int(bottom),int(top)};
+  Stack s{media.data_ptr<C>(),sigma.data_ptr<double>(),edges.data_ptr<double>(),media_layers(media),int(bottom),int(top),
+          media_stride(media)};
   int count=f.numel()*pairs.size(0);
   tail_kernel<<<(count+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
       s,planes.data_ptr<double>(),pairs.data_ptr<int64_t>(),f.data_ptr<double>(),out.data_ptr<C>(),
@@ -315,9 +320,9 @@ at::Tensor layered_vertical_network(at::Tensor media,at::Tensor sigma,at::Tensor
     at::Tensor f,at::Tensor q,int64_t bottom,int64_t top) {
   c10::cuda::CUDAGuard guard(f.device());
   int F=f.numel(),Q=q.size(1);
-  auto data=at::empty({F,Q,media.numel(),10},media.options());
+  auto data=at::empty({F,Q,media_layers(media),10},media.options());
   Stack s{media.data_ptr<C>(),sigma.data_ptr<double>(),edges.data_ptr<double>(),
-          int(media.numel()),int(bottom),int(top)};
+          media_layers(media),int(bottom),int(top),media_stride(media)};
   network_kernel<<<(F*Q+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
       s,q.data_ptr<C>(),f.data_ptr<double>(),data.data_ptr<C>(),F,Q);
   C10_CUDA_KERNEL_LAUNCH_CHECK();return data;
@@ -337,6 +342,7 @@ __global__ void vertical_spectral_kernel(Stack s,const C* q,const double* f,
   int p=t%P,j=(t/P)%Q,fi=t/(P*Q);
   bool reverse=zs[p]>zo[p];
   double source=fmin(zs[p],zo[p]),observer=fmax(zs[p],zo[p]),w=2*pi*f[fi],k0=w/c0;
+  s=s.at(fi);
   C kr=q[fi*Q+j];
   const C* network=data+(fi*Q+j)*s.n*10;
   int a=region(s,source),b=region(s,observer);
@@ -393,7 +399,7 @@ at::Tensor layered_vertical_spectral(at::Tensor media,at::Tensor sigma,at::Tenso
   auto out=at::empty({F,Q,P,components},media.options());
   auto network=layered_vertical_network(media,sigma,edges,f,q,bottom,top);
   Stack s{media.data_ptr<C>(),sigma.data_ptr<double>(),edges.data_ptr<double>(),
-          int(media.numel()),int(bottom),int(top)};
+          media_layers(media),int(bottom),int(top),media_stride(media)};
   vertical_spectral_kernel<<<(F*Q*P+127)/128,128,0,c10::cuda::getCurrentCUDAStream()>>>(
       s,q.data_ptr<C>(),f.data_ptr<double>(),zs.data_ptr<double>(),zo.data_ptr<double>(),
       network.data_ptr<C>(),out.data_ptr<C>(),F,Q,P,components);

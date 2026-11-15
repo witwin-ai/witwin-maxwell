@@ -32,35 +32,46 @@ def _thru_scene():
     y = np.arange(-ny, ny + 1) * DX
     z = np.arange(round(-0.03 / DX), round(0.18 / DX) + 1) * DX
     scene = mw.Scene(domain=mw.Domain(bounds=((x[0], x[-1]), (y[0], y[-1]), (z[0], z[-1]))),
-                     grid=mw.GridSpec.custom(x, y, z), boundary=mw.BoundarySpec.pml(num_layers=6), device="cuda")
+                     grid=mw.GridSpec.custom(x, y, z), boundary=mw.BoundarySpec.pml(num_layers=6))
     length = 2 * x[-1] + 20 * DX
 
     def sheet(name, low, high, coordinate):
+        nonlocal scene
         vertices = ((-length / 2, low), (length / 2, low), (length / 2, high), (-length / 2, high))
-        scene.add_structure(mw.Structure(mw.PlanarPEC(vertices, normal_axis="z", coordinate=coordinate),
-                                         mw.Material.pec(), name=name))
+        scene = scene.updated(structures=(
+            *scene.structures,
+            mw.Structure(mw.geometry.PlanarPEC(vertices, normal_axis="z", coordinate=coordinate),
+                         mw.Material.pec(), name=name),
+        ))
 
     sheet("ground", -0.3, 0.3, 0.0)
-    scene.add_structure(mw.Structure(mw.Box(position=(0, 0, HEIGHT / 2), size=(length, 0.6, HEIGHT)),
-                                     mw.Material(eps_r=EPS), name="substrate"))
+    scene = scene.updated(structures=(
+        *scene.structures,
+        mw.Structure(mw.Box(position=(0, 0, HEIGHT / 2), size=(length, 0.6, HEIGHT)),
+                     mw.Material(eps_r=EPS), name="substrate"),
+    ))
     offset = 0.5 * (WIDTH + GAP)
     sheet("p", offset - WIDTH / 2, offset + WIDTH / 2, HEIGHT)
     sheet("n", -offset - WIDTH / 2, -offset + WIDTH / 2, HEIGHT)
-    for name, x_port, direction in (("P1", -0.03, "+"), ("P2", 0.03, "-")):
-        scene.add_port(mw.TerminalWavePort(
-            name, position=(x_port, 0.0, 0.07), size=(0.0, 0.32, 0.14), direction=direction, reference_plane=x_port,
-            terminals=(mw.TerminalRef("p"), mw.TerminalRef("n")), reference=mw.TerminalRef("ground"),
-            voltage_integrals=tuple(mw.CustomVoltageIntegral(mw.AxisSegment((x_port, c, HEIGHT), (x_port, c, 0.0)))
-                                    for c in (offset, -offset)),
-            reference_impedance="characteristic"))
+    scene = scene.updated(ports=(
+        *scene.ports,
+        *(mw.rf.TerminalWavePort(
+              name, position=(x_port, 0.0, 0.07), size=(0.0, 0.32, 0.14), direction=direction, reference_plane=x_port,
+              terminals=(mw.rf.TerminalRef("p"), mw.rf.TerminalRef("n")), reference=mw.rf.TerminalRef("ground"),
+              voltage_integrals=tuple(mw.rf.CustomVoltageIntegral(mw.rf.AxisSegment((x_port, c, HEIGHT), (x_port, c, 0.0)))
+                       for c in (offset, -offset)),
+              reference_impedance="characteristic") for name, x_port, direction in (("P1", -0.03, "+"), ("P2", 0.03, "-"))),
+    ))
     return scene
 
 
 def test_coupled_microstrip_thru_is_matched_in_mixed_mode():
     result = mw.Simulation.fdtd(
-        _thru_scene(), frequencies=(0.7e9,), excitations=mw.PortSweep(),
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=16),
-        spectral_sampler=mw.SpectralSampler(window="hanning"), full_field_dft=False,
+        _thru_scene(), frequencies=(0.7e9,), excitations=mw.rf.PortSweep(),
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=16),
+            spectral_sampler=mw.fdtd.SpectralSampler(window="hanning"), full_field_dft=False,
+        ),
     ).run()
     network = result.network
     assert network.port_names == ("P1::T1", "P1::T2", "P2::T1", "P2::T2")

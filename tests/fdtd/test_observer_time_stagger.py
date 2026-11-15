@@ -89,10 +89,6 @@ def test_spectral_observers_apply_the_yee_half_step_stagger():
         Hy=torch.zeros((1, 1, 1)),
         complex_fields_enabled=False,
         _compute_window_weight=lambda *args, **kwargs: 1.0,
-        _advance_phase=lambda cos, sin, step_cos, step_sin: (
-            cos * step_cos - sin * step_sin,
-            sin * step_cos + cos * step_sin,
-        ),
         _sync_observer_primary_state=lambda: None,
     )
 
@@ -182,10 +178,6 @@ def test_observer_adjoint_schedule_is_exact_transpose_of_forward_yee_dft(
         fdtd_module=recorder,
         complex_fields_enabled=False,
         _compute_window_weight=lambda *args, **kwargs: 1.0,
-        _advance_phase=lambda cos, sin, step_cos, step_sin: (
-            cos * step_cos - sin * step_sin,
-            sin * step_cos + cos * step_sin,
-        ),
         _sync_observer_primary_state=lambda: None,
         **{field_name: torch.zeros((1, 1, 1))},
     )

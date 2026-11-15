@@ -131,7 +131,7 @@ def main():
                                       offset=(.37, .21), zoff=zoff)
         if args.command == "audit":
             prepared = prepare_scene(scene)
-            c = original(prepared, prepared.structures[0])
+            c = original(prepared, prepared.scene.structures[0])
             report["cases"].append(dict(z=zoff, **summarize(c, prepared)))
             print(json.dumps(report["cases"][-1]), flush=True)
         else:

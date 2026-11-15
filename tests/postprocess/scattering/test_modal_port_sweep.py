@@ -21,41 +21,38 @@ _FREQUENCIES = (2.9e8, 3.0e8, 3.1e8)
 
 def _scene(*, left_offset=0.1, right_offset=-0.1, extra_port=None):
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-1.0, 1.0), (-0.5, 0.5), (-0.5, 0.5))),
-        grid=mw.GridSpec.uniform(0.1),
-        boundary=mw.BoundarySpec.pml(num_layers=2),
-        device="cpu",
-    )
-    scene.add_port(
-        mw.ModePort(
-            "left",
-            position=(-0.5, 0.0, 0.0),
-            size=(0.0, 0.6, 0.6),
-            direction="+",
-            polarization="Ez",
-            monitor_offset=left_offset,
-        )
-    )
-    scene.add_port(
-        mw.ModePort(
-            "right",
-            position=(0.5, 0.0, 0.0),
-            size=(0.0, 0.6, 0.6),
-            direction="-",
-            polarization="Ez",
-            monitor_offset=right_offset,
-            source_time=mw.CW(frequency=3.0e8),
-        )
-    )
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-0.5, 0.5), (-0.5, 0.5))),
+                grid=mw.GridSpec.uniform(0.1),
+                boundary=mw.BoundarySpec.pml(num_layers=2),
+                ports=(
+            mw.ModePort(
+                "left",
+                position=(-0.5, 0.0, 0.0),
+                size=(0.0, 0.6, 0.6),
+                direction="+",
+                polarization="Ez",
+                monitor_offset=left_offset,
+            ),
+            mw.ModePort(
+                "right",
+                position=(0.5, 0.0, 0.0),
+                size=(0.0, 0.6, 0.6),
+                direction="-",
+                polarization="Ez",
+                monitor_offset=right_offset,
+                source_time=mw.CW(frequency=3.0e8),
+            ),
+            ),
+            )
     if extra_port is not None:
-        scene.add_port(extra_port)
+        scene = scene.updated(ports=(*scene.ports, extra_port))
     return scene
 
 
 def test_plan_orders_channels_by_port_then_mode_with_labels():
     plan = plan_modal_port_sweep(
         _scene(),
-        mw.ModalPortSweep(modes={"left": (0, 1, ("Ey", 0))}),
+        mw.rf.ModalPortSweep(modes={"left": (0, 1, ("Ey", 0))}),
         _FREQUENCIES,
     )
 
@@ -76,7 +73,7 @@ def test_plan_orders_channels_by_port_then_mode_with_labels():
 
 
 def test_plan_resolves_run_only_in_channel_order_and_element_mappings():
-    sweep = mw.ModalPortSweep(
+    sweep = mw.rf.ModalPortSweep(
         run_only=("right::Ez0", ("left", 0)),
         source_time=mw.CW(frequency=3.0e8),
     )
@@ -84,7 +81,7 @@ def test_plan_resolves_run_only_in_channel_order_and_element_mappings():
     assert plan.run_columns == (0, 1)
     assert all(source.kind == "cw" for source in plan.source_times)
 
-    one_column = mw.ModalPortSweep(
+    one_column = mw.rf.ModalPortSweep(
         run_only=("left::Ez0",),
         element_mappings=(
             (("right::Ez0", "left::Ez0"), ("left::Ez0", "right::Ez0"), 1.0),
@@ -96,26 +93,26 @@ def test_plan_resolves_run_only_in_channel_order_and_element_mappings():
     assert plan.element_mappings == ((1, 0, 0, 1, 1.0 + 0.0j), (0, 0, 1, 1, 1.0 + 0.0j))
     assert plan.valid_columns == (True, True)
 
-    partial = mw.ModalPortSweep(run_only="left::Ez0")
+    partial = mw.rf.ModalPortSweep(run_only="left::Ez0")
     assert plan_modal_port_sweep(_scene(), partial, _FREQUENCIES).valid_columns == (True, False)
 
 
 @pytest.mark.parametrize(
     ("sweep", "message"),
     [
-        (mw.ModalPortSweep(ports=("left", "missing")), "missing ModePorts"),
-        (mw.ModalPortSweep(modes={"right": (("Ex", 0),)}), "Ex"),
-        (mw.ModalPortSweep(modes={"left": (0, 0)}), "repeats mode"),
-        (mw.ModalPortSweep(run_only=("left::Ez3",)), "not a sweep channel"),
+        (mw.rf.ModalPortSweep(ports=("left", "missing")), "missing ModePorts"),
+        (mw.rf.ModalPortSweep(modes={"right": (("Ex", 0),)}), "Ex"),
+        (mw.rf.ModalPortSweep(modes={"left": (0, 0)}), "repeats mode"),
+        (mw.rf.ModalPortSweep(run_only=("left::Ez3",)), "not a sweep channel"),
         (
-            mw.ModalPortSweep(
+            mw.rf.ModalPortSweep(
                 run_only=("left::Ez0",),
                 element_mappings=((("left::Ez0", "right::Ez0"), ("right::Ez0", "left::Ez0"), 1.0),),
             ),
             "neither computed",
         ),
         (
-            mw.ModalPortSweep(
+            mw.rf.ModalPortSweep(
                 element_mappings=((("left::Ez0", "left::Ez0"), ("right::Ez0", "right::Ez0"), 1.0),),
             ),
             "already computed",
@@ -129,13 +126,13 @@ def test_plan_rejects_inconsistent_requests(sweep, message):
 
 def test_plan_rejects_driven_monitor_behind_launch_plane():
     with pytest.raises(ValueError, match="monitor_offset"):
-        plan_modal_port_sweep(_scene(left_offset=-0.1), mw.ModalPortSweep(), _FREQUENCIES)
+        plan_modal_port_sweep(_scene(left_offset=-0.1), mw.rf.ModalPortSweep(), _FREQUENCIES)
     with pytest.raises(ValueError, match="monitor_offset"):
-        plan_modal_port_sweep(_scene(right_offset=0.0), mw.ModalPortSweep(), _FREQUENCIES)
+        plan_modal_port_sweep(_scene(right_offset=0.0), mw.rf.ModalPortSweep(), _FREQUENCIES)
     # A monitor-only port may sample anywhere, so run_only can skip it.
     plan = plan_modal_port_sweep(
         _scene(right_offset=0.0),
-        mw.ModalPortSweep(run_only="left::Ez0"),
+        mw.rf.ModalPortSweep(run_only="left::Ez0"),
         _FREQUENCIES,
     )
     assert plan.channels[1].reference_offset == 0.0
@@ -143,24 +140,25 @@ def test_plan_rejects_driven_monitor_behind_launch_plane():
 
 def test_plan_rejects_foreign_sources_ports_and_bad_frequencies():
     scene = _scene()
-    scene.add_source(
-        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez", source_time=mw.CW(frequency=3.0e8))
-    )
+    scene = scene.updated(sources=(
+        *scene.sources,
+        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez", source_time=mw.CW(frequency=3.0e8)),
+    ))
     with pytest.raises(ValueError, match="Scene.sources"):
-        plan_modal_port_sweep(scene, mw.ModalPortSweep(), _FREQUENCIES)
+        plan_modal_port_sweep(scene, mw.rf.ModalPortSweep(), _FREQUENCIES)
     with pytest.raises(ValueError, match="strictly increasing"):
-        plan_modal_port_sweep(_scene(), mw.ModalPortSweep(), (3.0e8, 2.0e8))
+        plan_modal_port_sweep(_scene(), mw.rf.ModalPortSweep(), (3.0e8, 2.0e8))
     with pytest.raises(TypeError):
-        mw.ModalPortSweep(modes={"left": (("Ez", 0, 1),)})
+        mw.rf.ModalPortSweep(modes={"left": (("Ez", 0, 1),)})
     with pytest.raises(TypeError):
-        plan_modal_port_sweep(_scene(), mw.PortSweep(), _FREQUENCIES)
+        plan_modal_port_sweep(_scene(), mw.rf.PortSweep(), _FREQUENCIES)
 
 
 def test_column_scene_excites_only_the_driven_channel():
     scene = _scene()
     plan = plan_modal_port_sweep(
         scene,
-        mw.ModalPortSweep(modes={"left": (0, 1)}, run_only=("left::Ez1", "right::Ez0")),
+        mw.rf.ModalPortSweep(modes={"left": (0, 1)}, run_only=("left::Ez1", "right::Ez0")),
         _FREQUENCIES,
     )
     first = build_modal_column_scene(scene, plan, 0)
@@ -220,7 +218,7 @@ def _reference_s(frequency_count, count, seed=1):
 
 def test_assembly_normalizes_by_driven_incident_and_deembeds_monitor_offsets():
     scene = _scene(left_offset=0.15, right_offset=-0.05)
-    plan = plan_modal_port_sweep(scene, mw.ModalPortSweep(modes={"left": (0, 1)}), _FREQUENCIES)
+    plan = plan_modal_port_sweep(scene, mw.rf.ModalPortSweep(modes={"left": (0, 1)}), _FREQUENCIES)
     count = len(plan.channels)
     beta = torch.tensor(
         [[9.0 + 0.0j, 7.5 + 0.0j, 9.5 + 0.1j]] * len(_FREQUENCIES), dtype=torch.complex128
@@ -257,7 +255,7 @@ def test_assembly_normalizes_by_driven_incident_and_deembeds_monitor_offsets():
 
 
 def test_assembly_phase_matches_beta_length_for_matched_line():
-    plan = plan_modal_port_sweep(_scene(), mw.ModalPortSweep(), _FREQUENCIES)
+    plan = plan_modal_port_sweep(_scene(), mw.rf.ModalPortSweep(), _FREQUENCIES)
     beta = (2.0 * cmath.pi * torch.tensor(_FREQUENCIES, dtype=torch.float64) * 1.6 / 3.0e8)
     beta = beta.to(torch.complex128).unsqueeze(-1).expand(-1, 2).contiguous()
     length = 1.0  # distance between the two ModePort reference planes
@@ -283,7 +281,7 @@ def test_assembly_fills_symmetric_entries_and_flags_incomplete_columns():
 
     mapped = plan_modal_port_sweep(
         scene,
-        mw.ModalPortSweep(
+        mw.rf.ModalPortSweep(
             run_only="left::Ez0",
             element_mappings=(
                 (("right::Ez0", "left::Ez0"), ("left::Ez0", "right::Ez0"), 1.0),
@@ -296,7 +294,7 @@ def test_assembly_fills_symmetric_entries_and_flags_incomplete_columns():
     assert network.is_complete
     torch.testing.assert_close(network.s, s_ref, rtol=1e-12, atol=1e-12)
 
-    partial = plan_modal_port_sweep(scene, mw.ModalPortSweep(run_only="left::Ez0"), _FREQUENCIES)
+    partial = plan_modal_port_sweep(scene, mw.rf.ModalPortSweep(run_only="left::Ez0"), _FREQUENCIES)
     ports, network = assemble_modal_network(partial, _synthetic_columns(partial, s_ref, beta))
     assert network.valid_columns.tolist() == [True, False]
     assert not network.is_complete
@@ -309,7 +307,7 @@ def test_assembly_fills_symmetric_entries_and_flags_incomplete_columns():
 
 
 def test_assembly_rejects_weak_drive_and_shape_errors():
-    plan = plan_modal_port_sweep(_scene(), mw.ModalPortSweep(), _FREQUENCIES)
+    plan = plan_modal_port_sweep(_scene(), mw.rf.ModalPortSweep(), _FREQUENCIES)
     beta = torch.full((len(_FREQUENCIES), 2), 8.0 + 0.0j, dtype=torch.complex128)
     columns = list(_synthetic_columns(plan, _reference_s(len(_FREQUENCIES), 2), beta))
     weak = columns[0].incident.clone()

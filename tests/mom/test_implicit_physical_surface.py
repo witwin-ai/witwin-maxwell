@@ -15,7 +15,7 @@ pytestmark=pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA require
 @pytest.mark.parametrize('backend,kind',[('hmatrix',HierarchicalSystemOperator),('h2',HierarchicalH2SystemOperator)])
 def test_physical_inverse_original_solve_gradient_and_decoder_mutation(backend,kind):
     dense,_=runpy.run_path('tests/mom/test_surface_volume.py')['problem']((2.,3.))
-    config=mw.MoMConfig(operator_backend=backend,integration=dense.integration,
+    config=mw.mom.MoMConfig(operator_backend=backend,integration=dense.integration,
         hierarchical=HMatrixConfig(leaf_size=64),riesz_storage='local_rwg_v1',
         stopping=StoppingRule(method='block_gmres',preconditioner='row_column_norm'))
     operator=kind(dense.system,dense.exterior,dense.sources,config)

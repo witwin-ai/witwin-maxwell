@@ -18,6 +18,7 @@ from .network import (
     _validate_safe_persistence,
     power_waves_to_voltage_current,
 )
+from ._stability import experimental
 
 
 ARRAY_POWER_NORMALIZATION = (
@@ -268,6 +269,7 @@ def _broadcast_pattern_parameter(
     return tensor
 
 
+@experimental("antenna")
 @dataclass(frozen=True)
 class BeamWeights:
     """Complex incident power-wave amplitudes with the port axis last."""
@@ -285,6 +287,7 @@ class BeamWeights:
             raise ValueError("BeamWeights.values must contain only finite values.")
 
 
+@experimental("antenna")
 @dataclass(frozen=True)
 class BeamCodebook:
     """A named set of incident power-wave weight vectors over one basis.
@@ -418,6 +421,7 @@ class BeamCodebook:
         )
 
 
+@experimental("antenna")
 @dataclass(frozen=True)
 class EmbeddedElementPatternData:
     """Power-normalized embedded element patterns in ``[F, N, T, P]`` order."""
@@ -699,6 +703,7 @@ class _BeamAntennaData:
     accepted_power_valid: torch.Tensor
 
 
+@experimental("antenna")
 @dataclass(frozen=True)
 class BeamData:
     weights: torch.Tensor
@@ -794,6 +799,7 @@ class BeamData:
         )
 
 
+@experimental("antenna")
 @dataclass(frozen=True)
 class MaxHoldComposite:
     """Per-direction envelope of a beam metric across a codebook."""
@@ -898,6 +904,7 @@ def _single_beam_weights(
     )
 
 
+@experimental("antenna")
 @dataclass(frozen=True)
 class ArrayBasisData:
     """Reusable N-port network and embedded-pattern basis for one physical scene."""
@@ -1509,6 +1516,7 @@ class ArrayBasisData:
         return numerator / denominator
 
 
+@experimental("antenna")
 @dataclass(frozen=True)
 class MultipathEnvironment:
     """Angular power spectrum and polarization statistics of an incident field."""
@@ -1562,6 +1570,7 @@ class MultipathEnvironment:
         }
 
 
+@experimental("antenna")
 @dataclass(frozen=True)
 class MIMOData:
     """MIMO correlation metrics with the environment that produced them."""

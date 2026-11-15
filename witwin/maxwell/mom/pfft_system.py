@@ -22,6 +22,7 @@ import time
 
 import torch
 
+from .ordered_reduction import ordered_index_add_
 from .pfft_config import PFFTConfig
 from .pfft_grid import PFFTProjection
 from .pfft_operator import PFFTRegion
@@ -105,9 +106,9 @@ class PFFTPrecorrection:
 
     def apply(self, delta, value):
         result = torch.zeros(self.count, device=value.device, dtype=torch.complex128)
-        result.index_add_(0, self.rows, delta*value[self.cols])
+        ordered_index_add_(result, 0, self.rows, delta*value[self.cols])
         off = self.off_diagonal
-        result.index_add_(0, self.cols[off], delta[off]*value[self.rows[off]])
+        ordered_index_add_(result, 0, self.cols[off], delta[off]*value[self.rows[off]])
         return result
 
     def tensors(self):

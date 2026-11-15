@@ -21,9 +21,9 @@ def test_scene_preserves_nested_geometry_ancestry_and_stack_material_compilation
     def build(stacked):
         geometry = mw.Box(**{slot: torch.stack(values) if stacked else values})
         material = mw.Material(eps_r=2.+theta if shared_epsilon else 2.1)
-        return mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"), domain=mw.Domain(bounds=((-1.,1.),)*3),
+        return mw.Scene(subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"), domain=mw.Domain(bounds=((-1.,1.),)*3),
             grid=mw.GridSpec.uniform(.2), boundary=mw.BoundarySpec.none(),
-            structures=(mw.Structure(geometry, material),),device='cpu')
+            structures=(mw.Structure(geometry, material),))
 
     nested, stacked = build(False), build(True)
     actual, expected = getattr(nested.structures[0].geometry,slot), getattr(stacked.structures[0].geometry,slot)
@@ -33,8 +33,8 @@ def test_scene_preserves_nested_geometry_ancestry_and_stack_material_compilation
     assert any(tensor is actual for tensor in candidates)
     safe=ancestry_safe_trainable_tensors(candidates)
     assert safe
-    tensor=prepare_scene(nested).permittivity
-    reference=prepare_scene(stacked).permittivity
+    tensor=prepare_scene(nested, device="cpu").permittivity
+    reference=prepare_scene(stacked, device="cpu").permittivity
     torch.testing.assert_close(tensor,reference,rtol=0,atol=0)
     weights=torch.linspace(.1,1.7,tensor.numel(),dtype=tensor.dtype).reshape(tensor.shape)
     gx=torch.autograd.grad((tensor*weights).sum(),theta,retain_graph=True)[0]
@@ -46,8 +46,8 @@ def test_scene_preserves_nested_geometry_ancestry_and_stack_material_compilation
 def test_shared_zero_derivative_geometry_still_has_structural_dependency():
     theta=torch.tensor(2.,dtype=torch.float64,requires_grad=True)
     geometry=mw.Box(position=(theta*0.,0.,0.))
-    scene=mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"), domain=mw.Domain(bounds=((-1.,1.),)*3),grid=mw.GridSpec.uniform(.5),
-        structures=(mw.Structure(geometry,mw.Material(eps_r=theta)),),device='cpu')
+    scene=mw.Scene(subpixel=mw.SubpixelSpec(samples=2, averaging="polarized"), domain=mw.Domain(bounds=((-1.,1.),)*3),grid=mw.GridSpec.uniform(.5),
+        structures=(mw.Structure(geometry,mw.Material(eps_r=theta)),))
     actual=scene.structures[0].geometry.position
     assert actual.requires_grad and actual.grad_fn is not None
     dependency,=torch.autograd.grad(actual.sum(),theta,allow_unused=True)

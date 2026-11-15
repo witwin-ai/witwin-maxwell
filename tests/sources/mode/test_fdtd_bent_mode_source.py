@@ -11,18 +11,17 @@ from witwin.maxwell.postprocess.modal import _mode_source_from_mode_spec
 
 def _build_wire_scene():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.05),
-        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-        device="cuda",
-    )
-    scene.add_structure(
-        mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
-            material=mw.Material(eps_r=12.0),
-            name='core',
-        )
-    )
+                domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+                structures=(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
+                material=mw.Material(eps_r=12.0),
+                name='core',
+            ),
+            ),
+            )
     return scene
 
 
@@ -37,7 +36,7 @@ def _solve_bent(bend_radius, bend_axis):
         bend_radius=bend_radius,
         bend_axis=bend_axis,
     )
-    scene.add_source(source)
+    scene = scene.updated(sources=(*scene.sources, source))
     solver = mw.Simulation.fdtd(scene, frequencies=[1.0e9]).prepare().solver
     compiled = _compile_mode_source(source, default_frequency=1.0e9)
     return solve_mode_source_profile(solver, compiled)

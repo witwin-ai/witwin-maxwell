@@ -12,6 +12,10 @@ from collections import OrderedDict
 from threading import RLock
 import torch
 from ..constants import EPSILON_0, MU_0
+from ..errors import ConvergenceError
+from .._enums import parse_enum
+from .._stability import experimental
+from .options import MoMOption, option_asdict
 
 
 def cross_matrix(vector):
@@ -917,6 +921,27 @@ def integrate_spatial_green(displacements, medium, *, radial_order, azimuthal_or
     return output
 
 
+@experimental("mom")
+class DyadicRadialMap(MoMOption):
+    """Sommerfeld radial-path mapping selected by ``DyadicIntegrationConfig.radial_map``."""
+    INFINITE_RATIONAL = 'infinite_rational'
+    MATERIAL_SPLIT_V1 = 'material_split_v1'
+    MATCHED_SPD_BRANCH_V1 = 'matched_spd_branch_v1'
+    PROPORTIONAL_SPD_BRANCH_V1 = 'proportional_spd_branch_v1'
+    SPD_REFERENCE_BRANCH_V1 = 'spd_reference_branch_v1'
+    PAIRED_SPD_REFERENCE_BRANCH_V1 = 'paired_spd_reference_branch_v1'
+
+
+@experimental("mom")
+class DyadicSpatialRule(MoMOption):
+    """Spatial dyadic Green evaluation rule selected by ``DyadicIntegrationConfig.spatial_rule``."""
+    NATIVE_V1 = 'native_v1'
+    PROPORTIONAL_SPD_CLOSED_FORM_V1 = 'proportional_spd_closed_form_v1'
+    FACTORED_SPD_TAIL_V1 = 'factored_spd_tail_v1'
+    FACTORED_SPD_PAIR_TAIL_V1 = 'factored_spd_pair_tail_v1'
+
+
+@experimental("mom")
 @dataclass(frozen=True)
 class DyadicIntegrationConfig:
     radial_order: int = 16
@@ -925,14 +950,14 @@ class DyadicIntegrationConfig:
     max_azimuthal_order: int = 128
     relative_tolerance: float = 1e-5
     absolute_tolerance: float = 1e-10
-    radial_map: str = "infinite_rational"
-    spatial_rule: str = 'native_v1'
+    radial_map: DyadicRadialMap = DyadicRadialMap.INFINITE_RATIONAL
+    spatial_rule: DyadicSpatialRule = DyadicSpatialRule.NATIVE_V1
 
     def __post_init__(self):
-        if self.spatial_rule not in ('native_v1','proportional_spd_closed_form_v1','factored_spd_tail_v1','factored_spd_pair_tail_v1'):
-            raise ValueError('Unsupported dyadic spatial rule')
-        if self.radial_map not in ('infinite_rational','material_split_v1','matched_spd_branch_v1','proportional_spd_branch_v1','spd_reference_branch_v1','paired_spd_reference_branch_v1'):
-            raise ValueError('Unsupported dyadic radial mapping')
+        object.__setattr__(self, 'spatial_rule',
+                           parse_enum(DyadicSpatialRule, self.spatial_rule, name='DyadicIntegrationConfig.spatial_rule'))
+        object.__setattr__(self, 'radial_map',
+                           parse_enum(DyadicRadialMap, self.radial_map, name='DyadicIntegrationConfig.radial_map'))
         if self.radial_map == 'paired_spd_reference_branch_v1' and self.spatial_rule != 'factored_spd_pair_tail_v1':
             raise ValueError('Paired SPD reference coordinates require the explicit paired tail rule')
         for name in ('radial_order', 'azimuthal_order', 'max_radial_order', 'max_azimuthal_order'):
@@ -951,14 +976,13 @@ class DyadicIntegrationConfig:
 
     def payload(self):
         """Canonical numerical identity: unchanged default, explicit new mapping."""
-        from dataclasses import asdict
-        values=asdict(self)
+        values=option_asdict(self)
         if self.radial_map=='infinite_rational':values.pop('radial_map')
         if self.spatial_rule=='native_v1':values.pop('spatial_rule')
         return values
 
 
-class DyadicConvergenceError(RuntimeError):
+class DyadicConvergenceError(ConvergenceError):
     def __init__(self, message, receipt):
         super().__init__(message)
         self.receipt = receipt
@@ -1040,9 +1064,9 @@ def evaluate_spatial_green(displacements, medium, config=DyadicIntegrationConfig
         if key not in cache:
             try:
                 contrast_options = {} if _exterior is None else {'_exterior': _exterior}
-                if config.radial_map!='infinite_rational':contrast_options['radial_map']=config.radial_map
+                if config.radial_map!='infinite_rational':contrast_options['radial_map']=config.radial_map.value
                 if config.spatial_rule in ('factored_spd_tail_v1', 'factored_spd_pair_tail_v1'):
-                    contrast_options['spatial_rule'] = config.spatial_rule
+                    contrast_options['spatial_rule'] = config.spatial_rule.value
                 value = integrate_spatial_green(displacements, medium, radial_order=radial, azimuthal_order=angular,
                     restore_static=not regular_part, mode_cache=mode_cache, **contrast_options)
                 if not bool(torch.isfinite(value).all()):

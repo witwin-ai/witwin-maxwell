@@ -55,7 +55,7 @@ def test_steering_weights_match_codebook_and_co_phase_target():
     positions = pp.rectangular_lattice(4, 3, 0.5 * WAVELENGTH, 0.45 * WAVELENGTH)
     theta0, phi0 = 0.4, 1.2
     weights = pp.steering_weights(positions, theta0, phi0, frequency=FREQUENCY)
-    codebook = mw.BeamCodebook.from_scan_angles(
+    codebook = mw.antenna.BeamCodebook.from_scan_angles(
         element_positions=positions,
         frequencies=torch.tensor([FREQUENCY], dtype=torch.float64),
         theta=torch.tensor([theta0], dtype=torch.float64),

@@ -11,7 +11,7 @@ from witwin.maxwell.fdtd.copper_foil import copper_spectral_power
 
 @pytest.mark.parametrize("scale", [.3, 1., 2.7])
 def test_spectral_midpoint_work_matches_independent_rational_response(scale):
-    response = compile_copper_response(mw.CopperFoil(thickness=2e-6,
+    response = compile_copper_response(mw.media.CopperFoil(thickness=2e-6,
         conductivity=5.8e7, frequency_range=(.5e9, 4e9)))
     frequencies = torch.tensor([.8e9, 1.7e9, 3.2e9], dtype=torch.float64)
     dt = 2e-12

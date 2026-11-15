@@ -55,7 +55,7 @@ def _site_port(data, *, dtype):
             bounds[index] = (low, high)
     scene = mw.Scene(
         domain=mw.Domain(bounds=[(axis[0], axis[-1]) for axis in axes]),
-        grid=mw.GridSpec.custom(*axes), boundary=mw.BoundarySpec.none(), device="cpu",
+        grid=mw.GridSpec.custom(*axes), boundary=mw.BoundarySpec.none(),
     )
     port = mw.LumpedPort(
         "feed", positive=positive, negative=negative, voltage_path=mw.AxisPath("xyz"[normal_index]),
@@ -71,8 +71,8 @@ def test_public_scene_float32_contours_have_the_same_identity_as_float64(scene_n
     data = json.loads((_SCENES / f"metahz-scene-{scene_name}.json").read_text())
     scene, port32, bounds = _site_port(data, dtype=torch.float32)
     _, port64, _ = _site_port(data, dtype=torch.float64)
-    expected = compile_port_geometry(scene, port64)
-    _assert_same_geometry(compile_port_geometry(scene, port32), expected)
+    expected = compile_port_geometry(scene, port64, device="cpu")
+    _assert_same_geometry(compile_port_geometry(scene, port32, device="cpu"), expected)
     if scene_name == "pcb-flexible":
         lower = float(port32.current_surface.position[2]) - 0.5 * float(port32.current_surface.size[2])
         assert bounds[2][0] == 25e-6
@@ -92,7 +92,7 @@ def _synthetic_scene_port(*, axis="z", offset=0.0, dtype=torch.float64, reverse=
         positive, negative = negative, positive
     scene = mw.Scene(
         domain=mw.Domain(bounds=((nodes[0], nodes[-1]),) * 3),
-        grid=mw.GridSpec.custom(nodes, nodes, nodes), boundary=mw.BoundarySpec.none(), device="cpu",
+        grid=mw.GridSpec.custom(nodes, nodes, nodes), boundary=mw.BoundarySpec.none(),
     )
     port = mw.LumpedPort(
         "feed", positive=torch.tensor(positive, dtype=dtype), negative=torch.tensor(negative, dtype=dtype),
@@ -109,8 +109,8 @@ def _synthetic_scene_port(*, axis="z", offset=0.0, dtype=torch.float64, reverse=
 def test_nonuniform_contours_preserve_polarity_under_translation_and_source_dtype(axis, offset, reverse):
     scene, port32 = _synthetic_scene_port(axis=axis, offset=offset, dtype=torch.float32, reverse=reverse)
     _, port64 = _synthetic_scene_port(axis=axis, offset=offset, reverse=reverse)
-    actual = compile_port_geometry(scene, port32)
-    _assert_same_geometry(actual, compile_port_geometry(scene, port64))
+    actual = compile_port_geometry(scene, port32, device="cpu")
+    _assert_same_geometry(actual, compile_port_geometry(scene, port64, device="cpu"))
     assert actual.direction == (-1 if reverse else 1)
     assert actual.voltage_weights.dtype == torch.float64
     assert len(actual.voltage_indices) == 3
@@ -119,7 +119,7 @@ def test_nonuniform_contours_preserve_polarity_under_translation_and_source_dtyp
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_saved_reconstructed_and_copied_ports_compile_identically(tmp_path, dtype):
     scene, port = _synthetic_scene_port(dtype=dtype)
-    expected = compile_port_geometry(scene, port)
+    expected = compile_port_geometry(scene, port, device="cpu")
     # There is no public Scene snapshot API; preserve the actual port object and
     # tensor geometry here, independently of Result's field-only snapshots.
     path = tmp_path / "port.pt"
@@ -128,7 +128,7 @@ def test_saved_reconstructed_and_copied_ports_compile_identically(tmp_path, dtyp
     assert restored.current_surface.position.dtype == dtype
     assert restored.current_surface.size.dtype == dtype
     for candidate in (restored, copy.deepcopy(port), port):
-        _assert_same_geometry(compile_port_geometry(prepare_scene(scene), candidate), expected)
+        _assert_same_geometry(compile_port_geometry(prepare_scene(scene, device="cpu"), candidate, device="cpu"), expected)
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -139,13 +139,13 @@ def test_numpy_terminal_coordinate_precision_is_retained(dtype):
         negative=np.asarray(template.negative, dtype=dtype), voltage_path=template.voltage_path,
         current_surface=template.current_surface,
     )
-    assert torch.equal(compile_port_geometry(scene, port).voltage_indices,
-                       compile_port_geometry(scene, template).voltage_indices)
+    assert torch.equal(compile_port_geometry(scene, port, device="cpu").voltage_indices,
+                       compile_port_geometry(scene, template, device="cpu").voltage_indices)
 
 
 def test_double_precision_contours_retain_identity_at_large_global_offset():
     scene, port = _synthetic_scene_port(offset=1000.0)
-    compiled = compile_port_geometry(scene, port)
+    compiled = compile_port_geometry(scene, port, device="cpu")
     assert len(compiled.voltage_indices) == 3
     assert port.current_surface.position.dtype == torch.float64
     assert port.current_surface.size.dtype == torch.float64
@@ -154,7 +154,7 @@ def test_double_precision_contours_retain_identity_at_large_global_offset():
 def test_insufficient_precision_at_large_offset_is_rejected_instead_of_merging_layers():
     scene, port = _synthetic_scene_port(offset=1000.0, dtype=torch.float32)
     with pytest.raises(ValueError, match="feed.*ambiguous coordinate precision.*float64"):
-        compile_port_geometry(scene, port)
+        compile_port_geometry(scene, port, device="cpu")
 
 
 @pytest.mark.parametrize("offset", [0.0, 1000.0])
@@ -172,14 +172,14 @@ def test_float64_off_grid_input_is_not_treated_as_float32_roundoff():
     scene, port = _synthetic_scene_port()
     port.current_surface.position[0] += 1e-10
     with pytest.raises(ValueError, match="feed.*half-grid.*off-grid"):
-        compile_port_geometry(scene, port)
+        compile_port_geometry(scene, port, device="cpu")
 
 
 def test_nonzero_surface_thickness_cannot_be_silently_flattened():
     scene, port = _synthetic_scene_port()
     port.current_surface.size[2] = 1e-14
     with pytest.raises(ValueError, match="planar"):
-        compile_port_geometry(scene, port)
+        compile_port_geometry(scene, port, device="cpu")
 
 
 @pytest.mark.parametrize("grid_kind", ["uniform", "custom", "auto"])
@@ -194,8 +194,8 @@ def test_contours_use_actual_prepared_yee_coordinates_for_every_grid_kind(grid_k
     }[grid_kind]
     scene = prepare_scene(mw.Scene(
         domain=mw.Domain(bounds=((0.0, 0.001),) * 3), grid=grid,
-        boundary=mw.BoundarySpec.none(), device="cpu",
-    ))
+        boundary=mw.BoundarySpec.none(),
+    ), device="cpu")
     axis_index = "xyz".index(axis)
     negative, positive, center, size = [], [], [], []
     for index, coordinate_axis in enumerate("xyz"):
@@ -210,7 +210,7 @@ def test_contours_use_actual_prepared_yee_coordinates_for_every_grid_kind(grid_k
         voltage_path=mw.AxisPath(axis),
         current_surface=mw.Box(position=torch.tensor(center, dtype=dtype), size=torch.tensor(size, dtype=dtype)),
     )
-    compiled = compile_port_geometry(scene, port)
+    compiled = compile_port_geometry(scene, port, device="cpu")
     assert compiled.direction == 1
     assert torch.sum(compiled.voltage_weights).item() == pytest.approx(positive[axis_index] - negative[axis_index])
     expected_normal_index = 1  # Chosen from actual halves, not the multigap midpoint.
@@ -225,10 +225,9 @@ def test_scene_placement_and_mesh_transform_preserve_float64_geometry(offset):
     geometry = mw.Box(position=position, size=size)
     scene = mw.Scene(
         domain=mw.Domain(bounds=((offset - 0.001, offset + 0.001),) * 3),
-        grid=mw.GridSpec.uniform(0.0001), boundary=mw.BoundarySpec.none(), device="cpu",
-        structures=[mw.Structure(geometry=geometry, material=mw.Material.pec())],
+        grid=mw.GridSpec.uniform(0.0001), boundary=mw.BoundarySpec.none(), structures=[mw.Structure(geometry=geometry, material=mw.Material.pec())],
     )
-    placed = prepare_scene(scene).structures[0].geometry
+    placed = prepare_scene(scene, device="cpu").scene.structures[0].geometry
     assert placed.position.dtype == torch.float64
     assert placed.size.dtype == torch.float64
     torch.testing.assert_close(placed.position, position, rtol=0, atol=0)
@@ -249,19 +248,19 @@ def test_true_double_precision_voltage_endpoint_offset_is_rejected(error):
         current_surface=template.current_surface,
     )
     with pytest.raises(ValueError, match="bad-endpoint.*Yee z node.*off-grid"):
-        compile_port_geometry(scene, port)
+        compile_port_geometry(scene, port, device="cpu")
 
 
 def test_terminal_contour_preserves_original_footprint_roundoff():
     structures = [mw.Structure(
         mw.Box(position=(0, 0, z), size=(.015, .015, .005)), mw.Material.pec(), name=name,
     ) for name, z in (("signal", .0125), ("ground", -.0125))]
-    port = mw.TerminalPort("feed", positive_terminal=mw.TerminalRef("signal"),
-        negative_terminal=mw.TerminalRef("ground"), integration_path=mw.AxisPath("z"), reference_plane=.0025)
+    port = mw.rf.TerminalPort("feed", positive_terminal=mw.rf.TerminalRef("signal"),
+        negative_terminal=mw.rf.TerminalRef("ground"), integration_path=mw.AxisPath("z"), reference_plane=.0025)
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.02, .02),) * 3),
         grid=mw.GridSpec.uniform(.005), boundary=mw.BoundarySpec.none(),
-        structures=structures, ports=[port], device="cpu")
-    compiled = compile_port_geometry(scene, scene.ports[0])
+        structures=structures, ports=[port])
+    compiled = compile_port_geometry(scene, scene.ports[0], device="cpu")
     assert all(indices.numel() for indices in compiled.current_indices)
     for indices in compiled.current_indices:
         assert torch.all(indices[:, 2] == 4)

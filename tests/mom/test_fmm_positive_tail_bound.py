@@ -102,19 +102,19 @@ def test_positive_contours_availability_precision_and_policy_identity():
     from witwin.maxwell.mom.runtime import _numerical_identity
     options=dict(operator_backend='fmm',riesz_storage='local_rwg_v1',stopping=StoppingRule(rtol=1e-9, preconditioner='rwg_diagonal'))
     for shift in ('dense','separable_v1'):
-        config=mw.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shift,kernel_bound_rule=RULE)
+        config=mw.mom.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shift,kernel_bound_rule=RULE)
         payload=config.payload()
         assert payload['version']=='cartesian_fmm_positive_tail_config_v1'
-        assert mw.FMMConfig.restore(payload)==config
-        previous=mw.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shift,kernel_bound_rule='real_support_min_v1')
-        assert _numerical_identity(mw.MoMConfig(fmm=config,**options))!=_numerical_identity(mw.MoMConfig(fmm=previous,**options))
+        assert mw.mom.FMMConfig.restore(payload)==config
+        previous=mw.mom.FMMConfig(table_storage='dense',near_storage='full_matrix',shift_storage=shift,kernel_bound_rule='real_support_min_v1')
+        assert _numerical_identity(mw.mom.MoMConfig(fmm=config,**options))!=_numerical_identity(mw.mom.MoMConfig(fmm=previous,**options))
         for field in payload['parameters']:
             bad=copy.deepcopy(payload);del bad['parameters'][field]
-            with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+            with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
         bad=copy.deepcopy(payload);bad['parameters']['kernel_bound_rule']='real_support_min_v1'
-        with pytest.raises(ValueError):mw.FMMConfig.restore(bad)
+        with pytest.raises(ValueError):mw.mom.FMMConfig.restore(bad)
         with pytest.raises(NotImplementedError,match='free space'):
-            mw.MoMConfig(fmm=config,periodic=mw.MoMPeriodicConfig(((1.,0,0),)),**options)
+            mw.mom.MoMConfig(fmm=config,periodic=mw.mom.MoMPeriodicConfig(((1.,0,0),)),**options)
 
 
 def test_positive_tail_global_small_wave_and_extreme_scales():

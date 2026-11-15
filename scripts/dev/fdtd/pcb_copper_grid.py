@@ -85,6 +85,6 @@ def refine_pcb_edges(scene,frequency,cells_per_skin):
                                     float(contour.position[axis]+contour.size[axis]/2)))
         axes[axis] = graded_edge_axis(axes[axis],edges,mandatory,half_planes,
             skin=skin_depth(frequency),cells_per_skin=cells_per_skin)
-    return scene.clone(grid=mw.GridSpec.custom(*axes),metadata={**scene.metadata,
+    return scene.updated(grid=mw.GridSpec.custom(*axes), metadata={**scene.metadata,
         "edge_cells_per_skin":cells_per_skin,
         "qualification":"actual edge-refined input; response and heat convergence remain unqualified"})

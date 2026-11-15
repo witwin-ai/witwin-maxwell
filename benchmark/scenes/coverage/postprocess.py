@@ -54,112 +54,109 @@ PROBE_POSITIONS = (
 
 def _tfsf_rcs_scene(geometry, material, *, name: str) -> mw.Scene:
     scene = base_scene()
-    scene.add_structure(mw.Structure(geometry=geometry, material=material, name=name))
-    scene.add_source(
+    scene = scene.updated(structures=(*scene.structures, mw.Structure(geometry=geometry, material=material, name=name)), sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(0.0, 0.0, 1.0),
             polarization="Ex",
             source_time=FAR_FIELD_PULSE,
             injection=mw.TFSF(bounds=RCS_TFSF_BOUNDS),
             name="rcs_tfsf",
-        )
-    )
-    scene.add_monitor(
-        mw.ClosedSurfaceMonitor.box(
+        ),
+    ), monitors=(
+        *scene.monitors,
+        mw.monitors.ClosedSurfaceMonitor.box(
             "huygens",
             position=(0.0, 0.0, 0.0),
             size=RCS_SURFACE_SIZE,
             frequencies=FAR_FIELD_FREQUENCIES,
-        )
-    )
-    scene.add_monitor(
+        ),
         mw.PlaneMonitor(
             "field",
             axis="y",
             position=0.0,
             fields=("Ex",),
             frequencies=FAR_FIELD_FREQUENCIES,
-        )
-    )
+        ),
+    ))
     return with_plot_monitors(scene, frequencies=FAR_FIELD_FREQUENCIES)
 
 
 def _two_dipole_array_scene() -> mw.Scene:
     scene = base_scene()
-    for index, offset in enumerate((-0.5 * DIPOLE_SEPARATION, 0.5 * DIPOLE_SEPARATION)):
-        scene.add_source(
-            mw.PointDipole(
-                position=(offset, 0.0, 0.0),
-                polarization="Ez",
-                profile="ideal",
-                source_time=FAR_FIELD_PULSE,
-                name=f"dipole_{index}",
-            )
-        )
-    scene.add_monitor(
-        mw.ClosedSurfaceMonitor.box(
+    scene = scene.updated(sources=(
+        *scene.sources,
+        *(mw.PointDipole(
+              position=(offset, 0.0, 0.0),
+              polarization="Ez",
+              profile="ideal",
+              source_time=FAR_FIELD_PULSE,
+              name=f"dipole_{index}",
+          ) for index, offset in enumerate((-0.5 * DIPOLE_SEPARATION, 0.5 * DIPOLE_SEPARATION))),
+    ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.ClosedSurfaceMonitor.box(
             "huygens",
             position=(0.0, 0.0, 0.0),
             size=ARRAY_SURFACE_SIZE,
             frequencies=FAR_FIELD_FREQUENCIES,
-        )
-    )
-    # Offset the display plane from y = 0 so neither singular element cell enters
-    # the field metric; the array main beam points along +y.
-    scene.add_monitor(
+        ),
         mw.PlaneMonitor(
             "field",
             axis="y",
             position=0.30,
             fields=("Ez",),
             frequencies=FAR_FIELD_FREQUENCIES,
-        )
-    )
+        ),
+    ))
     return with_plot_monitors(scene, frequencies=FAR_FIELD_FREQUENCIES)
 
 
 def _single_mode_guide_scene(*, mode_monitors: tuple[tuple[str, float], ...]) -> mw.Scene:
     scene = base_scene()
-    scene.add_structure(
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             # Run the core through the external PML on both ends so the case is a
             # pure launch/propagate/project check with no dielectric facet.
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=MODE_CORE_SIZE),
             material=mw.Material(eps_r=4.0),
             name="waveguide",
-        )
-    )
-    scene.add_source(
+        ),
+    ), sources=(
+        *scene.sources,
         mw.ModeSource(
             position=(MODE_SOURCE_X, 0.0, 0.0),
             size=MODE_PLANE_SIZE,
             polarization="Ey",
             source_time=MODE_PULSE,
             name="mode",
-        )
-    )
-    for name, position_x in mode_monitors:
-        scene.add_monitor(
-            mw.ModeMonitor(
-                name,
-                position=(position_x, 0.0, 0.0),
-                size=MODE_PLANE_SIZE,
-                polarization="Ey",
-                direction="+",
-                frequencies=MODE_FREQUENCIES,
-            )
-        )
+        ),
+    ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.ModeMonitor(
+              name,
+              position=(position_x, 0.0, 0.0),
+              size=MODE_PLANE_SIZE,
+              polarization="Ey",
+              direction="+",
+              frequencies=MODE_FREQUENCIES,
+          ) for name, position_x in mode_monitors),
+    ))
     # A longitudinal cut through the core shows the accumulated guided phase, which
     # is the quantity the modal amplitudes are supposed to reproduce.
-    scene.add_monitor(
+    scene = scene.updated(monitors=(
+        *scene.monitors,
         mw.PlaneMonitor(
             "field",
             axis="z",
             position=0.0,
             fields=("Ey",),
             frequencies=MODE_FREQUENCIES,
-        )
-    )
+        ),
+    ))
     return with_plot_monitors(scene, frequencies=MODE_FREQUENCIES)
 
 
@@ -171,96 +168,93 @@ def _normal_incidence_grating_scene() -> mw.Scene:
         y_low="periodic",
         y_high="periodic",
     )
-    scene = mw.Scene(
-        domain=reference.domain,
-        grid=reference.grid,
-        boundary=boundary,
-        device="cpu",
-    )
-    scene.add_structure(
-        mw.Structure(
-            # Half-period fill with a ~0.7 pi single-pass phase delay puts a large
-            # fraction of the transmitted power into the +-1st orders.
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(HALF_SPAN, 2 * HALF_SPAN, 0.25)),
-            material=mw.Material(eps_r=4.0),
-            name="grating_bar",
-        )
-    )
-    scene.add_source(
-        mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(0.0, 1.0, 0.0),
-            source_time=DIFFRACTION_PULSE,
-            name="grating_plane_wave",
-        )
-    )
     # Keep the order plane far enough above the bar that the +-2nd evanescent
     # orders have decayed before the transverse Fourier decomposition.
-    scene.add_monitor(
-        mw.DiffractionMonitor(
-            "orders",
-            position=(0.0, 0.0, 0.45),
-            size=(2 * HALF_SPAN, 2 * HALF_SPAN, 0.0),
-            frequencies=DIFFRACTION_FREQUENCIES,
-        )
-    )
-    scene.add_monitor(
-        mw.PlaneMonitor(
-            "field",
-            axis="y",
-            position=0.0,
-            fields=("Ey",),
-            frequencies=DIFFRACTION_FREQUENCIES,
-        )
-    )
-    scene.add_monitor(
-        mw.FluxMonitor(
-            "reflected",
-            axis="z",
-            position=-0.45,
-            frequencies=DIFFRACTION_FREQUENCIES,
-            normal_direction="-",
-        )
-    )
-    scene.add_monitor(
-        mw.FluxMonitor(
-            "transmitted",
-            axis="z",
-            position=0.50,
-            frequencies=DIFFRACTION_FREQUENCIES,
-        )
-    )
+    scene = mw.Scene(
+                domain=reference.domain,
+                grid=reference.grid,
+                boundary=boundary,
+                structures=(
+            mw.Structure(
+                # Half-period fill with a ~0.7 pi single-pass phase delay puts a large
+                # fraction of the transmitted power into the +-1st orders.
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(HALF_SPAN, 2 * HALF_SPAN, 0.25)),
+                material=mw.Material(eps_r=4.0),
+                name="grating_bar",
+            ),
+            ),
+                sources=(
+            mw.PlaneWave(
+                direction=(0.0, 0.0, 1.0),
+                polarization=(0.0, 1.0, 0.0),
+                source_time=DIFFRACTION_PULSE,
+                name="grating_plane_wave",
+            ),
+            ),
+                monitors=(
+            mw.monitors.DiffractionMonitor(
+                "orders",
+                position=(0.0, 0.0, 0.45),
+                size=(2 * HALF_SPAN, 2 * HALF_SPAN, 0.0),
+                frequencies=DIFFRACTION_FREQUENCIES,
+            ),
+            mw.PlaneMonitor(
+                "field",
+                axis="y",
+                position=0.0,
+                fields=("Ey",),
+                frequencies=DIFFRACTION_FREQUENCIES,
+            ),
+            mw.FluxMonitor(
+                "reflected",
+                axis="z",
+                position=-0.45,
+                frequencies=DIFFRACTION_FREQUENCIES,
+                normal_direction="-",
+            ),
+            mw.FluxMonitor(
+                "transmitted",
+                axis="z",
+                position=0.50,
+                frequencies=DIFFRACTION_FREQUENCIES,
+            ),
+            ),
+            )
     return with_plot_monitors(scene, frequencies=DIFFRACTION_FREQUENCIES)
 
 
 def _point_probe_scene() -> mw.Scene:
     scene = base_scene()
-    scene.add_source(
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PointDipole(
             position=(0.0, 0.0, 0.0),
             polarization="Ez",
             profile="ideal",
             source_time=PULSE,
             name="dipole",
-        )
-    )
-    for index, position in enumerate(PROBE_POSITIONS):
-        scene.add_monitor(
-            mw.PointMonitor(f"probe_{index}", position=position, fields=("Ex", "Ey", "Ez"))
-        )
+        ),
+    ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        *(mw.PointMonitor(f"probe_{index}", position=position, fields=("Ex", "Ey", "Ez")) for index, position in enumerate(PROBE_POSITIONS)),
+    ))
     return _observed(scene, axis="y", position=0.0, component="Ez")
 
 
 def _mode_port_scene() -> mw.Scene:
     """Straight guide assembled through the public ModePort abstraction."""
-    scene = base_scene().add_structure(
+    scene = base_scene()
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=MODE_CORE_SIZE),
             material=mw.Material(eps_r=4.0),
             name="waveguide",
-        )
-    )
-    scene.add_port(
+        ),
+    ))
+    scene = scene.updated(ports=(
+        *scene.ports,
         mw.ModePort(
             "mode_in",
             position=(MODE_SOURCE_X, 0.0, 0.0),
@@ -269,32 +263,32 @@ def _mode_port_scene() -> mw.Scene:
             frequencies=MODE_FREQUENCIES,
             source_time=MODE_PULSE,
             monitor_offset=0.05,
-        )
-    )
-    scene.add_port(
+        ),
         mw.ModePort(
             "mode_out",
             position=(0.30, 0.0, 0.0),
             size=MODE_PLANE_SIZE,
             polarization="Ey",
             frequencies=MODE_FREQUENCIES,
-        )
-    )
-    scene.add_monitor(
+        ),
+    ), monitors=(
+        *scene.monitors,
         mw.PlaneMonitor(
             "field",
             axis="z",
             position=0.0,
             fields=("Ey",),
             frequencies=MODE_FREQUENCIES,
-        )
-    )
+        ),
+    ))
     return with_plot_monitors(scene, frequencies=MODE_FREQUENCIES)
 
 
 def _permittivity_monitor_scene() -> mw.Scene:
     """Volume permittivity monitor over a dielectric slab and vacuum."""
-    scene = base_scene().add_structure(
+    scene = base_scene()
+    scene = scene.updated(structures=(
+        *scene.structures,
         mw.Structure(
             geometry=mw.Box(
                 position=(0.0, 0.0, 0.0),
@@ -302,23 +296,24 @@ def _permittivity_monitor_scene() -> mw.Scene:
             ),
             material=mw.Material(eps_r=4.0),
             name="permittivity_box",
-        )
-    )
-    scene.add_source(
+        ),
+    ))
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(0, 0, 1),
             polarization="Ex",
             source_time=MODE_PULSE,
-        )
-    )
-    scene.add_monitor(
-        mw.PermittivityMonitor(
+        ),
+    ), monitors=(
+        *scene.monitors,
+        mw.monitors.PermittivityMonitor(
             "permittivity",
             position=(0.0, 0.0, 0.0),
             size=(1.0, 1.0, 0.8),
             frequencies=FAR_FIELD_FREQUENCIES,
-        )
-    )
+        ),
+    ))
     return _observed(
         scene,
         frequencies=FAR_FIELD_FREQUENCIES,
@@ -328,29 +323,30 @@ def _permittivity_monitor_scene() -> mw.Scene:
 
 def _time_monitor_scene() -> mw.Scene:
     """Point-field and plane-flux time traces sampled on the shared FDTD step."""
-    scene = base_scene().add_source(
+    scene = base_scene()
+    scene = scene.updated(sources=(
+        *scene.sources,
         mw.PlaneWave(
             direction=(0, 0, 1),
             polarization="Ex",
             source_time=MODE_PULSE,
-        )
-    )
-    scene.add_monitor(
-        mw.FieldTimeMonitor(
+        ),
+    ))
+    scene = scene.updated(monitors=(
+        *scene.monitors,
+        mw.monitors.FieldTimeMonitor(
             "field_time",
             components=("Ex",),
             position=(0.0, 0.0, 0.25),
             interval=2,
-        )
-    )
-    scene.add_monitor(
-        mw.FluxTimeMonitor(
+        ),
+        mw.monitors.FluxTimeMonitor(
             "flux_time",
             axis="z",
             position=0.30,
             interval=2,
-        )
-    )
+        ),
+    ))
     return _observed(
         scene,
         frequencies=MODE_FREQUENCIES,
@@ -439,7 +435,7 @@ POSTPROCESS_COVERAGE_SCENARIOS = (
         _normal_incidence_grating_scene,
         component="Ey",
         frequencies=DIFFRACTION_FREQUENCIES,
-        run_time_factor=12,
+        run_time_factor=24.0,
         scalar_observable="diffraction_orders",
         absorber="cpml",
     ),

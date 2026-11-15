@@ -9,6 +9,8 @@ from ..copper_foil import (
     accumulate_copper_spectra, prepare_copper_spectra, copper_loss_report,
     prepare_copper_magnetic_support, correct_copper_magnetic_support,
 )
+from ...errors import UnsupportedFeatureError
+from ...compiler.ports import compile_ports
 
 
 class DistributedCopperRuntime:
@@ -33,12 +35,13 @@ class DistributedCopperRuntime:
                         raise RuntimeError("A distributed copper trace has multiple evolving state owners.")
                     owners[key] = (shard, entry, index)
         active = {(name, point) for _foil, name, point in owners}
-        for geometry in prepared_scene.compile_ports(device="cpu"):
+        for geometry in compile_ports(prepared_scene, device="cpu"):
             for point in geometry.voltage_indices.tolist():
                 if (geometry.voltage_component, tuple(point)) in active:
-                    raise NotImplementedError(
+                    raise UnsupportedFeatureError(
                         f"Distributed port {geometry.port_name!r} overlaps a CopperFoil split trace; "
-                        "joint two-trace port elimination is required.")
+                        "joint two-trace port elimination is required.",
+                        feature="material.copper_foil", method="fdtd")
         for shard in self.shards[:-1]:
             solver, layout = shard.solver, shard.layout
             for face in compile_copper_faces(solver.scene, device=shard.device, include_halos=True):

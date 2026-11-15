@@ -49,7 +49,7 @@ def test_source_table_gather_predicate(periodic_axes):
             })
     solver = SimpleNamespace(
         device="cpu", dt=0.1, source_omega=2.0,
-        scene=SimpleNamespace(boundary=boundary),
+        scene=SimpleNamespace(scene=SimpleNamespace(boundary=boundary)),
         _source_time={"kind": "cw", "frequency": 1.0, "amplitude": 1.0, "phase": 0.0},
         _source_terms=terms, _magnetic_source_terms=terms, _electric_source_terms=terms,
         tfsf_enabled=True, _tfsf_state={"magnetic_terms": terms, "electric_terms": terms},

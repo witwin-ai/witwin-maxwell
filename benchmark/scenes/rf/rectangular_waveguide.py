@@ -61,22 +61,20 @@ def wall_length(dx: float) -> float:
 WALL_LENGTH = wall_length(0.05)
 
 
-def _wave_port(name: str, x: float, direction: str) -> mw.WavePort:
-    return mw.WavePort(
+def _wave_port(name: str, x: float, direction: str) -> mw.rf.WavePort:
+    return mw.rf.WavePort(
         name,
         position=(x, 0.0, 0.0),
         size=(0.0, GUIDE_A, GUIDE_B),
         direction=direction,
         reference_plane=x,
-        modes=(mw.WaveModeSpec("te", polarization="Ez"),),
+        modes=(mw.rf.WaveModeSpec("te", polarization="Ez"),),
     )
 
 
-def rectangular_waveguide_scene(
-    *,
+def rectangular_waveguide_scene(*,
     dx: float = 0.05,
     short_far_port: bool = False,
-    device: str = "cuda",
 ) -> mw.Scene:
     """Build a two-port (or shorted one-port) hollow rectangular waveguide."""
 
@@ -116,7 +114,6 @@ def rectangular_waveguide_scene(
         boundary=mw.BoundarySpec.pml(num_layers=_pml_layers(dx)),
         ports=tuple(ports),
         structures=tuple(structures),
-        device=device,
     )
 
 
@@ -139,11 +136,9 @@ REF_SOURCE_X = -0.45
 REF_LENGTH = REF_OUT_X - REF_IN_X
 
 
-def rectangular_waveguide_reference_scene(
-    *,
+def rectangular_waveguide_reference_scene(*,
     dx: float = 0.05,
     frequencies: tuple[float, ...] | None = None,
-    device: str = "cpu",
 ) -> mw.Scene:
     """Mode-source-driven TE10 guide for the external-reference-solver cross-check.
 
@@ -174,43 +169,40 @@ def rectangular_waveguide_reference_scene(
     ]
 
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-DOMAIN_X, DOMAIN_X), (-0.5, 0.5), (-0.35, 0.35))),
-        grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pml(num_layers=_pml_layers(dx)),
-        structures=tuple(structures),
-        device=device,
-    )
-    scene.add_source(
-        mw.ModeSource(
-            position=(REF_SOURCE_X, 0.0, 0.0),
-            size=(0.0, GUIDE_A, GUIDE_B),
-            mode_index=0,
-            direction="+",
-            polarization="Ez",
-            source_time=mw.GaussianPulse(frequency=center, fwidth=fwidth),
-            name="te10_source",
-        )
-    )
-    scene.add_monitor(
-        mw.ModeMonitor(
-            "ref_in",
-            position=(REF_IN_X, 0.0, 0.0),
-            size=(0.0, GUIDE_A, GUIDE_B),
-            mode_index=0,
-            direction="+",
-            polarization="Ez",
-            frequencies=freqs,
-        )
-    )
-    scene.add_monitor(
-        mw.ModeMonitor(
-            "ref_out",
-            position=(REF_OUT_X, 0.0, 0.0),
-            size=(0.0, GUIDE_A, GUIDE_B),
-            mode_index=0,
-            direction="+",
-            polarization="Ez",
-            frequencies=freqs,
-        )
-    )
+                domain=mw.Domain(bounds=((-DOMAIN_X, DOMAIN_X), (-0.5, 0.5), (-0.35, 0.35))),
+                grid=mw.GridSpec.uniform(dx),
+                boundary=mw.BoundarySpec.pml(num_layers=_pml_layers(dx)),
+                structures=tuple(structures),
+                sources=(
+            mw.ModeSource(
+                position=(REF_SOURCE_X, 0.0, 0.0),
+                size=(0.0, GUIDE_A, GUIDE_B),
+                mode_index=0,
+                direction="+",
+                polarization="Ez",
+                source_time=mw.GaussianPulse(frequency=center, fwidth=fwidth),
+                name="te10_source",
+            ),
+            ),
+                monitors=(
+            mw.ModeMonitor(
+                "ref_in",
+                position=(REF_IN_X, 0.0, 0.0),
+                size=(0.0, GUIDE_A, GUIDE_B),
+                mode_index=0,
+                direction="+",
+                polarization="Ez",
+                frequencies=freqs,
+            ),
+            mw.ModeMonitor(
+                "ref_out",
+                position=(REF_OUT_X, 0.0, 0.0),
+                size=(0.0, GUIDE_A, GUIDE_B),
+                mode_index=0,
+                direction="+",
+                polarization="Ez",
+                frequencies=freqs,
+            ),
+            ),
+            )
     return scene

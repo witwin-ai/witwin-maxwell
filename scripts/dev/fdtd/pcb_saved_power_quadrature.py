@@ -53,7 +53,7 @@ def main():
     definition = json.loads(args.input.read_text())
     scene = import_pcb_scene(definition, frequency=frequency)
     observations = power_observations(definition, scene, frequency)
-    scene = scene.clone(monitors=observations)
+    scene = scene.updated(monitors=observations)
     result = mw.Result.load(args.result, scene=scene, map_location='cuda')
     if tuple(result.frequencies) != (frequency,):
         raise ValueError('This fixed-frequency application diagnostic requires only the declared 2.45 GHz spectrum.')

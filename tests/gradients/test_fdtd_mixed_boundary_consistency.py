@@ -1,4 +1,5 @@
 """Long-horizon public forward and adjoint checks with active boundary memory."""
+from dataclasses import replace
 import math
 
 import pytest
@@ -17,29 +18,35 @@ def _scene(density, axis):
     wavevector = [math.pi / 2.4] * 3
     wavevector[normal] = 0.0
     boundary = {a: "pml" if a == axis else "bloch" for a in "xyz"}
-    scene = mw.Scene(subpixel_samples=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=tuple(bounds)), grid=mw.GridSpec.uniform(0.15),
-                     boundary=mw.BoundarySpec.faces(default="pml", num_layers=2,
-                         bloch_wavevector=tuple(wavevector), **boundary), device="cuda")
-    scene.add_material_region(mw.MaterialRegion(name="design",
-        geometry=mw.Box(position=(0., 0., 0.), size=(0.15,) * 3),
-        density=density, eps_bounds=(1., 6.), mu_bounds=(1., 1.)))
     position = [0.] * 3
     position[normal] = -0.55
     component = "E" + "xyz"[transverse]
-    scene.add_source(mw.PointDipole(position=tuple(position), polarization=component, width=0.12,
-        source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=25.)))
-    scene.add_monitor(mw.PointMonitor("probe", (0., 0., 0.), fields=(component,)))
+    scene = mw.Scene(subpixel=mw.SubpixelSpec(samples=(1, 1, 1), averaging="arithmetic"), domain=mw.Domain(bounds=tuple(bounds)), grid=mw.GridSpec.uniform(0.15),
+                     boundary=mw.BoundarySpec.faces(default="pml", num_layers=2,
+                         bloch_wavevector=tuple(wavevector), **boundary),
+                     material_regions=(
+                         mw.MaterialRegion(name="design",
+                             geometry=mw.Box(position=(0., 0., 0.), size=(0.15,) * 3),
+                             density=density, eps_bounds=(1., 6.), mu_bounds=(1., 1.)),
+                     ),
+                     sources=(
+                         mw.PointDipole(position=tuple(position), polarization=component, width=0.12,
+                             source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=25.)),
+                     ),
+                     monitors=(mw.PointMonitor("probe", (0., 0., 0.), fields=(component,)),))
     return scene
 
 
 def _run(value, *, axis, memory, stride, grad=False):
     density = torch.full((1, 1, 1), value, device="cuda", dtype=torch.float64, requires_grad=grad)
     simulation = mw.Simulation.fdtd(_scene(density, axis), frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=400), spectral_sampler=mw.SpectralSampler(window="none"),
-        cuda_graph=False, cpml_config={"memory_mode": memory})
-    simulation.config.adjoint_checkpoint_stride = stride
+        config=mw.FDTDConfig(
+            run_time=mw.TimeConfig(time_steps=400), spectral_sampler=mw.fdtd.SpectralSampler(window="none"),
+            cuda_graph=False, cpml=mw.fdtd.CPMLConfig(memory_mode=memory),
+        ))
+    simulation.config = replace(simulation.config, adjoint_checkpoint_stride=stride)
     result = simulation.run()
-    spectrum = result.monitor("probe")["data"]
+    spectrum = result.monitor("probe", freq_index=0).isel(component=0).values
     return result, spectrum, density
 
 
